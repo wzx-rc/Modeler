@@ -906,9 +906,10 @@ fn cube_test() -> forme_core::Scene {
     s
 }
 
-/// Select mode: hover highlights a junction or an edge loop, tap selects it,
-/// the handle (or the panel) sets its fillet.
+/// Select mode: hover highlights a junction or one edge, tap selects it,
+/// CTRL held adds more, the handle (or the panel) sets their fillet.
 fn edges_cube(h: &mut Harness) {
+    let sel = |h: &Harness| -> Vec<(String, f32)> { h.st.edge_sel.iter().map(|e| (e.label.clone(), e.radius)).collect() };
     h.reset(AppState::new(cube_test(), "Cube test"));
     h.cam(Vec3::new(0.0, 2.0, 0.0), 64.0, 0.72, 0.62);
     h.steps(4);
@@ -920,7 +921,7 @@ fn edges_cube(h: &mut Harness) {
     h.shot("22-arete-survol");
     h.tap(rim);
     h.steps(4);
-    eprintln!("sélection : {:?}", h.st.edge_sel.as_ref().map(|e| (&e.label, e.radius)));
+    eprintln!("sélection : {:?}", sel(h));
     h.shot("23-arete-selection");
     // pull the fillet handle
     let hd = h.st.handles()[0].clone();
@@ -930,20 +931,58 @@ fn edges_cube(h: &mut Harness) {
     h.drag(a, a + dir * 70.0, 12, true);
     h.move_to(a + dir * 70.0 + egui::vec2(160.0, 120.0));
     h.steps(6);
-    eprintln!("fillet tiré : {:?}", h.st.edge_sel.as_ref().map(|e| e.radius));
+    eprintln!("fillet tiré : {:?}", sel(h));
     h.shot("24-fillet-tire");
-    // the cube's own edges
-    let edge = h.screen_of(Vec3::new(9.75, 9.75, -4.0));
-    h.move_to(edge);
+    // one edge of the cube: only that one lights up
+    let e1 = h.screen_of(Vec3::new(9.75, 9.75, -4.0));
+    h.move_to(e1);
     h.steps(4);
-    eprintln!("survol arête : {:?}", h.st.edge_hover.as_ref().map(|e| (&e.label, e.radius)));
-    h.shot("25-aretes-cube-survol");
-    h.tap(edge);
-    h.st.set_fillet(2.0, false, true);
-    h.move_to(edge + egui::vec2(220.0, 200.0));
+    eprintln!("survol arête : {:?}", h.st.edge_hover.as_ref().map(|e| (&e.label, e.radius, e.curves.len())));
+    h.shot("25-arete-cube-survol");
+    h.tap(e1);
+    // CTRL held: add two more edges
+    h.st.ctrl_held = true;
+    let e2 = h.screen_of(Vec3::new(-4.0, 9.75, 9.75));
+    let e3 = h.screen_of(Vec3::new(9.75, 0.0, 9.75));
+    h.move_to(e2);
+    h.steps(3);
+    h.shot("26-ctrl-survol");
+    h.tap(e2);
+    h.tap(e3);
+    h.st.ctrl_held = false;
+    eprintln!("CTRL + taps : {:?}", sel(h));
+    h.st.set_fillet(3.0, false, true);
+    h.move_to(e3 + egui::vec2(-260.0, 160.0));
     h.steps(6);
-    eprintln!("bevel cube : {:?}", h.st.edge_sel.as_ref().map(|e| (&e.label, e.radius, e.curves.len())));
-    h.shot("26-aretes-cube-fillet");
+    eprintln!("3 arêtes à 3 mm : {:?}", sel(h));
+    h.shot("27-trois-aretes-fillet");
+    // a chamfer on another edge, alone
+    let e4 = h.screen_of(Vec3::new(-8.9, 0.0, 10.0));
+    h.tap(e4);
+    eprintln!("e4 {:?} → {:?}", e4, sel(h));
+    h.st.set_fillet(1.5, true, true);
+    let cube = h.find("Cube");
+    eprintln!("arêtes du cube : {:?}", h.st.scene.node(cube).and_then(|n| n.shape()).map(|s| s.edges.clone()));
+    h.st.clear_edge();
+    h.st.select(None);
+    h.move_to(egui::pos2(900.0, 700.0));
+    h.cam(Vec3::new(0.0, 0.0, 0.0), 70.0, 0.25, 0.45);
+    h.steps(8);
+    h.shot("28-fillets-par-arete");
+    // and the bake
+    h.st.bake.open = false;
+    h.st.start_bake();
+    while h.st.bake.job.is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        h.step();
+    }
+    if let Some(b) = h.st.bake.result.clone() {
+        let st = &b.stats;
+        eprintln!("bake : {} faces ({} q {} t {} n) constructif {} ouvertes {} nm {}", b.faces.len(), st.quads, st.tris, st.ngons, st.constructive, st.open_edges, st.nonmanifold_edges);
+    }
+    h.st.toast = None;
+    h.steps(8);
+    h.shot("29-fillets-par-arete-bake");
 }
 
 /// The test cube (bevel 1 mm, through hole Ø8, fillet 0.8) baked in the app.

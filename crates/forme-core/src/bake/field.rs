@@ -42,6 +42,8 @@ pub struct PrimDef {
     /// Profile polyline (closed) and mode (true = revolve).
     pub poly: Vec<DVec2>,
     pub revolve: bool,
+    /// Per-edge fillets (box 12, cylinder 2; negative = chamfer), empty if uniform.
+    pub edges: Vec<f64>,
     pub material: u32,
     pub chain: Vec<ChainOp>,
     /// Product of the affine scales of the chain.
@@ -254,6 +256,12 @@ impl Field {
                         sides: f(2, 3),
                         poly,
                         revolve: w[3][2] > 0.5,
+                        edges: if w[3][3] > 0.5 {
+                            let off = w[3][0] as usize / 2;
+                            (0..w[3][1] as usize).map(|i| prog.aux.get(off + i / 4).map(|v| v[i % 4] as f64).unwrap_or(0.0)).collect()
+                        } else {
+                            vec![]
+                        },
                         material: w[0][2] as u32,
                         chain: chain.clone(),
                         sc,
@@ -790,6 +798,8 @@ pub fn prim_raw(pr: &PrimDef, p_in: DVec3) -> f64 {
         p.z /= f;
     }
     match pr.kind {
+        0 if pr.edges.len() == 12 => box_edges(p, size, &pr.edges),
+        1 if pr.edges.len() == 2 => cyl_edges(p, size, if p.y >= 0.0 { pr.edges[0] } else { pr.edges[1] }),
         0 => {
             let r = round.min(size.min_element());
             let q = p.abs() - (size - DVec3::splat(r));
@@ -869,6 +879,57 @@ pub fn prim_raw(pr: &PrimDef, p_in: DVec3) -> f64 {
             }
         }
         _ => EMPTY_DIST as f64,
+    }
+}
+
+fn wedge(qb: f64, qc: f64, r: f64, cap: f64) -> f64 {
+    if r < 0.0 {
+        qb.max(qc).max((qb + qc - r) * SQRT1_2)
+    } else {
+        let r = r.min(cap);
+        let v = DVec2::new(qb + r, qc + r);
+        v.max(DVec2::ZERO).length() + v.x.max(v.y).min(0.0) - r
+    }
+}
+
+/// Edge `i` of a box (12): parallel to axis i / 4, on the side given by
+/// i % 4 of the two other axes: (+,+) (-,+) (-,-) (+,-).
+pub fn box_edge_signs(i: usize) -> (usize, f64, f64) {
+    let (sb, sc) = [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)][i % 4];
+    (i / 4, sb, sc)
+}
+
+/// Box with one fillet per edge (see program::box_edges).
+pub fn box_edges(p: DVec3, size: DVec3, er: &[f64]) -> f64 {
+    let q = p.abs() - size;
+    let k = |sb: f64, sc: f64| -> usize {
+        match (sb >= 0.0, sc >= 0.0) {
+            (true, true) => 0,
+            (false, true) => 1,
+            (false, false) => 2,
+            (true, false) => 3,
+        }
+    };
+    let r0 = er[k(p.y, p.z)];
+    let r1 = er[4 + k(p.z, p.x)];
+    let r2 = er[8 + k(p.x, p.y)];
+    let mut d = wedge(q.y, q.z, r0, size.y.min(size.z)).max(wedge(q.z, q.x, r1, size.z.min(size.x))).max(wedge(q.x, q.y, r2, size.x.min(size.y)));
+    let rm = r0.min(r1).min(r2).min(size.min_element());
+    if rm > 0.0 {
+        let qs = q + DVec3::splat(rm);
+        d = d.max(qs.max(DVec3::ZERO).length() + vmax(qs).min(0.0) - rm);
+    }
+    d
+}
+
+pub fn cyl_edges(p: DVec3, size: DVec3, r: f64) -> f64 {
+    let dx = DVec2::new(p.x, p.z).length() - size.x;
+    let dy = p.y.abs() - size.y;
+    if r < 0.0 {
+        extrude(dx, dy).max((dx + dy - r) * SQRT1_2)
+    } else {
+        let r = r.min(size.x).min(size.y);
+        extrude(dx + r, dy + r) - r
     }
 }
 

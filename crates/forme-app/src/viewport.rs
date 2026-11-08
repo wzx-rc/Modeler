@@ -240,20 +240,30 @@ fn draw_edges(p: &Painter, st: &AppState) {
             flush(&mut run, run_vis);
         }
     };
-    if let Some(e) = &st.edge_sel {
-        draw(e, &st.edge_vis.sel, EDGE_SEL, true);
+    for (i, e) in st.edge_sel.iter().enumerate() {
+        let empty = vec![];
+        draw(e, st.edge_vis.sel.get(i).unwrap_or(&empty), EDGE_SEL, true);
     }
     if let Some(e) = &st.edge_hover {
-        let same = st.edge_sel.as_ref().map(|s| s.kind == e.kind).unwrap_or(false);
-        if !same {
-            draw(e, &st.edge_vis.hover, ACCENT_LIGHT, false);
+        let selected = st.edge_selected(e);
+        let multi = st.multi();
+        if !selected || multi {
+            if !selected {
+                draw(e, &st.edge_vis.hover, ACCENT_LIGHT, false);
+            }
             if let Some(h) = st.hover {
                 let r = if e.radius <= 0.0 {
                     "vive".to_string()
                 } else {
                     format!("{} {} mm", if e.chamfer { "chanfrein" } else { "fillet" }, fmt_mm(e.radius))
                 };
-                chip(p, pos2(h[0], h[1]) + vec2(18.0, 16.0), Align2::LEFT_TOP, &format!("{} · {r}", e.label), ACCENT_BORDER, ACCENT_TEXT);
+                // CTRL: the tap adds (or removes) this edge
+                let prefix = match (multi, selected) {
+                    (true, false) => "+ ",
+                    (true, true) => "− ",
+                    _ => "",
+                };
+                chip(p, pos2(h[0], h[1]) + vec2(18.0, 16.0), Align2::LEFT_TOP, &format!("{prefix}{} · {r}", e.label), ACCENT_BORDER, ACCENT_TEXT);
             }
         }
     }
@@ -306,9 +316,12 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                 Handle::Fillet => {
                     p.line_segment([o, sp], Stroke::new(if hot { 2.5 } else { 1.75 }, EDGE_SEL));
                     p.circle(sp, if hot { 9.5 } else { 8.0 }, EDGE_SEL, Stroke::new(2.0, ON_ACCENT));
-                    if let Some(e) = &st.edge_sel {
+                    if let Some(e) = st.edge_sel.last() {
                         let what = if e.chamfer { "Chanfrein" } else { "Fillet" };
-                        let t = if e.radius <= 0.0 { "Arête vive · tire pour arrondir".to_string() } else { format!("{what} {} mm", fmt_mm(e.radius)) };
+                        let mut t = if e.radius <= 0.0 { "Arête vive · tire pour arrondir".to_string() } else { format!("{what} {} mm", fmt_mm(e.radius)) };
+                        if st.edge_sel.len() > 1 {
+                            t = format!("{t} · {} arêtes", st.edge_sel.len());
+                        }
                         // towards the free side of the viewport
                         let right = sp.x < st.principal()[0];
                         let anchor = if right { Align2::LEFT_CENTER } else { Align2::RIGHT_CENTER };

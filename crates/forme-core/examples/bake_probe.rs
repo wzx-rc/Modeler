@@ -290,6 +290,18 @@ fn main() {
             ("vif", variant(Vec3::ZERO, Quat::IDENTITY, Vec3::new(4.0, 14.0, 0.0), CombineMode::Carve, 0.0)),
             ("pres-bord", variant(Vec3::new(4.5, 0.0, 0.0), Quat::IDENTITY, Vec3::new(3.0, 14.0, 0.0), CombineMode::Carve, 0.6)),
         ];
+        let mut cases = cases;
+        {
+            // per-edge fillets: three edges at 3 mm, one 1.5 mm chamfer, the rest 1 mm
+            let mut s = cube_hole();
+            let id = s.nodes.values().find(|n| n.name == "cube").unwrap().id;
+            let sh = s.node_mut(id).unwrap().shape_mut().unwrap();
+            for e in [8usize, 0, 9] {
+                sh.set_edge(e, 3.0);
+            }
+            sh.set_edge(10, -1.5);
+            cases.push(("par-arete", s));
+        }
         for (i, (name, s)) in cases.iter().enumerate() {
             let bs = bake::build::BuildSettings { size: 2.25, tol: 0.03, fillet_rows: 0, threads: 2 };
             match bake::build::build(s, &bs, &bake::Progress::default()) {
@@ -299,6 +311,9 @@ fn main() {
                     render(&b, &format!("/tmp/var_{i}.png"), DVec3::new(0.75, 0.9, 1.0), DVec3::new(0.0, 1.0, 0.0), 34.0, 700, 700);
                     if *name == "pres-bord" {
                         render(&b, "/tmp/var_zoom.png", DVec3::new(0.9, 0.8, 0.5), DVec3::new(8.0, 9.0, 0.0), 10.0, 700, 700);
+                    }
+                    if *name == "par-arete" {
+                        render(&b, "/tmp/var_edges_b.png", DVec3::new(-0.8, 0.6, -0.9), DVec3::new(0.0, 1.0, 0.0), 34.0, 700, 700);
                     }
                 }
                 None => println!("{name:10} not handled"),

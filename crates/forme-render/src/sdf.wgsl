@@ -100,6 +100,54 @@ fn min3(v: vec3<f32>) -> f32 {
     return min(v.x, min(v.y, v.z));
 }
 
+// Per-edge fillets (radius > 0) or chamfers (< 0), stored in aux.
+fn edge_r(off: u32, i: u32) -> f32 {
+    let v = aux[off / 2u + i / 4u];
+    return v[i % 4u];
+}
+
+fn wedge(qb: f32, qc: f32, r: f32, cap: f32) -> f32 {
+    if (r < 0.0) {
+        return max(max(qb, qc), (qb + qc - r) * SQRT1_2);
+    }
+    let rr = min(r, cap);
+    let v = vec2<f32>(qb + rr, qc + rr);
+    return length(max(v, vec2<f32>(0.0))) + min(max(v.x, v.y), 0.0) - rr;
+}
+
+fn oct_k(sb: f32, sc: f32) -> u32 {
+    if (sb >= 0.0) {
+        if (sc >= 0.0) { return 0u; }
+        return 3u;
+    }
+    if (sc >= 0.0) { return 1u; }
+    return 2u;
+}
+
+fn box_edges(p: vec3<f32>, size: vec3<f32>, off: u32) -> f32 {
+    let q = abs(p) - size;
+    let r0 = edge_r(off, oct_k(p.y, p.z));
+    let r1 = edge_r(off, 4u + oct_k(p.z, p.x));
+    let r2 = edge_r(off, 8u + oct_k(p.x, p.y));
+    var d = max(wedge(q.y, q.z, r0, min(size.y, size.z)), max(wedge(q.z, q.x, r1, min(size.z, size.x)), wedge(q.x, q.y, r2, min(size.x, size.y))));
+    let rm = min(min(r0, r1), min(r2, min3(size)));
+    if (rm > 0.0) {
+        let qs = q + vec3<f32>(rm);
+        d = max(d, length(max(qs, vec3<f32>(0.0))) + min(max(qs.x, max(qs.y, qs.z)), 0.0) - rm);
+    }
+    return d;
+}
+
+fn cyl_edges(p: vec3<f32>, size: vec3<f32>, r: f32) -> f32 {
+    let dx = length(p.xz) - size.x;
+    let dy = abs(p.y) - size.y;
+    if (r < 0.0) {
+        return max(extrude(dx, dy), (dx + dy - r) * SQRT1_2);
+    }
+    let rr = min(r, min(size.x, size.y));
+    return extrude(dx + rr, dy + rr) - rr;
+}
+
 fn eval_prim(pc: u32, p_in: vec3<f32>) -> f32 {
     let w0 = code[pc];
     let w1 = code[pc + 1u];
@@ -123,8 +171,13 @@ fn eval_prim(pc: u32, p_in: vec3<f32>) -> f32 {
         lip = min(f, 1.0) * 0.85;
     }
     var d = EMPTY_DIST;
+    let per_edge = w3.w > 0.5;
+    let eoff = u32(w3.x);
     switch kind {
         case 0u: {
+          if (per_edge) {
+            d = box_edges(p, size, eoff);
+          } else {
             let r = min(rnd, min3(size));
             let q = abs(p) - (size - vec3<f32>(r));
             d = length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
@@ -134,8 +187,14 @@ fn eval_prim(pc: u32, p_in: vec3<f32>) -> f32 {
                 d = max(d, (q2.x + q2.z + chamfer) * SQRT1_2);
                 d = max(d, (q2.y + q2.z + chamfer) * SQRT1_2);
             }
+          }
         }
         case 1u: {
+          if (per_edge) {
+            var r = edge_r(eoff, 1u);
+            if (p.y >= 0.0) { r = edge_r(eoff, 0u); }
+            d = cyl_edges(p, size, r);
+          } else {
             let r = min(rnd, min(size.x, size.y));
             let dx = length(p.xz) - size.x;
             let dy = abs(p.y) - size.y;
@@ -143,6 +202,7 @@ fn eval_prim(pc: u32, p_in: vec3<f32>) -> f32 {
             if (chamfer > 0.0) {
                 d = max(d, (dx + dy + chamfer) * SQRT1_2);
             }
+          }
         }
         case 2u: {
             let r = max(size, vec3<f32>(1e-3));

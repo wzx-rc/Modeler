@@ -291,6 +291,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     }
     mode_bar(ctx, st, screen);
     thumb_button(ctx, st, screen);
+    ctrl_button(ctx, st, screen);
     hud(ctx, st);
     right_column(ctx, st, screen);
     toast(ctx, st, screen);
@@ -333,8 +334,8 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.redo();
     }
     if del {
-        if let Some(e) = st.edge_sel.clone() {
-            // on an edge, Delete removes its fillet (the shape stays)
+        if let Some(e) = st.edge_sel.last().cloned() {
+            // on edges, Delete removes their fillet (the shapes stay)
             st.set_fillet(0.0, e.chamfer, true);
         } else {
             st.delete_selected();
@@ -344,7 +345,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.duplicate_selected();
     }
     if esc {
-        if st.edge_sel.is_some() {
+        if !st.edge_sel.is_empty() {
             st.clear_edge();
         }
         st.commit_placement();
@@ -360,8 +361,9 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if f {
         st.frame_selection();
     }
-    // Alt = keyboard version of the thumb button
+    // Alt = keyboard version of the thumb button, Ctrl / Cmd of the CTRL button
     st.alt_carve = alt;
+    st.key_ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
 }
 
 fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
@@ -560,6 +562,40 @@ fn mode_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         });
 }
 
+/// CTRL button area (points), just above the thumb button. Held, taps add to
+/// the selection (edges with the Select tool).
+pub fn ctrl_rect(screen_w: f32, screen_h: f32) -> Rect {
+    let t = thumb_rect(screen_w, screen_h);
+    Rect::from_min_size(t.min - vec2(0.0, 96.0), vec2(84.0, 84.0))
+}
+
+fn ctrl_button(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+    let cr = ctrl_rect(screen.width(), screen.height());
+    egui::Area::new(Id::new("ctrl")).order(Order::Middle).fixed_pos(cr.min).show(ctx, |ui| {
+        let (r, resp) = ui.allocate_exact_size(vec2(84.0, 84.0), Sense::click_and_drag());
+        if resp.is_pointer_button_down_on() {
+            st.ctrl_held = true;
+        } else if resp.drag_stopped() || resp.clicked() {
+            st.ctrl_held = false;
+        }
+        let held = st.multi();
+        let p = ui.painter();
+        let c = r.center();
+        let sub = if st.tool == Tool::Select { "+ sélection" } else { "combiner" };
+        if held {
+            p.circle_filled(c, 50.0, tint(EDGE_SEL, 0.22));
+            p.circle(c, 42.0, EDGE_SEL, Stroke::new(2.0, Color32::from_rgb(0xFF, 0xE4, 0xA6)));
+            let dark = Color32::from_rgb(0x2A, 0x20, 0x08);
+            p.text(c + vec2(0.0, -6.0), Align2::CENTER_CENTER, "CTRL", semibold(19.0), dark);
+            p.text(c + vec2(0.0, 15.0), Align2::CENTER_CENTER, sub, semibold(11.0), dark);
+        } else {
+            p.circle(c, 42.0, Color32::from_rgb(0x24, 0x23, 0x1E), Stroke::new(2.0, EDGE_SEL_DIM.gamma_multiply(1.6)));
+            p.text(c + vec2(0.0, -6.0), Align2::CENTER_CENTER, "CTRL", semibold(19.0), EDGE_SEL);
+            p.text(c + vec2(0.0, 15.0), Align2::CENTER_CENTER, sub, regular(11.0), Color32::from_rgb(0xB9, 0xB2, 0xA0));
+        }
+    });
+}
+
 /// Thumb button area (points). On iPad the platform layer handles this touch
 /// itself so that the Pencil, as the second touch, still drives the viewport.
 pub fn thumb_rect(screen_w: f32, screen_h: f32) -> Rect {
@@ -714,7 +750,7 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         return;
     }
     divider(ui);
-    if st.edge_sel.is_some() {
+    if !st.edge_sel.is_empty() {
         edge_card(ui, st);
         divider(ui);
     }
@@ -872,15 +908,22 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
 /// The selected edge: fillet size and kind, straight on the parameter that
 /// makes it (blend of a junction, rounding of a shape's edges).
 fn edge_card(ui: &mut Ui, st: &mut AppState) {
-    let Some(e) = st.edge_sel.clone() else { return };
+    let Some(e) = st.edge_sel.last().cloned() else { return };
+    let n = st.edge_sel.len();
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
         ui.painter().circle_filled(r.center(), 5.0, EDGE_SEL);
-        ui.label(egui::RichText::new("Arête sélectionnée").font(semibold(14.0)).color(TEXT));
+        let title = if n > 1 { format!("{n} arêtes sélectionnées") } else { "Arête sélectionnée".to_string() };
+        ui.label(egui::RichText::new(title).font(semibold(14.0)).color(TEXT));
     });
-    let what = match e.kind {
-        forme_core::edges::EdgeKind::Junction { .. } => format!("{} · jonction entre deux formes", e.label),
-        forme_core::edges::EdgeKind::Own { .. } => format!("{} · rayon commun à toutes", e.label),
+    let what = if n > 1 {
+        let mixed = st.edge_sel.iter().any(|x| (x.radius - e.radius).abs() > 1e-4 || x.chamfer != e.chamfer);
+        format!("Même réglage pour toutes{} · CTRL + tap pour en ajouter ou retirer", if mixed { " (valeurs différentes)" } else { "" })
+    } else {
+        match e.kind {
+            forme_core::edges::EdgeKind::Junction { .. } => format!("{} · jonction entre deux formes", e.label),
+            forme_core::edges::EdgeKind::Own { .. } => format!("{} · maintiens CTRL pour en ajouter", e.label),
+        }
     };
     ui.label(egui::RichText::new(what).font(regular(12.0)).color(TEXT2));
     ui.add_space(4.0);
@@ -993,11 +1036,18 @@ fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
         PrimKind::Profile => s.size.z,
         _ => s.size.x.min(s.size.y.max(0.1)),
     };
+    if !sh.edges.is_empty() {
+        ui.label(egui::RichText::new("Fillets réglés arête par arête · Rondeur / Chanfrein les remettent tous pareils").font(regular(11.5)).color(EDGE_SEL));
+    }
+    let (r0, c0) = (s.round, s.chamfer);
     if !matches!(sh.kind, PrimKind::Sphere | PrimKind::Capsule | PrimKind::Torus) {
         row(ui, "Rondeur", &mut s.round, 0.0..=max_round.max(0.1), 0.1, 1.0, "mm");
     }
     if matches!(sh.kind, PrimKind::Box | PrimKind::Cylinder) {
         row(ui, "Chanfrein", &mut s.chamfer, 0.0..=max_round.max(0.1), 0.1, 1.0, "mm");
+    }
+    if s.round != r0 || s.chamfer != c0 {
+        s.edges.clear();
     }
     if !matches!(sh.kind, PrimKind::Sphere | PrimKind::Torus | PrimKind::Profile) {
         row(ui, "Taper", &mut s.taper, -0.9..=0.9, 0.01, 1.0, "");

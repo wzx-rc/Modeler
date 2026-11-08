@@ -128,9 +128,59 @@ pub struct Shape {
     pub shell: f32,
     pub sides: u32,
     pub profile: Option<Profile>,
+    /// Per-edge fillets (box: 12 edges, cylinder: top and bottom rims), in mm;
+    /// a negative value is a chamfer of that size. Empty: every edge uses
+    /// `round` / `chamfer`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<f32>,
 }
 
 impl Shape {
+    /// Edges that can carry their own fillet (box edges, cylinder rims).
+    pub fn edge_count(&self) -> usize {
+        match self.kind {
+            PrimKind::Box => 12,
+            PrimKind::Cylinder => 2,
+            _ => 0,
+        }
+    }
+
+    /// Fillet of edge `i` (negative: chamfer).
+    pub fn edge_radius(&self, i: usize) -> f32 {
+        match self.edges.get(i) {
+            Some(r) => *r,
+            None if self.chamfer > 0.0 => -self.chamfer,
+            None => self.round,
+        }
+    }
+
+    /// Sets the fillet of one edge (negative: chamfer); back to the uniform
+    /// `round` / `chamfer` when every edge ends up the same.
+    pub fn set_edge(&mut self, i: usize, r: f32) {
+        let n = self.edge_count();
+        if i >= n {
+            return;
+        }
+        if self.edges.len() != n {
+            self.edges = (0..n).map(|k| self.edge_radius(k)).collect();
+        }
+        self.edges[i] = r;
+        let first = self.edges[0];
+        if self.edges.iter().all(|e| (*e - first).abs() < 1e-6) {
+            self.set_all_edges(first.max(0.0), (-first).max(0.0));
+        } else {
+            self.round = 0.0;
+            self.chamfer = 0.0;
+        }
+    }
+
+    /// Same fillet on every edge.
+    pub fn set_all_edges(&mut self, round: f32, chamfer: f32) {
+        self.edges.clear();
+        self.round = round;
+        self.chamfer = chamfer;
+    }
+
     pub fn new(kind: PrimKind) -> Self {
         let size = match kind {
             PrimKind::Box => Vec3::new(10.0, 10.0, 10.0),
@@ -152,6 +202,7 @@ impl Shape {
             shell: 0.0,
             sides: 6,
             profile: None,
+            edges: vec![],
         }
     }
 

@@ -699,7 +699,124 @@ fn quad_sphere(pr: &PrimDef, level: f64, st: &GenSettings) -> PolyMesh {
     mesh
 }
 
+/// Box with one fillet (or chamfer) per edge. The grid is built in the
+/// sharp box's parameter space, with a band of rows at each end of each
+/// axis as wide as the largest fillet around that face; every vertex is
+/// then cast from the inner point of its band onto the exact surface. One
+/// mapping for all faces: seams and corners stay watertight.
+fn rounded_box_edges(pr: &PrimDef, st: &GenSettings) -> PolyMesh {
+    let size = pr.size;
+    let er = |e: usize| pr.edges[e];
+    // edge between face (a, sa) and face (b, sb): parallel to the third axis
+    let edge_between = |a: usize, sa: f64, b: usize, sb: f64| -> usize {
+        let c = 3 - a - b;
+        let (u, v) = ((c + 1) % 3, (c + 2) % 3);
+        let sgn = |ax: usize| if ax == a { sa } else { sb };
+        let k = match (sgn(u) >= 0.0, sgn(v) >= 0.0) {
+            (true, true) => 0,
+            (false, true) => 1,
+            (false, false) => 2,
+            (true, false) => 3,
+        };
+        c * 4 + k
+    };
+    let mut band = [[0.0f64; 2]; 3];
+    for ax in 0..3 {
+        for (ei, end) in [-1.0f64, 1.0].iter().enumerate() {
+            let mut m = 0.0f64;
+            for o in 0..3 {
+                if o != ax {
+                    for so in [-1.0, 1.0] {
+                        let r = er(edge_between(ax, *end, o, so)).abs();
+                        let cap = size[ax].min(size[o]);
+                        m = m.max(r.min(cap));
+                    }
+                }
+            }
+            band[ax][ei] = m.min(size[ax] * 0.999);
+        }
+    }
+    let samples = |ax: usize| -> Vec<f64> {
+        let (b0, b1) = (band[ax][0], band[ax][1]);
+        let (lo, hi) = (-(size[ax] - b0), size[ax] - b1);
+        let mut v = vec![];
+        let k = (((hi - lo) / st.max_edge).ceil() as usize).max(1);
+        for i in 0..=k {
+            v.push(lo + (hi - lo) * i as f64 / k as f64);
+        }
+        for (bw, sign) in [(b0, -1.0), (b1, 1.0)] {
+            if bw <= 1e-12 {
+                continue;
+            }
+            let m = ((FRAC_PI_4 / arc_step(bw, st.tol)).ceil() as usize).max(1);
+            for j in 1..=m {
+                let t = if j == m { 1.0 } else { (FRAC_PI_4 * j as f64 / m as f64).tan() };
+                let x = sign * (size[ax] - bw + bw * t);
+                if sign > 0.0 {
+                    v.push(x);
+                } else {
+                    v.insert(0, x);
+                }
+            }
+        }
+        v
+    };
+    let s3 = [samples(0), samples(1), samples(2)];
+    let map = |y: DVec3| -> DVec3 {
+        let mut c = y;
+        for ax in 0..3 {
+            let lim = if y[ax] >= 0.0 { size[ax] - band[ax][1] } else { size[ax] - band[ax][0] };
+            c[ax] = y[ax].clamp(-lim, lim);
+        }
+        let d = y - c;
+        let len = d.length();
+        if len < 1e-12 {
+            return y;
+        }
+        let dir = d / len;
+        // the sharp box contains the filleted one: the surface is on [c, y]
+        let (mut a, mut b) = (0.0, len);
+        for _ in 0..60 {
+            let m = 0.5 * (a + b);
+            if prim_raw(pr, c + dir * m) < 0.0 {
+                a = m;
+            } else {
+                b = m;
+            }
+        }
+        c + dir * (0.5 * (a + b))
+    };
+    let mut mesh = PolyMesh::default();
+    for a in 0..3 {
+        for s in [-1.0, 1.0] {
+            let b = (a + 1) % 3;
+            let c = (a + 2) % 3;
+            let (sb, scn) = (&s3[b], &s3[c]);
+            let mut ids = vec![0u32; sb.len() * scn.len()];
+            for (j, &vc) in scn.iter().enumerate() {
+                for (i, &vb) in sb.iter().enumerate() {
+                    let mut x = DVec3::ZERO;
+                    x[a] = s * size[a];
+                    x[b] = vb;
+                    x[c] = vc;
+                    ids[j * sb.len() + i] = mesh.add(map(x));
+                }
+            }
+            for j in 0..scn.len() - 1 {
+                for i in 0..sb.len() - 1 {
+                    let w = sb.len();
+                    mesh.faces.push(vec![ids[j * w + i], ids[j * w + i + 1], ids[(j + 1) * w + i + 1], ids[(j + 1) * w + i]]);
+                }
+            }
+        }
+    }
+    mesh
+}
+
 fn rounded_box(pr: &PrimDef, level: f64, st: &GenSettings) -> PolyMesh {
+    if pr.edges.len() == 12 && level.abs() < 1e-12 {
+        return rounded_box_edges(pr, st);
+    }
     let size = pr.size;
     let r = pr.round.min(size.min_element());
     let mut inner = size - DVec3::splat(r);

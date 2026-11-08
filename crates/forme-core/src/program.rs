@@ -147,6 +147,19 @@ impl<'a> Builder<'a> {
             }
             _ => (0.0, 0.0, 0.0),
         };
+        // per-edge fillets: radii in the aux buffer, flag in w3.w
+        let n_edges = shape.edge_count();
+        let (aux_off, aux_count, edge_flag) = if n_edges > 0 && shape.edges.len() == n_edges {
+            let off = self.prog.aux.len() * 2;
+            for chunk in shape.edges.chunks(4) {
+                let mut v = [0.0f32; 4];
+                v[..chunk.len()].copy_from_slice(chunk);
+                self.prog.aux.push(v);
+            }
+            (off as f32, n_edges as f32, 1.0)
+        } else {
+            (aux_off, aux_count, 0.0)
+        };
         let s = shape.size;
         for v in 0..variants {
             self.op(OP_RESET, 0.0, 0.0, 0.0);
@@ -158,7 +171,7 @@ impl<'a> Builder<'a> {
                 [OP_PRIM as f32, shape.kind.code() as f32, material as f32, v as f32],
                 [s.x, s.y, s.z, shape.round],
                 [shape.chamfer, shape.taper, shape.shell, shape.sides.max(3) as f32],
-                [aux_off, aux_count, mode, 0.0],
+                [aux_off, aux_count, mode, edge_flag],
             ]);
             if v > 0 {
                 self.combine(&Combine { mode: CombineMode::Add, blend: 0.0, ..Default::default() });
@@ -320,6 +333,56 @@ fn sd_regular_polygon(p: Vec2, r: f32, n: f32) -> f32 {
 }
 
 /// Evaluates a primitive in its local space. `w` = the 4 words of the instruction.
+/// Rounded (r > 0) or chamfered (r < 0) intersection of two half-spaces.
+#[inline]
+fn wedge(qb: f32, qc: f32, r: f32, cap: f32) -> f32 {
+    if r < 0.0 {
+        qb.max(qc).max((qb + qc - r) * SQRT1_2)
+    } else {
+        let r = r.min(cap);
+        let v = Vec2::new(qb + r, qc + r);
+        v.max(Vec2::ZERO).length() + v.x.max(v.y).min(0.0) - r
+    }
+}
+
+/// Box with one fillet per edge: the three rounded wedges of the octant,
+/// and a spherical corner where they share their smallest radius.
+pub fn box_edges(p: Vec3, size: Vec3, er: &dyn Fn(usize) -> f32) -> f32 {
+    let q = p.abs() - size;
+    let k = |sb: f32, sc: f32| -> usize {
+        match (sb >= 0.0, sc >= 0.0) {
+            (true, true) => 0,
+            (false, true) => 1,
+            (false, false) => 2,
+            (true, false) => 3,
+        }
+    };
+    let r0 = er(k(p.y, p.z));
+    let r1 = er(4 + k(p.z, p.x));
+    let r2 = er(8 + k(p.x, p.y));
+    let mut d = wedge(q.y, q.z, r0, size.y.min(size.z)).max(wedge(q.z, q.x, r1, size.z.min(size.x))).max(wedge(q.x, q.y, r2, size.x.min(size.y)));
+    let rm = r0.min(r1).min(r2).min(size.min_element());
+    if rm > 0.0 {
+        let qs = q + Vec3::splat(rm);
+        d = d.max(qs.max(Vec3::ZERO).length() + vmax(qs).min(0.0) - rm);
+    }
+    d
+}
+
+/// Cylinder whose rim (top or bottom, chosen by the caller) has its own fillet.
+pub fn cyl_edges(p: Vec3, size: Vec3, r: f32) -> f32 {
+    let dx = Vec2::new(p.x, p.z).length() - size.x;
+    let dy = p.y.abs() - size.y;
+    let w = Vec2::new(dx, dy);
+    if r < 0.0 {
+        (w.x.max(w.y).min(0.0) + w.max(Vec2::ZERO).length()).max((dx + dy - r) * SQRT1_2)
+    } else {
+        let r = r.min(size.x).min(size.y);
+        let w = w + Vec2::splat(r);
+        w.x.max(w.y).min(0.0) + w.max(Vec2::ZERO).length() - r
+    }
+}
+
 pub fn eval_prim(w: &[[f32; 4]], aux: &[[f32; 4]], p_in: Vec3) -> f32 {
     let kind = w[0][1] as u32;
     let size = Vec3::new(w[1][0], w[1][1], w[1][2]);
@@ -338,7 +401,14 @@ pub fn eval_prim(w: &[[f32; 4]], aux: &[[f32; 4]], p_in: Vec3) -> f32 {
         p.z /= f;
         lip = f.min(1.0) * 0.85;
     }
+    let edges = w[3][3] > 0.5;
+    let er = |i: usize| -> f32 {
+        let k = w[3][0] as usize / 2 + i / 4;
+        aux.get(k).map(|v| v[i % 4]).unwrap_or(0.0)
+    };
     let mut d = match kind {
+        0 if edges => box_edges(p, size, &er),
+        1 if edges => cyl_edges(p, size, if p.y >= 0.0 { er(0) } else { er(1) }),
         0 => {
             // box
             let r = round.min(size.min_element());

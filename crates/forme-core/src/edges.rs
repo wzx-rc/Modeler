@@ -16,8 +16,18 @@ use glam::{DVec3, Vec3};
 pub enum EdgeKind {
     /// Where shape `a` meets shape `b`.
     Junction { a: NodeId, b: NodeId },
-    /// The shape's own edges.
-    Own { node: NodeId },
+    /// One of the shape's own edges (box edge, cylinder rim).
+    Own { node: NodeId, edge: u32 },
+}
+
+impl EdgeKind {
+    /// Same edge (a junction is the same from either side).
+    pub fn same(&self, o: &EdgeKind) -> bool {
+        match (self, o) {
+            (EdgeKind::Junction { a, b }, EdgeKind::Junction { a: c, b: d }) => (a == c && b == d) || (a == d && b == c),
+            _ => self == o,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -173,7 +183,7 @@ impl EdgeIndex {
             }
         }
         // the shape's own edges
-        if let Some((score, e)) = self.own(scene, owner, pd, tol) {
+        if let Some((score, e)) = self.own(scene, owner, pd, tol, None) {
             cands.push((score, e));
         }
         cands.into_iter().min_by(|a, b| a.0.partial_cmp(&b.0).unwrap()).map(|(_, mut e)| {
@@ -188,7 +198,7 @@ impl EdgeIndex {
         let find = |id: NodeId| self.shapes.iter().position(|(n, _)| *n == id);
         let mut out = match e.kind {
             EdgeKind::Junction { a, b } => self.junction(scene, find(a)?, find(b)?, e.seed.as_dvec3()),
-            EdgeKind::Own { node } => self.own(scene, find(node)?, e.seed.as_dvec3(), f64::INFINITY).map(|x| x.1),
+            EdgeKind::Own { node, edge } => self.own(scene, find(node)?, e.seed.as_dvec3(), f64::INFINITY, Some(edge as usize)).map(|x| x.1),
         }?;
         out.seed = e.seed;
         out.normal = self.all.grad(out.at.as_dvec3()).normalize_or_zero().as_vec3();
@@ -289,127 +299,142 @@ impl EdgeIndex {
         })
     }
 
-    /// Own edges of shape `i` near `p`: box edges and cylinder rims.
-    fn own(&self, scene: &Scene, i: usize, p: DVec3, tol: f64) -> Option<(f64, EdgePick)> {
+    /// Fillet of one own edge (negative: chamfer), as the evaluator sees it.
+    fn edge_r(pr: &crate::bake::field::PrimDef, e: usize) -> f64 {
+        match pr.edges.get(e) {
+            Some(r) => *r,
+            None if pr.chamfer > 0.0 => -pr.chamfer,
+            None => pr.round,
+        }
+    }
+
+    /// Local midline of own edge `e` (box: 12 edges, cylinder: 2 rims).
+    fn edge_line(pr: &crate::bake::field::PrimDef, e: usize) -> Vec<DVec3> {
+        let s = pr.size;
+        let r = Self::edge_r(pr, e);
+        let d45 = std::f64::consts::FRAC_1_SQRT_2;
+        if pr.kind == 0 {
+            let (axis, sb, sc) = crate::bake::field::box_edge_signs(e);
+            let (b, c) = ((axis + 1) % 3, (axis + 2) % 3);
+            let cap = s[b].min(s[c]);
+            // middle of the rounding (or of the chamfer face), set in from the sharp edge
+            let m = if r >= 0.0 { r.min(cap) * (1.0 - d45) } else { (-r).min(cap) * 0.5 };
+            let ext = s[axis] - m;
+            (0..=24)
+                .map(|t| {
+                    let mut x = DVec3::ZERO;
+                    x[axis] = -ext + 2.0 * ext * t as f64 / 24.0;
+                    x[b] = sb * (s[b] - m);
+                    x[c] = sc * (s[c] - m);
+                    // into the corners: onto the surface
+                    if t == 0 || t == 24 || x[axis].abs() > s[axis] - r.abs() {
+                        crate::bake::field::prim_project(pr, x, 0.0)
+                    } else {
+                        x
+                    }
+                })
+                .collect()
+        } else {
+            let cap = s.x.min(s.y);
+            let m = if r >= 0.0 { r.min(cap) * (1.0 - d45) } else { (-r).min(cap) * 0.5 };
+            let sy = if e == 0 { 1.0 } else { -1.0 };
+            (0..=96)
+                .map(|j| {
+                    let a = std::f64::consts::TAU * j as f64 / 96.0;
+                    DVec3::new((s.x - m) * a.cos(), sy * (s.y - m), (s.x - m) * a.sin())
+                })
+                .collect()
+        }
+    }
+
+    /// The own edge of shape `i` nearest to `p` (or edge `force`), with its
+    /// distance and pick: box edges and cylinder rims, one at a time.
+    fn own(&self, scene: &Scene, i: usize, p: DVec3, tol: f64, force: Option<usize>) -> Option<(f64, EdgePick)> {
         let (id, f) = &self.shapes[i];
         let node = &scene.nodes[id];
-        let shape = node.shape()?;
+        node.shape()?;
         let pr = f.prims.first()?;
         if pr.taper.abs() > 1e-4 || !matches!(pr.kind, 0 | 1) {
             return None;
         }
-        let r = if shape.chamfer > 0.0 { shape.chamfer as f64 } else { pr.round };
+        let n_edges = if pr.kind == 0 { 12 } else { 2 };
         let insts = f.instances(0);
         // nearest copy and its local point
         let (inst, lp) = insts
             .iter()
             .map(|c| (c, c.to_local.transform_point3(p)))
             .min_by(|a, b| prim_raw(pr, a.1).abs().partial_cmp(&prim_raw(pr, b.1).abs()).unwrap())?;
-        let tl = tol / pr.sc.max(1e-6);
-        let zone = r.max(0.0) + tl;
-        let s = pr.size;
-        let d45 = std::f64::consts::FRAC_1_SQRT_2;
-        // local polylines of every edge (middle of the rounding), and the distance to the hovered one
-        let mut local: Vec<Vec<DVec3>> = vec![];
-        let near: f64;
-        match pr.kind {
-            0 => {
-                let rr = r.min(s.min_element());
-                let inner = s - DVec3::splat(rr);
-                let q = lp.abs() - inner;
-                let mut idx = [0usize, 1, 2];
-                idx.sort_by(|a, b| q[*b].partial_cmp(&q[*a]).unwrap());
-                if q[idx[1]] < -zone {
-                    return None;
-                }
-                // distance to the edge between the two dominant faces
-                let (u, v) = (idx[0], idx[1]);
-                let e = DVec3::new(
-                    if u == 0 || v == 0 { inner.x + rr * d45 } else { 0.0 },
-                    if u == 1 || v == 1 { inner.y + rr * d45 } else { 0.0 },
-                    if u == 2 || v == 2 { inner.z + rr * d45 } else { 0.0 },
-                );
-                let a = lp.abs();
-                let du = a[u] - e[u];
-                let dv = a[v] - e[v];
-                near = (du * du + dv * dv).sqrt() * pr.sc;
-                for axis in 0..3 {
-                    let (b, c) = ((axis + 1) % 3, (axis + 2) % 3);
-                    for (sb, sc) in [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)] {
-                        // straight along the edge, curving into the rounded corners
-                        let ext = inner[axis] + rr * 0.62;
-                        let mut line = vec![];
-                        for t in 0..=20 {
-                            let mut x = DVec3::ZERO;
-                            x[axis] = -ext + 2.0 * ext * t as f64 / 20.0;
-                            x[b] = sb * (inner[b] + rr * d45);
-                            x[c] = sc * (inner[c] + rr * d45);
-                            line.push(if x[axis].abs() > inner[axis] { crate::bake::field::prim_project(pr, x, 0.0) } else { x });
-                        }
-                        local.push(line);
-                    }
-                }
+        let seg_dist = |line: &[DVec3]| -> f64 {
+            let mut d = f64::INFINITY;
+            for w in line.windows(2) {
+                let e = w[1] - w[0];
+                let t = ((lp - w[0]).dot(e) / e.length_squared().max(1e-18)).clamp(0.0, 1.0);
+                d = d.min(lp.distance(w[0] + e * t));
             }
-            _ => {
-                let rr = r.min(s.x).min(s.y);
-                let rad = DVec3::new(lp.x, 0.0, lp.z).length();
-                let (dx, dy) = (rad - (s.x - rr), lp.y.abs() - (s.y - rr));
-                if dx < -zone || dy < -zone {
-                    return None;
-                }
-                let (er, ey) = (s.x - rr + rr * d45, s.y - rr + rr * d45);
-                near = ((rad - er).powi(2) + (lp.y.abs() - ey).powi(2)).sqrt() * pr.sc;
-                for sy in [1.0, -1.0] {
-                    local.push((0..=96).map(|j| {
-                        let a = std::f64::consts::TAU * j as f64 / 96.0;
-                        DVec3::new(er * a.cos(), sy * ey, er * a.sin())
-                    }).collect());
-                }
+            d
+        };
+        let (edge, line, near) = match force {
+            Some(e) if e < n_edges => {
+                let l = Self::edge_line(pr, e);
+                let d = seg_dist(&l);
+                (e, l, d)
             }
-        }
-        if near > tol + r * pr.sc {
+            Some(_) => return None,
+            None => (0..n_edges)
+                .map(|e| {
+                    let l = Self::edge_line(pr, e);
+                    let d = seg_dist(&l);
+                    (e, l, d)
+                })
+                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap())?,
+        };
+        let r = Self::edge_r(pr, edge);
+        let near = near * pr.sc;
+        if near > tol + r.abs() * pr.sc {
             return None;
         }
-        // every copy shares the rounding: show them all, cut where they are not visible
+        // every copy shares the edge's fillet: show them all, cut where hidden
         let mut curves: Vec<Vec<Vec3>> = vec![];
-        let keep = (r * pr.sc * 0.5).max(self.extent * 2e-3);
+        let keep = (r.abs() * pr.sc * 0.5).max(self.extent * 2e-3);
         let mut ordered: Vec<&crate::bake::field::Instance> = vec![inst];
         ordered.extend(insts.iter().filter(|c| c.copy != inst.copy));
         for c in ordered {
-            for line in &local {
-                let mut cur: Vec<Vec3> = vec![];
-                for x in line {
-                    let w = c.to_world.transform_point3(*x);
-                    if self.all.dist(w).abs() <= keep {
-                        cur.push(w.as_vec3());
-                    } else {
-                        if cur.len() > 1 {
-                            curves.push(std::mem::take(&mut cur));
-                        }
-                        cur.clear();
+            let mut cur: Vec<Vec3> = vec![];
+            for x in &line {
+                let w = c.to_world.transform_point3(*x);
+                if self.all.dist(w).abs() <= keep {
+                    cur.push(w.as_vec3());
+                } else {
+                    if cur.len() > 1 {
+                        curves.push(std::mem::take(&mut cur));
                     }
+                    cur.clear();
                 }
-                if cur.len() > 1 {
-                    curves.push(cur);
-                }
+            }
+            if cur.len() > 1 {
+                curves.push(cur);
             }
         }
         if curves.is_empty() {
             return None;
         }
-        let at = curves.iter().flatten().min_by(|a, b| a.as_dvec3().distance(p).partial_cmp(&b.as_dvec3().distance(p)).unwrap()).copied()?;
-        let what = if pr.kind == 0 { "Arêtes" } else { "Bords" };
+        let at = curves[0].iter().min_by(|a, b| a.as_dvec3().distance(p).partial_cmp(&b.as_dvec3().distance(p)).unwrap()).copied()?;
+        let label = match (pr.kind, edge) {
+            (0, _) => format!("Arête de {}", node.name),
+            (_, 0) => format!("Bord haut de {}", node.name),
+            _ => format!("Bord bas de {}", node.name),
+        };
         Some((
-            (near - r * pr.sc * 0.7).max(0.0),
+            (near - r.abs() * pr.sc * 0.7).max(0.0),
             EdgePick {
-                kind: EdgeKind::Own { node: *id },
+                kind: EdgeKind::Own { node: *id, edge: edge as u32 },
                 owner: *id,
                 curves,
                 at,
                 normal: Vec3::Y,
-                radius: if shape.chamfer > 0.0 { shape.chamfer } else { shape.round },
-                chamfer: shape.chamfer > 0.0,
-                label: format!("{what} de {}", node.name),
+                radius: (r.abs() as f32),
+                chamfer: r < 0.0,
+                label,
                 seed: p.as_vec3(),
             },
         ))
@@ -445,9 +470,33 @@ mod tests {
         // on the top face, next to a box edge
         let e = idx.pick(&s, Vec3::new(9.4, 10.0, 3.0), 0.5).expect("box edge");
         assert!(matches!(e.kind, EdgeKind::Own { .. }), "{:?}", e.kind);
-        assert_eq!(e.curves.len(), 12);
+        assert_eq!(e.curves.len(), 1, "one edge at a time");
         // in the middle of a face: nothing
         assert!(idx.pick(&s, Vec3::new(-6.0, 10.0, -6.0), 0.5).is_none());
+    }
+
+    #[test]
+    fn one_edge_fillet() {
+        let mut s = cube_hole();
+        let idx = EdgeIndex::new(&s);
+        let e = idx.pick(&s, Vec3::new(9.6, 9.6, 3.0), 0.5).expect("edge");
+        let EdgeKind::Own { node, edge } = e.kind else { panic!("{:?}", e.kind) };
+        let sh = s.node_mut(node).unwrap().shape_mut().unwrap();
+        sh.set_edge(edge as usize, 3.0);
+        assert_eq!(sh.edges.len(), 12);
+        let prog = compile(&s);
+        let f = Field::new(&prog);
+        // that edge is rounded by 3 mm, the opposite one keeps 1 mm
+        let d45 = std::f64::consts::FRAC_1_SQRT_2;
+        let on = |r: f64, sx: f64| DVec3::new(sx * (10.0 - r + r * d45), 10.0 - r + r * d45, 3.0);
+        assert!(f.dist(on(3.0, 1.0)).abs() < 1e-4, "{}", f.dist(on(3.0, 1.0)));
+        assert!(f.dist(on(1.0, -1.0)).abs() < 1e-4, "{}", f.dist(on(1.0, -1.0)));
+        // f32 evaluator agrees
+        assert!((prog.dist(on(3.0, 1.0).as_vec3())).abs() < 1e-3);
+        // and the edge is picked again with its new radius
+        let idx = EdgeIndex::new(&s);
+        let e2 = idx.refresh(&s, &e).expect("refresh");
+        assert!((e2.radius - 3.0).abs() < 1e-6);
     }
 }
 

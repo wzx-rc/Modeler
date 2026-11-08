@@ -38,6 +38,7 @@ struct App {
     gesture_moved: bool,
     redraw_until: f64,
     thumb_touch: Option<u64>,
+    ctrl_touch: Option<u64>,
 }
 
 impl App {
@@ -65,6 +66,7 @@ impl App {
             gesture_moved: false,
             redraw_until: 0.0,
             thumb_touch: None,
+            ctrl_touch: None,
         }
     }
 
@@ -226,6 +228,24 @@ impl ApplicationHandler for App {
                     return;
                 }
                 _ if self.thumb_touch == Some(t.id) => return,
+                _ => {}
+            }
+            // same for the CTRL button (held while the Pencil taps edges)
+            let cr = forme_app::ui::ctrl_rect(size.width, size.height);
+            match t.phase {
+                TouchPhase::Started if !pencil && self.ctrl_touch.is_none() && cr.expand(10.0).contains(egui::pos2(p.x, p.y)) => {
+                    self.ctrl_touch = Some(t.id);
+                    self.st.ctrl_held = true;
+                    window.request_redraw();
+                    return;
+                }
+                TouchPhase::Ended | TouchPhase::Cancelled if self.ctrl_touch == Some(t.id) => {
+                    self.ctrl_touch = None;
+                    self.st.ctrl_held = false;
+                    window.request_redraw();
+                    return;
+                }
+                _ if self.ctrl_touch == Some(t.id) => return,
                 _ => {}
             }
         }
