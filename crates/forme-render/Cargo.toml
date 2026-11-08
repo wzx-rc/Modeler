@@ -9,7 +9,7 @@ glam.workspace = true
 bytemuck.workspace = true
 wgpu.workspace = true
 log.workspace = true
+pollster.workspace = true
 
 [dev-dependencies]
-pollster.workspace = true
 image.workspace = true

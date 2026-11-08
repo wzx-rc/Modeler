@@ -19,6 +19,7 @@ pub const OP_LINEAR: u32 = 5;
 pub const OP_MIRROR: u32 = 6;
 pub const OP_PRIM: u32 = 7;
 pub const OP_COMBINE: u32 = 8;
+pub const OP_BOUND: u32 = 9;
 
 pub const INSTR_WORDS: usize = 4;
 pub const STACK_SIZE: usize = 16;
@@ -99,7 +100,19 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn prim(&mut self, chain: &[PointOp], shape: &Shape, material: u32) {
+    fn prim(&mut self, id: NodeId, chain: &[PointOp], shape: &Shape, material: u32, combine: &Combine) {
+        if let Some((lo, hi)) = self.scene.shape_world_aabb(id) {
+            let c = (lo + hi) * 0.5;
+            let r = (hi - lo).length() * 0.5;
+            let skip = 2 + chain.len();
+            let pad = combine.blend.max(0.0) + combine.depth.max(0.0) + combine.width.max(0.0);
+            self.instr([
+                [OP_BOUND as f32, combine.mode.code() as f32, pad, skip as f32],
+                [c.x, c.y, c.z, r],
+                [0.0; 4],
+                [0.0; 4],
+            ]);
+        }
         self.op(OP_RESET, 0.0, 0.0, 0.0);
         for o in chain {
             self.point_op(o);
@@ -155,7 +168,7 @@ impl<'a> Builder<'a> {
                 if shape.kind == PrimKind::Profile && shape.profile.as_ref().map(|p| p.points.len() < 3).unwrap_or(true) {
                     return;
                 }
-                self.prim(&chain2, shape, n.material);
+                self.prim(id, &chain2, shape, n.material, &combine);
                 self.combine(&combine);
             }
             NodeKind::Group { children, combined } => {
@@ -464,6 +477,20 @@ impl Program {
                     if sp < STACK_SIZE {
                         stack[sp] = (EMPTY_DIST, 0.0);
                         sp += 1;
+                    }
+                }
+                OP_BOUND => {
+                    let c = Vec3::new(w[1][0], w[1][1], w[1][2]);
+                    let bd = (pw - c).length() - w[1][3];
+                    let a = if sp > 0 { stack[sp - 1].0 } else { EMPTY_DIST };
+                    if bd > a.abs() + w[0][2] + 0.5 {
+                        let neutral = if w[0][1] as u32 == 2 { bd } else { EMPTY_DIST };
+                        if sp < STACK_SIZE {
+                            stack[sp] = (neutral, 0.0);
+                            sp += 1;
+                        }
+                        pc += (w[0][3] as usize + 1) * INSTR_WORDS;
+                        continue;
                     }
                 }
                 OP_RESET => {

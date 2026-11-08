@@ -796,6 +796,45 @@ impl Scene {
         (lo, hi)
     }
 
+    /// World-space AABB of a shape node, including every copy made by its own
+    /// and its ancestors' repetitions and mirrors (used to skip far primitives).
+    pub fn shape_world_aabb(&self, id: NodeId) -> Option<(Vec3, Vec3)> {
+        let n = self.node(id)?;
+        let shape = n.shape()?;
+        let pad = n.combine.blend.max(0.0) + n.combine.depth.max(0.0) + n.combine.width.max(0.0);
+        let he = shape.local_half_extents() + Vec3::splat(pad);
+        let mut pts: Vec<Vec3> = (0..8)
+            .map(|i| {
+                Vec3::new(
+                    if i & 1 == 0 { -he.x } else { he.x },
+                    if i & 2 == 0 { -he.y } else { he.y },
+                    if i & 4 == 0 { -he.z } else { he.z },
+                )
+            })
+            .collect();
+        let mut chain = self.ancestors(id);
+        chain.reverse();
+        let mut levels = vec![n];
+        for a in chain {
+            levels.push(&self.nodes[&a]);
+        }
+        if let Some(root) = self.node(self.root) {
+            levels.push(root);
+        }
+        for lvl in levels {
+            let m = lvl.transform.matrix();
+            pts = pts.iter().map(|p| m.transform_point3(*p)).collect();
+            pts = expand_copies(&pts, lvl.repeat, lvl.mirror);
+        }
+        let mut lo = Vec3::splat(f32::MAX);
+        let mut hi = Vec3::splat(f32::MIN);
+        for p in pts {
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        Some((lo, hi))
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
@@ -814,4 +853,40 @@ pub fn default_materials() -> Vec<Material> {
         Material { name: "Acier".into(), color: [0.56, 0.57, 0.6], metal: 1.0, rough: 0.3 },
         Material { name: "Caoutchouc".into(), color: [0.08, 0.08, 0.09], metal: 0.0, rough: 0.8 },
     ]
+}
+
+/// Copies of points made by a repetition and a mirror (in the parent frame).
+pub fn expand_copies(local: &[Vec3], repeat: Repeat, mirror: Mirror) -> Vec<Vec3> {
+    let mut pts = local.to_vec();
+    match repeat {
+        Repeat::Radial { count, axis } => {
+            for i in 1..count.max(1) {
+                let q = Quat::from_axis_angle(axis.vec(), i as f32 * std::f32::consts::TAU / count as f32);
+                pts.extend(local.iter().map(|p| q * *p));
+            }
+        }
+        Repeat::Linear { count, step } => {
+            for i in 1..count.max(1) {
+                pts.extend(local.iter().map(|p| *p + step * i as f32));
+            }
+        }
+        Repeat::None => {}
+    }
+    if mirror.any() {
+        let base = pts.clone();
+        for p in base {
+            let mut q = p;
+            if mirror.x {
+                q.x = -q.x;
+            }
+            if mirror.y {
+                q.y = -q.y;
+            }
+            if mirror.z {
+                q.z = -q.z;
+            }
+            pts.push(q);
+        }
+    }
+    pts
 }
