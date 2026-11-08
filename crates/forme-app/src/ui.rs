@@ -1245,15 +1245,15 @@ fn bake_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.label(egui::RichText::new("Bake · maillage propre").font(semibold(18.0)).color(TEXT));
             ui.label(
                 egui::RichText::new(
-                    "Chaque forme est maillée à partir de ses paramètres, puis découpée exactement là où une autre forme prend le relais. \
-                     Le résultat n'a plus de lien avec le modèle : toute modification demande un nouveau Bake.",
+                    "Chaque opération de l'historique construit sa propre topologie : maillage natif des formes, intersections et fillets \
+                     tracés exactement, raccords en boucles de quads. Le résultat n'a plus de lien avec le modèle : toute modification demande un nouveau Bake.",
                 )
                 .font(regular(12.5))
                 .color(TEXT2),
             );
             ui.add_space(6.0);
-            section(ui, "Précision");
-            let q = [(Quality::Draft, "Brouillon", ACCENT), (Quality::Standard, "Standard", ACCENT), (Quality::Max, "Max", ACCENT)];
+            section(ui, "Densité");
+            let q = [(Quality::Draft, "Légère", ACCENT), (Quality::Standard, "Standard", ACCENT), (Quality::Max, "Dense", ACCENT)];
             let running = st.bake.job.is_some();
             if let Some(v) = segmented(ui, &q, st.bake.quality, 40.0) {
                 if !running {
@@ -1261,17 +1261,16 @@ fn bake_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 }
             }
             let s = BakeSettings::preset(st.bake.quality);
-            ui.label(
-                egui::RichText::new(format!(
-                    "Écart de corde {} mm · arêtes ≤ {} mm · découpes {} mm · {} cœurs",
+            let plan = st.bake_plan();
+            let line = match plan {
+                Some(size) => format!("Par opération · quads de ~{} mm · fillets en rangées · 100 % quads visé", fmt_mm(size as f32)),
+                None => format!(
+                    "Historique pas encore géré par opération : bake par surfaces (repli) · écart {} mm · {} cœurs",
                     fmt_mm_fine(s.tol),
-                    fmt_mm(s.max_edge as f32),
-                    fmt_mm(s.trim_len as f32),
                     s.threads
-                ))
-                .font(regular(12.0))
-                .color(TEXT2),
-            );
+                ),
+            };
+            ui.label(egui::RichText::new(line).font(regular(12.0)).color(if plan.is_some() { OK } else { TEXT2 }));
             ui.add_space(8.0);
             if let Some(j) = &st.bake.job {
                 let f = j.progress.fraction();
@@ -1310,7 +1309,11 @@ fn bake_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     if defects == 0 { "étanche".to_string() } else { format!("{} arêtes à reprendre", fmt_int(defects)) },
                     if defects == 0 { OK } else { CARVE },
                 );
-                stat_row(ui, "Calcul", format!("{:.1} s · {} surfaces", s.seconds, s.patches), LABEL);
+                if s.constructive {
+                    stat_row(ui, "Calcul", format!("{:.2} s · par opération ({} étapes)", s.seconds, s.patches), LABEL);
+                } else {
+                    stat_row(ui, "Calcul", format!("{:.1} s · {} surfaces (repli)", s.seconds, s.patches), LABEL);
+                }
                 ui.add_space(4.0);
                 if toggle_row(ui, "Afficher le maillage baké", st.bake.show) {
                     st.bake.show = !st.bake.show && !st.bake.stale(st.scene_version);

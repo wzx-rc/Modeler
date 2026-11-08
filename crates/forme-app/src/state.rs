@@ -211,6 +211,8 @@ pub struct BakeState {
     pub show: bool,
     pub wire: bool,
     pub last_export: Option<String>,
+    /// Cached constructive plan: (scene version, quality, quad size).
+    pub plan: Option<(u64, forme_core::bake::Quality, Option<f64>)>,
 }
 
 impl BakeState {
@@ -347,7 +349,7 @@ impl AppState {
             export_job: None,
             bake: BakeState {
                 open: false,
-                quality: forme_core::bake::Quality::Max,
+                quality: forme_core::bake::Quality::Standard,
                 job: None,
                 result: None,
                 version: 0,
@@ -355,6 +357,7 @@ impl AppState {
                 show: false,
                 wire: true,
                 last_export: None,
+                plan: None,
             },
             files_open: false,
             kit_open: false,
@@ -1224,6 +1227,20 @@ impl AppState {
         self.export_job = Some((rx, self.now));
     }
 
+    /// Quad size of the bake par opération for the current scene, or None
+    /// when the history needs the classic bake (cached per scene version).
+    pub fn bake_plan(&mut self) -> Option<f64> {
+        let q = self.bake.quality;
+        if let Some((v, pq, p)) = self.bake.plan {
+            if v == self.scene_version && pq == q {
+                return p;
+            }
+        }
+        let p = forme_core::bake::build::plan(&self.scene, &forme_core::bake::BakeSettings::preset(q));
+        self.bake.plan = Some((self.scene_version, q, p));
+        p
+    }
+
     pub fn start_bake(&mut self) {
         if self.bake.job.is_some() {
             return;
@@ -1295,7 +1312,9 @@ impl AppState {
             self.bake.job = None;
             match r {
                 Some(b) => {
-                    let msg = format!("Bake terminé · {} faces · {:.1} s", fmt_int(b.faces.len()), b.stats.seconds);
+                    let secs = if b.stats.seconds < 1.0 { format!("{:.0} ms", b.stats.seconds * 1000.0) } else { format!("{:.1} s", b.stats.seconds) };
+                    let quads = if b.stats.quads == b.faces.len() { " · 100 % quads" } else { "" };
+                    let msg = format!("Bake terminé · {} faces{quads} · {secs}", fmt_int(b.faces.len()));
                     self.bake.result = Some(std::sync::Arc::new(b));
                     self.bake.version += 1;
                     self.bake.show = true;

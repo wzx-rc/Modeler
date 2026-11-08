@@ -10,6 +10,8 @@
 pub mod field;
 pub mod gen;
 pub mod patch;
+pub mod quad;
+pub mod build;
 
 use crate::mesh::Mesh;
 use crate::program::compile;
@@ -46,15 +48,17 @@ pub struct BakeSettings {
     pub max_edge: f64,
     pub trim_len: f64,
     pub threads: usize,
+    /// Bake par opération: quads across the main body.
+    pub divisions: f64,
 }
 
 impl BakeSettings {
     pub fn preset(q: Quality) -> Self {
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(16);
         match q {
-            Quality::Draft => BakeSettings { tol: 0.05, max_edge: 8.0, trim_len: 1.0, threads },
-            Quality::Standard => BakeSettings { tol: 0.015, max_edge: 5.0, trim_len: 0.5, threads },
-            Quality::Max => BakeSettings { tol: 0.006, max_edge: 4.0, trim_len: 0.5, threads },
+            Quality::Draft => BakeSettings { tol: 0.05, max_edge: 8.0, trim_len: 1.0, threads, divisions: 5.0 },
+            Quality::Standard => BakeSettings { tol: 0.015, max_edge: 5.0, trim_len: 0.5, threads, divisions: 8.0 },
+            Quality::Max => BakeSettings { tol: 0.006, max_edge: 4.0, trim_len: 0.5, threads, divisions: 12.0 },
         }
     }
 }
@@ -114,6 +118,10 @@ pub struct BakeStats {
     pub mean_dev: f64,
     pub seconds: f64,
     pub stage_seconds: [f64; 5],
+    /// Built operation by operation (all-quad topology), not by surfaces.
+    pub constructive: bool,
+    /// Bake par opération: target quad size (mm).
+    pub quad_size: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -153,6 +161,13 @@ fn par_for<T: Send, F: Fn(usize) -> T + Sync>(n: usize, threads: usize, order: &
 
 /// Runs the whole bake. Returns None if cancelled.
 pub fn bake(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Option<Baked> {
+    // the history this builder handles gets a topology built per operation
+    if let Some(b) = build::build_auto(scene, st, progress) {
+        return Some(b);
+    }
+    if progress.cancelled() {
+        return None;
+    }
     let t0 = Instant::now();
     let mut stage_t = [0.0f64; 5];
     progress.set(0, 1);
@@ -176,7 +191,7 @@ pub fn bake(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Option<Bak
     // parametric meshes, one per (primitive, level), shared by all copies
     let t1 = Instant::now();
     progress.set(1, levels.len() as u32);
-    let gs = GenSettings { tol: st.tol, max_edge: st.max_edge };
+    let gs = GenSettings { tol: st.tol, max_edge: st.max_edge, segs: 0 };
     let order: Vec<usize> = (0..levels.len()).collect();
     let bases: Vec<PolyMesh> = par_for(levels.len(), st.threads, &order, |i| {
         let (prim, level) = levels[i];
@@ -755,7 +770,7 @@ fn stitch(field: &Field, patches: Vec<PatchOut>, st: &BakeSettings, progress: &P
 }
 
 /// Closed boundary loops, oriented in the filling direction.
-fn boundary_loops(faces: &[Vec<u32>], pos: &[DVec3], gap: f64) -> Vec<Vec<u32>> {
+pub(crate) fn boundary_loops(faces: &[Vec<u32>], pos: &[DVec3], gap: f64) -> Vec<Vec<u32>> {
     let ec = edge_counts(faces);
     let mut next: HashMap<u32, Vec<u32>> = HashMap::new();
     for (&(a, b), _) in ec.iter() {
@@ -792,7 +807,7 @@ fn boundary_loops(faces: &[Vec<u32>], pos: &[DVec3], gap: f64) -> Vec<Vec<u32>> 
 }
 
 /// A loop that passes twice through a vertex is split into simple loops.
-fn split_pinched(lp: Vec<u32>) -> Vec<Vec<u32>> {
+pub(crate) fn split_pinched(lp: Vec<u32>) -> Vec<Vec<u32>> {
     let mut out = vec![];
     let mut stack: Vec<u32> = vec![];
     let mut seen: HashMap<u32, usize> = HashMap::new();
@@ -892,7 +907,7 @@ fn bridge_parallel(pos: &[DVec3], mut loops: Vec<Vec<u32>>, gap: f64) -> Vec<Vec
 
 /// Fills a loop with triangles, always cutting the ear with the shortest
 /// diagonal among those facing outwards (works for thin bands and bridges).
-fn fill_loop(field: &Field, pos: &[DVec3], lp: &[u32], faces: &mut Vec<Vec<u32>>, face_patch: &mut Vec<u32>, edges: &mut std::collections::HashSet<(u32, u32)>) {
+pub(crate) fn fill_loop(field: &Field, pos: &[DVec3], lp: &[u32], faces: &mut Vec<Vec<u32>>, face_patch: &mut Vec<u32>, edges: &mut std::collections::HashSet<(u32, u32)>) {
     let mut idx: Vec<u32> = lp.to_vec();
     let mut guard = 0;
     while idx.len() > 3 && guard < lp.len() * 4 {
@@ -945,7 +960,7 @@ fn fill_loop(field: &Field, pos: &[DVec3], lp: &[u32], faces: &mut Vec<Vec<u32>>
 }
 
 /// Materials, per-corner normals (split on creases), quality statistics.
-fn finish(field: &Field, out: &mut Baked, st: &BakeSettings, progress: &Progress) {
+pub(crate) fn finish(field: &Field, out: &mut Baked, st: &BakeSettings, progress: &Progress) {
     let pos = out.positions.clone();
     // exact normal once per vertex
     let nv_order: Vec<usize> = (0..pos.len()).collect();

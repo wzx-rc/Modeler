@@ -14,6 +14,8 @@ pub struct GenSettings {
     pub tol: f64,
     /// Maximum edge length on flat or straight parts (mm).
     pub max_edge: f64,
+    /// Forced segment count around surfaces of revolution (0 = automatic).
+    pub segs: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -122,7 +124,7 @@ fn arc_step(radius: f64, tol: f64) -> f64 {
 }
 
 /// Local bounds of a primitive at an iso level (conservative).
-fn prim_bounds(pr: &PrimDef, level: f64) -> (DVec3, DVec3) {
+pub(crate) fn prim_bounds(pr: &PrimDef, level: f64) -> (DVec3, DVec3) {
     let s = pr.size;
     let he = match pr.kind {
         0 | 2 => s,
@@ -559,6 +561,9 @@ fn revolve(pr: &PrimDef, level: f64, st: &GenSettings) -> PolyMesh {
     let mut segs = (TAU / arc_step(rmax, st.tol)).ceil() as usize;
     segs = segs.max((TAU * rmax / st.max_edge).ceil() as usize).max(12);
     segs = segs.div_ceil(8) * 8;
+    if st.segs >= 3 {
+        segs = st.segs;
+    }
     for (mer, closed) in meridians {
         let rows: Vec<Vec<u32>> = mer
             .iter()

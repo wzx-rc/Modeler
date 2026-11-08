@@ -117,6 +117,17 @@ pub struct Instance {
     pub to_local: DAffine3,
 }
 
+/// One operation of the modelling history (see `Field::steps`).
+#[derive(Clone, Copy, Debug)]
+pub struct Step {
+    pub prim: u32,
+    /// 0 add, 1 carve, 2 intersect, u32::MAX for the body.
+    pub mode: u32,
+    /// Blend (fillet) size in world units.
+    pub k: f64,
+    pub chamfer: bool,
+}
+
 pub struct Field {
     instrs: Vec<Instr>,
     pub prims: Vec<PrimDef>,
@@ -535,6 +546,60 @@ impl Field {
     }
 
     /// Static analysis: every (primitive, world level) that can own the surface.
+    /// The modelling history as a flat list of operations, when the program
+    /// is a plain chain (body, then one primitive combined at a time):
+    /// the first step is the body (mode u32::MAX).
+    pub fn steps(&self) -> Option<Vec<Step>> {
+        let mut stack: Vec<Option<u32>> = vec![];
+        let mut out: Vec<Step> = vec![];
+        for ins in &self.instrs {
+            match *ins {
+                Instr::Empty => stack.push(None),
+                Instr::Prim(k) => {
+                    // fold variants of one term combine into the same prim
+                    stack.push(Some(k));
+                }
+                Instr::Combine { mode, k, chamfer, .. } => {
+                    let b = stack.pop()?;
+                    let a = stack.pop()?;
+                    match (a, b) {
+                        (Some(x), Some(y)) if x == y => stack.push(Some(x)),
+                        (None, Some(y)) | (Some(y), None) => {
+                            if out.is_empty() {
+                                out.push(Step { prim: y, mode: u32::MAX, k: 0.0, chamfer: false });
+                            }
+                            stack.push(Some(u32::MAX - 1));
+                        }
+                        (Some(x), Some(y)) => {
+                            if out.is_empty() {
+                                if x >= u32::MAX - 1 {
+                                    return None;
+                                }
+                                out.push(Step { prim: x, mode: u32::MAX, k: 0.0, chamfer: false });
+                            }
+                            if y >= u32::MAX - 1 || mode > 2 {
+                                return None;
+                            }
+                            out.push(Step { prim: y, mode, k, chamfer });
+                            stack.push(Some(u32::MAX - 1));
+                        }
+                        _ => return None,
+                    }
+                }
+                Instr::End => break,
+                _ => {}
+            }
+        }
+        if out.is_empty() {
+            if let Some(Some(k)) = stack.first() {
+                if *k < u32::MAX - 1 {
+                    out.push(Step { prim: *k, mode: u32::MAX, k: 0.0, chamfer: false });
+                }
+            }
+        }
+        Some(out)
+    }
+
     pub fn term_levels(&self) -> Vec<(u32, f64)> {
         let mut stack: Vec<Vec<(u32, f64)>> = vec![];
         for ins in &self.instrs {

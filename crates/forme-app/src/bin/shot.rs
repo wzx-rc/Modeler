@@ -338,6 +338,9 @@ fn main() {
     if want("10") {
         bake_grenade(&mut h);
     }
+    if want("19") {
+        bake_cube(&mut h);
+    }
     let _ = (Tool::Select, demo::starter);
     let _: Option<_S> = None;
 }
@@ -886,6 +889,45 @@ fn raster_mesh(mesh: &forme_core::mesh::Mesh, st: &AppState, w: u32, h: u32, pat
 
 /// Bake of the rebuilt grenade: dialog, progress, result, wireframe, zoom,
 /// exports, and the same zoom on the old voxel export for comparison.
+/// The test cube (bevel 1 mm, through hole Ø8, fillet 0.8) baked in the app.
+fn bake_cube(h: &mut Harness) {
+    use forme_core::scene::{NodeSpec, Scene, Shape};
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::splat(10.0);
+    b.round = 1.0;
+    s.add(root, NodeSpec::shape("Cube", b));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(4.0, 14.0, 0.0);
+    s.add(root, NodeSpec::shape("Trou", c).mode(CombineMode::Carve).blend(0.8));
+    h.reset(AppState::new(s, "Cube test"));
+    h.st.frame_all();
+    h.steps(4);
+    h.st.bake.quality = forme_core::bake::Quality::Standard;
+    h.st.bake.open = true;
+    h.steps(30);
+    h.shot("19-cube-bake-dialogue");
+    h.st.start_bake();
+    while h.st.bake.job.is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        h.step();
+    }
+    let b = h.st.bake.result.clone().expect("bake result");
+    let st = &b.stats;
+    eprintln!("cube : {} faces ({} q {} t {} n) constructif {} · {:.3} s", b.faces.len(), st.quads, st.tris, st.ngons, st.constructive, st.seconds);
+    h.steps(30);
+    h.shot("19-cube-bake-resultat");
+    h.st.bake.open = false;
+    h.st.toast = None;
+    h.cam(Vec3::new(3.0, 0.0, 0.0), 78.0, 0.72, 0.52);
+    h.steps(20);
+    h.shot("20-cube-bake-filaire");
+    h.cam(Vec3::new(2.0, 8.0, 2.0), 34.0, 0.62, 0.8);
+    h.steps(10);
+    h.shot("21-cube-bake-zoom");
+}
+
 fn bake_grenade(h: &mut Harness) {
     let path = format!("{}/replay/grenade-remontee.forme", h.out_dir);
     let scene = std::fs::read_to_string(&path).ok().and_then(|s| forme_core::Scene::from_json(&s).ok()).unwrap_or_else(forme_core::demo::grenade);

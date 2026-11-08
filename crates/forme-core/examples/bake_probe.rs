@@ -34,6 +34,28 @@ fn defects(b: &bake::Baked) {
     }
 }
 
+/// Test piece like the reference: a pot with a lip and an inset panel.
+fn pot() -> Scene {
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(12.0, 12.0, 0.0);
+    c.round = 1.0;
+    s.add(root, NodeSpec::shape("pot", c));
+    let mut lip = Shape::new(PrimKind::Cylinder);
+    lip.size = Vec3::new(10.6, 2.0, 0.0);
+    s.add(root, NodeSpec::shape("lip", lip).at(Vec3::new(0.0, 12.0, 0.0)).mode(CombineMode::Carve).blend(0.6));
+    let g = s.add(root, NodeSpec::group("panel", true).mode(CombineMode::Carve).blend(0.5));
+    let mut tube = Shape::new(PrimKind::Tube);
+    tube.size = Vec3::new(13.0, 20.0, 11.3);
+    s.add(g, NodeSpec::shape("shell", tube));
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::new(5.5, 6.0, 8.0);
+    b.round = 2.0;
+    s.add(g, NodeSpec::shape("window", b).at(Vec3::new(0.0, -1.0, 10.0)).mode(CombineMode::Intersect));
+    s
+}
+
 fn report(name: &str, scene: &Scene, q: Quality) {
     let b = bake::bake_blocking(scene, q);
     if std::env::var("DEFECTS").is_ok() {
@@ -63,7 +85,7 @@ fn report(name: &str, scene: &Scene, q: Quality) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let what = args.get(1).map(|s| s.as_str()).unwrap_or("all");
-    let gs = gen::GenSettings { tol: 0.01, max_edge: 4.0 };
+    let gs = gen::GenSettings { tol: 0.01, max_edge: 4.0, segs: 0 };
     if what == "all" || what == "gen" {
         let mut kinds: Vec<(&str, Shape)> = vec![];
         let mut b = Shape::new(PrimKind::Box);
@@ -226,6 +248,77 @@ fn main() {
         let dir = std::env::var("DIR").ok().map(|v| { let w: Vec<f64> = v.split(',').map(|x| x.parse().unwrap()).collect(); glam::DVec3::new(w[0], w[1], w[2]) }).unwrap_or(glam::DVec3::new(0.6, 0.35, 1.0));
         render(&b, "/tmp/sub.png", dir, cx, ext, 1000, 900);
     }
+    if what == "quad" {
+        let s = if std::env::var("POT").is_ok() { pot() } else { cube_hole() };
+        let size: f64 = std::env::var("SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.8);
+        let qs = bake::quad::QuadSettings { size, crease_deg: 35.0, threads: 2 };
+        let b = bake::quad::quad_bake(&s, &qs, &bake::Progress::default()).unwrap();
+        let st = &b.stats;
+        println!(
+            "pot quad  {} faces ({} q {} t {} n) open {} nonman {} holes {} dev max {:.4} mean {:.5} {:.2}s {:?}",
+            b.faces.len(), st.quads, st.tris, st.ngons, st.open_edges, st.nonmanifold_edges, st.holes_filled, st.max_dev, st.mean_dev, st.seconds, st.stage_seconds
+        );
+        if std::env::var("POT").is_ok() {
+            render(&b, "/tmp/pot.png", glam::DVec3::new(0.5, 0.45, 1.0), glam::DVec3::new(0.0, 0.0, 0.0), 34.0, 1000, 1000);
+            render(&b, "/tmp/pot_zoom.png", glam::DVec3::new(0.25, 0.15, 1.0), glam::DVec3::new(3.0, 2.0, 12.0), 14.0, 1000, 1000);
+        } else {
+            render(&b, "/tmp/pot.png", glam::DVec3::new(0.75, 0.9, 1.0), glam::DVec3::new(0.0, 1.0, 0.0), 34.0, 1100, 1100);
+            render(&b, "/tmp/pot_zoom.png", glam::DVec3::new(0.35, 1.0, 0.55), glam::DVec3::new(1.5, 8.0, 2.0), 15.0, 1100, 1100);
+        }
+
+    }
+    if what == "build" {
+        let s = cube_hole();
+        let size: f64 = std::env::var("SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(2.25);
+        let bs = bake::build::BuildSettings { size, tol: 0.03, fillet_rows: 0, threads: 2 };
+        let b = bake::build::build(&s, &bs, &bake::Progress::default()).expect("build unsupported");
+        let st = &b.stats;
+        println!(
+            "build {} faces ({} q {} t {} n) verts {} open {} nonman {} dev max {:.5} mean {:.6} {:.3}s",
+            b.faces.len(), st.quads, st.tris, st.ngons, st.verts, st.open_edges, st.nonmanifold_edges, st.max_dev, st.mean_dev, st.seconds
+        );
+        render(&b, "/tmp/build_a.png", glam::DVec3::new(0.75, 0.9, 1.0), glam::DVec3::new(0.0, 1.0, 0.0), 34.0, 1100, 1100);
+        render(&b, "/tmp/build_b.png", glam::DVec3::new(0.35, 1.0, 0.55), glam::DVec3::new(1.5, 8.0, 2.0), 15.0, 1100, 1100);
+    }
+    if what == "variants" {
+        use glam::DVec3;
+        let cases: Vec<(&str, Scene)> = vec![
+            ("decale", variant(Vec3::new(3.0, 0.0, 2.0), Quat::IDENTITY, Vec3::new(3.0, 14.0, 0.0), CombineMode::Carve, 0.8)),
+            ("cote", variant(Vec3::ZERO, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2), Vec3::new(3.0, 14.0, 0.0), CombineMode::Carve, 0.6)),
+            ("borgne", variant(Vec3::new(0.0, 9.0, 0.0), Quat::IDENTITY, Vec3::new(4.0, 5.0, 0.0), CombineMode::Carve, 0.8)),
+            ("bossage", variant(Vec3::new(0.0, 11.0, 0.0), Quat::IDENTITY, Vec3::new(4.0, 3.0, 0.0), CombineMode::Add, 1.0)),
+            ("vif", variant(Vec3::ZERO, Quat::IDENTITY, Vec3::new(4.0, 14.0, 0.0), CombineMode::Carve, 0.0)),
+            ("pres-bord", variant(Vec3::new(4.5, 0.0, 0.0), Quat::IDENTITY, Vec3::new(3.0, 14.0, 0.0), CombineMode::Carve, 0.6)),
+        ];
+        for (i, (name, s)) in cases.iter().enumerate() {
+            let bs = bake::build::BuildSettings { size: 2.25, tol: 0.03, fillet_rows: 0, threads: 2 };
+            match bake::build::build(s, &bs, &bake::Progress::default()) {
+                Some(b) => {
+                    let st = &b.stats;
+                    println!("{name:10} {} faces ({} q {} t {} n) open {} nonman {} dev max {:.4}", b.faces.len(), st.quads, st.tris, st.ngons, st.open_edges, st.nonmanifold_edges, st.max_dev);
+                    render(&b, &format!("/tmp/var_{i}.png"), DVec3::new(0.75, 0.9, 1.0), DVec3::new(0.0, 1.0, 0.0), 34.0, 700, 700);
+                    if *name == "pres-bord" {
+                        render(&b, "/tmp/var_zoom.png", DVec3::new(0.9, 0.8, 0.5), DVec3::new(8.0, 9.0, 0.0), 10.0, 700, 700);
+                    }
+                }
+                None => println!("{name:10} not handled"),
+            }
+        }
+    }
+    if what == "target" {
+        let b = target_mesh();
+        let mut und: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+        for f in &b.faces {
+            for i in 0..f.verts.len() {
+                let (a, c) = (f.verts[i], f.verts[(i + 1) % f.verts.len()]);
+                *und.entry((a.min(c), a.max(c))).or_default() += 1;
+            }
+        }
+        let quads = b.faces.iter().filter(|f| f.verts.len() == 4).count();
+        println!("target: {} faces, {} quads, open {} nonmanifold {}", b.faces.len(), quads, und.values().filter(|&&c| c == 1).count(), und.values().filter(|&&c| c > 2).count());
+        render(&b, "/tmp/target_a.png", glam::DVec3::new(0.75, 0.9, 1.0), glam::DVec3::new(0.0, 1.0, 0.0), 34.0, 1100, 1100);
+        render(&b, "/tmp/target_b.png", glam::DVec3::new(0.35, 1.0, 0.55), glam::DVec3::new(1.5, 8.0, 2.0), 15.0, 1100, 1100);
+    }
     if what == "terms" {
         per_term(&demo::grenade(), Quality::Standard);
     }
@@ -308,7 +401,7 @@ pub fn per_term(scene: &Scene, q: Quality) {
         walk(scene, scene.root, &mut v);
         v
     };
-    let gs = gen::GenSettings { tol: st.tol, max_edge: st.max_edge };
+    let gs = gen::GenSettings { tol: st.tol, max_edge: st.max_edge, segs: 0 };
     let ps = PatchSettings { trim_len: st.trim_len, min_size: st.trim_len / 8.0, max_level: 9 };
     for (prim, level) in field.term_levels() {
         let pr = &field.prims[prim as usize];
@@ -370,7 +463,10 @@ pub fn render(b: &bake::Baked, path: &str, eye_dir: glam::DVec3, target: glam::D
             // back face: still draw (helps to see holes) but darker
         }
         let shade = (n.dot(light).max(0.0) * 0.75 + 0.25).min(1.0);
-        let col = if std::env::var("BY_PATCH").is_ok() {
+        let col = if std::env::var("BY_STEP").is_ok() {
+            // constructive bake groups: native, rings, fillet, tool rings, tool native
+            [[0.66, 0.68, 0.64], [0.55, 0.68, 0.86], [0.95, 0.6, 0.3], [0.68, 0.55, 0.85], [0.42, 0.72, 0.66]][(f.patch as usize).min(4)]
+        } else if std::env::var("BY_PATCH").is_ok() {
             if f.patch == u32::MAX {
                 [1.0, 0.2, 0.2]
             } else {
@@ -455,7 +551,7 @@ pub fn check_cuts(scene: &Scene, q: Quality) {
     use bake::patch::{self, PatchSettings, Term};
     let st = bake::BakeSettings::preset(q);
     let field = Field::new(&compile(scene));
-    let gs = gen::GenSettings { tol: st.tol, max_edge: st.max_edge };
+    let gs = gen::GenSettings { tol: st.tol, max_edge: st.max_edge, segs: 0 };
     let ps = PatchSettings { trim_len: st.trim_len, min_size: st.trim_len / 8.0, max_level: 9 };
     let term_val = |k: &bake::field::TermKey, x: glam::DVec3| -> f64 {
         let pr = &field.prims[k.prim as usize];
@@ -502,7 +598,7 @@ pub fn dump_near(scene: &Scene, prim: u32, level: f64, at: glam::DVec3, r: f64) 
     use bake::patch::{self, PatchSettings, Term};
     let st = bake::BakeSettings::preset(Quality::Standard);
     let field = Field::new(&compile(scene));
-    let gs = gen::GenSettings { tol: st.tol, max_edge: st.max_edge };
+    let gs = gen::GenSettings { tol: st.tol, max_edge: st.max_edge, segs: 0 };
     let ps = PatchSettings { trim_len: st.trim_len, min_size: st.trim_len / 8.0, max_level: 9 };
     let pr = &field.prims[prim as usize];
     let base = gen::generate(pr, level / pr.sc, &gs);
@@ -518,4 +614,155 @@ pub fn dump_near(scene: &Scene, prim: u32, level: f64, at: glam::DVec3, r: f64) 
             }
         }
     }
+}
+
+/// Cube bevel radius (env ROUND, 1 mm by default: "plus sharp").
+pub fn round() -> f32 {
+    std::env::var("ROUND").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
+}
+
+/// Test cube: 20 mm, rounded edges (bevel) ROUND mm, through hole Ø8 with a 0.8 mm rim fillet.
+pub fn cube_hole() -> Scene {
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::splat(10.0);
+    b.round = round();
+    s.add(root, NodeSpec::shape("cube", b));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(4.0, 14.0, 0.0);
+    s.add(root, NodeSpec::shape("trou", c).mode(CombineMode::Carve).blend(0.8));
+    s
+}
+
+pub fn variant(at: Vec3, rot: Quat, size: Vec3, mode: CombineMode, blend: f32) -> Scene {
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::splat(10.0);
+    b.round = round();
+    s.add(root, NodeSpec::shape("cube", b));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = size;
+    s.add(root, NodeSpec::shape("outil", c).at(at).rot(rot).mode(mode).blend(blend));
+    s
+}
+
+/// Hand-built target topology for `cube_hole`, laid on the exact surface.
+pub fn target_mesh() -> bake::Baked {
+    use glam::DVec3;
+    let scene = cube_hole();
+    let field = Field::new(&compile(&scene));
+    // the rounded cube: 8 flat segments per face, 4 bevel rows per edge
+    let pr = &field.prims[0];
+    let a = 10.0 - round() as f64;
+    let gs = gen::GenSettings { tol: 0.03, max_edge: 2.0 * a / 8.0, segs: 0 };
+    let cube = gen::generate(pr, 0.0, &gs);
+    let mut pos: Vec<DVec3> = cube.pos.clone();
+    let on_cap = |p: DVec3, y: f64| (p.y - y).abs() < 1e-6 && p.x.abs() <= a + 1e-6 && p.z.abs() <= a + 1e-6;
+    let mut faces: Vec<Vec<u32>> = cube.faces.iter().filter(|f| !(f.iter().all(|v| on_cap(pos[*v as usize], 10.0)) || f.iter().all(|v| on_cap(pos[*v as usize], -10.0)))).cloned().collect();
+    let segs = 32usize;
+    let add = |pos: &mut Vec<DVec3>, p: DVec3| -> u32 {
+        pos.push(p);
+        pos.len() as u32 - 1
+    };
+    for &(y, sgn) in &[(10.0f64, 1.0f64), (-10.0, -1.0)] {
+        // square border of the flat cap, 8 segments per side, counter-clockwise from +x
+        let find = |pos: &Vec<DVec3>, x: f64, z: f64| -> u32 {
+            pos.iter().position(|p| (p.x - x).abs() < 1e-6 && (p.z - z).abs() < 1e-6 && (p.y - y).abs() < 1e-6).unwrap() as u32
+        };
+        let mut square = vec![];
+        for j in 0..segs {
+            let ang = std::f64::consts::TAU * j as f64 / segs as f64;
+            // point of the square border at the same index (equal steps along the sides)
+            let side = (j + 4) / 8 % 4;
+            let k = ((j + 4) % 8) as f64; // 0..8 along the side
+            let t = -a + 2.0 * a * k / 8.0;
+            let (x, z) = match side {
+                0 => (a, t),
+                1 => (-t, a),
+                2 => (-a, -t),
+                _ => (t, -a),
+            };
+            let _ = ang;
+            square.push(find(&pos, x, z));
+        }
+        let rings_r = [0.75, 0.5, 0.25];
+        let circle = |r: f64, yy: f64, j: usize| {
+            let ang = std::f64::consts::TAU * j as f64 / segs as f64;
+            DVec3::new(r * ang.cos(), yy, r * ang.sin())
+        };
+        let mut rings: Vec<Vec<u32>> = vec![square.clone()];
+        for &w in &rings_r {
+            let ring: Vec<u32> = (0..segs)
+                .map(|j| {
+                    let sq = pos[square[j] as usize];
+                    let ci = circle(4.8, y, j);
+                    add(&mut pos, ci.lerp(sq, w))
+                })
+                .collect();
+            rings.push(ring);
+        }
+        // fillet: rail on the cap, middle, rail on the wall
+        rings.push((0..segs).map(|j| add(&mut pos, circle(4.8, y, j))).collect());
+        rings.push((0..segs).map(|j| add(&mut pos, circle(4.0, y, j))).collect());
+        rings.push((0..segs).map(|j| add(&mut pos, circle(4.0, y - 0.8 * sgn, j))).collect());
+        if sgn > 0.0 {
+            // wall rows down to the bottom rail (shared with the bottom cap)
+            for r in 1..9 {
+                let yy = 9.2 - 18.4 * r as f64 / 9.0;
+                rings.push((0..segs).map(|j| add(&mut pos, circle(4.0, yy, j))).collect());
+            }
+        }
+        for w in rings.windows(2) {
+            for j in 0..segs {
+                let j2 = (j + 1) % segs;
+                let f = vec![w[0][j], w[0][j2], w[1][j2], w[1][j]];
+                faces.push(f);
+            }
+        }
+        if sgn > 0.0 {
+            // remember the last wall row to join it to the bottom
+            let last = rings.last().unwrap().clone();
+            faces.push(vec![u32::MAX]); // marker
+            faces.push(last);
+        }
+    }
+    // join the top wall's last row to the bottom wall rail
+    let mi = faces.iter().position(|f| f == &vec![u32::MAX]).unwrap();
+    let last = faces.remove(mi + 1);
+    faces.remove(mi);
+    let bottom_rail: Vec<u32> = (0..segs)
+        .map(|j| {
+            let ang = std::f64::consts::TAU * j as f64 / segs as f64;
+            let target = DVec3::new(4.0 * ang.cos(), -9.2, 4.0 * ang.sin());
+            pos.iter().position(|p| p.distance(target) < 1e-9).unwrap() as u32
+        })
+        .collect();
+    for j in 0..segs {
+        let j2 = (j + 1) % segs;
+        faces.push(vec![last[j], last[j2], bottom_rail[j2], bottom_rail[j]]);
+    }
+    for p in pos.iter_mut() {
+        if let Some(q) = field.project(*p) {
+            *p = q;
+        }
+    }
+    // outward orientation, exact normals
+    let mut b = bake::Baked::default();
+    for mut f in faces {
+        let mut n = DVec3::ZERO;
+        let mut c = DVec3::ZERO;
+        for k in 0..f.len() {
+            n += pos[f[k] as usize].cross(pos[f[(k + 1) % f.len()] as usize]);
+            c += pos[f[k] as usize];
+        }
+        if n.dot(field.grad(c / f.len() as f64)) < 0.0 {
+            f.reverse();
+        }
+        let normals = f.iter().map(|v| field.grad(pos[*v as usize]).normalize_or_zero()).collect();
+        b.faces.push(bake::BFace { verts: f, normals, mat: 0, patch: 0 });
+    }
+    b.positions = pos;
+    b
 }
