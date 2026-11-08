@@ -171,6 +171,7 @@ mod tests {
         assert!(p.prim_count > 20, "prims: {}", p.prim_count);
         let (lo, hi) = s.bounds();
         assert!(lo.y < 10.0 && hi.y > 140.0, "bounds {lo} {hi}");
+        assert!(lo.y > -2.0, "nothing below the ground: {lo}");
         let t = p.raycast(Vec3::new(0.0, 46.0, 300.0), -Vec3::Z, 600.0).expect("hit");
         // front boss surface ~ z = 33
         let z = 300.0 - t;

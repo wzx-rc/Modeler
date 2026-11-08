@@ -173,6 +173,34 @@ impl Shape {
         }
     }
 
+    /// Conservative local bounding box (min, max).
+    pub fn local_bounds(&self) -> (Vec3, Vec3) {
+        if let (PrimKind::Profile, Some(p)) = (self.kind, self.profile.as_ref()) {
+            let pts = p.polyline();
+            let mut lo = Vec2::splat(f32::MAX);
+            let mut hi = Vec2::splat(f32::MIN);
+            for q in &pts {
+                lo = lo.min(*q);
+                hi = hi.max(*q);
+            }
+            if pts.is_empty() {
+                return (Vec3::splat(-1.0), Vec3::splat(1.0));
+            }
+            let pad = Vec3::splat(self.shell.max(0.0) + 0.5);
+            return match p.mode {
+                ProfileMode::Revolve => {
+                    let r = lo.x.abs().max(hi.x.abs());
+                    (Vec3::new(-r, lo.y, -r) - pad, Vec3::new(r, hi.y, r) + pad)
+                }
+                ProfileMode::Extrude => {
+                    (Vec3::new(lo.x, lo.y, -self.size.z) - pad, Vec3::new(hi.x, hi.y, self.size.z) + pad)
+                }
+            };
+        }
+        let he = self.local_half_extents();
+        (-he, he)
+    }
+
     /// Conservative local bounding box (half extents).
     pub fn local_half_extents(&self) -> Vec3 {
         let s = self.size;
@@ -713,13 +741,15 @@ impl Scene {
                     if n.combine.mode != CombineMode::Add && n.combine.mode != CombineMode::Tongue {
                         return;
                     }
-                    let he = shape.local_half_extents() + Vec3::splat(n.combine.blend + n.combine.depth);
+                    let (l, h) = shape.local_bounds();
+                    let pad = Vec3::splat(n.combine.blend + n.combine.depth);
+                    let (l, h) = (l - pad, h + pad);
                     let mut corners = vec![];
                     for i in 0..8 {
                         let c = Vec3::new(
-                            if i & 1 == 0 { -he.x } else { he.x },
-                            if i & 2 == 0 { -he.y } else { he.y },
-                            if i & 4 == 0 { -he.z } else { he.z },
+                            if i & 1 == 0 { l.x } else { h.x },
+                            if i & 2 == 0 { l.y } else { h.y },
+                            if i & 4 == 0 { l.z } else { h.z },
                         );
                         corners.push(m.transform_point3(c));
                     }
@@ -801,14 +831,15 @@ impl Scene {
     pub fn shape_world_aabb(&self, id: NodeId) -> Option<(Vec3, Vec3)> {
         let n = self.node(id)?;
         let shape = n.shape()?;
-        let pad = n.combine.blend.max(0.0) + n.combine.depth.max(0.0) + n.combine.width.max(0.0);
-        let he = shape.local_half_extents() + Vec3::splat(pad);
+        let pad = Vec3::splat(n.combine.blend.max(0.0) + n.combine.depth.max(0.0) + n.combine.width.max(0.0));
+        let (l, h) = shape.local_bounds();
+        let (l, h) = (l - pad, h + pad);
         let mut pts: Vec<Vec3> = (0..8)
             .map(|i| {
                 Vec3::new(
-                    if i & 1 == 0 { -he.x } else { he.x },
-                    if i & 2 == 0 { -he.y } else { he.y },
-                    if i & 4 == 0 { -he.z } else { he.z },
+                    if i & 1 == 0 { l.x } else { h.x },
+                    if i & 2 == 0 { l.y } else { h.y },
+                    if i & 4 == 0 { l.z } else { h.z },
                 )
             })
             .collect();
