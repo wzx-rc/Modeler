@@ -116,6 +116,20 @@ impl Harness {
 
     /// Renders the current state at full quality and saves a PNG.
     fn shot(&mut self, name: &str) {
+        let scale = self.fr.full_scale;
+        self.shot_at(name, 2.0, scale);
+    }
+
+    fn shot_at(&mut self, name: &str, ppp: f32, scale: f32) {
+        let (old_ppp, old_scale) = (self.ppp, self.fr.full_scale);
+        self.ppp = ppp;
+        self.fr.full_scale = scale;
+        self.render_png(name);
+        self.ppp = old_ppp;
+        self.fr.full_scale = old_scale;
+    }
+
+    fn render_png(&mut self, name: &str) {
         self.t += 1.0 / 60.0;
         let raw = self.raw();
         self.st.tick(self.t);
@@ -130,6 +144,9 @@ impl Harness {
         self.fr.render(&self.gpu.device, &self.gpu.queue, &view, [w, h], self.ppp, &mut self.st, &paint, &mut out.textures_delta, true);
         let px = self.gpu.read_rgba(&tex);
         let path = format!("{}/{}.png", self.out_dir, name);
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
         image::save_buffer(&path, &px, w, h, image::ExtendedColorType::Rgba8).expect("png");
         eprintln!("{path}  ({:.1?})", t0.elapsed());
     }
@@ -315,8 +332,476 @@ fn main() {
             raster_mesh(&mesh, &h.st, 1600, 1120, &path);
         }
     }
+    if want("09") {
+        replay_grenade(&mut h);
+    }
     let _ = (Tool::Select, demo::starter);
     let _: Option<_S> = None;
+}
+
+
+// ------------------------------------------------------------------------
+// Full rebuild of the grenade from an empty scene, with the app's tools only.
+// Camera moves stand for finger gestures; numeric fields stand for the panel.
+// ------------------------------------------------------------------------
+
+use forme_app::state::Handle;
+use forme_core::{Axis, NodeKind, Repeat};
+
+struct Replay {
+    journal: Vec<String>,
+    frame: usize,
+    step: usize,
+    /// Journal index where the current step's notes start.
+    mark: usize,
+    /// Timelapse frames: (file, seconds on screen).
+    frames: Vec<(String, f32)>,
+}
+
+impl Harness {
+    fn note(&mut self, r: &mut Replay, text: &str) {
+        r.journal.push(format!("- {text}"));
+        eprintln!("  · {text}");
+        self.st.toast = Some(forme_app::state::Toast { text: text.to_string(), until: self.t + 100.0, warn: false });
+        self.steps(12);
+        r.frame += 1;
+        let name = format!("replay/frames/f{:03}", r.frame);
+        self.shot_at(&name, 1.0, 0.7);
+        r.frames.push((name, 0.55));
+    }
+
+    fn step_frame(&mut self, r: &mut Replay, title: &str) {
+        r.step += 1;
+        r.journal.insert(r.mark, format!("\n**Étape {} · {title}**", r.step));
+        r.mark = r.journal.len();
+        eprintln!("Étape {} · {title}", r.step);
+        self.st.toast = Some(forme_app::state::Toast { text: format!("Étape {} · {title}", r.step), until: self.t + 100.0, warn: false });
+        self.steps(30); // let the toast fade in
+        r.frame += 1;
+        let name = format!("replay/frames/f{:03}", r.frame);
+        self.shot_at(&name, 1.0, 0.7);
+        r.frames.push((name, 1.8));
+    }
+
+    fn tool(&mut self, r: &mut Replay, t: Tool) {
+        self.st.commit_placement();
+        self.st.tool = t;
+        self.steps(2);
+        let what = match t {
+            Tool::Place(k) => format!("outil {}", k.label()),
+            Tool::Kit(k) => format!("kit {}", k.label()),
+            Tool::Profile => "outil Profil".into(),
+            other => format!("{other:?}"),
+        };
+        self.note(r, &format!("rail : {what}"));
+    }
+
+    /// Pencil: base on a surface (or the ground), stretched while reading the live
+    /// measure until `size` (radius, or half width × half depth for boxes), then the height.
+    fn place(&mut self, r: &mut Replay, base: Vec3, size: (f32, f32), height: Option<f32>) -> NodeId {
+        let a = self.screen_of(base);
+        self.press(a, true);
+        for i in 1..=3 {
+            self.move_to(a + egui::vec2(3.0 * i as f32, 0.0));
+        }
+        let p = self.st.placement.clone().expect("placement started");
+        let is_box = p.kind == PrimKind::Box;
+        let target = p.base + p.rot * Vec3::X * size.0 + if is_box { p.rot * Vec3::Z * size.1 } else { Vec3::ZERO };
+        let b = self.screen_of(target);
+        let a2 = a + egui::vec2(9.0, 0.0);
+        for i in 1..=10 {
+            self.move_to(a2 + (b - a2) * (i as f32 / 10.0));
+        }
+        self.press(b, false);
+        self.step();
+        let id = self.st.selection.expect("shape created");
+        let msg = format!(
+            "Pencil : base{} (normale {:.2}, {:.2}, {:.2})",
+            p.snapped.map(|s| format!(" aimantée sur {s}")).unwrap_or_default(),
+            p.normal.x,
+            p.normal.y,
+            p.normal.z
+        );
+        if let Some(hgt) = height {
+            let p = self.st.placement.clone().expect("awaiting height");
+            let px = self.st.view().pixel_size_at((p.base - self.st.camera.eye()).length());
+            let dy = (hgt - p.height) / px;
+            self.drag(b, b + egui::vec2(0.0, -dy), 12, true);
+        }
+        let n = self.st.scene.node(id).unwrap();
+        let sh = n.shape().unwrap();
+        self.note(r, &format!("{msg} → {} {} · taille {:.1} / {:.1} / {:.1} mm", n.name, n.combine.mode.label(), sh.size.x, sh.size.y, sh.size.z));
+        id
+    }
+
+    fn select_node(&mut self, r: &mut Replay, id: NodeId) {
+        self.st.tool = Tool::Select;
+        self.st.select(Some(id));
+        self.steps(2);
+        let name = self.st.scene.node(id).unwrap().name.clone();
+        self.note(r, &format!("arbre : sélection de « {name} »"));
+    }
+
+    /// Drags a gizmo handle of the selection by a world offset.
+    fn gizmo(&mut self, r: &mut Replay, handle: Handle, delta: Vec3) {
+        self.st.tool = Tool::Select;
+        self.steps(2);
+        let info = self.st.handles().into_iter().find(|h| h.handle == handle).expect("handle");
+        let from = self.screen_of(info.world);
+        let to = self.screen_of(info.world + delta);
+        self.drag(from, to, 14, true);
+        let id = self.st.selection.unwrap();
+        let pos = self.st.scene.world_matrix(id).transform_point3(Vec3::ZERO);
+        self.note(r, &format!("gizmo {handle:?} → position {:.1}, {:.1}, {:.1}", pos.x, pos.y, pos.z));
+    }
+
+    fn panel<F: FnOnce(&mut forme_core::Node)>(&mut self, r: &mut Replay, what: &str, f: F) {
+        let id = self.st.selection.unwrap();
+        self.st.edit(what, id, f);
+        self.steps(2);
+        self.note(r, &format!("panneau : {what}"));
+    }
+
+    fn rename(&mut self, r: &mut Replay, name: &str) {
+        let n = name.to_string();
+        self.panel(r, &format!("nom « {name} »"), move |node| node.name = n);
+    }
+
+    fn shape_edit<F: FnOnce(&mut forme_core::Shape)>(&mut self, r: &mut Replay, what: &str, f: F) {
+        self.panel(r, what, move |n| {
+            if let NodeKind::Shape(s) = &mut n.kind {
+                f(s)
+            }
+        });
+    }
+
+    fn cam(&mut self, target: Vec3, dist: f32, yaw: f32, pitch: f32) {
+        self.st.camera.ortho = false;
+        self.st.camera.target = target;
+        self.st.camera.dist = dist;
+        self.st.camera.yaw = yaw;
+        self.st.camera.pitch = pitch;
+        self.st.view_changed();
+        self.steps(2);
+    }
+}
+
+fn replay_grenade(h: &mut Harness) {
+    use forme_app::camera::ViewPreset;
+    let mut r = Replay { journal: vec!["# Remontage de la grenade, scène vide → objet complet".into()], frame: 0, step: 0, mark: 1, frames: Vec::new() };
+    h.reset(AppState::new(forme_core::Scene::new(), "Grenade (remontage)"));
+    h.st.pointer_kind = PointerKind::Pencil;
+    h.cam(Vec3::new(0.0, 40.0, 0.0), 330.0, 0.42, 0.3);
+    h.step_frame(&mut r, "Scène vide");
+
+    // 1. body
+    h.tool(&mut r, Tool::Place(PrimKind::Cylinder));
+    let fut = h.place(&mut r, Vec3::ZERO, (27.0, 27.0), Some(68.0));
+    h.gizmo(&mut r, Handle::MoveY, Vec3::new(0.0, 24.6, 0.0));
+    h.rename(&mut r, "Fût");
+    h.shape_edit(&mut r, "Rondeur 10 mm, Taper 0,04", |s| {
+        s.round = 10.0;
+        s.taper = 0.04;
+    });
+    h.panel(&mut r, "Matière Vert militaire", |n| n.material = 1);
+    h.step_frame(&mut r, "Fût : cylindre au sol, monté au gizmo, arrondi");
+
+    // 2. lobes
+    h.cam(Vec3::new(0.0, 58.0, 0.0), 260.0, 0.42, 0.2);
+    h.tool(&mut r, Tool::Place(PrimKind::Sphere));
+    let lobe = h.place(&mut r, Vec3::new(0.0, 46.0, 26.8), (14.0, 14.0), None);
+    h.select_node(&mut r, lobe);
+    h.shape_edit(&mut r, "Rayons 14 / 15,5 / 12 mm", |s| s.size = Vec3::new(14.0, 15.5, 12.0));
+    let lz = h.st.scene.world_matrix(lobe).transform_point3(Vec3::ZERO).z;
+    h.gizmo(&mut r, Handle::MoveZ, Vec3::new(0.0, 0.0, 19.0 - lz));
+    h.panel(&mut r, "Blend 5 mm, Vert, Répétition radiale ×4 (axe Y)", |n| {
+        n.combine.blend = 5.0;
+        n.material = 1;
+        n.repeat = Repeat::Radial { count: 4, axis: Axis::Y };
+        n.name = "Lobe".into();
+    });
+    h.st.group_selected();
+    h.note(&mut r, "arbre : Grouper");
+    h.panel(&mut r, "groupe « Lobes », Répétition linéaire ×2, pas 24 mm en Y", |n| {
+        n.name = "Lobes".into();
+        n.repeat = Repeat::Linear { count: 2, step: Vec3::new(0.0, 24.0, 0.0) };
+    });
+    h.step_frame(&mut r, "Lobes : sphère au Pencil, radiale ×4, groupe ×2");
+
+    // 3. bosses + kit screws
+    h.cam(Vec3::new(0.0, 52.0, 10.0), 200.0, 0.3, 0.12);
+    h.tool(&mut r, Tool::Place(PrimKind::Cylinder));
+    let boss = h.place(&mut r, Vec3::new(0.0, 46.0, 31.0), (6.5, 6.5), Some(6.0));
+    h.select_node(&mut r, boss);
+    h.panel(&mut r, "rotation 90° / 0 / 0 (axe exactement en Z)", |n| n.transform.rot = glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
+    let bp = h.st.scene.world_matrix(boss).transform_point3(Vec3::ZERO);
+    h.gizmo(&mut r, Handle::PlaneXY, Vec3::new(-bp.x, 46.0 - bp.y, 0.0));
+    let bz = h.st.scene.world_matrix(boss).transform_point3(Vec3::ZERO).z;
+    h.gizmo(&mut r, Handle::MoveZ, Vec3::new(0.0, 0.0, 30.0 - bz));
+    h.rename(&mut r, "Bossage");
+    h.shape_edit(&mut r, "Rondeur 1,2 mm", |s| s.round = 1.2);
+    h.panel(&mut r, "Blend 1,5 mm, Vert", |n| {
+        n.combine.blend = 1.5;
+        n.material = 1;
+    });
+    h.st.group_selected();
+    let g1 = h.st.selection.unwrap();
+    h.note(&mut r, "arbre : Grouper (bossage + vis)");
+    h.select_node(&mut r, boss);
+    h.tool(&mut r, Tool::Kit(forme_app::kit::KitPiece::Screw));
+    let top = h.screen_of(Vec3::new(0.0, 46.0, 33.0));
+    h.tap(top);
+    h.note(&mut r, "kit : vis à fente posée au centre du bossage");
+    h.select_node(&mut r, g1);
+    h.panel(&mut r, "Répétition radiale ×4", |n| {
+        n.name = "Bossage + vis".into();
+        n.repeat = Repeat::Radial { count: 4, axis: Axis::Y };
+    });
+    h.st.group_selected();
+    h.note(&mut r, "arbre : Grouper");
+    h.panel(&mut r, "groupe « Bossages », Répétition linéaire ×2, pas 24 mm en Y", |n| {
+        n.name = "Bossages".into();
+        n.repeat = Repeat::Linear { count: 2, step: Vec3::new(0.0, 24.0, 0.0) };
+    });
+    h.step_frame(&mut r, "Bossages : cylindre + vis du kit, radiale ×4, groupe ×2");
+
+    // 4. lower ring and base
+    h.cam(Vec3::new(0.0, 30.0, 0.0), 300.0, 0.42, 0.25);
+    h.tool(&mut r, Tool::Place(PrimKind::Cylinder));
+    let ring = h.place(&mut r, Vec3::ZERO, (28.5, 28.5), Some(5.0));
+    let ry = h.st.scene.world_matrix(ring).transform_point3(Vec3::ZERO).y;
+    h.gizmo(&mut r, Handle::MoveY, Vec3::new(0.0, 27.0 - ry, 0.0));
+    h.rename(&mut r, "Bague basse");
+    h.shape_edit(&mut r, "Rondeur 1,2 mm", |s| s.round = 1.2);
+    h.panel(&mut r, "Matière Orange", |n| n.material = 2);
+    h.step_frame(&mut r, "Bague basse : anneau orange");
+
+    h.tool(&mut r, Tool::Place(PrimKind::Cylinder));
+    let base = h.place(&mut r, Vec3::ZERO, (23.0, 23.0), Some(14.0));
+    let by = h.st.scene.world_matrix(base).transform_point3(Vec3::ZERO).y;
+    h.gizmo(&mut r, Handle::MoveY, Vec3::new(0.0, 15.0 - by, 0.0));
+    h.rename(&mut r, "Base");
+    h.shape_edit(&mut r, "Rondeur 5 mm", |s| s.round = 5.0);
+    h.panel(&mut r, "Blend 2 mm, Vert", |n| {
+        n.combine.blend = 2.0;
+        n.material = 1;
+    });
+    h.cam(Vec3::new(0.0, 14.0, 10.0), 200.0, 0.3, 0.05);
+    h.tool(&mut r, Tool::Place(PrimKind::Sphere));
+    let foot = h.place(&mut r, Vec3::new(0.0, 12.0, 23.5), (6.0, 6.0), None);
+    h.select_node(&mut r, foot);
+    h.shape_edit(&mut r, "Rayons 6 / 4 / 6 mm", |s| s.size = Vec3::new(6.0, 4.0, 6.0));
+    let fp = h.st.scene.world_matrix(foot).transform_point3(Vec3::ZERO);
+    h.gizmo(&mut r, Handle::PlaneYZ, Vec3::new(0.0, 8.5 - fp.y, 15.0 - fp.z));
+    h.panel(&mut r, "Blend 2 mm, Vert, Répétition radiale ×6", |n| {
+        n.name = "Pieds".into();
+        n.combine.blend = 2.0;
+        n.material = 1;
+        n.repeat = Repeat::Radial { count: 6, axis: Axis::Y };
+    });
+    h.step_frame(&mut r, "Base et pieds (équerre YZ)");
+
+    // 5. neck
+    h.cam(Vec3::new(0.0, 100.0, 0.0), 260.0, 0.42, 0.35);
+    h.tool(&mut r, Tool::Place(PrimKind::Cylinder));
+    let core = h.place(&mut r, Vec3::new(0.0, 92.0, 0.0), (14.0, 14.0), Some(18.0));
+    h.select_node(&mut r, core);
+    h.rename(&mut r, "Noyau du col");
+    h.panel(&mut r, "Matière Métal sombre", |n| n.material = 3);
+    h.tool(&mut r, Tool::Place(PrimKind::Torus));
+    let thread = h.place(&mut r, Vec3::new(0.0, 109.0, 0.0), (14.5, 14.5), Some(3.0));
+    let ty = h.st.scene.world_matrix(thread).transform_point3(Vec3::ZERO).y;
+    h.gizmo(&mut r, Handle::MoveY, Vec3::new(0.0, 93.5 - ty, 0.0));
+    h.panel(&mut r, "« Filetage », Acier, Répétition linéaire ×5, pas 3,5 mm", |n| {
+        n.name = "Filetage".into();
+        n.material = 4;
+        n.repeat = Repeat::Linear { count: 5, step: Vec3::new(0.0, 3.5, 0.0) };
+    });
+    h.tool(&mut r, Tool::Place(PrimKind::Cylinder));
+    let collar = h.place(&mut r, Vec3::new(0.0, 109.0, 0.0), (19.0, 19.0), Some(8.0));
+    h.select_node(&mut r, collar);
+    h.rename(&mut r, "Collier");
+    h.shape_edit(&mut r, "Rondeur 1,5 mm", |s| s.round = 1.5);
+    h.panel(&mut r, "Matière Orange", |n| n.material = 2);
+    h.step_frame(&mut r, "Col : noyau aimanté au centre, filetage ×5, collier");
+
+    // 6. head block and hinge
+    h.cam(Vec3::new(4.0, 125.0, 0.0), 230.0, 0.42, 0.3);
+    h.tool(&mut r, Tool::Place(PrimKind::Box));
+    let block = h.place(&mut r, Vec3::new(0.0, 116.0, 0.0), (16.0, 13.0), Some(16.0));
+    h.select_node(&mut r, block);
+    h.rename(&mut r, "Bloc");
+    h.shape_edit(&mut r, "Rondeur 3,5 mm", |s| s.round = 3.5);
+    h.panel(&mut r, "Matière Métal sombre", |n| n.material = 3);
+    h.tool(&mut r, Tool::Place(PrimKind::Box));
+    let hinge = h.place(&mut r, Vec3::new(16.0, 126.0, 0.0), (7.0, 8.5), Some(16.0));
+    h.select_node(&mut r, hinge);
+    let hx = h.st.scene.world_matrix(hinge).transform_point3(Vec3::ZERO).x;
+    h.gizmo(&mut r, Handle::MoveX, Vec3::new(13.0 - hx, 0.0, 0.0));
+    h.rename(&mut r, "Charnière");
+    h.shape_edit(&mut r, "Rondeur 3 mm", |s| s.round = 3.0);
+    h.panel(&mut r, "Blend 1 mm, Orange", |n| {
+        n.combine.blend = 1.0;
+        n.material = 2;
+    });
+    h.step_frame(&mut r, "Tête : bloc sur le collier, charnière sur sa face");
+
+    // 7. hinge axis: carve then pin
+    h.cam(Vec3::new(14.0, 126.0, 6.0), 150.0, 0.35, 0.15);
+    h.tool(&mut r, Tool::Place(PrimKind::Cylinder));
+    h.st.carve_held = true;
+    h.note(&mut r, "pouce : Carve maintenu");
+    let hole = h.place(&mut r, Vec3::new(15.0, 126.0, 8.5), (2.4, 2.4), Some(20.0));
+    h.st.carve_held = false;
+    h.select_node(&mut r, hole);
+    h.panel(&mut r, "« Trou d'axe », blend 0,3 mm, Métal sombre", |n| {
+        n.name = "Trou d'axe".into();
+        n.combine.blend = 0.3;
+        n.material = 3;
+    });
+    h.tool(&mut r, Tool::Place(PrimKind::Cylinder));
+    let pin = h.place(&mut r, Vec3::new(15.0, 126.0, 7.0), (1.7, 1.7), Some(19.0));
+    h.select_node(&mut r, pin);
+    let pz = h.st.scene.world_matrix(pin).transform_point3(Vec3::ZERO).z;
+    h.gizmo(&mut r, Handle::MoveZ, Vec3::new(0.0, 0.0, -pz));
+    h.rename(&mut r, "Axe");
+    h.shape_edit(&mut r, "Rondeur 0,4 mm", |s| s.round = 0.4);
+    h.panel(&mut r, "Matière Acier", |n| n.material = 4);
+    h.step_frame(&mut r, "Charnière : perçage en Carve, axe aimanté dans le trou");
+
+    // 8. drum, groove, cap
+    h.cam(Vec3::new(-10.0, 135.0, 0.0), 260.0, -0.5, 0.3);
+    h.tool(&mut r, Tool::Place(PrimKind::Cylinder));
+    let drum = h.place(&mut r, Vec3::new(-16.0, 124.0, 0.0), (12.0, 12.0), Some(38.0));
+    h.select_node(&mut r, drum);
+    let dp = h.st.scene.world_matrix(drum).transform_point3(Vec3::ZERO);
+    h.gizmo(&mut r, Handle::PlaneXY, Vec3::new(-6.0 - dp.x, 142.0 - dp.y, 0.0));
+    h.rename(&mut r, "Tambour");
+    h.shape_edit(&mut r, "Rondeur 2 mm", |s| s.round = 2.0);
+    h.panel(&mut r, "Matière Métal sombre", |n| n.material = 3);
+    h.step_frame(&mut r, "Tambour : posé sur la face gauche, placé à l'équerre XY");
+
+    h.st.select(None);
+    h.tool(&mut r, Tool::Place(PrimKind::Box));
+    h.st.set_mode(CombineMode::Groove);
+    h.note(&mut r, "barre de modes : Groove");
+    let groove = h.place(&mut r, Vec3::new(3.0, 154.0, 0.0), (0.5, 20.0), Some(40.0));
+    h.st.set_mode(CombineMode::Add);
+    h.select_node(&mut r, groove);
+    h.shape_edit(&mut r, "Largeur 0,2 mm (plan de coupe)", |s| s.size.x = 0.1);
+    h.panel(&mut r, "« Rainure », profondeur 1,2 mm, largeur 0,9 mm, Métal sombre", |n| {
+        n.name = "Rainure".into();
+        n.combine.depth = 1.2;
+        n.combine.width = 0.9;
+        n.material = 3;
+    });
+    h.cam(Vec3::new(-24.0, 142.0, 0.0), 170.0, -0.9, 0.15);
+    h.tool(&mut r, Tool::Place(PrimKind::Cylinder));
+    let cap = h.place(&mut r, Vec3::new(-25.0, 142.0, 0.0), (10.5, 10.5), Some(6.0));
+    h.select_node(&mut r, cap);
+    let cx = h.st.scene.world_matrix(cap).transform_point3(Vec3::ZERO).x;
+    h.gizmo(&mut r, Handle::MoveX, Vec3::new(-25.5 - cx, 0.0, 0.0));
+    h.rename(&mut r, "Capuchon");
+    h.shape_edit(&mut r, "Rondeur 1,2 mm", |s| s.round = 1.2);
+    h.panel(&mut r, "Matière Orange", |n| n.material = 2);
+    h.tool(&mut r, Tool::Place(PrimKind::Cylinder));
+    let plug = h.place(&mut r, Vec3::new(-28.5, 142.0, 0.0), (6.0, 6.0), Some(7.0));
+    h.select_node(&mut r, plug);
+    let px_ = h.st.scene.world_matrix(plug).transform_point3(Vec3::ZERO).x;
+    h.gizmo(&mut r, Handle::MoveX, Vec3::new(-27.5 - px_, 0.0, 0.0));
+    h.rename(&mut r, "Bouchon");
+    h.shape_edit(&mut r, "Rondeur 0,8 mm", |s| s.round = 0.8);
+    h.panel(&mut r, "Matière Métal sombre", |n| n.material = 3);
+    h.step_frame(&mut r, "Rainure en Groove, capuchon et bouchon aimantés");
+
+    // 9. lever drawn with the Pencil
+    h.st.select(None);
+    h.st.camera.preset(ViewPreset::Front);
+    h.st.camera.target = Vec3::new(18.0, 84.0, 0.0);
+    h.st.camera.dist = 300.0;
+    h.st.view_changed();
+    h.note(&mut r, "vue : Face (orthographique)");
+    h.tool(&mut r, Tool::Profile);
+    h.st.ensure_profile();
+    let pts = forme_core::demo::lever_profile().points;
+    for pt in &pts {
+        let p = h.screen_of(Vec3::new(pt.pos.x, pt.pos.y, 0.0));
+        if pt.smooth {
+            h.drag(p + egui::vec2(-16.0, 10.0), p, 6, true);
+        } else {
+            h.tap(p);
+        }
+    }
+    h.note(&mut r, &format!("Pencil : {} points (taps = angles, glissés = courbes)", pts.len()));
+    h.step_frame(&mut r, "Levier : contour tracé au Pencil en vue Face");
+    let first = h.screen_of(Vec3::new(pts[0].pos.x, pts[0].pos.y, 0.0));
+    h.tap(first);
+    let lever = h.st.selection.unwrap();
+    h.note(&mut r, "Pencil : tap sur le premier point → contour fermé, extrudé");
+    h.shape_edit(&mut r, "Épaisseur 9 mm, rondeur 1,2 mm", |s| {
+        s.size.z = 4.5;
+        s.round = 1.2;
+    });
+    h.panel(&mut r, "« Lame », position Z −4 mm, Vert", |n| {
+        n.name = "Lame".into();
+        n.transform.pos.z = -4.0;
+        n.material = 1;
+    });
+
+    // 10. pin and ring
+    h.cam(Vec3::new(40.0, 110.0, 0.0), 200.0, 0.5, 0.15);
+    h.tool(&mut r, Tool::Place(PrimKind::Capsule));
+    let gp = h.place(&mut r, Vec3::new(48.6, 112.0, -4.0), (1.4, 1.4), Some(14.8));
+    h.select_node(&mut r, gp);
+    h.panel(&mut r, "« Goupille », Acier", |n| {
+        n.name = "Goupille".into();
+        n.material = 4;
+    });
+    h.st.select(None);
+    h.st.camera.preset(ViewPreset::Front);
+    h.st.camera.target = Vec3::new(40.0, 110.0, 0.0);
+    h.st.camera.dist = 200.0;
+    h.st.view_changed();
+    h.tool(&mut r, Tool::Place(PrimKind::Torus));
+    let ring2 = h.place(&mut r, Vec3::new(63.5, 112.0, 0.0), (6.5, 6.5), Some(2.6));
+    h.select_node(&mut r, ring2);
+    h.panel(&mut r, "« Anneau », position Z −4 mm, Acier", |n| {
+        n.name = "Anneau".into();
+        n.transform.pos.z = -4.0;
+        n.material = 4;
+    });
+    h.st.camera.preset(ViewPreset::Perspective);
+    h.st.frame_all();
+    h.st.tool = Tool::Select;
+    h.st.select(None);
+    h.steps(2);
+    h.step_frame(&mut r, "Goupille et anneau : grenade terminée");
+
+    let shapes = h.st.scene.shape_count();
+    r.journal.push(format!("\n{} formes dans l'arbre, {} nœuds.", shapes, h.st.scene.nodes.len() - 1));
+    let rows: Vec<String> = h
+        .st
+        .scene
+        .rows()
+        .iter()
+        .map(|(id, d)| format!("{}{}", "  ".repeat(*d), h.st.scene.node(*id).unwrap().name))
+        .collect();
+    r.journal.push(format!("\n```\n{}\n```", rows.join("\n")));
+    std::fs::write(format!("{}/replay/journal.md", h.out_dir), r.journal.join("\n")).ok();
+    // ffmpeg concat list for the timelapse (last frame repeated, as the demuxer requires).
+    let mut list = String::new();
+    for (f, d) in &r.frames {
+        list += &format!("file '../{f}.png'\nduration {d}\n");
+    }
+    if let Some((f, _)) = r.frames.last() {
+        list += &format!("file '../{f}.png'\n");
+    }
+    std::fs::write(format!("{}/replay/frames.txt", h.out_dir), list).ok();
+    std::fs::write(format!("{}/replay/grenade-remontee.forme", h.out_dir), h.st.scene.to_json()).ok();
+    h.st.toast = None;
+    h.steps(2);
+    h.shot("09-grenade-remontee");
+    let _ = fut;
 }
 
 /// Minimal software rasteriser: flat shading + wireframe, to show the exported topology.

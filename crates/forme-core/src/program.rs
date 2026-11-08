@@ -41,11 +41,11 @@ pub struct Program {
     pub prim_count: u32,
 }
 
-fn node_ops(n: &Node) -> Vec<PointOp> {
+fn node_ops(scene: &Scene, n: &Node) -> Vec<PointOp> {
     let mut ops = vec![];
     match n.repeat {
         Repeat::Radial { count, axis } if count > 1 => ops.push(PointOp::Radial { count, axis: axis.index() }),
-        Repeat::Linear { count, step } if count > 1 => ops.push(PointOp::Linear { count, step, origin: n.transform.pos }),
+        Repeat::Linear { count, step } if count > 1 => ops.push(PointOp::Linear { count, step, origin: scene.content_center_parent(n.id) }),
         _ => {}
     }
     if n.mirror.any() {
@@ -161,7 +161,7 @@ impl<'a> Builder<'a> {
             return;
         }
         let mut chain2 = chain.to_vec();
-        chain2.extend(node_ops(n));
+        chain2.extend(node_ops(self.scene, n));
         let combine = combine_override.unwrap_or(n.combine);
         match &n.kind {
             NodeKind::Shape(shape) => {
@@ -191,7 +191,7 @@ impl<'a> Builder<'a> {
 fn ancestor_chain(scene: &Scene, id: NodeId) -> Vec<PointOp> {
     let mut chain = vec![];
     for a in scene.ancestors(id) {
-        chain.extend(node_ops(&scene.nodes[&a]));
+        chain.extend(node_ops(scene, &scene.nodes[&a]));
     }
     chain
 }
@@ -202,7 +202,7 @@ pub fn compile(scene: &Scene) -> Program {
     b.op(OP_EMPTY, 0.0, 0.0, 0.0);
     if let Some(root) = scene.node(scene.root) {
         let mut chain = vec![];
-        chain.extend(node_ops(root));
+        chain.extend(node_ops(scene, root));
         for c in root.children().to_vec() {
             b.node(c, &chain, None);
         }
@@ -218,7 +218,7 @@ pub fn compile_single(scene: &Scene, id: NodeId) -> Program {
     b.op(OP_EMPTY, 0.0, 0.0, 0.0);
     let mut chain = ancestor_chain(scene, id);
     if let Some(root) = scene.node(scene.root) {
-        let mut c = node_ops(root);
+        let mut c = node_ops(scene, root);
         c.extend(chain);
         chain = c;
     }

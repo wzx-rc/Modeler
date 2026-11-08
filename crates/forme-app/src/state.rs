@@ -70,6 +70,10 @@ pub enum Handle {
     MoveX,
     MoveY,
     MoveZ,
+    /// Plane handles ("équerres"): move inside the plane, `axis` = plane normal.
+    PlaneXY,
+    PlaneYZ,
+    PlaneXZ,
     Radius,
     Height,
     Depth,
@@ -77,9 +81,24 @@ pub enum Handle {
 }
 
 impl Handle {
+    pub fn is_plane(self) -> bool {
+        matches!(self, Handle::PlaneXY | Handle::PlaneYZ | Handle::PlaneXZ)
+    }
+    pub fn is_move(self) -> bool {
+        matches!(self, Handle::MoveX | Handle::MoveY | Handle::MoveZ) || self.is_plane()
+    }
+    /// The two in-plane axes of a plane handle.
+    pub fn plane_axes(self) -> (Vec3, Vec3) {
+        match self {
+            Handle::PlaneXY => (Vec3::X, Vec3::Y),
+            Handle::PlaneYZ => (Vec3::Y, Vec3::Z),
+            _ => (Vec3::X, Vec3::Z),
+        }
+    }
     pub fn label(self) -> &'static str {
         match self {
             Handle::MoveX | Handle::MoveY | Handle::MoveZ => "Position",
+            Handle::PlaneXY | Handle::PlaneYZ | Handle::PlaneXZ => "Position (plan)",
             Handle::Radius => "Rayon",
             Handle::Height => "Hauteur",
             Handle::Depth => "Profondeur",
@@ -105,6 +124,8 @@ pub struct HandleDrag {
     pub t0: f32,
     pub start: Node,
     pub scale: f32,
+    /// Plane handles: where the drag started on the plane.
+    pub start_hit: Vec3,
 }
 
 #[derive(Clone, Debug)]
@@ -231,6 +252,15 @@ fn snap_to(v: f32, step: f32, on: bool) -> f32 {
 
 fn snap_vec(v: Vec3, step: f32, on: bool) -> Vec3 {
     Vec3::new(snap_to(v.x, step, on), snap_to(v.y, step, on), snap_to(v.z, step, on))
+}
+
+pub fn ray_plane(ro: Vec3, rd: Vec3, o: Vec3, n: Vec3) -> Option<Vec3> {
+    let den = rd.dot(n);
+    if den.abs() < 1e-6 {
+        return None;
+    }
+    let t = (o - ro).dot(n) / den;
+    (t > 0.0).then(|| ro + rd * t)
 }
 
 /// Closest point parameter on the line (o, d) to the ray (ro, rd).
@@ -713,6 +743,9 @@ impl AppState {
             HandleInfo { handle: Handle::MoveX, world: o + Vec3::X * len, origin: o, axis: Vec3::X },
             HandleInfo { handle: Handle::MoveY, world: o + Vec3::Y * len, origin: o, axis: Vec3::Y },
             HandleInfo { handle: Handle::MoveZ, world: o + Vec3::Z * len, origin: o, axis: Vec3::Z },
+            HandleInfo { handle: Handle::PlaneXY, world: o + (Vec3::X + Vec3::Y) * len * 0.3, origin: o, axis: Vec3::Z },
+            HandleInfo { handle: Handle::PlaneYZ, world: o + (Vec3::Y + Vec3::Z) * len * 0.3, origin: o, axis: Vec3::X },
+            HandleInfo { handle: Handle::PlaneXZ, world: o + (Vec3::X + Vec3::Z) * len * 0.3, origin: o, axis: Vec3::Y },
         ];
         if let Some(sh) = n.shape() {
             let sz = sh.size;
@@ -757,9 +790,11 @@ impl AppState {
         let Some(start) = self.scene.node(id).cloned() else { return };
         let (ro, rd) = self.ray(pos);
         let t0 = line_param(info.origin, info.axis, ro, rd);
+        let start_hit = ray_plane(ro, rd, info.origin, info.axis).unwrap_or(info.origin);
         let s = self.scene.world_matrix(id).to_scale_rotation_translation().0.x;
         self.history.record(info.handle.label(), &self.scene);
-        self.handle_drag = Some(HandleDrag { node: id, handle: info.handle, origin: info.origin, axis: info.axis, t0, start, scale: s });
+        self.handle_drag =
+            Some(HandleDrag { node: id, handle: info.handle, origin: info.origin, axis: info.axis, t0, start, scale: s, start_hit });
     }
 
     pub fn drag_handle(&mut self, pos: [f32; 2]) {
@@ -768,6 +803,23 @@ impl AppState {
         let t = line_param(d.origin, d.axis, ro, rd);
         let snap = self.snap;
         match d.handle {
+            Handle::PlaneXY | Handle::PlaneYZ | Handle::PlaneXZ => {
+                let Some(hit) = ray_plane(ro, rd, d.origin, d.axis) else { return };
+                let start_world = self.scene.parent_matrix(d.node) * d.start.transform.matrix();
+                let (_, rot, o) = start_world.to_scale_rotation_translation();
+                let (a1, a2) = d.handle.plane_axes();
+                let mut np = o + (hit - d.start_hit);
+                if snap {
+                    for a in [a1, a2] {
+                        let i = a.abs().max_position();
+                        np[i] = snap_to(np[i], 0.5, true);
+                    }
+                }
+                self.set_world(d.node, np, rot);
+                if let Some(n) = self.scene.node_mut(d.node) {
+                    n.transform.scale = d.start.transform.scale;
+                }
+            }
             Handle::MoveX | Handle::MoveY | Handle::MoveZ => {
                 let start_world = self.scene.parent_matrix(d.node) * d.start.transform.matrix();
                 let (_, rot, o) = start_world.to_scale_rotation_translation();
@@ -951,8 +1003,13 @@ impl AppState {
         self.changed();
     }
 
+    /// Mode bar: sets the mode of the next shapes; with the Select tool it also
+    /// changes the selected shape.
     pub fn set_mode(&mut self, m: CombineMode) {
         self.mode = m;
+        if self.tool != Tool::Select {
+            return;
+        }
         if let Some(id) = self.selection {
             if self.scene.node(id).map(|n| n.shape().is_some() || matches!(n.kind, NodeKind::Group { combined: true, .. })).unwrap_or(false) {
                 self.edit("Mode", id, |n| n.combine.mode = m);

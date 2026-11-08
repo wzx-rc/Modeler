@@ -866,6 +866,38 @@ impl Scene {
         Some((lo, hi))
     }
 
+    /// Centre of one copy of a node's content, in its parent's frame
+    /// (anchor of linear repetitions: copies are numbered from there).
+    pub fn content_center_parent(&self, id: NodeId) -> Vec3 {
+        let Some(n) = self.node(id) else { return Vec3::ZERO };
+        if n.shape().is_some() {
+            return n.transform.pos;
+        }
+        let mut tmp = self.clone();
+        if let Some(m) = tmp.node_mut(id) {
+            m.repeat = Repeat::None;
+            m.mirror = Mirror::default();
+        }
+        let mut lo = Vec3::splat(f32::MAX);
+        let mut hi = Vec3::splat(f32::MIN);
+        let mut stack = n.children().to_vec();
+        while let Some(c) = stack.pop() {
+            if let Some(cn) = tmp.node(c) {
+                stack.extend_from_slice(cn.children());
+                if cn.shape().is_some() && cn.combine.mode != CombineMode::Carve {
+                    if let Some((l, h)) = tmp.shape_world_aabb(c) {
+                        lo = lo.min(l);
+                        hi = hi.max(h);
+                    }
+                }
+            }
+        }
+        if lo.x > hi.x {
+            return n.transform.pos;
+        }
+        self.parent_matrix(id).inverse().transform_point3((lo + hi) * 0.5)
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }

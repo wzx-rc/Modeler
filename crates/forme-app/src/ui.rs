@@ -511,7 +511,11 @@ fn mode_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let current = st.effective_mode();
-                    let target_mode = st.selection.and_then(|id| st.scene.node(id)).filter(|n| n.shape().is_some()).map(|n| n.combine.mode);
+                    let target_mode = if st.tool == Tool::Select {
+                        st.selection.and_then(|id| st.scene.node(id)).filter(|n| n.shape().is_some()).map(|n| n.combine.mode)
+                    } else {
+                        None
+                    };
                     let shown = if st.carve_held { current } else { target_mode.unwrap_or(current) };
                     for m in CombineMode::ALL {
                         let g = ui.painter().layout_no_wrap(m.label().to_string(), semibold(14.0), TEXT);

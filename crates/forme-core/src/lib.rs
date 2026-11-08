@@ -120,6 +120,21 @@ mod tests {
     }
 
     #[test]
+    fn linear_repeat_of_a_group_made_from_the_tree() {
+        // group at the origin, content at y = 46: copies at 46 and 70
+        let mut s = Scene::new();
+        let r = s.root;
+        let g = s.add(r, NodeSpec::group("g", false).repeat(Repeat::Linear { count: 2, step: Vec3::new(0.0, 24.0, 0.0) }));
+        let mut sh = Shape::new(PrimKind::Sphere);
+        sh.size = Vec3::splat(3.0);
+        s.add(g, NodeSpec::shape("s", sh).at(Vec3::new(0.0, 46.0, 20.0)));
+        let p = compile(&s);
+        assert!(p.dist(Vec3::new(0.0, 46.0, 20.0)) < -2.9);
+        assert!(p.dist(Vec3::new(0.0, 70.0, 20.0)) < -2.9);
+        assert!(p.dist(Vec3::new(0.0, 22.0, 20.0)) > 0.0);
+    }
+
+    #[test]
     fn mirror_and_groups() {
         let mut s = Scene::new();
         let r = s.root;

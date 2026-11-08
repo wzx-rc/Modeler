@@ -27,7 +27,7 @@ fn handle_at(st: &AppState, pos: Pos2) -> Option<HandleInfo> {
     let mut best: Option<(HandleInfo, f32)> = None;
     for (h, sp) in handle_points(st) {
         let d = sp.distance(pos);
-        let reach = if matches!(h.handle, Handle::MoveX | Handle::MoveY | Handle::MoveZ) { 20.0 } else { 24.0 };
+        let reach = if h.handle.is_plane() { 18.0 } else if h.handle.is_move() { 20.0 } else { 24.0 };
         if d < reach && best.as_ref().map(|(_, bd)| d < *bd).unwrap_or(true) {
             best = Some((h, d));
         }
@@ -206,6 +206,22 @@ fn draw_overlay(p: &Painter, st: &AppState) {
             let Some(o) = view.project(h.origin).map(|q| pos2(q[0], q[1])) else { continue };
             let hot = active == Some(h.handle);
             match h.handle {
+                Handle::PlaneXY | Handle::PlaneYZ | Handle::PlaneXZ => {
+                    // équerre: a small square between two axes, its outer L drawn solid
+                    let (a1, a2) = h.handle.plane_axes();
+                    let len = view.pixel_size_at((h.origin - view.eye).length()) * 110.0;
+                    let q = |u: f32, v: f32| view.project(h.origin + a1 * len * u + a2 * len * v).map(|s| pos2(s[0], s[1]));
+                    let c = match h.handle {
+                        Handle::PlaneXY => AXIS_Z,
+                        Handle::PlaneYZ => AXIS_X,
+                        _ => AXIS_Y,
+                    };
+                    let c = if active.is_some() && !hot { tint(c, 0.3) } else { c };
+                    if let (Some(p0), Some(p1), Some(p2), Some(p3)) = (q(0.2, 0.2), q(0.4, 0.2), q(0.4, 0.4), q(0.2, 0.4)) {
+                        p.add(Shape::convex_polygon(vec![p0, p1, p2, p3], tint(c, if hot { 0.45 } else { 0.22 }), Stroke::NONE));
+                        p.add(Shape::line(vec![p1, p2, p3], Stroke::new(if hot { 2.5 } else { 1.75 }, c)));
+                    }
+                }
                 Handle::MoveX | Handle::MoveY | Handle::MoveZ => {
                     let c = match h.handle {
                         Handle::MoveX => AXIS_X,
