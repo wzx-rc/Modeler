@@ -142,6 +142,7 @@ impl Harness {
 fn main() {
     let out = std::env::args().nth(1).unwrap_or_else(|| "shots".into());
     let only: Vec<String> = std::env::args().skip(2).collect();
+    std::fs::create_dir_all(format!("{out}/docs")).ok();
     std::env::set_var("FORME_DOCS", format!("{out}/docs"));
     let mut h = Harness::new(&out);
     let want = |n: &str| only.is_empty() || only.iter().any(|o| n.starts_with(o.as_str()));
@@ -294,7 +295,7 @@ fn main() {
         h.reset(AppState::default());
         h.st.export_open = true;
         h.st.export_res = forme_app::state::ExportRes::Normal;
-        h.steps(2);
+        h.steps(40);
         if want("07") {
             h.shot("07-export");
         }
@@ -323,9 +324,9 @@ fn raster_mesh(mesh: &forme_core::mesh::Mesh, st: &AppState, w: u32, h: u32, pat
     let mut cam = st.camera;
     let (lo, hi) = st.scene.bounds();
     cam.frame(lo, hi);
-    cam.dist *= 0.62;
-    cam.target.y += 22.0;
-    cam.target.x += 6.0;
+    cam.dist *= 0.8;
+    cam.target.y += 4.0;
+    cam.target.x += 4.0;
     let view = cam.view([w as f32, h as f32], [w as f32 * 0.5, h as f32 * 0.5]);
     let (fwd, _, _) = view.basis();
     let mut color = vec![[23u8, 24, 27]; (w * h) as usize];

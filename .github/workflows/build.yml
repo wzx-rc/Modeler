@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  # Core tests + screenshots of the real app, rendered on a software GPU.
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Software Vulkan (lavapipe)
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - name: Tests
+        run: cargo test -p forme-core
+      - name: Screenshots
+        run: |
+          mkdir -p shots
+          cargo run -p forme-app --bin forme-shot -- shots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: captures
+          path: shots/*.png
+
+  # Unsigned .ipa for iPad, to sideload with AltStore / Sideloadly (free Apple ID).
+  ipad:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Forme.ipa
+        run: bash ios/build_ipa.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Forme-ipa
+          path: target/ipa/Forme.ipa

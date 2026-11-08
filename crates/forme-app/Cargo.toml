@@ -27,6 +27,4 @@ wgpu.workspace = true
 pollster.workspace = true
 log.workspace = true
 serde_json.workspace = true
-
-[target.'cfg(not(target_os = "ios"))'.dependencies]
 image.workspace = true
