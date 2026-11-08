@@ -347,9 +347,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.frame_selection();
     }
     // Alt = keyboard version of the thumb button
-    if alt != st.carve_held && st.gesture == Gesture::None {
-        st.carve_held = alt;
-    }
+    st.alt_carve = alt;
 }
 
 fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
@@ -540,15 +538,23 @@ fn mode_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         });
 }
 
+/// Thumb button area (points). On iPad the platform layer handles this touch
+/// itself so that the Pencil, as the second touch, still drives the viewport.
+pub fn thumb_rect(screen_w: f32, screen_h: f32) -> Rect {
+    let _ = screen_w;
+    Rect::from_min_size(pos2(12.0, screen_h - 102.0), vec2(84.0, 84.0))
+}
+
 fn thumb_button(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
-    egui::Area::new(Id::new("thumb")).order(Order::Middle).fixed_pos(pos2(12.0, screen.max.y - 102.0)).show(ctx, |ui| {
+    let tr = thumb_rect(screen.width(), screen.height());
+    egui::Area::new(Id::new("thumb")).order(Order::Middle).fixed_pos(tr.min).show(ctx, |ui| {
         let (r, resp) = ui.allocate_exact_size(vec2(84.0, 84.0), Sense::click_and_drag());
-        let held = resp.is_pointer_button_down_on() || (st.carve_held && st.gesture != Gesture::None) || st.carve_held;
         if resp.is_pointer_button_down_on() {
             st.carve_held = true;
         } else if resp.drag_stopped() || resp.clicked() {
             st.carve_held = false;
         }
+        let held = st.carve_held || st.alt_carve;
         let p = ui.painter();
         let c = r.center();
         if held {
@@ -604,12 +610,13 @@ fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 
 fn right_column(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     let x = screen.max.x - 12.0 - RIGHT_W;
-    let tree_h = if st.show_tree { 268.0 } else { 0.0 };
-    let props_max = screen.height() - 80.0 - 12.0 - if st.show_tree { tree_h + 12.0 } else { 0.0 };
+    let show_tree = st.show_tree && st.tool != Tool::Profile;
+    let tree_h = if show_tree { 268.0 } else { 0.0 };
+    let props_max = screen.height() - 80.0 - 12.0 - if show_tree { tree_h + 12.0 } else { 0.0 };
     egui::Area::new(Id::new("props")).order(Order::Middle).fixed_pos(pos2(x, 80.0)).show(ctx, |ui| {
         panel().inner_margin(Margin::same(14)).show(ui, |ui| {
             ui.set_width(RIGHT_W - 28.0);
-            egui::ScrollArea::vertical().max_height(props_max - 28.0).auto_shrink([false, true]).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("props-scroll").max_height(props_max - 28.0).min_scrolled_height(props_max - 28.0).auto_shrink([false, false]).show(ui, |ui| {
                 ui.set_width(RIGHT_W - 28.0);
                 if st.tool == Tool::Profile {
                     profile_panel(ui, st);
@@ -621,7 +628,7 @@ fn right_column(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             });
         });
     });
-    if st.show_tree {
+    if show_tree {
         egui::Area::new(Id::new("tree")).order(Order::Middle).fixed_pos(pos2(x, screen.max.y - 12.0 - tree_h)).show(ctx, |ui| {
             panel().inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
                 ui.set_width(RIGHT_W - 20.0);
@@ -1112,7 +1119,7 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
                 info += &format!(" ×{}", n.repeat.count());
             }
             if n.mirror.any() {
-                info += " ⇋";
+                info += " · sym.";
             }
             p.text(pos2(r.max.x - 40.0, r.center().y), Align2::RIGHT_CENTER, info, regular(12.0), if selected { Color32::from_rgb(0xC3, 0xD9, 0xF2) } else { tint(TEXT2, dim) });
             let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));

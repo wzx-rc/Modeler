@@ -1,0 +1,508 @@
+{
+  "nodes": {
+    "0": {
+      "id": 0,
+      "name": "Scène",
+      "kind": {
+        "Group": {
+          "children": [
+            1,
+            2,
+            3,
+            4,
+            8
+          ],
+          "combined": false
+        }
+      },
+      "transform": {
+        "pos": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rot": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "combine": {
+        "mode": "Add",
+        "blend": 0.0,
+        "kind": "Smooth",
+        "depth": 1.0,
+        "width": 0.6
+      },
+      "repeat": "None",
+      "mirror": {
+        "x": false,
+        "y": false,
+        "z": false
+      },
+      "material": 0,
+      "visible": true,
+      "expanded": true
+    },
+    "1": {
+      "id": 1,
+      "name": "Boîte 1",
+      "kind": {
+        "Shape": {
+          "kind": "Box",
+          "size": [
+            40.0,
+            17.0,
+            26.0
+          ],
+          "round": 4.0,
+          "chamfer": 0.0,
+          "taper": 0.0,
+          "shell": 0.0,
+          "sides": 6,
+          "profile": null
+        }
+      },
+      "transform": {
+        "pos": [
+          0.0,
+          16.4,
+          0.0
+        ],
+        "rot": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "combine": {
+        "mode": "Add",
+        "blend": 0.0,
+        "kind": "Smooth",
+        "depth": 1.0,
+        "width": 0.6
+      },
+      "repeat": "None",
+      "mirror": {
+        "x": false,
+        "y": false,
+        "z": false
+      },
+      "material": 0,
+      "visible": true,
+      "expanded": false
+    },
+    "2": {
+      "id": 2,
+      "name": "Cylindre 1",
+      "kind": {
+        "Shape": {
+          "kind": "Cylinder",
+          "size": [
+            12.0,
+            14.5,
+            0.0
+          ],
+          "round": 0.0,
+          "chamfer": 0.0,
+          "taper": 0.0,
+          "shell": 0.0,
+          "sides": 6,
+          "profile": null
+        }
+      },
+      "transform": {
+        "pos": [
+          -7.9952545,
+          19.303541,
+          0.0063171387
+        ],
+        "rot": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "combine": {
+        "mode": "Carve",
+        "blend": 0.0,
+        "kind": "Smooth",
+        "depth": 1.0,
+        "width": 0.6
+      },
+      "repeat": "None",
+      "mirror": {
+        "x": false,
+        "y": false,
+        "z": false
+      },
+      "material": 0,
+      "visible": true,
+      "expanded": false
+    },
+    "3": {
+      "id": 3,
+      "name": "Cylindre 2",
+      "kind": {
+        "Shape": {
+          "kind": "Cylinder",
+          "size": [
+            22.0,
+            16.75,
+            0.0
+          ],
+          "round": 0.0,
+          "chamfer": 0.0,
+          "taper": 0.0,
+          "shell": 0.0,
+          "sides": 6,
+          "profile": null
+        }
+      },
+      "transform": {
+        "pos": [
+          -7.9952545,
+          33.40354,
+          0.0063171387
+        ],
+        "rot": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "combine": {
+        "mode": "Groove",
+        "blend": 0.0,
+        "kind": "Smooth",
+        "depth": 1.0,
+        "width": 0.6
+      },
+      "repeat": "None",
+      "mirror": {
+        "x": false,
+        "y": false,
+        "z": false
+      },
+      "material": 0,
+      "visible": true,
+      "expanded": false
+    },
+    "4": {
+      "id": 4,
+      "name": "Vis",
+      "kind": {
+        "Group": {
+          "children": [
+            5,
+            6,
+            7
+          ],
+          "combined": false
+        }
+      },
+      "transform": {
+        "pos": [
+          30.490585,
+          33.402863,
+          16.177536
+        ],
+        "rot": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "combine": {
+        "mode": "Add",
+        "blend": 0.0,
+        "kind": "Smooth",
+        "depth": 1.0,
+        "width": 0.6
+      },
+      "repeat": "None",
+      "mirror": {
+        "x": true,
+        "y": false,
+        "z": true
+      },
+      "material": 0,
+      "visible": true,
+      "expanded": false
+    },
+    "5": {
+      "id": 5,
+      "name": "Logement",
+      "kind": {
+        "Shape": {
+          "kind": "Cylinder",
+          "size": [
+            3.4,
+            1.2,
+            0.0
+          ],
+          "round": 0.0,
+          "chamfer": 0.0,
+          "taper": 0.0,
+          "shell": 0.0,
+          "sides": 6,
+          "profile": null
+        }
+      },
+      "transform": {
+        "pos": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rot": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "combine": {
+        "mode": "Carve",
+        "blend": 0.3,
+        "kind": "Smooth",
+        "depth": 1.0,
+        "width": 0.6
+      },
+      "repeat": "None",
+      "mirror": {
+        "x": false,
+        "y": false,
+        "z": false
+      },
+      "material": 3,
+      "visible": true,
+      "expanded": false
+    },
+    "6": {
+      "id": 6,
+      "name": "Tête",
+      "kind": {
+        "Shape": {
+          "kind": "Cylinder",
+          "size": [
+            2.9,
+            0.9,
+            0.0
+          ],
+          "round": 0.7,
+          "chamfer": 0.0,
+          "taper": 0.0,
+          "shell": 0.0,
+          "sides": 6,
+          "profile": null
+        }
+      },
+      "transform": {
+        "pos": [
+          0.0,
+          -0.3,
+          0.0
+        ],
+        "rot": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": 1.0
+      },
+      "combine": {
+        "mode": "Add",
+        "blend": 0.0,
+        "kind": "Smooth",
+        "depth": 1.0,
+        "width": 0.6
+      },
+      "repeat": "None",
+      "mirror": {
+        "x": false,
+        "y": false,
+        "z": false
+      },
+      "material": 4,
+      "visible": true,
+      "expanded": false
+    },
+    "7": {
+      "id": 7,
+      "name": "Fente",
+      "kind": {
+        "Shape": {
+          "kind": "Box",
+          "size": [
+            2.4,
+            1.0,
+            0.4
+          ],
+          "round": 0.0,
+          "chamfer": 0.0,
+          "taper": 0.0,
+          "shell": 0.0,
+          "sides": 6,
+          "profile": null
+        }
+      },
+      "transform": {
+        "pos": [
+          0.0,
+          0.7,
+          0.0
+        ],
+        "rot": [
+          0.0,
+          0.29552022,
+          0.0,
+          0.9553365
+        ],
+        "scale": 1.0
+      },
+      "combine": {
+        "mode": "Carve",
+        "blend": 0.0,
+        "kind": "Smooth",
+        "depth": 1.0,
+        "width": 0.6
+      },
+      "repeat": "None",
+      "mirror": {
+        "x": false,
+        "y": false,
+        "z": false
+      },
+      "material": 5,
+      "visible": true,
+      "expanded": false
+    },
+    "8": {
+      "id": 8,
+      "name": "Prisme 1",
+      "kind": {
+        "Shape": {
+          "kind": "Prism",
+          "size": [
+            7.0,
+            6.0,
+            0.0
+          ],
+          "round": 0.0,
+          "chamfer": 0.0,
+          "taper": 0.0,
+          "shell": 0.0,
+          "sides": 6,
+          "profile": null
+        }
+      },
+      "transform": {
+        "pos": [
+          14.001114,
+          16.701096,
+          31.40151
+        ],
+        "rot": [
+          0.7071068,
+          0.0,
+          0.0,
+          0.7071068
+        ],
+        "scale": 1.0
+      },
+      "combine": {
+        "mode": "Add",
+        "blend": 0.0,
+        "kind": "Smooth",
+        "depth": 1.0,
+        "width": 0.6
+      },
+      "repeat": "None",
+      "mirror": {
+        "x": false,
+        "y": false,
+        "z": false
+      },
+      "material": 0,
+      "visible": true,
+      "expanded": false
+    }
+  },
+  "root": 0,
+  "next_id": 9,
+  "materials": [
+    {
+      "name": "Gris argile",
+      "color": [
+        0.5,
+        0.5,
+        0.49
+      ],
+      "metal": 0.0,
+      "rough": 0.55
+    },
+    {
+      "name": "Vert militaire",
+      "color": [
+        0.34,
+        0.39,
+        0.24
+      ],
+      "metal": 0.0,
+      "rough": 0.45
+    },
+    {
+      "name": "Orange",
+      "color": [
+        0.86,
+        0.42,
+        0.14
+      ],
+      "metal": 0.0,
+      "rough": 0.4
+    },
+    {
+      "name": "Métal sombre",
+      "color": [
+        0.16,
+        0.17,
+        0.19
+      ],
+      "metal": 0.7,
+      "rough": 0.35
+    },
+    {
+      "name": "Acier",
+      "color": [
+        0.56,
+        0.57,
+        0.6
+      ],
+      "metal": 1.0,
+      "rough": 0.3
+    },
+    {
+      "name": "Caoutchouc",
+      "color": [
+        0.08,
+        0.08,
+        0.09
+      ],
+      "metal": 0.0,
+      "rough": 0.8
+    }
+  ]
+}

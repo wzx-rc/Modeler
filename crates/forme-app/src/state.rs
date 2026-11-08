@@ -61,6 +61,8 @@ pub struct Placement {
     pub mode: CombineMode,
     pub snapped: Option<&'static str>,
     pub started_on_surface: bool,
+    /// Screen anchor and starting height of the height gesture.
+    pub anchor: Option<([f32; 2], f32)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,6 +182,8 @@ pub struct AppState {
     pub tool: Tool,
     pub mode: CombineMode,
     pub carve_held: bool,
+    /// Alt key (desktop) acts like the thumb button.
+    pub alt_carve: bool,
     pub camera: OrbitCamera,
     pub doc_name: String,
     pub sym_x: bool,
@@ -259,6 +263,7 @@ impl AppState {
             tool: Tool::Select,
             mode: CombineMode::Add,
             carve_held: false,
+            alt_carve: false,
             camera: OrbitCamera::default(),
             doc_name: name.to_string(),
             sym_x: false,
@@ -317,7 +322,7 @@ impl AppState {
     }
 
     pub fn effective_mode(&self) -> CombineMode {
-        if self.carve_held {
+        if self.carve_held || self.alt_carve {
             CombineMode::Carve
         } else {
             self.mode
@@ -393,9 +398,10 @@ impl AppState {
         }
     }
 
+    /// New shapes go next to the selection (same group), or at the root.
+    /// To work inside a group, select one of its children first.
     fn insertion_parent(&self) -> NodeId {
         match self.selection.and_then(|id| self.scene.node(id)) {
-            Some(n) if n.is_group() => n.id,
             Some(n) => self.scene.parent_of(n.id).unwrap_or(self.scene.root),
             None => self.scene.root,
         }
@@ -467,7 +473,7 @@ impl AppState {
         self.commit_placement();
         let (ro, rd) = self.ray(pos);
         let mut snapped = None;
-        let (mut base, normal, on_surface) = match self.hit(pos) {
+        let (mut base, normal0, on_surface) = match self.hit(pos) {
             Some((p, n)) => (p, n, true),
             None => {
                 // ground plane, else a plane through the target facing the camera
@@ -481,17 +487,34 @@ impl AppState {
                 }
             }
         };
-        // snap to the centre of a picked round shape
+        // snap to the centre of a picked round shape (boss, hole...), aligned on its axis
+        let mut normal = normal0;
         if on_surface {
             let tol = 1.0 + self.view().pixel_size_at((base - ro).length()) * 6.0;
             if let Some(id) = pick_node(&self.scene, base, tol) {
                 let n = &self.scene.nodes[&id];
-                if let (Some(sh), Repeat::None) = (n.shape(), n.repeat) {
-                    let c = self.scene.world_matrix(id).transform_point3(Vec3::ZERO);
-                    let lateral = (base - c) - normal * (base - c).dot(normal);
-                    if lateral.length() < sh.radius() * 0.45 {
-                        base -= lateral;
-                        snapped = Some("centre de la forme");
+                let round = n.shape().map(|s| !matches!(s.kind, PrimKind::Box | PrimKind::Profile)).unwrap_or(false);
+                if let (Some(sh), Repeat::None, true) = (n.shape(), n.repeat, round) {
+                    let wm = self.scene.world_matrix(id);
+                    let (sc, _, _) = wm.to_scale_rotation_translation();
+                    let c = wm.transform_point3(Vec3::ZERO);
+                    let mut axis = wm.transform_vector3(Vec3::Y).normalize_or(Vec3::Y);
+                    if axis.dot(normal) < 0.0 {
+                        axis = -axis;
+                    }
+                    let lateral = (base - c) - axis * (base - c).dot(axis);
+                    // anywhere inside a hole (walls, bottom) counts; near the centre on a boss
+                    let reach = if n.combine.mode == CombineMode::Carve { 1.05 } else { 0.45 };
+                    if lateral.length() < sh.radius() * sc.x * reach {
+                        if n.combine.mode == CombineMode::Carve {
+                            // inside a hole: centre on its mouth
+                            base = c + axis * (sh.half_height() * sc.x - 0.4);
+                            snapped = Some("centre du perçage");
+                        } else {
+                            base -= lateral;
+                            snapped = Some("centre de la forme");
+                        }
+                        normal = axis;
                     }
                 }
             }
@@ -527,6 +550,7 @@ impl AppState {
             mode,
             snapped,
             started_on_surface: on_surface,
+            anchor: None,
         });
         self.selection = Some(id);
         self.apply_placement();
@@ -553,10 +577,13 @@ impl AppState {
             _ => hh,
         };
         let embed = (along * 0.15).min(0.6);
-        let center = if p.mode == CombineMode::Add || p.mode == CombineMode::Tongue {
-            p.base + p.normal * (along - embed)
-        } else {
-            p.base - p.normal * (along - 0.4)
+        let center = match p.mode {
+            // grows outwards, slightly embedded so it fuses
+            CombineMode::Add => p.base + p.normal * (along - embed),
+            // cutters go into the matter, top slightly proud of the surface
+            CombineMode::Carve | CombineMode::Intersect => p.base - p.normal * (along - 0.4),
+            // line operators work where their surface crosses the matter
+            CombineMode::Groove | CombineMode::Tongue => p.base,
         };
         if let Some(n) = self.scene.node_mut(p.node) {
             if let Some(s) = n.shape_mut() {
@@ -588,16 +615,21 @@ impl AppState {
                 p.hz = snap_to(q.dot(tz).abs(), 0.5, self.snap).max(0.5);
                 if p.kind == PrimKind::Box {
                     p.radius = p.hx.max(p.hz);
+                    p.height = p.hx.min(p.hz).max(1.0);
+                } else {
+                    p.height = (p.radius * 1.0).max(1.0);
                 }
-                p.height = (p.radius * 1.0).max(1.0);
                 if p.kind == PrimKind::Torus {
                     p.height = p.radius * 0.4;
                 }
             }
             PlacePhase::Height => {
-                let t = line_param(p.base, p.normal, ro, rd);
-                let h = snap_to(t.abs(), 0.5, self.snap).max(0.5);
-                p.height = h;
+                // vertical screen drag, one pixel = one pixel of surface at the base
+                let (a, h0) = p.anchor.unwrap_or((pos, p.height));
+                let px = self.view().pixel_size_at((p.base - ro).length());
+                let h = h0 + (a[1] - pos[1]) * px;
+                p.height = snap_to(h.max(0.5), 0.5, self.snap).max(0.5);
+                let _ = rd;
             }
             PlacePhase::AwaitHeight => {}
         }
@@ -645,9 +677,10 @@ impl AppState {
         }
     }
 
-    pub fn begin_height(&mut self) {
+    pub fn begin_height(&mut self, pos: [f32; 2]) {
         if let Some(p) = self.placement.as_mut() {
             p.phase = PlacePhase::Height;
+            p.anchor = Some((pos, p.height));
         }
     }
 

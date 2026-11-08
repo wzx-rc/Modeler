@@ -21,6 +21,9 @@ fn handle_points(st: &AppState) -> Vec<(HandleInfo, Pos2)> {
 }
 
 fn handle_at(st: &AppState, pos: Pos2) -> Option<HandleInfo> {
+    if st.tool != Tool::Select {
+        return None;
+    }
     let mut best: Option<(HandleInfo, f32)> = None;
     for (h, sp) in handle_points(st) {
         let d = sp.distance(pos);
@@ -93,7 +96,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         st.gesture = if shift {
             Gesture::Pan
         } else if awaiting && !finger {
-            st.begin_height();
+            st.begin_height(p2(origin));
             Gesture::Height
         } else if let Some(h) = handle_at(st, origin) {
             st.begin_handle(&h, p2(origin));
@@ -196,7 +199,7 @@ fn draw_overlay(p: &Painter, st: &AppState) {
     let view = st.view();
 
     // selection handles
-    if st.placement.is_none() && st.profile.is_none() {
+    if st.placement.is_none() && st.profile.is_none() && st.tool == Tool::Select {
         let active = st.handle_drag.as_ref().map(|d| d.handle);
         let node = st.selection.and_then(|id| st.scene.node(id));
         for (h, sp) in handle_points(st) {

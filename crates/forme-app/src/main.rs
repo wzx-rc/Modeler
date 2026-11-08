@@ -37,6 +37,7 @@ struct App {
     gesture_start: Option<Instant>,
     gesture_moved: bool,
     redraw_until: f64,
+    thumb_touch: Option<u64>,
 }
 
 impl App {
@@ -63,6 +64,7 @@ impl App {
             gesture_start: None,
             gesture_moved: false,
             redraw_until: 0.0,
+            thumb_touch: None,
         }
     }
 
@@ -202,6 +204,31 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(window) = self.window.clone() else { return };
+        // The thumb Carve button is handled here, outside egui: holding it with a
+        // finger must not turn the Pencil touch into a two-finger camera gesture.
+        if let WindowEvent::Touch(t) = &event {
+            let sf = window.scale_factor();
+            let size = window.inner_size().to_logical::<f32>(sf);
+            let p = t.location.to_logical::<f32>(sf);
+            let tr = forme_app::ui::thumb_rect(size.width, size.height);
+            let pencil = matches!(t.force, Some(Force::Calibrated { altitude_angle: Some(_), .. }));
+            match t.phase {
+                TouchPhase::Started if !pencil && self.thumb_touch.is_none() && tr.expand(10.0).contains(egui::pos2(p.x, p.y)) => {
+                    self.thumb_touch = Some(t.id);
+                    self.st.carve_held = true;
+                    window.request_redraw();
+                    return;
+                }
+                TouchPhase::Ended | TouchPhase::Cancelled if self.thumb_touch == Some(t.id) => {
+                    self.thumb_touch = None;
+                    self.st.carve_held = false;
+                    window.request_redraw();
+                    return;
+                }
+                _ if self.thumb_touch == Some(t.id) => return,
+                _ => {}
+            }
+        }
         match &event {
             WindowEvent::Touch(t) => {
                 // Apple Pencil reports an altitude angle; fingers do not.
