@@ -1,0 +1,32 @@
+[package]
+name = "forme-app"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "forme_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "forme"
+path = "src/main.rs"
+
+[[bin]]
+name = "forme-shot"
+path = "src/bin/shot.rs"
+
+[dependencies]
+forme-core = { path = "../forme-core" }
+forme-render = { path = "../forme-render" }
+glam.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+log.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+image.workspace = true

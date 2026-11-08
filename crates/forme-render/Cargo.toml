@@ -1,0 +1,15 @@
+[package]
+name = "forme-render"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+forme-core = { path = "../forme-core" }
+glam.workspace = true
+bytemuck.workspace = true
+wgpu.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+image.workspace = true
