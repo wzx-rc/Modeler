@@ -275,4 +275,70 @@ mod tests {
         let obj = export::to_obj(&m, &s.materials, "bloc");
         assert!(obj.lines().filter(|l| l.starts_with("f ")).count() == m.triangle_count());
     }
+
+    #[test]
+    fn overlapping_radial_copies_have_no_seam() {
+        // spheres larger than their sector: the neighbour copy must be seen
+        let mut s = Scene::new();
+        let r = s.root;
+        let mut sp = Shape::new(PrimKind::Sphere);
+        sp.size = Vec3::splat(9.0);
+        s.add(r, NodeSpec::shape("s", sp).at(Vec3::new(0.0, 0.0, 10.0)).repeat(Repeat::Radial { count: 4, axis: Axis::Y }));
+        let p = compile(&s);
+        let a = std::f32::consts::FRAC_PI_4;
+        for rad in [6.0f32, 8.0, 10.0] {
+            let d1 = p.dist(Vec3::new(rad * (a + 1e-3).sin(), 0.0, rad * (a + 1e-3).cos()));
+            let d2 = p.dist(Vec3::new(rad * (a - 1e-3).sin(), 0.0, rad * (a - 1e-3).cos()));
+            assert!((d1 - d2).abs() < 0.05, "seam at r={rad}: {d1} vs {d2}");
+        }
+    }
+
+    fn bake_ok(s: &Scene) -> bake::Baked {
+        let b = bake::bake_blocking(s, bake::Quality::Standard);
+        assert!(!b.faces.is_empty());
+        assert_eq!(b.stats.open_edges + b.stats.nonmanifold_edges, 0, "seams left open");
+        assert!(b.stats.mean_dev < 0.02, "mean deviation {}", b.stats.mean_dev);
+        b
+    }
+
+    #[test]
+    fn bake_box_with_blended_hole_is_closed_and_mostly_quads() {
+        let mut s = Scene::new();
+        let r = s.root;
+        let mut b = Shape::new(PrimKind::Box);
+        b.round = 1.0;
+        s.add(r, NodeSpec::shape("b", b));
+        let mut c = Shape::new(PrimKind::Cylinder);
+        c.size = Vec3::new(4.0, 14.0, 0.0);
+        s.add(r, NodeSpec::shape("c", c).mode(CombineMode::Carve).blend(1.0));
+        let out = bake_ok(&s);
+        assert!(out.stats.quads * 2 > out.faces.len());
+        // OBJ keeps the polygons, GLB is triangulated
+        let obj = out.to_obj(&s.materials, "t");
+        assert_eq!(obj.lines().filter(|l| l.starts_with("f ")).count(), out.faces.len());
+        let mesh = out.to_mesh();
+        assert_eq!(mesh.triangle_count(), out.triangle_count());
+    }
+
+    #[test]
+    fn bake_threads_on_a_core_and_a_groove() {
+        let mut s = Scene::new();
+        let r = s.root;
+        let mut c = Shape::new(PrimKind::Cylinder);
+        c.size = Vec3::new(14.0, 9.0, 0.0);
+        s.add(r, NodeSpec::shape("core", c).at(Vec3::new(0.0, 100.0, 0.0)));
+        let mut t = Shape::new(PrimKind::Torus);
+        t.size = Vec3::new(14.4, 0.0, 1.5);
+        s.add(r, NodeSpec::shape("thread", t).at(Vec3::new(0.0, 93.5, 0.0)).repeat(Repeat::Linear { count: 5, step: Vec3::new(0.0, 3.3, 0.0) }));
+        bake_ok(&s);
+        let mut s = Scene::new();
+        let r = s.root;
+        let mut b = Shape::new(PrimKind::Box);
+        b.size = Vec3::new(10.0, 6.0, 10.0);
+        s.add(r, NodeSpec::shape("b", b));
+        let mut g = Shape::new(PrimKind::Box);
+        g.size = Vec3::new(0.1, 10.0, 14.0);
+        s.add(r, NodeSpec::shape("g", g).at(Vec3::new(0.0, 6.0, 0.0)).mode(CombineMode::Groove).groove(1.2, 0.9));
+        bake_ok(&s);
+    }
 }

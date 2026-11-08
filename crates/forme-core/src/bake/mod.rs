@@ -54,7 +54,7 @@ impl BakeSettings {
         match q {
             Quality::Draft => BakeSettings { tol: 0.05, max_edge: 8.0, trim_len: 1.0, threads },
             Quality::Standard => BakeSettings { tol: 0.015, max_edge: 5.0, trim_len: 0.5, threads },
-            Quality::Max => BakeSettings { tol: 0.004, max_edge: 3.0, trim_len: 0.25, threads },
+            Quality::Max => BakeSettings { tol: 0.006, max_edge: 4.0, trim_len: 0.5, threads },
         }
     }
 }
@@ -228,17 +228,34 @@ pub fn bake(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Option<Bak
             (wlo - pad, whi + pad, size)
         })
         .collect();
+    // terms that visibly own something somewhere (others are not features)
+    let far = field.blend_bound * 1.5 + 1e-3;
+    let live: Vec<bool> = par_for(terms.len(), st.threads, &order, |i| {
+        let t = &terms[i];
+        let b = &bases[base_of[&(t.key.prim, t.key.level)]];
+        b.pos.iter().any(|p| {
+            let s = field.eval(t.inst.to_world.transform_point3(*p));
+            s.owner.key() == t.key && s.d.abs() <= far
+        })
+    })
+    .into_iter()
+    .map(|l| l.unwrap_or(false))
+    .collect();
     let patches: Vec<PatchOut> = par_for(terms.len(), st.threads, &order, |i| {
         let t = &terms[i];
         let (lo, hi, _) = boxes[i];
         let features: Vec<patch::Feature> = boxes
             .iter()
             .enumerate()
-            .filter(|&(j, b)| j != i && b.2 > 0.0 && b.2 < st.max_edge * 2.0 && b.0.cmple(hi).all() && lo.cmple(b.1).all())
+            .filter(|&(j, b)| j != i && live[j] && b.2 > 0.0 && b.2 < st.max_edge * 2.0 && b.0.cmple(hi).all() && lo.cmple(b.1).all())
             .map(|(_, b)| patch::Feature { lo: b.0, hi: b.1, size: b.2 })
             .collect();
+        let tt = Instant::now();
         let r = if progress.cancelled() { PatchOut::default() } else { patch::process(&field, t, &bases[base_of[&(t.key.prim, t.key.level)]], &features, &[], &ps) };
         progress.tick();
+        if std::env::var("BAKE_TIME").is_ok() && tt.elapsed().as_secs_f64() > 0.5 {
+            eprintln!("patch prim {} copy {} level {} : {:.2}s faces {} refined {} cuts {}", t.key.prim, t.key.copy, t.key.level, tt.elapsed().as_secs_f64(), r.faces.len(), r.refined, r.cuts);
+        }
         r
     })
     .into_iter()
@@ -252,7 +269,7 @@ pub fn bake(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Option<Bak
     // hidden between its vertices) and is processed again around those points
     let mut patches = patches;
     let index_of: HashMap<TermKey, usize> = terms.iter().enumerate().map(|(i, t)| (t.key, i)).collect();
-    for _round in 0..3 {
+    for _round in 0..1 {
         let mut hints: Vec<Vec<DVec3>> = vec![vec![]; terms.len()];
         for p in &patches {
             for (x, o) in p.pos.iter().zip(&p.other) {
@@ -264,7 +281,7 @@ pub fn bake(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Option<Bak
             }
         }
         let redo: Vec<usize> = (0..terms.len()).filter(|&i| !hints[i].is_empty() && !explained(&patches[i], &hints[i], st.trim_len)).collect();
-        if std::env::var("BAKE_EDGES").is_ok() {
+        if std::env::var("BAKE_EDGES").is_ok() || std::env::var("BAKE_TIME").is_ok() {
             eprintln!("round {_round}: redo {:?}", redo.iter().map(|&i| (terms[i].key.prim, terms[i].key.copy, terms[i].key.level, hints[i].len())).collect::<Vec<_>>());
         }
         if redo.is_empty() {
@@ -278,7 +295,7 @@ pub fn bake(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Option<Bak
             let features: Vec<patch::Feature> = boxes
                 .iter()
                 .enumerate()
-                .filter(|&(j, b)| j != i && b.2 > 0.0 && b.2 < st.max_edge * 2.0 && b.0.cmple(hi).all() && lo.cmple(b.1).all())
+                .filter(|&(j, b)| j != i && live[j] && b.2 > 0.0 && b.2 < st.max_edge * 2.0 && b.0.cmple(hi).all() && lo.cmple(b.1).all())
                 .map(|(_, b)| patch::Feature { lo: b.0, hi: b.1, size: b.2 })
                 .collect();
             let r = patch::process(&field, t, &bases[base_of[&(t.key.prim, t.key.level)]], &features, &hints[i], &ps);
@@ -431,7 +448,7 @@ fn stitch(field: &Field, patches: Vec<PatchOut>, st: &BakeSettings, progress: &P
         }
     }
     // weld coincident trim points of different patches
-    let weld_eps = 1e-4;
+    let weld_eps = 5e-4;
     let boundary_verts = |faces: &[Vec<u32>]| -> Vec<u32> {
         let ec = edge_counts(faces);
         let mut v: Vec<u32> = vec![];
@@ -447,17 +464,22 @@ fn stitch(field: &Field, patches: Vec<PatchOut>, st: &BakeSettings, progress: &P
     };
     let cell = st.trim_len.max(0.05);
     let hkey = |p: DVec3| ((p.x / cell).floor() as i64, (p.y / cell).floor() as i64, (p.z / cell).floor() as i64);
-    let bverts = boundary_verts(&faces);
+    // every vertex takes part: a kept vertex lying on a trim curve can meet
+    // another patch's trim point
+    let bverts: Vec<u32> = (0..pos.len() as u32).collect();
+    let wcell = weld_eps * 4.0;
+    let hkey_w = |p: DVec3| ((p.x / wcell).floor() as i64, (p.y / wcell).floor() as i64, (p.z / wcell).floor() as i64);
     let mut grid: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
     for &v in &bverts {
-        grid.entry(hkey(pos[v as usize])).or_default().push(v);
+        grid.entry(hkey_w(pos[v as usize])).or_default().push(v);
     }
+    let hkey_weld = hkey_w;
     let mut remap: Vec<u32> = (0..pos.len() as u32).collect();
     for &v in &bverts {
         if remap[v as usize] != v {
             continue;
         }
-        let k = hkey(pos[v as usize]);
+        let k = hkey_weld(pos[v as usize]);
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
@@ -476,11 +498,23 @@ fn stitch(field: &Field, patches: Vec<PatchOut>, st: &BakeSettings, progress: &P
         for v in f.iter_mut() {
             *v = remap[*v as usize];
         }
+    }
+    // faces pinched by the weld split into simple polygons
+    let mut split_faces: Vec<Vec<u32>> = vec![];
+    let mut split_patch: Vec<u32> = vec![];
+    for (f, &p) in faces.iter().zip(&face_patch) {
+        let mut f = f.clone();
         f.dedup();
         while f.len() > 1 && f.first() == f.last() {
             f.pop();
         }
+        for sub in split_pinched(f) {
+            split_faces.push(sub);
+            split_patch.push(p);
+        }
     }
+    faces = split_faces;
+    face_patch = split_patch;
     let keep_f: Vec<bool> = faces.iter().map(|f| f.len() >= 3).collect();
     let mut k = keep_f.iter();
     faces.retain(|_| *k.next().unwrap());
@@ -617,9 +651,16 @@ fn stitch(field: &Field, patches: Vec<PatchOut>, st: &BakeSettings, progress: &P
     }
     // remaining gaps: thin bands between two trims that should have met (a
     // sliver too thin for any patch) and small holes at triple junctions
-    let loops = boundary_loops(&faces);
-    let loops = bridge_parallel(&pos, loops, st.trim_len);
+    let loops: Vec<Vec<u32>> = boundary_loops(&faces, &pos, st.trim_len * 2.0).into_iter().flat_map(split_pinched).collect();
+    let loops: Vec<Vec<u32>> = bridge_parallel(&pos, loops, st.trim_len);
     let holes = loops.len();
+    let mut edge_set: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    for f in &faces {
+        for i in 0..f.len() {
+            let (a, b) = (f[i], f[(i + 1) % f.len()]);
+            edge_set.insert((a.min(b), a.max(b)));
+        }
+    }
     for lp in &loops {
         if std::env::var("BAKE_EDGES").is_ok() && lp.len() > 3 {
             eprintln!("hole {} verts", lp.len());
@@ -628,7 +669,63 @@ fn stitch(field: &Field, patches: Vec<PatchOut>, st: &BakeSettings, progress: &P
                 eprintln!("   {:?} patch {:?} other {:?}", pos[v as usize], keys.get(g.patch as usize).map(|k| (k.prim, k.copy, k.level)), g.other.map(|k| (k.prim, k.copy, k.level)));
             }
         }
-        fill_loop(field, &pos, lp, &mut faces, &mut face_patch);
+        fill_loop(field, &pos, lp, &mut faces, &mut face_patch, &mut edge_set);
+    }
+    // repair: faces on non-manifold edges that are slivers or fillers are
+    // dropped and the holes they leave filled again
+    let mut holes = holes;
+    for _ in 0..6 {
+        let mut und: HashMap<(u32, u32), u32> = HashMap::new();
+        for f in &faces {
+            for i in 0..f.len() {
+                let (a, b) = (f[i], f[(i + 1) % f.len()]);
+                *und.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        let area = |f: &Vec<u32>| -> (f64, f64) {
+            let mut n = DVec3::ZERO;
+            let mut l = 0.0f64;
+            for i in 0..f.len() {
+                let (a, b) = (pos[f[i] as usize], pos[f[(i + 1) % f.len()] as usize]);
+                n += a.cross(b);
+                l = l.max(a.distance(b));
+            }
+            (n.length() * 0.5, l)
+        };
+        let mut drop = vec![false; faces.len()];
+        let mut any = false;
+        for (fi, f) in faces.iter().enumerate() {
+            let bad = (0..f.len()).any(|i| {
+                let (a, b) = (f[i], f[(i + 1) % f.len()]);
+                und[&(a.min(b), a.max(b))] > 2
+            });
+            if bad {
+                let (ar, l) = area(f);
+                if face_patch[fi] == u32::MAX || ar < 1e-3 * l * l {
+                    drop[fi] = true;
+                    any = true;
+                }
+            }
+        }
+        if !any {
+            break;
+        }
+        let mut k = drop.iter();
+        faces.retain(|_| !*k.next().unwrap());
+        let mut k = drop.iter();
+        face_patch.retain(|_| !*k.next().unwrap());
+        let mut es: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        for f in &faces {
+            for i in 0..f.len() {
+                let (a, b) = (f[i], f[(i + 1) % f.len()]);
+                es.insert((a.min(b), a.max(b)));
+            }
+        }
+        let loops: Vec<Vec<u32>> = boundary_loops(&faces, &pos, st.trim_len * 2.0).into_iter().flat_map(split_pinched).collect();
+        holes += loops.len();
+        for lp in &loops {
+            fill_loop(field, &pos, lp, &mut faces, &mut face_patch, &mut es);
+        }
     }
     progress.tick();
     // drop unused vertices
@@ -658,7 +755,7 @@ fn stitch(field: &Field, patches: Vec<PatchOut>, st: &BakeSettings, progress: &P
 }
 
 /// Closed boundary loops, oriented in the filling direction.
-fn boundary_loops(faces: &[Vec<u32>]) -> Vec<Vec<u32>> {
+fn boundary_loops(faces: &[Vec<u32>], pos: &[DVec3], gap: f64) -> Vec<Vec<u32>> {
     let ec = edge_counts(faces);
     let mut next: HashMap<u32, Vec<u32>> = HashMap::new();
     for (&(a, b), _) in ec.iter() {
@@ -684,12 +781,38 @@ fn boundary_loops(faces: &[Vec<u32>]) -> Vec<Vec<u32>> {
                 lp.push(n);
                 cur = n;
             }
-            if closed && lp.len() >= 3 {
+            // an open chain whose ends are close is closed by a new edge
+            let near = lp.len() >= 3 && pos[lp[0] as usize].distance(pos[*lp.last().unwrap() as usize]) < gap;
+            if (closed || near) && lp.len() >= 3 {
                 loops.push(lp);
             }
         }
     }
     loops
+}
+
+/// A loop that passes twice through a vertex is split into simple loops.
+fn split_pinched(lp: Vec<u32>) -> Vec<Vec<u32>> {
+    let mut out = vec![];
+    let mut stack: Vec<u32> = vec![];
+    let mut seen: HashMap<u32, usize> = HashMap::new();
+    for v in lp {
+        if let Some(&i) = seen.get(&v) {
+            let sub: Vec<u32> = stack.drain(i..).collect();
+            for x in &sub {
+                seen.remove(x);
+            }
+            if sub.len() >= 3 {
+                out.push(sub);
+            }
+        }
+        seen.insert(v, stack.len());
+        stack.push(v);
+    }
+    if stack.len() >= 3 {
+        out.push(stack);
+    }
+    out
 }
 
 /// Two loops running alongside each other bound one thin band: join them by
@@ -769,7 +892,7 @@ fn bridge_parallel(pos: &[DVec3], mut loops: Vec<Vec<u32>>, gap: f64) -> Vec<Vec
 
 /// Fills a loop with triangles, always cutting the ear with the shortest
 /// diagonal among those facing outwards (works for thin bands and bridges).
-fn fill_loop(field: &Field, pos: &[DVec3], lp: &[u32], faces: &mut Vec<Vec<u32>>, face_patch: &mut Vec<u32>) {
+fn fill_loop(field: &Field, pos: &[DVec3], lp: &[u32], faces: &mut Vec<Vec<u32>>, face_patch: &mut Vec<u32>, edges: &mut std::collections::HashSet<(u32, u32)>) {
     let mut idx: Vec<u32> = lp.to_vec();
     let mut guard = 0;
     while idx.len() > 3 && guard < lp.len() * 4 {
@@ -798,12 +921,19 @@ fn fill_loop(field: &Field, pos: &[DVec3], lp: &[u32], faces: &mut Vec<Vec<u32>>
             if best.map(|f| diag >= f.0).unwrap_or(false) {
                 continue;
             }
+            // a diagonal that already exists would make a non-manifold edge
+            let (ia, ic) = (idx[(k + n - 1) % n], idx[(k + 1) % n]);
+            if edges.contains(&(ia.min(ic), ia.max(ic))) && n > 3 {
+                continue;
+            }
             let g = field.grad((a + b + c) / 3.0);
             if nrm.dot(g) > 0.0 {
                 best = Some((diag, k));
             }
         }
         let k = best.or(fallback).unwrap().1;
+        let (ia, ic) = (idx[(k + n - 1) % n], idx[(k + 1) % n]);
+        edges.insert((ia.min(ic), ia.max(ic)));
         faces.push(vec![idx[(k + n - 1) % n], idx[k], idx[(k + 1) % n]]);
         face_patch.push(u32::MAX);
         idx.remove(k);
@@ -817,6 +947,9 @@ fn fill_loop(field: &Field, pos: &[DVec3], lp: &[u32], faces: &mut Vec<Vec<u32>>
 /// Materials, per-corner normals (split on creases), quality statistics.
 fn finish(field: &Field, out: &mut Baked, st: &BakeSettings, progress: &Progress) {
     let pos = out.positions.clone();
+    // exact normal once per vertex
+    let nv_order: Vec<usize> = (0..pos.len()).collect();
+    let vnorm: Vec<DVec3> = par_for(pos.len(), st.threads, &nv_order, |i| field.grad(pos[i]).normalize_or_zero()).into_iter().map(|n| n.unwrap()).collect();
     let n_faces = out.faces.len();
     let order: Vec<usize> = (0..n_faces).collect();
     let faces_ref = &out.faces;
@@ -824,26 +957,40 @@ fn finish(field: &Field, out: &mut Baked, st: &BakeSettings, progress: &Progress
         let f = &faces_ref[fi];
         let m = f.verts.len();
         let c = f.verts.iter().fold(DVec3::ZERO, |s, v| s + pos[*v as usize]) / m as f64;
-        let mat = field.eval(c).mat;
+        let sc = field.eval(c);
+        let mat = sc.mat;
         let mut newell = DVec3::ZERO;
         for i in 0..m {
             newell += pos[f.verts[i] as usize].cross(pos[f.verts[(i + 1) % m] as usize]);
         }
         let nface = newell.normalize_or_zero();
-        let mut normals = Vec::with_capacity(m);
-        for &v in &f.verts {
-            let nv = field.grad(pos[v as usize]).normalize_or_zero();
-            // smooth where the exact normal agrees with the face, else crease
-            normals.push(if nv.dot(nface) > 0.9 || nface == DVec3::ZERO { nv } else { nface });
-        }
-        // deviation: the face centre and edge midpoints against the exact surface
-        let mut dev = field.dist(c).abs();
+        // smooth where the exact normal agrees with the face, else crease
+        let normals: Vec<DVec3> = f
+            .verts
+            .iter()
+            .map(|&v| {
+                let nv = vnorm[v as usize];
+                if nv.dot(nface) > 0.9 || nface == DVec3::ZERO {
+                    nv
+                } else {
+                    nface
+                }
+            })
+            .collect();
+        // deviation: face centre and longest edge midpoint against the exact surface
+        let mut dev = sc.d.abs();
+        let mut best = (0.0, 0);
         for i in 0..m {
-            let a = pos[f.verts[i] as usize];
-            let b = pos[f.verts[(i + 1) % m] as usize];
-            dev = dev.max(field.dist((a + b) * 0.5).abs());
+            let l = pos[f.verts[i] as usize].distance(pos[f.verts[(i + 1) % m] as usize]);
+            if l > best.0 {
+                best = (l, i);
+            }
         }
-        progress.tick();
+        let (a, b) = (pos[f.verts[best.1] as usize], pos[f.verts[(best.1 + 1) % m] as usize]);
+        dev = dev.max(field.dist((a + b) * 0.5).abs());
+        if fi % 64 == 0 {
+            progress.done.fetch_add(64, Ordering::Relaxed);
+        }
         (mat, normals, dev)
     });
     let mut sum = 0.0;
@@ -887,7 +1034,8 @@ impl Baked {
         self.faces.iter().map(|f| f.verts.len().saturating_sub(2)).sum()
     }
 
-    fn triangulate(&self, f: &BFace) -> Vec<[usize; 3]> {
+    /// Triangles (corner indices of the face) of one polygon.
+    pub fn triangulate_face(&self, f: &BFace) -> Vec<[usize; 3]> {
         let m = f.verts.len();
         if m == 3 {
             return vec![[0, 1, 2]];
@@ -924,7 +1072,7 @@ impl Baked {
                     })
                 })
                 .collect();
-            for t in self.triangulate(f) {
+            for t in self.triangulate_face(f) {
                 mesh.indices.extend_from_slice(&[ids[t[0]], ids[t[1]], ids[t[2]]]);
             }
         }

@@ -190,6 +190,35 @@ pub struct ExportResult {
     pub seconds: f32,
 }
 
+/// A bake running in the background.
+pub struct BakeJob {
+    pub progress: std::sync::Arc<forme_core::bake::Progress>,
+    pub rx: mpsc::Receiver<Option<forme_core::bake::Baked>>,
+    pub started: f64,
+}
+
+/// Parametric history → clean mesh. One shot: the result keeps no link with
+/// the scene; any edit makes it stale and needs a full new bake.
+pub struct BakeState {
+    pub open: bool,
+    pub quality: forme_core::bake::Quality,
+    pub job: Option<BakeJob>,
+    pub result: Option<std::sync::Arc<forme_core::bake::Baked>>,
+    /// Bumped on every new result (GPU upload key).
+    pub version: u64,
+    /// Scene version the result was baked from.
+    pub scene_version: u64,
+    pub show: bool,
+    pub wire: bool,
+    pub last_export: Option<String>,
+}
+
+impl BakeState {
+    pub fn stale(&self, scene_version: u64) -> bool {
+        self.result.is_some() && self.scene_version != scene_version
+    }
+}
+
 pub struct Toast {
     pub text: String,
     pub until: f64,
@@ -226,6 +255,7 @@ pub struct AppState {
     pub export_obj: bool,
     pub export_glb: bool,
     pub export_job: Option<(mpsc::Receiver<Result<ExportResult, String>>, f64)>,
+    pub bake: BakeState,
     pub files_open: bool,
     pub kit_open: bool,
     pub material: u32,
@@ -315,6 +345,17 @@ impl AppState {
             export_obj: true,
             export_glb: true,
             export_job: None,
+            bake: BakeState {
+                open: false,
+                quality: forme_core::bake::Quality::Max,
+                job: None,
+                result: None,
+                version: 0,
+                scene_version: 0,
+                show: false,
+                wire: true,
+                last_export: None,
+            },
             files_open: false,
             kit_open: false,
             material: 0,
@@ -1183,9 +1224,90 @@ impl AppState {
         self.export_job = Some((rx, self.now));
     }
 
+    pub fn start_bake(&mut self) {
+        if self.bake.job.is_some() {
+            return;
+        }
+        if compile(&self.scene).is_empty() {
+            self.warn("Rien à baker");
+            return;
+        }
+        let scene = self.scene.clone();
+        let settings = forme_core::bake::BakeSettings::preset(self.bake.quality);
+        let progress = std::sync::Arc::new(forme_core::bake::Progress::default());
+        let p2 = progress.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(forme_core::bake::bake(&scene, &settings, &p2));
+        });
+        self.bake.job = Some(BakeJob { progress, rx, started: self.now });
+        self.bake.scene_version = self.scene_version;
+        self.bake.last_export = None;
+    }
+
+    pub fn cancel_bake(&mut self) {
+        if let Some(j) = &self.bake.job {
+            j.progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Writes the baked mesh (OBJ with quads and n-gons, GLB triangulated).
+    pub fn export_bake(&mut self, obj: bool, glb: bool) {
+        let Some(b) = self.bake.result.clone() else { return };
+        let name = format!("{} bake", files::sanitize(&self.doc_name));
+        let dir = files::documents_dir();
+        let mut done = vec![];
+        let mut err = None;
+        if obj {
+            let p = dir.join(format!("{name}.obj"));
+            match std::fs::write(&p, b.to_obj(&self.scene.materials, &name)) {
+                Ok(_) => done.push(format!("{name}.obj")),
+                Err(e) => err = Some(e.to_string()),
+            }
+        }
+        if glb {
+            let p = dir.join(format!("{name}.glb"));
+            match std::fs::write(&p, export::to_glb(&b.to_mesh(), &self.scene.materials, &name)) {
+                Ok(_) => done.push(format!("{name}.glb")),
+                Err(e) => err = Some(e.to_string()),
+            }
+        }
+        match err {
+            Some(e) => self.warn(format!("Export impossible : {e}")),
+            None => {
+                let msg = format!("Exporté : {}", done.join(", "));
+                self.bake.last_export = Some(msg.clone());
+                self.toast(msg);
+            }
+        }
+    }
+
     /// Called every frame.
     pub fn tick(&mut self, now: f64) {
         self.now = now;
+        let mut finished = None;
+        if let Some(j) = &self.bake.job {
+            if let Ok(r) = j.rx.try_recv() {
+                finished = Some((r, now - j.started));
+            }
+        }
+        if let Some((r, _)) = finished {
+            self.bake.job = None;
+            match r {
+                Some(b) => {
+                    let msg = format!("Bake terminé · {} faces · {:.1} s", fmt_int(b.faces.len()), b.stats.seconds);
+                    self.bake.result = Some(std::sync::Arc::new(b));
+                    self.bake.version += 1;
+                    self.bake.show = true;
+                    self.toast(msg);
+                }
+                None => self.toast("Bake annulé".to_string()),
+            }
+        }
+        if self.bake.show && self.bake.stale(self.scene_version) {
+            // the baked mesh no longer matches the model: back to the live view
+            self.bake.show = false;
+        }
         if let Some((rx, _)) = &self.export_job {
             if let Ok(res) = rx.try_recv() {
                 self.export_job = None;
@@ -1223,6 +1345,11 @@ impl AppState {
 
     /// One-line hint for the HUD.
     pub fn hint(&self) -> String {
+        if self.bake.show {
+            if let Some(b) = &self.bake.result {
+                return format!("Maillage baké · {} faces · {} quads · aperçu sans lien avec le modèle", fmt_int(b.faces.len()), fmt_int(b.stats.quads));
+            }
+        }
         if let Some(p) = &self.placement {
             return match p.phase {
                 PlacePhase::Base => format!("{} · {} — étire la base", p.kind.label(), p.mode.label()),

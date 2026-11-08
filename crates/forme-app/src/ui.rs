@@ -173,7 +173,7 @@ fn nice_ceil(x: f32) -> f32 {
 /// Touch-friendly slider (44 pt tall hit area). Sizes use an adaptive range so the
 /// knob sits mid-track whatever the scale; the range is frozen while dragging.
 fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adaptive: bool, step: f32, width: f32) -> (bool, bool) {
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, 34.0), Sense::click_and_drag());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::click_and_drag());
     let resp = ui.interact(rect.expand2(vec2(0.0, 5.0)), id, Sense::click_and_drag());
     let key = id.with("frozen-max");
     let soft = if adaptive { nice_ceil((v.abs() * 2.0).max(max)) } else { max };
@@ -240,7 +240,7 @@ fn stepper(ui: &mut Ui, label: &str, value: u32, min: u32, max: u32) -> Option<u
         ui.set_height(44.0);
         let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 136.0, 40.0), Sense::hover());
         ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(13.0), LABEL);
-        let mut btn = |ui: &mut Ui, t: &str| {
+        let btn = |ui: &mut Ui, t: &str| {
             let (r, resp) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::click());
             ui.painter().rect_filled(r, 10.0, if resp.hovered() { Color32::from_rgb(0x33, 0x37, 0x3E) } else { RAISED });
             ui.painter().text(r.center(), Align2::CENTER_CENTER, t, regular(18.0), TEXT);
@@ -296,6 +296,12 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     toast(ctx, st, screen);
     if st.export_open {
         export_dialog(ctx, st, screen);
+    }
+    if st.bake.open {
+        bake_dialog(ctx, st, screen);
+    }
+    if st.bake.job.is_some() {
+        ctx.request_repaint();
     }
     if st.files_open {
         files_dialog(ctx, st, screen);
@@ -416,7 +422,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     }
                 }
                 ui.add_space(4.0);
-                if toggle_chip(ui, Icon::Mirror, "Symétrie X", st.sym_x).clicked() {
+                if toggle_chip(ui, Icon::Mirror, "Sym. X", st.sym_x).clicked() {
                     st.sym_x = !st.sym_x;
                     st.toast(if st.sym_x { "Symétrie X : les nouvelles formes sont doublées" } else { "Symétrie X désactivée" });
                 }
@@ -429,6 +435,10 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 }
                 let (sep, _) = ui.allocate_exact_size(vec2(9.0, 24.0), Sense::hover());
                 ui.painter().rect_filled(Rect::from_center_size(sep.center(), vec2(1.0, 24.0)), 0.0, DIVIDER);
+                let baking = st.bake.job.is_some();
+                if toggle_chip(ui, Icon::Cube, if baking { "Bake…" } else { "Bake" }, st.bake.open || st.bake.show).clicked() {
+                    st.bake.open = !st.bake.open;
+                }
                 if primary_btn(ui, Some(Icon::Export), "Exporter", None).clicked() {
                     st.export_open = !st.export_open;
                 }
@@ -1210,6 +1220,139 @@ fn export_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             }
         });
     });
+}
+
+fn stat_row(ui: &mut Ui, label: &str, value: String, color: Color32) {
+    ui.horizontal(|ui| {
+        ui.set_height(22.0);
+        ui.label(egui::RichText::new(label).font(regular(13.0)).color(TEXT2));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(egui::RichText::new(value).font(medium(13.0)).color(color));
+        });
+    });
+}
+
+fn bake_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+    use forme_core::bake::{BakeSettings, Quality, STAGES};
+    if dim(ctx, screen, "bake-dim") {
+        st.bake.open = false;
+        return;
+    }
+    let cx = st.principal()[0];
+    egui::Area::new(Id::new("bake")).order(Order::Tooltip).pivot(Align2::CENTER_CENTER).fixed_pos(pos2(cx, screen.center().y)).show(ctx, |ui| {
+        panel().inner_margin(Margin::same(20)).show(ui, |ui| {
+            ui.set_width(420.0);
+            ui.label(egui::RichText::new("Bake · maillage propre").font(semibold(18.0)).color(TEXT));
+            ui.label(
+                egui::RichText::new(
+                    "Chaque forme est maillée à partir de ses paramètres, puis découpée exactement là où une autre forme prend le relais. \
+                     Le résultat n'a plus de lien avec le modèle : toute modification demande un nouveau Bake.",
+                )
+                .font(regular(12.5))
+                .color(TEXT2),
+            );
+            ui.add_space(6.0);
+            section(ui, "Précision");
+            let q = [(Quality::Draft, "Brouillon", ACCENT), (Quality::Standard, "Standard", ACCENT), (Quality::Max, "Max", ACCENT)];
+            let running = st.bake.job.is_some();
+            if let Some(v) = segmented(ui, &q, st.bake.quality, 40.0) {
+                if !running {
+                    st.bake.quality = v;
+                }
+            }
+            let s = BakeSettings::preset(st.bake.quality);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Écart de corde {} mm · arêtes ≤ {} mm · découpes {} mm · {} cœurs",
+                    fmt_mm_fine(s.tol),
+                    fmt_mm(s.max_edge as f32),
+                    fmt_mm(s.trim_len as f32),
+                    s.threads
+                ))
+                .font(regular(12.0))
+                .color(TEXT2),
+            );
+            ui.add_space(8.0);
+            if let Some(j) = &st.bake.job {
+                let f = j.progress.fraction();
+                let stage = j.progress.stage.load(std::sync::atomic::Ordering::Relaxed) as usize;
+                let el = st.now - j.started;
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
+                ui.painter().rect_filled(r, 5.0, WELL);
+                ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * f.max(0.02), r.height())), 5.0, ACCENT);
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
+                    ui.label(egui::RichText::new(format!("{} · {:.0} % · {:.0} s", STAGES.get(stage).copied().unwrap_or(""), f * 100.0, el)).font(medium(13.0)).color(LABEL));
+                });
+                ui.add_space(6.0);
+                if secondary_btn(ui, "Annuler le Bake", ui.available_width()).clicked() {
+                    st.cancel_bake();
+                }
+                return;
+            }
+            if let Some(b) = st.bake.result.clone() {
+                let s = &b.stats;
+                if st.bake.stale(st.scene_version) {
+                    ui.label(egui::RichText::new("Le modèle a changé depuis ce Bake : relance-le pour le mettre à jour.").font(medium(12.5)).color(CARVE));
+                    ui.add_space(4.0);
+                }
+                section(ui, "Résultat");
+                let total = b.faces.len().max(1);
+                stat_row(ui, "Faces", format!("{}  ({} % de quads)", fmt_int(b.faces.len()), s.quads * 100 / total), TEXT);
+                stat_row(ui, "Quads · triangles · n-gones", format!("{} · {} · {}", fmt_int(s.quads), fmt_int(s.tris), fmt_int(s.ngons)), LABEL);
+                stat_row(ui, "Sommets", fmt_int(s.verts), LABEL);
+                stat_row(ui, "Écart à la surface exacte", format!("moy. {} · max {} mm", fmt_mm_fine(s.mean_dev), fmt_mm_fine(s.max_dev)), LABEL);
+                let defects = s.open_edges + s.nonmanifold_edges;
+                stat_row(
+                    ui,
+                    "Fermeture",
+                    if defects == 0 { "étanche".to_string() } else { format!("{} arêtes à reprendre", fmt_int(defects)) },
+                    if defects == 0 { OK } else { CARVE },
+                );
+                stat_row(ui, "Calcul", format!("{:.1} s · {} surfaces", s.seconds, s.patches), LABEL);
+                ui.add_space(4.0);
+                if toggle_row(ui, "Afficher le maillage baké", st.bake.show) {
+                    st.bake.show = !st.bake.show && !st.bake.stale(st.scene_version);
+                }
+                if toggle_row(ui, "Filaire (arêtes des polygones)", st.bake.wire) {
+                    st.bake.wire = !st.bake.wire;
+                }
+                if let Some(m) = &st.bake.last_export {
+                    ui.label(egui::RichText::new(format!("{m} · {}", files::documents_dir().display())).font(regular(11.5)).color(OK));
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if secondary_btn(ui, "OBJ (quads)", 130.0).clicked() {
+                        st.export_bake(true, false);
+                    }
+                    if secondary_btn(ui, "GLB", 90.0).clicked() {
+                        st.export_bake(false, true);
+                    }
+                    if primary_btn(ui, None, "Nouveau Bake", Some(ui.available_width())).clicked() {
+                        st.start_bake();
+                    }
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    if secondary_btn(ui, "Fermer", 120.0).clicked() {
+                        st.bake.open = false;
+                    }
+                    if primary_btn(ui, Some(Icon::Cube), "Lancer le Bake", Some(ui.available_width())).clicked() {
+                        st.start_bake();
+                    }
+                });
+            }
+        });
+    });
+}
+
+fn fmt_mm_fine(v: f64) -> String {
+    if v < 0.001 {
+        format!("{:.4}", v).replace('.', ",")
+    } else {
+        format!("{:.3}", v).replace('.', ",")
+    }
 }
 
 fn files_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {

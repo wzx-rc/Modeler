@@ -335,6 +335,9 @@ fn main() {
     if want("09") {
         replay_grenade(&mut h);
     }
+    if want("10") {
+        bake_grenade(&mut h);
+    }
     let _ = (Tool::Select, demo::starter);
     let _: Option<_S> = None;
 }
@@ -736,7 +739,7 @@ fn replay_grenade(h: &mut Harness) {
     h.step_frame(&mut r, "Levier : contour tracé au Pencil en vue Face");
     let first = h.screen_of(Vec3::new(pts[0].pos.x, pts[0].pos.y, 0.0));
     h.tap(first);
-    let lever = h.st.selection.unwrap();
+    let _lever = h.st.selection.unwrap();
     h.note(&mut r, "Pencil : tap sur le premier point → contour fermé, extrudé");
     h.shape_edit(&mut r, "Épaisseur 9 mm, rondeur 1,2 mm", |s| {
         s.size.z = 4.5;
@@ -879,4 +882,96 @@ fn raster_mesh(mesh: &forme_core::mesh::Mesh, st: &AppState, w: u32, h: u32, pat
     let px: Vec<u8> = color.iter().flat_map(|c| [c[0], c[1], c[2], 255]).collect();
     image::save_buffer(path, &px, w, h, image::ExtendedColorType::Rgba8).expect("png");
     eprintln!("{path}  ({} triangles)", mesh.triangle_count());
+}
+
+/// Bake of the rebuilt grenade: dialog, progress, result, wireframe, zoom,
+/// exports, and the same zoom on the old voxel export for comparison.
+fn bake_grenade(h: &mut Harness) {
+    let path = format!("{}/replay/grenade-remontee.forme", h.out_dir);
+    let scene = std::fs::read_to_string(&path).ok().and_then(|s| forme_core::Scene::from_json(&s).ok()).unwrap_or_else(forme_core::demo::grenade);
+    h.reset(AppState::new(scene, "Grenade (remontage)"));
+    h.st.frame_all();
+    h.steps(4);
+    h.st.bake.quality = forme_core::bake::Quality::Max;
+    h.st.bake.open = true;
+    h.steps(40);
+    h.shot("10-bake-dialogue");
+    let t0 = Instant::now();
+    h.st.start_bake();
+    let mut mid = false;
+    while h.st.bake.job.is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        h.step();
+        let f = h.st.bake.job.as_ref().map(|j| j.progress.fraction()).unwrap_or(1.0);
+        if !mid && f > 0.4 && h.st.bake.job.is_some() {
+            mid = true;
+            h.shot("11-bake-calcul");
+        }
+    }
+    let b = h.st.bake.result.clone().expect("bake result");
+    let s = &b.stats;
+    eprintln!(
+        "bake : {:.1?} · {} faces ({} quads, {} tris, {} n-gons) · {} sommets · écart moy {:.4} max {:.4} · ouvertes {} non-manifold {} · trous comblés {}",
+        t0.elapsed(),
+        b.faces.len(),
+        s.quads,
+        s.tris,
+        s.ngons,
+        s.verts,
+        s.mean_dev,
+        s.max_dev,
+        s.open_edges,
+        s.nonmanifold_edges,
+        s.holes_filled
+    );
+    h.steps(40);
+    h.shot("12-bake-resultat");
+    h.st.bake.open = false;
+    h.steps(20);
+    h.shot("13-bake-filaire");
+    // close-up: bosses, lobes and fillets
+    h.cam(Vec3::new(2.0, 56.0, 26.0), 95.0, 0.32, 0.14);
+    h.st.toast = None;
+    h.steps(6);
+    h.shot("14-bake-zoom");
+    let zoom_bake = format!("{}/14-bake-zoom.png", h.out_dir);
+    h.st.export_bake(true, true);
+    eprintln!("{}", h.st.bake.last_export.clone().unwrap_or_default());
+    // same view on the voxel export (dual contouring) for comparison
+    let prog = forme_core::compile(&h.st.scene);
+    let (lo, hi) = h.st.scene.bounds();
+    let cell = (hi - lo).max_element() / forme_app::state::ExportRes::Normal.cells();
+    let dc = forme_core::mesh::dual_contour(&prog, lo, hi, cell);
+    let mut fake = forme_core::bake::Baked::default();
+    fake.positions = dc.positions.iter().map(|p| p.as_dvec3()).collect();
+    for t in dc.indices.chunks(3) {
+        let n: Vec<glam::DVec3> = t.iter().map(|&i| dc.normals[i as usize].as_dvec3()).collect();
+        fake.faces.push(forme_core::bake::BFace { verts: t.to_vec(), normals: n, mat: dc.materials[t[0] as usize], patch: 0 });
+    }
+    let real = h.st.bake.result.clone();
+    h.st.bake.result = Some(std::sync::Arc::new(fake));
+    h.st.bake.version += 1;
+    h.st.bake.show = true;
+    h.st.toast = None;
+    h.steps(6);
+    h.shot("tmp-dc-zoom");
+    let dc_path = format!("{}/tmp-dc-zoom.png", h.out_dir);
+    if let (Ok(a), Ok(bimg)) = (image::open(&dc_path), image::open(&zoom_bake)) {
+        let (a, bimg) = (a.to_rgba8(), bimg.to_rgba8());
+        let (w, hh) = (a.width(), a.height());
+        // the free viewport area (between rail, panels, top bar and mode bar)
+        let (x0, y0) = (w * 9 / 100, hh * 15 / 100);
+        let (cw, ch) = (w * 62 / 100, hh * 72 / 100);
+        let mut out = image::RgbaImage::new(cw * 2 + 12, ch);
+        for p in out.pixels_mut() {
+            *p = image::Rgba([23, 24, 27, 255]);
+        }
+        image::imageops::overlay(&mut out, &image::imageops::crop_imm(&a, x0, y0, cw, ch).to_image(), 0, 0);
+        image::imageops::overlay(&mut out, &image::imageops::crop_imm(&bimg, x0, y0, cw, ch).to_image(), (cw + 12) as i64, 0);
+        out.save(format!("{}/15-voxel-vs-bake.png", h.out_dir)).ok();
+        std::fs::remove_file(&dc_path).ok();
+    }
+    eprintln!("voxel export (dual contouring) : {} triangles", dc.triangle_count());
+    h.st.bake.result = real;
+    h.st.bake.version += 1;
 }

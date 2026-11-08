@@ -12,8 +12,33 @@ fn single(shape: Shape, combine: Combine) -> Scene {
     s
 }
 
+fn defects(b: &bake::Baked) {
+    let mut und: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+    for f in &b.faces {
+        for i in 0..f.verts.len() {
+            let (a, c) = (f.verts[i], f.verts[(i + 1) % f.verts.len()]);
+            *und.entry((a.min(c), a.max(c))).or_default() += 1;
+        }
+    }
+    let mut clusters: std::collections::BTreeMap<(i64, i64, i64), (u32, u32)> = std::collections::BTreeMap::new();
+    for (&(a, _), &c) in &und {
+        if c != 2 {
+            let p = b.positions[a as usize];
+            let k = ((p.x / 3.0).round() as i64 * 3, (p.y / 3.0).round() as i64 * 3, (p.z / 3.0).round() as i64 * 3);
+            let e = clusters.entry(k).or_default();
+            if c == 1 { e.0 += 1 } else { e.1 += 1 }
+        }
+    }
+    for (k, (o, n)) in clusters.iter().take(30) {
+        println!("   defects near {:?}: open {o} nonmanifold {n}", k);
+    }
+}
+
 fn report(name: &str, scene: &Scene, q: Quality) {
     let b = bake::bake_blocking(scene, q);
+    if std::env::var("DEFECTS").is_ok() {
+        defects(&b);
+    }
     let s = &b.stats;
     println!(
         "{name:<22} {:>7} faces ({:>6} q {:>6} t {:>5} n) open {:>4} nonman {:>3} holes {:>3} dev max {:.4} mean {:.5}  {:.2}s [{:.2} {:.2} {:.2} {:.2} {:.2}]",
@@ -163,6 +188,31 @@ fn main() {
             }
         }
         report("subset", &s, Quality::Standard);
+        if let Ok(v) = std::env::var("NEAR") {
+            let w: Vec<f64> = v.split(',').map(|x| x.parse().unwrap()).collect();
+            let at = glam::DVec3::new(w[0], w[1], w[2]);
+            let b = bake::bake_blocking(&s, Quality::Standard);
+            let mut und: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+            for f in &b.faces {
+                for i in 0..f.verts.len() {
+                    let (a, c) = (f.verts[i], f.verts[(i + 1) % f.verts.len()]);
+                    *und.entry((a.min(c), a.max(c))).or_default() += 1;
+                }
+            }
+            for (fi, f) in b.faces.iter().enumerate() {
+                let bad = (0..f.verts.len()).any(|i| {
+                    let (a, c) = (f.verts[i], f.verts[(i + 1) % f.verts.len()]);
+                    und[&(a.min(c), a.max(c))] != 2
+                });
+                if bad && f.verts.iter().any(|v| b.positions[*v as usize].distance(at) < w[3]) {
+                    println!("face {fi} patch {} :", f.patch);
+                    for i in 0..f.verts.len() {
+                        let (a, c) = (f.verts[i], f.verts[(i + 1) % f.verts.len()]);
+                        println!("   v{a} {:?} edge->v{c} uses {}", b.positions[a as usize], und[&(a.min(c), a.max(c))]);
+                    }
+                }
+            }
+        }
         if std::env::var("CUTS").is_ok() {
             check_cuts(&s, Quality::Standard);
         }
@@ -220,7 +270,8 @@ fn main() {
         render(&b, "/tmp/groove_end.png", glam::DVec3::new(0.3, 0.2, 1.0), glam::DVec3::new(0.0, -4.0, 10.0), 4.0, 900, 700);
         if args.get(2).is_some() {
             report("starter", &demo::starter(), Quality::Standard);
-            report("grenade std", &demo::grenade(), Quality::Standard);
+            let q = match std::env::var("Q").as_deref() { Ok("max") => Quality::Max, Ok("draft") => Quality::Draft, _ => Quality::Standard };
+            report("grenade", &demo::grenade(), q);
             let b = bake::bake_blocking(&demo::grenade(), Quality::Standard);
             render(&b, "/tmp/grenade.png", glam::DVec3::new(0.7, 0.35, 1.0), glam::DVec3::new(15.0, 80.0, 0.0), 175.0, 1100, 1300);
             render(&b, "/tmp/grenade_zoom.png", glam::DVec3::new(0.3, 0.2, 1.0), glam::DVec3::new(0.0, 50.0, 25.0), 40.0, 1100, 900);

@@ -8,8 +8,8 @@ Forme construit un objet en combinant des formes paramétriques au Pencil (Add, 
 
 | Crate | Rôle |
 | --- | --- |
-| `forme-core` | Arbre de formes, compilation en bytecode SDF, évaluation CPU, historique, projets JSON, maillage *dual contouring*, export OBJ et GLB. Aucune dépendance plateforme. |
-| `forme-render` | Viewport : un shader WGSL raymarche le bytecode (volumes englobants pour sauter les formes lointaines), surbrillance de la sélection et fantôme des formes de coupe. Capture hors écran. |
+| `forme-core` | Arbre de formes, compilation en bytecode SDF, évaluation CPU, historique, projets JSON, maillage *dual contouring*, **Bake** (historique → maillage propre), export OBJ et GLB. Aucune dépendance plateforme. |
+| `forme-render` | Viewport : un shader WGSL raymarche le bytecode (volumes englobants pour sauter les formes lointaines), surbrillance de la sélection et fantôme des formes de coupe ; aperçu du maillage baké (faces éclairées, filaire des vrais polygones). Capture hors écran. |
 | `forme-app` | L'application : interface egui fidèle à la maquette, gestes (doigts = caméra, Pencil = outils), poignées, mode Profil, kit, export. Binaire `forme` (iPad et ordinateur) et `forme-shot` (captures automatiques). |
 
 Le shader et l'interpréteur CPU exécutent le même bytecode : le picking, le maillage d'export et les tests utilisent le CPU, l'affichage le GPU.
@@ -30,6 +30,20 @@ Le shader et l'interpréteur CPU exécutent le même bytecode : le picking, le m
 Sur ordinateur : clic gauche = Pencil, clic droit = orbite, molette = zoom, Maj + glisser = pan, Alt = Carve, Cmd/Ctrl+Z, Suppr, Cmd/Ctrl+D, F (cadrer), Entrée, Échap.
 
 Aimantation : le Snap arrondit au demi-millimètre ; toucher le centre d'un bossage ou l'intérieur d'un perçage centre la nouvelle forme sur son axe.
+
+## Bake : de l'historique paramétrique au maillage propre
+
+Le bouton **Bake** convertit l'arbre de formes en maillage d'export sans passer par des voxels (`forme-core/src/bake`) :
+
+1. **Termes** : le bytecode est réinterprété en double précision en suivant, pour chaque point, quelle copie de quelle primitive (et à quel niveau d'offset pour coques, Groove, Tongue) donne la surface.
+2. **Surfaces paramétriques** : chaque primitive est maillée à partir de ses paramètres : anneaux de révolution (cylindre, cône, capsule, tore, tube, profil en révolution) avec disques tout en quads, boîtes arrondies, sphères en quads, extrusions arrondies (contours décalés et faces n-gones). Les copies des répétitions et symétries réutilisent le même maillage.
+3. **Découpe exacte** : chaque copie n'est raffinée que là où une autre forme peut se cacher. Ses sommets sont projetés sur la surface finale (congés compris) et ses faces coupées par dichotomie le long des courbes où une autre forme prend le relais.
+4. **Couture** : soudure des points de découpe, insertion des points de l'autre côté (pas de T-junctions), bandes trop fines comblées, réparation des arêtes non manifold.
+5. **Normales** : normales exactes du champ, séparées sur les arêtes vives ; matières en couleurs de vertex.
+
+Le résultat est figé : il n'a plus de lien avec le modèle, et toute modification demande un nouveau Bake. Le calcul se fait en arrière-plan sur tous les cœurs, avec progression et annulation. Trois précisions sont proposées (Brouillon, Standard, Max). L'export OBJ garde quads et n-gones, l'export GLB est triangulé.
+
+Grenade remontée en précision Max : 290 000 faces, dont la moitié en quads, en ~24 s sur 2 cœurs. L'écart moyen à la surface exacte est de 0,002 mm. Il reste une vingtaine d'arêtes non manifold aux jonctions triples.
 
 ## Construire
 
@@ -52,7 +66,8 @@ Sur un Mac : `bash ios/build_ipa.sh`.
 - J2 UX tactile : fait (création au geste, poignées, snaps, pouce Carve, vues Face/Droite/Dessus orthographiques).
 - J3 Hard surface : fait (profils extrudés ou en révolution, Groove/Tongue, kit vis/rivet/écrou/grille). La grenade de démo est reconstruite intégralement.
 - J4 Export : fait (dual contouring à arêtes vives, GLB + OBJ, IDs matière en couleurs de vertex).
+- J5 Bake : fait (maillage propre depuis l'historique, aperçu, export quads). Les répétitions dont les copies débordent de leur secteur sont désormais unies à la copie voisine : plus de couture, ni au rendu ni au Bake.
 
-À faire ensuite : cache de briques du champ (performances au-delà de ~150 formes), réglage fin de la pression et du survol du Pencil, poignée de rotation, menu radial (squeeze Pencil Pro), rétopo par lignes de force à l'export.
+À faire ensuite : Bake sans aucune arête à reprendre aux jonctions triples, bandes de congés en rangées de quads, cache de briques du champ (performances au-delà de ~150 formes), réglage fin de la pression et du survol du Pencil, poignée de rotation, menu radial (squeeze Pencil Pro), rétopo par lignes de force à l'export.
 
 Polices : Inter (SIL Open Font License, `crates/forme-app/assets/Inter-LICENSE.txt`).

@@ -95,6 +95,8 @@ pub struct Settings {
     pub grid: bool,
     pub sel_color: [f32; 3],
     pub ghost_color: [f32; 3],
+    /// Background and ground only (another pass draws the content).
+    pub hide_scene: bool,
 }
 
 impl Default for Settings {
@@ -106,6 +108,7 @@ impl Default for Settings {
             grid: true,
             sel_color: [0.24, 0.55, 1.0],
             ghost_color: [1.0, 0.45, 0.12],
+            hide_scene: false,
         }
     }
 }
@@ -322,7 +325,7 @@ impl Renderer {
             ghost_color: [settings.ghost_color[0], settings.ghost_color[1], settings.ghost_color[2], 1.0],
             params: [
                 settings.max_steps as f32,
-                if self.has_scene { 1.0 } else { 0.0 },
+                if self.has_scene && !settings.hide_scene { 1.0 } else { 0.0 },
                 if settings.shadows { 1.0 } else { 0.0 },
                 if settings.ao { 1.0 } else { 0.0 },
             ],
@@ -344,3 +347,4 @@ impl Renderer {
 }
 
 pub mod headless;
+pub mod mesh;

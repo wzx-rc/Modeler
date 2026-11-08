@@ -38,10 +38,14 @@ struct RenderKey {
     full: bool,
     grid: bool,
     cam: [u32; 6],
+    bake: (bool, u64, bool),
 }
 
 pub struct FrameRenderer {
     pub scene: Renderer,
+    /// Baked mesh preview.
+    pub mesh: forme_render::mesh::MeshRenderer,
+    mesh_version: u64,
     pub egui: egui_wgpu::Renderer,
     blit: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
@@ -113,6 +117,8 @@ impl FrameRenderer {
         });
         FrameRenderer {
             scene: Renderer::new(device, format),
+            mesh: forme_render::mesh::MeshRenderer::new(device, format),
+            mesh_version: 0,
             egui: egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions::default()),
             blit,
             blit_layout,
@@ -179,6 +185,16 @@ impl FrameRenderer {
             self.uploaded = (st.scene_version, sel);
         }
 
+        if self.mesh_version != st.bake.version {
+            if let Some(b) = &st.bake.result {
+                let verts = forme_render::mesh::mesh_vertices(b, &st.scene.materials);
+                self.mesh.upload(device, queue, &verts);
+            }
+            self.mesh_version = st.bake.version;
+        }
+        let show_bake = st.bake.show && self.mesh.has_mesh();
+        self.mesh.wire = st.bake.wire;
+
         // 2. scene image (only when something changed)
         let moving = !force_full && (st.interacting || st.placement.is_some() || st.handle_drag.is_some());
         let scale = if moving { self.interactive_scale } else { self.full_scale };
@@ -194,6 +210,7 @@ impl FrameRenderer {
             full: !moving,
             grid: st.grid,
             cam: [cam.target.x.to_bits(), cam.target.y.to_bits(), cam.yaw.to_bits(), cam.pitch.to_bits(), cam.dist.to_bits(), cam.ortho as u32],
+            bake: (show_bake, self.mesh_version, st.bake.wire),
         };
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         if self.last_key != Some(key) {
@@ -213,6 +230,7 @@ impl FrameRenderer {
             if moving {
                 settings.max_steps = 110;
             }
+            settings.hide_scene = show_bake;
             self.scene.update_view(queue, &view, &settings);
             let off = self.offscreen.as_ref().unwrap();
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -227,6 +245,9 @@ impl FrameRenderer {
             });
             self.scene.draw(&mut pass);
             drop(pass);
+            if show_bake {
+                self.mesh.draw(device, queue, &mut enc, &off.view, [w, h], &view);
+            }
             self.last_key = Some(key);
             self.renders += 1;
         }

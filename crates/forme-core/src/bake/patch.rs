@@ -87,6 +87,21 @@ impl Ctx<'_> {
 
     fn exact(&self, mut v: V) -> V {
         v.exact = true;
+        // outside any blend the surface is the primitives' own: no projection
+        let s0 = self.field.eval(v.world);
+        if s0.blend == 0.0 {
+            // no blend reaches this point: kept iff it is on the surface and
+            // ours (a hidden or removed point would project too far away)
+            let k = s0.owner.key();
+            v.x = v.world;
+            v.kept = k == self.term.key && s0.d.abs() < 1e-8;
+            v.margin = s0.margin;
+            v.near = s0.d.abs();
+            if !v.kept {
+                v.other = k;
+            }
+            return v;
+        }
         if let Some(x) = self.field.project(v.world) {
             let s = self.field.eval(x);
             let k = s.owner.key();
@@ -420,6 +435,20 @@ fn cut_point(field: &Field, pr: &PrimDef, term: &Term, k: &V, o: &V) -> (DVec3, 
         let t = 0.5 * (lo + hi);
         let l = prim_project(pr, k.local.lerp(o.local, t), term.level_local);
         let p = term.inst.to_world.transform_point3(l);
+        let s0 = field.eval(p);
+        if s0.blend == 0.0 {
+            // sharp region: the probe is kept iff it is on the surface and ours
+            let key = s0.owner.key();
+            if key == term.key && s0.d.abs() < 1e-8 {
+                lo = t;
+                best = p;
+                offset = DVec3::ZERO;
+            } else {
+                hi = t;
+                other = key;
+            }
+            continue;
+        }
         match field.project(p + offset).or_else(|| field.project(p)) {
             Some(x) => {
                 let s = field.eval(x);
