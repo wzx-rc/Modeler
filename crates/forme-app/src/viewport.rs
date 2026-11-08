@@ -40,6 +40,10 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     egui::Area::new(Id::new("viewport")).order(Order::Background).fixed_pos(screen.min).show(ctx, |ui| {
         let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
         handle_input(ctx, st, &resp, rect);
+        st.update_edge_hover();
+        st.refresh_edge();
+        st.update_edge_vis();
+        draw_edges(ui.painter(), st);
         draw_overlay(ui.painter(), st);
     });
 }
@@ -195,6 +199,66 @@ fn arrow(p: &Painter, a: Pos2, b: Pos2, color: Color32, width: f32) {
     p.add(Shape::convex_polygon(vec![tip, b + n * 5.0, b - n * 5.0], color, Stroke::NONE));
 }
 
+/// Hovered and selected edges: a glow on the visible parts, a faint line
+/// where the model hides them.
+fn draw_edges(p: &Painter, st: &AppState) {
+    if st.placement.is_some() || st.profile.is_some() || st.bake.show {
+        return;
+    }
+    let view = st.view();
+    let draw = |e: &forme_core::edges::EdgePick, vis: &[Vec<bool>], color: Color32, strong: bool| {
+        for (ci, c) in e.curves.iter().enumerate() {
+            let pts: Vec<Option<Pos2>> = c.iter().map(|q| view.project(*q).map(|s| pos2(s[0], s[1]))).collect();
+            let v = |i: usize| vis.get(ci).and_then(|x| x.get(i)).copied().unwrap_or(true);
+            let mut run: Vec<Pos2> = vec![];
+            let mut run_vis = true;
+            let flush = |run: &mut Vec<Pos2>, visible: bool| {
+                if run.len() >= 2 {
+                    if visible {
+                        p.add(Shape::line(run.clone(), Stroke::new(if strong { 9.0 } else { 8.0 }, tint(color, if strong { 0.24 } else { 0.3 }))));
+                        p.add(Shape::line(run.clone(), Stroke::new(if strong { 3.0 } else { 2.5 }, color)));
+                    } else {
+                        p.add(Shape::line(run.clone(), Stroke::new(1.0, tint(color, 0.16))));
+                    }
+                }
+                run.clear();
+            };
+            for (i, q) in pts.iter().enumerate() {
+                let Some(q) = q else {
+                    flush(&mut run, run_vis);
+                    continue;
+                };
+                let vi = v(i);
+                if !run.is_empty() && vi != run_vis {
+                    let last = *run.last().unwrap();
+                    flush(&mut run, run_vis);
+                    run.push(last);
+                }
+                run_vis = vi;
+                run.push(*q);
+            }
+            flush(&mut run, run_vis);
+        }
+    };
+    if let Some(e) = &st.edge_sel {
+        draw(e, &st.edge_vis.sel, EDGE_SEL, true);
+    }
+    if let Some(e) = &st.edge_hover {
+        let same = st.edge_sel.as_ref().map(|s| s.kind == e.kind).unwrap_or(false);
+        if !same {
+            draw(e, &st.edge_vis.hover, ACCENT_LIGHT, false);
+            if let Some(h) = st.hover {
+                let r = if e.radius <= 0.0 {
+                    "vive".to_string()
+                } else {
+                    format!("{} {} mm", if e.chamfer { "chanfrein" } else { "fillet" }, fmt_mm(e.radius))
+                };
+                chip(p, pos2(h[0], h[1]) + vec2(18.0, 16.0), Align2::LEFT_TOP, &format!("{} · {r}", e.label), ACCENT_BORDER, ACCENT_TEXT);
+            }
+        }
+    }
+}
+
 fn draw_overlay(p: &Painter, st: &AppState) {
     let view = st.view();
 
@@ -238,6 +302,19 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                         ACCENT_LIGHT,
                         Stroke::new(1.5, ON_ACCENT),
                     ));
+                }
+                Handle::Fillet => {
+                    p.line_segment([o, sp], Stroke::new(if hot { 2.5 } else { 1.75 }, EDGE_SEL));
+                    p.circle(sp, if hot { 9.5 } else { 8.0 }, EDGE_SEL, Stroke::new(2.0, ON_ACCENT));
+                    if let Some(e) = &st.edge_sel {
+                        let what = if e.chamfer { "Chanfrein" } else { "Fillet" };
+                        let t = if e.radius <= 0.0 { "Arête vive · tire pour arrondir".to_string() } else { format!("{what} {} mm", fmt_mm(e.radius)) };
+                        // towards the free side of the viewport
+                        let right = sp.x < st.principal()[0];
+                        let anchor = if right { Align2::LEFT_CENTER } else { Align2::RIGHT_CENTER };
+                        chip(p, sp + vec2(if right { 16.0 } else { -16.0 }, 0.0), anchor, &t, EDGE_SEL_DIM, EDGE_SEL);
+                    }
+                    continue;
                 }
                 _ => {
                     p.line_segment([o, sp], Stroke::new(if hot { 2.5 } else { 1.75 }, ACCENT));

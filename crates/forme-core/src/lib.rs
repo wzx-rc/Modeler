@@ -3,6 +3,7 @@
 
 pub mod bake;
 pub mod demo;
+pub mod edges;
 pub mod export;
 pub mod history;
 pub mod mesh;

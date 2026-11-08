@@ -3,6 +3,7 @@
 use crate::camera::OrbitCamera;
 use crate::files;
 use crate::kit::{self, KitPiece};
+use forme_core::edges::{EdgeIndex, EdgeKind, EdgePick};
 use forme_core::*;
 use forme_render::{SelMode, View};
 use glam::{Mat3, Mat4, Quat, Vec2, Vec3};
@@ -78,6 +79,8 @@ pub enum Handle {
     Height,
     Depth,
     Round,
+    /// Fillet of the selected edge (junction blend or shape rounding).
+    Fillet,
 }
 
 impl Handle {
@@ -103,6 +106,7 @@ impl Handle {
             Handle::Height => "Hauteur",
             Handle::Depth => "Profondeur",
             Handle::Round => "Bevel",
+            Handle::Fillet => "Fillet",
         }
     }
 }
@@ -227,6 +231,14 @@ pub struct Toast {
     pub warn: bool,
 }
 
+/// Visibility of the points of the hovered / selected edge curves.
+#[derive(Default)]
+pub struct EdgeVis {
+    key: (u64, u64, usize, usize),
+    pub hover: Vec<Vec<bool>>,
+    pub sel: Vec<Vec<bool>>,
+}
+
 pub struct AppState {
     pub scene: Scene,
     pub history: History,
@@ -268,10 +280,51 @@ pub struct AppState {
     pub renaming: bool,
     pub gesture: Gesture,
     pub hover: Option<[f32; 2]>,
+    /// Edge under the pointer (Select tool) and the selected edge.
+    pub edge_hover: Option<EdgePick>,
+    pub edge_sel: Option<EdgePick>,
+    /// Which points of the shown edges are visible (not behind the model).
+    pub edge_vis: EdgeVis,
+    edge_hover_at: Option<[f32; 2]>,
+    edge_index: Option<(u64, std::sync::Arc<EdgeIndex>)>,
+    edge_sel_version: u64,
     program: Program,
     program_version: u64,
     sel_program: Program,
     sel_key: (u64, Option<NodeId>),
+}
+
+/// Fillet size and kind held by a node for an edge.
+pub fn fillet_of(n: &Node, kind: EdgeKind) -> (f32, bool) {
+    match kind {
+        EdgeKind::Junction { .. } => (n.combine.blend.max(0.0), n.combine.kind == BlendKind::Chamfer),
+        EdgeKind::Own { .. } => match n.shape() {
+            Some(sh) if sh.chamfer > 0.0 => (sh.chamfer, true),
+            Some(sh) => (sh.round, false),
+            None => (0.0, false),
+        },
+    }
+}
+
+/// Writes a fillet (or chamfer) on the node that holds it.
+pub fn apply_fillet(n: &mut Node, kind: EdgeKind, r: f32, chamfer: bool) {
+    match kind {
+        EdgeKind::Junction { .. } => {
+            n.combine.blend = r;
+            n.combine.kind = if chamfer { BlendKind::Chamfer } else { BlendKind::Smooth };
+        }
+        EdgeKind::Own { .. } => {
+            if let Some(sh) = n.shape_mut() {
+                if chamfer {
+                    sh.chamfer = r;
+                    sh.round = 0.0;
+                } else {
+                    sh.round = r;
+                    sh.chamfer = 0.0;
+                }
+            }
+        }
+    }
 }
 
 fn snap_to(v: f32, step: f32, on: bool) -> f32 {
@@ -369,6 +422,12 @@ impl AppState {
             renaming: false,
             gesture: Gesture::None,
             hover: None,
+            edge_hover: None,
+            edge_sel: None,
+            edge_vis: EdgeVis::default(),
+            edge_hover_at: None,
+            edge_index: None,
+            edge_sel_version: 0,
             program: Program::default(),
             program_version: 0,
             sel_program: Program::default(),
@@ -422,6 +481,8 @@ impl AppState {
             self.sel_key = key;
         }
         let mode = match sel.and_then(|id| self.scene.node(id)) {
+            // an edge is selected: its highlight says it all
+            _ if self.edge_sel.is_some() => SelMode::None,
             None => SelMode::None,
             Some(n) if n.combine.mode.is_cutter() => SelMode::Ghost,
             Some(n) if n.is_group() => SelMode::Tint,
@@ -457,11 +518,19 @@ impl AppState {
 
     pub fn select(&mut self, id: Option<NodeId>) {
         self.selection = id;
+        self.edge_sel = None;
         self.renaming = false;
         self.view_changed();
     }
 
     pub fn tap_select(&mut self, pos: [f32; 2]) {
+        // an edge near the tap: junction or shape edge, ready to fillet
+        let px = if self.pointer_kind == PointerKind::Finger { 22.0 } else { 12.0 };
+        let hovered = if self.pointer_kind == PointerKind::Finger { None } else { self.edge_hover.clone() };
+        if let Some(e) = hovered.or_else(|| self.pick_edge(pos, px)) {
+            self.select_edge(e);
+            return;
+        }
         match self.hit(pos) {
             Some((p, _)) => {
                 let tol = 1.0 + self.view().pixel_size_at((p - self.camera.eye()).length()) * 6.0;
@@ -470,6 +539,135 @@ impl AppState {
             }
             None => self.select(None),
         }
+    }
+
+    // ------------------------------------------------------------------ edges
+
+    fn edges(&mut self) -> std::sync::Arc<EdgeIndex> {
+        if let Some((v, idx)) = &self.edge_index {
+            if *v == self.scene_version {
+                return idx.clone();
+            }
+        }
+        let idx = std::sync::Arc::new(EdgeIndex::new(&self.scene));
+        self.edge_index = Some((self.scene_version, idx.clone()));
+        idx
+    }
+
+    /// The edge (junction or shape edge) within `px` points of a screen position.
+    pub fn pick_edge(&mut self, pos: [f32; 2], px: f32) -> Option<EdgePick> {
+        let (p, _) = self.hit(pos)?;
+        let view = self.view();
+        let tol = view.pixel_size_at((p - view.eye).length()) * px;
+        let idx = self.edges();
+        idx.pick(&self.scene, p, tol)
+    }
+
+    /// Hover highlight with the Select tool (pencil hover, trackpad, mouse).
+    pub fn update_edge_hover(&mut self) {
+        let active = self.tool == Tool::Select
+            && self.gesture == Gesture::None
+            && self.placement.is_none()
+            && self.handle_drag.is_none()
+            && self.pointer_kind != PointerKind::Finger
+            && !self.bake.show;
+        let pos = if active { self.hover } else { None };
+        if pos.is_none() {
+            self.edge_hover = None;
+            self.edge_hover_at = None;
+            return;
+        }
+        if pos == self.edge_hover_at {
+            return;
+        }
+        self.edge_hover_at = pos;
+        self.edge_hover = self.pick_edge(pos.unwrap(), 12.0);
+    }
+
+    pub fn select_edge(&mut self, e: EdgePick) {
+        self.selection = Some(e.owner);
+        self.renaming = false;
+        self.edge_sel_version = self.scene_version;
+        self.edge_sel = Some(e);
+        self.edge_hover = None;
+        self.view_changed();
+    }
+
+    pub fn clear_edge(&mut self) {
+        self.edge_sel = None;
+        self.view_changed();
+    }
+
+    /// Largest fillet that makes sense for the selected edge.
+    pub fn fillet_max(&self) -> f32 {
+        let Some(e) = &self.edge_sel else { return 0.0 };
+        match e.kind {
+            EdgeKind::Own { node } => match self.scene.node(node).and_then(|n| n.shape()) {
+                Some(sh) if sh.kind == PrimKind::Box => sh.size.min_element(),
+                Some(sh) => sh.size.x.min(sh.half_height()),
+                None => 0.0,
+            },
+            EdgeKind::Junction { .. } => {
+                let (lo, hi) = self.scene.bounds();
+                ((hi - lo).max_element() * 0.25).clamp(1.0, 50.0)
+            }
+        }
+    }
+
+    /// Sets the fillet of the selected edge (live: one history entry per gesture).
+    pub fn set_fillet(&mut self, r: f32, chamfer: bool, start: bool) {
+        let Some(e) = self.edge_sel.clone() else { return };
+        let r = r.clamp(0.0, self.fillet_max());
+        let label = if chamfer { "Chanfrein" } else { "Fillet" };
+        self.edit_live(label, e.owner, start, |n| apply_fillet(n, e.kind, r, chamfer));
+    }
+
+    /// Keeps the selected edge in step with the scene (after edits, undo…).
+    pub fn refresh_edge(&mut self) {
+        if self.edge_sel.is_none() || self.edge_sel_version == self.scene_version {
+            return;
+        }
+        self.edge_sel_version = self.scene_version;
+        let idx = self.edges();
+        let e = self.edge_sel.clone().unwrap();
+        self.edge_sel = idx.refresh(&self.scene, &e);
+        if self.edge_sel.is_none() || self.selection != Some(e.owner) {
+            self.edge_sel = None;
+        }
+    }
+
+    /// Which points of the shown edges are in front of the model.
+    pub fn update_edge_vis(&mut self) {
+        let count = |e: &Option<EdgePick>| e.as_ref().map(|e| e.curves.iter().map(|c| c.len()).sum::<usize>() + (e.at.x.to_bits() as usize & 0xffff)).unwrap_or(0);
+        let key = (self.view_version, self.scene_version, count(&self.edge_hover), count(&self.edge_sel));
+        if self.edge_vis.key == key {
+            return;
+        }
+        let prog = self.program().clone();
+        let view = self.view();
+        let vis = |e: &Option<EdgePick>| -> Vec<Vec<bool>> {
+            let Some(e) = e else { return vec![] };
+            e.curves
+                .iter()
+                .map(|c| {
+                    c.iter()
+                        .map(|p| {
+                            let Some(s) = view.project(*p) else { return false };
+                            let (ro, rd) = view.ray(s[0], s[1]);
+                            let tp = (*p - ro).dot(rd);
+                            let eps = view.pixel_size_at(tp.abs()) * 4.0 + 1e-3;
+                            match prog.raycast(ro, rd, tp + eps) {
+                                Some(t) => t >= tp - eps,
+                                None => true,
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        self.edge_vis.hover = vis(&self.edge_hover);
+        self.edge_vis.sel = vis(&self.edge_sel);
+        self.edge_vis.key = key;
     }
 
     /// New shapes go next to the selection (same group), or at the root.
@@ -774,6 +972,12 @@ impl AppState {
 
     pub fn handles(&self) -> Vec<HandleInfo> {
         let Some(id) = self.selection else { return vec![] };
+        if let Some(e) = &self.edge_sel {
+            let view = self.view();
+            let len = view.pixel_size_at((e.at - view.eye).length()) * 64.0;
+            let n = if e.normal.length_squared() > 0.5 { e.normal } else { Vec3::Y };
+            return vec![HandleInfo { handle: Handle::Fillet, world: e.at + n * len, origin: e.at, axis: n }];
+        }
         let Some(n) = self.scene.node(id) else { return vec![] };
         let m = self.scene.world_matrix(id);
         let (s, r, o) = m.to_scale_rotation_translation();
@@ -862,6 +1066,15 @@ impl AppState {
                 self.set_world(d.node, np, rot);
                 if let Some(n) = self.scene.node_mut(d.node) {
                     n.transform.scale = d.start.transform.scale;
+                }
+            }
+            Handle::Fillet => {
+                let Some(e) = self.edge_sel.clone() else { return };
+                let r0 = fillet_of(&d.start, e.kind).0;
+                let chamfer = fillet_of(&d.start, e.kind).1;
+                let r = snap_to((r0 + (t - d.t0) * 0.6).max(0.0), 0.1, snap).clamp(0.0, self.fillet_max());
+                if let Some(n) = self.scene.node_mut(d.node) {
+                    apply_fillet(n, e.kind, r, chamfer);
                 }
             }
             Handle::MoveX | Handle::MoveY | Handle::MoveZ => {

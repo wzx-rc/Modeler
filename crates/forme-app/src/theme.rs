@@ -26,6 +26,9 @@ pub const NEUTRAL_MODE: Color32 = Color32::from_rgb(0xC8, 0xCC, 0xD2);
 pub const AXIS_X: Color32 = Color32::from_rgb(0xE0, 0x7A, 0x5F);
 pub const AXIS_Y: Color32 = Color32::from_rgb(0x8F, 0xC2, 0x7A);
 pub const AXIS_Z: Color32 = Color32::from_rgb(0x6F, 0xA8, 0xF5);
+/// Selected edge (fillet tool).
+pub const EDGE_SEL: Color32 = Color32::from_rgb(0xFF, 0xCF, 0x5A);
+pub const EDGE_SEL_DIM: Color32 = Color32::from_rgb(0x6B, 0x55, 0x22);
 pub const OK: Color32 = Color32::from_rgb(0x8F, 0xC2, 0x7A);
 
 pub fn tint(c: Color32, a: f32) -> Color32 {

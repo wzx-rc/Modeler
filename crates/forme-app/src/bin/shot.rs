@@ -341,6 +341,9 @@ fn main() {
     if want("19") {
         bake_cube(&mut h);
     }
+    if want("22") {
+        edges_cube(&mut h);
+    }
     let _ = (Tool::Select, demo::starter);
     let _: Option<_S> = None;
 }
@@ -889,6 +892,60 @@ fn raster_mesh(mesh: &forme_core::mesh::Mesh, st: &AppState, w: u32, h: u32, pat
 
 /// Bake of the rebuilt grenade: dialog, progress, result, wireframe, zoom,
 /// exports, and the same zoom on the old voxel export for comparison.
+fn cube_test() -> forme_core::Scene {
+    use forme_core::scene::{NodeSpec, Scene, Shape};
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::splat(10.0);
+    b.round = 1.0;
+    s.add(root, NodeSpec::shape("Cube", b));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(4.0, 14.0, 0.0);
+    s.add(root, NodeSpec::shape("Trou", c).mode(CombineMode::Carve).blend(0.8));
+    s
+}
+
+/// Select mode: hover highlights a junction or an edge loop, tap selects it,
+/// the handle (or the panel) sets its fillet.
+fn edges_cube(h: &mut Harness) {
+    h.reset(AppState::new(cube_test(), "Cube test"));
+    h.cam(Vec3::new(0.0, 2.0, 0.0), 64.0, 0.72, 0.62);
+    h.steps(4);
+    // hover the hole rim
+    let rim = h.screen_of(Vec3::new(3.45, 10.0, 3.45));
+    h.move_to(rim);
+    h.steps(4);
+    eprintln!("survol : {:?}", h.st.edge_hover.as_ref().map(|e| (&e.label, e.radius)));
+    h.shot("22-arete-survol");
+    h.tap(rim);
+    h.steps(4);
+    eprintln!("sélection : {:?}", h.st.edge_sel.as_ref().map(|e| (&e.label, e.radius)));
+    h.shot("23-arete-selection");
+    // pull the fillet handle
+    let hd = h.st.handles()[0].clone();
+    let a = h.screen_of(hd.world);
+    let o = h.screen_of(hd.origin);
+    let dir = (a - o).normalized();
+    h.drag(a, a + dir * 70.0, 12, true);
+    h.move_to(a + dir * 70.0 + egui::vec2(160.0, 120.0));
+    h.steps(6);
+    eprintln!("fillet tiré : {:?}", h.st.edge_sel.as_ref().map(|e| e.radius));
+    h.shot("24-fillet-tire");
+    // the cube's own edges
+    let edge = h.screen_of(Vec3::new(9.75, 9.75, -4.0));
+    h.move_to(edge);
+    h.steps(4);
+    eprintln!("survol arête : {:?}", h.st.edge_hover.as_ref().map(|e| (&e.label, e.radius)));
+    h.shot("25-aretes-cube-survol");
+    h.tap(edge);
+    h.st.set_fillet(2.0, false, true);
+    h.move_to(edge + egui::vec2(220.0, 200.0));
+    h.steps(6);
+    eprintln!("bevel cube : {:?}", h.st.edge_sel.as_ref().map(|e| (&e.label, e.radius, e.curves.len())));
+    h.shot("26-aretes-cube-fillet");
+}
+
 /// The test cube (bevel 1 mm, through hole Ø8, fillet 0.8) baked in the app.
 fn bake_cube(h: &mut Harness) {
     use forme_core::scene::{NodeSpec, Scene, Shape};

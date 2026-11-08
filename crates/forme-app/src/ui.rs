@@ -333,12 +333,20 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.redo();
     }
     if del {
-        st.delete_selected();
+        if let Some(e) = st.edge_sel.clone() {
+            // on an edge, Delete removes its fillet (the shape stays)
+            st.set_fillet(0.0, e.chamfer, true);
+        } else {
+            st.delete_selected();
+        }
     }
     if dup {
         st.duplicate_selected();
     }
     if esc {
+        if st.edge_sel.is_some() {
+            st.clear_edge();
+        }
         st.commit_placement();
         st.cancel_profile();
         st.tool = Tool::Select;
@@ -706,6 +714,10 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         return;
     }
     divider(ui);
+    if st.edge_sel.is_some() {
+        edge_card(ui, st);
+        divider(ui);
+    }
 
     if let Some(sh) = node.shape().cloned() {
         section(ui, "Forme");
@@ -855,6 +867,42 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
 
     section(ui, "Matière");
     material_palette(ui, st, Some(id), node.material);
+}
+
+/// The selected edge: fillet size and kind, straight on the parameter that
+/// makes it (blend of a junction, rounding of a shape's edges).
+fn edge_card(ui: &mut Ui, st: &mut AppState) {
+    let Some(e) = st.edge_sel.clone() else { return };
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+        ui.painter().circle_filled(r.center(), 5.0, EDGE_SEL);
+        ui.label(egui::RichText::new("Arête sélectionnée").font(semibold(14.0)).color(TEXT));
+    });
+    let what = match e.kind {
+        forme_core::edges::EdgeKind::Junction { .. } => format!("{} · jonction entre deux formes", e.label),
+        forme_core::edges::EdgeKind::Own { .. } => format!("{} · rayon commun à toutes", e.label),
+    };
+    ui.label(egui::RichText::new(what).font(regular(12.0)).color(TEXT2));
+    ui.add_space(4.0);
+    let kinds = [(false, "Arrondi", EDGE_SEL), (true, "Chanfrein", EDGE_SEL)];
+    if let Some(c) = segmented(ui, &kinds, e.chamfer, 36.0) {
+        st.set_fillet(e.radius, c, true);
+    }
+    let max = st.fillet_max().max(0.1);
+    let mut r = e.radius;
+    let label = if e.chamfer { "Chanfrein" } else { "Fillet" };
+    let (changed, start) = slider_row(ui, label, &mut r, 0.0..=max, 0.1, "mm");
+    if changed {
+        st.set_fillet(r, e.chamfer, start);
+    }
+    ui.horizontal(|ui| {
+        if secondary_btn(ui, "Arête vive", 120.0).clicked() {
+            st.set_fillet(0.0, e.chamfer, true);
+        }
+        if secondary_btn(ui, "Désélectionner", ui.available_width()).clicked() {
+            st.clear_edge();
+        }
+    });
 }
 
 fn chip_label(ui: &mut Ui, text: &str, bg: Color32, fg: Color32) {
