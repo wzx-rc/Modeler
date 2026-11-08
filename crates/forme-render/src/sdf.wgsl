@@ -345,7 +345,10 @@ fn run(start: u32, pw: vec3<f32>) -> vec2<f32> {
                 let sector = TAU / cnt;
                 let a = atan2(v, u);
                 let a2 = a + sector * 0.5;
-                let a3 = a2 - sector * floor(a2 / sector) - sector * 0.5;
+                var a3 = a2 - sector * floor(a2 / sector) - sector * 0.5;
+                if (w0.w > 0.5 && cnt > 1.5) {
+                    a3 = a3 - select(-sector, sector, a3 >= 0.0);
+                }
                 let l = sqrt(u * u + v * v);
                 let nu = l * cos(a3);
                 let nv = l * sin(a3);
@@ -366,7 +369,11 @@ fn run(start: u32, pw: vec3<f32>) -> vec2<f32> {
                 let origin = code[pc + 2u].xyz;
                 let ss = dot(stp, stp);
                 if (ss > 1e-9) {
-                    let t = clamp(round(dot(p - origin, stp) / ss), 0.0, cnt - 1.0);
+                    let uu = dot(p - origin, stp) / ss;
+                    var t = clamp(round(uu), 0.0, cnt - 1.0);
+                    if (w0.z > 0.5) {
+                        t = clamp(t + select(-1.0, 1.0, uu > t), 0.0, cnt - 1.0);
+                    }
                     p = p - stp * t;
                 }
             }

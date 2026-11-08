@@ -28,9 +28,24 @@ pub const EMPTY_DIST: f32 = 1.0e5;
 #[derive(Clone, Copy, Debug)]
 enum PointOp {
     Affine { rows: [Vec4; 3], scale: f32 },
-    Radial { count: u32, axis: u32 },
-    Linear { count: u32, step: Vec3, origin: Vec3 },
+    /// `second`: evaluate the neighbouring copy instead of the nearest one
+    /// (copies that overlap their sector are unioned with their neighbour).
+    Radial { count: u32, axis: u32, second: bool },
+    Linear { count: u32, step: Vec3, origin: Vec3, second: bool },
     Mirror { x: bool, y: bool, z: bool },
+}
+
+impl PointOp {
+    fn is_fold(&self) -> bool {
+        matches!(self, PointOp::Radial { count, .. } | PointOp::Linear { count, .. } if *count > 1)
+    }
+    fn with_second(self, s: bool) -> Self {
+        match self {
+            PointOp::Radial { count, axis, .. } => PointOp::Radial { count, axis, second: s },
+            PointOp::Linear { count, step, origin, .. } => PointOp::Linear { count, step, origin, second: s },
+            o => o,
+        }
+    }
 }
 
 /// Compiled scene: `code` = instructions, `aux` = profile points (2 per vec4).
@@ -44,8 +59,8 @@ pub struct Program {
 fn node_ops(scene: &Scene, n: &Node) -> Vec<PointOp> {
     let mut ops = vec![];
     match n.repeat {
-        Repeat::Radial { count, axis } if count > 1 => ops.push(PointOp::Radial { count, axis: axis.index() }),
-        Repeat::Linear { count, step } if count > 1 => ops.push(PointOp::Linear { count, step, origin: scene.content_center_parent(n.id) }),
+        Repeat::Radial { count, axis } if count > 1 => ops.push(PointOp::Radial { count, axis: axis.index(), second: false }),
+        Repeat::Linear { count, step } if count > 1 => ops.push(PointOp::Linear { count, step, origin: scene.content_center_parent(n.id), second: false }),
         _ => {}
     }
     if n.mirror.any() {
@@ -89,9 +104,9 @@ impl<'a> Builder<'a> {
                 rows[1].to_array(),
                 rows[2].to_array(),
             ]),
-            PointOp::Radial { count, axis } => self.op(OP_RADIAL, count as f32, axis as f32, 0.0),
-            PointOp::Linear { count, step, origin } => self.instr([
-                [OP_LINEAR as f32, count as f32, 0.0, 0.0],
+            PointOp::Radial { count, axis, second } => self.op(OP_RADIAL, count as f32, axis as f32, second as u32 as f32),
+            PointOp::Linear { count, step, origin, second } => self.instr([
+                [OP_LINEAR as f32, count as f32, second as u32 as f32, 0.0],
                 [step.x, step.y, step.z, 0.0],
                 [origin.x, origin.y, origin.z, 0.0],
                 [0.0; 4],
@@ -101,10 +116,15 @@ impl<'a> Builder<'a> {
     }
 
     fn prim(&mut self, id: NodeId, chain: &[PointOp], shape: &Shape, material: u32, combine: &Combine) {
+        // copies made by folds may overlap their cell: each fold is evaluated
+        // for the nearest and the neighbouring copy, and the variants unioned
+        let folds: Vec<usize> = chain.iter().enumerate().filter(|(_, o)| o.is_fold()).map(|(i, _)| i).collect();
+        let folds: Vec<usize> = folds.iter().rev().take(3).rev().copied().collect();
+        let variants = 1usize << folds.len();
         if let Some((lo, hi)) = self.scene.shape_world_aabb(id) {
             let c = (lo + hi) * 0.5;
             let r = (hi - lo).length() * 0.5;
-            let skip = 2 + chain.len();
+            let skip = variants * (2 + chain.len()) + (variants - 1);
             let pad = combine.blend.max(0.0) + combine.depth.max(0.0) + combine.width.max(0.0);
             self.instr([
                 [OP_BOUND as f32, combine.mode.code() as f32, pad, skip as f32],
@@ -112,10 +132,6 @@ impl<'a> Builder<'a> {
                 [0.0; 4],
                 [0.0; 4],
             ]);
-        }
-        self.op(OP_RESET, 0.0, 0.0, 0.0);
-        for o in chain {
-            self.point_op(o);
         }
         let (aux_off, aux_count, mode) = match (&shape.kind, &shape.profile) {
             (PrimKind::Profile, Some(p)) => {
@@ -132,12 +148,22 @@ impl<'a> Builder<'a> {
             _ => (0.0, 0.0, 0.0),
         };
         let s = shape.size;
-        self.instr([
-            [OP_PRIM as f32, shape.kind.code() as f32, material as f32, 0.0],
-            [s.x, s.y, s.z, shape.round],
-            [shape.chamfer, shape.taper, shape.shell, shape.sides.max(3) as f32],
-            [aux_off, aux_count, mode, 0.0],
-        ]);
+        for v in 0..variants {
+            self.op(OP_RESET, 0.0, 0.0, 0.0);
+            for (i, o) in chain.iter().enumerate() {
+                let second = folds.iter().position(|&f| f == i).map(|b| v & (1 << b) != 0).unwrap_or(false);
+                self.point_op(&o.with_second(second));
+            }
+            self.instr([
+                [OP_PRIM as f32, shape.kind.code() as f32, material as f32, v as f32],
+                [s.x, s.y, s.z, shape.round],
+                [shape.chamfer, shape.taper, shape.shell, shape.sides.max(3) as f32],
+                [aux_off, aux_count, mode, 0.0],
+            ]);
+            if v > 0 {
+                self.combine(&Combine { mode: CombineMode::Add, blend: 0.0, ..Default::default() });
+            }
+        }
         self.prog.prim_count += 1;
     }
 
@@ -517,7 +543,10 @@ impl Program {
                     let sector = std::f32::consts::TAU / n;
                     let a = v.atan2(u);
                     let a2 = a + sector * 0.5;
-                    let a3 = a2 - sector * (a2 / sector).floor() - sector * 0.5;
+                    let mut a3 = a2 - sector * (a2 / sector).floor() - sector * 0.5;
+                    if w[0][3] > 0.5 && n > 1.5 {
+                        a3 -= if a3 >= 0.0 { sector } else { -sector };
+                    }
                     let l = (u * u + v * v).sqrt();
                     let (nu, nv) = (l * a3.cos(), l * a3.sin());
                     match axis {
@@ -541,7 +570,11 @@ impl Program {
                     let origin = Vec3::new(w[2][0], w[2][1], w[2][2]);
                     let ss = step.dot(step);
                     if ss > 1e-9 {
-                        let t = ((p - origin).dot(step) / ss).round().clamp(0.0, n - 1.0);
+                        let u = (p - origin).dot(step) / ss;
+                        let mut t = u.round().clamp(0.0, n - 1.0);
+                        if w[0][2] > 0.5 {
+                            t = (t + if u > t { 1.0 } else { -1.0 }).clamp(0.0, n - 1.0);
+                        }
                         p -= step * t;
                     }
                 }

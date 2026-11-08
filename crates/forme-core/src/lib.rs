@@ -1,6 +1,7 @@
 //! Forme core: scene model, SDF bytecode, CPU evaluation, meshing and export.
 //! Pure Rust, no platform dependencies: runs the same on iPad and desktop.
 
+pub mod bake;
 pub mod demo;
 pub mod export;
 pub mod history;
