@@ -54,7 +54,7 @@ impl App {
         theme::install(&ctx);
         // the last session if there is one, else an empty scene (the demo
         // grenade is in Documents)
-        let st = match files::load(&files::project_path(SESSION)) {
+        let mut st = match files::load(&files::project_path(SESSION)) {
             Ok(scene) => {
                 let mut s = AppState::new(scene, SESSION);
                 s.frame_all();
@@ -62,6 +62,8 @@ impl App {
             }
             Err(_) => AppState::new(forme_core::Scene::new(), "Sans titre"),
         };
+        st.settings = forme_app::settings::Settings::load();
+        st.enforce_basics();
         App {
             window: None,
             gfx: None,
@@ -169,7 +171,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("Forme").with_inner_size(winit::dpi::LogicalSize::new(1194.0, 834.0));
+        let attrs = Window::default_attributes().with_title("Forme").with_inner_size(if cfg!(target_os = "ios") { winit::dpi::LogicalSize::new(1194.0, 834.0) } else { winit::dpi::LogicalSize::new(1600.0, 900.0) });
         let window = Arc::new(el.create_window(attrs).expect("window"));
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance.create_surface(window.clone()).expect("surface");

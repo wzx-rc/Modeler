@@ -22,6 +22,7 @@ cargo test --release -p forme-core                      # core tests (19 tests)
 cargo run --release -p forme-app --bin forme            # the app on PC
 cargo run --release -p forme-app --bin forme-shot -- shots          # every capture scenario
 cargo run --release -p forme-app --bin forme-shot -- /tmp/x max     # one scenario (prefix): max, user, live, 22, 19, ui-ipad…
+cargo run --release -p forme-app --bin forme-shot -- /tmp/x pc-atelier pc-studio   # the two PC interfaces at 1600×900
 IPAD_ZOOM=0.84 cargo run --release -p forme-app --bin forme-shot -- /tmp/x ui-ipad   # layout as on the iPad
 cargo run --release -p forme-core --example bake_probe -- build      # bake of the test cube → /tmp/build_a.png, _b.png
 cargo run --release -p forme-core --example bake_probe -- variants   # 7 bake variants → /tmp/var_*.png
@@ -37,7 +38,7 @@ The iPad `.ipa` is built by GitHub Actions on every push to `main` (repository `
 
 - `crates/forme-core`: scene (shape tree), SDF bytecode compiler + CPU interpreter, history, `.forme` JSON projects, OBJ/GLB export, dual contouring, `edges.rs` (edge picking for fillets), `bake/` (all bakes).
 - `crates/forme-render`: WGSL raymarcher (`sdf.wgsl`), preview of the baked mesh (`mesh.rs`), headless capture.
-- `crates/forme-app`: egui UI (`ui.rs`), gestures (`viewport.rs`), state and tools (`state.rs`), frame composition and progressive rendering (`gfx.rs`), entry point (`main.rs`), kit of parts (`kit.rs`), capture harness (`bin/shot.rs`).
+- `crates/forme-app`: two desktop interfaces chosen in Settings: Atelier (`ui.rs`, floating panels, also the iPad layout) and Studio (`studio.rs`, docked panels and menus, 3ds Max style); user preferences (`settings.rs`, `settings.json` next to the projects, `FORME_UI=studio|atelier` overrides); gestures (`viewport.rs`), state and tools (`state.rs`), frame composition and progressive rendering (`gfx.rs`), entry point (`main.rs`), kit of parts (`kit.rs`), capture harness (`bin/shot.rs`).
 
 ## Rules that are easy to break
 
@@ -46,4 +47,6 @@ The iPad `.ipa` is built by GitHub Actions on every push to `main` (repository `
 - `Shape.edges` empty = uniform fillet (`round` / `chamfer`). Negative value = chamfer. `set_edge` collapses back to uniform when every edge is equal.
 - Bake by operation (`bake/build.rs`): any history it does not handle must return `Err(reason)`. `bake()` then falls back to the surface bake and shows the reason in the dialog. Never return a broken mesh in silence.
 - Renderer: an image is "moving" when it changes from frame to frame (not just because a tool is active). The full-quality image is refined in bands, so it never blocks the UI.
+- Both interfaces drive the same `AppState`: a feature goes in `state.rs`, then gets a control in `ui.rs` (Atelier) and in `studio.rs` (Studio). Each interface sets `st.view_rect` every frame (the free 3D area), which centres the camera.
+- Features hidden by the basic mode (`Settings.advanced` off) are hidden, not removed: check `st.settings.prim_allowed()` / `modes()` before showing them.
 - Never commit `target/` or `shots/replay/frames/`.

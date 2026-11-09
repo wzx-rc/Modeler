@@ -1,10 +1,12 @@
-//! Panels, laid out like the mock-up: top bar, tool rail, mode bar, thumb Carve
-//! button, properties + shape tree on the right, dialogs and toasts.
+//! Atelier interface: viewport first, floating panels (top bar, tool rail with
+//! the modes, properties + shape tree on the right, history strip at the
+//! bottom), plus the dialogs and toasts shared with the Studio interface.
 
 use crate::camera::ViewPreset;
 use crate::files;
 use crate::icons::{self, Icon};
 use crate::kit::KitPiece;
+use crate::settings::UiMode;
 use crate::state::*;
 use crate::theme::*;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, Frame, Id, Margin, Order, Rect, Response, Sense, Stroke, StrokeKind, Ui};
@@ -13,11 +15,11 @@ use glam::{EulerRot, Quat, Vec3};
 
 const RIGHT_W: f32 = 276.0;
 
-fn panel() -> Frame {
+pub(crate) fn panel() -> Frame {
     Frame::new().fill(PANEL).stroke(Stroke::new(1.0, PANEL_BORDER)).corner_radius(CornerRadius::same(16)).inner_margin(Margin::same(8))
 }
 
-fn mode_color(m: CombineMode) -> Color32 {
+pub(crate) fn mode_color(m: CombineMode) -> Color32 {
     match m {
         CombineMode::Add => ACCENT,
         CombineMode::Carve => CARVE,
@@ -59,7 +61,7 @@ pub fn paint_mode_glyph(p: &egui::Painter, c: egui::Pos2, m: CombineMode, color:
     }
 }
 
-fn prim_icon(k: PrimKind) -> Icon {
+pub(crate) fn prim_icon(k: PrimKind) -> Icon {
     match k {
         PrimKind::Box => Icon::Box,
         PrimKind::Cylinder => Icon::Cylinder,
@@ -88,7 +90,7 @@ pub fn icon_btn(ui: &mut Ui, icon: Icon, selected: bool, tip: &str, size: f32) -
     resp.on_hover_text(tip)
 }
 
-fn toggle_chip(ui: &mut Ui, icon: Icon, label: &str, on: bool) -> Response {
+pub(crate) fn toggle_chip(ui: &mut Ui, icon: Icon, label: &str, on: bool) -> Response {
     let galley = ui.painter().layout_no_wrap(label.to_string(), medium(13.0), TEXT);
     let w = galley.size().x + 24.0 + 22.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 44.0), Sense::click());
@@ -100,7 +102,7 @@ fn toggle_chip(ui: &mut Ui, icon: Icon, label: &str, on: bool) -> Response {
     resp
 }
 
-fn primary_btn(ui: &mut Ui, icon: Option<Icon>, label: &str, width: Option<f32>) -> Response {
+pub(crate) fn primary_btn(ui: &mut Ui, icon: Option<Icon>, label: &str, width: Option<f32>) -> Response {
     let galley = ui.painter().layout_no_wrap(label.to_string(), semibold(14.0), ON_ACCENT);
     let w = width.unwrap_or(galley.size().x + 32.0 + if icon.is_some() { 24.0 } else { 0.0 });
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 44.0), Sense::click());
@@ -116,7 +118,7 @@ fn primary_btn(ui: &mut Ui, icon: Option<Icon>, label: &str, width: Option<f32>)
     resp
 }
 
-fn secondary_btn(ui: &mut Ui, label: &str, width: f32) -> Response {
+pub(crate) fn secondary_btn(ui: &mut Ui, label: &str, width: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 44.0), Sense::click());
     let p = ui.painter();
     let fill = if resp.hovered() { RAISED } else { Color32::TRANSPARENT };
@@ -126,7 +128,7 @@ fn secondary_btn(ui: &mut Ui, label: &str, width: f32) -> Response {
 }
 
 /// Segmented control. Returns the picked value.
-fn segmented<T: PartialEq + Copy>(ui: &mut Ui, items: &[(T, &str, Color32)], current: T, height: f32) -> Option<T> {
+pub(crate) fn segmented<T: PartialEq + Copy>(ui: &mut Ui, items: &[(T, &str, Color32)], current: T, height: f32) -> Option<T> {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     ui.painter().rect_filled(rect, 11.0, WELL);
@@ -152,7 +154,7 @@ fn segmented<T: PartialEq + Copy>(ui: &mut Ui, items: &[(T, &str, Color32)], cur
     picked
 }
 
-fn section(ui: &mut Ui, title: &str) {
+pub(crate) fn section(ui: &mut Ui, title: &str) {
     ui.add_space(4.0);
     ui.label(egui::RichText::new(title).font(semibold(12.0)).color(TEXT2));
 }
@@ -258,7 +260,7 @@ fn stepper(ui: &mut Ui, label: &str, value: u32, min: u32, max: u32) -> Option<u
     out
 }
 
-fn toggle_row(ui: &mut Ui, label: &str, on: bool) -> bool {
+pub(crate) fn toggle_row(ui: &mut Ui, label: &str, on: bool) -> bool {
     let mut clicked = false;
     ui.horizontal(|ui| {
         ui.set_height(44.0);
@@ -274,7 +276,7 @@ fn toggle_row(ui: &mut Ui, label: &str, on: bool) -> bool {
     clicked
 }
 
-fn divider(ui: &mut Ui) {
+pub(crate) fn divider(ui: &mut Ui) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
     ui.painter().rect_filled(r, 0.0, PANEL_BORDER);
 }
@@ -284,16 +286,28 @@ fn divider(ui: &mut Ui) {
 pub fn show(ctx: &egui::Context, st: &mut AppState) {
     let screen = ctx.content_rect();
     st.screen = [screen.width(), screen.height()];
+    // free view: between the rail and the right column, above the history strip
+    let right = if st.panel_visible { screen.width() - 308.0 } else { screen.width() - 12.0 };
+    st.view_rect = [84.0, 72.0, right, screen.height() - 84.0];
     top_bar(ctx, st, screen);
     rail(ctx, st);
     if matches!(st.tool, Tool::Kit(_)) || st.kit_open {
         kit_popup(ctx, st);
     }
-    mode_bar(ctx, st, screen);
-    thumb_button(ctx, st, screen);
-    ctrl_button(ctx, st, screen);
+    history_strip(ctx, st, screen);
+    if cfg!(target_os = "ios") {
+        // touch only: a keyboard has Alt and Ctrl
+        thumb_button(ctx, st, screen);
+        ctrl_button(ctx, st, screen);
+    }
     hud(ctx, st);
     right_column(ctx, st, screen);
+    dialogs(ctx, st, screen);
+    shortcuts(ctx, st);
+}
+
+/// Toast and modal dialogs (both interfaces).
+pub(crate) fn dialogs(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     toast(ctx, st, screen);
     if st.export_open {
         export_dialog(ctx, st, screen);
@@ -307,14 +321,13 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     if st.files_open {
         files_dialog(ctx, st, screen);
     }
-    shortcuts(ctx, st);
 }
 
-fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
+pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if ctx.egui_wants_keyboard_input() {
         return;
     }
-    let (undo, redo, del, dup, esc, enter, alt, f) = ctx.input(|i| {
+    let (undo, redo, del, dup, esc, enter, alt, f, save) = ctx.input(|i| {
         let cmd = i.modifiers.command;
         (
             cmd && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
@@ -324,9 +337,13 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             i.key_pressed(egui::Key::Escape),
             i.key_pressed(egui::Key::Enter),
             i.modifiers.alt,
-            i.key_pressed(egui::Key::F),
+            i.key_pressed(egui::Key::F) && !cmd,
+            cmd && i.key_pressed(egui::Key::S),
         )
     });
+    if save {
+        st.save();
+    }
     if undo {
         st.undo();
     }
@@ -344,7 +361,9 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if dup {
         st.duplicate_selected();
     }
-    if esc {
+    if esc && st.settings_open {
+        st.settings_open = false;
+    } else if esc {
         if !st.edge_sel.is_empty() {
             st.clear_edge();
         }
@@ -399,6 +418,9 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             }
             if icon_btn(ui, Icon::Redo, false, "Rétablir (tap à 3 doigts)", 44.0).clicked() {
                 st.redo();
+            }
+            if icon_btn(ui, Icon::Settings, st.settings_open, "Réglages (interface Atelier ou Studio)", 44.0).clicked() {
+                st.settings_open = !st.settings_open;
             }
         });
     });
@@ -466,12 +488,23 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
                 st.tool = Tool::Select;
             }
             divider(ui);
-            for k in PrimKind::PLACEABLE {
+            for k in st.settings.placeable() {
                 if icon_btn(ui, prim_icon(k), st.tool == Tool::Place(k), k.label(), 44.0).clicked() {
                     st.commit_placement();
                     st.tool = Tool::Place(k);
                     st.kit_open = false;
                 }
+            }
+            divider(ui);
+            // mode of the next shapes (and of the selected one)
+            let shown = shown_mode(st);
+            for m in st.settings.modes() {
+                if mode_btn(ui, m, shown == m).clicked() {
+                    st.set_mode(m);
+                }
+            }
+            if !st.settings.advanced {
+                return;
             }
             divider(ui);
             if icon_btn(ui, Icon::Profile, st.tool == Tool::Profile, "Profil (dessiner un contour)", 44.0).clicked() {
@@ -520,46 +553,135 @@ fn kit_popup(ctx: &egui::Context, st: &mut AppState) {
     });
 }
 
-fn mode_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+/// Mode shown as current: while placing, the placement mode; with the Select
+/// tool, the selected shape's mode.
+fn shown_mode(st: &AppState) -> CombineMode {
+    let current = st.effective_mode();
+    let target = if st.tool == Tool::Select {
+        st.selection.and_then(|id| st.scene.node(id)).filter(|n| n.shape().is_some()).map(|n| n.combine.mode)
+    } else {
+        None
+    };
+    if st.carve_held || st.alt_carve {
+        current
+    } else {
+        target.unwrap_or(current)
+    }
+}
+
+fn mode_btn(ui: &mut Ui, m: CombineMode, on: bool) -> Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(44.0, 38.0), Sense::click());
+    let c = mode_color(m);
+    let p = ui.painter();
+    if on {
+        p.rect(r.shrink(0.75), 10.0, tint(c, 0.16), Stroke::new(1.5, c), StrokeKind::Inside);
+    } else if resp.hovered() {
+        p.rect_filled(r, 10.0, RAISED);
+    }
+    paint_mode_glyph(p, r.center(), m, if on { c } else { TEXT_ICON }, 14.0);
+    let tip = match m {
+        CombineMode::Add => "Add : ajoute la forme",
+        CombineMode::Carve => "Carve : creuse (Alt maintenu)",
+        CombineMode::Intersect => "Intersect : garde la partie commune",
+        CombineMode::Groove => "Groove : rainure le long du contact",
+        CombineMode::Tongue => "Tongue : languette le long du contact",
+    };
+    resp.on_hover_text(tip)
+}
+
+/// The operations in evaluation order, as a strip of chips: the history the
+/// Bake replays. A chip selects its operation.
+fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+    let rows = st.scene.rows();
     let cx = st.principal()[0];
-    egui::Area::new(Id::new("modes"))
-        .order(Order::Middle)
-        .pivot(Align2::CENTER_BOTTOM)
-        .fixed_pos(pos2(cx, screen.max.y - 18.0))
-        .show(ctx, |ui| {
-            panel().inner_margin(Margin::same(6)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    let current = st.effective_mode();
-                    let target_mode = if st.tool == Tool::Select {
-                        st.selection.and_then(|id| st.scene.node(id)).filter(|n| n.shape().is_some()).map(|n| n.combine.mode)
-                    } else {
-                        None
+    let max_w = (st.view_rect[2] - st.view_rect[0] - 24.0).max(320.0);
+    egui::Area::new(Id::new("history")).order(Order::Middle).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(cx, screen.max.y - 14.0)).show(ctx, |ui| {
+        panel().inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(egui::RichText::new("Historique").font(semibold(13.0)).color(TEXT));
+                    let n = rows.len();
+                    let sub = match n {
+                        0 => "vide".to_string(),
+                        1 => "1 opération".to_string(),
+                        _ => format!("{n} opérations"),
                     };
-                    let shown = if st.carve_held { current } else { target_mode.unwrap_or(current) };
-                    for m in CombineMode::ALL {
-                        let g = ui.painter().layout_no_wrap(m.label().to_string(), semibold(14.0), TEXT);
-                        let w = (g.size().x + 44.0).max(92.0);
-                        let (r, resp) = ui.allocate_exact_size(vec2(w, 44.0), Sense::click());
-                        let on = shown == m;
-                        let c = mode_color(m);
-                        let p = ui.painter();
-                        if on {
-                            p.rect(r, 11.0, tint(c, 0.16), Stroke::new(1.5, c), StrokeKind::Inside);
-                        } else if resp.hovered() {
-                            p.rect_filled(r, 11.0, RAISED);
-                        }
-                        let total = 14.0 + 8.0 + g.size().x;
-                        let x0 = r.center().x - total * 0.5;
-                        paint_mode_glyph(p, pos2(x0 + 7.0, r.center().y), m, c, 13.0);
-                        p.galley(pos2(x0 + 22.0, r.center().y - g.size().y * 0.5), g, if on { TEXT_STRONG } else { Color32::from_rgb(0xAE, 0xB3, 0xBA) });
-                        if resp.clicked() {
-                            st.set_mode(m);
-                        }
-                    }
+                    ui.label(egui::RichText::new(sub).font(regular(11.5)).color(TEXT2));
                 });
+                let (sep, _) = ui.allocate_exact_size(vec2(1.0, 36.0), Sense::hover());
+                ui.painter().rect_filled(sep, 0.0, DIVIDER);
+                if rows.is_empty() {
+                    ui.label(egui::RichText::new("Choisis Cube ou Cylindre à gauche, puis glisse dans la vue").font(regular(13.0)).color(TEXT2));
+                    return;
+                }
+                egui::ScrollArea::horizontal().id_salt("history-scroll").max_width(max_w - 220.0).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for (i, (id, depth)) in rows.iter().enumerate() {
+                            if i > 0 {
+                                let (lr, _) = ui.allocate_exact_size(vec2(12.0, 44.0), Sense::hover());
+                                ui.painter().rect_filled(Rect::from_center_size(lr.center(), vec2(10.0, 2.0)), 1.0, DIVIDER);
+                            }
+                            if history_chip(ui, st, *id, *depth).clicked() {
+                                st.commit_placement();
+                                st.tool = Tool::Select;
+                                st.select(Some(*id));
+                            }
+                        }
+                    });
+                });
+                let (er, _) = ui.allocate_exact_size(vec2(40.0, 44.0), Sense::hover());
+                let p = ui.painter();
+                p.rect_filled(Rect::from_center_size(pos2(er.min.x + 4.0, er.center().y), vec2(3.0, 30.0)), 2.0, ACCENT);
+                p.text(pos2(er.min.x + 12.0, er.center().y), Align2::LEFT_CENTER, "Fin", regular(12.0), TEXT2);
             });
         });
+    });
+}
+
+fn history_chip(ui: &mut Ui, st: &AppState, id: NodeId, depth: usize) -> Response {
+    let Some(n) = st.scene.node(id) else {
+        return ui.allocate_exact_size(vec2(0.0, 0.0), Sense::hover()).1;
+    };
+    let title = n.name.clone();
+    let mut sub = if n.shape().is_some() { format!("{} · {}", n.type_label(), n.combine.mode.label()) } else { n.type_label() };
+    if n.mirror.any() {
+        sub += " · sym.";
+    }
+    if n.repeat.count() > 1 {
+        sub += &format!(" ×{}", n.repeat.count());
+    }
+    let tg = ui.painter().layout_no_wrap(title, semibold(12.5), TEXT);
+    let sg = ui.painter().layout_no_wrap(sub, regular(11.0), TEXT2);
+    let w = 8.0 + depth.saturating_sub(1) as f32 * 6.0 + 28.0 + 8.0 + tg.size().x.max(sg.size().x) + 12.0;
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 44.0), Sense::click());
+    let selected = st.selection == Some(id);
+    let p = ui.painter();
+    if selected {
+        p.rect(r, 10.0, ACCENT_BG, Stroke::new(1.0, ACCENT_BORDER), StrokeKind::Inside);
+    } else if resp.hovered() {
+        p.rect_filled(r, 10.0, RAISED);
+    }
+    let dim = if n.visible { 1.0 } else { 0.45 };
+    let x0 = r.min.x + 8.0 + depth.saturating_sub(1) as f32 * 6.0;
+    let ir = Rect::from_min_size(pos2(x0, r.center().y - 13.0), vec2(26.0, 26.0));
+    p.rect_filled(ir, 7.0, RAISED);
+    let icon = match n.shape() {
+        Some(sh) => prim_icon(sh.kind),
+        None => Icon::Folder,
+    };
+    icons::paint(p, ir.shrink(5.0), icon, tint(TEXT_ICON, dim));
+    if n.shape().is_some() {
+        let c = mode_color(n.combine.mode);
+        p.circle_filled(ir.right_bottom() - vec2(1.0, 1.0), 5.5, PANEL);
+        p.circle_filled(ir.right_bottom() - vec2(1.0, 1.0), 4.0, c);
+    }
+    let tx = ir.max.x + 8.0;
+    p.galley(pos2(tx, r.center().y - tg.size().y - 0.5), tg, if selected { ACCENT_TEXT } else { tint(TEXT, dim) });
+    p.galley(pos2(tx, r.center().y + 1.5), sg, TEXT2);
+    resp.on_hover_text("Sélectionner cette opération")
 }
 
 /// CTRL button area (points), just above the thumb button. Held, taps add to
@@ -632,7 +754,7 @@ fn thumb_button(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     });
 }
 
-fn hud(ctx: &egui::Context, st: &mut AppState) {
+pub(crate) fn hud(ctx: &egui::Context, st: &mut AppState) {
     let cx = st.principal()[0];
     let text = st.hint();
     let color = match &st.placement {
@@ -652,7 +774,7 @@ fn hud(ctx: &egui::Context, st: &mut AppState) {
     });
 }
 
-fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+pub(crate) fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     let Some(t) = &st.toast else { return };
     let text = t.text.clone();
     let warn = t.warn;
@@ -777,7 +899,8 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
 
     if node.shape().is_some() || matches!(node.kind, NodeKind::Group { combined: true, .. }) {
         section(ui, "Combinaison");
-        let items: Vec<(CombineMode, &str, Color32)> = CombineMode::ALL
+        let modes = st.settings.modes();
+        let items: Vec<(CombineMode, &str, Color32)> = modes
             .iter()
             .map(|m| (*m, if *m == CombineMode::Intersect { "Inter." } else { m.label() }, mode_color(*m)))
             .collect();
@@ -810,6 +933,17 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         }
     }
 
+    if st.settings.advanced {
+        repeat_rows(ui, st, id, &node);
+    }
+    symmetry_row(ui, st, id, &node);
+    position_rows(ui, st, id, &node);
+
+    section(ui, "Matière");
+    material_palette(ui, st, Some(id), node.material);
+}
+
+fn repeat_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
     section(ui, "Organisation");
     let kinds = [(0u8, "Aucune", ACCENT), (1u8, "Radiale", ACCENT), (2u8, "Linéaire", ACCENT)];
     let cur = match node.repeat {
@@ -855,6 +989,9 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         }
         Repeat::None => {}
     }
+}
+
+fn symmetry_row(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
     ui.horizontal(|ui| {
         ui.set_height(40.0);
         let (lr, _) = ui.allocate_exact_size(vec2(84.0, 36.0), Sense::hover());
@@ -875,7 +1012,9 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
             }
         }
     });
+}
 
+fn position_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
     section(ui, "Position et rotation");
     let mut pos = node.transform.pos;
     let (ex, ey, ez) = node.transform.rot.to_euler(EulerRot::XYZ);
@@ -901,9 +1040,6 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         let q = Quat::from_euler(EulerRot::XYZ, rot.x.to_radians(), rot.y.to_radians(), rot.z.to_radians());
         st.edit("Rotation", id, |n| n.transform.rot = q);
     }
-
-    section(ui, "Matière");
-    material_palette(ui, st, Some(id), node.material);
 }
 
 /// The selected edge: fillet size and kind, straight on the parameter that
@@ -949,14 +1085,14 @@ fn edge_card(ui: &mut Ui, st: &mut AppState) {
     });
 }
 
-fn chip_label(ui: &mut Ui, text: &str, bg: Color32, fg: Color32) {
+pub(crate) fn chip_label(ui: &mut Ui, text: &str, bg: Color32, fg: Color32) {
     let g = ui.painter().layout_no_wrap(text.to_string(), medium(11.5), fg);
     let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 14.0, 20.0), Sense::hover());
     ui.painter().rect_filled(r, 6.0, bg);
     ui.painter().galley(pos2(r.min.x + 7.0, r.center().y - g.size().y * 0.5), g, fg);
 }
 
-fn material_palette(ui: &mut Ui, st: &mut AppState, target: Option<NodeId>, current: u32) {
+pub(crate) fn material_palette(ui: &mut Ui, st: &mut AppState, target: Option<NodeId>, current: u32) {
     let mats = st.scene.materials.clone();
     let cols = 3;
     egui::Grid::new(("mats", target)).spacing(vec2(6.0, 6.0)).show(ui, |ui| {
@@ -968,7 +1104,11 @@ fn material_palette(ui: &mut Ui, st: &mut AppState, target: Option<NodeId>, curr
             let c = Color32::from_rgb((m.color[0] * 255.0) as u8, (m.color[1] * 255.0) as u8, (m.color[2] * 255.0) as u8);
             p.rect(Rect::from_min_size(r.min + vec2(8.0, 11.0), vec2(18.0, 18.0)), 5.0, c, Stroke::new(1.0, tint(Color32::WHITE, 0.15)), StrokeKind::Inside);
             let name = m.name.split(' ').next().unwrap_or("").to_string();
-            p.text(r.min + vec2(32.0, 20.0), Align2::LEFT_CENTER, name, regular(12.0), if on { ACCENT_TEXT } else { LABEL });
+            let fg = if on { ACCENT_TEXT } else { LABEL };
+            let mut job = egui::text::LayoutJob::single_section(name, egui::text::TextFormat::simple(regular(12.0), fg));
+            job.wrap = egui::text::TextWrapping { max_width: r.width() - 38.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+            let g = p.layout_job(job);
+            p.galley(pos2(r.min.x + 32.0, r.center().y - g.size().y * 0.5), g, fg);
             if resp.clicked() {
                 match target {
                     Some(id) => st.edit("Matière", id, |n| n.material = i as u32),
@@ -983,6 +1123,7 @@ fn material_palette(ui: &mut Ui, st: &mut AppState, target: Option<NodeId>, curr
 }
 
 fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
+    let advanced = st.settings.advanced;
     let mut s = sh.clone();
     let mut any = false;
     let mut start = false;
@@ -1050,10 +1191,12 @@ fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
     if s.round != r0 || s.chamfer != c0 {
         s.edges.clear();
     }
-    if !matches!(sh.kind, PrimKind::Sphere | PrimKind::Torus | PrimKind::Profile) {
+    if advanced && !matches!(sh.kind, PrimKind::Sphere | PrimKind::Torus | PrimKind::Profile) {
         row(ui, "Taper", &mut s.taper, -0.9..=0.9, 0.01, 1.0, "");
     }
-    row(ui, "Coque", &mut s.shell, 0.0..=10.0, 0.1, 1.0, "mm");
+    if advanced {
+        row(ui, "Coque", &mut s.shell, 0.0..=10.0, 0.1, 1.0, "mm");
+    }
     if sh.kind == PrimKind::Prism {
         if let Some(n) = stepper(ui, "Côtés", sh.sides, 3, 24) {
             s.sides = n;
@@ -1089,7 +1232,8 @@ fn scene_panel(ui: &mut Ui, st: &mut AppState) {
     ui.add_space(4.0);
     divider(ui);
     section(ui, "Nouvelles formes");
-    let items: Vec<(CombineMode, &str, Color32)> = CombineMode::ALL
+    let modes = st.settings.modes();
+    let items: Vec<(CombineMode, &str, Color32)> = modes
         .iter()
         .map(|m| (*m, if *m == CombineMode::Intersect { "Inter." } else { m.label() }, mode_color(*m)))
         .collect();
@@ -1262,9 +1406,9 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
 
 // ----------------------------------------------------------------- dialogs
 
-fn dim(ctx: &egui::Context, screen: Rect, id: &str) -> bool {
+pub(crate) fn dim(ctx: &egui::Context, screen: Rect, id: &str) -> bool {
     let mut close = false;
-    egui::Area::new(Id::new(id)).order(Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
+    egui::Area::new(Id::new(id)).order(Order::Foreground).fade_in(false).fixed_pos(screen.min).show(ctx, |ui| {
         let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
         ui.painter().rect_filled(r, 0.0, tint(Color32::BLACK, 0.45));
         close = resp.clicked();
@@ -1272,7 +1416,7 @@ fn dim(ctx: &egui::Context, screen: Rect, id: &str) -> bool {
     close
 }
 
-fn export_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+pub(crate) fn export_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     if dim(ctx, screen, "export-dim") && st.export_job.is_none() {
         st.export_open = false;
         return;
@@ -1339,7 +1483,7 @@ fn stat_row(ui: &mut Ui, label: &str, value: String, color: Color32) {
     });
 }
 
-fn bake_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+pub(crate) fn bake_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     use forme_core::bake::{BakeSettings, Quality, STAGES};
     if dim(ctx, screen, "bake-dim") {
         st.bake.open = false;
@@ -1468,7 +1612,7 @@ fn fmt_mm_fine(v: f64) -> String {
     }
 }
 
-fn files_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+pub(crate) fn files_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     if dim(ctx, screen, "files-dim") {
         st.files_open = false;
         return;
@@ -1517,6 +1661,68 @@ fn files_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     }
                 }
             });
+        });
+    });
+}
+
+// ---------------------------------------------------------------- settings
+
+/// Settings: the interface (Atelier or Studio) and the advanced functions.
+/// Shown over both interfaces.
+pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
+    if !st.settings_open {
+        return;
+    }
+    let screen = ctx.content_rect();
+    if dim(ctx, screen, "settings-dim") {
+        st.settings_open = false;
+        return;
+    }
+    egui::Area::new(Id::new("settings")).order(Order::Tooltip).fade_in(false).pivot(Align2::CENTER_CENTER).fixed_pos(screen.center()).show(ctx, |ui| {
+        panel().inner_margin(Margin::same(20)).show(ui, |ui| {
+            ui.set_width(440.0);
+            ui.set_max_width(440.0);
+            ui.label(egui::RichText::new("Réglages").font(semibold(18.0)).color(TEXT));
+            section(ui, "Interface");
+            for m in UiMode::ALL {
+                let on = st.settings.ui_mode == m;
+                let blurb = ui.painter().layout(m.blurb().to_string(), regular(12.0), TEXT2, 440.0 - 58.0);
+                let (r, resp) = ui.allocate_exact_size(vec2(440.0, 38.0 + blurb.size().y + 10.0), Sense::click());
+                let p = ui.painter();
+                if on {
+                    p.rect(r, 12.0, ACCENT_BG, Stroke::new(1.0, ACCENT_BORDER), StrokeKind::Inside);
+                } else {
+                    p.rect(r, 12.0, if resp.hovered() { RAISED } else { Color32::TRANSPARENT }, Stroke::new(1.0, DIVIDER), StrokeKind::Inside);
+                }
+                let c = pos2(r.min.x + 22.0, r.center().y);
+                p.circle_stroke(c, 8.0, Stroke::new(1.5, if on { ACCENT } else { TEXT2 }));
+                if on {
+                    p.circle_filled(c, 4.5, ACCENT);
+                }
+                p.text(pos2(r.min.x + 42.0, r.min.y + 20.0), Align2::LEFT_CENTER, m.label(), semibold(14.0), if on { ACCENT_TEXT } else { TEXT });
+                p.galley(pos2(r.min.x + 42.0, r.min.y + 32.0), blurb, TEXT2);
+                if resp.clicked() {
+                    st.set_ui_mode(m);
+                }
+            }
+            ui.label(egui::RichText::new("Le choix est gardé pour les prochaines sessions.").font(regular(11.5)).color(TEXT2));
+            section(ui, "Fonctions");
+            if toggle_row(ui, "Toutes les primitives et tous les modes", st.settings.advanced) {
+                st.settings.advanced = !st.settings.advanced;
+                st.save_settings();
+                st.enforce_basics();
+            }
+            ui.label(
+                egui::RichText::new("Désactivé : Cube et Cylindre, Add, Carve et Intersect. Activé : sphère, capsule, tore, cône, prisme, tube, profil, kit, Groove, Tongue, répétitions.")
+                    .font(regular(11.5))
+                    .color(TEXT2),
+            );
+            ui.add_space(10.0);
+            ui.add(egui::Label::new(egui::RichText::new(format!("Fichier : {}", crate::settings::Settings::path().display())).font(regular(11.0)).color(TEXT2)).wrap());
+            ui.add_space(6.0);
+            if primary_btn(ui, None, "Fermer", Some(440.0)).clicked() {
+                st.settings_open = false;
+            }
         });
     });
 }

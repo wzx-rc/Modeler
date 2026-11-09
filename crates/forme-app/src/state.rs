@@ -3,6 +3,7 @@
 use crate::camera::OrbitCamera;
 use crate::files;
 use crate::kit::{self, KitPiece};
+use crate::settings::{Settings, UiMode};
 use forme_core::edges::{EdgeIndex, EdgeKind, EdgePick};
 use forme_core::*;
 use forme_render::{SelMode, View};
@@ -262,7 +263,13 @@ pub struct AppState {
     pub profile: Option<ProfileDraft>,
     pub pointer_kind: PointerKind,
     pub screen: [f32; 2],
+    /// Free 3D view area in points (min x, min y, max x, max y), set by the
+    /// interface every frame: the camera centres the model in it.
+    pub view_rect: [f32; 4],
     pub panel_visible: bool,
+    /// Preferences (interface, advanced functions), saved in settings.json.
+    pub settings: Settings,
+    pub settings_open: bool,
     pub scene_version: u64,
     pub view_version: u64,
     pub interacting: bool,
@@ -398,7 +405,10 @@ impl AppState {
             profile: None,
             pointer_kind: PointerKind::Mouse,
             screen: [1194.0, 834.0],
+            view_rect: [84.0, 16.0, 1194.0 - 308.0, 834.0],
             panel_visible: true,
+            settings: Settings::default(),
+            settings_open: false,
             // unique per document instance: renderer caches never mistake two documents
             scene_version: new_version_base() + 1,
             view_version: new_version_base() + 1,
@@ -502,11 +512,42 @@ impl AppState {
         (&self.sel_program, mode)
     }
 
-    /// Free viewport area (between the rail and the right panel), in points.
+    /// Centre of the free 3D view area, in points.
     pub fn principal(&self) -> [f32; 2] {
-        let left = 84.0;
-        let right = if self.panel_visible { self.screen[0] - 308.0 } else { self.screen[0] - 12.0 };
-        [(left + right) * 0.5, self.screen[1] * 0.5 + 8.0]
+        let r = self.view_rect;
+        [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5]
+    }
+
+    /// Switches the interface and saves the choice.
+    pub fn set_ui_mode(&mut self, m: UiMode) {
+        if self.settings.ui_mode == m {
+            return;
+        }
+        self.settings.ui_mode = m;
+        self.save_settings();
+        self.view_changed();
+    }
+
+    pub fn save_settings(&mut self) {
+        if let Err(e) = self.settings.save() {
+            self.warn(format!("Réglages non enregistrés : {e}"));
+        }
+    }
+
+    /// Advanced functions off: falls back from a hidden tool or mode.
+    pub fn enforce_basics(&mut self) {
+        if let Tool::Place(k) = self.tool {
+            if !self.settings.prim_allowed(k) {
+                self.tool = Tool::Select;
+            }
+        }
+        if !self.settings.advanced && matches!(self.tool, Tool::Profile | Tool::Kit(_)) {
+            self.tool = Tool::Select;
+            self.kit_open = false;
+        }
+        if !self.settings.modes().contains(&self.mode) {
+            self.mode = CombineMode::Add;
+        }
     }
 
     pub fn view(&self) -> View {
@@ -1702,7 +1743,7 @@ impl AppState {
             return match p.phase {
                 PlacePhase::Base => format!("{} · {} — étire la base", p.kind.label(), p.mode.label()),
                 PlacePhase::AwaitHeight if self.pointer_kind == PointerKind::Finger => format!("{} · {} — glisse pour la hauteur, tap pour valider", p.kind.label(), p.mode.label()),
-                PlacePhase::AwaitHeight => format!("{} · {} — monte ou descends pour la hauteur, tap pour valider", p.kind.label(), p.mode.label()),
+                PlacePhase::AwaitHeight => format!("{} · {} — monte ou descends pour la hauteur, {} pour valider", p.kind.label(), p.mode.label(), tap_word()),
                 PlacePhase::Height => format!("{} · {} — relâche pour valider", p.kind.label(), p.mode.label()),
             };
         }
@@ -1722,7 +1763,7 @@ impl AppState {
                 }
                 None => format!("{} formes · touche une forme pour la sélectionner", self.scene.shape_count()),
             },
-            Tool::Place(k) => format!("{} · {} — glisse pour la base (ou tap : taille par défaut)", k.label(), self.effective_mode().label()),
+            Tool::Place(k) => format!("{} · {} — glisse pour la base (ou {} : taille par défaut)", k.label(), self.effective_mode().label(), tap_word()),
             Tool::Profile => "Profil · tap = angle · glisser = courbe".to_string(),
             Tool::Kit(k) => format!("Kit · {} — touche une surface", k.label()),
         }
@@ -1743,4 +1784,13 @@ pub fn fmt_int(n: usize) -> String {
 
 pub fn fmt_mm(v: f32) -> String {
     format!("{:.1}", v).replace('.', ",")
+}
+
+/// "tap" on iPad, "clic" with a mouse.
+fn tap_word() -> &'static str {
+    if cfg!(target_os = "ios") {
+        "tap"
+    } else {
+        "clic"
+    }
 }
