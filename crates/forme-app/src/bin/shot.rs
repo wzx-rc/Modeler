@@ -369,6 +369,43 @@ fn main() {
     if want("19") {
         bake_cube(&mut h);
     }
+    if want("user") {
+        // like Romain's test on the iPad: a box, a profile blade, four kit screws, then Bake
+        use forme_core::scene::{NodeSpec, Profile, ProfileMode, ProfilePoint, Scene, Shape};
+        let mut s = Scene::new();
+        let root = s.root;
+        let mut b = Shape::new(PrimKind::Box);
+        b.size = Vec3::new(14.0, 16.0, 12.0);
+        s.add(root, NodeSpec::shape("Boîte 1", b));
+        let mut prof = Shape::new(PrimKind::Profile);
+        prof.size = Vec3::new(0.0, 0.0, 1.5);
+        let pts = [(-2.0, -1.0), (22.0, 1.5), (22.0, 4.0), (-2.0, 3.0)];
+        prof.profile = Some(Profile { points: pts.iter().map(|(x, y)| ProfilePoint { pos: glam::Vec2::new(*x, *y), smooth: false }).collect(), mode: ProfileMode::Extrude });
+        s.add(root, NodeSpec::shape("Profil 1", prof).at(Vec3::new(12.0, 8.0, 0.0)));
+        for at in [Vec3::new(-6.0, 4.0, 12.0), Vec3::new(3.0, 6.0, 12.0), Vec3::new(0.0, -2.0, 12.0), Vec3::new(-4.0, -6.0, 12.0)] {
+            forme_app::kit::insert(&mut s, root, forme_app::kit::KitPiece::Screw, at, glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2), 1.0);
+        }
+        h.reset(AppState::new(s, "Sans titre"));
+        h.st.frame_all();
+        h.steps(4);
+        h.shot("user-1-scene");
+        h.st.bake.quality = forme_core::bake::Quality::Standard;
+        h.st.start_bake();
+        while h.st.bake.job.is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            h.step();
+        }
+        if let Some(b) = h.st.bake.result.clone() {
+            let st = &b.stats;
+            eprintln!("bake : {} faces ({} q {} t {} n) constructif {} ouvertes {} nm {} · {}", b.faces.len(), st.quads, st.tris, st.ngons, st.constructive, st.open_edges, st.nonmanifold_edges, st.note);
+        }
+        h.st.toast = None;
+        h.steps(6);
+        h.shot("user-2-bake");
+        h.cam(Vec3::new(-2.0, 1.0, 12.0), 34.0, 0.25, 0.25);
+        h.steps(6);
+        h.shot("user-3-bake-vis");
+    }
     if want("max") {
         // 3ds Max style creation at the finger: base drag, release, height drag
         h.reset(AppState::new(forme_core::Scene::new(), "Sans titre"));

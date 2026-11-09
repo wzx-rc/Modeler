@@ -280,6 +280,29 @@ fn main() {
         render(&b, "/tmp/build_a.png", glam::DVec3::new(0.75, 0.9, 1.0), glam::DVec3::new(0.0, 1.0, 0.0), 34.0, 1100, 1100);
         render(&b, "/tmp/build_b.png", glam::DVec3::new(0.35, 1.0, 0.55), glam::DVec3::new(1.5, 8.0, 2.0), 15.0, 1100, 1100);
     }
+    if what == "screws" {
+        let s = screws_scene();
+        let size: f64 = std::env::var("SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let mut bs = bake::BakeSettings::preset(bake::Quality::Standard);
+        bs.threads = 2;
+        if size > 0.0 {
+            bs.divisions = 20.0 / size;
+        }
+        let t = std::time::Instant::now();
+        match bake::build::build_auto(&s, &bs, &bake::Progress::default()).map_err(|e| println!("repli : {e}")).ok() {
+            Some(b) => {
+                let st = &b.stats;
+                println!("screws {} faces ({} q {} t {} n) open {} nonman {} dev max {:.4} mean {:.5} {:.2}s", b.faces.len(), st.quads, st.tris, st.ngons, st.open_edges, st.nonmanifold_edges, st.max_dev, st.mean_dev, t.elapsed().as_secs_f64());
+                render(&b, "/tmp/screws_a.png", glam::DVec3::new(0.6, 0.5, 1.0), glam::DVec3::new(0.0, 0.0, 0.0), 36.0, 1100, 1100);
+                render(&b, "/tmp/screws_b.png", glam::DVec3::new(0.25, 0.3, 1.0), glam::DVec3::new(-4.0, 3.0, 10.0), 10.0, 1100, 1100);
+                render(&b, "/tmp/screws_c.png", glam::DVec3::new(-0.5, 0.9, 1.0), glam::DVec3::new(-4.0, 3.0, 10.5), 4.0, 1100, 1100);
+                std::env::set_var("BY_STEP", "1");
+                render(&b, "/tmp/screws_d.png", glam::DVec3::new(-0.5, 0.9, 1.0), glam::DVec3::new(-4.0, 3.0, 10.5), 4.0, 1100, 1100);
+                std::env::remove_var("BY_STEP");
+            }
+            None => println!("screws: not handled ({:.2}s)", t.elapsed().as_secs_f64()),
+        }
+    }
     if what == "variants" {
         use glam::DVec3;
         let cases: Vec<(&str, Scene)> = vec![
@@ -304,7 +327,7 @@ fn main() {
         }
         for (i, (name, s)) in cases.iter().enumerate() {
             let bs = bake::build::BuildSettings { size: 2.25, tol: 0.03, fillet_rows: 0, threads: 2 };
-            match bake::build::build(s, &bs, &bake::Progress::default()) {
+            match bake::build::build(s, &bs, &bake::Progress::default()).ok() {
                 Some(b) => {
                     let st = &b.stats;
                     println!("{name:10} {} faces ({} q {} t {} n) open {} nonman {} dev max {:.4}", b.faces.len(), st.quads, st.tris, st.ngons, st.open_edges, st.nonmanifold_edges, st.max_dev);
@@ -647,6 +670,35 @@ pub fn cube_hole() -> Scene {
     let mut c = Shape::new(PrimKind::Cylinder);
     c.size = Vec3::new(4.0, 14.0, 0.0);
     s.add(root, NodeSpec::shape("trou", c).mode(CombineMode::Carve).blend(0.8));
+    s
+}
+
+/// Like the user's test: a box with four slotted screws from the kit on its
+/// front face (hole carved, head added, slot carved; transparent groups).
+pub fn screws_scene() -> Scene {
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::splat(10.0);
+    b.round = 0.0;
+    s.add(root, NodeSpec::shape("Boîte 1", b));
+    let cyl = |r: f32, hh: f32, round: f32| {
+        let mut c = Shape::new(PrimKind::Cylinder);
+        c.size = Vec3::new(r, hh, 0.0);
+        c.round = round;
+        c
+    };
+    for (i, at) in [Vec3::new(-4.0, 3.0, 10.0), Vec3::new(4.0, 4.0, 10.0), Vec3::new(3.0, -3.5, 10.0), Vec3::new(-3.5, -4.5, 10.0)].iter().enumerate() {
+        let sc = if i == 0 { 1.0 } else { 0.55 };
+        let mut spec = NodeSpec::group("Vis", false).at(*at).rot(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
+        spec.transform.scale = sc;
+        let g = s.add(root, spec);
+        s.add(g, NodeSpec::shape("Logement", cyl(3.4, 1.2, 0.0)).mode(CombineMode::Carve).blend(0.3));
+        s.add(g, NodeSpec::shape("Tête", cyl(2.9, 0.9, 0.7)).at(Vec3::new(0.0, -0.3, 0.0)));
+        let mut slot = Shape::new(PrimKind::Box);
+        slot.size = Vec3::new(2.4, 1.0, 0.4);
+        s.add(g, NodeSpec::shape("Fente", slot).at(Vec3::new(0.0, 0.7, 0.0)).rot(Quat::from_rotation_y(0.6)).mode(CombineMode::Carve));
+    }
     s
 }
 

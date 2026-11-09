@@ -1421,6 +1421,9 @@ fn bake_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 } else {
                     stat_row(ui, "Calcul", format!("{:.1} s · {} surfaces (repli)", s.seconds, s.patches), LABEL);
                 }
+                if !s.note.is_empty() {
+                    ui.label(egui::RichText::new(&s.note).font(regular(11.5)).color(EDGE_SEL));
+                }
                 ui.add_space(4.0);
                 if toggle_row(ui, "Afficher le maillage baké", st.bake.show) {
                     st.bake.show = !st.bake.show && !st.bake.stale(st.scene_version);

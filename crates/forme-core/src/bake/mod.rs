@@ -122,6 +122,8 @@ pub struct BakeStats {
     pub constructive: bool,
     /// Bake par opération: target quad size (mm).
     pub quad_size: f64,
+    /// Why the bake par opération was not used (empty when it was).
+    pub note: String,
 }
 
 #[derive(Clone, Debug)]
@@ -162,12 +164,20 @@ fn par_for<T: Send, F: Fn(usize) -> T + Sync>(n: usize, threads: usize, order: &
 /// Runs the whole bake. Returns None if cancelled.
 pub fn bake(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Option<Baked> {
     // the history this builder handles gets a topology built per operation
-    if let Some(b) = build::build_auto(scene, st, progress) {
-        return Some(b);
-    }
+    let why = match build::build_auto(scene, st, progress) {
+        Ok(b) => return Some(b),
+        Err(why) => why,
+    };
     if progress.cancelled() {
         return None;
     }
+    let mut b = bake_surfaces(scene, st, progress)?;
+    b.stats.note = format!("Repli sur le bake par surfaces · {why}");
+    Some(b)
+}
+
+/// The first bake: trimmed parametric patches stitched together.
+fn bake_surfaces(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Option<Baked> {
     let t0 = Instant::now();
     let mut stage_t = [0.0f64; 5];
     progress.set(0, 1);

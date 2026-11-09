@@ -128,8 +128,11 @@ pub struct Step {
     /// Blend (fillet) size in world units.
     pub k: f64,
     pub chamfer: bool,
+    /// Index of the instruction that combines this step (see `Field::prefix`).
+    pub end: usize,
 }
 
+#[derive(Clone)]
 pub struct Field {
     instrs: Vec<Instr>,
     pub prims: Vec<PrimDef>,
@@ -560,21 +563,26 @@ impl Field {
     pub fn steps(&self) -> Option<Vec<Step>> {
         let mut stack: Vec<Option<u32>> = vec![];
         let mut out: Vec<Step> = vec![];
-        for ins in &self.instrs {
+        for (idx, ins) in self.instrs.iter().enumerate() {
             match *ins {
                 Instr::Empty => stack.push(None),
-                Instr::Prim(k) => {
-                    // fold variants of one term combine into the same prim
-                    stack.push(Some(k));
-                }
+                Instr::Prim(k) => stack.push(Some(k)),
                 Instr::Combine { mode, k, chamfer, .. } => {
                     let b = stack.pop()?;
                     let a = stack.pop()?;
                     match (a, b) {
-                        (Some(x), Some(y)) if x == y => stack.push(Some(x)),
+                        // fold variants of one term
+                        (Some(x), Some(y)) if x == y => {
+                            stack.push(Some(x));
+                            if let Some(last) = out.last_mut() {
+                                if last.prim == x {
+                                    last.end = idx;
+                                }
+                            }
+                        }
                         (None, Some(y)) | (Some(y), None) => {
                             if out.is_empty() {
-                                out.push(Step { prim: y, mode: u32::MAX, k: 0.0, chamfer: false });
+                                out.push(Step { prim: y, mode: u32::MAX, k: 0.0, chamfer: false, end: idx });
                             }
                             stack.push(Some(u32::MAX - 1));
                         }
@@ -583,12 +591,12 @@ impl Field {
                                 if x >= u32::MAX - 1 {
                                     return None;
                                 }
-                                out.push(Step { prim: x, mode: u32::MAX, k: 0.0, chamfer: false });
+                                out.push(Step { prim: x, mode: u32::MAX, k: 0.0, chamfer: false, end: idx });
                             }
                             if y >= u32::MAX - 1 || mode > 2 {
                                 return None;
                             }
-                            out.push(Step { prim: y, mode, k, chamfer });
+                            out.push(Step { prim: y, mode, k, chamfer, end: idx });
                             stack.push(Some(u32::MAX - 1));
                         }
                         _ => return None,
@@ -601,11 +609,22 @@ impl Field {
         if out.is_empty() {
             if let Some(Some(k)) = stack.first() {
                 if *k < u32::MAX - 1 {
-                    out.push(Step { prim: *k, mode: u32::MAX, k: 0.0, chamfer: false });
+                    out.push(Step { prim: *k, mode: u32::MAX, k: 0.0, chamfer: false, end: self.instrs.len().saturating_sub(1) });
                 }
             }
         }
         Some(out)
+    }
+
+    /// The model after its first `n` steps only.
+    pub fn prefix(&self, steps: &[Step], n: usize) -> Field {
+        let mut f = self.clone();
+        if n >= 1 && n <= steps.len() {
+            let end = steps[n - 1].end.min(f.instrs.len().saturating_sub(1));
+            f.instrs.truncate(end + 1);
+            f.instrs.push(Instr::End);
+        }
+        f
     }
 
     pub fn term_levels(&self) -> Vec<(u32, f64)> {

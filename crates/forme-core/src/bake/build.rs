@@ -39,6 +39,9 @@ pub const P_FILLET: u32 = 2;
 pub const P_TOOL_LOFT: u32 = 3;
 pub const P_TOOL: u32 = 4;
 
+/// Clearance around a new feature, as a fraction of its radius.
+const CLEAR_FRAC: f64 = 0.6;
+
 /// One primitive copy placed in the world.
 #[derive(Clone, Copy)]
 struct Surf<'a> {
@@ -124,11 +127,11 @@ fn native(out: &mut Out, s: &Surf, gs: &GenSettings) -> Vec<Vec<u32>> {
 /// Splits faces into kept ones (no vertex to `clear`) and connected
 /// cleared regions, grown until their outline has no notch (no kept face
 /// touching a region by two edges), so that the outline is a clean loop.
-fn regions(pos: &[DVec3], faces: &[Vec<u32>], clear: &dyn Fn(DVec3) -> bool, must: &dyn Fn(DVec3) -> bool, allow: &dyn Fn(&[u32]) -> bool) -> (Vec<bool>, Vec<Vec<usize>>) {
+fn regions(pos: &[DVec3], faces: &[Vec<u32>], clear: &dyn Fn(DVec3) -> bool, must: &dyn Fn(DVec3) -> bool, allow: &dyn Fn(usize) -> bool) -> (Vec<bool>, Vec<Vec<usize>>) {
     let cl: HashMap<u32, bool> = faces.iter().flatten().map(|&v| (v, clear(pos[v as usize]))).collect();
     let ms: HashMap<u32, bool> = faces.iter().flatten().map(|&v| (v, must(pos[v as usize]))).collect();
     let forced: Vec<bool> = faces.iter().map(|f| f.iter().any(|v| ms[v])).collect();
-    let allowed: Vec<bool> = faces.iter().enumerate().map(|(i, f)| forced[i] || allow(f)).collect();
+    let allowed: Vec<bool> = (0..faces.len()).map(|i| forced[i] || allow(i)).collect();
     let mut kept: Vec<bool> = faces.iter().enumerate().map(|(i, f)| !(forced[i] || (allowed[i] && f.iter().any(|v| cl[v])))).collect();
     let mut edge_faces: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
     for (i, f) in faces.iter().enumerate() {
@@ -462,28 +465,98 @@ fn loft(out: &mut Out, inner: &[u32], outer: &[u32], weights: &[f64], onto: &dyn
     }
 }
 
-/// Bridge between two loops of different lengths: quads where both advance,
-/// triangles where only one does.
-fn bridge(out: &mut Out, a: &[u32], b: &[u32], patch: u32) {
-    let (na, nb) = (a.len(), b.len());
+/// Quads between two closed loops of different lengths, matched by their
+/// arc-length fractions (both start at index 0, same direction). Where the
+/// longer loop runs ahead, a "3 + 1" quad takes two of its edges at once;
+/// only an odd difference leaves one triangle.
+fn bridge_quads(out: &mut Out, a: &[u32], b: &[u32], patch: u32) {
+    // a is the longer loop
+    if a.len() < b.len() {
+        bridge_quads_rev(out, b, a, patch);
+        return;
+    }
+    let ta = arc_params(&a.iter().map(|v| out.pos[*v as usize]).collect::<Vec<_>>()).0;
+    let tb = arc_params(&b.iter().map(|v| out.pos[*v as usize]).collect::<Vec<_>>()).0;
+    let (n, m) = (a.len(), b.len());
+    let pa = |i: usize| if i >= n { 1.0 } else { ta[i] };
+    let pb = |j: usize| if j >= m { 1.0 } else { tb[j] };
     let (mut i, mut j) = (0usize, 0usize);
-    while i < na || j < nb {
-        let ta = (i + 1) as f64 / na as f64;
-        let tb = (j + 1) as f64 / nb as f64;
-        let (a0, a1, b0, b1) = (a[i % na], a[(i + 1) % na], b[j % nb], b[(j + 1) % nb]);
-        if i < na && j < nb && (ta - tb).abs() < 0.5 / na.max(nb) as f64 {
-            out.face(vec![a0, a1, b1, b0], patch);
-            i += 1;
-            j += 1;
-        } else if j >= nb || (i < na && ta < tb) {
+    while i < n || j < m {
+        let (ra, rb) = (n - i, m - j);
+        let diff = ra as i64 - rb as i64;
+        let (a0, a1, a2) = (a[i % n], a[(i + 1) % n], a[(i + 2) % n]);
+        let (b0, b1) = (b[j % m], b[(j + 1) % m]);
+        if rb == 0 || (diff >= 2 && pa(i + 2) <= pb(j + 1) + 1e-9) || (diff >= 2 && ra >= 2 && (pa(i + 1) - pb(j)).abs() < (pb(j + 1) - pa(i + 1)).abs() * 0.0) {
+            if ra >= 2 && diff >= 2 {
+                out.face(vec![a0, a1, a2, b0], patch);
+                i += 2;
+            } else {
+                out.face(vec![a0, a1, b0], patch);
+                i += 1;
+            }
+        } else if diff == 1 && pa(i + 1) <= pb(j + 1) * 0.5 + pb(j) * 0.5 {
             out.face(vec![a0, a1, b0], patch);
             i += 1;
-        } else {
+        } else if ra == 0 {
             out.face(vec![a0, b1, b0], patch);
+            j += 1;
+        } else {
+            out.face(vec![a0, a1, b1, b0], patch);
+            i += 1;
             j += 1;
         }
     }
 }
+
+fn bridge_quads_rev(out: &mut Out, a: &[u32], b: &[u32], patch: u32) {
+    let start = out.faces.len();
+    bridge_quads(out, a, b, patch);
+    // same faces seen from the other loop: flip so that b stays "inner"
+    for f in &mut out.faces[start..] {
+        f.reverse();
+    }
+}
+
+/// Like `loft`, between loops of different lengths: the vertex count of the
+/// rings goes from one to the other, the change spread over the rings.
+fn loft_varying(out: &mut Out, inner: &[u32], outer: &[u32], weights: &[f64], onto: &dyn Fn(DVec3) -> DVec3, patch: u32) {
+    let (n0, n1) = (inner.len() as f64, outer.len() as f64);
+    let pin: Vec<DVec3> = inner.iter().map(|v| out.pos[*v as usize]).collect();
+    let pout: Vec<DVec3> = outer.iter().map(|v| out.pos[*v as usize]).collect();
+    let (sin, _) = arc_params(&pin);
+    let (sout, _) = arc_params(&pout);
+    let mut rows: Vec<Vec<u32>> = vec![inner.to_vec()];
+    let mut prev = inner.len();
+    for &w in weights {
+        // even steps keep every transition all-quad
+        let mut c = (n0 + (n1 - n0) * w).round().max(3.0) as usize;
+        if (c as i64 - prev as i64).rem_euclid(2) == 1 {
+            c += 1;
+        }
+        let r: Vec<u32> = (0..c)
+            .map(|k| {
+                let t = k as f64 / c as f64;
+                let p = at(&pin, &sin, t).lerp(at(&pout, &sout, t), w);
+                out.add(onto(p))
+            })
+            .collect();
+        prev = c;
+        rows.push(r);
+    }
+    rows.push(outer.to_vec());
+    for w in rows.windows(2) {
+        if w[0].len() == w[1].len() {
+            let n = w[0].len();
+            for j in 0..n {
+                let j2 = (j + 1) % n;
+                out.face(vec![w[0][j], w[0][j2], w[1][j2], w[1][j]], patch);
+            }
+        } else {
+            bridge_quads(out, &w[0], &w[1], patch);
+        }
+    }
+}
+
 
 /// Faces oriented consistently (propagation over shared edges), then
 /// outward on the whole according to the exact gradient.
@@ -542,6 +615,200 @@ fn orient(out: &mut Out, field: &Field) {
     }
 }
 
+/// One step of the history on the mesh built so far: `pre` is the model
+/// before the step, `post` after it, `tool` the primitive copy it adds or
+/// carves. The faces it does not reach keep their topology.
+#[allow(clippy::too_many_arguments)]
+fn apply_step(out: &mut Out, pre: &Field, post: &Field, tool: &Surf, step: &Step, st: &BuildSettings, gs: &GenSettings) -> Option<()> {
+    let body_faces = std::mem::take(&mut out.faces);
+    let body_patch = std::mem::take(&mut out.patch);
+    let carve = step.mode == 1;
+    let k = step.k;
+    let clear = st.size;
+    let sa = |p: DVec3| pre.dist(p);
+    let sb = |p: DVec3| tool.d(p);
+    // rails and corner as exact curves
+    let rail_a = |p: DVec3| solve2(&sa, &|x| sb(x) - k, p, st.size);
+    let corner = |p: DVec3| solve2(&sa, &sb, p, st.size);
+    let ka = if carve { -k } else { k };
+    let rail_b = |p: DVec3| solve2(&sb, &|x| sa(x) - ka, p, st.size);
+    // body: cleared inside its rail and around it (room for the rings)
+    let all: Vec<usize> = (0..body_faces.len()).collect();
+    let rails: Vec<Vec<DVec3>> = contour(&out.pos, &body_faces, &all, &|p| sb(p) - k).into_iter().map(|c| densify(c, &rail_a, st.size / 4.0)).collect();
+    // rings are laid by projection: they stay on the smooth part around the rail
+    let rail_n: Vec<(DVec3, DVec3)> = rails.iter().flatten().map(|p| (*p, grad(&sa, *p).normalize_or_zero())).collect();
+    // room for the rings: a fraction of the feature's own size, not more than a cell
+    let feat = rails.iter().map(|r| arc_params(r).1 / std::f64::consts::TAU).fold(0.0, f64::max);
+    let clear = clear.min(feat * CLEAR_FRAC).max(st.size * 0.2);
+    // faces made by earlier steps (rings, fillets, other tools) are only taken
+    // when the new curve runs through them
+    let pos_a = &out.pos;
+    let allow_a = |i: usize| body_patch[i] == P_NATIVE && flat(pos_a, &body_faces[i], &rail_n);
+    let (kept_a, comps_a) = regions(&out.pos, &body_faces, &|p| dist_to_loops(p, &rails) < clear, &|p| sb(p) < k, &allow_a);
+    for (i, f) in body_faces.iter().enumerate() {
+        if kept_a[i] {
+            out.face(f.clone(), body_patch[i]);
+        }
+    }
+    struct Hole {
+        rail_a: Vec<u32>,
+        rail_b: Vec<u32>,
+    }
+    let mut holes: Vec<Hole> = vec![];
+    for comp in &comps_a {
+        let outl = outline(&body_faces, comp);
+        let curves = contour(&out.pos, &body_faces, comp, &|p| sb(p) - k);
+        if curves.is_empty() {
+            if comp.iter().any(|&i| body_faces[i].iter().any(|&v| sb(out.pos[v as usize]) < 0.0)) {
+                // the tool cuts through the whole region: not handled yet
+                return None;
+            }
+            // the tool does not reach the surface here: keep it native
+            for &i in comp {
+                out.face(body_faces[i].clone(), body_patch[i]);
+            }
+            continue;
+        }
+        if outl.len() != 1 || curves.len() != 1 {
+            return None;
+        }
+        let ring_ids = &outl[0];
+        let ring: Vec<DVec3> = ring_ids.iter().map(|v| out.pos[*v as usize]).collect();
+        let dense = densify(curves[0].clone(), &rail_a, st.size / 16.0);
+        let samples: Vec<DVec3> = match_samples(&ring, &dense).into_iter().map(rail_a).collect();
+        let pa: Vec<u32> = samples.iter().map(|p| out.add(*p)).collect();
+        // fillet rows between the rails, along the cross-section through the corner
+        let pb: Vec<u32> = if k > 1e-9 {
+            let cs: Vec<DVec3> = samples.iter().map(|p| corner(*p)).collect();
+            let qs: Vec<DVec3> = cs.iter().map(|c| rail_b(*c)).collect();
+            let n = pa.len();
+            let col = (0..n).map(|j| samples[j].distance(samples[(j + 1) % n])).sum::<f64>() / n as f64;
+            let prof = (0..n).map(|j| samples[j].distance(cs[j]) + cs[j].distance(qs[j])).sum::<f64>() / n as f64 * 0.8;
+            let rows = if st.fillet_rows > 0 { st.fillet_rows } else { ((prof / col).round() as usize).max(2) };
+            let qb: Vec<u32> = qs.iter().map(|q| out.add(*q)).collect();
+            let mut grid: Vec<Vec<u32>> = vec![pa.clone()];
+            for r in 1..rows {
+                let t = r as f64 / rows as f64;
+                let row: Vec<u32> = (0..n)
+                    .map(|j| {
+                        let (p, c, q) = (samples[j], cs[j], qs[j]);
+                        let b = p * (1.0 - t) * (1.0 - t) + c * 2.0 * t * (1.0 - t) + q * t * t;
+                        let x = post.project(b).unwrap_or(b);
+                        out.add(x)
+                    })
+                    .collect();
+                grid.push(row);
+            }
+            grid.push(qb.clone());
+            for w in grid.windows(2) {
+                for j in 0..n {
+                    let j2 = (j + 1) % n;
+                    out.face(vec![w[0][j], w[0][j2], w[1][j2], w[1][j]], P_FILLET);
+                }
+            }
+            qb
+        } else {
+            pa.clone()
+        };
+        // rings from the rail to the native outline, on the body surface
+        let n = pa.len();
+        let gap = (0..n).map(|j| samples[j].distance(ring[j])).sum::<f64>() / n as f64;
+        let h0 = (0..n).map(|j| samples[j].distance(samples[(j + 1) % n])).sum::<f64>() / n as f64;
+        let h1 = (0..n).map(|j| ring[j].distance(ring[(j + 1) % n])).sum::<f64>() / n as f64;
+        let w = ring_weights(gap, h0, h1);
+        loft(out, &pa, ring_ids, &w, &|p| pre.project(p).unwrap_or(p), P_LOFT);
+        holes.push(Hole { rail_a: pa, rail_b: pb });
+    }
+    // the tool: native mesh with matching columns, kept where it is the surface
+    let kcols = holes.first().map(|h| h.rail_b.len()).unwrap_or(0);
+    let gs_t = GenSettings { segs: kcols, ..*gs };
+    let tool_faces = native(out, tool, &gs_t);
+    // clearance shrinks until part of the tool is native (small bosses)
+    let mut split = None;
+    let rails_b: Vec<Vec<DVec3>> = holes.iter().map(|h| h.rail_b.iter().map(|v| out.pos[*v as usize]).collect()).collect();
+    let rail_nb: Vec<(DVec3, DVec3)> = rails_b.iter().flatten().map(|p| (*p, grad(&sb, *p).normalize_or_zero())).collect();
+    for c in [clear, clear * 0.5, clear * 0.25, 0.0] {
+        let must_b = |p: DVec3| if carve { sa(p) > -k } else { sa(p) < k };
+        let pos_t = &out.pos;
+        let r = regions(&out.pos, &tool_faces, &|p| dist_to_loops(p, &rails_b) < c, &must_b, &|i| flat(pos_t, &tool_faces[i], &rail_nb));
+        if r.0.iter().any(|&x| x) {
+            split = Some(r);
+            break;
+        }
+    }
+    let Some((kept_b, comps_b)) = split else {
+        // nothing of the tool shows (an Add inside the matter, a Carve outside it)
+        if holes.is_empty() {
+            return Some(());
+        }
+        return None;
+    };
+    for (i, f) in tool_faces.iter().enumerate() {
+        if kept_b[i] {
+            out.face(f.clone(), P_TOOL);
+        }
+    }
+    for h in &holes {
+        let q: Vec<DVec3> = h.rail_b.iter().map(|v| out.pos[*v as usize]).collect();
+        // tool region holding this rail: the one nearest to it
+        let mut best = (f64::INFINITY, usize::MAX);
+        for (ci, comp) in comps_b.iter().enumerate() {
+            for &fi in comp {
+                for &v in &tool_faces[fi] {
+                    let d = out.pos[v as usize].distance(q[0]);
+                    if d < best.0 {
+                        best = (d, ci);
+                    }
+                }
+            }
+        }
+        if best.1 == usize::MAX {
+            return None;
+        }
+        let outl = outline(&tool_faces, &comps_b[best.1]);
+        // the loop of the kept part, nearest to the rail
+        let ring_ids = outl
+            .iter()
+            .min_by(|a, b| {
+                let da = a.iter().map(|v| out.pos[*v as usize].distance(q[0])).fold(f64::INFINITY, f64::min);
+                let db = b.iter().map(|v| out.pos[*v as usize].distance(q[0])).fold(f64::INFINITY, f64::min);
+                da.partial_cmp(&db).unwrap()
+            })?
+            .clone();
+        let n = q.len();
+        let h0 = (0..n).map(|j| q[j].distance(q[(j + 1) % n])).sum::<f64>() / n as f64;
+        if ring_ids.len() == n {
+            let ring_ids = align_loop(&out.pos, &q, &ring_ids);
+            let ring: Vec<DVec3> = ring_ids.iter().map(|v| out.pos[*v as usize]).collect();
+            let gap = (0..n).map(|j| q[j].distance(ring[j])).sum::<f64>() / n as f64;
+            let w = ring_weights(gap, h0, st.size);
+            loft(out, &h.rail_b, &ring_ids, &w, &|p| tool.project(p), P_TOOL_LOFT);
+        } else {
+            let ring: Vec<DVec3> = ring_ids.iter().map(|v| out.pos[*v as usize]).collect();
+            let m = ring.len();
+            let mut best = (f64::INFINITY, 0usize);
+            for s in 0..m {
+                let d = ring[s].distance(q[0]);
+                if d < best.0 {
+                    best = (d, s);
+                }
+            }
+            let mut r2: Vec<u32> = (0..m).map(|i| ring_ids[(i + best.1) % m]).collect();
+            // same turning direction as the rail
+            let fwd = out.pos[r2[1] as usize].distance(q[1]) < out.pos[r2[m - 1] as usize].distance(q[1]);
+            if !fwd {
+                r2 = std::iter::once(r2[0]).chain(r2[1..].iter().rev().copied()).collect();
+            }
+            let ring2: Vec<DVec3> = r2.iter().map(|v| out.pos[*v as usize]).collect();
+            let gap = q.iter().map(|x| ring2.iter().map(|y| x.distance(*y)).fold(f64::INFINITY, f64::min)).sum::<f64>() / n as f64;
+            let w = ring_weights(gap, h0, st.size);
+            loft_varying(out, &h.rail_b, &r2, &w, &|p| tool.project(p), P_TOOL_LOFT);
+        }
+        let _ = &h.rail_a;
+    }
+    Some(())
+}
+
 /// Quad size the constructive bake would use for `scene`, or None when its
 /// history is not one it handles (the classic bake is used instead).
 pub fn plan(scene: &Scene, st: &BakeSettings) -> Option<f64> {
@@ -551,12 +818,13 @@ pub fn plan(scene: &Scene, st: &BakeSettings) -> Option<f64> {
 
 fn plan_field(field: &Field, st: &BakeSettings) -> Option<f64> {
     let steps = field.steps()?;
-    if steps.is_empty() || steps.len() > 2 {
+    if steps.is_empty() {
         return None;
     }
     for (i, s) in steps.iter().enumerate() {
         let pr = &field.prims[s.prim as usize];
-        if field.instances(s.prim).len() != 1 || pr.shell > 0.0 || (i > 0 && (s.mode > 1 || s.chamfer)) {
+        let one_body = i > 0 || field.instances(s.prim).len() == 1;
+        if !one_body || pr.shell > 0.0 || (i > 0 && (s.mode > 1 || s.chamfer)) {
             return None;
         }
     }
@@ -567,23 +835,42 @@ fn plan_field(field: &Field, st: &BakeSettings) -> Option<f64> {
 }
 
 /// Bake entry point: the constructive build when the history allows it.
-pub fn build_auto(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Option<Baked> {
-    let size = plan(scene, st)?;
+pub fn build_auto(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Result<Baked, String> {
+    let size = plan(scene, st).ok_or_else(|| "historique pas encore géré (groupes fusionnés, coques, Groove/Tongue, copies de la forme de base)".to_string())?;
     let bs = BuildSettings { size, tol: (st.tol * 2.0).max(0.01), fillet_rows: 0, threads: st.threads };
     let mut b = build(scene, &bs, progress)?;
     b.stats.quad_size = size;
-    Some(b)
+    Ok(b)
+}
+
+/// Names of the visible shapes, in the order the compiler emits them.
+fn shape_names(scene: &Scene) -> Vec<String> {
+    fn walk(s: &Scene, id: crate::scene::NodeId, vis: bool, out: &mut Vec<String>) {
+        let n = &s.nodes[&id];
+        let vis = vis && n.visible;
+        if vis && n.shape().is_some() {
+            out.push(n.name.clone());
+        }
+        for c in n.children() {
+            walk(s, *c, vis, out);
+        }
+    }
+    let mut out = vec![];
+    walk(scene, scene.root, true, &mut out);
+    out
 }
 
 /// Builds the mesh of `scene` operation by operation. None when the history
 /// is not (yet) one this builder handles: the caller falls back.
-pub fn build(scene: &Scene, st: &BuildSettings, progress: &Progress) -> Option<Baked> {
+pub fn build(scene: &Scene, st: &BuildSettings, progress: &Progress) -> Result<Baked, String> {
     let t0 = Instant::now();
     progress.set(0, 1);
     let field = Field::new(&compile(scene));
-    let steps: Vec<Step> = field.steps()?;
-    if steps.is_empty() || steps.len() > 2 {
-        return None;
+    let names = shape_names(scene);
+    let name = |prim: u32| names.get(prim as usize).cloned().unwrap_or_else(|| format!("forme {}", prim + 1));
+    let steps: Vec<Step> = field.steps().ok_or("historique en arbre (groupes fusionnés)")?;
+    if steps.is_empty() {
+        return Err("scène vide".into());
     }
     let surf = |s: &Step| -> Option<Surf> {
         let pr = &field.prims[s.prim as usize];
@@ -593,193 +880,34 @@ pub fn build(scene: &Scene, st: &BuildSettings, progress: &Progress) -> Option<B
         }
         Some(Surf { pr, inst: inst[0] })
     };
-    let body = surf(&steps[0])?;
+    let body = surf(&steps[0]).ok_or_else(|| format!("{} : forme de base répétée ou en coque", name(steps[0].prim)))?;
     let gs = GenSettings { tol: st.tol, max_edge: st.size, segs: 0 };
     let mut out = Out::default();
     progress.set(1, 1);
     let body_faces = native(&mut out, &body, &gs);
-    if steps.len() == 1 {
-        for f in body_faces {
-            out.face(f, P_NATIVE);
-        }
-    } else {
-        let step = steps[1];
-        let tool = surf(&step)?;
+    for f in body_faces {
+        out.face(f, P_NATIVE);
+    }
+    for (i, step) in steps.iter().enumerate().skip(1) {
         if step.mode > 1 || step.chamfer {
-            return None;
+            return Err(format!("{} : Intersect / chanfrein de jonction pas encore gérés", name(step.prim)));
         }
-        let carve = step.mode == 1;
-        let k = step.k;
-        let clear = st.size;
-        let sa = |p: DVec3| body.d(p);
-        let sb = |p: DVec3| tool.d(p);
-        // rails and corner as exact curves
-        let rail_a = |p: DVec3| solve2(&sa, &|x| sb(x) - k, p, st.size);
-        let corner = |p: DVec3| solve2(&sa, &sb, p, st.size);
-        let ka = if carve { -k } else { k };
-        let rail_b = |p: DVec3| solve2(&sb, &|x| sa(x) - ka, p, st.size);
-        // body: cleared inside its rail and around it (room for the rings)
-        let all: Vec<usize> = (0..body_faces.len()).collect();
-        let rails: Vec<Vec<DVec3>> = contour(&out.pos, &body_faces, &all, &|p| sb(p) - k).into_iter().map(|c| densify(c, &rail_a, st.size / 4.0)).collect();
-        // rings are laid by projection: they stay on the smooth part around the rail
-        let rail_n: Vec<(DVec3, DVec3)> = rails.iter().flatten().map(|p| (*p, grad(&sa, *p).normalize_or_zero())).collect();
-        let (kept_a, comps_a) = regions(&out.pos, &body_faces, &|p| dist_to_loops(p, &rails) < clear, &|p| sb(p) < k, &|f| flat(&out.pos, f, &rail_n));
-        for (i, f) in body_faces.iter().enumerate() {
-            if kept_a[i] {
-                out.face(f.clone(), P_NATIVE);
-            }
+        let pr = &field.prims[step.prim as usize];
+        if pr.shell > 0.0 {
+            return Err(format!("{} : coque pas encore gérée", name(step.prim)));
         }
-        struct Hole {
-            rail_a: Vec<u32>,
-            rail_b: Vec<u32>,
+        let pre = field.prefix(&steps, i);
+        let post = field.prefix(&steps, i + 1);
+        for inst in field.instances(step.prim) {
+            let tool = Surf { pr, inst };
+            apply_step(&mut out, &pre, &post, &tool, step, st, &gs).ok_or_else(|| format!("{} : jonction trop complexe pour l'instant", name(step.prim)))?;
+            // the next step reads outlines: faces must agree on their orientation
+            orient(&mut out, &post);
         }
-        let mut holes: Vec<Hole> = vec![];
-        for comp in &comps_a {
-            let outl = outline(&body_faces, comp);
-            let curves = contour(&out.pos, &body_faces, comp, &|p| sb(p) - k);
-            if curves.is_empty() {
-                if comp.iter().any(|&i| body_faces[i].iter().any(|&v| sb(out.pos[v as usize]) < 0.0)) {
-                    // the tool cuts through the whole region: not handled yet
-                    return None;
-                }
-                // the tool does not reach the surface here: keep it native
-                for &i in comp {
-                    out.face(body_faces[i].clone(), P_NATIVE);
-                }
-                continue;
-            }
-            if outl.len() != 1 || curves.len() != 1 {
-                return None;
-            }
-            let ring_ids = &outl[0];
-            let ring: Vec<DVec3> = ring_ids.iter().map(|v| out.pos[*v as usize]).collect();
-            let dense = densify(curves[0].clone(), &rail_a, st.size / 16.0);
-            let samples: Vec<DVec3> = match_samples(&ring, &dense).into_iter().map(rail_a).collect();
-            let pa: Vec<u32> = samples.iter().map(|p| out.add(*p)).collect();
-            // fillet rows between the rails, along the cross-section through the corner
-            let pb: Vec<u32> = if k > 1e-9 {
-                let cs: Vec<DVec3> = samples.iter().map(|p| corner(*p)).collect();
-                let qs: Vec<DVec3> = cs.iter().map(|c| rail_b(*c)).collect();
-                let n = pa.len();
-                let col = (0..n).map(|j| samples[j].distance(samples[(j + 1) % n])).sum::<f64>() / n as f64;
-                let prof = (0..n).map(|j| samples[j].distance(cs[j]) + cs[j].distance(qs[j])).sum::<f64>() / n as f64 * 0.8;
-                let rows = if st.fillet_rows > 0 { st.fillet_rows } else { ((prof / col).round() as usize).max(2) };
-                let qb: Vec<u32> = qs.iter().map(|q| out.add(*q)).collect();
-                let mut grid: Vec<Vec<u32>> = vec![pa.clone()];
-                for r in 1..rows {
-                    let t = r as f64 / rows as f64;
-                    let row: Vec<u32> = (0..n)
-                        .map(|j| {
-                            let (p, c, q) = (samples[j], cs[j], qs[j]);
-                            let b = p * (1.0 - t) * (1.0 - t) + c * 2.0 * t * (1.0 - t) + q * t * t;
-                            let x = field.project(b).unwrap_or(b);
-                            out.add(x)
-                        })
-                        .collect();
-                    grid.push(row);
-                }
-                grid.push(qb.clone());
-                for w in grid.windows(2) {
-                    for j in 0..n {
-                        let j2 = (j + 1) % n;
-                        out.face(vec![w[0][j], w[0][j2], w[1][j2], w[1][j]], P_FILLET);
-                    }
-                }
-                qb
-            } else {
-                pa.clone()
-            };
-            // rings from the rail to the native outline, on the body surface
-            let n = pa.len();
-            let gap = (0..n).map(|j| samples[j].distance(ring[j])).sum::<f64>() / n as f64;
-            let h0 = (0..n).map(|j| samples[j].distance(samples[(j + 1) % n])).sum::<f64>() / n as f64;
-            let h1 = (0..n).map(|j| ring[j].distance(ring[(j + 1) % n])).sum::<f64>() / n as f64;
-            let w = ring_weights(gap, h0, h1);
-            loft(&mut out, &pa, ring_ids, &w, &|p| body.project(p), P_LOFT);
-            holes.push(Hole { rail_a: pa, rail_b: pb });
+        progress.set(1, (i * 1000 / steps.len()) as u32);
+        if progress.cancelled() {
+            return Err("annulé".into());
         }
-        // the tool: native mesh with matching columns, kept where it is the surface
-        let kcols = holes.first().map(|h| h.rail_b.len()).unwrap_or(0);
-        let gs_t = GenSettings { segs: kcols, ..gs };
-        let tool_faces = native(&mut out, &tool, &gs_t);
-        // clearance shrinks until part of the tool is native (small bosses)
-        let mut split = None;
-        let rails_b: Vec<Vec<DVec3>> = holes.iter().map(|h| h.rail_b.iter().map(|v| out.pos[*v as usize]).collect()).collect();
-        let rail_nb: Vec<(DVec3, DVec3)> = rails_b.iter().flatten().map(|p| (*p, grad(&sb, *p).normalize_or_zero())).collect();
-        for c in [clear, clear * 0.5, clear * 0.25, 0.0] {
-            let must_b = |p: DVec3| if carve { sa(p) > -k } else { sa(p) < k };
-            let pos_t = &out.pos;
-            let r = regions(&out.pos, &tool_faces, &|p| dist_to_loops(p, &rails_b) < c, &must_b, &|f| flat(pos_t, f, &rail_nb));
-            if r.0.iter().any(|&x| x) {
-                split = Some(r);
-                break;
-            }
-        }
-        let (kept_b, comps_b) = split?;
-        for (i, f) in tool_faces.iter().enumerate() {
-            if kept_b[i] {
-                out.face(f.clone(), P_TOOL);
-            }
-        }
-        let mut used = vec![false; comps_b.len()];
-        for h in &holes {
-            let q: Vec<DVec3> = h.rail_b.iter().map(|v| out.pos[*v as usize]).collect();
-            // tool region holding this rail: the one nearest to it
-            let mut best = (f64::INFINITY, usize::MAX);
-            for (ci, comp) in comps_b.iter().enumerate() {
-                for &fi in comp {
-                    for &v in &tool_faces[fi] {
-                        let d = out.pos[v as usize].distance(q[0]);
-                        if d < best.0 {
-                            best = (d, ci);
-                        }
-                    }
-                }
-            }
-            if best.1 == usize::MAX {
-                return None;
-            }
-            used[best.1] = true;
-            let outl = outline(&tool_faces, &comps_b[best.1]);
-            // the loop of the kept part, nearest to the rail
-            let ring_ids = outl
-                .iter()
-                .min_by(|a, b| {
-                    let da = a.iter().map(|v| out.pos[*v as usize].distance(q[0])).fold(f64::INFINITY, f64::min);
-                    let db = b.iter().map(|v| out.pos[*v as usize].distance(q[0])).fold(f64::INFINITY, f64::min);
-                    da.partial_cmp(&db).unwrap()
-                })?
-                .clone();
-            let n = q.len();
-            let h0 = (0..n).map(|j| q[j].distance(q[(j + 1) % n])).sum::<f64>() / n as f64;
-            if ring_ids.len() == n {
-                let ring_ids = align_loop(&out.pos, &q, &ring_ids);
-                let ring: Vec<DVec3> = ring_ids.iter().map(|v| out.pos[*v as usize]).collect();
-                let gap = (0..n).map(|j| q[j].distance(ring[j])).sum::<f64>() / n as f64;
-                let w = ring_weights(gap, h0, st.size);
-                loft(&mut out, &h.rail_b, &ring_ids, &w, &|p| tool.project(p), P_TOOL_LOFT);
-            } else {
-                let ring: Vec<DVec3> = ring_ids.iter().map(|v| out.pos[*v as usize]).collect();
-                let m = ring.len();
-                let mut best = (f64::INFINITY, 0usize);
-                for s in 0..m {
-                    let d = ring[s].distance(q[0]);
-                    if d < best.0 {
-                        best = (d, s);
-                    }
-                }
-                let mut r2: Vec<u32> = (0..m).map(|i| ring_ids[(i + best.1) % m]).collect();
-                // same turning direction as the rail
-                let fwd = out.pos[r2[1] as usize].distance(q[1]) < out.pos[r2[m - 1] as usize].distance(q[1]);
-                if !fwd {
-                    r2 = std::iter::once(r2[0]).chain(r2[1..].iter().rev().copied()).collect();
-                }
-                bridge(&mut out, &h.rail_b, &r2, P_TOOL_LOFT);
-            }
-            let _ = &h.rail_a;
-        }
-        // tool regions with no rail: outside the body, dropped
-        let _ = used;
     }
     // compact: drop unused vertices
     let mut remap = vec![u32::MAX; out.pos.len()];
@@ -807,5 +935,5 @@ pub fn build(scene: &Scene, st: &BuildSettings, progress: &Progress) -> Option<B
     b.stats.patches = steps.len();
     b.stats.constructive = true;
     b.stats.seconds = t0.elapsed().as_secs_f64();
-    Some(b)
+    Ok(b)
 }
