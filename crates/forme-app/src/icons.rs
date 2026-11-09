@@ -29,10 +29,14 @@ pub enum Icon {
     Folder,
     Chevron,
     ChevronRight,
+    ChevronLeft,
     Up,
     Down,
     Cube,
     Frame,
+    Settings,
+    Fillet,
+    Bake,
 }
 
 struct Pen<'a> {
@@ -211,6 +215,7 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Chevron => pen.line(&[(5.0, 8.0), (10.0, 13.0), (15.0, 8.0)]),
         Icon::ChevronRight => pen.line(&[(8.0, 5.0), (13.0, 10.0), (8.0, 15.0)]),
+        Icon::ChevronLeft => pen.line(&[(12.0, 5.0), (7.0, 10.0), (12.0, 15.0)]),
         Icon::Up => pen.line(&[(5.0, 12.0), (10.0, 7.0), (15.0, 12.0)]),
         Icon::Down => pen.line(&[(5.0, 8.0), (10.0, 13.0), (15.0, 8.0)]),
         Icon::Frame => {
@@ -219,6 +224,26 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(17.0, 13.0), (17.0, 17.0), (13.0, 17.0)]);
             pen.line(&[(7.0, 17.0), (3.0, 17.0), (3.0, 13.0)]);
             pen.circle(10.0, 10.0, 2.5);
+        }
+        Icon::Settings => {
+            pen.circle(10.0, 10.0, 2.6);
+            pen.circle(10.0, 10.0, 5.6);
+            for i in 0..8 {
+                let a = i as f32 * PI / 4.0;
+                pen.line(&[(10.0 + 5.6 * a.cos(), 10.0 + 5.6 * a.sin()), (10.0 + 7.8 * a.cos(), 10.0 + 7.8 * a.sin())]);
+            }
+        }
+        Icon::Fillet => {
+            pen.arc(10.0, 10.0, 6.5, 6.5, PI, 1.5 * PI);
+            pen.line(&[(3.5, 10.0), (3.5, 17.0)]);
+            pen.line(&[(10.0, 3.5), (17.0, 3.5)]);
+        }
+        Icon::Bake => {
+            pen.closed(&[(3.0, 3.0), (17.0, 3.0), (17.0, 17.0), (3.0, 17.0)]);
+            pen.line(&[(3.0, 7.7), (17.0, 7.7)]);
+            pen.line(&[(3.0, 12.3), (17.0, 12.3)]);
+            pen.line(&[(7.7, 3.0), (7.7, 17.0)]);
+            pen.line(&[(12.3, 3.0), (12.3, 17.0)]);
         }
     }
 }

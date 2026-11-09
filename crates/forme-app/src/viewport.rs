@@ -436,7 +436,7 @@ fn draw_overlay(p: &Painter, st: &AppState) {
     }
 
     // axis gizmo (bottom right of the free area)
-    let gc = pos2(st.principal()[0] + (st.principal()[0] - 84.0) - 40.0, st.screen[1] - 60.0);
+    let gc = pos2(st.view_rect[2] - 40.0, st.view_rect[3] - 40.0);
     let (_, right, up) = view.basis();
     p.circle(gc, 27.0, Color32::from_rgb(0x1E, 0x20, 0x23), Stroke::new(1.0, Color32::from_rgb(0x2E, 0x31, 0x36)));
     for (axis, c, l) in [(glam::Vec3::X, AXIS_X, "X"), (glam::Vec3::Y, AXIS_Y, "Y"), (glam::Vec3::Z, AXIS_Z, "Z")] {

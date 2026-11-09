@@ -26,5 +26,6 @@ winit.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 log.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 image.workspace = true

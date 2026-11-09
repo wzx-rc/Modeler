@@ -3,6 +3,7 @@
 
 use egui::{pos2, Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use forme_app::gfx::FrameRenderer;
+use forme_app::settings::UiMode;
 use forme_app::state::{AppState, PointerKind, Tool};
 use forme_app::{theme, AppState as _S};
 use forme_core::{demo, CombineMode, NodeId, PrimKind};
@@ -53,6 +54,17 @@ impl Harness {
         self.st = st;
         self.st.autosave = false;
         self.st.screen = self.size;
+        // the iPad scenarios show every primitive and mode
+        self.st.settings.advanced = true;
+    }
+
+    /// PC window size and interface, for the desktop scenarios.
+    fn pc(&mut self, st: AppState, mode: UiMode) {
+        self.size = [1600.0, 900.0];
+        self.reset(st);
+        self.st.settings.advanced = false;
+        self.st.settings.ui_mode = mode;
+        self.st.enforce_basics();
     }
 
     fn raw(&mut self) -> RawInput {
@@ -441,6 +453,9 @@ fn main() {
         let _ = top;
         h.steps(2);
         h.shot("max-4-fini");
+    }
+    if want("pc-atelier") || want("pc-studio") {
+        pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
         // the layout as seen on the device (run with IPAD_ZOOM=0.84)
@@ -1049,6 +1064,86 @@ fn raster_mesh(mesh: &forme_core::mesh::Mesh, st: &AppState, w: u32, h: u32, pat
     let px: Vec<u8> = color.iter().flat_map(|c| [c[0], c[1], c[2], 255]).collect();
     image::save_buffer(path, &px, w, h, image::ExtendedColorType::Rgba8).expect("png");
     eprintln!("{path}  ({} triangles)", mesh.triangle_count());
+}
+
+/// Desktop test part: a pillow block made only of cubes and cylinders,
+/// with the three basic modes.
+fn support_axe() -> forme_core::Scene {
+    use forme_core::scene::{Mirror, NodeSpec, Scene, Shape};
+    let mut s = Scene::new();
+    let root = s.root;
+    let lying = glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::new(26.0, 5.0, 16.0);
+    b.round = 1.5;
+    s.add(root, NodeSpec::shape("Socle", b).at(Vec3::new(0.0, 5.0, 0.0)));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(11.0, 14.0, 0.0);
+    c.round = 1.0;
+    s.add(root, NodeSpec::shape("Palier", c).at(Vec3::new(0.0, 19.0, 0.0)).rot(lying).blend(2.0));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(6.0, 20.0, 0.0);
+    s.add(root, NodeSpec::shape("Alésage", c).at(Vec3::new(0.0, 19.0, 0.0)).rot(lying).mode(CombineMode::Carve).blend(0.6));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(2.6, 8.0, 0.0);
+    s.add(
+        root,
+        NodeSpec::shape("Trous de fixation", c)
+            .at(Vec3::new(19.0, 5.0, 10.0))
+            .mode(CombineMode::Carve)
+            .blend(0.4)
+            .mirror(Mirror { x: true, y: false, z: true }),
+    );
+    s
+}
+
+/// The two desktop interfaces (1600 × 900) on the test part, and the settings.
+fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
+    let part = || AppState::new(support_axe(), "Support d'axe");
+    if want("pc-atelier") {
+        h.pc(part(), UiMode::Atelier);
+        h.steps(2);
+        h.st.frame_all();
+        let id = h.find("Palier");
+        h.st.select(Some(id));
+        h.steps(8);
+        h.shot("pc-atelier");
+        h.st.settings_open = true;
+        h.steps(8);
+        h.shot("pc-reglages");
+        h.st.settings_open = false;
+        h.st.select(None);
+        h.st.tool = Tool::Place(PrimKind::Cylinder);
+        h.steps(6);
+        h.shot("pc-atelier-creation");
+    }
+    if want("pc-studio") {
+        h.pc(part(), UiMode::Studio);
+        h.steps(2);
+        h.st.frame_all();
+        let id = h.find("Palier");
+        h.st.select(Some(id));
+        h.steps(8);
+        h.shot("pc-studio");
+        h.st.select(None);
+        h.st.tool = Tool::Place(PrimKind::Box);
+        h.steps(6);
+        h.shot("pc-studio-creation");
+        h.st.tool = Tool::Select;
+        h.st.bake.quality = forme_core::bake::Quality::Standard;
+        h.st.start_bake();
+        while h.st.bake.job.is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            h.step();
+        }
+        if let Some(b) = &h.st.bake.result {
+            let st = &b.stats;
+            eprintln!("support : {} faces ({} q {} t {} n) constructif {} · {:.3} s", b.faces.len(), st.quads, st.tris, st.ngons, st.constructive, st.seconds);
+        }
+        h.st.toast = None;
+        h.steps(10);
+        h.shot("pc-studio-bake");
+    }
 }
 
 /// Bake of the rebuilt grenade: dialog, progress, result, wireframe, zoom,

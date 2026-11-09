@@ -36,7 +36,7 @@ impl PrimKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            PrimKind::Box => "Boîte",
+            PrimKind::Box => "Cube",
             PrimKind::Cylinder => "Cylindre",
             PrimKind::Sphere => "Sphère",
             PrimKind::Capsule => "Capsule",

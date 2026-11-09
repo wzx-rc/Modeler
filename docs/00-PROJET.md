@@ -21,6 +21,9 @@
 | Sélection d'arêtes | En mode Select, le survol met en évidence une jonction ou une arête ; un tap la sélectionne. **Une seule arête à la fois.** Un gros bouton **CTRL** en HUD à gauche, maintenu, ajoute ou retire des arêtes de la sélection. Le fillet se règle avec une poignée ou un curseur. |
 | Création des primitives | **Style 3ds Max** : glisser la base (la boîte se trace coin à coin), relâcher, puis glisser la hauteur (au Pencil, la hauteur suit le survol) et taper pour valider. |
 | iPad | Démarrer sur une **scène vierge**. L'UI était trop grosse, surtout le panneau de droite : elle est maintenant à 84 %, avec un panneau de 276 pt. Le viewport doit rester fluide. |
+| PC d'abord (9 nov. 2026) | Pause du développement iPad direct. On construit les algorithmes et l'UI/UX sur PC, en Rust, et on revient à l'iPad ensuite (même code). Ressenti Substance Modeler / Spline / Plasticity, avec un côté pro 3ds Max. |
+| Deux interfaces (9 nov. 2026) | Les deux maquettes ont été retenues. Dans **Réglages** (roue dentée), on bascule entre **Atelier** (viewport plein écran, panneaux flottants, historique en bas) et **Studio** (menus, explorateur, panneau de commandes Créer / Modifier / Affichage, barre d'état, façon 3ds Max). Les deux partagent la scène, les outils et le rendu ; l'UX est totalement différente. Le choix est gardé dans `settings.json`. |
+| Fonctions de base | Par défaut, seulement **Cube et Cylindre** et **Add / Carve / Intersect**. Le reste (autres primitives, Groove, Tongue, profil, kit, répétitions, taper, coque) est caché, pas supprimé : interrupteur « Toutes les primitives et tous les modes » dans Réglages. |
 | Distribution | Pas de compte développeur Apple. Le `.ipa` est compilé par GitHub Actions (dépôt `wzx-rc/Modeler`), puis installé avec Sideloadly ou AltStore. |
 
 ## 3. Ce qui existe (fonctionnel)
@@ -80,7 +83,7 @@
 
 ## 5. Prochaines étapes (ordre proposé)
 
-1. Retour de Romain sur l'iPad (qualité, vitesse, gestes 3ds Max), puis corrections.
+1. PC : retour de Romain sur les deux interfaces (Atelier / Studio), puis les 4 vues de Studio (Dessus, Face, Gauche, Perspective : rendu multi-caméras dans `gfx.rs`). L'iPad attend.
 2. Bake par opération :
    - fonctionnalités voisines qui se chevauchent : région commune à plusieurs trous ;
    - jonction profil / boîte plus propre ;
