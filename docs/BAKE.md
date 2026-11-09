@@ -20,6 +20,12 @@ Toujours dans cet ordre, à garder pour toutes les jonctions :
 
 Validé sur la pièce test « Support d'axe » : jonction palier / socle, anneau avant du palier, face avant en rayons droits (topologie A, sans pôle) soudée au fillet du socle, coins en éventail (`bake_probe lignes`, `anneau`, `raccord`, `liaison`). Puis la pièce entière (`bake_probe piece`) : 5168 quads, 100 % quads, 0 bord ouvert, 0 non-manifold, sommets sur la surface exacte. Cette version est écrite pour cette pièce (positions des trous, palier le long de z) : reste à la généraliser dans `build.rs`. Captures : `/mnt/project-files/forme-pc/jonctions/`.
 
+### R&D : décimer les loops plates (9 nov. 2026)
+
+`bake_probe decime` (seuil `DEG`, 5° par défaut) retire les edge loops fermées qui ne font pas de volume : en chaque sommet de la loop, le chemin qui la traverse (voisin d'un côté, sommet, voisin de l'autre) ne sort pas de la surface de plus de `DEG`. Les deux quads de part et d'autre fusionnent. Une loop à la fois, la plus plate d'abord. Sur la pièce test : 59 loops, 5168 → 2256 quads, toujours 100 % quads et fermé. Même résultat de 1° à 5° (les loops retirées sont exactement plates, la suivante est à 7,5° sur le palier). À 10° le palier perd une colonne sur deux, à 20° tout devient facetté.
+
+Limite : une loop n'est retirée qu'entière. Celles qui passent par un trou, un éventail de fillet ou un pôle (coin du carré d'un trou) restent, même sur leurs morceaux plats (dessous du socle).
+
 ## Historique des approches
 
 1. **Bake par surfaces** (`patch.rs`, encore utilisé en repli). Patchs paramétriques par primitive, découpés exactement le long des courbes de jonction puis cousus. C'est précis (écart moyen 0,002 mm), mais la topologie est mauvaise : raffinements adaptatifs, triangles. **Refusé par Romain.**

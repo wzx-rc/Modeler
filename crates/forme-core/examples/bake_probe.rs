@@ -447,6 +447,9 @@ fn main() {
     if what == "piece" {
         piece();
     }
+    if what == "decime" {
+        decime();
+    }
     if what == "screws" {
         let s = screws_scene();
         let size: f64 = std::env::var("SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -1212,10 +1215,9 @@ fn block_edge(g: &[Vec<glam::DVec3>], (i0, i1, j0, j1): (usize, usize, usize, us
 /// (cream), all welded on shared vertices. Written for this part (bearing
 /// along z on the base, a hole on each corner of the base) to see the
 /// topology; the general version belongs in the constructive bake.
-fn piece() {
+fn piece_mesh() -> (Field, bake::Baked) {
     use glam::DVec3;
     use std::f64::consts::FRAC_PI_2;
-    let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp".into());
     let s = support(4);
     let full = Field::new(&compile(&s));
     let steps = full.steps().unwrap();
@@ -1460,8 +1462,24 @@ fn piece() {
     }
     grid_quads(&mut m, &gb, &bblocks);
 
-    // ---- check and pictures ----------------------------------------------
-    let (b, open, nonman, dev) = weld_baked(m, &full);
+    let (b, _, _, _) = weld_baked(m, &full);
+    (full, b)
+}
+
+/// Open and non-manifold edge counts, largest vertex distance to the surface.
+fn mesh_check(b: &bake::Baked, full: &Field) -> (usize, usize, f64) {
+    let edges = edge_counts(b);
+    let open = edges.values().filter(|&&c| c == 1).count();
+    let nonman = edges.values().filter(|&&c| c > 2).count();
+    let dev = b.positions.iter().map(|p| full.dist(*p).abs()).fold(0.0, f64::max);
+    (open, nonman, dev)
+}
+
+fn piece() {
+    use glam::DVec3;
+    let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp".into());
+    let (full, b) = piece_mesh();
+    let (open, nonman, dev) = mesh_check(&b, &full);
     let fil = b.faces.iter().filter(|f| f.patch == 2).count();
     println!(
         "pièce : {} quads (fillets {fil}, remplissage {}), {} sommets, bords libres {open}, non-manifold {nonman}, écart max {dev:.3} mm",
@@ -1480,6 +1498,205 @@ fn piece() {
     ];
     for (v, dir, target, ext) in views {
         render_lines(None, Some(&b), &none, &format!("{out}/piece-{v}.png"), dir, target, ext, 1400, 1050);
+    }
+}
+
+/// R&D: dissolve the closed edge loops that add no volume. A loop may go
+/// when, at each of its vertices, the path across it (neighbour on one side,
+/// the vertex, neighbour on the other side) bends out of the surface by less
+/// than `max_deg`; the quads on both sides then merge into one. One loop at a
+/// time, the flattest first, until none is left. Returns the mesh and the
+/// removed loops (as positions, for the pictures).
+fn dissolve_flat_loops(full: &Field, b: &bake::Baked, max_deg: f64) -> (bake::Baked, Vec<Vec<glam::DVec3>>) {
+    use glam::DVec3;
+    use std::collections::{HashMap, HashSet};
+    let pos = &b.positions;
+    let nrm: Vec<DVec3> = pos.iter().map(|p| full.grad(*p).normalize_or_zero()).collect();
+    let mut faces: Vec<Option<([u32; 4], u32)>> = b.faces.iter().map(|f| Some(([f.verts[0], f.verts[1], f.verts[2], f.verts[3]], f.patch))).collect();
+    let mut removed = vec![];
+    loop {
+        let mut dir: HashMap<(u32, u32), usize> = HashMap::new();
+        let mut nb: Vec<Vec<u32>> = vec![vec![]; pos.len()];
+        for (fi, f) in faces.iter().enumerate() {
+            let Some((f, _)) = f else { continue };
+            for k in 0..4 {
+                let (a, c) = (f[k], f[(k + 1) % 4]);
+                dir.insert((a, c), fi);
+                for (x, y) in [(a, c), (c, a)] {
+                    if !nb[x as usize].contains(&y) {
+                        nb[x as usize].push(y);
+                    }
+                }
+            }
+        }
+        let face = |fi: usize| faces[fi].unwrap().0;
+        // the edge after (x, y) through y, straight across
+        let opposite = |x: u32, y: u32| -> Option<u32> {
+            if nb[y as usize].len() != 4 {
+                return None;
+            }
+            let (f1, f2) = (face(*dir.get(&(x, y))?), face(*dir.get(&(y, x))?));
+            let k1 = f1.iter().position(|&v| v == y)?;
+            let k2 = f2.iter().position(|&v| v == y)?;
+            let (c1, c2) = (f1[(k1 + 1) % 4], f2[(k2 + 3) % 4]);
+            let rest: Vec<u32> = nb[y as usize].iter().copied().filter(|&v| v != x && v != c1 && v != c2).collect();
+            (rest.len() == 1).then(|| rest[0])
+        };
+        let mut keys: Vec<(u32, u32)> = dir.keys().copied().collect();
+        keys.sort();
+        let mut seen: HashSet<(u32, u32)> = HashSet::new();
+        let mut best: Option<(f64, Vec<u32>, Vec<([u32; 4], u32)>, Vec<usize>)> = None;
+        for (a, c) in keys {
+            if seen.contains(&(a.min(c), a.max(c))) {
+                continue;
+            }
+            let mut lp = vec![a, c];
+            let mut inside: HashSet<u32> = [a, c].into_iter().collect();
+            let mut closed = false;
+            loop {
+                let (x, y) = (lp[lp.len() - 2], lp[lp.len() - 1]);
+                seen.insert((x.min(y), x.max(y)));
+                let Some(z) = opposite(x, y) else { break };
+                if z == a {
+                    seen.insert((y.min(a), y.max(a)));
+                    closed = opposite(y, a) == Some(c);
+                    break;
+                }
+                if !inside.insert(z) {
+                    break;
+                }
+                lp.push(z);
+            }
+            if !closed {
+                continue;
+            }
+            let n = lp.len();
+            // how much the path across the loop leaves the surface
+            let mut worst = 0.0f64;
+            for i in 0..n {
+                let (p, v, q) = (lp[(i + n - 1) % n], lp[i], lp[(i + 1) % n]);
+                let cross: Vec<u32> = nb[v as usize].iter().copied().filter(|&w| w != p && w != q).collect();
+                let (pv, nv) = (pos[v as usize], nrm[v as usize]);
+                let e1 = (pv - pos[cross[0] as usize]).normalize();
+                let e2 = (pos[cross[1] as usize] - pv).normalize();
+                let bend = (e1.dot(nv).clamp(-1.0, 1.0).asin() - e2.dot(nv).clamp(-1.0, 1.0).asin()).abs().to_degrees();
+                worst = worst.max(bend);
+                if worst >= max_deg {
+                    break;
+                }
+            }
+            if worst >= max_deg || best.as_ref().map_or(false, |b| b.0 <= worst) {
+                continue;
+            }
+            // the merged quads: both faces of each loop edge become one
+            let mut used = HashSet::new();
+            let mut new = vec![];
+            let mut ok = true;
+            for i in 0..n {
+                let (u, w) = (lp[i], lp[(i + 1) % n]);
+                let (Some(&f1), Some(&f2)) = (dir.get(&(u, w)), dir.get(&(w, u))) else {
+                    ok = false;
+                    break;
+                };
+                if !used.insert(f1) || !used.insert(f2) {
+                    ok = false;
+                    break;
+                }
+                let rot = |f: [u32; 4], s: u32| {
+                    let k = f.iter().position(|&v| v == s).unwrap();
+                    [f[k], f[(k + 1) % 4], f[(k + 2) % 4], f[(k + 3) % 4]]
+                };
+                let (a1, a2) = (rot(face(f1), u), rot(face(f2), w));
+                let q = [a1[2], a1[3], a2[2], a2[3]];
+                let distinct = (0..4).all(|i| (i + 1..4).all(|j| q[i] != q[j]));
+                // no edge that already exists elsewhere, convex in its plane
+                let fresh = !nb[a1[3] as usize].contains(&a2[2]) && !nb[a2[3] as usize].contains(&a1[2]);
+                let pts: Vec<DVec3> = q.iter().map(|v| pos[*v as usize]).collect();
+                let cn = full.grad((pts[0] + pts[1] + pts[2] + pts[3]) * 0.25);
+                let turns: Vec<f64> = (0..4).map(|k| (pts[(k + 1) % 4] - pts[k]).cross(pts[(k + 2) % 4] - pts[(k + 1) % 4]).dot(cn)).collect();
+                let convex = turns.iter().all(|t| *t > 0.0) || turns.iter().all(|t| *t < 0.0);
+                if !distinct || !fresh || !convex {
+                    ok = false;
+                    break;
+                }
+                new.push((q, faces[f1].unwrap().1));
+            }
+            if ok {
+                best = Some((worst, lp, new, used.into_iter().collect()));
+            }
+        }
+        let Some((_, lp, new, used)) = best else { break };
+        removed.push(lp.iter().map(|v| pos[*v as usize]).collect());
+        for fi in used {
+            faces[fi] = None;
+        }
+        faces.extend(new.into_iter().map(Some));
+    }
+    // compact
+    let mut out = bake::Baked::default();
+    let mut remap = vec![u32::MAX; pos.len()];
+    for (f, patch) in faces.into_iter().flatten() {
+        let verts: Vec<u32> = f
+            .iter()
+            .map(|&v| {
+                if remap[v as usize] == u32::MAX {
+                    remap[v as usize] = out.positions.len() as u32;
+                    out.positions.push(pos[v as usize]);
+                }
+                remap[v as usize]
+            })
+            .collect();
+        let normals = f.iter().map(|v| nrm[*v as usize]).collect();
+        out.faces.push(bake::BFace { verts, normals, mat: 0, patch });
+    }
+    (out, removed)
+}
+
+/// Largest and mean distance to the surface at the faces' centres and edge
+/// middles: what the flat quads lose.
+fn face_dev(b: &bake::Baked, full: &Field) -> (f64, f64) {
+    let mut v = vec![];
+    for f in &b.faces {
+        let p: Vec<glam::DVec3> = f.verts.iter().map(|i| b.positions[*i as usize]).collect();
+        v.push(full.dist((p[0] + p[1] + p[2] + p[3]) * 0.25).abs());
+        for k in 0..4 {
+            v.push(full.dist((p[k] + p[(k + 1) % 4]) * 0.5).abs());
+        }
+    }
+    (v.iter().cloned().fold(0.0, f64::max), v.iter().sum::<f64>() / v.len() as f64)
+}
+
+fn decime() {
+    use glam::DVec3;
+    let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp".into());
+    let deg: f64 = std::env::var("DEG").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
+    let (full, b) = piece_mesh();
+    let t0 = std::time::Instant::now();
+    let (d, loops) = dissolve_flat_loops(&full, &b, deg);
+    let (open, nonman, _) = mesh_check(&d, &full);
+    let quads = d.faces.iter().filter(|f| f.verts.len() == 4).count();
+    let (m0, a0) = face_dev(&b, &full);
+    let (m1, a1) = face_dev(&d, &full);
+    println!(
+        "seuil {deg}° : {} loops retirées en {:.1} s, {} → {} faces ({} quads), {} → {} sommets, bords libres {open}, non-manifold {nonman}, écart au milieu des faces {m0:.3} / {a0:.4} → {m1:.3} / {a1:.4} mm (max / moyen)",
+        loops.len(),
+        t0.elapsed().as_secs_f64(),
+        b.faces.len(),
+        d.faces.len(),
+        quads,
+        b.positions.len(),
+        d.positions.len()
+    );
+    let lines: Vec<(&Vec<DVec3>, [u8; 3], bool, bool)> = loops.iter().map(|l| (l, [220, 40, 60], false, true)).collect();
+    let none: Vec<(&Vec<DVec3>, [u8; 3], bool, bool)> = vec![];
+    let views = [
+        ("dessus", DVec3::new(0.75, 0.6, 1.0), DVec3::new(0.0, 8.0, 0.0), 62.0),
+        ("dessous", DVec3::new(0.6, -0.7, 0.8), DVec3::new(0.0, 3.0, 0.0), 62.0),
+        ("avant", DVec3::new(0.35, 0.35, 1.0), DVec3::new(0.0, 12.0, 15.0), 26.0),
+    ];
+    for (v, dir, target, ext) in views {
+        render_lines(None, Some(&b), &lines, &format!("{out}/decime-loops-{v}.png"), dir, target, ext, 1400, 1050);
+        render_lines(None, Some(&d), &none, &format!("{out}/decime-{v}.png"), dir, target, ext, 1400, 1050);
     }
 }
 

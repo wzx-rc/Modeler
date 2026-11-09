@@ -33,6 +33,7 @@ OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- support  # 
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- raccord  # test part: bearing front face joining the two rings (topologies A and B)
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- liaison  # test part: front face (A) welded to the bearing / base fillet
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- piece    # test part: the whole part, fillets first (orange) then fill paths (cream), closed
+DEG=5 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- decime  # R&D: dissolve the closed edge loops whose cross path bends less than DEG out of the surface
 ```
 
 `forme-shot` runs the real app headless (egui + wgpu). It accepts a software GPU (lavapipe / llvmpipe) and writes full-quality PNGs. Use it to check every visual change before showing it.
