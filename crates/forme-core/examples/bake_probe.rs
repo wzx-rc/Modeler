@@ -331,12 +331,12 @@ fn main() {
         println!("fillet {} faces ({} q) open {} dev max {:.3} mean {:.4}", f.faces.len(), st.quads, st.open_edges, st.max_dev, st.mean_dev);
         let part = bake::bake_blocking(&s, Quality::Max);
         // the corner sits under the fillet: drawn dashed through the surface
-        let lines: Vec<(&Vec<DVec3>, [u8; 3], bool)> = j
+        let lines: Vec<(&Vec<DVec3>, [u8; 3], bool, bool)> = j
             .corner
             .iter()
-            .map(|c| (c, [255, 214, 10], true))
-            .chain(j.rail_a.iter().map(|c| (c, [64, 156, 255], false)))
-            .chain(j.rail_b.iter().map(|c| (c, [255, 120, 40], false)))
+            .map(|c| (c, [255, 214, 10], true, true))
+            .chain(j.rail_a.iter().map(|c| (c, [64, 156, 255], false, true)))
+            .chain(j.rail_b.iter().map(|c| (c, [255, 120, 40], false, true)))
             .collect();
         let views = [
             ("a-vue", DVec3::new(0.75, 0.6, 1.0), DVec3::new(0.0, 12.0, 0.0), 62.0),
@@ -349,6 +349,94 @@ fn main() {
         }
         render_lines(None, Some(f), &lines, &format!("{out}/fillet-seul.png"), DVec3::new(0.75, 0.6, 1.0), DVec3::new(0.0, 11.0, 0.0), 36.0, 1400, 1050);
         render_lines(None, Some(f), &lines, &format!("{out}/fillet-seul-coin.png"), DVec3::new(0.35, 1.0, 0.45), DVec3::new(7.0, 11.0, 14.0), 9.0, 1100, 1100);
+    }
+    if what == "anneau" {
+        // front ring of the bearing: its inner edge (junction with the bore,
+        // 0.6 mm fillet) and its outer edge (the cylinder's own 1 mm round)
+        use bake::field::Field;
+        use glam::DVec3;
+        let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp".into());
+        let s = support(4);
+        let full = Field::new(&compile(&s));
+        let on_part = |p: DVec3| full.dist(p).abs() < 0.02;
+        let front = |p: &DVec3| p.z > 0.0;
+        // inner edge
+        let bs = bake::build::BuildSettings { size: 1.0, tol: 0.01, fillet_rows: 0, threads: 2 };
+        let j = bake::build::junction(&support(3), 2, &bs).expect("junction");
+        let keep = |l: &Vec<Vec<DVec3>>| -> Vec<Vec<DVec3>> { l.iter().filter(|c| c.iter().all(front)).cloned().collect() };
+        let (corner, rail_a, rail_b) = (keep(&j.corner), keep(&j.rail_a), keep(&j.rail_b));
+        let mut inner = j.fillet.clone();
+        inner.faces.retain(|f| f.verts.iter().all(|v| front(&inner.positions[*v as usize])));
+        // outer edge: the native rows of the round, where they are on the part
+        let steps = full.steps().unwrap();
+        let pi = steps[1].prim;
+        let pr = &full.prims[pi as usize];
+        let inst = full.instances(pi)[0];
+        let (r, hh, rd) = (pr.size.x, pr.size.y, pr.round);
+        // rows of the round like the inner strip: columns at the same target
+        // length, rows across the quarter circle, kept where they are on the part
+        let n = ((std::f64::consts::TAU * (r - rd * 0.5) / bs.size).round() as usize).max(8);
+        let rows = ((rd * std::f64::consts::FRAC_PI_2 / bs.size).round() as usize).max(2);
+        let mut outer = bake::Baked::default();
+        for i in 0..n {
+            let a = i as f64 / n as f64 * std::f64::consts::TAU;
+            for t in 0..=rows {
+                let phi = t as f64 / rows as f64 * std::f64::consts::FRAC_PI_2;
+                let rad = r - rd + rd * phi.sin();
+                let y = hh - rd + rd * phi.cos();
+                outer.positions.push(inst.to_world.transform_point3(DVec3::new(rad * a.cos(), y, rad * a.sin())));
+            }
+        }
+        let id = |i: usize, t: usize| ((i % n) * (rows + 1) + t) as u32;
+        for i in 0..n {
+            for t in 0..rows {
+                let verts = vec![id(i, t), id(i + 1, t), id(i + 1, t + 1), id(i, t + 1)];
+                let w: Vec<DVec3> = verts.iter().map(|v| outer.positions[*v as usize]).collect();
+                if !w.iter().all(|p| on_part(*p)) {
+                    continue;
+                }
+                let normals = w.iter().map(|p| full.grad(*p).normalize_or_zero()).collect();
+                outer.faces.push(bake::BFace { verts, normals, mat: 0, patch: 2 });
+            }
+        }
+        // tangent lines of the round, cut where the part swallows them
+        let circle = |rad: f64, y: f64| -> Vec<Vec<DVec3>> {
+            let mut segs: Vec<Vec<DVec3>> = vec![vec![]];
+            for i in 0..=512 {
+                let a = i as f64 / 512.0 * std::f64::consts::TAU;
+                let p = inst.to_world.transform_point3(DVec3::new(rad * a.cos(), y, rad * a.sin()));
+                if on_part(p) {
+                    segs.last_mut().unwrap().push(p);
+                } else if !segs.last().unwrap().is_empty() {
+                    segs.push(vec![]);
+                }
+            }
+            segs.into_iter().filter(|s| s.len() > 1).collect()
+        };
+        let (cap_line, side_line) = (circle(r - rd, hh), circle(r, hh - rd));
+        println!("bord intérieur : coin {} boucle(s), rails {} / {}, bande {} quads", corner.len(), rail_a.len(), rail_b.len(), inner.faces.len());
+        println!("bord extérieur : arrondi {} quads, lignes {} + {} morceaux", outer.faces.len(), cap_line.len(), side_line.len());
+        let mut strip = inner.clone();
+        let base = strip.positions.len() as u32;
+        strip.positions.extend(outer.positions.iter().copied());
+        for f in &outer.faces {
+            strip.faces.push(bake::BFace { verts: f.verts.iter().map(|v| v + base).collect(), normals: f.normals.clone(), mat: 0, patch: 2 });
+        }
+        let lines: Vec<(&Vec<DVec3>, [u8; 3], bool, bool)> = corner
+            .iter()
+            .map(|c| (c, [255, 214, 10], true, true))
+            .chain(rail_a.iter().map(|c| (c, [64, 156, 255], false, true)))
+            .chain(rail_b.iter().map(|c| (c, [255, 120, 40], false, true)))
+            .chain(cap_line.iter().map(|c| (c, [64, 156, 255], false, false)))
+            .chain(side_line.iter().map(|c| (c, [255, 120, 40], false, false)))
+            .collect();
+        let part = bake::bake_blocking(&s, Quality::Max);
+        let views = [("a-vue", DVec3::new(0.45, 0.35, 1.0), DVec3::new(0.0, 18.0, 14.0), 30.0), ("b-zoom", DVec3::new(0.55, 0.5, 1.0), DVec3::new(5.0, 25.0, 14.0), 11.0)];
+        for (name, dir, target, ext) in views {
+            render_lines(Some(&part), None, &lines, &format!("{out}/anneau-lignes-{name}.png"), dir, target, ext, 1400, 1050);
+            render_lines(Some(&part), Some(&strip), &lines, &format!("{out}/anneau-polys-{name}.png"), dir, target, ext, 1400, 1050);
+        }
+        render_lines(None, Some(&strip), &lines, &format!("{out}/anneau-polys-seul.png"), DVec3::new(0.45, 0.35, 1.0), DVec3::new(0.0, 18.0, 14.0), 30.0, 1400, 1050);
     }
     if what == "screws" {
         let s = screws_scene();
@@ -656,7 +744,7 @@ pub fn render(b: &bake::Baked, path: &str, eye_dir: glam::DVec3, target: glam::D
 
 /// Shaded part without wire, the fillet strip with its wire, and curves on top.
 #[allow(clippy::too_many_arguments)]
-pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lines: &[(&Vec<glam::DVec3>, [u8; 3], bool)], path: &str, eye_dir: glam::DVec3, target: glam::DVec3, extent: f64, w: u32, h: u32) {
+pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lines: &[(&Vec<glam::DVec3>, [u8; 3], bool, bool)], path: &str, eye_dir: glam::DVec3, target: glam::DVec3, extent: f64, w: u32, h: u32) {
     use glam::DVec3;
     let fwd = (-eye_dir).normalize();
     let right = fwd.cross(DVec3::Y).normalize();
@@ -713,7 +801,7 @@ pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lin
         let lift = 0.15;
         for f in &b.faces {
             let n = normal(b, f);
-            let pts: Vec<DVec3> = f.verts.iter().map(|v| b.positions[*v as usize] + n * lift).collect();
+            let pts: Vec<DVec3> = f.verts.iter().enumerate().map(|(k, v)| b.positions[*v as usize] + f.normals.get(k).copied().unwrap_or(n) * lift).collect();
             tri(&pts, n, [0.95, 0.62, 0.32], &mut img, &mut zb);
         }
     }
@@ -748,11 +836,12 @@ pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lin
     if let Some(b) = strip {
         let mut seen = std::collections::HashSet::new();
         for f in &b.faces {
-            let n = normal(b, f) * 0.05;
+            let n = normal(b, f);
+            let at = |k: usize| b.positions[f.verts[k] as usize] + f.normals.get(k).copied().unwrap_or(n) * 0.16;
             for i in 0..f.verts.len() {
                 let (a, c) = (f.verts[i], f.verts[(i + 1) % f.verts.len()]);
                 if seen.insert((a.min(c), a.max(c))) {
-                    line(b.positions[a as usize] + n * 3.0, b.positions[c as usize] + n * 3.0, image::Rgb([40, 22, 10]), 0, 0.05, &mut img, &zb);
+                    line(at(i), at((i + 1) % f.verts.len()), image::Rgb([40, 22, 10]), 0, 0.05, &mut img, &zb);
                 }
             }
         }
@@ -760,9 +849,10 @@ pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lin
     // curves: drawn through the surface when they are just under it (the
     // corner sits under the fillet)
     let px = extent / w.min(h) as f64;
-    for (c, col, xray) in lines {
+    for (c, col, xray, closed) in lines {
         let tol = if *xray { f64::INFINITY } else { 1.2 + 3.0 * px };
-        for i in 0..c.len() {
+        let n = if *closed { c.len() } else { c.len().saturating_sub(1) };
+        for i in 0..n {
             line(c[i], c[(i + 1) % c.len()], image::Rgb(*col), 1, tol, &mut img, &zb);
         }
     }

@@ -28,6 +28,7 @@ cargo run --release -p forme-core --example bake_probe -- variants   # 7 bake va
 cargo run --release -p forme-core --example bake_probe -- screws     # box + 4 kit screws
 cargo run --release -p forme-core --example bake_probe -- target     # hand-made target topology (reference)
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- lignes   # test part: junction lines + fillet strip alone
+OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- anneau   # test part: front ring of the bearing (bore fillet + outer round)
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- support  # test part, junction by junction (par opération or why not)
 ```
 
