@@ -18,7 +18,7 @@ Toujours dans cet ordre, à garder pour toutes les jonctions :
 2. **Les matérialiser en orange** dans les rendus de mise au point, pour voir les bandes seules avant le reste.
 3. **Ensuite les paths de remplissage** : les faces plates et les parois se remplissent entre les bords des bandes, en reprenant exactement leurs sommets (soudés, jamais recousus après coup). Si une bande rejoint une face déjà posée, ses colonnes partent des sommets de cette face.
 
-Validé sur la pièce test « Support d'axe » : jonction palier / socle, anneau avant du palier, face avant en rayons droits (topologie A, sans pôle) soudée au fillet du socle, coins en éventail (`bake_probe lignes`, `anneau`, `raccord`, `liaison`). Captures : `/mnt/project-files/forme-pc/jonctions/`.
+Validé sur la pièce test « Support d'axe » : jonction palier / socle, anneau avant du palier, face avant en rayons droits (topologie A, sans pôle) soudée au fillet du socle, coins en éventail (`bake_probe lignes`, `anneau`, `raccord`, `liaison`). Puis la pièce entière (`bake_probe piece`) : 5168 quads, 100 % quads, 0 bord ouvert, 0 non-manifold, sommets sur la surface exacte. Cette version est écrite pour cette pièce (positions des trous, palier le long de z) : reste à la généraliser dans `build.rs`. Captures : `/mnt/project-files/forme-pc/jonctions/`.
 
 ## Historique des approches
 
@@ -82,7 +82,7 @@ Validé sur la pièce test « Support d'axe » : jonction palier / socle, anneau
 ## Outils de mise au point
 
 - `cargo run --release -p forme-core --example bake_probe -- build | variants | screws | target` : rendus CPU filaires dans `/tmp`.
-- `OUT=/tmp/x … bake_probe -- lignes | anneau | raccord | liaison | support` : pièce test, jonction par jonction (bandes de fillet en orange, faces de remplissage en crème).
+- `OUT=/tmp/x … bake_probe -- lignes | anneau | raccord | liaison | piece | support` : pièce test, jonction par jonction (bandes de fillet en orange, faces de remplissage en crème).
 - `BY_STEP=1` : couleur par rôle (natif, anneaux, fillet, raccord paroi, paroi native).
 - `ROUND=…` : bevel du cube test. `SIZE=…` : taille des quads.
 - `forme-shot -- /tmp/x 19` (cube dans l'app), `22` (sélection d'arêtes, fillets par arête, bake), `user` (scène de test de Romain).

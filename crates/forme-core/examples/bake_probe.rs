@@ -444,6 +444,9 @@ fn main() {
     if what == "liaison" {
         liaison();
     }
+    if what == "piece" {
+        piece();
+    }
     if what == "screws" {
         let s = screws_scene();
         let size: f64 = std::env::var("SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -795,6 +798,10 @@ struct Front {
     /// where the face meets the base fillet, from +x to -x: up the round's
     /// end column, the chord, down the other end column
     bottom: Vec<glam::DVec3>,
+    /// the outer round's edge on the bearing's body, from -x over the top to +x
+    rim: Vec<glam::DVec3>,
+    /// the bore fillet's edge on the bore wall, all around
+    bore: Vec<glam::DVec3>,
     reductions: usize,
     n_in: usize,
     n_out: usize,
@@ -919,7 +926,9 @@ fn front_face_into(m: &mut Weld, full: &Field, inner: usize, outer: usize, chord
     bottom.extend(bound[..chord].iter().copied());
     bottom.extend((0..=rows_r).map(|t| round_pt(0, t)));
     let pinch = (0..chord).map(|i| ring0[i].distance(bound[i])).fold(f64::MAX, f64::min);
-    Front { bottom, reductions: k, n_in, n_out, pinch }
+    let rim = (0..=outer).map(|i| round_pt(i, rows_r)).collect();
+    let bore = ang_in.iter().map(|a| bez(*a, rows_b as f64 / rows_b as f64)).collect();
+    Front { bottom, rim, bore, reductions: k, n_in, n_out, pinch }
 }
 
 /// The welded quads as a mesh facing out of `full`, with its open and
@@ -1008,7 +1017,14 @@ fn cut(l: &[glam::DVec3], c: glam::DVec3, t: glam::DVec3) -> Option<glam::DVec3>
 /// section from the bevel-like sections square to the corner curve, picked by
 /// where it sits on the top edge: so the front columns land exactly on the
 /// front face's bottom vertices and the strip shares them.
-fn base_fillet(m: &mut Weld, full: &Field, j: &bake::build::Junction, top: &[glam::DVec3], rows: usize) -> (usize, f64, f64) {
+fn base_fillet(m: &mut Weld, full: &Field, j: &bake::build::Junction, top: &[glam::DVec3], rows: usize) -> Vec<Vec<glam::DVec3>> {
+    let cols: Vec<Vec<glam::DVec3>> = base_sections(full, j, top).iter().map(|&(p, c, q)| fillet_column(full, p, c, q, rows)).collect();
+    strip_quads(m, &cols, true, 2);
+    cols
+}
+
+/// (top point, corner, base point) of each column of the bearing / base fillet.
+fn base_sections(full: &Field, j: &bake::build::Junction, top: &[glam::DVec3]) -> Vec<(glam::DVec3, glam::DVec3, glam::DVec3)> {
     use glam::DVec3;
     let longest = |ls: &[Vec<DVec3>]| ls.iter().max_by_key(|l| l.len()).unwrap().clone();
     let (corner, rail_top, rail_base) = (longest(&j.corner), longest(&j.rail_b), longest(&j.rail_a));
@@ -1043,33 +1059,40 @@ fn base_fillet(m: &mut Weld, full: &Field, j: &bake::build::Junction, top: &[gla
         }
         (best.1, best.2)
     };
-    let cols: Vec<Vec<DVec3>> = top
-        .iter()
+    top.iter()
         .map(|&p| {
             let (c, q) = section(p);
-            let q = full.project(q).unwrap_or(q);
-            (0..=rows)
-                .map(|r| {
-                    let t = r as f64 / rows as f64;
-                    let x = p * (1.0 - t) * (1.0 - t) + c * 2.0 * t * (1.0 - t) + q * t * t;
-                    if r == 0 || r == rows {
-                        x
-                    } else {
-                        full.project(x).unwrap_or(x)
-                    }
-                })
-                .collect()
+            (p, c, full.project(q).unwrap_or(q))
         })
-        .collect();
-    let nt = top.len();
-    for i in 0..nt {
-        let (a, b) = (&cols[i], &cols[(i + 1) % nt]);
-        for r in 0..rows {
-            m.quad([a[r], b[r], b[r + 1], a[r + 1]], 2);
+        .collect()
+}
+
+/// One column of a fillet strip: rows along the quadratic from `p` (first
+/// rail) through the corner `c` to `q` (second rail), projected on the surface.
+fn fillet_column(full: &Field, p: glam::DVec3, c: glam::DVec3, q: glam::DVec3, rows: usize) -> Vec<glam::DVec3> {
+    (0..=rows)
+        .map(|r| {
+            let t = r as f64 / rows as f64;
+            let x = p * (1.0 - t) * (1.0 - t) + c * 2.0 * t * (1.0 - t) + q * t * t;
+            if r == 0 || r == rows {
+                x
+            } else {
+                full.project(x).unwrap_or(x)
+            }
+        })
+        .collect()
+}
+
+/// Quads between consecutive columns of equal length.
+fn strip_quads(m: &mut Weld, cols: &[Vec<glam::DVec3>], closed: bool, patch: u32) {
+    let n = cols.len();
+    let segs = if closed { n } else { n - 1 };
+    for i in 0..segs {
+        let (a, b) = (&cols[i], &cols[(i + 1) % n]);
+        for r in 0..a.len() - 1 {
+            m.quad([a[r], b[r], b[r + 1], a[r + 1]], patch);
         }
     }
-    let base_edges: Vec<f64> = (0..nt).map(|i| cols[i][rows].distance(cols[(i + 1) % nt][rows])).collect();
-    (nt * rows, base_edges.iter().cloned().fold(f64::MAX, f64::min), base_edges.iter().cloned().fold(0.0, f64::max))
 }
 
 /// Front face (proposal A) welded to the bearing / base fillet.
@@ -1098,7 +1121,17 @@ fn liaison() {
     top.extend(fb.iter().rev().map(|p| mirror(*p)));
     top.extend(side(mirror(first), first));
     let rows = 3;
-    let (n_fillet, base_min, base_max) = base_fillet(&mut m, &full, &j, &top, rows);
+    let cols = base_fillet(&mut m, &full, &j, &top, rows);
+    let n_fillet = cols.len() * rows;
+    let base_edges: Vec<f64> = (0..cols.len()).map(|i| cols[i][rows].distance(cols[(i + 1) % cols.len()][rows])).collect();
+    let (base_min, base_max) = (base_edges.iter().cloned().fold(f64::MAX, f64::min), base_edges.iter().cloned().fold(0.0, f64::max));
+    if std::env::var("DBG").is_ok() {
+        for (i, c) in cols.iter().enumerate() {
+            if c[0].x > -1.0 && c[0].z > 10.0 {
+                println!("col {i:2} top {:6.3} {:6.3} {:6.3}  base {:6.3} {:6.3} {:6.3}", c[0].x, c[0].y, c[0].z, c[rows].x, c[rows].y, c[rows].z);
+            }
+        }
+    }
     let (b, open, nonman, dev) = weld_baked(m, &full);
     // the join itself: every edge of the face's bottom must have two faces
     let edges = edge_counts(&b);
@@ -1126,6 +1159,328 @@ fn liaison() {
     }
     render_lines(None, Some(&b), &rail, &format!("{out}/liaison-seul.png"), DVec3::new(0.45, 0.35, 1.0), DVec3::new(0.0, 15.0, 8.0), 34.0, 1400, 1050);
     render_lines(None, Some(&b), &rail, &format!("{out}/liaison-seul-coin.png"), DVec3::new(0.9, 0.7, 1.0), DVec3::new(7.5, 11.0, 13.5), 8.0, 1400, 1050);
+}
+
+/// `n` steps from the last value of `v` to `to`, `to` itself exact.
+fn run(v: &mut Vec<f64>, to: f64, n: usize) {
+    let a = *v.last().unwrap();
+    for i in 1..n {
+        v.push(a + (to - a) * i as f64 / n as f64);
+    }
+    v.push(to);
+}
+
+/// Fill grid: column 0 is `inner` (the edge of a fillet strip), the next
+/// columns sit on the x lines; rows leave the inner edge at its own z and
+/// straighten onto `zn` after `blend` columns. Cells inside the hole blocks
+/// (i0, i1, j0, j1) are left for the holes.
+fn region(m: &mut Weld, inner: &[glam::DVec3], xs: &[f64], zn: &[f64], y: f64, blend: usize, holes: &[(usize, usize, usize, usize)]) -> Vec<Vec<glam::DVec3>> {
+    use glam::DVec3;
+    assert_eq!(inner.len(), zn.len());
+    let mut g = vec![inner.to_vec()];
+    for (i, &x) in xs.iter().enumerate() {
+        let s = (i + 1) as f64 / blend as f64;
+        g.push(inner.iter().zip(zn).map(|(p, &z)| DVec3::new(x, y, if s >= 1.0 { z } else { p.z + (z - p.z) * s })).collect());
+    }
+    grid_quads(m, &g, holes);
+    g
+}
+
+fn grid_quads(m: &mut Weld, g: &[Vec<glam::DVec3>], holes: &[(usize, usize, usize, usize)]) {
+    for i in 0..g.len() - 1 {
+        for j in 0..g[i].len() - 1 {
+            if holes.iter().any(|&(i0, i1, j0, j1)| i >= i0 && i < i1 && j >= j0 && j < j1) {
+                continue;
+            }
+            m.quad([g[i][j], g[i + 1][j], g[i + 1][j + 1], g[i][j + 1]], 1);
+        }
+    }
+}
+
+/// The edge of a hole block of the grid, all around.
+fn block_edge(g: &[Vec<glam::DVec3>], (i0, i1, j0, j1): (usize, usize, usize, usize)) -> Vec<glam::DVec3> {
+    let mut v = vec![];
+    v.extend((i0..i1).map(|i| g[i][j0]));
+    v.extend((j0..j1).map(|j| g[i1][j]));
+    v.extend((i0 + 1..=i1).rev().map(|i| g[i][j1]));
+    v.extend((j0 + 1..=j1).rev().map(|j| g[i0][j]));
+    v
+}
+
+/// The whole test part with the fillets-first rule: every fillet and round
+/// as a strip of quads (orange), then the fill paths between the strips
+/// (cream), all welded on shared vertices. Written for this part (bearing
+/// along z on the base, a hole on each corner of the base) to see the
+/// topology; the general version belongs in the constructive bake.
+fn piece() {
+    use glam::DVec3;
+    use std::f64::consts::FRAC_PI_2;
+    let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp".into());
+    let s = support(4);
+    let full = Field::new(&compile(&s));
+    let steps = full.steps().unwrap();
+    let bs = bake::build::BuildSettings { size: 1.5, tol: 0.02, fillet_rows: 0, threads: 2 };
+    let size = bs.size;
+    let j = bake::build::junction(&support(2), 1, &bs).expect("junction");
+    let mut m = Weld::default();
+    let mirror = |p: DVec3| DVec3::new(p.x, p.y, -p.z);
+    let lin = |a: f64, b: f64, n: usize| -> Vec<f64> {
+        let mut v = vec![a];
+        run(&mut v, b, n);
+        v
+    };
+
+    // ---- 1. fillets and rounds (orange) --------------------------------
+    // the bearing's front face with its two rings, the back as its mirror
+    let mut fw = Weld::default();
+    let front = front_face_into(&mut fw, &full, 36, 36, 12);
+    for (f, patch) in &fw.faces {
+        let q: Vec<DVec3> = f.iter().map(|v| fw.pos[*v as usize]).collect();
+        m.quad([q[0], q[1], q[2], q[3]], *patch);
+        m.quad([mirror(q[0]), mirror(q[1]), mirror(q[2]), mirror(q[3])], *patch);
+    }
+    // the bearing / base fillet all around: the faces' bottom edges at both
+    // ends, straight lines along the body
+    let fb = &front.bottom;
+    let nf = fb.len();
+    let (first, last) = (fb[0], fb[nf - 1]);
+    let side = |from: DVec3, to: DVec3| -> Vec<DVec3> {
+        let n = ((from.distance(to) / size).round() as usize).max(1);
+        (1..n).map(|i| from.lerp(to, i as f64 / n as f64)).collect()
+    };
+    let left = side(last, mirror(last));
+    let right = side(mirror(first), first);
+    let ns = left.len();
+    let mut top: Vec<DVec3> = fb.clone();
+    top.extend(left.iter().copied());
+    top.extend(fb.iter().rev().map(|p| mirror(*p)));
+    top.extend(right.iter().copied());
+    let back0 = nf + ns;
+    let right0 = back0 + nf;
+    let mut secs = base_sections(&full, &j, &top);
+    // the base: tangent lines of its 1.5 mm round
+    let base = &full.prims[steps[0].prim as usize];
+    let bc = full.instances(steps[0].prim)[0].to_world.translation;
+    let rr = base.round;
+    let (xt, zt) = (base.size.x - rr, base.size.z - rr);
+    let (ytop, ybot) = (bc.y + base.size.y, bc.y - base.size.y);
+    let (yhi, ylo) = (ytop - rr, ybot + rr);
+    // at both ends the fillet's base edge leaves the base's top face for its
+    // round: the column nearest that point lands exactly on it
+    let rail_base = j.rail_a.iter().max_by_key(|l| l.len()).unwrap().clone();
+    let cross = [2, nf - 3, back0 + 2, back0 + nf - 3];
+    for &i in &cross {
+        let q = secs[i].2;
+        let z = zt * q.z.signum();
+        assert!((q.z.abs() - zt).abs() < 0.6, "colonne {i} loin du bord du dessus ({:.2})", q.z);
+        let x = cut(&rail_base, DVec3::new(q.x, ytop, z), DVec3::Z).expect("rail du socle").x;
+        secs[i].2 = DVec3::new(x, ytop, z);
+    }
+    let rows = 3;
+    let cols: Vec<Vec<DVec3>> = secs.iter().map(|&(p, c, q)| fillet_column(&full, p, c, q, rows)).collect();
+    strip_quads(&mut m, &cols, true, 2);
+    let qb = |i: usize| cols[i][rows];
+
+    // fixing holes: 0.4 mm fillets top and bottom
+    let hole = &full.prims[steps[3].prim as usize];
+    let (hr, hk) = (hole.size.x, steps[3].k);
+    let centers: Vec<DVec3> = full.instances(steps[3].prim).iter().map(|i| i.to_world.translation).collect();
+    let (hxc, hzc) = (centers[0].x.abs(), centers[0].z.abs());
+    let hs = hr + hk + 0.6; // half side of the square around each hole
+    let kq = 5; // segments per side of that square
+    let nwall = (((ytop - ybot - 2.0 * hk) / size).round() as usize).max(1);
+    let hole_at = |m: &mut Weld, ctr: DVec3, sq: &[DVec3]| {
+        let at = |a: f64, r: f64, y: f64| DVec3::new(ctr.x + r * a.cos(), y, ctr.z + r * a.sin());
+        let ang: Vec<f64> = sq.iter().map(|p| (p.z - ctr.z).atan2(p.x - ctr.x)).collect();
+        let ring_t: Vec<Vec<DVec3>> = sq.iter().zip(&ang).map(|(p, &a)| vec![*p, at(a, hr + hk, ytop)]).collect();
+        let fil_t: Vec<Vec<DVec3>> = ang.iter().map(|&a| fillet_column(&full, at(a, hr + hk, ytop), at(a, hr, ytop), at(a, hr, ytop - hk), 2)).collect();
+        let wall: Vec<Vec<DVec3>> = ang
+            .iter()
+            .map(|&a| (0..=nwall).map(|k| at(a, hr, if k == 0 { ytop - hk } else if k == nwall { ybot + hk } else { ytop - hk + (ybot - ytop + 2.0 * hk) * k as f64 / nwall as f64 })).collect())
+            .collect();
+        let fil_b: Vec<Vec<DVec3>> = ang.iter().map(|&a| fillet_column(&full, at(a, hr, ybot + hk), at(a, hr, ybot), at(a, hr + hk, ybot), 2)).collect();
+        let ring_b: Vec<Vec<DVec3>> = sq.iter().zip(&ang).map(|(p, &a)| vec![at(a, hr + hk, ybot), DVec3::new(p.x, ybot, p.z)]).collect();
+        strip_quads(m, &ring_t, true, 1);
+        strip_quads(m, &fil_t, true, 2);
+        strip_quads(m, &wall, true, 1);
+        strip_quads(m, &fil_b, true, 2);
+        strip_quads(m, &ring_b, true, 1);
+    };
+
+    // ---- 2. fill paths (cream) -----------------------------------------
+    // bearing body: between the two rims and the fillet's top lines
+    let rim = &front.rim;
+    let no = rim.len() - 1;
+    let kz = ns + 1;
+    let body: Vec<Vec<DVec3>> = (0..=no)
+        .map(|i| {
+            (0..=kz)
+                .map(|k| {
+                    if k == 0 {
+                        rim[i]
+                    } else if k == kz {
+                        mirror(rim[i])
+                    } else if i == 0 {
+                        left[k - 1]
+                    } else if i == no {
+                        right[ns - k]
+                    } else {
+                        DVec3::new(rim[i].x, rim[i].y, left[k - 1].z)
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    strip_quads(&mut m, &body, false, 1);
+    // bore wall
+    let bore = &front.bore;
+    let zb = bore[0].z;
+    let nbz = ((2.0 * zb / size).round() as usize).max(1);
+    let wall: Vec<Vec<DVec3>> = bore
+        .iter()
+        .map(|&p| (0..=nbz).map(|k| if k == 0 { p } else if k == nbz { mirror(p) } else { DVec3::new(p.x, p.y, zb - 2.0 * zb * k as f64 / nbz as f64) }).collect())
+        .collect();
+    strip_quads(&mut m, &wall, true, 1);
+
+    // base top, right and left of the bearing: rows from the fillet's base
+    // edge, columns straight, a square of kq x kq cells around each hole
+    let inner_r: Vec<DVec3> = [back0 + nf - 3, back0 + nf - 2, back0 + nf - 1].into_iter().chain(right0..right0 + ns).chain([0, 1, 2]).map(qb).collect();
+    let inner_l: Vec<DVec3> = [back0 + 2, back0 + 1, back0].into_iter().chain((nf..nf + ns).rev()).chain([nf - 1, nf - 2, nf - 3]).map(qb).collect();
+    let jseg = inner_r.len() - 1;
+    let mid = jseg - 2 * (kq + 1);
+    let mut zn = vec![-zt];
+    run(&mut zn, -hzc - hs, 1);
+    run(&mut zn, -hzc + hs, kq);
+    run(&mut zn, hzc - hs, mid);
+    run(&mut zn, hzc + hs, kq);
+    run(&mut zn, zt, 1);
+    let x_in = qb(right0 + ns / 2).x;
+    let blend = 4;
+    let mut xs = vec![x_in];
+    run(&mut xs, hxc - hs, blend);
+    run(&mut xs, hxc + hs, kq);
+    run(&mut xs, xt, 1);
+    xs.remove(0);
+    let xs_l: Vec<f64> = xs.iter().map(|x| -x).collect();
+    let nx = xs.len();
+    let blocks = [(blend, blend + kq, 1, 1 + kq), (blend, blend + kq, jseg - 1 - kq, jseg - 1)];
+    let g_r = region(&mut m, &inner_r, &xs, &zn, ytop, blend, &blocks);
+    let g_l = region(&mut m, &inner_l, &xs_l, &zn, ytop, blend, &blocks);
+    let center = |sx: f64, sz: f64| *centers.iter().find(|c| c.x.signum() == sx && c.z.signum() == sz).unwrap();
+    for (g, sx) in [(&g_r, 1.0), (&g_l, -1.0)] {
+        hole_at(&mut m, center(sx, -1.0), &block_edge(g, blocks[0]));
+        hole_at(&mut m, center(sx, 1.0), &block_edge(g, blocks[1]));
+    }
+
+    // base rounds: a column = top vertex, middle, bottom vertex around the
+    // round's axis; where the bearing fillet sits on the round, the column
+    // starts at the fillet's base edge
+    let round_col = |p: DVec3, c: DVec3, u: DVec3, v: DVec3| -> Vec<DVec3> {
+        let d = p - c;
+        let a0 = d.dot(v).atan2(d.dot(u));
+        let am = 0.5 * (a0 + FRAC_PI_2);
+        vec![p, c + (u * am.cos() + v * am.sin()) * rr, c + v * rr]
+    };
+    let top_edge = |sz: f64| -> Vec<DVec3> {
+        let jj = if sz > 0.0 { jseg } else { 0 };
+        let (zone, cl, cr): (Vec<usize>, usize, usize) =
+            if sz > 0.0 { ((3..=nf - 4).rev().collect(), nf - 3, 2) } else { ((back0 + 3..=back0 + nf - 4).collect(), back0 + 2, back0 + nf - 3) };
+        let mut v: Vec<DVec3> = (1..=nx).rev().map(|i| g_l[i][jj]).collect();
+        v.push(qb(cl));
+        v.extend(zone.into_iter().map(qb));
+        v.push(qb(cr));
+        v.extend((1..=nx).map(|i| g_r[i][jj]));
+        v
+    };
+    let ny = (((yhi - ylo) / size).round() as usize).max(1);
+    let ys = lin(yhi, ylo, ny);
+    let mut xf_all = vec![];
+    for sz in [1.0, -1.0] {
+        let edge = top_edge(sz);
+        let tz = DVec3::Z * sz;
+        let strip: Vec<Vec<DVec3>> = edge.iter().map(|&p| round_col(p, DVec3::new(p.x, yhi, zt * sz), DVec3::Y, tz)).collect();
+        strip_quads(&mut m, &strip, false, 2);
+        let xf: Vec<f64> = strip.iter().map(|c| c[2].x).collect();
+        // front / back face of the base
+        let face: Vec<Vec<DVec3>> = xf.iter().map(|&x| ys.iter().map(|&y| DVec3::new(x, y, (zt + rr) * sz)).collect()).collect();
+        strip_quads(&mut m, &face, false, 1);
+        // bottom round along x
+        let low: Vec<Vec<DVec3>> = xf.iter().map(|&x| round_col(DVec3::new(x, ylo, (zt + rr) * sz), DVec3::new(x, ylo, zt * sz), tz, -DVec3::Y)).collect();
+        strip_quads(&mut m, &low, false, 2);
+        xf_all.push(xf);
+    }
+    for sx in [1.0, -1.0] {
+        let tx = DVec3::X * sx;
+        let g = if sx > 0.0 { &g_r } else { &g_l };
+        let strip: Vec<Vec<DVec3>> = (0..=jseg).map(|jj| round_col(g[nx][jj], DVec3::new(xt * sx, yhi, zn[jj]), DVec3::Y, tx)).collect();
+        strip_quads(&mut m, &strip, false, 2);
+        let face: Vec<Vec<DVec3>> = zn.iter().map(|&z| ys.iter().map(|&y| DVec3::new((xt + rr) * sx, y, z)).collect()).collect();
+        strip_quads(&mut m, &face, false, 1);
+        let low: Vec<Vec<DVec3>> = zn.iter().map(|&z| round_col(DVec3::new((xt + rr) * sx, ylo, z), DVec3::new(xt * sx, ylo, z), tx, -DVec3::Y)).collect();
+        strip_quads(&mut m, &low, false, 2);
+        for sz in [1.0, -1.0] {
+            let tz = DVec3::Z * sz;
+            // vertical round
+            let vert: Vec<Vec<DVec3>> = ys.iter().map(|&y| round_col(DVec3::new(xt * sx, y, (zt + rr) * sz), DVec3::new(xt * sx, y, zt * sz), tz, tx)).collect();
+            strip_quads(&mut m, &vert, false, 2);
+            // corners: three quads on the ball
+            for (yc, ty) in [(yhi, DVec3::Y), (ylo, -DVec3::Y)] {
+                let c = DVec3::new(xt * sx, yc, zt * sz);
+                let h = std::f64::consts::FRAC_1_SQRT_2;
+                let (py, pz, px) = (c + ty * rr, c + tz * rr, c + tx * rr);
+                let (myz, myx, mzx) = (c + (ty + tz) * h * rr, c + (ty + tx) * h * rr, c + (tz + tx) * h * rr);
+                let ctr = c + (tx + ty + tz).normalize() * rr;
+                m.quad([py, myz, ctr, myx], 2);
+                m.quad([pz, mzx, ctr, myz], 2);
+                m.quad([px, myx, ctr, mzx], 2);
+            }
+        }
+    }
+    // base bottom: same columns as the front and back faces, same rows as
+    // the sides, the same squares around the holes
+    let (xf, xb) = (&xf_all[0], &xf_all[1]);
+    let gb: Vec<Vec<DVec3>> = (0..xf.len())
+        .map(|i| {
+            zn.iter()
+                .map(|&z| {
+                    let t = (zt - z) / (2.0 * zt);
+                    let x = if xf[i] == xb[i] { xf[i] } else { xf[i] + (xb[i] - xf[i]) * t };
+                    DVec3::new(x, ybot, z)
+                })
+                .collect()
+        })
+        .collect();
+    let col_of = |x: f64| xf.iter().position(|v| (v - x).abs() < 1e-9).expect("colonne du carré");
+    let mut bblocks = vec![];
+    for sx in [1.0, -1.0] {
+        let (a, b) = (col_of(sx * (hxc - hs)), col_of(sx * (hxc + hs)));
+        let (i0, i1) = (a.min(b), a.max(b));
+        bblocks.push((i0, i1, 1, 1 + kq));
+        bblocks.push((i0, i1, jseg - 1 - kq, jseg - 1));
+    }
+    grid_quads(&mut m, &gb, &bblocks);
+
+    // ---- check and pictures ----------------------------------------------
+    let (b, open, nonman, dev) = weld_baked(m, &full);
+    let fil = b.faces.iter().filter(|f| f.patch == 2).count();
+    println!(
+        "pièce : {} quads (fillets {fil}, remplissage {}), {} sommets, bords libres {open}, non-manifold {nonman}, écart max {dev:.3} mm",
+        b.faces.len(),
+        b.faces.len() - fil,
+        b.positions.len()
+    );
+    let none: Vec<(&Vec<DVec3>, [u8; 3], bool, bool)> = vec![];
+    let views = [
+        ("dessus", DVec3::new(0.75, 0.6, 1.0), DVec3::new(0.0, 8.0, 0.0), 62.0),
+        ("dessous", DVec3::new(0.6, -0.7, 0.8), DVec3::new(0.0, 3.0, 0.0), 62.0),
+        ("arriere", DVec3::new(-0.7, 0.5, -1.0), DVec3::new(0.0, 9.0, 0.0), 62.0),
+        ("avant", DVec3::new(0.35, 0.35, 1.0), DVec3::new(0.0, 12.0, 15.0), 26.0),
+        ("trou", DVec3::new(0.45, 1.0, 0.6), DVec3::new(18.0, 10.0, 10.0), 14.0),
+        ("coin", DVec3::new(0.9, 0.6, 1.0), DVec3::new(10.0, 10.0, 14.5), 10.0),
+    ];
+    for (v, dir, target, ext) in views {
+        render_lines(None, Some(&b), &none, &format!("{out}/piece-{v}.png"), dir, target, ext, 1400, 1050);
+    }
 }
 
 /// Shaded part without wire, the fillet strip with its wire, and curves on top.
