@@ -280,6 +280,76 @@ fn main() {
         render(&b, "/tmp/build_a.png", glam::DVec3::new(0.75, 0.9, 1.0), glam::DVec3::new(0.0, 1.0, 0.0), 34.0, 1100, 1100);
         render(&b, "/tmp/build_b.png", glam::DVec3::new(0.35, 1.0, 0.55), glam::DVec3::new(1.5, 8.0, 2.0), 15.0, 1100, 1100);
     }
+    if what == "support" {
+        // the PC test part, junction by junction: why the bake by operation
+        // refuses it, and close-ups of what the bake gives at each junction
+        use glam::DVec3;
+        let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp".into());
+        let stages: Vec<(&str, Scene)> = vec![
+            ("1-socle-palier", support(2)),
+            ("2-alesage", support(3)),
+            ("3-trous", support(4)),
+            ("0-bossage-debout", support_boss()),
+        ];
+        for (name, s) in &stages {
+            let mut bs = bake::BakeSettings::preset(Quality::Standard);
+            bs.threads = 2;
+            match bake::build::build_auto(s, &bs, &bake::Progress::default()) {
+                Ok(b) => {
+                    let st = &b.stats;
+                    println!("{name:18} par opération : {} faces ({} q {} t {} n) open {} nonman {} dev max {:.4}", b.faces.len(), st.quads, st.tris, st.ngons, st.open_edges, st.nonmanifold_edges, st.max_dev);
+                }
+                Err(e) => println!("{name:18} repli : {e}"),
+            }
+            let b = bake::bake_blocking(s, Quality::Standard);
+            let st = &b.stats;
+            println!("{name:18} bake : {} faces ({} q {} t {} n) open {} nonman {} constructif {}", b.faces.len(), st.quads, st.tris, st.ngons, st.open_edges, st.nonmanifold_edges, st.constructive);
+            render(&b, &format!("{out}/{name}_vue.png"), DVec3::new(0.75, 0.6, 1.0), DVec3::new(0.0, 12.0, 0.0), 66.0, 1200, 1000);
+            if name.starts_with('0') {
+                render(&b, &format!("{out}/{name}_zoom.png"), DVec3::new(0.7, 0.45, 1.0), DVec3::new(6.0, 11.0, 4.0), 16.0, 1100, 1100);
+            } else {
+                // along the long junction line, then where the end cap meets the top
+                render(&b, &format!("{out}/{name}_zoom.png"), DVec3::new(1.0, 0.55, 0.35), DVec3::new(7.0, 11.0, 4.0), 18.0, 1100, 1100);
+                render(&b, &format!("{out}/{name}_coin.png"), DVec3::new(0.55, 0.5, 1.0), DVec3::new(6.0, 11.0, 13.0), 12.0, 1100, 1100);
+            }
+        }
+    }
+    if what == "lignes" {
+        // the bearing / base junction of the test part as lines, then its
+        // fillet alone as a strip of quads
+        use glam::DVec3;
+        let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp".into());
+        let s = support(4);
+        let bs = bake::build::BuildSettings { size: 1.5, tol: 0.02, fillet_rows: 0, threads: 2 };
+        let j = bake::build::junction(&support(2), 1, &bs).expect("junction");
+        let f = &j.fillet;
+        let st = &f.stats;
+        let len = |c: &Vec<DVec3>| (0..c.len()).map(|i| c[i].distance(c[(i + 1) % c.len()])).sum::<f64>();
+        println!("coin {:?} mm", j.corner.iter().map(len).collect::<Vec<_>>());
+        println!("rail socle {:?} mm", j.rail_a.iter().map(len).collect::<Vec<_>>());
+        println!("rail palier {:?} mm", j.rail_b.iter().map(len).collect::<Vec<_>>());
+        println!("fillet {} faces ({} q) open {} dev max {:.3} mean {:.4}", f.faces.len(), st.quads, st.open_edges, st.max_dev, st.mean_dev);
+        let part = bake::bake_blocking(&s, Quality::Max);
+        // the corner sits under the fillet: drawn dashed through the surface
+        let lines: Vec<(&Vec<DVec3>, [u8; 3], bool)> = j
+            .corner
+            .iter()
+            .map(|c| (c, [255, 214, 10], true))
+            .chain(j.rail_a.iter().map(|c| (c, [64, 156, 255], false)))
+            .chain(j.rail_b.iter().map(|c| (c, [255, 120, 40], false)))
+            .collect();
+        let views = [
+            ("a-vue", DVec3::new(0.75, 0.6, 1.0), DVec3::new(0.0, 12.0, 0.0), 62.0),
+            ("b-cote", DVec3::new(1.0, 0.45, 0.25), DVec3::new(8.0, 11.0, 0.0), 30.0),
+            ("c-bout", DVec3::new(0.6, 0.5, 1.0), DVec3::new(7.0, 11.0, 14.0), 13.0),
+        ];
+        for (name, dir, target, ext) in views {
+            render_lines(Some(&part), None, &lines, &format!("{out}/lignes-{name}.png"), dir, target, ext, 1400, 1050);
+            render_lines(Some(&part), Some(f), &lines, &format!("{out}/fillet-{name}.png"), dir, target, ext, 1400, 1050);
+        }
+        render_lines(None, Some(f), &lines, &format!("{out}/fillet-seul.png"), DVec3::new(0.75, 0.6, 1.0), DVec3::new(0.0, 11.0, 0.0), 36.0, 1400, 1050);
+        render_lines(None, Some(f), &lines, &format!("{out}/fillet-seul-coin.png"), DVec3::new(0.35, 1.0, 0.45), DVec3::new(7.0, 11.0, 14.0), 9.0, 1100, 1100);
+    }
     if what == "screws" {
         let s = screws_scene();
         let size: f64 = std::env::var("SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -584,6 +654,121 @@ pub fn render(b: &bake::Baked, path: &str, eye_dir: glam::DVec3, target: glam::D
     img.save(path).unwrap();
 }
 
+/// Shaded part without wire, the fillet strip with its wire, and curves on top.
+#[allow(clippy::too_many_arguments)]
+pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lines: &[(&Vec<glam::DVec3>, [u8; 3], bool)], path: &str, eye_dir: glam::DVec3, target: glam::DVec3, extent: f64, w: u32, h: u32) {
+    use glam::DVec3;
+    let fwd = (-eye_dir).normalize();
+    let right = fwd.cross(DVec3::Y).normalize();
+    let up = right.cross(fwd);
+    let scale = w.min(h) as f64 / extent;
+    let proj = |p: DVec3| -> (f64, f64, f64) {
+        let d = p - target;
+        (w as f64 * 0.5 + d.dot(right) * scale, h as f64 * 0.5 - d.dot(up) * scale, d.dot(fwd))
+    };
+    let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([24, 26, 30]));
+    let mut zb = vec![f64::MAX; (w * h) as usize];
+    let light = DVec3::new(-0.4, 0.8, 0.5).normalize();
+    let tri = |pts: &[DVec3], n: DVec3, col: [f64; 3], img: &mut image::RgbImage, zb: &mut Vec<f64>| {
+        let shade = (n.dot(light).abs() * 0.7 + 0.3).min(1.0);
+        let rgb = image::Rgb([(col[0] * shade * 255.0) as u8, (col[1] * shade * 255.0) as u8, (col[2] * shade * 255.0) as u8]);
+        for k in 1..pts.len() - 1 {
+            let t = [proj(pts[0]), proj(pts[k]), proj(pts[k + 1])];
+            let area = (t[1].0 - t[0].0) * (t[2].1 - t[0].1) - (t[2].0 - t[0].0) * (t[1].1 - t[0].1);
+            if area.abs() < 1e-12 {
+                continue;
+            }
+            let minx = t.iter().map(|p| p.0).fold(f64::MAX, f64::min).floor().max(0.0) as i64;
+            let maxx = t.iter().map(|p| p.0).fold(f64::MIN, f64::max).ceil().min(w as f64 - 1.0) as i64;
+            let miny = t.iter().map(|p| p.1).fold(f64::MAX, f64::min).floor().max(0.0) as i64;
+            let maxy = t.iter().map(|p| p.1).fold(f64::MIN, f64::max).ceil().min(h as f64 - 1.0) as i64;
+            for y in miny..=maxy {
+                for x in minx..=maxx {
+                    let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+                    let w0 = ((t[1].0 - px) * (t[2].1 - py) - (t[2].0 - px) * (t[1].1 - py)) / area;
+                    let w1 = ((t[2].0 - px) * (t[0].1 - py) - (t[0].0 - px) * (t[2].1 - py)) / area;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                        continue;
+                    }
+                    let z = w0 * t[0].2 + w1 * t[1].2 + w2 * t[2].2;
+                    let i = (y as u32 * w + x as u32) as usize;
+                    if z < zb[i] {
+                        zb[i] = z;
+                        img.put_pixel(x as u32, y as u32, rgb);
+                    }
+                }
+            }
+        }
+    };
+    let normal = |_b: &bake::Baked, f: &bake::BFace| -> DVec3 { f.normals.iter().fold(DVec3::ZERO, |s, n| s + *n).normalize_or_zero() };
+    if let Some(b) = part {
+        for f in &b.faces {
+            let pts: Vec<DVec3> = f.verts.iter().map(|v| b.positions[*v as usize]).collect();
+            tri(&pts, normal(b, f), [0.6, 0.61, 0.6], &mut img, &mut zb);
+        }
+    }
+    if let Some(b) = strip {
+        // slightly lifted so it wins over the part where they coincide
+        let lift = 0.15;
+        for f in &b.faces {
+            let n = normal(b, f);
+            let pts: Vec<DVec3> = f.verts.iter().map(|v| b.positions[*v as usize] + n * lift).collect();
+            tri(&pts, n, [0.95, 0.62, 0.32], &mut img, &mut zb);
+        }
+    }
+    let mut dash = 0.0f64;
+    let mut line = |a: DVec3, c: DVec3, col: image::Rgb<u8>, thick: i64, tol: f64, img: &mut image::RgbImage, zb: &[f64]| {
+        let (pa, pc) = (proj(a), proj(c));
+        let steps = ((pc.0 - pa.0).abs().max((pc.1 - pa.1).abs()).ceil() as usize).max(1);
+        for s in 0..=steps {
+            let t = s as f64 / steps as f64;
+            let (x, y, z) = (pa.0 + (pc.0 - pa.0) * t, pa.1 + (pc.1 - pa.1) * t, pa.2 + (pc.2 - pa.2) * t);
+            if tol.is_infinite() {
+                // dashed: 10 px on, 7 px off
+                dash += 1.0;
+                if dash % 17.0 >= 10.0 {
+                    continue;
+                }
+            }
+            for dx in -thick..=thick {
+                for dy in -thick..=thick {
+                    let (xi, yi) = (x as i64 + dx, y as i64 + dy);
+                    if xi < 0 || yi < 0 || xi >= w as i64 || yi >= h as i64 {
+                        continue;
+                    }
+                    let i = (yi as u32 * w + xi as u32) as usize;
+                    if z <= zb[i] + tol {
+                        img.put_pixel(xi as u32, yi as u32, col);
+                    }
+                }
+            }
+        }
+    };
+    if let Some(b) = strip {
+        let mut seen = std::collections::HashSet::new();
+        for f in &b.faces {
+            let n = normal(b, f) * 0.05;
+            for i in 0..f.verts.len() {
+                let (a, c) = (f.verts[i], f.verts[(i + 1) % f.verts.len()]);
+                if seen.insert((a.min(c), a.max(c))) {
+                    line(b.positions[a as usize] + n * 3.0, b.positions[c as usize] + n * 3.0, image::Rgb([40, 22, 10]), 0, 0.05, &mut img, &zb);
+                }
+            }
+        }
+    }
+    // curves: drawn through the surface when they are just under it (the
+    // corner sits under the fillet)
+    let px = extent / w.min(h) as f64;
+    for (c, col, xray) in lines {
+        let tol = if *xray { f64::INFINITY } else { 1.2 + 3.0 * px };
+        for i in 0..c.len() {
+            line(c[i], c[(i + 1) % c.len()], image::Rgb(*col), 1, tol, &mut img, &zb);
+        }
+    }
+    img.save(path).unwrap();
+}
+
 #[allow(dead_code)]
 pub fn check_cuts(scene: &Scene, q: Quality) {
     use bake::patch::{self, PatchSettings, Term};
@@ -699,6 +884,53 @@ pub fn screws_scene() -> Scene {
         slot.size = Vec3::new(2.4, 1.0, 0.4);
         s.add(g, NodeSpec::shape("Fente", slot).at(Vec3::new(0.0, 0.7, 0.0)).rot(Quat::from_rotation_y(0.6)).mode(CombineMode::Carve));
     }
+    s
+}
+
+/// The PC test part (pillow block), first `n` operations: base, bearing
+/// (lying cylinder on the base), bore, mirrored fixing holes.
+pub fn support(n: usize) -> Scene {
+    let mut s = Scene::new();
+    let root = s.root;
+    let lying = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::new(26.0, 5.0, 16.0);
+    b.round = 1.5;
+    s.add(root, NodeSpec::shape("Socle", b).at(Vec3::new(0.0, 5.0, 0.0)));
+    if n > 1 {
+        let mut c = Shape::new(PrimKind::Cylinder);
+        c.size = Vec3::new(11.0, 14.0, 0.0);
+        c.round = 1.0;
+        s.add(root, NodeSpec::shape("Palier", c).at(Vec3::new(0.0, 19.0, 0.0)).rot(lying).blend(2.0));
+    }
+    if n > 2 {
+        let mut c = Shape::new(PrimKind::Cylinder);
+        c.size = Vec3::new(6.0, 20.0, 0.0);
+        s.add(root, NodeSpec::shape("Alésage", c).at(Vec3::new(0.0, 19.0, 0.0)).rot(lying).mode(CombineMode::Carve).blend(0.6));
+    }
+    if n > 3 {
+        let mut c = Shape::new(PrimKind::Cylinder);
+        c.size = Vec3::new(2.6, 8.0, 0.0);
+        s.add(
+            root,
+            NodeSpec::shape("Trous de fixation", c)
+                .at(Vec3::new(19.0, 5.0, 10.0))
+                .mode(CombineMode::Carve)
+                .blend(0.4)
+                .mirror(scene::Mirror { x: true, y: false, z: true }),
+        );
+    }
+    s
+}
+
+/// The same base with a standing cylinder: the case the bake already handles.
+pub fn support_boss() -> Scene {
+    let mut s = support(1);
+    let root = s.root;
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(8.0, 6.0, 0.0);
+    c.round = 1.0;
+    s.add(root, NodeSpec::shape("Bossage", c).at(Vec3::new(0.0, 14.0, 0.0)).blend(2.0));
     s
 }
 

@@ -860,6 +860,162 @@ fn shape_names(scene: &Scene) -> Vec<String> {
     out
 }
 
+/// Lines of one junction, to look at it and to build it piece by piece.
+#[derive(Default)]
+pub struct Junction {
+    /// Where the two surfaces meet (the sharp corner, under the fillet).
+    pub corner: Vec<Vec<DVec3>>,
+    /// Where the fillet starts on the shapes before the step.
+    pub rail_a: Vec<Vec<DVec3>>,
+    /// Where the fillet starts on the new shape.
+    pub rail_b: Vec<Vec<DVec3>>,
+    /// The fillet alone: rows of quads between the two rails.
+    pub fillet: Baked,
+}
+
+/// Mean distance from the points of `a` to the polyline `b` (its vertices).
+fn mean_dist(a: &[DVec3], b: &[DVec3]) -> f64 {
+    a.iter().map(|p| b.iter().map(|q| q.distance_squared(*p)).fold(f64::MAX, f64::min).sqrt()).sum::<f64>() / a.len().max(1) as f64
+}
+
+/// Where the closed polyline `l` crosses the plane through `c` square to
+/// `t`, the crossing nearest to `c`.
+fn cut(l: &[DVec3], c: DVec3, t: DVec3) -> Option<DVec3> {
+    let n = l.len();
+    let mut best: Option<(f64, DVec3)> = None;
+    for i in 0..n {
+        let (a, b) = (l[i], l[(i + 1) % n]);
+        let (da, db) = ((a - c).dot(t), (b - c).dot(t));
+        if (da <= 0.0) != (db <= 0.0) {
+            let x = a.lerp(b, da / (da - db));
+            let d = x.distance_squared(c);
+            if best.map_or(true, |(bd, _)| d < bd) {
+                best = Some((d, x));
+            }
+        }
+    }
+    best.map(|(_, x)| x)
+}
+
+/// Junction of step `i` of the history (1 = first shape after the body)
+/// with the shapes before it.
+pub fn junction(scene: &Scene, i: usize, st: &BuildSettings) -> Result<Junction, String> {
+    let field = Field::new(&compile(scene));
+    let steps: Vec<Step> = field.steps().ok_or("historique en arbre (groupes fusionnés)")?;
+    if i == 0 || i >= steps.len() {
+        return Err("pas de jonction à cette étape".into());
+    }
+    let step = &steps[i];
+    let pre = field.prefix(&steps, i);
+    let post = field.prefix(&steps, i + 1);
+    let pr = &field.prims[step.prim as usize];
+    let k = step.k;
+    let ka = if step.mode == 1 { -k } else { k };
+    // fine native meshes to trace the curves on
+    let gs = GenSettings { tol: st.tol, max_edge: (st.size * 0.25).max(0.2), segs: 0 };
+    let mut a = Out::default();
+    let mut fa = vec![];
+    for s in &steps[..i] {
+        for inst in field.instances(s.prim) {
+            fa.extend(native(&mut a, &Surf { pr: &field.prims[s.prim as usize], inst }, &gs));
+        }
+    }
+    let on_a: Vec<usize> = (0..fa.len()).filter(|&f| fa[f].iter().all(|&v| pre.dist(a.pos[v as usize]).abs() < 0.05)).collect();
+    let mut j = Junction::default();
+    let mut out = Out::default();
+    for inst in field.instances(step.prim) {
+        let tool = Surf { pr, inst };
+        let sa = |p: DVec3| pre.dist(p);
+        let sb = |p: DVec3| tool.d(p);
+        let rail_a = |p: DVec3| solve2(&sa, &|x| sb(x) - k, p, st.size);
+        let corner = |p: DVec3| solve2(&sa, &sb, p, st.size);
+        let rail_b = |p: DVec3| solve2(&sb, &|x| sa(x) - ka, p, st.size);
+        let mut b = Out::default();
+        let fb = native(&mut b, &tool, &gs);
+        let all_b: Vec<usize> = (0..fb.len()).collect();
+        let fine = st.size / 4.0;
+        let first_c = j.corner.len();
+        for c in contour(&b.pos, &fb, &all_b, &sa) {
+            j.corner.push(densify(c, &corner, fine));
+        }
+        if k <= 1e-9 {
+            continue;
+        }
+        for c in contour(&b.pos, &fb, &all_b, &|p| sa(p) - ka) {
+            j.rail_b.push(densify(c, &rail_b, fine));
+        }
+        let first_a = j.rail_a.len();
+        for c in contour(&a.pos, &fa, &on_a, &|p| sb(p) - k) {
+            j.rail_a.push(densify(c, &rail_a, fine));
+        }
+        // the strip, like a bevel along the corner curve: one column per
+        // section plane square to the corner, as many as needed so that no
+        // edge of either rail or of the corner gets longer than the target
+        let corners: Vec<Vec<DVec3>> = j.corner[first_c..].iter().filter(|c| c.len() > 2).cloned().collect();
+        for cl in &corners {
+            let near = |loops: &[Vec<DVec3>]| -> Option<Vec<DVec3>> {
+                loops.iter().min_by(|x, y| mean_dist(cl, x).partial_cmp(&mean_dist(cl, y)).unwrap()).cloned()
+            };
+            let (Some(la), Some(lb)) = (near(&j.rail_a[first_a..]), near(&j.rail_b)) else { continue };
+            let spine = densify(cl.clone(), &corner, st.size / 10.0);
+            let m = spine.len();
+            let mut cols: Vec<(DVec3, DVec3, DVec3)> = vec![];
+            for i in 0..m {
+                let c = spine[i];
+                let t = (spine[(i + 1) % m] - spine[(i + m - 1) % m]).normalize_or_zero();
+                let (Some(p), Some(q)) = (cut(&la, c, t), cut(&lb, c, t)) else { continue };
+                let (p, q) = (rail_a(p), rail_b(q));
+                let far = |l: &(DVec3, DVec3, DVec3)| l.0.distance(p).max(l.1.distance(c)).max(l.2.distance(q)) >= st.size;
+                if cols.last().map_or(true, far) {
+                    cols.push((p, c, q));
+                }
+            }
+            // the loop closes on the first column
+            while cols.len() > 3 {
+                let (l, f) = (cols[cols.len() - 1], cols[0]);
+                if l.0.distance(f.0).max(l.1.distance(f.1)).max(l.2.distance(f.2)) < st.size * 0.5 {
+                    cols.pop();
+                } else {
+                    break;
+                }
+            }
+            let n = cols.len();
+            if n < 3 {
+                continue;
+            }
+            let width = cols.iter().map(|(p, c, q)| p.distance(*c) + c.distance(*q)).sum::<f64>() / n as f64 * 0.8;
+            let rows = if st.fillet_rows > 0 { st.fillet_rows } else { ((width / st.size).round() as usize).max(2) };
+            let grid: Vec<Vec<u32>> = (0..=rows)
+                .map(|r| {
+                    let t = r as f64 / rows as f64;
+                    cols.iter()
+                        .map(|&(p, c, e)| {
+                            let x = p * (1.0 - t) * (1.0 - t) + c * 2.0 * t * (1.0 - t) + e * t * t;
+                            let x = if r == 0 || r == rows { x } else { post.project(x).unwrap_or(x) };
+                            out.add(x)
+                        })
+                        .collect()
+                })
+                .collect();
+            for w in grid.windows(2) {
+                for q in 0..n {
+                    let q2 = (q + 1) % n;
+                    out.face(vec![w[0][q], w[0][q2], w[1][q2], w[1][q]], P_FILLET);
+                }
+            }
+        }
+    }
+    let mut b = Baked::default();
+    for (f, p) in out.faces.into_iter().zip(out.patch) {
+        b.faces.push(BFace { verts: f, normals: vec![], mat: 0, patch: p });
+    }
+    b.positions = out.pos;
+    let bs = BakeSettings { tol: st.tol, max_edge: st.size, trim_len: st.size, threads: st.threads, divisions: 0.0 };
+    finish(&post, &mut b, &bs, &Progress::default());
+    j.fillet = b;
+    Ok(j)
+}
+
 /// Builds the mesh of `scene` operation by operation. None when the history
 /// is not (yet) one this builder handles: the caller falls back.
 pub fn build(scene: &Scene, st: &BuildSettings, progress: &Progress) -> Result<Baked, String> {
@@ -931,6 +1087,15 @@ pub fn build(scene: &Scene, st: &BuildSettings, progress: &Progress) -> Result<B
     let bs = BakeSettings { tol: st.tol, max_edge: st.size, trim_len: st.size, threads: st.threads, divisions: 0.0 };
     progress.set(4, b.faces.len() as u32);
     finish(&field, &mut b, &bs, progress);
+    // a junction built wrong shows up as holes or as distance to the exact
+    // surface: never hand back a broken mesh, let the caller fall back
+    if b.stats.open_edges > 0 {
+        return Err(format!("jonction mal fermée ({} bords ouverts)", b.stats.open_edges));
+    }
+    let limit = (st.size * 0.5).max(1.0);
+    if b.stats.max_dev > limit {
+        return Err(format!("jonction mal construite (écart de {:.1} mm à la surface)", b.stats.max_dev).replace('.', ","));
+    }
     b.stats.terms = steps.len();
     b.stats.patches = steps.len();
     b.stats.constructive = true;

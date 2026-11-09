@@ -27,6 +27,8 @@ cargo run --release -p forme-core --example bake_probe -- build      # bake of t
 cargo run --release -p forme-core --example bake_probe -- variants   # 7 bake variants → /tmp/var_*.png
 cargo run --release -p forme-core --example bake_probe -- screws     # box + 4 kit screws
 cargo run --release -p forme-core --example bake_probe -- target     # hand-made target topology (reference)
+OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- lignes   # test part: junction lines + fillet strip alone
+OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- support  # test part, junction by junction (par opération or why not)
 ```
 
 `forme-shot` runs the real app headless (egui + wgpu). It accepts a software GPU (lavapipe / llvmpipe) and writes full-quality PNGs. Use it to check every visual change before showing it.
