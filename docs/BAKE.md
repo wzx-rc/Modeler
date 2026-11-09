@@ -20,9 +20,13 @@ Toujours dans cet ordre, à garder pour toutes les jonctions :
 
 Validé sur la pièce test « Support d'axe » : jonction palier / socle, anneau avant du palier, face avant en rayons droits (topologie A, sans pôle) soudée au fillet du socle, coins en éventail (`bake_probe lignes`, `anneau`, `raccord`, `liaison`). Puis la pièce entière (`bake_probe piece`) : 5168 quads, 100 % quads, 0 bord ouvert, 0 non-manifold, sommets sur la surface exacte. Cette version est écrite pour cette pièce (positions des trous, palier le long de z) : reste à la généraliser dans `build.rs`. Captures : `/mnt/project-files/forme-pc/jonctions/`.
 
-### R&D : décimer les loops plates (9 nov. 2026)
+### Passe secondaire : retirer les loops plates (9 nov. 2026, option, désactivée par défaut)
 
-`bake_probe decime` (seuil `DEG`, 5° par défaut) retire les edge loops fermées qui ne font pas de volume : en chaque sommet de la loop, le chemin qui la traverse (voisin d'un côté, sommet, voisin de l'autre) ne sort pas de la surface de plus de `DEG`. Les deux quads de part et d'autre fusionnent. Une loop à la fois, la plus plate d'abord. Sur la pièce test : 59 loops, 5168 → 2256 quads, toujours 100 % quads et fermé. Même résultat de 1° à 5° (les loops retirées sont exactement plates, la suivante est à 7,5° sur le palier). À 10° le palier perd une colonne sur deux, à 20° tout devient facetté.
+Validée par Romain, mais **jamais appliquée par le Bake par défaut**. C'est une option de la fenêtre Bake (« Passe secondaire · Retirer les loops plates (< 5°) ») qui tourne en arrière-plan sur le résultat du Bake ; la désactiver rend le Bake sans la passe, et l'export prend le maillage affiché. Code : `bake/decimate.rs` (`dissolve_flat_loops`, seuil `FLAT_LOOPS_DEG` = 5°), par tours : toutes les loops candidates, la plus plate d'abord, celles qui partagent une face avec une loop déjà retirée attendent le tour suivant.
+
+Sur les bakes de l'app : cube 20 mm 384 → 6 faces, cube arrondi 864 → 150, cube test (trou + fillet) 1376 → 624, cylindre arrondi 1392 → 1056, grenade (repli par surfaces) 132 345 → 125 737 en 3,3 s. Toujours fermé, aucun défaut ajouté.
+
+`bake_probe decime` (seuil `DEG`, 5° par défaut) appelle la même fonction et retire les edge loops fermées qui ne font pas de volume : en chaque sommet de la loop, le chemin qui la traverse (voisin d'un côté, sommet, voisin de l'autre) ne sort pas de la surface de plus de `DEG`. Les deux quads de part et d'autre fusionnent. Sur la pièce test : 59 loops, 5168 → 2256 quads, toujours 100 % quads et fermé. Même résultat de 1° à 5° (les loops retirées sont exactement plates, la suivante est à 7,5° sur le palier). À 10° le palier perd une colonne sur deux, à 20° tout devient facetté.
 
 Limite : une loop n'est retirée qu'entière. Celles qui passent par un trou, un éventail de fillet ou un pôle (coin du carré d'un trou) restent, même sur leurs morceaux plats (dessous du socle).
 

@@ -202,6 +202,8 @@ pub struct BakeJob {
     pub progress: std::sync::Arc<forme_core::bake::Progress>,
     pub rx: mpsc::Receiver<Option<forme_core::bake::Baked>>,
     pub started: f64,
+    /// The scene being baked (the optional second pass needs its field).
+    pub scene: Scene,
 }
 
 /// Parametric history → clean mesh. One shot: the result keeps no link with
@@ -220,6 +222,15 @@ pub struct BakeState {
     pub last_export: Option<String>,
     /// Cached constructive plan: (scene version, quality, quad size).
     pub plan: Option<(u64, forme_core::bake::Quality, Option<f64>)>,
+    /// Optional second pass: dissolve the flat edge loops. Off by default;
+    /// when on, `result` is `base` after the pass.
+    pub flat: bool,
+    /// The bake itself, before any optional pass.
+    pub base: Option<std::sync::Arc<forme_core::bake::Baked>>,
+    /// Scene `base` was baked from.
+    pub base_scene: Option<Scene>,
+    /// Second pass running in the background.
+    pub pass: Option<mpsc::Receiver<forme_core::bake::Baked>>,
 }
 
 impl BakeState {
@@ -420,6 +431,10 @@ impl AppState {
                 wire: true,
                 last_export: None,
                 plan: None,
+                flat: false,
+                base: None,
+                base_scene: None,
+                pass: None,
             },
             files_open: false,
             kit_open: false,
@@ -1583,12 +1598,41 @@ impl AppState {
         let progress = std::sync::Arc::new(forme_core::bake::Progress::default());
         let p2 = progress.clone();
         let (tx, rx) = mpsc::channel();
+        let sc = scene.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(forme_core::bake::bake(&scene, &settings, &p2));
+            let _ = tx.send(forme_core::bake::bake(&sc, &settings, &p2));
         });
-        self.bake.job = Some(BakeJob { progress, rx, started: self.now });
+        self.bake.job = Some(BakeJob { progress, rx, started: self.now, scene });
         self.bake.scene_version = self.scene_version;
         self.bake.last_export = None;
+        self.bake.pass = None;
+    }
+
+    /// Optional second pass on or off: runs it on the current bake in the
+    /// background, or goes back to the bake without it.
+    pub fn set_flat_pass(&mut self, on: bool) {
+        self.bake.flat = on;
+        self.bake.pass = None;
+        self.bake.last_export = None;
+        if on {
+            self.start_flat_pass();
+        } else if let Some(b) = &self.bake.base {
+            if !self.bake.result.as_ref().is_some_and(|r| std::sync::Arc::ptr_eq(r, b)) {
+                self.bake.result = Some(b.clone());
+                self.bake.version += 1;
+            }
+        }
+    }
+
+    fn start_flat_pass(&mut self) {
+        let (Some(base), Some(scene)) = (self.bake.base.clone(), self.bake.base_scene.clone()) else { return };
+        let threads = forme_core::bake::BakeSettings::preset(self.bake.quality).threads;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            use forme_core::bake::decimate::{dissolve_flat_loops, FLAT_LOOPS_DEG};
+            let _ = tx.send(dissolve_flat_loops(&scene, &base, FLAT_LOOPS_DEG, threads));
+        });
+        self.bake.pass = Some(rx);
     }
 
     pub fn cancel_bake(&mut self) {
@@ -1638,18 +1682,39 @@ impl AppState {
             }
         }
         if let Some((r, _)) = finished {
-            self.bake.job = None;
+            let job = self.bake.job.take().unwrap();
             match r {
                 Some(b) => {
                     let secs = if b.stats.seconds < 1.0 { format!("{:.0} ms", b.stats.seconds * 1000.0) } else { format!("{:.1} s", b.stats.seconds) };
                     let quads = if b.stats.quads == b.faces.len() { " · 100 % quads" } else { "" };
                     let msg = format!("Bake terminé · {} faces{quads} · {secs}", fmt_int(b.faces.len()));
-                    self.bake.result = Some(std::sync::Arc::new(b));
+                    let b = std::sync::Arc::new(b);
+                    self.bake.base = Some(b.clone());
+                    self.bake.base_scene = Some(job.scene);
+                    self.bake.result = Some(b);
                     self.bake.version += 1;
                     self.bake.show = true;
                     self.toast(msg);
+                    if self.bake.flat {
+                        self.start_flat_pass();
+                    }
                 }
                 None => self.toast("Bake annulé".to_string()),
+            }
+        }
+        if let Some(rx) = &self.bake.pass {
+            if let Ok(d) = rx.try_recv() {
+                self.bake.pass = None;
+                let s = &d.stats;
+                let msg = format!(
+                    "Passe loops plates · {} retirées · {} → {} faces",
+                    s.flat_loops,
+                    fmt_int(s.faces_before_flat),
+                    fmt_int(d.faces.len())
+                );
+                self.bake.result = Some(std::sync::Arc::new(d));
+                self.bake.version += 1;
+                self.toast(msg);
             }
         }
         if self.bake.show && self.bake.stale(self.scene_version) {

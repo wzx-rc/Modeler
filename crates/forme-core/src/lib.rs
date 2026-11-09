@@ -322,6 +322,27 @@ mod tests {
     }
 
     #[test]
+    fn flat_loops_pass_is_optional_and_keeps_the_mesh_closed() {
+        let mut s = Scene::new();
+        let r = s.root;
+        let mut b = Shape::new(PrimKind::Box);
+        b.round = 1.0;
+        s.add(r, NodeSpec::shape("b", b));
+        let mut c = Shape::new(PrimKind::Cylinder);
+        c.size = Vec3::new(4.0, 14.0, 0.0);
+        s.add(r, NodeSpec::shape("c", c).mode(CombineMode::Carve).blend(1.0));
+        let out = bake_ok(&s);
+        // off by default: the bake itself never runs it
+        assert_eq!(out.stats.flat_loops, 0);
+        let d = bake::decimate::dissolve_flat_loops(&s, &out, bake::decimate::FLAT_LOOPS_DEG, 2);
+        assert!(d.stats.flat_loops > 0 && d.faces.len() < out.faces.len());
+        assert_eq!(d.stats.faces_before_flat, out.faces.len());
+        assert_eq!(d.stats.open_edges + d.stats.nonmanifold_edges, 0, "pass opened the mesh");
+        assert_eq!(d.stats.quads, d.faces.len());
+        assert!(d.stats.max_dev <= out.stats.max_dev + 1e-6);
+    }
+
+    #[test]
     fn bake_threads_on_a_core_and_a_groove() {
         let mut s = Scene::new();
         let r = s.root;

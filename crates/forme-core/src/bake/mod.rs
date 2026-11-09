@@ -12,6 +12,7 @@ pub mod gen;
 pub mod patch;
 pub mod quad;
 pub mod build;
+pub mod decimate;
 
 use crate::mesh::Mesh;
 use crate::program::compile;
@@ -124,6 +125,11 @@ pub struct BakeStats {
     pub quad_size: f64,
     /// Why the bake par opération was not used (empty when it was).
     pub note: String,
+    /// Optional second pass (`decimate`): flat loops removed, 0 when off.
+    pub flat_loops: usize,
+    /// Faces before that pass.
+    pub faces_before_flat: usize,
+    pub flat_seconds: f64,
 }
 
 #[derive(Clone, Debug)]
