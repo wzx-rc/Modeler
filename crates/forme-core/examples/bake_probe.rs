@@ -441,6 +441,9 @@ fn main() {
     if what == "raccord" {
         raccord();
     }
+    if what == "liaison" {
+        liaison();
+    }
     if what == "screws" {
         let s = screws_scene();
         let size: f64 = std::env::var("SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -773,6 +776,32 @@ impl Weld {
 /// `inner` and `outer`: segments along the arc part; `chord`: along the
 /// bottom; outer - inner must be even (3-to-1 reductions in the middle row).
 fn front_face(full: &Field, inner: usize, outer: usize, chord: usize) -> (bake::Baked, String) {
+    let mut m = Weld::default();
+    let f = front_face_into(&mut m, full, inner, outer, chord);
+    let (b, open, nonman, dev) = weld_baked(m, full);
+    let face_n = b.faces.iter().filter(|f| f.patch != 2).count();
+    let info = format!(
+        "{} quads (face {face_n}, réductions {}), colonnes dedans {} / dehors {}, bords libres {open}, non-manifold {nonman}, écart max {dev:.3} mm, face la plus étroite {:.2} mm",
+        b.faces.len(),
+        f.reductions,
+        f.n_in,
+        f.n_out,
+        f.pinch
+    );
+    (b, info)
+}
+
+struct Front {
+    /// where the face meets the base fillet, from +x to -x: up the round's
+    /// end column, the chord, down the other end column
+    bottom: Vec<glam::DVec3>,
+    reductions: usize,
+    n_in: usize,
+    n_out: usize,
+    pinch: f64,
+}
+
+fn front_face_into(m: &mut Weld, full: &Field, inner: usize, outer: usize, chord: usize) -> Front {
     use glam::DVec3;
     use std::f64::consts::{FRAC_PI_2, PI, TAU};
     let steps = full.steps().unwrap();
@@ -826,7 +855,6 @@ fn front_face(full: &Field, inner: usize, outer: usize, chord: usize) -> (bake::
     let out_of = |j: usize| -> DVec3 { bound[first[j]] };
     let ring1: Vec<DVec3> = (0..n_in).map(|j| ring0[j].lerp(out_of(j), 1.0 / 3.0)).collect();
     let ring2: Vec<DVec3> = (0..n_out).map(|o| foot[o].lerp(bound[o], 2.0 / 3.0)).collect();
-    let mut m = Weld::default();
     for j in 0..n_in {
         let j2 = (j + 1) % n_in;
         m.quad([ring0[j], ring0[j2], ring1[j2], ring1[j]], 1);
@@ -887,7 +915,17 @@ fn front_face(full: &Field, inner: usize, outer: usize, chord: usize) -> (bake::
             m.quad([round_pt(i, t), round_pt(i + 1, t), round_pt(i + 1, t + 1), round_pt(i, t + 1)], 2);
         }
     }
-    // outward faces, exact normals
+    let mut bottom: Vec<DVec3> = (1..=rows_r).rev().map(|t| round_pt(outer, t)).collect();
+    bottom.extend(bound[..chord].iter().copied());
+    bottom.extend((0..=rows_r).map(|t| round_pt(0, t)));
+    let pinch = (0..chord).map(|i| ring0[i].distance(bound[i])).fold(f64::MAX, f64::min);
+    Front { bottom, reductions: k, n_in, n_out, pinch }
+}
+
+/// The welded quads as a mesh facing out of `full`, with its open and
+/// non-manifold edge counts and its largest distance to the surface.
+fn weld_baked(m: Weld, full: &Field) -> (bake::Baked, usize, usize, f64) {
+    use glam::DVec3;
     let mut b = bake::Baked::default();
     b.positions = m.pos.clone();
     for (mut f, patch) in m.faces {
@@ -902,23 +940,22 @@ fn front_face(full: &Field, inner: usize, outer: usize, chord: usize) -> (bake::
         let normals = f.iter().map(|v| full.grad(m.pos[*v as usize]).normalize_or_zero()).collect();
         b.faces.push(bake::BFace { verts: f, normals, mat: 0, patch });
     }
-    let mut edges: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+    let edges = edge_counts(&b);
+    let open = edges.values().filter(|&&c| c == 1).count();
+    let nonman = edges.values().filter(|&&c| c > 2).count();
+    let dev = b.positions.iter().map(|p| full.dist(*p).abs()).fold(0.0, f64::max);
+    (b, open, nonman, dev)
+}
+
+fn edge_counts(b: &bake::Baked) -> std::collections::HashMap<(u32, u32), u32> {
+    let mut edges = std::collections::HashMap::new();
     for f in &b.faces {
         for i in 0..f.verts.len() {
             let (a, c) = (f.verts[i], f.verts[(i + 1) % f.verts.len()]);
             *edges.entry((a.min(c), a.max(c))).or_default() += 1;
         }
     }
-    let open = edges.values().filter(|&&c| c == 1).count();
-    let nonman = edges.values().filter(|&&c| c > 2).count();
-    let dev = b.positions.iter().map(|p| full.dist(*p).abs()).fold(0.0, f64::max);
-    let pinch = (0..chord).map(|i| ring0[i].distance(bound[i])).fold(f64::MAX, f64::min);
-    let face_n = b.faces.iter().filter(|f| f.patch != 2).count();
-    let info = format!(
-        "{} quads (face {face_n}, réductions {k}), colonnes dedans {n_in} / dehors {n_out}, bords libres {open}, non-manifold {nonman}, écart max {dev:.3} mm, face la plus étroite {pinch:.2} mm",
-        b.faces.len()
-    );
-    (b, info)
+    edges
 }
 
 fn raccord() {
@@ -947,6 +984,150 @@ fn raccord() {
     }
 }
 
+/// Where the closed polyline `l` crosses the plane through `c` square to
+/// `t`, the crossing nearest to `c` (same as in the constructive bake).
+fn cut(l: &[glam::DVec3], c: glam::DVec3, t: glam::DVec3) -> Option<glam::DVec3> {
+    let n = l.len();
+    let mut best: Option<(f64, glam::DVec3)> = None;
+    for i in 0..n {
+        let (a, b) = (l[i], l[(i + 1) % n]);
+        let (da, db) = ((a - c).dot(t), (b - c).dot(t));
+        if (da <= 0.0) != (db <= 0.0) {
+            let x = a.lerp(b, da / (da - db));
+            let d = x.distance_squared(c);
+            if best.map_or(true, |(bd, _)| d < bd) {
+                best = Some((d, x));
+            }
+        }
+    }
+    best.map(|(_, x)| x)
+}
+
+/// The bearing / base fillet as one strip around the bearing, through the
+/// given points of its top edge (on the bearing). Each column takes its
+/// section from the bevel-like sections square to the corner curve, picked by
+/// where it sits on the top edge: so the front columns land exactly on the
+/// front face's bottom vertices and the strip shares them.
+fn base_fillet(m: &mut Weld, full: &Field, j: &bake::build::Junction, top: &[glam::DVec3], rows: usize) -> (usize, f64, f64) {
+    use glam::DVec3;
+    let longest = |ls: &[Vec<DVec3>]| ls.iter().max_by_key(|l| l.len()).unwrap().clone();
+    let (corner, rail_top, rail_base) = (longest(&j.corner), longest(&j.rail_b), longest(&j.rail_a));
+    // corner curve every 0.1 mm or less, one section per point
+    let mut spine = vec![];
+    for i in 0..corner.len() {
+        let (a, b) = (corner[i], corner[(i + 1) % corner.len()]);
+        let n = (a.distance(b) / 0.1).ceil().max(1.0) as usize;
+        spine.extend((0..n).map(|k| a.lerp(b, k as f64 / n as f64)));
+    }
+    let ns = spine.len();
+    let sec: Vec<(DVec3, DVec3, DVec3)> = (0..ns)
+        .filter_map(|i| {
+            let c = spine[i];
+            let t = (spine[(i + 1) % ns] - spine[(i + ns - 1) % ns]).normalize_or_zero();
+            Some((cut(&rail_top, c, t)?, c, cut(&rail_base, c, t)?))
+        })
+        .collect();
+    let n = sec.len();
+    // the section through a top point: between the two nearest sections
+    let section = |p: DVec3| -> (DVec3, DVec3) {
+        let i = (0..n).min_by(|&a, &b| sec[a].0.distance_squared(p).partial_cmp(&sec[b].0.distance_squared(p)).unwrap()).unwrap();
+        let mut best = (f64::MAX, sec[i].1, sec[i].2);
+        for (a, b) in [((i + n - 1) % n, i), (i, (i + 1) % n)] {
+            let (pa, pb) = (sec[a].0, sec[b].0);
+            let d = pb - pa;
+            let f = if d.length_squared() > 1e-12 { ((p - pa).dot(d) / d.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+            let e = p.distance(pa + d * f);
+            if e < best.0 {
+                best = (e, sec[a].1.lerp(sec[b].1, f), sec[a].2.lerp(sec[b].2, f));
+            }
+        }
+        (best.1, best.2)
+    };
+    let cols: Vec<Vec<DVec3>> = top
+        .iter()
+        .map(|&p| {
+            let (c, q) = section(p);
+            let q = full.project(q).unwrap_or(q);
+            (0..=rows)
+                .map(|r| {
+                    let t = r as f64 / rows as f64;
+                    let x = p * (1.0 - t) * (1.0 - t) + c * 2.0 * t * (1.0 - t) + q * t * t;
+                    if r == 0 || r == rows {
+                        x
+                    } else {
+                        full.project(x).unwrap_or(x)
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let nt = top.len();
+    for i in 0..nt {
+        let (a, b) = (&cols[i], &cols[(i + 1) % nt]);
+        for r in 0..rows {
+            m.quad([a[r], b[r], b[r + 1], a[r + 1]], 2);
+        }
+    }
+    let base_edges: Vec<f64> = (0..nt).map(|i| cols[i][rows].distance(cols[(i + 1) % nt][rows])).collect();
+    (nt * rows, base_edges.iter().cloned().fold(f64::MAX, f64::min), base_edges.iter().cloned().fold(0.0, f64::max))
+}
+
+/// Front face (proposal A) welded to the bearing / base fillet.
+fn liaison() {
+    use glam::DVec3;
+    let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp".into());
+    let s = support(4);
+    let full = Field::new(&compile(&s));
+    let part = bake::bake_blocking(&s, Quality::Max);
+    let bs = bake::build::BuildSettings { size: 1.5, tol: 0.02, fillet_rows: 0, threads: 2 };
+    let j = bake::build::junction(&support(2), 1, &bs).expect("junction");
+    let mut m = Weld::default();
+    let front = front_face_into(&mut m, &full, 36, 36, 12);
+    // top edge of the fillet all around: the face's bottom at the front, the
+    // bearing's side lines, and the same at the back (mirrored, for when the
+    // back face is built the same way)
+    let fb = &front.bottom;
+    let (first, last) = (fb[0], fb[fb.len() - 1]);
+    let side = |from: DVec3, to: DVec3| -> Vec<DVec3> {
+        let n = ((from.distance(to) / bs.size).round() as usize).max(1);
+        (1..n).map(|i| from.lerp(to, i as f64 / n as f64)).collect()
+    };
+    let mirror = |p: DVec3| DVec3::new(p.x, p.y, -p.z);
+    let mut top: Vec<DVec3> = fb.clone();
+    top.extend(side(last, mirror(last)));
+    top.extend(fb.iter().rev().map(|p| mirror(*p)));
+    top.extend(side(mirror(first), first));
+    let rows = 3;
+    let (n_fillet, base_min, base_max) = base_fillet(&mut m, &full, &j, &top, rows);
+    let (b, open, nonman, dev) = weld_baked(m, &full);
+    // the join itself: every edge of the face's bottom must have two faces
+    let edges = edge_counts(&b);
+    let id = |p: DVec3| b.positions.iter().position(|q| q.distance(p) < 1e-6).unwrap() as u32;
+    let joined = (0..fb.len() - 1).filter(|&i| {
+        let (a, c) = (id(fb[i]), id(fb[i + 1]));
+        edges.get(&(a.min(c), a.max(c))) == Some(&2)
+    });
+    println!(
+        "{} quads (fillet socle {n_fillet}, {} colonnes x {rows} rangées), jonction soudée {}/{} arêtes, bords libres {open}, non-manifold {nonman}, écart max {dev:.3} mm, arêtes côté socle {base_min:.2} à {base_max:.2} mm",
+        b.faces.len(),
+        top.len(),
+        joined.count(),
+        fb.len() - 1
+    );
+    let rail: Vec<(&Vec<DVec3>, [u8; 3], bool, bool)> = vec![];
+    let views = [
+        ("vue", DVec3::new(0.3, 0.25, 1.0), DVec3::new(0.0, 17.0, 14.0), 28.0),
+        ("bas", DVec3::new(0.3, 0.45, 1.0), DVec3::new(0.0, 11.5, 14.5), 10.0),
+        ("coin", DVec3::new(0.9, 0.7, 1.0), DVec3::new(7.5, 11.0, 13.5), 8.0),
+        ("tour", DVec3::new(0.75, 0.6, 1.0), DVec3::new(0.0, 15.0, 0.0), 50.0),
+    ];
+    for (v, dir, target, ext) in views {
+        render_lines(Some(&part), Some(&b), &rail, &format!("{out}/liaison-{v}.png"), dir, target, ext, 1400, 1050);
+    }
+    render_lines(None, Some(&b), &rail, &format!("{out}/liaison-seul.png"), DVec3::new(0.45, 0.35, 1.0), DVec3::new(0.0, 15.0, 8.0), 34.0, 1400, 1050);
+    render_lines(None, Some(&b), &rail, &format!("{out}/liaison-seul-coin.png"), DVec3::new(0.9, 0.7, 1.0), DVec3::new(7.5, 11.0, 13.5), 8.0, 1400, 1050);
+}
+
 /// Shaded part without wire, the fillet strip with its wire, and curves on top.
 #[allow(clippy::too_many_arguments)]
 pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lines: &[(&Vec<glam::DVec3>, [u8; 3], bool, bool)], path: &str, eye_dir: glam::DVec3, target: glam::DVec3, extent: f64, w: u32, h: u32) {
@@ -962,7 +1143,7 @@ pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lin
     let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([24, 26, 30]));
     let mut zb = vec![f64::MAX; (w * h) as usize];
     let light = DVec3::new(-0.4, 0.8, 0.5).normalize();
-    let tri = |pts: &[DVec3], n: DVec3, col: [f64; 3], img: &mut image::RgbImage, zb: &mut Vec<f64>| {
+    let tri = |pts: &[DVec3], n: DVec3, col: [f64; 3], bias: f64, img: &mut image::RgbImage, zb: &mut Vec<f64>| {
         let shade = (n.dot(light).abs() * 0.7 + 0.3).min(1.0);
         let rgb = image::Rgb([(col[0] * shade * 255.0) as u8, (col[1] * shade * 255.0) as u8, (col[2] * shade * 255.0) as u8]);
         for k in 1..pts.len() - 1 {
@@ -984,7 +1165,7 @@ pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lin
                     if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
                         continue;
                     }
-                    let z = w0 * t[0].2 + w1 * t[1].2 + w2 * t[2].2;
+                    let z = w0 * t[0].2 + w1 * t[1].2 + w2 * t[2].2 + bias;
                     let i = (y as u32 * w + x as u32) as usize;
                     if z < zb[i] {
                         zb[i] = z;
@@ -998,7 +1179,9 @@ pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lin
     if let Some(b) = part {
         for f in &b.faces {
             let pts: Vec<DVec3> = f.verts.iter().map(|v| b.positions[*v as usize]).collect();
-            tri(&pts, normal(b, f), [0.6, 0.61, 0.6], &mut img, &mut zb);
+            // pushed back a little: the shaded part is only an approximation of the
+            // surface and must not poke through the exact strips
+            tri(&pts, normal(b, f), [0.6, 0.61, 0.6], 0.35, &mut img, &mut zb);
         }
     }
     if let Some(b) = strip {
@@ -1012,7 +1195,7 @@ pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lin
                 3 => [0.58, 0.82, 0.52],
                 _ => [0.95, 0.62, 0.32],
             };
-            tri(&pts, n, col, &mut img, &mut zb);
+            tri(&pts, n, col, 0.0, &mut img, &mut zb);
         }
     }
     let mut dash = 0.0f64;
