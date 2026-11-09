@@ -151,6 +151,30 @@ impl Harness {
         eprintln!("{path}  ({:.1?})", t0.elapsed());
     }
 
+    /// One app frame through the interactive path (progressive refinement),
+    /// as on iPad; returns the wall time and saves the image if `name`.
+    fn frame_live(&mut self, name: Option<&str>) -> f32 {
+        self.t += 1.0 / 60.0;
+        let raw = self.raw();
+        self.st.tick(self.t);
+        let st = &mut self.st;
+        let mut out = self.ctx.run_pass(raw, |ctx| forme_app::run(ctx, st));
+        let paint = self.ctx.tessellate(std::mem::take(&mut out.shapes), out.pixels_per_point);
+        let w = (self.size[0] * self.ppp) as u32;
+        let h = (self.size[1] * self.ppp) as u32;
+        let tex = self.gpu.target(w, h, FMT);
+        let view = tex.create_view(&Default::default());
+        let t0 = Instant::now();
+        self.fr.render(&self.gpu.device, &self.gpu.queue, &view, [w, h], self.ppp, &mut self.st, &paint, &mut out.textures_delta, false);
+        let px = self.gpu.read_rgba(&tex);
+        let ms = t0.elapsed().as_secs_f32() * 1000.0;
+        if let Some(name) = name {
+            let path = format!("{}/{}.png", self.out_dir, name);
+            image::save_buffer(&path, &px, w, h, image::ExtendedColorType::Rgba8).expect("png");
+        }
+        ms
+    }
+
     fn find(&self, name: &str) -> NodeId {
         self.st.scene.nodes.values().find(|n| n.name == name).map(|n| n.id).unwrap_or_else(|| panic!("node {name}"))
     }
@@ -340,6 +364,54 @@ fn main() {
     }
     if want("19") {
         bake_cube(&mut h);
+    }
+    if want("live") {
+        // the iPad path: pixel budgets, quick image while moving, refinement in bands
+        h.reset(AppState::default());
+        h.fr.full_px = 2.4e6;
+        h.fr.interactive_px = 4.5e5;
+        h.fr.band_px = 3.0e5;
+        let mut n = 0;
+        let mut times = vec![];
+        while n < 200 {
+            times.push(h.frame_live(None));
+            n += 1;
+            if !h.fr.needs_refine() {
+                break;
+            }
+        }
+        eprintln!("immobile : image complète après {n} frames, {:?} ms", times.iter().map(|t| *t as u32).collect::<Vec<_>>());
+        h.frame_live(Some("live-immobile"));
+        // orbit: quick image every frame
+        let c = egui::pos2(600.0, 420.0);
+        h.st.pointer_kind = forme_app::state::PointerKind::Finger;
+        let mut times = vec![];
+        h.st.interacting = true;
+        for i in 0..12 {
+            h.st.camera.yaw += 0.03;
+            h.st.view_changed();
+            times.push(h.frame_live(None));
+            let _ = (i, c);
+        }
+        h.st.interacting = false;
+        eprintln!("en mouvement : {:?} ms", times.iter().map(|t| *t as u32).collect::<Vec<_>>());
+        let mut n = 0;
+        while h.fr.needs_refine() && n < 200 {
+            h.frame_live(None);
+            n += 1;
+        }
+        eprintln!("raffinage après mouvement : {n} frames");
+        h.frame_live(Some("live-apres"));
+        // a blank document (first launch)
+        h.reset(AppState::new(forme_core::Scene::new(), "Sans titre"));
+        h.frame_live(None);
+        for _ in 0..20 {
+            if !h.fr.needs_refine() {
+                break;
+            }
+            h.frame_live(None);
+        }
+        h.frame_live(Some("live-vierge"));
     }
     if want("22") {
         edges_cube(&mut h);

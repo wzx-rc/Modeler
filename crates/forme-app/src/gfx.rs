@@ -1,6 +1,11 @@
-//! Frame composition: the raymarched scene goes to an offscreen texture
-//! (re-rendered only when something changed, at reduced resolution while the
-//! user is moving things), then it is blitted and egui is drawn on top.
+//! Frame composition: the raymarched scene goes to offscreen textures,
+//! re-rendered only when something changed, then it is blitted and egui is
+//! drawn on top.
+//!
+//! The scene never holds the UI back: while the user moves things, a small
+//! image (its resolution adapts to the measured frame time) is rendered each
+//! frame; once still, the full-quality image is refined band by band across
+//! frames (a pixel budget per frame), and swapped in when complete.
 
 use crate::state::AppState;
 use forme_core::NodeId;
@@ -29,16 +34,22 @@ struct Offscreen {
     size: [u32; 2],
 }
 
+/// Everything the scene image depends on (besides its size and quality).
 #[derive(Clone, Copy, PartialEq)]
-struct RenderKey {
+struct StateKey {
     scene: u64,
     view: u64,
     sel: Option<NodeId>,
-    size: [u32; 2],
-    full: bool,
     grid: bool,
     cam: [u32; 6],
     bake: (bool, u64, bool),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct RenderKey {
+    state: StateKey,
+    size: [u32; 2],
+    full: bool,
 }
 
 pub struct FrameRenderer {
@@ -50,14 +61,32 @@ pub struct FrameRenderer {
     blit: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    offscreen: Option<Offscreen>,
+    /// Quick image (while moving, and as a preview) and full-quality image.
+    low: Option<Offscreen>,
+    high: Option<Offscreen>,
     format: wgpu::TextureFormat,
     uploaded: (u64, Option<NodeId>),
-    last_key: Option<RenderKey>,
+    key_low: Option<RenderKey>,
+    key_high: Option<RenderKey>,
+    /// Rows of the full-quality image already rendered.
+    high_rows: u32,
+    /// Which image the shared view uniforms were last written for.
+    uniforms: Option<RenderKey>,
+    show_high: bool,
     pub settings: Settings,
-    /// Fraction of full resolution used while interacting.
+    /// Fraction of full resolution used while interacting (upper bound).
     pub interactive_scale: f32,
     pub full_scale: f32,
+    /// Pixel budgets (0 = use the scales): full image, quick image, and
+    /// pixels refined per frame.
+    pub full_px: f32,
+    pub interactive_px: f32,
+    pub band_px: f32,
+    /// Adaptive factor on the quick image (from the measured frame time).
+    adapt: f32,
+    frame_ms: f32,
+    last_frame: Option<std::time::Instant>,
+    last_moving: bool,
     pub renders: u64,
 }
 
@@ -123,21 +152,30 @@ impl FrameRenderer {
             blit,
             blit_layout,
             sampler,
-            offscreen: None,
+            low: None,
+            high: None,
             format,
             uploaded: (0, None),
-            last_key: None,
+            key_low: None,
+            key_high: None,
+            high_rows: 0,
+            uniforms: None,
+            show_high: false,
             settings: Settings::default(),
             interactive_scale: 0.5,
             full_scale: 1.0,
+            full_px: 0.0,
+            interactive_px: 0.0,
+            band_px: 1.5e6,
+            adapt: 1.0,
+            frame_ms: 16.0,
+            last_frame: None,
+            last_moving: false,
             renders: 0,
         }
     }
 
-    fn ensure_offscreen(&mut self, device: &wgpu::Device, size: [u32; 2]) {
-        if self.offscreen.as_ref().map(|o| o.size == size).unwrap_or(false) {
-            return;
-        }
+    fn make_offscreen(&self, device: &wgpu::Device, size: [u32; 2]) -> Offscreen {
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("forme-scene"),
             size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
@@ -157,8 +195,7 @@ impl FrameRenderer {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
         });
-        self.offscreen = Some(Offscreen { view, bind, size });
-        self.last_key = None;
+        Offscreen { view, bind, size }
     }
 
     /// Renders one frame into `target` (size in physical pixels).
@@ -197,58 +234,148 @@ impl FrameRenderer {
 
         // 2. scene image (only when something changed)
         let moving = !force_full && (st.interacting || st.placement.is_some() || st.handle_drag.is_some());
-        let scale = if moving { self.interactive_scale } else { self.full_scale };
-        let w = ((size_px[0] as f32 * scale) as u32).max(16);
-        let h = ((size_px[1] as f32 * scale) as u32).max(16);
-        self.ensure_offscreen(device, [w, h]);
+        let now = std::time::Instant::now();
+        if let Some(t) = self.last_frame {
+            let dt = now.duration_since(t).as_secs_f32() * 1000.0;
+            if moving && self.last_moving {
+                // the quick image follows the measured frame time
+                self.frame_ms = self.frame_ms * 0.7 + dt.min(200.0) * 0.3;
+                if self.frame_ms > 30.0 {
+                    self.adapt = (self.adapt * 0.92).max(0.35);
+                } else if self.frame_ms < 18.0 {
+                    self.adapt = (self.adapt * 1.04).min(1.0);
+                }
+            } else if !moving && !self.last_moving && self.key_high.is_some() && !self.show_high && self.high_rows > 0 {
+                // refinement: as many pixels per frame as keeps the UI fluid
+                if dt > 40.0 {
+                    self.band_px = (self.band_px * 0.7).max(4.0e4);
+                } else if dt < 22.0 {
+                    self.band_px = (self.band_px * 1.15).min(8.0e6);
+                }
+            }
+        }
+        self.last_frame = Some(now);
+        self.last_moving = moving;
         let cam = st.camera;
-        let key = RenderKey {
+        let state = StateKey {
             scene: st.scene_version,
             view: st.view_version,
             sel,
-            size: [w, h],
-            full: !moving,
             grid: st.grid,
             cam: [cam.target.x.to_bits(), cam.target.y.to_bits(), cam.yaw.to_bits(), cam.pitch.to_bits(), cam.dist.to_bits(), cam.ortho as u32],
             bake: (show_bake, self.mesh_version, st.bake.wire),
         };
+        let px = size_px[0] as f32 * size_px[1] as f32;
+        let budget = |px_budget: f32, cap: f32| if px_budget > 0.0 { (px_budget / px).sqrt().min(cap) } else { cap };
+        let full_scale = budget(self.full_px, self.full_scale);
+        let low_scale = (budget(self.interactive_px, self.interactive_scale) * self.adapt).min(full_scale);
+        let dims = |sc: f32| [((size_px[0] as f32 * sc) as u32).max(16), ((size_px[1] as f32 * sc) as u32).max(16)];
+        let (low_size, high_size) = (dims(low_scale), dims(full_scale));
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
-        if self.last_key != Some(key) {
-            let k = (w as f32) / (size_px[0] as f32 / ppp);
+
+        // what to draw this frame: (full quality?, rows from, rows to)
+        let mut job: Option<(bool, u32, u32)> = None;
+        if force_full {
+            self.key_high = Some(RenderKey { state, size: high_size, full: true });
+            if self.high.as_ref().map(|o| o.size) != Some(high_size) {
+                self.high = Some(self.make_offscreen(device, high_size));
+            }
+            if self.uniforms != self.key_high || self.high_rows < high_size[1] || !self.show_high {
+                job = Some((true, 0, high_size[1]));
+            }
+        } else if moving {
+            let k = RenderKey { state, size: low_size, full: false };
+            if self.key_low != Some(k) {
+                job = Some((false, 0, low_size[1]));
+            }
+            self.show_high = false;
+        } else {
+            let kh = RenderKey { state, size: high_size, full: true };
+            if self.key_high != Some(kh) {
+                // new image to refine: a quick preview first if the quick one is stale
+                self.key_high = Some(kh);
+                self.high_rows = 0;
+                self.show_high = false;
+                if self.key_low.map(|k| k.state) != Some(state) {
+                    job = Some((false, 0, low_size[1]));
+                }
+            }
+            if self.key_high == Some(kh) && self.high_rows >= high_size[1] {
+                // still image already complete (e.g. a touch that changed nothing)
+                self.show_high = true;
+            }
+            if job.is_none() && self.high_rows < high_size[1] {
+                let rows = ((self.band_px / high_size[0] as f32) as u32).clamp(8, high_size[1]);
+                job = Some((true, self.high_rows, (self.high_rows + rows).min(high_size[1])));
+            }
+        }
+
+        if let Some((full, r0, r1)) = job {
+            let size = if full { high_size } else { low_size };
+            let key = RenderKey { state, size, full };
+            let slot = if full { &mut self.high } else { &mut self.low };
+            if slot.as_ref().map(|o| o.size) != Some(size) {
+                let o = self.make_offscreen(device, size);
+                if full {
+                    self.high = Some(o);
+                } else {
+                    self.low = Some(o);
+                }
+            }
             let pv = st.view();
+            let k = (size[0] as f32) / (size_px[0] as f32 / ppp);
             let view = View {
                 eye: pv.eye,
                 target: pv.target,
                 fov_y: pv.fov_y,
-                size: [w as f32, h as f32],
+                size: [size[0] as f32, size[1] as f32],
                 principal: [pv.principal[0] * k, pv.principal[1] * k],
             };
-            let mut settings = self.settings;
-            settings.grid = st.grid;
-            settings.shadows = !moving && self.settings.shadows;
-            settings.ao = !moving && self.settings.ao;
-            if moving {
-                settings.max_steps = 110;
+            if self.uniforms != Some(key) {
+                let mut settings = self.settings;
+                settings.grid = st.grid;
+                settings.shadows = full && self.settings.shadows;
+                settings.ao = full && self.settings.ao;
+                if !full {
+                    settings.max_steps = 110;
+                }
+                settings.hide_scene = show_bake;
+                self.scene.update_view(queue, &view, &settings);
+                self.uniforms = Some(key);
             }
-            settings.hide_scene = show_bake;
-            self.scene.update_view(queue, &view, &settings);
-            let off = self.offscreen.as_ref().unwrap();
+            let off = if full { self.high.as_ref().unwrap() } else { self.low.as_ref().unwrap() };
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &off.view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: if r0 == 0 { wgpu::LoadOp::Clear(wgpu::Color::BLACK) } else { wgpu::LoadOp::Load },
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 ..Default::default()
             });
+            pass.set_scissor_rect(0, r0, size[0], r1 - r0);
             self.scene.draw(&mut pass);
             drop(pass);
-            if show_bake {
-                self.mesh.draw(device, queue, &mut enc, &off.view, [w, h], &view);
+            let complete = r1 >= size[1];
+            if complete && show_bake {
+                self.mesh.draw(device, queue, &mut enc, &off.view, size, &view);
             }
-            self.last_key = Some(key);
+            if full {
+                self.high_rows = r1;
+                if complete {
+                    self.show_high = true;
+                }
+            } else {
+                self.key_low = Some(key);
+                if !force_full && !moving {
+                    // the next frames refine the full image
+                    self.high_rows = 0;
+                }
+            }
             self.renders += 1;
         }
 
@@ -263,7 +390,8 @@ impl FrameRenderer {
 
         // 4. blit + UI
         {
-            let off = self.offscreen.as_ref().unwrap();
+            let shown = if self.show_high { self.high.as_ref() } else { self.low.as_ref().or(self.high.as_ref()) };
+            let off = shown.unwrap();
             let mut pass = enc
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("ui"),
@@ -301,8 +429,8 @@ impl FrameRenderer {
         textures.clear();
     }
 
-    /// True when the last frame used the reduced resolution (a full one is due).
+    /// True while the full-quality image is still being refined.
     pub fn needs_refine(&self) -> bool {
-        self.last_key.map(|k| !k.full).unwrap_or(false)
+        !self.show_high
     }
 }

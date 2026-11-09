@@ -361,6 +361,11 @@ pub fn line_param(o: Vec3, d: Vec3, ro: Vec3, rd: Vec3) -> f32 {
     (b * e - d0) / den
 }
 
+fn new_version_base() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) << 32
+}
+
 impl Default for AppState {
     fn default() -> Self {
         let mut s = Self::new(demo::grenade(), "Grenade sci-fi");
@@ -391,8 +396,9 @@ impl AppState {
             pointer_kind: PointerKind::Mouse,
             screen: [1194.0, 834.0],
             panel_visible: true,
-            scene_version: 1,
-            view_version: 1,
+            // unique per document instance: renderer caches never mistake two documents
+            scene_version: new_version_base() + 1,
+            view_version: new_version_base() + 1,
             interacting: false,
             toast: None,
             export_open: false,

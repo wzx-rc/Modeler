@@ -11,6 +11,9 @@ use winit::event::{Force, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+/// Autosave of the current session (written when the app goes to the background).
+const SESSION: &str = "Session";
+
 struct Gfx {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -45,13 +48,15 @@ impl App {
     fn new() -> Self {
         let ctx = egui::Context::default();
         theme::install(&ctx);
-        let st = match files::load(&files::project_path("Autosauvegarde")) {
+        // the last session if there is one, else an empty scene (the demo
+        // grenade is in Documents)
+        let st = match files::load(&files::project_path(SESSION)) {
             Ok(scene) => {
-                let mut s = AppState::new(scene, "Autosauvegarde");
+                let mut s = AppState::new(scene, SESSION);
                 s.frame_all();
                 s
             }
-            Err(_) => AppState::default(),
+            Err(_) => AppState::new(forme_core::Scene::new(), "Sans titre"),
         };
         App {
             window: None,
@@ -187,8 +192,11 @@ impl ApplicationHandler for App {
         let mut fr = FrameRenderer::new(&device, config.format);
         #[cfg(target_os = "ios")]
         {
-            fr.full_scale = 0.85;
-            fr.interactive_scale = 0.5;
+            // pixel budgets: iPad Pro screens are 4 to 5.6 Mpx, the raymarcher
+            // renders fewer and the image is upscaled
+            fr.full_px = 2.4e6;
+            fr.interactive_px = 4.5e5;
+            fr.band_px = 3.0e5;
         }
         let es = egui_winit::State::new(
             self.ctx.clone(),
@@ -270,7 +278,7 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                let _ = files::save(&self.st.scene, "Autosauvegarde");
+                let _ = files::save(&self.st.scene, SESSION);
                 el.exit();
             }
             WindowEvent::Resized(size) => {
@@ -288,6 +296,11 @@ impl ApplicationHandler for App {
                 window.request_redraw();
             }
         }
+    }
+
+    /// iPadOS: going to the background may be the last chance to save.
+    fn suspended(&mut self, _el: &ActiveEventLoop) {
+        let _ = files::save(&self.st.scene, SESSION);
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
