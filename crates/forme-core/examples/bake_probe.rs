@@ -438,6 +438,9 @@ fn main() {
         }
         render_lines(None, Some(&strip), &lines, &format!("{out}/anneau-polys-seul.png"), DVec3::new(0.45, 0.35, 1.0), DVec3::new(0.0, 18.0, 14.0), 30.0, 1400, 1050);
     }
+    if what == "raccord" {
+        raccord();
+    }
     if what == "screws" {
         let s = screws_scene();
         let size: f64 = std::env::var("SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -742,6 +745,208 @@ pub fn render(b: &bake::Baked, path: &str, eye_dir: glam::DVec3, target: glam::D
     img.save(path).unwrap();
 }
 
+/// Welded quad mesh under construction.
+#[derive(Default)]
+struct Weld {
+    pos: Vec<glam::DVec3>,
+    faces: Vec<(Vec<u32>, u32)>,
+    map: std::collections::HashMap<(i64, i64, i64), u32>,
+}
+
+impl Weld {
+    fn v(&mut self, p: glam::DVec3) -> u32 {
+        let k = ((p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64, (p.z * 1e6).round() as i64);
+        let n = self.pos.len() as u32;
+        *self.map.entry(k).or_insert_with(|| {
+            self.pos.push(p);
+            n
+        })
+    }
+    fn quad(&mut self, q: [glam::DVec3; 4], patch: u32) {
+        let f: Vec<u32> = q.iter().map(|p| self.v(*p)).collect();
+        self.faces.push((f, patch));
+    }
+}
+
+/// Front face of the bearing between its two rings (bore fillet inside,
+/// 1 mm round outside), down to the line where the base fillet starts.
+/// `inner` and `outer`: segments along the arc part; `chord`: along the
+/// bottom; outer - inner must be even (3-to-1 reductions in the middle row).
+fn front_face(full: &Field, inner: usize, outer: usize, chord: usize) -> (bake::Baked, String) {
+    use glam::DVec3;
+    use std::f64::consts::{FRAC_PI_2, PI, TAU};
+    let steps = full.steps().unwrap();
+    let pal = &full.prims[steps[1].prim as usize];
+    let inst = full.instances(steps[1].prim)[0];
+    let (r, hh, rd) = (pal.size.x, pal.size.y, pal.round);
+    let (rb, kb) = (full.prims[steps[2].prim as usize].size.x, steps[2].k);
+    let base = &full.prims[steps[0].prim as usize];
+    let base_top = full.instances(steps[0].prim)[0].to_world.translation.y + base.size.y;
+    // the base fillet reaches the bearing up to this local z (world height)
+    let zc = inst.to_local.transform_point3(DVec3::new(0.0, base_top + steps[1].k, 0.0)).z;
+    let w = |rho: f64, y: f64, a: f64| inst.to_world.transform_point3(DVec3::new(rho * a.cos(), y, rho * a.sin()));
+    let ri = rb + kb;
+    let ro = r - rd;
+    let a1 = (zc / ro).asin();
+    let a2 = PI - a1;
+    let span = TAU - (a2 - a1);
+    // inner circle samples: the bottom (chord) part, then the arc part
+    let mut ang_in: Vec<f64> = (0..chord).map(|i| a1 + (a2 - a1) * i as f64 / chord as f64).collect();
+    ang_in.extend((0..inner).map(|i| a2 + span * i as f64 / inner as f64));
+    // outer boundary: chord points, then the arc at the round's edge
+    let (xa, xb) = (ro * a1.cos(), ro * a2.cos());
+    let mut bound: Vec<DVec3> = (0..chord).map(|i| inst.to_world.transform_point3(DVec3::new(xa + (xb - xa) * i as f64 / chord as f64, hh, zc))).collect();
+    let arc: Vec<DVec3> = (0..=outer).map(|i| w(ro, hh, a2 + span * i as f64 / outer as f64)).collect();
+    bound.extend(arc[..outer].iter().copied());
+    let n_in = ang_in.len();
+    let n_out = bound.len();
+    let ring0: Vec<DVec3> = ang_in.iter().map(|a| w(ri, hh, *a)).collect();
+    // outer segments per inner segment: 1, or 3 for a reduction, spread evenly
+    let k = (outer - inner) / 2;
+    let mut per = vec![1usize; n_in];
+    for j in 0..k {
+        per[chord + ((j as f64 + 0.5) * inner as f64 / k as f64) as usize] = 3;
+    }
+    // where each outer vertex sits on the inner side (to place the rows)
+    let mut foot = vec![DVec3::ZERO; n_out];
+    let mut first = vec![0usize; n_in + 1];
+    let mut o = 0;
+    for j in 0..n_in {
+        first[j] = o;
+        for m in 0..per[j] {
+            let t = m as f64 / per[j] as f64;
+            let a = ang_in[j] + (if j + 1 < n_in { ang_in[j + 1] } else { ang_in[0] + TAU } - ang_in[j]) * t;
+            foot[o] = w(ri, hh, a);
+            o += 1;
+        }
+    }
+    first[n_in] = n_out;
+    assert_eq!(o, n_out);
+    // the boundary point straight out of each inner sample, for row 1
+    let out_of = |j: usize| -> DVec3 { bound[first[j]] };
+    let ring1: Vec<DVec3> = (0..n_in).map(|j| ring0[j].lerp(out_of(j), 1.0 / 3.0)).collect();
+    let ring2: Vec<DVec3> = (0..n_out).map(|o| foot[o].lerp(bound[o], 2.0 / 3.0)).collect();
+    let mut m = Weld::default();
+    for j in 0..n_in {
+        let j2 = (j + 1) % n_in;
+        m.quad([ring0[j], ring0[j2], ring1[j2], ring1[j]], 1);
+    }
+    for j in 0..n_in {
+        let j2 = (j + 1) % n_in;
+        let o0 = first[j];
+        let r2 = |o: usize| ring2[o % n_out];
+        if per[j] == 1 {
+            m.quad([ring1[j], ring1[j2], r2(o0 + 1), r2(o0)], 1);
+        } else {
+            let a = ((ring1[j] * 2.0 + ring1[j2]) / 3.0).lerp(r2(o0 + 1), 0.5);
+            let b = ((ring1[j] + ring1[j2] * 2.0) / 3.0).lerp(r2(o0 + 2), 0.5);
+            m.quad([ring1[j], a, r2(o0 + 1), r2(o0)], 3);
+            m.quad([a, b, r2(o0 + 2), r2(o0 + 1)], 3);
+            m.quad([b, ring1[j2], r2(o0 + 3), r2(o0 + 2)], 3);
+            m.quad([ring1[j], ring1[j2], b, a], 3);
+        }
+    }
+    for o in 0..n_out {
+        let o2 = (o + 1) % n_out;
+        m.quad([ring2[o], ring2[o2], bound[o2], bound[o]], 1);
+    }
+    // bore fillet: rows from the face down into the bore, same columns
+    let rows_b = 2;
+    let bez = |a: f64, t: f64| -> DVec3 {
+        let (p, c, q) = (w(ri, hh, a), w(rb, hh, a), w(rb, hh - kb, a));
+        let x = p * (1.0 - t) * (1.0 - t) + c * 2.0 * t * (1.0 - t) + q * t * t;
+        if t > 0.0 && t < 1.0 {
+            full.project(x).unwrap_or(x)
+        } else {
+            x
+        }
+    };
+    for j in 0..n_in {
+        let (a, b) = (ang_in[j], ang_in[(j + 1) % n_in]);
+        for t in 0..rows_b {
+            let (t0, t1) = (t as f64 / rows_b as f64, (t + 1) as f64 / rows_b as f64);
+            m.quad([bez(a, t0), bez(b, t0), bez(b, t1), bez(a, t1)], 2);
+        }
+    }
+    // outer round over the arc part; its end columns follow the line where
+    // the base fillet starts
+    let rows_r = 2;
+    let round_pt = |i: usize, t: usize| -> DVec3 {
+        if t == 0 {
+            return arc[i];
+        }
+        let phi = t as f64 / rows_r as f64 * FRAC_PI_2;
+        let rho = ro + rd * phi.sin();
+        let y = hh - rd + rd * phi.cos();
+        let c2 = PI - (zc / rho).asin();
+        let c1 = (zc / rho).asin() + TAU;
+        w(rho, y, c2 + (c1 - c2) * i as f64 / outer as f64)
+    };
+    for i in 0..outer {
+        for t in 0..rows_r {
+            m.quad([round_pt(i, t), round_pt(i + 1, t), round_pt(i + 1, t + 1), round_pt(i, t + 1)], 2);
+        }
+    }
+    // outward faces, exact normals
+    let mut b = bake::Baked::default();
+    b.positions = m.pos.clone();
+    for (mut f, patch) in m.faces {
+        let c = f.iter().fold(DVec3::ZERO, |s, v| s + m.pos[*v as usize]) / f.len() as f64;
+        let mut nrm = DVec3::ZERO;
+        for i in 0..f.len() {
+            nrm += m.pos[f[i] as usize].cross(m.pos[f[(i + 1) % f.len()] as usize]);
+        }
+        if nrm.dot(full.grad(c)) < 0.0 {
+            f.reverse();
+        }
+        let normals = f.iter().map(|v| full.grad(m.pos[*v as usize]).normalize_or_zero()).collect();
+        b.faces.push(bake::BFace { verts: f, normals, mat: 0, patch });
+    }
+    let mut edges: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+    for f in &b.faces {
+        for i in 0..f.verts.len() {
+            let (a, c) = (f.verts[i], f.verts[(i + 1) % f.verts.len()]);
+            *edges.entry((a.min(c), a.max(c))).or_default() += 1;
+        }
+    }
+    let open = edges.values().filter(|&&c| c == 1).count();
+    let nonman = edges.values().filter(|&&c| c > 2).count();
+    let dev = b.positions.iter().map(|p| full.dist(*p).abs()).fold(0.0, f64::max);
+    let pinch = (0..chord).map(|i| ring0[i].distance(bound[i])).fold(f64::MAX, f64::min);
+    let face_n = b.faces.iter().filter(|f| f.patch != 2).count();
+    let info = format!(
+        "{} quads (face {face_n}, réductions {k}), colonnes dedans {n_in} / dehors {n_out}, bords libres {open}, non-manifold {nonman}, écart max {dev:.3} mm, face la plus étroite {pinch:.2} mm",
+        b.faces.len()
+    );
+    (b, info)
+}
+
+fn raccord() {
+    use glam::DVec3;
+    let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp".into());
+    let s = support(4);
+    let full = Field::new(&compile(&s));
+    let part = bake::bake_blocking(&s, Quality::Max);
+    let bs = bake::build::BuildSettings { size: 1.5, tol: 0.02, fillet_rows: 0, threads: 2 };
+    let j = bake::build::junction(&support(2), 1, &bs).expect("junction");
+    let rail: Vec<(&Vec<DVec3>, [u8; 3], bool, bool)> = j.rail_b.iter().map(|c| (c, [255, 120, 40], false, true)).collect();
+    // A: same columns everywhere; B: ~1 mm everywhere with reductions
+    let props = [("A", 36, 36, 12), ("B", 30, 46, 12)];
+    for (name, inner, outer, chord) in props {
+        let (b, info) = front_face(&full, inner, outer, chord);
+        println!("{name} : {info}");
+        let views = [
+            ("vue", DVec3::new(0.3, 0.25, 1.0), DVec3::new(0.0, 19.0, 14.0), 26.0),
+            ("bas", DVec3::new(0.3, 0.45, 1.0), DVec3::new(0.0, 12.5, 14.0), 9.0),
+            ("haut", DVec3::new(0.25, 0.2, 1.0), DVec3::new(5.0, 26.0, 14.0), 9.0),
+        ];
+        for (v, dir, target, ext) in views {
+            render_lines(Some(&part), Some(&b), &rail, &format!("{out}/raccord-{name}-{v}.png"), dir, target, ext, 1400, 1050);
+        }
+        render_lines(None, Some(&b), &rail, &format!("{out}/raccord-{name}-seul.png"), DVec3::new(0.3, 0.25, 1.0), DVec3::new(0.0, 19.0, 14.0), 26.0, 1400, 1050);
+    }
+}
+
 /// Shaded part without wire, the fillet strip with its wire, and curves on top.
 #[allow(clippy::too_many_arguments)]
 pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lines: &[(&Vec<glam::DVec3>, [u8; 3], bool, bool)], path: &str, eye_dir: glam::DVec3, target: glam::DVec3, extent: f64, w: u32, h: u32) {
@@ -802,7 +1007,12 @@ pub fn render_lines(part: Option<&bake::Baked>, strip: Option<&bake::Baked>, lin
         for f in &b.faces {
             let n = normal(b, f);
             let pts: Vec<DVec3> = f.verts.iter().enumerate().map(|(k, v)| b.positions[*v as usize] + f.normals.get(k).copied().unwrap_or(n) * lift).collect();
-            tri(&pts, n, [0.95, 0.62, 0.32], &mut img, &mut zb);
+            let col = match f.patch {
+                1 => [0.88, 0.82, 0.66],
+                3 => [0.58, 0.82, 0.52],
+                _ => [0.95, 0.62, 0.32],
+            };
+            tri(&pts, n, col, &mut img, &mut zb);
         }
     }
     let mut dash = 0.0f64;

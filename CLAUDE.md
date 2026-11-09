@@ -30,6 +30,7 @@ cargo run --release -p forme-core --example bake_probe -- target     # hand-made
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- lignes   # test part: junction lines + fillet strip alone
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- anneau   # test part: front ring of the bearing (bore fillet + outer round)
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- support  # test part, junction by junction (par opération or why not)
+OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- raccord  # test part: bearing front face joining the two rings (topologies A and B)
 ```
 
 `forme-shot` runs the real app headless (egui + wgpu). It accepts a software GPU (lavapipe / llvmpipe) and writes full-quality PNGs. Use it to check every visual change before showing it.
