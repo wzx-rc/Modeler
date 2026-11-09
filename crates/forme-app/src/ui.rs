@@ -11,7 +11,7 @@ use egui::{pos2, vec2, Align2, Color32, CornerRadius, Frame, Id, Margin, Order, 
 use forme_core::*;
 use glam::{EulerRot, Quat, Vec3};
 
-const RIGHT_W: f32 = 296.0;
+const RIGHT_W: f32 = 276.0;
 
 fn panel() -> Frame {
     Frame::new().fill(PANEL).stroke(Stroke::new(1.0, PANEL_BORDER)).corner_radius(CornerRadius::same(16)).inner_margin(Margin::same(8))
@@ -565,8 +565,9 @@ fn mode_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 /// CTRL button area (points), just above the thumb button. Held, taps add to
 /// the selection (edges with the Select tool).
 pub fn ctrl_rect(screen_w: f32, screen_h: f32) -> Rect {
+    // next to the thumb button, clear of the tool column
     let t = thumb_rect(screen_w, screen_h);
-    Rect::from_min_size(t.min - vec2(0.0, 96.0), vec2(84.0, 84.0))
+    Rect::from_min_size(t.min + vec2(t.width() + 10.0, 0.0), vec2(84.0, 84.0))
 }
 
 fn ctrl_button(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
@@ -1225,7 +1226,6 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             }
             let p = ui.painter();
             let name_color = if selected { TEXT_STRONG } else { tint(TEXT, dim) };
-            p.text(pos2(x0 + 44.0, r.center().y), Align2::LEFT_CENTER, &n.name, if selected { semibold(13.0) } else { regular(13.0) }, name_color);
             let mut info = n.type_label();
             if n.repeat.count() > 1 {
                 info += &format!(" ×{}", n.repeat.count());
@@ -1233,7 +1233,16 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             if n.mirror.any() {
                 info += " · sym.";
             }
-            p.text(pos2(r.max.x - 40.0, r.center().y), Align2::RIGHT_CENTER, info, regular(12.0), if selected { Color32::from_rgb(0xC3, 0xD9, 0xF2) } else { tint(TEXT2, dim) });
+            let info_g = p.layout_no_wrap(info, regular(12.0), if selected { Color32::from_rgb(0xC3, 0xD9, 0xF2) } else { tint(TEXT2, dim) });
+            let info_x = r.max.x - 40.0 - info_g.size().x;
+            p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
+            // the name gives way to the type (ellipsis)
+            let max_w = (info_x - 8.0 - (x0 + 44.0)).max(20.0);
+            let mut job = egui::text::LayoutJob::single_section(n.name.clone(), egui::TextFormat::simple(if selected { semibold(13.0) } else { regular(13.0) }, name_color));
+            job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+            let name_g = ui.painter().layout_job(job);
+            let p = ui.painter();
+            p.galley(pos2(x0 + 44.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
             let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
             icons::paint(p, er, if n.visible { Icon::Eye } else { Icon::EyeOff }, tint(TEXT2, 0.8));
             let eresp = ui.interact(er.expand(10.0), Id::new(("eye", id)), Sense::click());

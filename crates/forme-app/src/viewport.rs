@@ -94,12 +94,21 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     let finger = st.pointer_kind == PointerKind::Finger;
     let shift = ctx.input(|i| i.modifiers.shift);
 
+    // like 3ds Max: once the base is down, the height follows the Pencil
+    // hover (or the mouse) until the next tap
+    if !finger && st.gesture == Gesture::None {
+        if let Some(h) = st.hover {
+            st.hover_height(h);
+        }
+    }
+
     if resp.drag_started_by(PointerButton::Primary) {
         let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
         let awaiting = st.placement.as_ref().map(|p| p.phase == PlacePhase::AwaitHeight).unwrap_or(false);
+        // 3ds Max style, finger or Pencil: drag the base, release, drag the height
         st.gesture = if shift {
             Gesture::Pan
-        } else if awaiting && !finger {
+        } else if awaiting {
             st.begin_height(p2(origin));
             Gesture::Height
         } else if let Some(h) = handle_at(st, origin) {
@@ -107,7 +116,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             Gesture::Handle
         } else {
             match st.tool {
-                Tool::Place(_) if !finger => {
+                Tool::Place(_) => {
                     st.begin_placement(p2(origin));
                     Gesture::Place
                 }
@@ -171,7 +180,6 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         }
         match st.tool {
             Tool::Select => st.tap_select(pos),
-            Tool::Place(_) if finger => st.tap_select(pos),
             Tool::Place(_) => st.tap_place(pos),
             Tool::Profile if !finger => st.profile_point(pos, false),
             Tool::Kit(piece) => st.place_kit(piece, pos),

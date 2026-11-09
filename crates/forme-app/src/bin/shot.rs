@@ -38,8 +38,12 @@ impl Harness {
             ctx,
             st: AppState::default(),
             t: 0.0,
-            size: [1194.0, 834.0],
-            ppp: 2.0,
+            // IPAD_ZOOM: the device's UI zoom (layout in more points, fewer pixels per point)
+            size: {
+                let z: f32 = std::env::var("IPAD_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                [1194.0 / z, 834.0 / z]
+            },
+            ppp: 2.0 * std::env::var("IPAD_ZOOM").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0),
             pending: vec![],
             out_dir: out_dir.to_string(),
         }
@@ -364,6 +368,54 @@ fn main() {
     }
     if want("19") {
         bake_cube(&mut h);
+    }
+    if want("max") {
+        // 3ds Max style creation at the finger: base drag, release, height drag
+        h.reset(AppState::new(forme_core::Scene::new(), "Sans titre"));
+        h.cam(Vec3::new(0.0, 0.0, 0.0), 120.0, 0.7, 0.55);
+        h.st.pointer_kind = forme_app::state::PointerKind::Finger;
+        h.st.tool = forme_app::state::Tool::Place(PrimKind::Box);
+        h.steps(3);
+        let a = h.screen_of(Vec3::new(-15.0, 0.0, -10.0));
+        let b = h.screen_of(Vec3::new(15.0, 0.0, 12.0));
+        h.drag(a, b, 10, false);
+        h.steps(2);
+        h.shot("max-1-base");
+        h.press(b, false);
+        h.step();
+        let p = h.st.placement.clone();
+        eprintln!("après la base : {:?}", p.as_ref().map(|p| (p.phase, p.hx, p.hz, p.height)));
+        h.shot("max-2-attente-hauteur");
+        h.drag(b, b - egui::vec2(0.0, 160.0), 10, false);
+        h.steps(2);
+        h.shot("max-3-hauteur");
+        h.press(b - egui::vec2(0.0, 160.0), false);
+        h.steps(3);
+        let id = h.st.scene.nodes.values().find(|n| n.shape().is_some()).map(|n| n.id);
+        eprintln!(
+            "boîte : {:?} · outil {:?}",
+            id.and_then(|i| h.st.scene.node(i)).and_then(|n| n.shape()).map(|s| s.size),
+            h.st.tool
+        );
+        // then a cylinder carved into its top, by tap (default size) then a height drag
+        h.st.tool = forme_app::state::Tool::Place(PrimKind::Cylinder);
+        h.st.carve_held = true;
+        let top = h.screen_of(Vec3::new(0.0, 999.0, 0.0).min(Vec3::new(0.0, 20.0, 0.0)));
+        let _ = top;
+        h.steps(2);
+        h.shot("max-4-fini");
+    }
+    if want("ui-ipad") {
+        // the layout as seen on the device (run with IPAD_ZOOM=0.84)
+        h.reset(AppState::default());
+        let id = h.find("Bossage");
+        h.st.select(Some(id));
+        h.steps(6);
+        h.shot("ui-ipad-selection");
+        h.st.tool = forme_app::state::Tool::Place(PrimKind::Box);
+        h.st.select(None);
+        h.steps(6);
+        h.shot("ui-ipad-placement");
     }
     if want("live") {
         // the iPad path: pixel budgets, quick image while moving, refinement in bands

@@ -11,6 +11,10 @@ use winit::event::{Force, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+/// UI scale on iPad (egui points per logical point).
+#[cfg(target_os = "ios")]
+const UI_ZOOM: f32 = 0.84;
+
 /// Autosave of the current session (written when the app goes to the background).
 const SESSION: &str = "Session";
 
@@ -194,9 +198,11 @@ impl ApplicationHandler for App {
         {
             // pixel budgets: iPad Pro screens are 4 to 5.6 Mpx, the raymarcher
             // renders fewer and the image is upscaled
-            fr.full_px = 2.4e6;
-            fr.interactive_px = 4.5e5;
+            fr.full_px = 3.8e6;
+            fr.interactive_px = 6.0e5;
             fr.band_px = 3.0e5;
+            // the layout was drawn for 1194 × 834 pt: a bit tighter on the device
+            self.ctx.set_zoom_factor(UI_ZOOM);
         }
         let es = egui_winit::State::new(
             self.ctx.clone(),
@@ -218,8 +224,12 @@ impl ApplicationHandler for App {
         // finger must not turn the Pencil touch into a two-finger camera gesture.
         if let WindowEvent::Touch(t) = &event {
             let sf = window.scale_factor();
+            // egui points (logical points divided by the UI zoom)
+            let z = self.ctx.zoom_factor();
             let size = window.inner_size().to_logical::<f32>(sf);
+            let size = winit::dpi::LogicalSize::new(size.width / z, size.height / z);
             let p = t.location.to_logical::<f32>(sf);
+            let p = winit::dpi::LogicalPosition::new(p.x / z, p.y / z);
             let tr = forme_app::ui::thumb_rect(size.width, size.height);
             let pencil = matches!(t.force, Some(Force::Calibrated { altitude_angle: Some(_), .. }));
             match t.phase {

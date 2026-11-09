@@ -87,6 +87,10 @@ pub struct FrameRenderer {
     frame_ms: f32,
     last_frame: Option<std::time::Instant>,
     last_moving: bool,
+    /// Last scene state seen, and when it last changed: "moving" means the
+    /// image changes from frame to frame, not that a tool is active.
+    last_state: Option<StateKey>,
+    last_change: Option<std::time::Instant>,
     pub renders: u64,
 }
 
@@ -171,6 +175,8 @@ impl FrameRenderer {
             frame_ms: 16.0,
             last_frame: None,
             last_moving: false,
+            last_state: None,
+            last_change: None,
             renders: 0,
         }
     }
@@ -233,8 +239,23 @@ impl FrameRenderer {
         self.mesh.wire = st.bake.wire;
 
         // 2. scene image (only when something changed)
-        let moving = !force_full && (st.interacting || st.placement.is_some() || st.handle_drag.is_some());
         let now = std::time::Instant::now();
+        let cam = st.camera;
+        let state = StateKey {
+            scene: st.scene_version,
+            view: st.view_version,
+            sel,
+            grid: st.grid,
+            cam: [cam.target.x.to_bits(), cam.target.y.to_bits(), cam.yaw.to_bits(), cam.pitch.to_bits(), cam.dist.to_bits(), cam.ortho as u32],
+            bake: (show_bake, self.mesh_version, st.bake.wire),
+        };
+        if self.last_state != Some(state) {
+            self.last_state = Some(state);
+            self.last_change = Some(now);
+        }
+        // fingers on the screen, or the image changed less than 0.12 s ago
+        let recent = self.last_change.map(|t| now.duration_since(t).as_secs_f32() < 0.12).unwrap_or(false);
+        let moving = !force_full && (st.interacting || st.handle_drag.is_some() || recent);
         if let Some(t) = self.last_frame {
             let dt = now.duration_since(t).as_secs_f32() * 1000.0;
             if moving && self.last_moving {
@@ -256,15 +277,6 @@ impl FrameRenderer {
         }
         self.last_frame = Some(now);
         self.last_moving = moving;
-        let cam = st.camera;
-        let state = StateKey {
-            scene: st.scene_version,
-            view: st.view_version,
-            sel,
-            grid: st.grid,
-            cam: [cam.target.x.to_bits(), cam.target.y.to_bits(), cam.yaw.to_bits(), cam.pitch.to_bits(), cam.dist.to_bits(), cam.ortho as u32],
-            bake: (show_bake, self.mesh_version, st.bake.wire),
-        };
         let px = size_px[0] as f32 * size_px[1] as f32;
         let budget = |px_budget: f32, cap: f32| if px_budget > 0.0 { (px_budget / px).sqrt().min(cap) } else { cap };
         let full_scale = budget(self.full_px, self.full_scale);

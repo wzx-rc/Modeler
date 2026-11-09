@@ -64,6 +64,9 @@ pub struct Placement {
     pub started_on_surface: bool,
     /// Screen anchor and starting height of the height gesture.
     pub anchor: Option<([f32; 2], f32)>,
+    /// Centre of the base relative to where the drag started (a box is drawn
+    /// corner to corner, like in 3ds Max; round shapes from their centre).
+    pub offset: Vec3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -897,6 +900,7 @@ impl AppState {
             snapped,
             started_on_surface: on_surface,
             anchor: None,
+            offset: Vec3::ZERO,
         });
         self.selection = Some(id);
         self.apply_placement();
@@ -923,7 +927,7 @@ impl AppState {
             _ => hh,
         };
         let embed = (along * 0.15).min(0.6);
-        let center = match p.mode {
+        let center = p.offset + match p.mode {
             // grows outwards, slightly embedded so it fuses
             CombineMode::Add => p.base + p.normal * (along - embed),
             // cutters go into the matter, top slightly proud of the surface
@@ -960,6 +964,11 @@ impl AppState {
                 p.hx = snap_to(q.dot(tx).abs(), 0.5, self.snap).max(0.5);
                 p.hz = snap_to(q.dot(tz).abs(), 0.5, self.snap).max(0.5);
                 if p.kind == PrimKind::Box {
+                    // corner to corner
+                    let (qx, qz) = (q.dot(tx), q.dot(tz));
+                    p.hx = snap_to(qx.abs() * 0.5, 0.5, self.snap).max(0.5);
+                    p.hz = snap_to(qz.abs() * 0.5, 0.5, self.snap).max(0.5);
+                    p.offset = tx * (p.hx * qx.signum()) + tz * (p.hz * qz.signum());
                     p.radius = p.hx.max(p.hz);
                     p.height = p.hx.min(p.hz).max(1.0);
                 } else {
@@ -994,6 +1003,7 @@ impl AppState {
                     return true;
                 }
                 p.phase = PlacePhase::AwaitHeight;
+                p.anchor = None;
                 self.placement = Some(p);
                 false
             }
@@ -1023,6 +1033,29 @@ impl AppState {
         }
     }
 
+    /// Pencil hover / mouse after the base: the height follows the pointer.
+    pub fn hover_height(&mut self, pos: [f32; 2]) {
+        let Some(mut p) = self.placement.clone() else { return };
+        if p.phase != PlacePhase::AwaitHeight {
+            return;
+        }
+        let (a, h0) = match p.anchor {
+            Some(a) => a,
+            None => {
+                p.anchor = Some((pos, p.height));
+                self.placement = Some(p);
+                return;
+            }
+        };
+        let px = self.view().pixel_size_at((p.base - self.camera.eye()).length());
+        let h = snap_to((h0 + (a[1] - pos[1]) * px).max(0.5), 0.5, self.snap).max(0.5);
+        if (h - p.height).abs() > 1e-4 {
+            p.height = h;
+            self.placement = Some(p);
+            self.apply_placement();
+        }
+    }
+
     pub fn begin_height(&mut self, pos: [f32; 2]) {
         if let Some(p) = self.placement.as_mut() {
             p.phase = PlacePhase::Height;
@@ -1038,7 +1071,13 @@ impl AppState {
 
     fn finish_placement_toast(&mut self, p: &Placement) {
         let name = self.scene.node(p.node).map(|n| n.name.clone()).unwrap_or_default();
-        self.toast(format!("{name} · {}", p.mode.label()));
+        // at the finger, back to selection: one finger orbits again
+        if self.pointer_kind == PointerKind::Finger {
+            self.tool = Tool::Select;
+            self.toast(format!("{name} · {} · retouche l'outil pour en créer une autre", p.mode.label()));
+        } else {
+            self.toast(format!("{name} · {}", p.mode.label()));
+        }
         self.changed();
     }
 
@@ -1662,7 +1701,8 @@ impl AppState {
         if let Some(p) = &self.placement {
             return match p.phase {
                 PlacePhase::Base => format!("{} · {} — étire la base", p.kind.label(), p.mode.label()),
-                PlacePhase::AwaitHeight => format!("{} · {} — glisse pour la hauteur, tap pour valider", p.kind.label(), p.mode.label()),
+                PlacePhase::AwaitHeight if self.pointer_kind == PointerKind::Finger => format!("{} · {} — glisse pour la hauteur, tap pour valider", p.kind.label(), p.mode.label()),
+                PlacePhase::AwaitHeight => format!("{} · {} — monte ou descends pour la hauteur, tap pour valider", p.kind.label(), p.mode.label()),
                 PlacePhase::Height => format!("{} · {} — relâche pour valider", p.kind.label(), p.mode.label()),
             };
         }
@@ -1682,7 +1722,7 @@ impl AppState {
                 }
                 None => format!("{} formes · touche une forme pour la sélectionner", self.scene.shape_count()),
             },
-            Tool::Place(k) => format!("{} · {} — pose au Pencil sur une surface", k.label(), self.effective_mode().label()),
+            Tool::Place(k) => format!("{} · {} — glisse pour la base (ou tap : taille par défaut)", k.label(), self.effective_mode().label()),
             Tool::Profile => "Profil · tap = angle · glisser = courbe".to_string(),
             Tool::Kit(k) => format!("Kit · {} — touche une surface", k.label()),
         }
