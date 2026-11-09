@@ -15,8 +15,14 @@ permissions:
 
 jobs:
   # Unsigned .ipa for iPad, to sideload with AltStore / Sideloadly (free Apple ID).
+  # Built on both Mac flavours: GitHub's arm64 Macs are often saturated, the
+  # first one to finish publishes (the result is the same .ipa).
   ipad:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,7 +33,7 @@ jobs:
         run: bash ios/build_ipa.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: Forme-ipa
+          name: Forme-ipa-${{ matrix.os }}
           path: target/ipa/Forme.ipa
       # direct download link: Releases > « Forme — dernière build iPad »
       - name: Publish the .ipa (release ipa-latest)
@@ -41,6 +47,7 @@ jobs:
             Build automatique du commit ${{ github.sha }}.
             Forme.ipa non signé : installe-le avec Sideloadly ou AltStore et ton Apple ID (à re-signer tous les 7 jours avec un compte gratuit).
           files: target/ipa/Forme.ipa
+          overwrite_files: true
 
   # Core tests (and, on demand, screenshots of the real app on a software GPU).
   linux:
