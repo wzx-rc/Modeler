@@ -10,7 +10,11 @@ pub fn documents_dir() -> PathBuf {
     } else if cfg!(target_os = "ios") {
         PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join("Documents")
     } else {
-        std::env::var("HOME").map(|h| PathBuf::from(h).join("Documents").join("Forme")).unwrap_or_else(|_| PathBuf::from("forme-docs"))
+        // Documents/Forme in the user's home (USERPROFILE on Windows)
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(|h| PathBuf::from(h).join("Documents").join("Forme"))
+            .unwrap_or_else(|_| PathBuf::from("forme-docs"))
     };
     let _ = std::fs::create_dir_all(&dir);
     dir
