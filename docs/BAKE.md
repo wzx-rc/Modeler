@@ -10,6 +10,16 @@
 
 Cible dessinée à la main et validée : `docs/images/16-cible-cube-trou.jpg`. Cube de 20 mm, bevel 1 mm en 4 rangées, grille 8 × 8, trou Ø8 en 32 segments avec 3 anneaux de raccord, fillet de 0,8 mm en 2 rangées, parois en rangées.
 
+## Ordre de construction (règle validée par Romain, 9 nov. 2026)
+
+Toujours dans cet ordre, à garder pour toutes les jonctions :
+
+1. **D'abord les fillets.** Chaque congé ou arrondi (jonction entre deux formes, arrondi d'une forme, congé d'un trou) devient une bande de quads, construite depuis ses rails et son arête vive : une colonne = une section en biseau perpendiculaire à l'arête vive, des rangées comme un bevel modifier.
+2. **Les matérialiser en orange** dans les rendus de mise au point, pour voir les bandes seules avant le reste.
+3. **Ensuite les paths de remplissage** : les faces plates et les parois se remplissent entre les bords des bandes, en reprenant exactement leurs sommets (soudés, jamais recousus après coup). Si une bande rejoint une face déjà posée, ses colonnes partent des sommets de cette face.
+
+Validé sur la pièce test « Support d'axe » : jonction palier / socle, anneau avant du palier, face avant en rayons droits (topologie A, sans pôle) soudée au fillet du socle, coins en éventail (`bake_probe lignes`, `anneau`, `raccord`, `liaison`). Captures : `/mnt/project-files/forme-pc/jonctions/`.
+
 ## Historique des approches
 
 1. **Bake par surfaces** (`patch.rs`, encore utilisé en repli). Patchs paramétriques par primitive, découpés exactement le long des courbes de jonction puis cousus. C'est précis (écart moyen 0,002 mm), mais la topologie est mauvaise : raffinements adaptatifs, triangles. **Refusé par Romain.**
@@ -72,6 +82,7 @@ Cible dessinée à la main et validée : `docs/images/16-cible-cube-trou.jpg`. C
 ## Outils de mise au point
 
 - `cargo run --release -p forme-core --example bake_probe -- build | variants | screws | target` : rendus CPU filaires dans `/tmp`.
+- `OUT=/tmp/x … bake_probe -- lignes | anneau | raccord | liaison | support` : pièce test, jonction par jonction (bandes de fillet en orange, faces de remplissage en crème).
 - `BY_STEP=1` : couleur par rôle (natif, anneaux, fillet, raccord paroi, paroi native).
 - `ROUND=…` : bevel du cube test. `SIZE=…` : taille des quads.
 - `forme-shot -- /tmp/x 19` (cube dans l'app), `22` (sélection d'arêtes, fillets par arête, bake), `user` (scène de test de Romain).

@@ -49,6 +49,7 @@ The iPad `.ipa` is built by GitHub Actions on every push to `main` (repository `
 - **The shader (`sdf.wgsl`), the f32 CPU interpreter (`program.rs::eval_prim`) and the f64 bake interpreter (`bake/field.rs::prim_raw`) must stay identical.** Any change to a primitive (for example per-edge fillets) goes in all three.
 - Box edge indices (12): `axis*4 + k`, with k over the signs of the other two axes `(+,+) (-,+) (-,-) (+,-)`, other axes = `(axis+1)%3, (axis+2)%3`. Cylinder: 0 = top rim, 1 = bottom rim.
 - `Shape.edges` empty = uniform fillet (`round` / `chamfer`). Negative value = chamfer. `set_edge` collapses back to uniform when every edge is equal.
+- Bake build order (validated by Romain): **fillets first**, as quad strips shown in orange in debug renders, **then the fill paths** (flat faces, walls) between them, reusing the strips' edge vertices exactly. See `docs/BAKE.md`.
 - Bake by operation (`bake/build.rs`): any history it does not handle must return `Err(reason)`. `bake()` then falls back to the surface bake and shows the reason in the dialog. Never return a broken mesh in silence.
 - Renderer: an image is "moving" when it changes from frame to frame (not just because a tool is active). The full-quality image is refined in bands, so it never blocks the UI.
 - Never commit `target/` or `shots/replay/frames/`.
