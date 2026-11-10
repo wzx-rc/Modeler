@@ -281,7 +281,7 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect, on_handle: bool
     if st.marking.demo {
         return st.marking.is_open();
     }
-    if cfg!(target_os = "ios") || st.placement.is_some() || st.profile.is_some() {
+    if cfg!(target_os = "ios") || st.placement.is_some() {
         st.marking.press = None;
         return st.marking.is_open();
     }

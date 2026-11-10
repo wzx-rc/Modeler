@@ -21,7 +21,7 @@ Forme is a hard-surface modelling app for iPad Pro, in the spirit of Substance 3
 cargo test --release -p forme-core                      # core tests (25 tests)
 cargo run --release -p forme-app --bin forme            # the app on PC
 cargo run --release -p forme-app --bin forme-shot -- shots          # every capture scenario
-cargo run --release -p forme-app --bin forme-shot -- /tmp/x max     # one scenario (prefix): max, user, live, 22, 19, ui-ipad…
+cargo run --release -p forme-app --bin forme-shot -- /tmp/x max     # one scenario (prefix): max, live, 22, 19, ui-ipad…
 cargo run --release -p forme-app --bin forme-shot -- /tmp/x pc-atelier pc-studio   # the two PC interfaces at 1600×900
 IPAD_ZOOM=0.84 cargo run --release -p forme-app --bin forme-shot -- /tmp/x ui-ipad   # layout as on the iPad
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes  # the Bake on its test scenes, CPU renders (CASE=romain-aretes|rc|raccord|boss|bossage|bossage-c3z+1|rc-sans-raccord|ra-coin3|romain|coin|trou|… for one, DEBUG_LAYOUT=1 for the rays, DEBUG_FACE="prim face file" dumps one face's lines, DEBUG_COUNTS=file dumps the segment-count system when it does not settle, QUALITE=legere|dense, BEVEL=0 for the layout without the sharp-edge bevel, OBJ=1 writes each mesh)
@@ -40,7 +40,7 @@ The iPad `.ipa` is built by GitHub Actions on every push to `main` (repository `
 
 - `crates/forme-core`: scene (shape tree), SDF bytecode compiler + CPU interpreter, history, `.forme` JSON projects, OBJ/GLB export, dual contouring, `edges.rs` (edge picking for fillets), `bake/` (the Bake by lines `layout.rs`, construction lines `lines.rs`, optional pass `decimate.rs`, f64 interpreter `field.rs`, primitive tessellation `gen.rs`).
 - `crates/forme-render`: WGSL raymarcher (`sdf.wgsl`), preview of the baked mesh (`mesh.rs`), headless capture.
-- `crates/forme-app`: two desktop interfaces chosen in Settings: Atelier (`ui.rs`, floating panels, also the iPad layout) and Studio (`studio.rs`, docked panels and menus, 3ds Max style); user preferences (`settings.rs`, `settings.json` next to the projects, `FORME_UI=studio|atelier` overrides); gestures (`viewport.rs`), state and tools (`state.rs`), frame composition and progressive rendering (`gfx.rs`), entry point (`main.rs`), kit of parts (`kit.rs`), capture harness (`bin/shot.rs`).
+- `crates/forme-app`: two desktop interfaces chosen in Settings: Atelier (`ui.rs`, floating panels, also the iPad layout) and Studio (`studio.rs`, docked panels and menus, 3ds Max style); user preferences (`settings.rs`, `settings.json` next to the projects, `FORME_UI=studio|atelier` overrides); gestures (`viewport.rs`), state and tools (`state.rs`), frame composition and progressive rendering (`gfx.rs`), entry point (`main.rs`), capture harness (`bin/shot.rs`).
 
 ## Rules that are easy to break
 
@@ -53,5 +53,5 @@ The iPad `.ipa` is built by GitHub Actions on every push to `main` (repository `
 - **One Bake algorithm: by construction lines (`bake/layout.rs`)** (Romain, 10 nov. 2026). The old bakes (by operation `build.rs`, by surfaces `patch.rs`, field-aligned `quad.rs`) are deleted: never bring back a fallback mesh. A history it does not handle returns `Err(reason)`; `bake()` returns it as is and the Bake panel shows it in red, with no mesh. Never return a broken mesh in silence.
 - Renderer: an image is "moving" when it changes from frame to frame (not just because a tool is active). The full-quality image is refined in bands, so it never blocks the UI.
 - Both interfaces drive the same `AppState`: a feature goes in `state.rs`, then gets a control in `ui.rs` (Atelier) and in `studio.rs` (Studio). Each interface sets `st.view_rect` every frame (the free 3D area), which centres the camera.
-- Features hidden by the basic mode (`Settings.advanced` off) are hidden, not removed: check `st.settings.prim_allowed()` / `modes()` before showing them.
+- The app creates only Cube, Cylinder, Sphere, Capsule and Torus (`state::PRIMS`) with the Add and Carve modes (`state::MODES`). The Profile tool, the kit of parts, repetitions, Cone / Prism / Tube, Intersect / Groove / Tongue and the old "advanced" setting were removed from the app (Romain, 10 nov. 2026): do not bring them back as hidden options. forme-core still knows them, so older `.forme` files load and render.
 - Never commit `target/` or `shots/replay/frames/`.

@@ -1,11 +1,11 @@
 //! The 3D viewport: gestures (finger = camera, Pencil/mouse = tools) and the
-//! overlays drawn on top of the raymarched image (handles, measures, profile).
+//! overlays drawn on top of the raymarched image (handles, measures).
 
 use crate::icons::{self, Icon};
 use crate::state::*;
 use crate::theme::*;
 use egui::{pos2, vec2, Align2, Color32, Id, Order, Painter, PointerButton, Pos2, Rect, Sense, Shape, Stroke};
-use forme_core::{CombineMode, PrimKind, Profile};
+use forme_core::{CombineMode, PrimKind};
 
 fn p2(v: Pos2) -> [f32; 2] {
     [v.x, v.y]
@@ -187,7 +187,6 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                     st.begin_placement(p2(origin));
                     Gesture::Place
                 }
-                Tool::Profile if !finger => Gesture::ProfileDrag,
                 _ if marquee => {
                     st.marquee = Some((p2(origin), p2(origin)));
                     Gesture::Marquee
@@ -234,11 +233,6 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                     st.marquee_select(a, b, add);
                 }
             }
-            Gesture::ProfileDrag => {
-                if let Some(p) = st.hover.or(resp.interact_pointer_pos().map(p2)) {
-                    st.profile_point(p, true);
-                }
-            }
             _ => {}
         }
         st.gesture = Gesture::None;
@@ -264,9 +258,6 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             Tool::Select => st.tap_select(pos),
             Tool::Place(_) if st.settings.creation == crate::settings::Creation::Direct => st.direct_place(pos),
             Tool::Place(_) => st.tap_place(pos),
-            Tool::Profile if !finger => st.profile_point(pos, false),
-            Tool::Kit(piece) => st.place_kit(piece, pos),
-            _ => {}
         }
     }
 }
@@ -344,7 +335,7 @@ fn draw_construction_lines(p: &Painter, st: &AppState) {
 /// Hovered and selected edges: a glow on the visible parts, a faint line
 /// where the model hides them.
 fn draw_edges(p: &Painter, st: &AppState) {
-    if st.placement.is_some() || st.profile.is_some() || st.bake.show || st.bake_mode() {
+    if st.placement.is_some() || st.bake.show || st.bake_mode() {
         return;
     }
     let view = st.view();
@@ -424,7 +415,7 @@ fn draw_overlay(p: &Painter, st: &AppState) {
     let view = st.view();
 
     // selection handles
-    if st.placement.is_none() && st.profile.is_none() && st.tool == Tool::Select && !st.bake_mode() {
+    if st.placement.is_none() && st.tool == Tool::Select && !st.bake_mode() {
         let active = st.handle_drag.as_ref().map(|d| d.handle);
         let node = st.selection.and_then(|id| st.scene.node(id));
         for (h, sp) in handle_points(st) {
@@ -563,38 +554,6 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                 let gh = g1.size().y;
                 p.galley(r.min + vec2(12.0, 8.0), g1, TEXT2);
                 p.galley(r.min + vec2(12.0, 10.0 + gh), g2, TEXT);
-            }
-        }
-    }
-
-    // profile draft
-    if let Some(d) = &st.profile {
-        let to_s = |v: glam::Vec2| view.project(d.to_world(v)).map(|q| pos2(q[0], q[1]));
-        if d.points.len() >= 2 {
-            let prof = Profile { points: d.points.clone(), mode: d.mode };
-            let poly = prof.polyline();
-            let pts: Vec<Pos2> = poly.iter().filter_map(|v| to_s(*v)).collect();
-            if pts.len() >= 2 {
-                // closing preview, faint
-                p.add(Shape::dashed_line(&[*pts.last().unwrap(), pts[0]], Stroke::new(1.5, Color32::from_gray(0x8B)), 5.0, 5.0));
-                p.add(Shape::line(pts, Stroke::new(2.5, TEXT)));
-            }
-        }
-        if let (Some(last), Some(h)) = (d.points.last().and_then(|pt| to_s(pt.pos)), st.hover) {
-            if st.pointer_kind != PointerKind::Finger {
-                p.line_segment([last, pos2(h[0], h[1])], Stroke::new(2.5, ACCENT));
-            }
-        }
-        for (i, pt) in d.points.iter().enumerate() {
-            let Some(s) = to_s(pt.pos) else { continue };
-            if i == 0 && d.points.len() >= 3 {
-                p.circle_stroke(s, 12.0, Stroke::new(1.5, ACCENT_LIGHT));
-                chip(p, s + vec2(-16.0, -16.0), Align2::RIGHT_BOTTOM, "Fermer ici", ACCENT_BORDER, ACCENT_TEXT);
-            }
-            if pt.smooth {
-                p.circle(s, 5.5, TEXT, Stroke::new(2.0, BG));
-            } else {
-                p.rect(Rect::from_center_size(s, vec2(11.0, 11.0)), 0.0, TEXT, Stroke::new(2.0, BG), egui::StrokeKind::Middle);
             }
         }
     }

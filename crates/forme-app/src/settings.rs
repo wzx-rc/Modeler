@@ -2,7 +2,6 @@
 //! projects (Documents/Forme on PC).
 
 use crate::files;
-use forme_core::{CombineMode, PrimKind};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -39,9 +38,6 @@ impl UiMode {
 #[serde(default)]
 pub struct Settings {
     pub ui_mode: UiMode,
-    /// Every primitive and mode (sphere, capsule, Groove, profile, kit…).
-    /// Off: Cube and Cylinder, Add (+) / Carve (-) only.
-    pub advanced: bool,
     /// Creation starts on the face under the pointer (3ds Max AutoGrid),
     /// else on the ground plane. On by default.
     pub snap_faces: bool,
@@ -92,7 +88,7 @@ impl Display {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { ui_mode: UiMode::Atelier, advanced: false, snap_faces: true, creation: Creation::Interactive, display: Display::default() }
+        Settings { ui_mode: UiMode::Atelier, snap_faces: true, creation: Creation::Interactive, display: Display::default() }
     }
 }
 
@@ -116,20 +112,5 @@ impl Settings {
     pub fn save(&self) -> std::io::Result<()> {
         let text = serde_json::to_string_pretty(self).unwrap_or_default();
         std::fs::write(Self::path(), text)
-    }
-
-    pub fn prim_allowed(&self, k: PrimKind) -> bool {
-        self.advanced || matches!(k, PrimKind::Box | PrimKind::Cylinder)
-    }
-
-    pub fn placeable(&self) -> Vec<PrimKind> {
-        PrimKind::PLACEABLE.into_iter().filter(|k| self.prim_allowed(*k)).collect()
-    }
-
-    pub fn modes(&self) -> Vec<CombineMode> {
-        CombineMode::ALL
-            .into_iter()
-            .filter(|m| self.advanced || matches!(m, CombineMode::Add | CombineMode::Carve))
-            .collect()
     }
 }

@@ -18,7 +18,6 @@ pub mod camera;
 pub mod files;
 pub mod gfx;
 pub mod icons;
-pub mod kit;
 pub mod marking;
 pub mod settings;
 pub mod state;

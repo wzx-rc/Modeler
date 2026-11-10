@@ -5,7 +5,6 @@
 use crate::camera::ViewPreset;
 use crate::files;
 use crate::icons::{self, Icon};
-use crate::kit::KitPiece;
 use crate::settings::UiMode;
 use crate::state::*;
 use crate::theme::*;
@@ -358,9 +357,6 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         return;
     }
     rail(ctx, st);
-    if matches!(st.tool, Tool::Kit(_)) || st.kit_open {
-        kit_popup(ctx, st);
-    }
     history_strip(ctx, st, screen);
     if cfg!(target_os = "ios") {
         // touch only: a keyboard has Alt and Ctrl
@@ -450,13 +446,9 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.clear_edge();
         }
         st.commit_placement();
-        st.cancel_profile();
         st.tool = Tool::Select;
     }
     if enter {
-        if st.profile.is_some() {
-            st.close_profile();
-        }
         st.commit_placement();
     }
     if f {
@@ -476,7 +468,7 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.set_pick_mode(PickMode::Object);
     }
     for (pressed, k) in [(kr, PrimKind::Box), (kc, PrimKind::Cylinder)] {
-        if pressed && st.settings.prim_allowed(k) {
+        if pressed {
             st.commit_placement();
             st.tool = Tool::Place(k);
         }
@@ -587,6 +579,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 
 /// BUILD | BAKE switch (both interfaces). BAKE freezes the model: only the
 /// camera, the diagnostics, the options and the Bake.
+#[allow(dead_code)] // the Bake is set aside for now
 pub(crate) fn mode_switch(ui: &mut Ui, st: &mut AppState, height: f32) {
     let baking = st.bake.job.is_some();
     let items = [(false, "BUILD"), (true, if baking { "BAKE…" } else { "BAKE" })];
@@ -701,7 +694,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
                 st.set_pick_mode(PickMode::Edge);
             }
             divider(ui);
-            for k in st.settings.placeable() {
+            for k in PRIMS {
                 let tip = match prim_key(k) {
                     Some(key) => format!("{} ({key})", k.label()),
                     None => k.label().to_string(),
@@ -713,7 +706,6 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
                 if r.clicked() {
                     st.commit_placement();
                     st.tool = Tool::Place(k);
-                    st.kit_open = false;
                 }
             }
             if DESK {
@@ -722,55 +714,9 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
             divider(ui);
             // mode of the next shapes (and of the selected one)
             let shown = shown_mode(st);
-            for m in st.settings.modes() {
+            for m in MODES {
                 if mode_btn(ui, m, shown == m).clicked() {
                     st.set_mode(m);
-                }
-            }
-            if !st.settings.advanced {
-                return;
-            }
-            divider(ui);
-            if icon_btn(ui, Icon::Profile, st.tool == Tool::Profile, "Profil (dessiner un contour)", 44.0).clicked() {
-                st.commit_placement();
-                st.tool = Tool::Profile;
-                st.ensure_profile();
-                st.kit_open = false;
-            }
-            let kit_on = matches!(st.tool, Tool::Kit(_));
-            if icon_btn(ui, Icon::Kit, kit_on, "Kit de pièces (vis, rivets…)", 44.0).clicked() {
-                st.commit_placement();
-                if !kit_on {
-                    st.tool = Tool::Kit(KitPiece::Screw);
-                }
-                st.kit_open = !st.kit_open || !kit_on;
-            }
-            let rep_on = st.selection.and_then(|id| st.scene.node(id)).map(|n| n.repeat != Repeat::None).unwrap_or(false);
-            if icon_btn(ui, Icon::Repeat, rep_on, "Répétition radiale", 44.0).clicked() {
-                st.toggle_repeat();
-            }
-        });
-    });
-}
-
-fn kit_popup(ctx: &egui::Context, st: &mut AppState) {
-    egui::Area::new(Id::new("kit")).order(Order::Foreground).fixed_pos(pos2(84.0, 560.0)).show(ctx, |ui| {
-        panel().inner_margin(Margin::same(10)).show(ui, |ui| {
-            ui.set_width(196.0);
-            ui.label(egui::RichText::new("Kit de pièces").font(semibold(13.0)).color(TEXT));
-            for piece in KitPiece::ALL {
-                let on = st.tool == Tool::Kit(piece);
-                let (r, resp) = ui.allocate_exact_size(vec2(196.0, 40.0), Sense::click());
-                let p = ui.painter();
-                if on {
-                    p.rect(r, 9.0, ACCENT_BG, Stroke::new(1.0, ACCENT_BORDER), StrokeKind::Inside);
-                } else if resp.hovered() {
-                    p.rect_filled(r, 9.0, RAISED);
-                }
-                icons::paint(p, Rect::from_min_size(r.min + vec2(10.0, 11.0), vec2(18.0, 18.0)), Icon::Kit, if on { ACCENT_TEXT } else { TEXT_ICON });
-                p.text(r.min + vec2(38.0, 20.0), Align2::LEFT_CENTER, piece.label(), medium(13.0), if on { ACCENT_TEXT } else { TEXT });
-                if resp.clicked() {
-                    st.tool = Tool::Kit(piece);
                 }
             }
         });
@@ -803,13 +749,7 @@ fn mode_btn(ui: &mut Ui, m: CombineMode, on: bool) -> Response {
         p.rect_filled(r, 10.0, RAISED);
     }
     paint_mode_glyph(p, r.center(), m, if on { c } else { TEXT_ICON }, 14.0);
-    let tip = match m {
-        CombineMode::Add => "Add : ajoute la forme",
-        CombineMode::Carve => "Carve : creuse",
-        CombineMode::Intersect => "Intersect : garde la partie commune",
-        CombineMode::Groove => "Groove : rainure le long du contact",
-        CombineMode::Tongue => "Tongue : languette le long du contact",
-    };
+    let tip = if m == CombineMode::Add { "Add : ajoute la forme" } else { "Carve : creuse" };
     resp.on_hover_text(tip)
 }
 
@@ -1015,7 +955,7 @@ pub(crate) fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 
 fn right_column(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     let x = screen.max.x - 12.0 - RIGHT_W;
-    let show_tree = st.show_tree && st.tool != Tool::Profile;
+    let show_tree = st.show_tree;
     let tree_h = if show_tree { 268.0 } else { 0.0 };
     let props_max = screen.height() - 80.0 - 12.0 - if show_tree { tree_h + 12.0 } else { 0.0 };
     egui::Area::new(Id::new("props")).order(Order::Middle).fixed_pos(pos2(x, 80.0)).show(ctx, |ui| {
@@ -1023,9 +963,7 @@ fn right_column(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_width(RIGHT_W - 28.0);
             egui::ScrollArea::vertical().id_salt("props-scroll").max_height(props_max - 28.0).min_scrolled_height(props_max - 28.0).auto_shrink([false, false]).show(ui, |ui| {
                 ui.set_width(RIGHT_W - 28.0);
-                if st.tool == Tool::Profile {
-                    profile_panel(ui, st);
-                } else if st.selection.and_then(|id| st.scene.node(id)).is_some() {
+                if st.selection.and_then(|id| st.scene.node(id)).is_some() {
                     properties(ui, st);
                 } else {
                     scene_panel(ui, st);
@@ -1124,11 +1062,7 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
 
     if node.shape().is_some() || matches!(node.kind, NodeKind::Group { combined: true, .. }) {
         section(ui, "Combinaison");
-        let modes = st.settings.modes();
-        let items: Vec<(CombineMode, &str, Color32)> = modes
-            .iter()
-            .map(|m| (*m, if *m == CombineMode::Intersect { "Inter." } else { m.label() }, mode_color(*m)))
-            .collect();
+        let items = MODES.map(|m| (m, m.label(), mode_color(m)));
         if let Some(m) = segmented(ui, &items, node.combine.mode, 40.0) {
             st.mode = m;
             st.edit("Mode", id, |n| n.combine.mode = m);
@@ -1144,76 +1078,13 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
                 st.edit("Type de blend", id, |n| n.combine.kind = k);
             }
         }
-        if matches!(node.combine.mode, CombineMode::Groove | CombineMode::Tongue) {
-            let mut d = node.combine.depth;
-            let (ch, start) = slider_row(ui, "Profondeur", &mut d, 0.1..=8.0, 0.1, "mm");
-            if ch {
-                st.edit_live("Profondeur", id, start, |n| n.combine.depth = d);
-            }
-            let mut w = node.combine.width;
-            let (ch, start) = slider_row(ui, "Largeur", &mut w, 0.1..=6.0, 0.1, "mm");
-            if ch {
-                st.edit_live("Largeur", id, start, |n| n.combine.width = w);
-            }
-        }
     }
 
-    if st.settings.advanced {
-        repeat_rows(ui, st, id, &node);
-    }
     symmetry_row(ui, st, id, &node);
     position_rows(ui, st, id, &node);
 
     section(ui, "Matière");
     material_palette(ui, st, Some(id), node.material);
-}
-
-fn repeat_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
-    section(ui, "Organisation");
-    let kinds = [(0u8, "Aucune", ACCENT), (1u8, "Radiale", ACCENT), (2u8, "Linéaire", ACCENT)];
-    let cur = match node.repeat {
-        Repeat::None => 0,
-        Repeat::Radial { .. } => 1,
-        Repeat::Linear { .. } => 2,
-    };
-    if let Some(k) = segmented(ui, &kinds, cur, 40.0) {
-        let r = match k {
-            1 => Repeat::Radial { count: 4, axis: Axis::Y },
-            2 => Repeat::Linear { count: 3, step: Vec3::new(10.0, 0.0, 0.0) },
-            _ => Repeat::None,
-        };
-        st.edit("Répétition", id, |n| n.repeat = r);
-    }
-    match node.repeat {
-        Repeat::Radial { count, axis } => {
-            if let Some(c) = stepper(ui, "Copies", count, 2, 48) {
-                st.edit("Copies", id, |n| n.repeat = Repeat::Radial { count: c, axis });
-            }
-            let axes = [(Axis::X, "Axe X", AXIS_X), (Axis::Y, "Axe Y", AXIS_Y), (Axis::Z, "Axe Z", AXIS_Z)];
-            if let Some(a) = segmented(ui, &axes, axis, 36.0) {
-                st.edit("Axe", id, |n| n.repeat = Repeat::Radial { count, axis: a });
-            }
-        }
-        Repeat::Linear { count, step } => {
-            if let Some(c) = stepper(ui, "Copies", count, 2, 64) {
-                st.edit("Copies", id, |n| n.repeat = Repeat::Linear { count: c, step });
-            }
-            let a = step.abs().max_position();
-            let mut len = step.length();
-            let (ch, start) = slider_row(ui, "Pas", &mut len, 0.5..=80.0, 0.5, "mm");
-            if ch {
-                let dir = step.normalize_or(Vec3::X);
-                st.edit_live("Pas", id, start, |n| n.repeat = Repeat::Linear { count, step: dir * len });
-            }
-            let axes = [(0usize, "X", AXIS_X), (1usize, "Y", AXIS_Y), (2usize, "Z", AXIS_Z)];
-            if let Some(na) = segmented(ui, &axes, a, 36.0) {
-                let mut v = Vec3::ZERO;
-                v[na] = len.max(1.0);
-                st.edit("Axe", id, |n| n.repeat = Repeat::Linear { count, step: v });
-            }
-        }
-        Repeat::None => {}
-    }
 }
 
 fn symmetry_row(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
@@ -1355,7 +1226,6 @@ pub(crate) fn material_palette(ui: &mut Ui, st: &mut AppState, target: Option<No
 }
 
 fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
-    let advanced = st.settings.advanced;
     let mut s = sh.clone();
     let mut any = false;
     let mut start = false;
@@ -1423,12 +1293,6 @@ fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
     if s.round != r0 || s.chamfer != c0 {
         s.edges.clear();
     }
-    if advanced && !matches!(sh.kind, PrimKind::Sphere | PrimKind::Torus | PrimKind::Profile) {
-        row(ui, "Taper", &mut s.taper, -0.9..=0.9, 0.01, 1.0, "");
-    }
-    if advanced {
-        row(ui, "Coque", &mut s.shell, 0.0..=10.0, 0.1, 1.0, "mm");
-    }
     if sh.kind == PrimKind::Prism {
         if let Some(n) = stepper(ui, "Côtés", sh.sides, 3, 24) {
             s.sides = n;
@@ -1464,11 +1328,7 @@ fn scene_panel(ui: &mut Ui, st: &mut AppState) {
     ui.add_space(4.0);
     divider(ui);
     section(ui, "Nouvelles formes");
-    let modes = st.settings.modes();
-    let items: Vec<(CombineMode, &str, Color32)> = modes
-        .iter()
-        .map(|m| (*m, if *m == CombineMode::Intersect { "Inter." } else { m.label() }, mode_color(*m)))
-        .collect();
+    let items = MODES.map(|m| (m, m.label(), mode_color(m)));
     if let Some(m) = segmented(ui, &items, st.mode, 40.0) {
         st.mode = m;
     }
@@ -1489,62 +1349,6 @@ fn scene_panel(ui: &mut Ui, st: &mut AppState) {
     section(ui, "Affichage");
     if toggle_row(ui, "Arbre de formes", st.show_tree) {
         st.show_tree = !st.show_tree;
-    }
-}
-
-fn profile_panel(ui: &mut Ui, st: &mut AppState) {
-    let n = st.profile.as_ref().map(|d| d.points.len()).unwrap_or(0);
-    ui.label(egui::RichText::new("Nouveau profil").font(regular(12.0)).color(TEXT2));
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Contour").font(semibold(17.0)).color(TEXT));
-        chip_label(ui, &format!("{n} points · ouvert"), RAISED, LABEL);
-    });
-    divider(ui);
-    section(ui, "Tracé");
-    for (smooth, text) in [(true, "Glisser : point de courbe"), (false, "Tap : point d'angle")] {
-        ui.horizontal(|ui| {
-            ui.set_height(28.0);
-            let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-            if smooth {
-                ui.painter().circle_filled(r.center(), 5.0, TEXT);
-            } else {
-                ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(10.0, 10.0)), 0.0, TEXT);
-            }
-            ui.label(egui::RichText::new(text).color(LABEL));
-        });
-    }
-    if toggle_row(ui, "Snap demi-millimètre", st.snap) {
-        st.snap = !st.snap;
-    }
-    let Some(d) = st.profile.as_mut() else { return };
-    section(ui, "Opération");
-    let modes = [(ProfileMode::Extrude, "Extruder", ACCENT), (ProfileMode::Revolve, "Révolution", ACCENT)];
-    if let Some(m) = segmented(ui, &modes, d.mode, 40.0) {
-        d.mode = m;
-    }
-    let mut t = d.thickness * 2.0;
-    if slider_row(ui, "Épaisseur", &mut t, 0.5..=60.0, 0.5, "mm").0 {
-        d.thickness = t * 0.5;
-    }
-    let mut r = d.round;
-    if slider_row(ui, "Rondeur", &mut r, 0.0..=5.0, 0.1, "mm").0 {
-        d.round = r;
-    }
-    let sym = d.symmetric;
-    if toggle_row(ui, "Symétrique au plan", sym) {
-        d.symmetric = !sym;
-    }
-    ui.add_space(6.0);
-    let w = RIGHT_W - 28.0;
-    if primary_btn(ui, None, "Fermer et extruder", Some(w)).clicked() {
-        st.close_profile();
-    }
-    if secondary_btn(ui, "Annuler le dernier point", w).clicked() {
-        st.profile_undo_point();
-    }
-    if secondary_btn(ui, "Effacer le tracé", w).clicked() {
-        st.cancel_profile();
-        st.ensure_profile();
     }
 }
 
@@ -2015,7 +1819,7 @@ pub(crate) fn light_toggle(st: &mut AppState, resp: &Response) {
     }
 }
 
-/// Settings: the interface (Atelier or Studio) and the advanced functions.
+/// Settings: the interface (Atelier or Studio) and the creation options.
 /// Shown over both interfaces.
 pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
     if !st.settings_open {
@@ -2054,17 +1858,6 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                 }
             }
             ui.label(egui::RichText::new("Le choix est gardé pour les prochaines sessions.").font(regular(11.5)).color(TEXT2));
-            section(ui, "Fonctions");
-            if toggle_row(ui, "Toutes les primitives et tous les modes", st.settings.advanced) {
-                st.settings.advanced = !st.settings.advanced;
-                st.save_settings();
-                st.enforce_basics();
-            }
-            ui.label(
-                egui::RichText::new("Désactivé : Cube et Cylindre, Add (+) et Carve (−). Activé : Intersect, sphère, capsule, tore, cône, prisme, tube, profil, kit, Groove, Tongue, répétitions.")
-                    .font(regular(11.5))
-                    .color(TEXT2),
-            );
             section(ui, "Création");
             if toggle_row(ui, "Accrocher aux faces des objets (AutoGrid)", st.settings.snap_faces) {
                 st.settings.snap_faces = !st.settings.snap_faces;

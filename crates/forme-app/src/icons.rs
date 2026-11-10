@@ -14,8 +14,6 @@ pub enum Icon {
     Prism,
     Tube,
     Profile,
-    Kit,
-    Repeat,
     Undo,
     Redo,
     Mirror,
@@ -142,20 +140,6 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&pts);
             pen.closed(&[(11.0, 3.5), (16.5, 9.0), (14.5, 11.0), (9.0, 5.5)]);
             pen.dot(3.0, 16.0, 1.3);
-        }
-        Icon::Kit => {
-            pen.closed(&[(10.0, 3.0), (16.0, 6.5), (16.0, 13.5), (10.0, 17.0), (4.0, 13.5), (4.0, 6.5)]);
-            pen.circle(10.0, 10.0, 2.6);
-        }
-        Icon::Repeat => {
-            for i in 0..12 {
-                let a0 = i as f32 * PI / 6.0;
-                pen.arc(10.0, 10.0, 6.5, 6.5, a0, a0 + PI / 12.0);
-            }
-            pen.dot(10.0, 3.5, 1.8);
-            pen.dot(16.5, 10.0, 1.8);
-            pen.dot(10.0, 16.5, 1.8);
-            pen.dot(3.5, 10.0, 1.8);
         }
         Icon::Undo => {
             pen.line(&[(7.5, 5.0), (4.0, 8.5), (7.5, 12.0)]);

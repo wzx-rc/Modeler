@@ -2,12 +2,11 @@
 
 use crate::camera::OrbitCamera;
 use crate::files;
-use crate::kit::{self, KitPiece};
 use crate::settings::{Settings, UiMode};
 use forme_core::edges::{EdgeIndex, EdgeKind, EdgePick};
 use forme_core::*;
 use forme_render::{SelMode, View};
-use glam::{Mat3, Mat4, Quat, Vec2, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -15,9 +14,14 @@ use std::sync::mpsc;
 pub enum Tool {
     Select,
     Place(PrimKind),
-    Profile,
-    Kit(KitPiece),
 }
+
+/// The primitives the app creates (older files may hold others: they still
+/// load, render and edit).
+pub const PRIMS: [PrimKind; 5] = [PrimKind::Box, PrimKind::Cylinder, PrimKind::Sphere, PrimKind::Capsule, PrimKind::Torus];
+
+/// The combine modes offered: Add (+) and Carve (−).
+pub const MODES: [CombineMode; 2] = [CombineMode::Add, CombineMode::Carve];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PointerKind {
@@ -37,7 +41,6 @@ pub enum Gesture {
     Place,
     Height,
     Handle,
-    ProfileDrag,
 }
 
 /// Objects to snap to while placing a shape (without the shape itself).
@@ -159,37 +162,6 @@ pub struct HandleDrag {
     pub scale: f32,
     /// Plane handles: where the drag started on the plane.
     pub start_hit: Vec3,
-}
-
-#[derive(Clone, Debug)]
-pub struct ProfileDraft {
-    pub origin: Vec3,
-    pub right: Vec3,
-    pub up: Vec3,
-    pub normal: Vec3,
-    pub points: Vec<ProfilePoint>,
-    pub mode: ProfileMode,
-    pub thickness: f32,
-    pub round: f32,
-    pub symmetric: bool,
-}
-
-impl ProfileDraft {
-    pub fn to_world(&self, p: Vec2) -> Vec3 {
-        self.origin + self.right * p.x + self.up * p.y
-    }
-    pub fn to_plane(&self, ro: Vec3, rd: Vec3) -> Option<Vec2> {
-        let den = rd.dot(self.normal);
-        if den.abs() < 1e-6 {
-            return None;
-        }
-        let t = (self.origin - ro).dot(self.normal) / den;
-        if t < 0.0 {
-            return None;
-        }
-        let q = ro + rd * t - self.origin;
-        Some(Vec2::new(q.dot(self.right), q.dot(self.up)))
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,14 +307,13 @@ pub struct AppState {
     pub show_tree: bool,
     pub placement: Option<Placement>,
     pub handle_drag: Option<HandleDrag>,
-    pub profile: Option<ProfileDraft>,
     pub pointer_kind: PointerKind,
     pub screen: [f32; 2],
     /// Free 3D view area in points (min x, min y, max x, max y), set by the
     /// interface every frame: the camera centres the model in it.
     pub view_rect: [f32; 4],
     pub panel_visible: bool,
-    /// Preferences (interface, advanced functions), saved in settings.json.
+    /// Preferences (interface, creation, display), saved in settings.json.
     pub settings: Settings,
     pub settings_open: bool,
     /// Light panel (viewport and display), anchored under its button.
@@ -366,7 +337,6 @@ pub struct AppState {
     pub export_job: Option<(mpsc::Receiver<Result<ExportResult, String>>, f64)>,
     pub bake: BakeState,
     pub files_open: bool,
-    pub kit_open: bool,
     pub material: u32,
     pub now: f64,
     pub last_change: f64,
@@ -491,7 +461,6 @@ impl AppState {
             show_tree: true,
             placement: None,
             handle_drag: None,
-            profile: None,
             pointer_kind: PointerKind::Mouse,
             screen: [1194.0, 834.0],
             view_rect: [84.0, 16.0, 1194.0 - 308.0, 834.0],
@@ -536,7 +505,6 @@ impl AppState {
                 lines_vis: LinesVis::default(),
             },
             files_open: false,
-            kit_open: false,
             material: 0,
             now: 0.0,
             last_change: 0.0,
@@ -583,13 +551,11 @@ impl AppState {
         if on {
             // leave every edit in progress before freezing the model
             self.commit_placement();
-            self.cancel_profile();
             self.cancel_gestures();
             self.tool = Tool::Select;
             self.marking = Default::default();
             self.marquee = None;
             self.creation_open = false;
-            self.kit_open = false;
             self.renaming = false;
         } else {
             // the baked preview belongs to the BAKE mode
@@ -825,22 +791,6 @@ impl AppState {
         }
     }
 
-    /// Advanced functions off: falls back from a hidden tool or mode.
-    pub fn enforce_basics(&mut self) {
-        if let Tool::Place(k) = self.tool {
-            if !self.settings.prim_allowed(k) {
-                self.tool = Tool::Select;
-            }
-        }
-        if !self.settings.advanced && matches!(self.tool, Tool::Profile | Tool::Kit(_)) {
-            self.tool = Tool::Select;
-            self.kit_open = false;
-        }
-        if !self.settings.modes().contains(&self.mode) {
-            self.mode = CombineMode::Add;
-        }
-    }
-
     pub fn view(&self) -> View {
         self.camera.view(self.screen, self.principal())
     }
@@ -870,7 +820,6 @@ impl AppState {
     /// Selection tool in object or edge mode (3ds Max: 1 / 2).
     pub fn set_pick_mode(&mut self, m: PickMode) {
         self.commit_placement();
-        self.cancel_profile();
         self.tool = Tool::Select;
         if m != self.pick_mode {
             self.pick_mode = m;
@@ -1741,120 +1690,6 @@ impl AppState {
         self.handle_drag = None;
     }
 
-    // --------------------------------------------------------------- profile
-
-    pub fn ensure_profile(&mut self) -> &mut ProfileDraft {
-        if self.profile.is_none() {
-            let view = self.view();
-            let (fwd, _, cam_up) = view.basis();
-            let a = fwd.abs().max_position();
-            let mut normal = Vec3::ZERO;
-            normal[a] = -fwd[a].signum();
-            let mut up = cam_up - normal * cam_up.dot(normal);
-            let ua = up.abs().max_position();
-            let s = up[ua].signum();
-            up = Vec3::ZERO;
-            up[ua] = s;
-            let right = up.cross(normal);
-            let origin = match self.selection.and_then(|id| self.scene.node(id)) {
-                Some(n) => self.scene.world_matrix(n.id).transform_point3(Vec3::ZERO),
-                None => self.camera.target,
-            };
-            // plane through the origin, snapped to the grid
-            let origin = snap_vec(origin, 1.0, self.snap);
-            self.profile = Some(ProfileDraft {
-                origin,
-                right,
-                up,
-                normal,
-                points: vec![],
-                mode: ProfileMode::Extrude,
-                thickness: 3.0,
-                round: 0.6,
-                symmetric: true,
-            });
-        }
-        self.profile.as_mut().unwrap()
-    }
-
-    /// Adds a point (corner on tap, curve point on drag). Closes on the first point.
-    pub fn profile_point(&mut self, pos: [f32; 2], smooth: bool) {
-        let (ro, rd) = self.ray(pos);
-        let view = self.view();
-        let snap = self.snap;
-        let draft = self.ensure_profile();
-        let Some(q) = draft.to_plane(ro, rd) else { return };
-        if draft.points.len() >= 3 {
-            let first = draft.to_world(draft.points[0].pos);
-            if let Some(sp) = view.project(first) {
-                if (sp[0] - pos[0]).hypot(sp[1] - pos[1]) < 22.0 {
-                    self.close_profile();
-                    return;
-                }
-            }
-        }
-        let q = Vec2::new(snap_to(q.x, 0.5, snap), snap_to(q.y, 0.5, snap));
-        draft.points.push(ProfilePoint { pos: q, smooth });
-        self.view_changed();
-    }
-
-    pub fn profile_undo_point(&mut self) {
-        if let Some(d) = self.profile.as_mut() {
-            d.points.pop();
-        }
-        self.view_changed();
-    }
-
-    pub fn cancel_profile(&mut self) {
-        self.profile = None;
-        self.view_changed();
-    }
-
-    pub fn close_profile(&mut self) {
-        let Some(d) = self.profile.take() else { return };
-        if d.points.len() < 3 {
-            self.warn("Il faut au moins 3 points pour fermer le contour");
-            self.profile = Some(d);
-            return;
-        }
-        let mut shape = Shape::new(PrimKind::Profile);
-        shape.size = Vec3::new(0.0, 0.0, d.thickness);
-        shape.round = d.round.min(d.thickness * 0.9);
-        shape.profile = Some(Profile { points: d.points.clone(), mode: d.mode });
-        let mode = self.effective_mode();
-        let parent = self.insertion_parent();
-        let count = self.scene.nodes.values().filter(|n| n.shape().map(|s| s.kind == PrimKind::Profile).unwrap_or(false)).count() + 1;
-        self.history.record("Profil", &self.scene);
-        let spec = NodeSpec::shape(&format!("Profil {count}"), shape).mode(mode).mat(self.material);
-        let id = self.scene.add(parent, spec);
-        let rot = Quat::from_mat3(&Mat3::from_cols(d.right, d.up, d.normal)).normalize();
-        let origin = if d.symmetric { d.origin } else { d.origin + d.normal * d.thickness };
-        self.set_world(id, origin, rot);
-        self.selection = Some(id);
-        self.tool = Tool::Select;
-        self.changed();
-        self.toast(format!("Profil {} extrudé · {} points", count, d.points.len()));
-    }
-
-    // -------------------------------------------------------------------- kit
-
-    pub fn place_kit(&mut self, piece: KitPiece, pos: [f32; 2]) {
-        let Some((p, n)) = self.hit(pos) else {
-            self.warn("Pose le kit sur une surface");
-            return;
-        };
-        let rot = Quat::from_rotation_arc(Vec3::Y, n.normalize());
-        let parent = self.insertion_parent();
-        self.history.record(piece.label(), &self.scene);
-        let pm = self.parent_frame(parent);
-        let (ps, pr, _) = pm.to_scale_rotation_translation();
-        let local = pm.inverse().transform_point3(p);
-        let id = kit::insert(&mut self.scene, parent, piece, local, pr.inverse() * rot, 1.0 / ps.x.max(1e-4));
-        self.selection = Some(id);
-        self.changed();
-        self.toast(format!("{} posé", piece.label()));
-    }
-
     // -------------------------------------------------------- tree / commands
 
     pub fn edit<F: FnOnce(&mut Node)>(&mut self, label: &str, id: NodeId, f: F) {
@@ -1986,23 +1821,6 @@ impl AppState {
         self.changed();
     }
 
-    pub fn toggle_repeat(&mut self) {
-        let Some(id) = self.selection else {
-            self.warn("Sélectionne une forme à répéter");
-            return;
-        };
-        let cur = self.scene.node(id).map(|n| n.repeat).unwrap_or_default();
-        let next = match cur {
-            Repeat::None => Repeat::Radial { count: 4, axis: Axis::Y },
-            _ => Repeat::None,
-        };
-        self.edit("Répétition", id, |n| n.repeat = next);
-        self.toast(match next {
-            Repeat::None => "Répétition retirée".to_string(),
-            _ => "Répétition radiale ×4 autour de Y".to_string(),
-        });
-    }
-
     pub fn frame_all(&mut self) {
         let (lo, hi) = self.scene.bounds();
         self.camera.frame(lo, hi);
@@ -2032,7 +1850,6 @@ impl AppState {
         self.history = History::new();
         self.selection = None;
         self.placement = None;
-        self.profile = None;
         self.handle_drag = None;
         self.frame_all();
         self.changed();
@@ -2398,8 +2215,6 @@ impl AppState {
                 None => format!("{} formes · touche une forme pour la sélectionner", self.scene.shape_count()),
             },
             Tool::Place(k) => format!("{} · {} — glisse pour la base (ou {} : taille par défaut)", k.label(), self.effective_mode().label(), tap_word()),
-            Tool::Profile => "Profil · tap = angle · glisser = courbe".to_string(),
-            Tool::Kit(k) => format!("Kit · {} — touche une surface", k.label()),
         }
     }
 }

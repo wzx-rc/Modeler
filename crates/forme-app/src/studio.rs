@@ -336,7 +336,7 @@ fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                     if st.bake_mode() {
                         ui.disable(); // BAKE: the model is frozen
                     }
-                    for k in st.settings.placeable() {
+                    for k in PRIMS {
                         if ui.add(egui::Button::new(k.label()).selected(st.tool == Tool::Place(k))).clicked() {
                             st.commit_placement();
                             st.tool = Tool::Place(k);
@@ -344,7 +344,7 @@ fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                     }
                     ui.separator();
                     small_label(ui, "Mode des nouvelles formes");
-                    for m in st.settings.modes() {
+                    for m in MODES {
                         if ui.radio(st.mode == m, m.label()).clicked() {
                             st.mode = m;
                         }
@@ -356,7 +356,7 @@ fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                     }
                     let target = st.selection.filter(|id| st.scene.node(*id).map(|n| n.shape().is_some()).unwrap_or(false));
                     small_label(ui, "Combinaison de la sélection");
-                    for m in st.settings.modes() {
+                    for m in MODES {
                         let cur = target.and_then(|id| st.scene.node(id)).map(|n| n.combine.mode);
                         if ui.add_enabled(target.is_some(), egui::RadioButton::new(cur == Some(m), m.label())).clicked() {
                             if let Some(id) = target {
@@ -463,7 +463,7 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             }
             vsep(ui);
             ui.label(RichText::new("Créer").font(regular(11.5)).color(T3));
-            for k in st.settings.placeable() {
+            for k in PRIMS {
                 let key = ui::prim_key(k);
                 let tip = format!("{}{} : glisser la base, puis la hauteur", k.label(), key.map(|c| format!(" ({c})")).unwrap_or_default());
                 let r = tool_btn(ui, prim_icon(k), st.tool == Tool::Place(k), &tip);
@@ -481,7 +481,7 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             });
             vsep(ui);
             let shown = st.effective_mode();
-            for m in st.settings.modes() {
+            for m in MODES {
                 if mode_tool_btn(ui, m, shown == m).clicked() {
                     st.set_mode(m);
                 }
@@ -806,7 +806,7 @@ fn command_panel(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
 
 fn create_tab(ui: &mut Ui, st: &mut AppState) {
     rollout(ui, "c-prims", "Primitives", true, |ui| {
-        for k in st.settings.placeable() {
+        for k in PRIMS {
             let on = st.tool == Tool::Place(k);
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
             let p = ui.painter();
@@ -821,7 +821,7 @@ fn create_tab(ui: &mut Ui, st: &mut AppState) {
     });
     rollout(ui, "c-mode", "Mode des nouvelles formes", true, |ui| {
         ui.horizontal_wrapped(|ui| {
-            for m in st.settings.modes() {
+            for m in MODES {
                 if ui.radio(st.mode == m, m.label()).clicked() {
                     st.mode = m;
                 }
@@ -912,7 +912,7 @@ fn modify_tab(ui: &mut Ui, st: &mut AppState) {
     if node.shape().is_some() || matches!(node.kind, NodeKind::Group { combined: true, .. }) {
         rollout(ui, "m-combine", "Combinaison", true, |ui| {
             ui.horizontal_wrapped(|ui| {
-                for m in st.settings.modes() {
+                for m in MODES {
                     if ui.radio(node.combine.mode == m, m.label()).clicked() {
                         st.mode = m;
                         st.edit("Mode", id, |n| n.combine.mode = m);

@@ -63,7 +63,6 @@ impl App {
             Err(_) => AppState::new(forme_core::Scene::new(), "Sans titre"),
         };
         st.settings = forme_app::settings::Settings::load();
-        st.enforce_basics();
         App {
             window: None,
             gfx: None,
