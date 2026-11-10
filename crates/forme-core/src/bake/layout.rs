@@ -1014,6 +1014,9 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             .into_iter()
             .filter(|h| !hints.iter().any(|k| k.chart == h.chart && k.w == h.w && k.m.distance(h.m) < 1e-6))
             .collect();
+        if std::env::var("DEBUG_LAYOUT").is_ok() {
+            eprintln!("passe : indices {:?}", new);
+        }
         if new.is_empty() || hints.len() > 32 {
             return r;
         }
@@ -1788,13 +1791,18 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
             queue.push_back((other, m, DVec2::ZERO));
         }
     }
+    // hooks placed so far: the wall chart, the arc's middle, the hook node
+    // or landing, whether it was a landing, and whether on the part's own
+    // edge (the other end of a through opening takes the same square: see
+    // below)
+    let mut ends: Vec<(usize, DVec3, DVec3, bool, bool)> = vec![];
     for ci in 0..nc {
         if lay.charts[ci].strip.is_some() || ogrid[ci] || matches!(lay.charts[ci].map, Map::Rev { .. }) {
             continue;
         }
         // hooks with no room inside the face, placed once every loop of
         // the face is planned (they meet the boundary where a loop does)
-        let mut tight: Vec<(usize, DVec2, DVec2, bool, usize, DVec2, Option<DVec2>)> = vec![];
+        let mut tight: Vec<(usize, DVec2, DVec2, bool, usize, DVec2, Option<DVec2>, Option<DVec3>)> = vec![];
         // sharp re-entrant corners (first: hooks below align on their loops)
         let loops = lay.bnd[ci].clone();
         for lp in loops {
@@ -1880,14 +1888,40 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                         // diagonal runs on to that boundary, where a loop
                         // planned nearby meets it if there is one, and the
                         // sides of the square there are the boundary itself
-                        if hook < st.size * 0.6 {
-                            // (the arc's centre: on both ends' normals)
-                            let (n0, n1) = (perp(t_in), perp(t_out));
-                            let dn = n0.perp_dot(n1);
-                            let c = (dn.abs() > 1e-9).then(|| p0 + n0 * ((q0 - p0).perp_dot(n1) / dn));
-                            tight.push((m, a1, a2, rev, other, x, c));
+                        let (n0, n1) = (perp(t_in), perp(t_out));
+                        let dn = n0.perp_dot(n1);
+                        let centre = (dn.abs() > 1e-9).then(|| p0 + n0 * ((q0 - p0).perp_dot(n1) / dn));
+                        // the other end of a through opening (a hole's arc
+                        // on the face across, on the same wall, right in
+                        // line): the same square here, so that both ends
+                        // agree. Its landing in line, when this face's edge
+                        // is there too, else a hook node there when it
+                        // landed on the part's own edge (a face wider at
+                        // this end: its edges rounded at the other); its
+                        // hook node in line. (Only where the diagonal is
+                        // clear of any other shape)
+                        let m3 = lay.nodes[m];
+                        let twin = ends.iter().find(|t| t.0 == other && t.1.distance(m3) > lay.node_tol * 10.0 && map.to2(t.1).distance(mq) < lay.node_tol * 10.0).copied().and_then(|t| {
+                            let y2 = map.to2(t.2);
+                            if !(1..8).all(|i| lay.fmin(&lay.charts[ci], mq.lerp(y2, i as f64 / 8.0)).0 > 0.0) {
+                                return None;
+                            }
+                            if t.3 && boundary_hit(&lay, ci, mq, (y2 - mq).normalize_or_zero()).is_some_and(|h| map.to2(h.1).distance(y2) < lay.node_tol * 10.0) {
+                                Some((true, t.2))
+                            } else if (!t.3 || t.4) && lay.fmin(&lay.charts[ci], y2).0 > hook * 0.1 {
+                                Some((false, t.2))
+                            } else {
+                                None
+                            }
+                        });
+                        if twin.is_some() && std::env::var("DEBUG_LAYOUT").is_ok() {
+                            eprintln!("jumeau {:?} n{m} {:?} <- {:?}", lay.charts[ci].id, m3, twin);
+                        }
+                        if hook < st.size * 0.6 || twin.is_some_and(|t| t.0) {
+                            tight.push((m, a1, a2, rev, other, x, centre, twin.filter(|t| t.0).map(|t| t.1)));
                             continue;
                         }
+                        let twin_g = twin.map(|t| map.to2(t.1));
                         // on a loop already planned nearby, parallel to one
                         // of the walls (a hole's ring, another hook): there,
                         // rather than a thin row beside it
@@ -1945,6 +1979,25 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                             .map(|h| x + a1 * h[0] + a2 * h[1])
                             .find(|&g| lay.fmin(&lay.charts[ci], g).0 > hook * 0.1)
                             .unwrap_or(x + (a1 + a2) * hook);
+                        let g2 = twin_g.unwrap_or(g2);
+                        // nor when a side of the square would run along the
+                        // face's edge less than half a quad away (a sliver
+                        // row): the square rests on the edge there, as when
+                        // there is no room. (A straight edge along that side,
+                        // not another feature's arc, which has its own square)
+                        let near_edge = [a1, a2].into_iter().any(|dir| {
+                            boundary_hit(&lay, ci, g2, dir).is_some_and(|(e, x3)| {
+                                let p2 = lay.pts2(e, ci);
+                                let (pa, pb) = (p2[0], p2[p2.len() - 1]);
+                                let t = (pb - pa).normalize_or_zero();
+                                let straight = p2.iter().all(|&p| (p - pa).perp_dot(t).abs() < lay.node_tol * 10.0);
+                                straight && t.dot(dir).abs() < 0.1 && (map.to2(x3) - g2).length() < st.size * 0.5
+                            })
+                        });
+                        if near_edge && twin_g.is_none() {
+                            tight.push((m, a1, a2, rev, other, x, centre, None));
+                            continue;
+                        }
                         // the hook node of another feature right there: shared
                         let near_g = lay.inner[ci].iter().copied().find(|&n| map.to2(lay.nodes[n]).distance(g2) < hook * 0.5);
                         let g = match near_g {
@@ -1956,6 +2009,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                                 n
                             }
                         };
+                        ends.push((other, m3, lay.nodes[g], false, true));
                         // the square between the arc's centre and the hook
                         // node: its two sides through the node are loops
                         let (n0, n1) = (perp(t_in), perp(t_out));
@@ -2025,7 +2079,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 }
             }
         }
-        for (m, a1, a2, rev, other, x, c) in tight {
+        for (m, a1, a2, rev, other, x, c, twin) in tight {
             let map = lay.charts[ci].map;
             let o2 = map.to2(lay.nodes[m]);
             let dd = a1.perp_dot(a2);
@@ -2042,6 +2096,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
             // the loops planned on the face, parallel to a wall, and where
             // they land on the boundary
             let mut landings: Vec<(f64, usize, DVec3)> = vec![];
+            let mut crossing: Option<(f64, usize, DVec3)> = None;
             for &(qc, qn, qd) in queue.iter() {
                 if qc != ci || qd == DVec2::ZERO {
                     continue;
@@ -2058,6 +2113,23 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 let off = [gaps(q).0, gaps(q).1][side];
                 if let Some((e2, y3)) = boundary_hit(&lay, ci, q, qd) {
                     landings.push((off, e2, y3));
+                    // a loop across the diagonal's way: it would end on the
+                    // diagonal, a T that no counts can close (the rows on
+                    // both sides of the diagonal differ by its piece)
+                    let y2 = map.to2(y3);
+                    let (r, dg) = (y2 - q, xq - o2);
+                    let den = dg.perp_dot(r);
+                    if den.abs() > 1e-12 {
+                        let t = (q - o2).perp_dot(r) / den;
+                        let w = (q - o2).perp_dot(dg) / den;
+                        let (ya, yb) = gaps(y2);
+                        let clear = (1..8).all(|i| lay.fmin(&lay.charts[ci], o2.lerp(y2, i as f64 / 8.0)).0 > 0.0);
+                        // (not a diagonal bent far off: within 30 degrees)
+                        let bent = (y2 - o2).normalize_or_zero().dot(dg.normalize_or_zero()) < 0.866;
+                        if t > 0.05 && t < 1.0 && w > 0.0 && w < 1.0 && ya > 0.0 && yb > 0.0 && clear && !bent && crossing.is_none_or(|c: (f64, usize, DVec3)| t < c.0) {
+                            crossing = Some((t, e2, y3));
+                        }
+                    }
                 }
             }
             // (edge, point, snap): where a loop planned nearby will land if
@@ -2069,6 +2141,70 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 if dist < bd {
                     bd = dist;
                     best = (e2, y3, st.size * 0.02);
+                }
+            }
+            // or a loop from another face that ran into this diagonal on
+            // the last pass (round the part's edge, from the other end of
+            // a through hole)
+            let mm = lay.nodes[m];
+            for h in hints.iter().filter(|h| h.chart == ci && h.m.distance(mm) < lay.node_tol * 10.0) {
+                let (aw, ao) = if h.w == 0 { (a1, a2) } else { (a2, a1) };
+                let dg = xq - o2;
+                let den = dg.dot(aw);
+                if den.abs() < 1e-12 {
+                    continue;
+                }
+                let t = (h.c - (o2 - x).dot(aw)) / den;
+                if t <= 0.05 || t >= 1.0 || crossing.is_some_and(|c| c.0 <= t) {
+                    continue;
+                }
+                let q = o2 + dg * t;
+                if let Some((e2, y3)) = boundary_hit(&lay, ci, q, ao) {
+                    let y2 = map.to2(y3);
+                    let (ya, yb) = gaps(y2);
+                    let clear = (1..8).all(|i| lay.fmin(&lay.charts[ci], o2.lerp(y2, i as f64 / 8.0)).0 > 0.0);
+                    let bent = (y2 - o2).normalize_or_zero().dot(dg.normalize_or_zero()) < 0.866;
+                    if ya > 0.0 && yb > 0.0 && clear && !bent {
+                        crossing = Some((t, e2, y3));
+                    }
+                }
+            }
+            // a loop across the way: the diagonal lands where that loop
+            // does, the loop is then a side of the square
+            if let Some((_, e2, y3)) = crossing {
+                bd = 0.0;
+                best = (e2, y3, st.size * 0.02);
+            }
+            // the other end of a through opening landed: in line with it
+            if let Some(t3) = twin {
+                let y2 = map.to2(t3);
+                if let Some((e2, y3)) = boundary_hit(&lay, ci, o2, (y2 - o2).normalize_or_zero()).filter(|h| map.to2(h.1).distance(y2) < lay.node_tol * 10.0) {
+                    bd = 0.0;
+                    best = (e2, y3, st.size * 0.02);
+                }
+            }
+            // a corner of the face in the square's quadrant, too close for
+            // a hook on either wall (less than a quad and a half: a hook
+            // there would leave less than half a quad to both edges): the
+            // square rests on both edges, its corner is the face's corner
+            // and the diagonal runs into it, rather than leaving a short
+            // stretch of edge there and a loop from the landing across the
+            // face (a sliver row, and a T on the next diagonal)
+            if bd >= st.size * 0.6 {
+                let ed = &lay.edges[e];
+                let mut cn: Option<(f64, usize)> = None;
+                for n in [ed.a, ed.b] {
+                    let y2 = map.to2(lay.nodes[n]);
+                    let dist = y2.distance(xq);
+                    let (ya, yb) = gaps(y2);
+                    let convex = corner_angle(&lay, ci, n).is_some_and(|a| a > 0.5);
+                    let clear = (1..8).all(|i| lay.fmin(&lay.charts[ci], o2.lerp(y2, i as f64 / 8.0)).0 > 0.0);
+                    if dist > best.2 && ya > 0.0 && yb > 0.0 && ya.max(yb) < st.size * 1.5 && convex && clear && cn.is_none_or(|c| dist < c.0) {
+                        cn = Some((dist, n));
+                    }
+                }
+                if let Some((_, n)) = cn {
+                    best = (e, lay.nodes[n], st.size * 0.02);
                 }
             }
             // a corner of the boundary (another shape's) right at the corner
@@ -2095,7 +2231,9 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                     best = (e2, y3, st.size * 0.02);
                 }
             }
+            let own = lay.edges[best.0].charts.iter().all(|&c| lay.charts[c].id.prim == lay.charts[ci].id.prim);
             let g = boundary_node(&mut lay, best.0, best.1, best.2);
+            ends.push((other, lay.nodes[m], lay.nodes[g], true, own));
             lay.origins.push(g);
             if std::env::var("DEBUG_LAYOUT").is_ok() {
                 eprintln!("accroche au bord {:?} n{m} -> n{g} {:?}", lay.charts[ci].id, lay.nodes[g]);
