@@ -1555,12 +1555,12 @@ fn par_lignes() {
     let r0 = seul.root;
     seul.add(r0, NodeSpec::shape("Boîte", b));
     let t = DVec3::new(39.5, 19.4, 51.5);
-    let cases = [("romain", romain, t, 80.0), ("romain-vif", vif, t, 80.0), ("boite-arrondie", seul, DVec3::ZERO, 32.0)];
+    let cases = [("romain", romain.clone(), t, 80.0, true), ("romain-droit", romain, t, 80.0, false), ("romain-vif", vif, t, 80.0, true), ("boite-arrondie", seul, DVec3::ZERO, 32.0, true)];
     std::env::set_var("BY_STEP", "1");
-    for (name, scene, target, ext) in cases {
+    for (name, scene, target, ext, diagonal) in cases {
         let st = bake::BakeSettings::preset(bake::Quality::Standard);
         let size = bake::build::plan(&scene, &st).unwrap_or(5.0);
-        let ls = bake::layout::LayoutSettings { size, tol: st.tol * 2.0, threads: st.threads };
+        let ls = bake::layout::LayoutSettings { size, tol: st.tol * 2.0, threads: st.threads, diagonal };
         match bake::layout::build(&scene, &ls, &bake::Progress::default()) {
             Ok(b) => {
                 let s = &b.stats;

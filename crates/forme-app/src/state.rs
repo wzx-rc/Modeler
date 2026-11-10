@@ -246,6 +246,8 @@ pub struct BakeState {
     pub last_export: Option<String>,
     /// Cached constructive plan: (scene version, quality, quad size).
     pub plan: Option<(u64, forme_core::bake::Quality, Option<f64>)>,
+    /// Cached: (scene version, history the line bake handles).
+    pub lines_ok: Option<(u64, bool)>,
     /// Optional second pass: dissolve the flat edge loops. Off by default;
     /// when on, `result` is `base` after the pass.
     pub flat: bool,
@@ -508,6 +510,7 @@ impl AppState {
                 wire: true,
                 last_export: None,
                 plan: None,
+                lines_ok: None,
                 flat: false,
                 base: None,
                 base_scene: None,
@@ -1838,6 +1841,18 @@ impl AppState {
         let p = forme_core::bake::build::plan(&self.scene, &forme_core::bake::BakeSettings::preset(q));
         self.bake.plan = Some((self.scene_version, q, p));
         p
+    }
+
+    /// Whether the history is one the bake by construction lines handles.
+    pub fn bake_by_lines(&mut self) -> bool {
+        if let Some((v, ok)) = self.bake.lines_ok {
+            if v == self.scene_version {
+                return ok;
+            }
+        }
+        let ok = forme_core::bake::layout::handles(&self.scene).is_ok();
+        self.bake.lines_ok = Some((self.scene_version, ok));
+        ok
     }
 
     pub fn start_bake(&mut self) {

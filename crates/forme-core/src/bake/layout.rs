@@ -216,6 +216,8 @@ struct Layout<'a> {
     bnd: Vec<Vec<Vec<(usize, bool)>>>,
     /// Per chart: loop edges inside it.
     rays: Vec<Vec<usize>>,
+    /// Per chart: loop nodes inside the face (diagonal hooks).
+    inner: Vec<Vec<usize>>,
     origins: Vec<usize>,
     node_tol: f64,
 }
@@ -514,6 +516,9 @@ pub struct LayoutSettings {
     /// Chord tolerance on fillets (mm).
     pub tol: f64,
     pub threads: usize,
+    /// Concave fillets hook into the face's grid by a diagonal (Romain's
+    /// choice) instead of running their rows straight across the face.
+    pub diagonal: bool,
 }
 
 /// Rows across a fillet of radius `r` and opening `angle`, even, at least 2.
@@ -521,6 +526,35 @@ fn fillet_segs(r: f64, angle: f64, tol: f64) -> usize {
     let step = 2.0 * (1.0 - (tol / r).min(0.9)).acos();
     let n = ((angle / step.max(1e-3)).ceil() as usize).max(2);
     n + n % 2
+}
+
+/// Whether the history is one this bake handles (Err: why not).
+pub fn handles(scene: &Scene) -> Result<(), String> {
+    let field = Field::new(&compile(scene));
+    let steps: Vec<Step> = field.steps().ok_or("historique en arbre")?;
+    if steps.is_empty() {
+        return Err("scène vide".into());
+    }
+    check(&field, &steps)
+}
+
+fn check(field: &Field, steps: &[Step]) -> Result<(), String> {
+    for (i, s) in steps.iter().enumerate() {
+        let pr = &field.prims[s.prim as usize];
+        if pr.kind != 0 || pr.taper.abs() > 1e-6 || pr.shell > 0.0 {
+            return Err("par lignes : seulement des boîtes pour l'instant".into());
+        }
+        if field.instances(s.prim).len() != 1 {
+            return Err("par lignes : copies pas encore gérées".into());
+        }
+        if i > 0 && (s.mode > 1 || s.chamfer || s.k > 1e-9) {
+            return Err("par lignes : seulement Add / Carve sans fillet de jonction pour l'instant".into());
+        }
+        if (0..12).any(|e| edge_r(pr, e) < 0.0) {
+            return Err("par lignes : chanfreins pas encore gérés".into());
+        }
+    }
+    Ok(())
 }
 
 /// Bake by construction lines.
@@ -533,24 +567,12 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
     }
     let (lo, hi) = scene.bounds();
     let extent = if lo.x <= hi.x { ((hi - lo).max_element() as f64).max(1.0) } else { 20.0 };
+    check(&field, &steps)?;
     // shapes, one per step
     let mut shapes = vec![];
     for (i, s) in steps.iter().enumerate() {
-        let pr = &field.prims[s.prim as usize];
         let inst = field.instances(s.prim);
-        if pr.kind != 0 || pr.taper.abs() > 1e-6 || pr.shell > 0.0 {
-            return Err("par lignes : seulement des boîtes pour l'instant".into());
-        }
-        if inst.len() != 1 {
-            return Err("par lignes : copies pas encore gérées".into());
-        }
-        if i > 0 && (s.mode > 1 || s.chamfer || s.k > 1e-9) {
-            return Err("par lignes : seulement Add / Carve sans fillet de jonction pour l'instant".into());
-        }
-        if (0..12).any(|e| edge_r(pr, e) < 0.0) {
-            return Err("par lignes : chanfreins pas encore gérés".into());
-        }
-        shapes.push(Shape { pr, inst: inst[0], prim: s.prim, step: i, carve: i > 0 && s.mode == 1 });
+        shapes.push(Shape { pr: &field.prims[s.prim as usize], inst: inst[0], prim: s.prim, step: i, carve: i > 0 && s.mode == 1 });
     }
     let prev: Vec<Option<Field>> = (0..shapes.len()).map(|i| (i > 0).then(|| field.prefix(&steps, i))).collect();
     let tol_f = (st.tol * 2.0).max(0.02);
@@ -649,10 +671,11 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
     }
     progress.set(1, charts.len() as u32);
 
-    let mut lay = Layout { field: &field, shapes, prev, charts, nodes: vec![], edges: vec![], bnd: vec![], rays: vec![], origins: vec![], node_tol: extent * 2e-6 };
+    let mut lay = Layout { field: &field, shapes, prev, charts, nodes: vec![], edges: vec![], bnd: vec![], rays: vec![], inner: vec![], origins: vec![], node_tol: extent * 2e-6 };
     let nc = lay.charts.len();
     lay.bnd = vec![vec![]; nc];
     lay.rays = vec![vec![]; nc];
+    lay.inner = vec![vec![]; nc];
     let fd = extent * 1e-7;
 
     // 1. pieces of boundary of every chart, between nodes
@@ -839,7 +862,34 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                     let t_in = lay.end_dir(ep, fp, ci);
                     let t_out = lay.start_dir(en, fnx, ci);
                     let m = lay.split(e, sm.to3(mid));
-                    if total < 0.0 {
+                    if total < 0.0 && st.diagonal {
+                        // concave fillet hooked diagonally: from its middle a
+                        // line runs to a grid node one quad away from the
+                        // corner, where the two loops of the face cross
+                        lay.origins.push(m);
+                        let map = lay.charts[ci].map;
+                        let (ps, pe) = if fwd { (na, nb) } else { (nb, na) };
+                        let (p0, q0) = (map.to2(lay.nodes[ps]), map.to2(lay.nodes[pe]));
+                        let (a1, a2) = (t_in.normalize(), -t_out.normalize());
+                        // corner where the two walls would meet
+                        let den = a1.perp_dot(t_out);
+                        if den.abs() < 1e-6 {
+                            return Err("par lignes : fillet entre deux murs parallèles".into());
+                        }
+                        let s = (q0 - p0).perp_dot(t_out) / den;
+                        let x = p0 + a1 * s;
+                        let g2 = x + (a1 + a2) * st.size;
+                        let g = lay.node(map.to3(g2));
+                        lay.origins.push(g);
+                        lay.inner[ci].push(g);
+                        let re = lay.edges.len();
+                        lay.edges.push(GEdge { a: m, b: g, pts: vec![lay.nodes[m], lay.nodes[g]], charts: [ci, ci], ray: true, alive: true });
+                        lay.rays[ci].push(re);
+                        for d in [a1, -a1, a2, -a2] {
+                            queue.push_back((ci, g, d));
+                        }
+                        queue.push_back((other, m, DVec2::ZERO));
+                    } else if total < 0.0 {
                         // concave fillet: a re-entrant corner in its middle
                         lay.origins.push(m);
                         queue.push_back((ci, m, t_in));
@@ -921,6 +971,24 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                     }
                 }
             }
+        }
+        // a loop node inside the face on the way (where loops cross)
+        let mut stop: Option<(f64, usize)> = None;
+        for &g in &lay.inner[ci] {
+            if g == n0 {
+                continue;
+            }
+            let w = lay.charts[ci].map.to2(lay.nodes[g]) - o;
+            let s = w.dot(d);
+            if s > extent * 1e-6 && (w - d * s).length() < snap && best.is_none_or(|b| s < b.0) && stop.is_none_or(|x| s < x.0) {
+                stop = Some((s, g));
+            }
+        }
+        if let Some((_, g)) = stop {
+            let re = lay.edges.len();
+            lay.edges.push(GEdge { a: n0, b: g, pts: vec![lay.nodes[n0], lay.nodes[g]], charts: [ci, ci], ray: true, alive: true });
+            lay.rays[ci].push(re);
+            continue;
         }
         let Some((_, e, i, w)) = best else {
             return Err("par lignes : boucle qui ne ressort pas de la face".into());
@@ -1191,6 +1259,10 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         let mut acc: Vec<Vec<(f64, f64)>> = par.iter().map(|v| vec![(0.0, 0.0); v.len()]).collect();
         for (_, sides) in &patches {
             for (a, b) in [(0usize, 2usize), (2, 0), (1, 3), (3, 1)] {
+                // with diagonal hooks the fillet rows stay in their corner
+                if st.diagonal && sides[a].iter().any(|x| fixed[x.0]) {
+                    continue;
+                }
                 let pa = side_par(&sides[a], &par);
                 let n = pa.len() - 1;
                 let tot: f64 = sides[b].iter().map(|x| elen[x.0]).sum();

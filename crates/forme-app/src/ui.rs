@@ -1560,7 +1560,9 @@ pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
     }
     let s = BakeSettings::preset(st.bake.quality);
     let plan = st.bake_plan();
+    let by_lines = st.bake_by_lines();
     let line = match plan {
+        Some(size) if by_lines => format!("Par lignes de construction · quads de ~{} mm · fillets en rangées", fmt_mm(size as f32)),
         Some(size) => format!("Par opération · quads de ~{} mm · fillets en rangées", fmt_mm(size as f32)),
         None => format!("Historique pas encore géré par opération : repli par surfaces · écart {} mm", fmt_mm_fine(s.tol)),
     };

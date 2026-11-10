@@ -839,7 +839,7 @@ pub fn build_auto(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Resu
     let size = plan(scene, st).ok_or_else(|| "historique pas encore géré (groupes fusionnés, coques, Groove/Tongue, copies de la forme de base)".to_string())?;
     let bs = BuildSettings { size, tol: (st.tol * 2.0).max(0.01), fillet_rows: 0, threads: st.threads };
     // first from the construction lines, then the older builder
-    let ls = super::layout::LayoutSettings { size, tol: bs.tol, threads: st.threads };
+    let ls = super::layout::LayoutSettings { size, tol: bs.tol, threads: st.threads, diagonal: true };
     let why_lines = match super::layout::build(scene, &ls, progress) {
         Ok(mut b) => {
             b.stats.quad_size = size;
