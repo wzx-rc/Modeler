@@ -19,6 +19,8 @@ pub mod files;
 pub mod gfx;
 pub mod icons;
 pub mod marking;
+pub mod plaque;
+pub mod radial;
 pub mod settings;
 pub mod state;
 pub mod studio;
@@ -34,8 +36,8 @@ pub fn run(ctx: &egui::Context, st: &mut AppState) {
     // (or the one chosen in Réglages for all)
     use settings::{AmbianceChoice, UiMode};
     theme::set_ambiance(ctx, match (st.settings.ambiance, st.settings.ui_mode) {
-        (AmbianceChoice::Vert, _) | (AmbianceChoice::Auto, UiMode::Atelier) => theme::Ambiance::Vert,
-        (AmbianceChoice::Orange, _) | (AmbianceChoice::Auto, UiMode::Studio) => theme::Ambiance::Orange,
+        (AmbianceChoice::Vert, _) | (AmbianceChoice::Auto, UiMode::Atelier | UiMode::Radial) => theme::Ambiance::Vert,
+        (AmbianceChoice::Orange, _) | (AmbianceChoice::Auto, UiMode::Studio | UiMode::Plaque) => theme::Ambiance::Orange,
         (AmbianceChoice::Bleu, _) | (AmbianceChoice::Auto, UiMode::Focus) => theme::Ambiance::Bleu,
     });
     viewport::show(ctx, st);
@@ -43,6 +45,8 @@ pub fn run(ctx: &egui::Context, st: &mut AppState) {
         settings::UiMode::Atelier => ui::show(ctx, st),
         settings::UiMode::Studio => studio::show(ctx, st),
         settings::UiMode::Focus => ui::show_focus(ctx, st),
+        settings::UiMode::Plaque => plaque::show(ctx, st),
+        settings::UiMode::Radial => radial::show(ctx, st),
     }
     ui::display_panel(ctx, st);
     ui::creation_popover(ctx, st);

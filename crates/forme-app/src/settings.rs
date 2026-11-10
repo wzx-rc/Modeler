@@ -17,16 +17,24 @@ pub enum UiMode {
     /// « Focus »: almost nothing on screen, a dock at the bottom, the radial
     /// menu first, the scene in a drawer.
     Focus,
+    /// « Plaque » (mood A): sober Plasticity look, thin tool bar on the left,
+    /// floating inspector in mm, docked scene tree, status bar; orange.
+    Plaque,
+    /// « Radial » (mood B): tool pill with ADD / CARVE on top, tool cards on
+    /// the right, wedge marking menu, contextual inspector; green, mono labels.
+    Radial,
 }
 
 impl UiMode {
-    pub const ALL: [UiMode; 3] = [UiMode::Atelier, UiMode::Studio, UiMode::Focus];
+    pub const ALL: [UiMode; 5] = [UiMode::Atelier, UiMode::Studio, UiMode::Focus, UiMode::Plaque, UiMode::Radial];
 
     pub fn label(self) -> &'static str {
         match self {
             UiMode::Atelier => "Établi",
             UiMode::Studio => "Studio",
             UiMode::Focus => "Focus",
+            UiMode::Plaque => "Plaque",
+            UiMode::Radial => "Radial",
         }
     }
 
@@ -35,6 +43,8 @@ impl UiMode {
             UiMode::Atelier => "La 3D en plein écran, des îlots flottants : colonne de formes, inspecteur, barre d'actions sur la sélection, historique en frise.",
             UiMode::Studio => "Poste CAD ancré façon Plasticity : menus, palette de commandes (Espace), panneau fixe, cotes au clavier, barre d'état.",
             UiMode::Focus => "Presque rien à l'écran : un dock en bas, le menu radial au clic droit, la scène dans un tiroir à droite.",
+            UiMode::Plaque => "Sobre, façon Plasticity, en orange : outils fins à gauche, inspecteur en mm, arbre de la scène à droite, barre d'état.",
+            UiMode::Radial => "En vert : outil actif et ADD / CARVE en haut, cartes d'outils à droite, menu radial au clic droit, inspecteur qui suit la sélection.",
         }
     }
 }
@@ -166,6 +176,8 @@ impl Settings {
             Ok("studio") => s.ui_mode = UiMode::Studio,
             Ok("atelier") | Ok("etabli") => s.ui_mode = UiMode::Atelier,
             Ok("focus") => s.ui_mode = UiMode::Focus,
+            Ok("plaque") => s.ui_mode = UiMode::Plaque,
+            Ok("radial") => s.ui_mode = UiMode::Radial,
             _ => {}
         }
         s

@@ -1024,7 +1024,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
 }
 /// Mode shown as current: while placing, the placement mode; with the Select
 /// tool, the selected shape's mode.
-fn shown_mode(st: &AppState) -> CombineMode {
+pub(crate) fn shown_mode(st: &AppState) -> CombineMode {
     let current = st.effective_mode();
     let target = if st.tool == Tool::Select {
         st.selection.and_then(|id| st.scene.node(id)).filter(|n| n.shape().is_some()).map(|n| n.combine.mode)
@@ -1269,7 +1269,7 @@ fn right_column(ctx: &egui::Context, st: &mut AppState, screen: Rect, x: f32) {
     });
 }
 
-fn properties(ui: &mut Ui, st: &mut AppState) {
+pub(crate) fn properties(ui: &mut Ui, st: &mut AppState) {
     let id = st.selection.unwrap();
     let node = st.scene.node(id).cloned().unwrap();
 
@@ -1635,7 +1635,7 @@ fn scene_panel(ui: &mut Ui, st: &mut AppState) {
     }
 }
 
-fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
+pub(crate) fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     let row_h = if DESK { 28.0 } else { 34.0 };
     let n_shapes = st.scene.shape_count();
     ui.horizontal(|ui| {
@@ -2161,7 +2161,7 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                     st.save_settings();
                 }
                 let what = match st.settings.ambiance {
-                    AmbianceChoice::Auto => "Chaque interface garde la sienne : Établi vert, Studio orange, Focus bleu.",
+                    AmbianceChoice::Auto => "Chaque interface garde la sienne : Établi et Radial en vert, Studio et Plaque en orange, Focus en bleu.",
                     _ => "La même couleur d'accent pour les trois interfaces (Add, sélection, outil actif).",
                 };
                 ui.label(egui::RichText::new(what).font(regular(11.5)).color(TEXT2));

@@ -68,8 +68,13 @@ pub fn install(ctx: &egui::Context) {
     let mut md = vec!["inter-medium".to_string()];
     md.extend(fallback);
     fonts.families.insert(FontFamily::Name("medium".into()), md.clone());
-    // no monospace font is bundled: the « technical capitals » use Inter Medium
-    fonts.families.insert(FontFamily::Monospace, md);
+    // technical capitals: JetBrains Mono Medium (OFL), Inter as fallback
+    fonts
+        .font_data
+        .insert("jbmono-medium".into(), Arc::new(FontData::from_static(include_bytes!("../assets/JetBrainsMono-Medium.ttf"))));
+    let mut mono = vec!["jbmono-medium".to_string()];
+    mono.extend(md);
+    fonts.families.insert(FontFamily::Monospace, mono);
     ctx.set_fonts(fonts);
 
     ctx.global_style_mut(|style| {

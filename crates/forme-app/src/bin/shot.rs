@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -1110,6 +1110,41 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
                 wait(h);
                 h.shot(&format!("bake-diag-{name}-dessus"));
             }
+        }
+    }
+    if want("pc-themes") {
+        // the two looks: Plaque (A) and Radial (B), selection, creation,
+        // marking menu
+        for (tag, mode) in [("plaque", UiMode::Plaque), ("radial", UiMode::Radial)] {
+            h.pc(part(), mode);
+            h.steps(2);
+            h.st.frame_all();
+            h.steps(2);
+            h.shot(&format!("pc-{tag}-vide"));
+            let id = h.find("Palier");
+            h.st.select(Some(id));
+            h.steps(8);
+            h.shot(&format!("pc-{tag}"));
+            use forme_app::marking::{Ctx, Menu};
+            let c = h.screen_of(h.st.scene.node(id).unwrap().transform.pos);
+            h.st.marking.demo = true;
+            let mut m = Menu::new([c.x, c.y], Ctx::Shape(id), false, 0.0);
+            m.pointer = [c.x + 58.0, c.y - 4.0];
+            m.hover = Some(2);
+            h.st.marking.menu = Some(m);
+            h.steps(3);
+            h.shot(&format!("pc-{tag}-menu"));
+            h.st.marking.menu = None;
+            h.st.marking.demo = false;
+            h.st.select(None);
+            h.st.tool = Tool::Place(PrimKind::Cylinder);
+            h.steps(6);
+            h.shot(&format!("pc-{tag}-creation"));
+            h.st.tool = Tool::Select;
+            h.st.settings_open = true;
+            h.steps(6);
+            h.shot(&format!("pc-{tag}-reglages"));
+            h.st.settings_open = false;
         }
     }
     if want("pc-studio") {
