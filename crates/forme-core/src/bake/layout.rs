@@ -149,10 +149,17 @@ impl Shape<'_> {
     }
     /// Face of the shape under `p` (a point on its surface).
     fn face_at(&self, p: DVec3) -> u32 {
+        self.face_at_skip(p, u32::MAX)
+    }
+    /// Same, leaving face `skip` out (a face flush with the chart asking).
+    fn face_at_skip(&self, p: DVec3, skip: u32) -> u32 {
         let l = self.local(p);
         let mut best = (f64::INFINITY, 0u32);
         if self.pr.kind == 1 {
             for f in [CYL_SIDE, CYL_TOP, CYL_BOTTOM] {
+                if f == skip {
+                    continue;
+                }
                 let v = self.face_fn_local(f, l).abs();
                 if v < best.0 {
                     best = (v, f);
@@ -170,6 +177,9 @@ impl Shape<'_> {
             }
         }
         for f in 0..6u32 {
+            if f == skip {
+                continue;
+            }
             let v = self.face_fn_local(f, l).abs();
             if v < best.0 {
                 best = (v, f);
@@ -220,6 +230,30 @@ impl Shape<'_> {
     }
     fn face_fn(&self, f: u32, p: DVec3) -> f64 {
         self.face_fn_local(f, self.local(p)) * self.pr.sc
+    }
+    /// Outward normal of a flat face (box side, cylinder cap).
+    fn flat_normal(&self, f: u32) -> Option<DVec3> {
+        let (ax, sg) = if self.pr.kind == 1 {
+            match f {
+                CYL_TOP => (1, 1.0),
+                CYL_BOTTOM => (1, -1.0),
+                _ => return None,
+            }
+        } else if f < 6 {
+            ((f / 2) as usize, if f % 2 == 0 { 1.0 } else { -1.0 })
+        } else {
+            return None;
+        };
+        Some(self.inst.to_world.transform_vector3(unit(ax) * sg).normalize())
+    }
+    /// A flat face of the shape on the plane through `p` square to `n`
+    /// (flush with it): the face, and whether it faces along `n`.
+    fn flat_on(&self, p: DVec3, n: DVec3, tol: f64) -> Option<(u32, bool)> {
+        let faces: &[u32] = if self.pr.kind == 1 { &[CYL_TOP, CYL_BOTTOM] } else { &[0, 1, 2, 3, 4, 5] };
+        faces.iter().find_map(|&f| {
+            let m = self.flat_normal(f)?;
+            (m.dot(n).abs() > 1.0 - 1e-9 && self.face_fn(f, p).abs() < tol).then_some((f, m.dot(n) > 0.0))
+        })
     }
 }
 
@@ -540,17 +574,44 @@ impl Layout<'_> {
                 (so * l[o] - sa * l[ax] - d) * sh.pr.sc
             }
             Cons::Prev => {
+                // a face in contact with the part before (flush with one of
+                // its faces, or lying on it) is not the face: the part's own
+                // face keeps the surface they share
                 let sh = &self.shapes[ch.shape];
                 let d = self.prev[ch.shape].as_ref().map(|f| f.dist(ch.map.to3(q))).unwrap_or(1e9);
                 if sh.carve {
-                    -d
+                    -d - self.flush_tol()
                 } else {
                     // (a junction fillet starts k away from the model)
-                    d - sh.k
+                    d - sh.k - self.flush_tol()
                 }
             }
-            Cons::Later(j) => self.shapes[j].d(ch.map.to3(q)) - self.shapes[j].k,
+            Cons::Later(j) => {
+                // a later face flush with this one: an Add leaves it (seen
+                // from the air side), a Carve takes it (from the material side)
+                let sj = &self.shapes[j];
+                let mut p = ch.map.to3(q);
+                if let Some(n) = self.air(ch) {
+                    p += n * if sj.carve { -self.flush_tol() } else { self.flush_tol() };
+                }
+                sj.d(p) - sj.k
+            }
         }
+    }
+
+    /// Distance under which two flat faces are flush (same plane).
+    fn flush_tol(&self) -> f64 {
+        self.node_tol * 0.05
+    }
+
+    /// Normal of a flat chart toward the air of the part.
+    fn air(&self, ch: &Chart) -> Option<DVec3> {
+        if !matches!(ch.map, Map::Plane { .. }) {
+            return None;
+        }
+        let sh = &self.shapes[ch.shape];
+        let n = sh.flat_normal(ch.id.face)?;
+        Some(if sh.carve { -n } else { n })
     }
 
     /// Smallest constraint (the region is where it is positive).
@@ -585,8 +646,25 @@ impl Layout<'_> {
     }
 
     fn label_raw(&self, ch: &Chart, k: Cons, q: DVec2) -> FaceId {
+        let tol = self.flush_tol();
         match k {
-            Cons::Rect(s) => ch.side[s],
+            Cons::Rect(s) => {
+                // a later Add flush with this face, standing on this side:
+                // its face continues this one across the side
+                if let Some(n) = self.air(ch) {
+                    let p = ch.map.to3(q);
+                    for &c in &ch.cons {
+                        let Cons::Later(j) = c else { continue };
+                        let sj = &self.shapes[j];
+                        if !sj.carve && sj.k == 0.0 && sj.d(p).abs() < tol {
+                            if let Some((g, true)) = sj.flat_on(p, n, tol) {
+                                return FaceId { prim: sj.prim, face: g };
+                            }
+                        }
+                    }
+                }
+                ch.side[s]
+            }
             Cons::Arc(i) => ch.arcs[i].3,
             Cons::Disc => ch.disc.map(|d| d.1).unwrap_or(ch.id),
             Cons::Oct(i) => ch.ball.map(|b| b.1[i]).unwrap_or(ch.id),
@@ -595,7 +673,14 @@ impl Layout<'_> {
                 let p = ch.map.to3(q);
                 let me = &self.shapes[ch.shape];
                 let s = self.shapes.iter().filter(|s| s.step < me.step).min_by(|a, b| a.d(p).abs().total_cmp(&b.d(p).abs())).unwrap();
-                let f = FaceId { prim: s.prim, face: s.face_at(p) };
+                let mut f = FaceId { prim: s.prim, face: s.face_at(p) };
+                // flush with a face of the part before: that face across
+                // (same way) or the next one (face to face, in contact)
+                if let Some(n) = self.air(ch) {
+                    if let Some((g, same)) = s.flat_on(p, n, tol) {
+                        f.face = if same { g } else { s.face_at_skip(p, g) };
+                    }
+                }
                 // across the rail of a junction fillet: its strip
                 if me.k > 0.0 {
                     if let Some(i) = self.blends.iter().position(|b| b.shape == ch.shape && b.a == f && matches!(b.kind, BlendKind::Strip { face } if face == ch.id.face)) {
@@ -611,16 +696,40 @@ impl Layout<'_> {
                         return b;
                     }
                 }
-                FaceId { prim: self.shapes[j].prim, face: self.shapes[j].face_at(p) }
+                let sj = &self.shapes[j];
+                let mut f = sj.face_at(p);
+                // a later face flush with this one is not across: its next face is
+                if let Some((g, _)) = self.air(ch).and_then(|n| sj.flat_on(p, n, tol)) {
+                    f = sj.face_at_skip(p, g);
+                }
+                FaceId { prim: sj.prim, face: f }
             }
         }
     }
 
-    /// The function whose zero set carries a piece of boundary.
-    fn psi(&self, ch: &Chart, k: Cons, l: FaceId, q: DVec2) -> f64 {
+    /// The face whose surface carries the line toward face `l` across: `l`
+    /// itself, or for a face flush with this one (same plane), the face
+    /// where that one ends.
+    fn geom(&self, ch: &Chart, k: Cons, l: FaceId, q: DVec2) -> FaceId {
+        if !matches!(k, Cons::Prev | Cons::Later(_)) || l.face >= BLEND0 {
+            return l;
+        }
+        let p = ch.map.to3(q);
+        if let (Some(n), Some(s)) = (self.air(ch), self.shape_of(l.prim)) {
+            if let Some((g, _)) = s.flat_on(p, n, self.flush_tol()) {
+                if g == l.face {
+                    return FaceId { prim: l.prim, face: s.face_at_skip(p, g) };
+                }
+            }
+        }
+        l
+    }
+
+    /// The function whose zero set carries a piece of boundary (`g` from `geom`).
+    fn psi(&self, ch: &Chart, k: Cons, g: FaceId, q: DVec2) -> f64 {
         match k {
             Cons::Rect(_) | Cons::Arc(_) | Cons::Disc | Cons::Oct(_) | Cons::Miter { .. } => self.cval(ch, k, q),
-            _ => self.across(ch.id, l, ch.map.to3(q)),
+            _ => self.across(ch.id, g, ch.map.to3(q)),
         }
     }
 
@@ -740,6 +849,27 @@ impl Layout<'_> {
         } else {
             t
         }
+    }
+
+    /// The straight piece of chart `c`'s boundary that meets node `v`,
+    /// other than `e`: its direction in the chart, away from `v`.
+    fn straight_at(&self, c: usize, e: usize, v: usize) -> Option<DVec2> {
+        for lp in &self.bnd[c] {
+            for &(f, _) in lp {
+                let ed = &self.edges[f];
+                if f == e || !ed.alive || (ed.a != v && ed.b != v) {
+                    continue;
+                }
+                let p = self.pts2(f, c);
+                let (pa, pb) = (p[0], p[p.len() - 1]);
+                let t = (pb - pa).normalize_or_zero();
+                if t == DVec2::ZERO || p.iter().any(|&x| (x - pa).perp_dot(t).abs() > self.node_tol * 10.0) {
+                    return None;
+                }
+                return Some(if ed.a == v { t } else { -t });
+            }
+        }
+        None
     }
 
     /// Splits edge `e` at the 3D point `x` (on it); returns the node.
@@ -1513,15 +1643,16 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
         let loops = march(&f, ch.lo, ch.hi, grid);
         for lp in loops {
             // refine every point onto the curve it belongs to
-            let mut pts: Vec<(DVec2, Cons, FaceId)> = vec![];
+            let mut pts: Vec<(DVec2, Cons, FaceId, FaceId)> = vec![];
             for q in lp {
                 let (_, k) = lay.fmin(ch, q);
                 let l = lay.label(ch, k, q);
-                let q2 = proj1(&|x| lay.psi(ch, k, l, x), q, fd);
+                let g = lay.geom(ch, k, l, q);
+                let q2 = proj1(&|x| lay.psi(ch, k, g, x), q, fd);
                 if q2.distance(q) > grid * 2.0 {
                     continue;
                 }
-                pts.push((q2, k, l));
+                pts.push((q2, k, l, g));
             }
             let n = pts.len();
             if n < 3 {
@@ -1530,14 +1661,16 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
             // nodes where the curve or the face across changes
             let mut marks: Vec<(usize, DVec2)> = vec![];
             for i in 0..n {
-                let (qa, ka, la) = pts[i];
-                let (qb, kb, lb) = pts[(i + 1) % n];
-                if ka == kb && la == lb {
+                let (qa, ka, la, ga) = pts[i];
+                let (qb, kb, lb, gb) = pts[(i + 1) % n];
+                if ka == kb && la == lb && ga == gb {
                     continue;
                 }
-                let fa = |x: DVec2| lay.psi(ch, ka, la, x);
-                let fb = |x: DVec2| lay.psi(ch, kb, lb, x);
-                let mut node = solve_cross(&fa, &fb, (qa + qb) * 0.5, fd).filter(|x| x.distance((qa + qb) * 0.5) < grid * 3.0);
+                let fa = |x: DVec2| lay.psi(ch, ka, ga, x);
+                let fb = |x: DVec2| lay.psi(ch, kb, gb, x);
+                // (one curve, the face across changes: no crossing to solve)
+                let same = ka == kb && !matches!(ka, Cons::Prev | Cons::Later(_));
+                let mut node = if same { None } else { solve_cross(&fa, &fb, (qa + qb) * 0.5, fd).filter(|x| x.distance((qa + qb) * 0.5) < grid * 3.0) };
                 if node.is_none() {
                     // tangent change: bisection on which curve is under the point
                     let (mut s0, mut s1) = (0.0, 1.0);
@@ -1547,8 +1680,9 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                         let x = qa.lerp(qb, m);
                         let (_, k) = lay.fmin(ch, x);
                         let l = lay.label(ch, k, x);
-                        let xp = proj1(&|y| lay.psi(ch, k, l, y), x, fd);
-                        if k == ka && l == la {
+                        let g = lay.geom(ch, k, l, x);
+                        let xp = proj1(&|y| lay.psi(ch, k, g, y), x, fd);
+                        if k == ka && l == la && g == ga {
                             s0 = m;
                         } else {
                             s1 = m;
@@ -1558,6 +1692,17 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                     node = Some(last);
                 }
                 marks.push((i, node.unwrap()));
+            }
+            // two marks on one spot (a march point right on a corner): no
+            // piece between them, the piece before runs to the second
+            let mut k = 0;
+            while marks.len() > 1 && k < marks.len() {
+                let nk = (k + 1) % marks.len();
+                if ch.map.to3(marks[k].1).distance(ch.map.to3(marks[nk].1)) < lay.node_tol {
+                    marks.remove(k);
+                } else {
+                    k += 1;
+                }
             }
             if marks.is_empty() {
                 return Err("contour fermé sans coin (trou rond) pas encore géré".into());
@@ -1592,6 +1737,9 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
             let a = lay.node(pts[0]);
             let b = lay.node(*pts.last().unwrap());
             if a == b {
+                if std::env::var("DEBUG_LAYOUT").is_ok() {
+                    eprintln!("refermé : chart {:?} label {:?} {} points {:?} .. {:?}", lay.charts[ci].id, label, pts.len(), pts[0], pts.last().unwrap());
+                }
                 return Err("bord refermé sur un seul coin".into());
             }
             pieces.push(Piece { chart: ci, a, b, label, pts });
@@ -1664,12 +1812,59 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 let pp = lay.hpts(e, fwd, ci);
                 let total: f64 = pp.windows(3).map(|w| turn(w[1] - w[0], w[2] - w[1])).sum();
                 let k = (total.abs() / FRAC_PI_2).round() as usize;
-                if k < 2 {
-                    continue;
-                }
                 let (qa, qb) = (sm.to2(lay.nodes[lay.edges[e].a]), sm.to2(lay.nodes[lay.edges[e].b]));
                 let me = lay.charts[ci].id;
                 let Some(sh) = lay.shape_of(me.prim) else { continue };
+                // a hole's arc cut by a straight edge of the face (a notch
+                // through the edge): cut where the circle is square to the
+                // face's axes (its widest points and its bottom), as on a
+                // whole hole, so that its squares stand square to the edge
+                let (ea, eb) = (lay.edges[e].a, lay.edges[e].b);
+                let square = match (sm, lay.charts[ci].map) {
+                    (Map::Cyl { a, .. }, Map::Plane { u, v, .. }) => lay.charts[other].strip.is_none() && a.dot(u.cross(v)).abs() > 0.999 && total.abs() > 0.6,
+                    _ => false,
+                };
+                if let (Map::Cyl { o, .. }, true) = (sm, square) {
+                    if lay.straight_at(ci, e, ea).is_some() || lay.straight_at(ci, e, eb).is_some() {
+                        let map = lay.charts[ci].map;
+                        let p2 = lay.pts2(e, ci);
+                        let c2 = map.to2(o);
+                        let r = p2[0].distance(c2);
+                        let mut acc = vec![0.0];
+                        for w in p2.windows(2) {
+                            acc.push(acc[acc.len() - 1] + w[0].distance(w[1]));
+                        }
+                        let len = acc[acc.len() - 1];
+                        let margin = st.size * 0.35;
+                        let mut cuts: Vec<(f64, DVec2)> = vec![];
+                        for dir in [DVec2::X, -DVec2::X, DVec2::Y, -DVec2::Y] {
+                            let q = c2 + dir * r;
+                            let mut best = (f64::INFINITY, 0.0);
+                            for (i, w) in p2.windows(2).enumerate() {
+                                let ab = w[1] - w[0];
+                                let t = ((q - w[0]).dot(ab) / ab.length_squared().max(1e-30)).clamp(0.0, 1.0);
+                                let d = (w[0] + ab * t).distance(q);
+                                if d < best.0 {
+                                    best = (d, acc[i] + (acc[i + 1] - acc[i]) * t);
+                                }
+                            }
+                            if best.0 < r * 0.05 && best.1 > margin && len - best.1 > margin {
+                                cuts.push((best.1, q));
+                            }
+                        }
+                        cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+                        let xs: Vec<DVec3> = cuts.iter().map(|&(_, q)| sm.to3(proj1(&|x| sh.face_fn(me.face, sm.to3(x)), sm.to2(map.to3(q)), fd))).collect();
+                        let mut cur = e;
+                        for x in xs {
+                            lay.split(cur, x);
+                            cur = lay.edges.len() - 1;
+                        }
+                        continue;
+                    }
+                }
+                if k < 2 {
+                    continue;
+                }
                 let cuts: Vec<DVec3> = (1..k).map(|j| sm.to3(proj1(&|x| sh.face_fn(me.face, sm.to3(x)), qa.lerp(qb, j as f64 / k as f64), fd))).collect();
                 let mut cur = e;
                 for x in cuts {
@@ -1851,6 +2046,32 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                     // exact directions of the arc at both ends
                     let t_in = lay.tangent(e, fwd, ci, false);
                     let t_out = lay.tangent(e, fwd, ci, true);
+                    // an end where the arc runs into a straight edge of the
+                    // face at an angle (a hole through the edge): the side of
+                    // the square there stands square to that edge, and an arc
+                    // between that edge and the circle's widest point (both
+                    // ends square to the edge) has no square of its own, it
+                    // is part of the next one's side
+                    let (vs, ve) = if fwd { (na, nb) } else { (nb, na) };
+                    let hole = lay.charts[other].strip.is_none() && matches!(sm, Map::Cyl { .. });
+                    let square_to = |t: DVec2, v: usize| -> (DVec2, bool) {
+                        match lay.straight_at(ci, e, v).filter(|_| hole) {
+                            Some(d) if (-d).perp_dot(t).abs() > 0.17 || (-d).dot(t) < 0.0 => {
+                                let n = perp(d);
+                                (if n.dot(t) < 0.0 { -n } else { n }, true)
+                            }
+                            _ => (t, false),
+                        }
+                    };
+                    let (h_in, cut_in) = square_to(t_in, vs);
+                    let (h_out, cut_out) = square_to(-t_out, ve);
+                    let h_out = -h_out;
+                    if (cut_in || cut_out) && h_in.perp_dot(h_out).abs() < 0.17 && total < 0.0 && st.diagonal && planar && !rev {
+                        if std::env::var("DEBUG_LAYOUT").is_ok() {
+                            eprintln!("arc entre le bord et le flanc, sans carré : {:?}", lay.charts[ci].id);
+                        }
+                        continue;
+                    }
                     let m = lay.split(e, sm.to3(mid));
                     if total < 0.0 && st.diagonal {
                         // concave fillet hooked diagonally: from its middle a
@@ -1860,13 +2081,13 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                         let map = lay.charts[ci].map;
                         let (ps, pe) = if fwd { (na, nb) } else { (nb, na) };
                         let (p0, q0) = (map.to2(lay.nodes[ps]), map.to2(lay.nodes[pe]));
-                        let (a1, a2) = (t_in.normalize(), -t_out.normalize());
+                        let (a1, a2) = (h_in.normalize(), -h_out.normalize());
                         // corner where the two walls would meet
-                        let den = a1.perp_dot(t_out);
+                        let den = a1.perp_dot(h_out);
                         if den.abs() < 1e-6 {
                             return Err("fillet entre deux murs parallèles".into());
                         }
-                        let s = (q0 - p0).perp_dot(t_out) / den;
+                        let s = (q0 - p0).perp_dot(h_out) / den;
                         let x = p0 + a1 * s;
                         // one quad away, nearer when the face ends before
                         // (a hole or a junction close to the face's edge)
