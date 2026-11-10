@@ -273,7 +273,9 @@ fn eval_prim(pc: u32, p_in: vec3<f32>) -> f32 {
         default: {}
     }
     if (shell > 0.0) {
-        d = abs(d) - shell;
+        // shell: hollow, a wall `shell` thick inside the outer surface
+        let h = shell * 0.5;
+        d = abs(d + h) - h;
     }
     return d * lip;
 }

@@ -424,8 +424,11 @@ impl Field {
                     let pr = &self.prims[k as usize];
                     let raw = prim_raw(pr, p);
                     let (d, level, m) = if pr.shell > 0.0 {
-                        let s = if raw >= 0.0 { 1.0 } else { -1.0 };
-                        ((raw.abs() - pr.shell) * lip(pr, p), s * pr.shell * sc, raw.abs() * sc)
+                        // hollow, a wall `shell` thick inside the outer surface
+                        let h = pr.shell * 0.5;
+                        let c = raw + h;
+                        let s = if c >= 0.0 { 1.0 } else { -1.0 };
+                        ((c.abs() - h) * lip(pr, p), s * h * sc - h * sc, c.abs() * sc)
                     } else {
                         (raw * lip(pr, p), 0.0, f64::INFINITY)
                     };

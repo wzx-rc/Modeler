@@ -64,6 +64,18 @@ mod tests {
     }
 
     #[test]
+    fn shell_hollows_inside() {
+        // box half 10, wall 2 mm inside: the outer face stays at 10
+        let mut sh = Shape::new(PrimKind::Box);
+        sh.shell = 2.0;
+        let p = compile(&one(sh, Vec3::ZERO));
+        assert!((p.dist(Vec3::new(12.0, 0.0, 0.0)) - 2.0).abs() < 1e-3, "outer face unchanged");
+        assert!(p.dist(Vec3::new(9.0, 0.0, 0.0)) < 0.0, "inside the wall");
+        assert!((p.dist(Vec3::new(7.0, 0.0, 0.0)) - 1.0).abs() < 1e-3, "cavity, 1 mm from the wall");
+        assert!(p.dist(Vec3::ZERO) > 0.0, "hollow centre");
+    }
+
+    #[test]
     fn transform_and_scale() {
         let mut s = Scene::new();
         let r = s.root;

@@ -509,7 +509,9 @@ pub fn eval_prim(w: &[[f32; 4]], aux: &[[f32; 4]], p_in: Vec3) -> f32 {
         _ => EMPTY_DIST,
     };
     if shell > 0.0 {
-        d = d.abs() - shell;
+        // shell: hollow, a wall `shell` thick inside the outer surface
+        let h = shell * 0.5;
+        d = (d + h).abs() - h;
     }
     d * lip
 }
