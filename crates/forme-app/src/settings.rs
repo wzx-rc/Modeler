@@ -9,18 +9,35 @@ use std::path::PathBuf;
 /// renderer; only the screen organisation and the way of working differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UiMode {
-    /// Viewport first, floating panels, history strip (Plasticity / Spline feel).
+    /// Plaque: sober Plasticity look, thin tool bar on the left, floating
+    /// inspector in mm, docked scene tree, status bar; orange accent.
     #[default]
+    Plaque,
+    /// Radial: top pill (tool + Add / Carve), tool cards on the right, the
+    /// marking menu drawn as a ring of wedges, contextual inspector; green.
+    Radial,
+    /// Viewport first, floating panels, history strip (Plasticity / Spline feel).
     Atelier,
     /// Docked panels, menus, command panel, status bar (3ds Max feel).
     Studio,
 }
 
 impl UiMode {
-    pub const ALL: [UiMode; 2] = [UiMode::Atelier, UiMode::Studio];
+    pub const ALL: [UiMode; 4] = [UiMode::Plaque, UiMode::Radial, UiMode::Atelier, UiMode::Studio];
+
+    /// Palette of the look (theme::set_palette).
+    pub fn palette(self) -> u8 {
+        match self {
+            UiMode::Plaque => 1,
+            UiMode::Radial => 2,
+            _ => 0,
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
+            UiMode::Plaque => "Plaque",
+            UiMode::Radial => "Radial",
             UiMode::Atelier => "Atelier",
             UiMode::Studio => "Studio",
         }
@@ -28,6 +45,8 @@ impl UiMode {
 
     pub fn blurb(self) -> &'static str {
         match self {
+            UiMode::Plaque => "Sobre, façon Plasticity : outils à gauche, inspecteur en mm, arbre de la scène à droite, barre d'état. Accent orange.",
+            UiMode::Radial => "Barre d'outil en haut, cartes d'outils à droite, menu radial à secteurs au clic droit, inspecteur qui suit la sélection. Accent vert.",
             UiMode::Atelier => "Viewport en plein écran, panneaux flottants, historique en bas.",
             UiMode::Studio => "Panneaux ancrés, menus, panneau de commandes et barre d'état, façon 3ds Max.",
         }
@@ -119,7 +138,7 @@ impl Display {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { ui_mode: UiMode::Atelier, snap_faces: true, creation: Creation::Interactive, display: Display::default(), navigation: Navigation::Maya }
+        Settings { ui_mode: UiMode::Plaque, snap_faces: true, creation: Creation::Interactive, display: Display::default(), navigation: Navigation::Maya }
     }
 }
 
@@ -134,6 +153,8 @@ impl Settings {
         let mut s: Settings = std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         match std::env::var("FORME_UI").map(|v| v.to_lowercase()).as_deref() {
             Ok("studio") => s.ui_mode = UiMode::Studio,
+            Ok("plaque") => s.ui_mode = UiMode::Plaque,
+            Ok("radial") => s.ui_mode = UiMode::Radial,
             Ok("atelier") => s.ui_mode = UiMode::Atelier,
             _ => {}
         }

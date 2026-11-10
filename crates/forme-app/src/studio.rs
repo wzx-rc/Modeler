@@ -8,7 +8,7 @@ use crate::camera::ViewPreset;
 use crate::icons::{self, Icon};
 use crate::settings::UiMode;
 use crate::state::*;
-use crate::theme::{medium, regular, semibold, AXIS_X, AXIS_Y, AXIS_Z, CARVE, EDGE_SEL, ERROR, OK};
+use crate::theme::{medium, regular, semibold, AXIS_X, AXIS_Y, AXIS_Z, EDGE_SEL, ERROR, OK};
 use crate::ui;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, Id, LayerId, Order, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui};
 use forme_core::*;
@@ -212,7 +212,7 @@ fn small_label(ui: &mut Ui, text: &str) {
 fn mode_color(m: CombineMode) -> Color32 {
     match m {
         CombineMode::Add => AC,
-        CombineMode::Carve => CARVE,
+        CombineMode::Carve => crate::theme::pal().carve,
         _ => Color32::from_rgb(0xC8, 0xCC, 0xD2),
     }
 }
@@ -647,7 +647,7 @@ fn bake_box(ui: &mut Ui, st: &mut AppState) {
         (Some(_), _) => ("En cours…", AC),
         _ if error.is_some() => ("Impossible", ERROR),
         (None, Some(_)) if st.bake.pass.is_some() => ("Passe en cours…", AC),
-        (None, Some(_)) if stale => ("Périmé", CARVE),
+        (None, Some(_)) if stale => ("Périmé", crate::theme::pal().carve),
         (None, Some(_)) => ("À jour", OK),
         (None, None) => ("Pas encore baké", T3),
     };

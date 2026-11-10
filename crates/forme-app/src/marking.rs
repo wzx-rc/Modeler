@@ -450,7 +450,7 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect, on_handle: bool
 fn pill_rect(p: &Painter, c: Pos2, dir: u8, label: &str) -> (Rect, std::sync::Arc<egui::Galley>) {
     let a = dir as f32 * std::f32::consts::PI / 4.0;
     let at = pos2(c.x + a.sin() * RADIUS, c.y - a.cos() * RADIUS * 0.82);
-    let g = p.layout_no_wrap(label.to_string(), medium(12.0), TEXT);
+    let g = p.layout_no_wrap(label.to_string(), medium(12.0), pal().text);
     let (pw, ph) = (g.size().x + 18.0, g.size().y + 8.0);
     let x0 = if a.sin() > 0.3 {
         at.x - 8.0
@@ -503,6 +503,77 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
     }
     let c = pos2(m.center[0], m.center[1]);
     let pointer = pos2(m.pointer[0], m.pointer[1]);
+    if palette_index() == 2 {
+        draw_ring(&p, st, m, c);
+    } else {
+        draw_pills(&p, st, m, c, pointer);
+    }
+    // material arc: the swatches come out one by one
+    draw_arc(&p, st, m, c, now);
+}
+
+/// Radial look: a ring of eight wedges, the hot one in the accent.
+fn draw_ring(p: &Painter, st: &AppState, m: &Menu, c: Pos2) {
+    let pl = pal();
+    p.circle_filled(c, RING_OUT + 6.0, Color32::from_black_alpha(70));
+    let items = items(st, m.ctx);
+    for dir in 0..8u8 {
+        let item = items.iter().find(|i| i.dir == dir);
+        let hot = item.is_some() && (m.hover == Some(dir) && m.swatch.is_none() || item.map(|i| i.act == Act::Material && m.arc.is_some()).unwrap_or(false));
+        let (fill, stroke) = match (item, hot) {
+            (None, _) => (tint(pl.panel, 0.55), Stroke::new(1.0, tint(pl.panel_border, 0.6))),
+            (Some(_), true) => (pl.accent_bg, Stroke::new(1.5, pl.accent)),
+            (Some(_), false) => (tint(pl.panel, 0.95), Stroke::new(1.0, pl.panel_border)),
+        };
+        wedge(p, c, dir, fill, stroke);
+        if let Some(item) = item {
+            let a = dir as f32 * std::f32::consts::PI / 4.0;
+            let mid = (RING_IN + RING_OUT) * 0.5;
+            let at = c + vec2(a.sin(), -a.cos()) * mid;
+            let col = if hot { pl.accent_text } else if item.checked { pl.accent } else { pl.text };
+            let job = egui::text::LayoutJob::simple(item.label.to_uppercase(), mono(9.5), col, RING_OUT - RING_IN - 6.0);
+            let g = p.layout_job(job);
+            p.galley(at - g.size() * 0.5, g, col);
+        }
+    }
+    p.circle_filled(c, RING_IN - 6.0, tint(pl.panel, 0.95));
+    p.circle_stroke(c, RING_IN - 6.0, Stroke::new(1.0, pl.panel_border));
+    p.text(c, Align2::CENTER_CENTER, m.ctx.title().to_uppercase(), mono(9.0), pl.text2);
+}
+
+/// Inner and outer radius of the wedge ring.
+const RING_IN: f32 = 34.0;
+const RING_OUT: f32 = 104.0;
+
+/// One wedge of the ring, centred on direction `dir` (0 = north), with a
+/// small gap to its neighbours.
+fn wedge(p: &Painter, c: Pos2, dir: u8, fill: Color32, stroke: Stroke) {
+    use std::f32::consts::PI;
+    let a0 = dir as f32 * PI / 4.0 - PI / 8.0;
+    let gap_in = 3.0 / RING_IN;
+    let gap_out = 3.0 / RING_OUT;
+    let n = 12;
+    let at = |a: f32, r: f32| c + vec2(a.sin(), -a.cos()) * r;
+    let outer: Vec<Pos2> = (0..=n).map(|k| at(a0 + gap_out + (PI / 4.0 - 2.0 * gap_out) * k as f32 / n as f32, RING_OUT)).collect();
+    let inner: Vec<Pos2> = (0..=n).map(|k| at(a0 + gap_in + (PI / 4.0 - 2.0 * gap_in) * k as f32 / n as f32, RING_IN)).collect();
+    let mut mesh = egui::Mesh::default();
+    for k in 0..=n {
+        mesh.colored_vertex(outer[k], fill);
+        mesh.colored_vertex(inner[k], fill);
+    }
+    for k in 0..n as u32 {
+        let i = 2 * k;
+        mesh.add_triangle(i, i + 1, i + 2);
+        mesh.add_triangle(i + 1, i + 3, i + 2);
+    }
+    p.add(egui::Shape::mesh(mesh));
+    let mut outline = outer.clone();
+    outline.extend(inner.iter().rev());
+    p.add(egui::Shape::closed_line(outline, stroke));
+}
+
+/// Default look: labelled pills around the pointer.
+fn draw_pills(p: &Painter, st: &AppState, m: &Menu, c: Pos2, pointer: Pos2) {
     p.circle_filled(c, 4.5, Color32::from_rgba_unmultiplied(236, 236, 226, 200));
     p.circle_stroke(c, DEAD, Stroke::new(1.0, Color32::from_rgba_unmultiplied(236, 236, 226, 70)));
     if m.hover.is_some() {
@@ -511,11 +582,13 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
     p.text(c + vec2(0.0, DEAD + 6.0), Align2::CENTER_TOP, m.ctx.title(), regular(11.0), Color32::from_rgba_unmultiplied(236, 236, 226, 160));
     for item in items(st, m.ctx) {
         let label = if item.checked { format!("• {}", item.label) } else { item.label.clone() };
-        let (r, g) = pill_rect(&p, c, item.dir, &label);
+        let (r, g) = pill_rect(p, c, item.dir, &label);
         let hot = m.hover == Some(item.dir) && m.swatch.is_none();
-        draw_pill(&p, r, g, hot || (item.act == Act::Material && m.arc.is_some()), 1.0);
+        draw_pill(p, r, g, hot || (item.act == Act::Material && m.arc.is_some()), 1.0);
     }
-    // material arc: the swatches come out one by one
+}
+
+fn draw_arc(p: &Painter, st: &AppState, m: &Menu, c: Pos2, now: f64) {
     if let (Some(t0), Ctx::Shape(id)) = (m.arc, m.ctx) {
         let cur = st.scene.node(id).map(|n| n.material as usize);
         let mats = &st.scene.materials;
@@ -537,7 +610,7 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
             let ring = if hot { HOT } else if cur == Some(k) { Color32::WHITE } else { Color32::from_rgba_unmultiplied(110, 114, 124, 200) };
             p.circle_stroke(q, r, Stroke::new(if hot || cur == Some(k) { 2.0 } else { 1.0 }, ring.gamma_multiply(e)));
             if hot {
-                p.text(q + vec2(0.0, -r - 6.0), Align2::CENTER_BOTTOM, &mat.name, medium(12.0), TEXT);
+                p.text(q + vec2(0.0, -r - 6.0), Align2::CENTER_BOTTOM, &mat.name, medium(12.0), pal().text);
             }
         }
     }
