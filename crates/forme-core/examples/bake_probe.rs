@@ -193,6 +193,19 @@ pub fn raccord(k: f32) -> Scene {
     s
 }
 
+/// A round boss standing on a block, joined by a junction blend `k` (0: sharp).
+pub fn bossage(k: f32) -> Scene {
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::new(10.0, 5.0, 10.0);
+    s.add(root, NodeSpec::shape("Socle", b).at(Vec3::new(0.0, 5.0, 0.0)));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(3.0, 2.5, 0.0);
+    s.add(root, NodeSpec::shape("Bossage", c).at(Vec3::new(0.0, 12.0, 0.0)).blend(k));
+    s
+}
+
 /// A plate with a round hole through its middle (no fillet).
 pub fn trou() -> Scene {
     let mut s = Scene::new();
@@ -267,7 +280,34 @@ fn par_lignes() {
         }
         sc
     };
+    // his scene of 10 nov, 10:55: a cylinder standing on the top face with a
+    // 2.8 mm junction blend (Cube 3 without blend, hole removed)
+    let bossage_r = Scene::from_json(include_str!("scenes/romain-bossage.forme")).expect("scène de Romain (bossage)");
+    let mut bossage_vif = bossage_r.clone();
+    for n in bossage_vif.nodes.values_mut() {
+        n.combine.blend = 0.0;
+    }
+    // the same, the cylinder moved (centre x, z)
+    let bossage_at = |x: f32, z: f32| {
+        let mut sc = bossage_r.clone();
+        let ids: Vec<NodeId> = sc.nodes.keys().copied().collect();
+        for id in ids {
+            if let Some(n) = sc.node_mut(id).filter(|n| n.name == "Cylindre 1") {
+                n.transform.pos.x = x;
+                n.transform.pos.z = z;
+            }
+        }
+        sc
+    };
     let cases = [
+        ("bossage-48", bossage_at(40.0, 48.0), t, 80.0, true, front),
+        ("bossage-46", bossage_at(38.83, 46.0), t, 80.0, true, front),
+        ("bossage-50", bossage_at(36.0, 50.0), t, 80.0, true, front),
+        ("bossage-44", bossage_at(42.0, 44.5), t, 80.0, true, front),
+        ("boss", bossage(2.0), DVec3::new(0.0, 10.0, 0.0), 30.0, true, front),
+        ("boss-vif", bossage(0.0), DVec3::new(0.0, 10.0, 0.0), 30.0, true, front),
+        ("bossage", bossage_r, t, 80.0, true, front),
+        ("bossage-vif", bossage_vif, t, 80.0, true, front),
         ("raccord", raccord(2.0), DVec3::new(0.0, 10.0, 0.0), 30.0, true, front),
         ("rc", cyl.clone(), t, 80.0, true, front),
         ("rc-sans-raccord", cyl_var(false, true), t, 80.0, true, front),
@@ -293,7 +333,13 @@ fn par_lignes() {
                 continue;
             }
         }
-        let st = bake::BakeSettings::preset(bake::Quality::Standard);
+        // QUALITE=legere|dense for the other densities of the Bake panel
+        let q = match std::env::var("QUALITE").as_deref() {
+            Ok("legere") => bake::Quality::Draft,
+            Ok("dense") => bake::Quality::Max,
+            _ => bake::Quality::Standard,
+        };
+        let st = bake::BakeSettings::preset(q);
         let size = bake::plan(&scene, &st).unwrap_or(5.0);
         let ls = bake::layout::LayoutSettings { size, tol: st.tol * 2.0, threads: st.threads, diagonal };
         match bake::layout::build(&scene, &ls, &bake::Progress::default()) {

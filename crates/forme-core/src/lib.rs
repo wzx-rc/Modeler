@@ -375,6 +375,22 @@ mod tests {
     }
 
     #[test]
+    fn bake_junction_blend_cylinder_on_face() {
+        // a round boss standing on a block with a blend: a ring of rows
+        // around it, in two halves like its wall
+        let mut s = Scene::new();
+        let r = s.root;
+        let mut b = Shape::new(PrimKind::Box);
+        b.size = Vec3::new(10.0, 5.0, 10.0);
+        s.add(r, NodeSpec::shape("Socle", b).at(Vec3::new(0.0, 5.0, 0.0)));
+        let mut c = Shape::new(PrimKind::Cylinder);
+        c.size = Vec3::new(3.0, 2.5, 0.0);
+        s.add(r, NodeSpec::shape("Bossage", c).at(Vec3::new(0.0, 12.0, 0.0)).blend(2.0));
+        let b = bake_ok(&s);
+        assert!(b.faces.iter().filter(|f| f.patch == bake::P_FILLET).count() >= 16, "no ring");
+    }
+
+    #[test]
     fn flat_loops_pass_is_optional_and_keeps_the_mesh_closed() {
         let s = plate_with_hole();
         let out = bake_ok(&s);

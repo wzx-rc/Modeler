@@ -316,6 +316,11 @@ enum Map {
     /// coordinates from the edge's foot `c`, height (along `a`) from the
     /// distance to the edge; the edge meets the fillet at the centre.
     Rev { c: DVec3, a: DVec3, e1: DVec3, e2: DVec3, k: f64 },
+    /// Junction fillet around a cylinder standing on a plane: the profile
+    /// of `Blend` turned around the axis `a` (foot `c` on the plane, radius
+    /// `r`); around (angle × `rr` from direction `b` toward `e`) × arc length
+    /// across, from the rail on the plane (y = 0) to the rail on the wall.
+    Ring { c: DVec3, a: DVec3, b: DVec3, e: DVec3, r: f64, rr: f64, k: f64 },
 }
 
 impl Map {
@@ -332,6 +337,11 @@ impl Map {
                 o + e * q.x + na * (k * t * t) + nb * (k * (1.0 - t) * (1.0 - t))
             }
             Map::Rev { c, a, e1, e2, k } => c + e1 * q.x + e2 * q.y + a * blend_u(k, q.length()),
+            Map::Ring { c, a, b, e, r, rr, k } => {
+                let th = q.x / rr;
+                let t = blend_t(q.y / k);
+                c + (b * th.cos() + e * th.sin()) * (r + k * (1.0 - t) * (1.0 - t)) + a * (k * t * t)
+            }
         }
     }
     fn to2(&self, p: DVec3) -> DVec2 {
@@ -358,6 +368,14 @@ impl Map {
             Map::Rev { c, e1, e2, .. } => {
                 let d = p - c;
                 DVec2::new(d.dot(e1), d.dot(e2))
+            }
+            Map::Ring { c, a, b, e, r, rr, k } => {
+                let d = p - c;
+                let h = d.dot(a);
+                let w = d - a * h;
+                let (su, sv) = (h.max(0.0).sqrt(), (w.length() - r).max(0.0).sqrt());
+                let t = if su + sv > 1e-300 { su / (su + sv) } else { 0.5 };
+                DVec2::new(w.dot(e).atan2(w.dot(b)) * rr, k * blend_s(t))
             }
         }
     }
@@ -576,6 +594,12 @@ impl Layout<'_> {
     /// edge it faces.
     fn blend_at(&self, j: usize, a: FaceId, p: DVec3) -> Option<FaceId> {
         let sh = &self.shapes[j];
+        if sh.pr.kind == 1 {
+            // around a cylinder: the half of the ring by the half of the wall
+            let wall = self.half(FaceId { prim: sh.prim, face: CYL_SIDE }, p).face;
+            let i = self.blends.iter().position(|b| b.shape == j && b.a == a && matches!(b.kind, BlendKind::Strip { face } if face == wall))?;
+            return Some(FaceId { prim: sh.prim, face: BLEND0 + i as u32 });
+        }
         let l = sh.local(p);
         let s = sh.pr.size;
         let out: Vec<u32> = (0..3).filter(|&i| l[i].abs() > s[i]).map(|i| (i * 2) as u32 + (l[i] < 0.0) as u32).collect();
@@ -881,8 +905,8 @@ fn check(field: &Field, steps: &[Step]) -> Result<(), String> {
             if s.mode != 0 {
                 return Err("fillet de jonction d'une forme creusée pas encore géré".into());
             }
-            if pr.kind != 0 || pr.round > 0.0 || pr.chamfer > 0.0 || pr.edges.iter().any(|r| *r != 0.0) {
-                return Err("fillet de jonction : seulement une boîte à arêtes vives posée sur une face, pour l'instant".into());
+            if pr.round > 0.0 || pr.chamfer > 0.0 || pr.edges.iter().any(|r| *r != 0.0) {
+                return Err("fillet de jonction : seulement une boîte à arêtes vives ou un cylindre posés sur une face, pour l'instant".into());
             }
         }
         if (0..12).any(|e| edge_r(pr, e) < 0.0) {
@@ -1128,6 +1152,10 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             let fa = ch.id.face as usize;
             let na = other.inst.to_world.transform_vector3(unit(fa / 2) * if fa % 2 == 0 { 1.0 } else { -1.0 }).normalize();
             let Some(ab) = (0..3).find(|&i| wax(i).dot(na).abs() > 1.0 - 1e-9) else { continue };
+            // (a cylinder stands on its end)
+            if sh.pr.kind == 1 && ab != 1 {
+                continue;
+            }
             let h = (cb - o).dot(na);
             let half = s[ab] * sc;
             let q = ch.map.to2(cb);
@@ -1136,18 +1164,16 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             }
         }
         if on.len() != 1 {
-            return Err("fillet de jonction : la boîte doit être posée d'aplomb sur une face plane, pour l'instant".into());
+            return Err(if sh.pr.kind == 1 {
+                "fillet de jonction : le cylindre doit être posé debout sur une face plane, pour l'instant"
+            } else {
+                "fillet de jonction : la boîte doit être posée d'aplomb sur une face plane, pour l'instant"
+            }
+            .into());
         }
         let (ca, ab, na, h) = on[0];
         let fa = charts[ca].id;
         let foot = cb - na * h;
-        let (i, j) = ((ab + 1) % 3, (ab + 2) % 3);
-        let walls = [(i, 1.0f64), (i, -1.0), (j, 1.0), (j, -1.0)];
-        let face_of = |ax: usize, sg: f64| (ax * 2) as u32 + (sg < 0.0) as u32;
-        let base = blends.len() as u32;
-        let strip_id = |ax: usize, sg: f64| FaceId { prim: sh.prim, face: BLEND0 + base + walls.iter().position(|w| w.0 == ax && w.1 == sg).unwrap() as u32 };
-        let corners = [(1.0f64, 1.0f64), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)];
-        let corner_id = |si_: f64, sj: f64| FaceId { prim: sh.prim, face: BLEND0 + base + 4 + corners.iter().position(|c| c.0 == si_ && c.1 == sj).unwrap() as u32 };
         let len_l = k * blend_s(1.0);
         let rows = fillet_segs(k * 0.71, FRAC_PI_2, tol_f).max(((len_l / st.size).round() as usize + 1) / 2 * 2);
         if std::env::var("DEBUG_LAYOUT").is_ok() {
@@ -1158,51 +1184,86 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             cons.push(Cons::Later(jj));
         }
         let mut new_charts: Vec<Chart> = vec![];
-        for &(ax, sg) in &walls {
-            let ox = if ax == i { j } else { i };
-            let nb = wax(ax) * sg;
-            let e = wax(ox);
-            let o = foot + nb * (s[ax] * sc) - e * (s[ox] * sc);
-            let len = 2.0 * s[ox] * sc;
-            // the edge at x = len is on the + side of axis ox
-            let end = |so: f64| if ax == i { corner_id(sg, so) } else { corner_id(so, sg) };
-            blends.push(BlendPart { shape: si, a: fa, kind: BlendKind::Strip { face: face_of(ax, sg) } });
-            new_charts.push(Chart {
-                id: strip_id(ax, sg),
-                shape: si,
-                map: Map::Blend { o, e, na, nb, k },
-                lo: DVec2::ZERO,
-                hi: DVec2::new(len, len_l),
-                side: [fa, end(1.0), FaceId { prim: sh.prim, face: face_of(ax, sg) }, end(-1.0)],
-                arcs: vec![],
-                strip: Some((len_l / FRAC_PI_2, rows)),
-                ring: None,
-                disc: None,
-                ball: None,
-                cons: cons.clone(),
-            });
-        }
-        for &(sgi, sgj) in &corners {
-            let (e1, e2) = (wax(i) * sgi, wax(j) * sgj);
-            let c = foot + e1 * (s[i] * sc) + e2 * (s[j] * sc);
-            blends.push(BlendPart { shape: si, a: fa, kind: BlendKind::Corner { faces: [face_of(i, sgi), face_of(j, sgj)], c, axis: na } });
-            let mut cc = cons.clone();
-            cc.push(Cons::Disc);
-            new_charts.push(Chart {
-                id: corner_id(sgi, sgj),
-                shape: si,
-                map: Map::Rev { c, a: na, e1, e2, k },
-                lo: DVec2::ZERO,
-                hi: DVec2::splat(k * 1.02),
-                // y = 0: the end of the strip of wall i; x = 0: of wall j
-                side: [strip_id(i, sgi), fa, fa, strip_id(j, sgj)],
-                arcs: vec![],
-                strip: None,
-                ring: None,
-                disc: Some((k, fa)),
-                ball: None,
-                cons: cc,
-            });
+        if sh.pr.kind == 1 {
+            // a cylinder: a ring around it, in two halves like its wall
+            // (each half |θ| ≤ π/2 in the frame of the wall's half)
+            let rad = s.x * sc;
+            let (bm, cm) = (wax(0), wax(2));
+            let rr = rad + k * 0.25;
+            let base = blends.len() as u32;
+            let ring_id = |w: u32| FaceId { prim: sh.prim, face: BLEND0 + base + w };
+            for (w, (b, e, wall)) in [(cm, -bm, CYL_SIDE), (-cm, bm, CYL_SIDE_B)].into_iter().enumerate() {
+                let other = ring_id(1 - w as u32);
+                blends.push(BlendPart { shape: si, a: fa, kind: BlendKind::Strip { face: wall } });
+                new_charts.push(Chart {
+                    id: ring_id(w as u32),
+                    shape: si,
+                    map: Map::Ring { c: foot, a: na, b, e, r: rad, rr, k },
+                    lo: DVec2::new(-FRAC_PI_2 * rr, 0.0),
+                    hi: DVec2::new(FRAC_PI_2 * rr, len_l),
+                    side: [fa, other, FaceId { prim: sh.prim, face: wall }, other],
+                    arcs: vec![],
+                    strip: Some((len_l / FRAC_PI_2, rows)),
+                    ring: None,
+                    disc: None,
+                    ball: None,
+                    cons: cons.clone(),
+                });
+            }
+        } else {
+            let (i, j) = ((ab + 1) % 3, (ab + 2) % 3);
+            let walls = [(i, 1.0f64), (i, -1.0), (j, 1.0), (j, -1.0)];
+            let face_of = |ax: usize, sg: f64| (ax * 2) as u32 + (sg < 0.0) as u32;
+            let base = blends.len() as u32;
+            let strip_id = |ax: usize, sg: f64| FaceId { prim: sh.prim, face: BLEND0 + base + walls.iter().position(|w| w.0 == ax && w.1 == sg).unwrap() as u32 };
+            let corners = [(1.0f64, 1.0f64), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)];
+            let corner_id = |si_: f64, sj: f64| FaceId { prim: sh.prim, face: BLEND0 + base + 4 + corners.iter().position(|c| c.0 == si_ && c.1 == sj).unwrap() as u32 };
+            for &(ax, sg) in &walls {
+                let ox = if ax == i { j } else { i };
+                let nb = wax(ax) * sg;
+                let e = wax(ox);
+                let o = foot + nb * (s[ax] * sc) - e * (s[ox] * sc);
+                let len = 2.0 * s[ox] * sc;
+                // the edge at x = len is on the + side of axis ox
+                let end = |so: f64| if ax == i { corner_id(sg, so) } else { corner_id(so, sg) };
+                blends.push(BlendPart { shape: si, a: fa, kind: BlendKind::Strip { face: face_of(ax, sg) } });
+                new_charts.push(Chart {
+                    id: strip_id(ax, sg),
+                    shape: si,
+                    map: Map::Blend { o, e, na, nb, k },
+                    lo: DVec2::ZERO,
+                    hi: DVec2::new(len, len_l),
+                    side: [fa, end(1.0), FaceId { prim: sh.prim, face: face_of(ax, sg) }, end(-1.0)],
+                    arcs: vec![],
+                    strip: Some((len_l / FRAC_PI_2, rows)),
+                    ring: None,
+                    disc: None,
+                    ball: None,
+                    cons: cons.clone(),
+                });
+            }
+            for &(sgi, sgj) in &corners {
+                let (e1, e2) = (wax(i) * sgi, wax(j) * sgj);
+                let c = foot + e1 * (s[i] * sc) + e2 * (s[j] * sc);
+                blends.push(BlendPart { shape: si, a: fa, kind: BlendKind::Corner { faces: [face_of(i, sgi), face_of(j, sgj)], c, axis: na } });
+                let mut cc = cons.clone();
+                cc.push(Cons::Disc);
+                new_charts.push(Chart {
+                    id: corner_id(sgi, sgj),
+                    shape: si,
+                    map: Map::Rev { c, a: na, e1, e2, k },
+                    lo: DVec2::ZERO,
+                    hi: DVec2::splat(k * 1.02),
+                    // y = 0: the end of the strip of wall i; x = 0: of wall j
+                    side: [strip_id(i, sgi), fa, fa, strip_id(j, sgj)],
+                    arcs: vec![],
+                    strip: None,
+                    ring: None,
+                    disc: Some((k, fa)),
+                    ball: None,
+                    cons: cc,
+                });
+            }
         }
         // the blend is the profile only where the model before it is that
         // face alone (no other edge or shape within its reach)
@@ -1218,7 +1279,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                         }
                         _ => {
                             let t = b as f64 / 8.0;
-                            (DVec2::new(ch.hi.x * a as f64 / 8.0, k * blend_s(t)), k * t * t, k * (1.0 - t) * (1.0 - t))
+                            (DVec2::new(ch.lo.x + (ch.hi.x - ch.lo.x) * a as f64 / 8.0, k * blend_s(t)), k * t * t, k * (1.0 - t) * (1.0 - t))
                         }
                     };
                     let p = ch.map.to3(q);
@@ -1289,6 +1350,12 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         let phi = -PI + (best.1 as f64 + best.0 as f64 * 0.5) * TAU / nth as f64 + PI;
         let (b2, c2) = (b * phi.cos() + c * phi.sin(), c * phi.cos() - b * phi.sin());
         lay.charts[ci].map = Map::Cyl { o, a, b: b2, c: c2, r };
+    }
+    // a ring of junction fillet goes with the two halves of its wall
+    for sh in &lay.shapes {
+        if sh.k > 0.0 && sh.pr.kind == 1 && !lay.walls.iter().any(|w| w.0 == sh.prim) {
+            return Err("fillet de jonction : cylindre caché en partie, pas encore géré".into());
+        }
     }
     let nc = lay.charts.len();
     lay.bnd = vec![vec![]; nc];
@@ -1468,7 +1535,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             for &(e, fwd) in &lp {
                 let other = lay.edges[e].charts.iter().copied().find(|&c| c != ci).unwrap_or(ci);
                 let sm = lay.charts[other].map;
-                if !matches!(sm, Map::Cyl { .. }) {
+                if !matches!(sm, Map::Cyl { .. } | Map::Ring { .. }) {
                     continue;
                 }
                 let pp = lay.hpts(e, fwd, ci);
@@ -1595,7 +1662,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 let total: f64 = pp.windows(3).map(|w| turn(w[1] - w[0], w[2] - w[1])).sum();
                 let planar = matches!(lay.charts[ci].map, Map::Plane { .. });
                 let rev = matches!(lay.charts[other].map, Map::Rev { .. });
-                if planar && (matches!(lay.charts[other].map, Map::Cyl { .. }) || rev) && total.abs() > 0.6 {
+                if planar && (matches!(lay.charts[other].map, Map::Cyl { .. } | Map::Ring { .. }) || rev) && total.abs() > 0.6 {
                     // an arc against a fillet strip or a cylinder wall: its
                     // middle, in the curved chart (a whole row on a strip)
                     let sm = lay.charts[other].map;
@@ -1663,7 +1730,12 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                                 hk[w] = c;
                             }
                         }
-                        let g2 = x + a1 * hk[0] + a2 * hk[1];
+                        // (not when that takes the node off the face)
+                        let g2 = [hk, [hk[0], hook], [hook, hk[1]], [hook, hook]]
+                            .into_iter()
+                            .map(|h| x + a1 * h[0] + a2 * h[1])
+                            .find(|&g| lay.fmin(&lay.charts[ci], g).0 > hook * 0.1)
+                            .unwrap_or(x + (a1 + a2) * hook);
                         // the hook node of another feature right there: shared
                         let near_g = lay.inner[ci].iter().copied().find(|&n| map.to2(lay.nodes[n]).distance(g2) < hook * 0.5);
                         let g = match near_g {
@@ -2105,6 +2177,33 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
     }
 
     // 6. patches: faces of the line graph in each chart
+    for ci in 0..nc {
+        // DEBUG_FACE="prim face path": that chart's lines, for a drawing
+        if let Ok(v) = std::env::var("DEBUG_FACE") {
+            let w: Vec<&str> = v.split_whitespace().collect();
+            if w.len() == 3 && w[0].parse() == Ok(lay.charts[ci].id.prim) && w[1].parse() == Ok(lay.charts[ci].id.face) {
+                let m = lay.charts[ci].map;
+                let mut out = String::new();
+                for lp in &lay.bnd[ci] {
+                    for &(e, _) in lp {
+                        let p = lay.pts2(e, ci);
+                        out += &format!("b {}\n", p.iter().map(|q| format!("{} {}", q.x, q.y)).collect::<Vec<_>>().join(" "));
+                    }
+                }
+                for &r in &lay.rays[ci] {
+                    if lay.edges[r].alive {
+                        let (a, b) = (m.to2(lay.nodes[lay.edges[r].a]), m.to2(lay.nodes[lay.edges[r].b]));
+                        out += &format!("r {} {} {} {}\n", a.x, a.y, b.x, b.y);
+                    }
+                }
+                for &g in &lay.inner[ci] {
+                    let q = m.to2(lay.nodes[g]);
+                    out += &format!("g {} {}\n", q.x, q.y);
+                }
+                let _ = std::fs::write(w[2], out);
+            }
+        }
+    }
     let mut patches: Vec<(usize, [Vec<(usize, bool)>; 4])> = vec![];
     for ci in 0..nc {
         let mut hes: Vec<(usize, bool, bool)> = vec![]; // (edge, fwd, inside)
