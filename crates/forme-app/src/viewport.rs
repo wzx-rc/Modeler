@@ -379,6 +379,14 @@ fn draw_overlay(p: &Painter, st: &AppState) {
         if let Some(b) = view.project(pl.base).map(|q| pos2(q[0], q[1])) {
             p.line_segment([b - vec2(10.0, 0.0), b + vec2(10.0, 0.0)], Stroke::new(1.5, Color32::WHITE));
             p.line_segment([b - vec2(0.0, 10.0), b + vec2(0.0, 10.0)], Stroke::new(1.5, Color32::WHITE));
+            if let Some((what, s)) = pl.snap_end {
+                if let Some(q) = view.project(s).map(|q| pos2(q[0], q[1])) {
+                    // snapped far corner: a diamond on the vertex / edge
+                    let r = 7.0;
+                    p.add(Shape::convex_polygon(vec![q + vec2(0.0, -r), q + vec2(r, 0.0), q + vec2(0.0, r), q + vec2(-r, 0.0)], Color32::TRANSPARENT, Stroke::new(2.0, ACCENT_LIGHT)));
+                    chip(p, q + vec2(14.0, -14.0), Align2::LEFT_BOTTOM, &format!("Snap · {what}"), ACCENT_BORDER, ACCENT_TEXT);
+                }
+            }
             if let Some(snap) = pl.snapped {
                 chip(p, b + vec2(26.0, -34.0), Align2::LEFT_BOTTOM, &format!("Snap · {snap}"), Color32::from_gray(0x4A), TEXT);
             }

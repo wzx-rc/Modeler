@@ -382,6 +382,13 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if f {
         st.frame_selection();
     }
+    let (k1, k2) = ctx.input(|i| (!i.modifiers.command && i.key_pressed(egui::Key::Num1), !i.modifiers.command && i.key_pressed(egui::Key::Num2)));
+    if k1 {
+        st.set_pick_mode(PickMode::Object);
+    }
+    if k2 {
+        st.set_pick_mode(PickMode::Edge);
+    }
     // Alt = keyboard version of the thumb button, Ctrl / Cmd of the CTRL button
     st.alt_carve = alt;
     st.key_ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
@@ -487,9 +494,13 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
         panel().show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.set_width(44.0);
-            if icon_btn(ui, Icon::Select, st.tool == Tool::Select, "Sélection", 44.0).clicked() {
-                st.commit_placement();
-                st.tool = Tool::Select;
+            // selection, like 3ds Max: object (1) or edges (2)
+            let sel = st.tool == Tool::Select;
+            if icon_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (1)", 44.0).clicked() {
+                st.set_pick_mode(PickMode::Object);
+            }
+            if icon_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins", 44.0).clicked() {
+                st.set_pick_mode(PickMode::Edge);
             }
             divider(ui);
             for k in st.settings.placeable() {
@@ -1813,12 +1824,12 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                     .color(TEXT2),
             );
             section(ui, "Création");
-            if toggle_row(ui, "AutoGrid : partir de la face sous le curseur", st.settings.autogrid) {
-                st.settings.autogrid = !st.settings.autogrid;
+            if toggle_row(ui, "Accrocher aux faces des objets (AutoGrid)", st.settings.snap_faces) {
+                st.settings.snap_faces = !st.settings.snap_faces;
                 st.save_settings();
             }
             ui.label(
-                egui::RichText::new("Désactivé (comme 3ds Max) : la base se trace sur le plan du sol. Monte pour ajouter (+), descends pour creuser (−), Ctrl inverse pendant la création.")
+                egui::RichText::new("Activé : la base part de la face sous le curseur, sinon du sol ; avec Snap, elle s'accroche aux arêtes et aux sommets. Monte pour ajouter (+), descends pour creuser (−), Ctrl inverse pendant la création.")
                     .font(regular(11.5))
                     .color(TEXT2),
             );

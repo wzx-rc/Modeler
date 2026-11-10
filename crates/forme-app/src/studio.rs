@@ -440,9 +440,12 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                 st.redo();
             }
             vsep(ui);
-            if tool_btn(ui, Icon::Select, st.tool == Tool::Select, "Sélection (Échap)").clicked() {
-                st.commit_placement();
-                st.tool = Tool::Select;
+            let sel = st.tool == Tool::Select;
+            if tool_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (1)").clicked() {
+                st.set_pick_mode(PickMode::Object);
+            }
+            if tool_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins").clicked() {
+                st.set_pick_mode(PickMode::Edge);
             }
             vsep(ui);
             ui.label(RichText::new("Créer").font(regular(11.5)).color(T3));

@@ -38,6 +38,23 @@ pub enum Gesture {
     ProfileDrag,
 }
 
+/// Objects to snap to while placing a shape (without the shape itself).
+pub struct SnapCtx {
+    scene: Scene,
+    prog: Program,
+    idx: EdgeIndex,
+}
+
+/// What the selection tool picks (3ds Max object / sub-object level).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PickMode {
+    /// Whole shapes: a click selects the shape under the pointer.
+    #[default]
+    Object,
+    /// Edges and junctions: a click selects the edge (fillet, chamfer).
+    Edge,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlacePhase {
     /// Dragging the base (radius / width).
@@ -72,6 +89,8 @@ pub struct Placement {
     /// For Add / Carve the sign of the height decides: up = +, down = −, and
     /// Ctrl swaps them while creating.
     pub base_mode: CombineMode,
+    /// Where the base drag snapped (vertex or edge), for the cue.
+    pub snap_end: Option<(&'static str, Vec3)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,6 +306,8 @@ pub struct AppState {
     pub settings_open: bool,
     /// Light panel (viewport and display), anchored under its button.
     pub display_open: bool,
+    /// Selection level: objects or edges.
+    pub pick_mode: PickMode,
     pub display_anchor: [f32; 2],
     pub scene_version: u64,
     pub view_version: u64,
@@ -319,6 +340,8 @@ pub struct AppState {
     pub edge_vis: EdgeVis,
     edge_hover_at: Option<[f32; 2]>,
     edge_index: Option<(u64, std::sync::Arc<EdgeIndex>)>,
+    /// Snapping context of the current placement (objects without the new shape).
+    snap_ctx: Option<std::sync::Arc<SnapCtx>>,
     edge_sel_version: u64,
     program: Program,
     program_version: u64,
@@ -428,6 +451,7 @@ impl AppState {
             settings: Settings::default(),
             settings_open: false,
             display_open: false,
+            pick_mode: PickMode::Object,
             display_anchor: [1180.0, 76.0],
             // unique per document instance: renderer caches never mistake two documents
             scene_version: new_version_base() + 1,
@@ -472,6 +496,7 @@ impl AppState {
             edge_vis: EdgeVis::default(),
             edge_hover_at: None,
             edge_index: None,
+            snap_ctx: None,
             edge_sel_version: 0,
             program: Program::default(),
             program_version: 0,
@@ -599,17 +624,34 @@ impl AppState {
         self.view_changed();
     }
 
-    pub fn tap_select(&mut self, pos: [f32; 2]) {
-        // an edge near the tap: junction or shape edge, ready to fillet
-        let px = if self.pointer_kind == PointerKind::Finger { 22.0 } else { 12.0 };
-        let hovered = if self.pointer_kind == PointerKind::Finger { None } else { self.edge_hover.clone() };
-        let add = self.multi();
-        if let Some(e) = hovered.or_else(|| self.pick_edge(pos, px)) {
-            self.select_edge(e, add);
-            return;
+    /// Selection tool in object or edge mode (3ds Max: 1 / 2).
+    pub fn set_pick_mode(&mut self, m: PickMode) {
+        self.commit_placement();
+        self.cancel_profile();
+        self.tool = Tool::Select;
+        if m != self.pick_mode {
+            self.pick_mode = m;
+            if m == PickMode::Object {
+                self.edge_sel.clear();
+            }
+            self.edge_hover = None;
+            self.edge_hover_at = None;
+            self.view_changed();
         }
-        if add {
-            // CTRL held: a tap away from the edges keeps the selection
+    }
+
+    pub fn tap_select(&mut self, pos: [f32; 2]) {
+        if self.pick_mode == PickMode::Edge {
+            // an edge near the tap: junction or shape edge, ready to fillet
+            let px = if self.pointer_kind == PointerKind::Finger { 22.0 } else { 12.0 };
+            let hovered = if self.pointer_kind == PointerKind::Finger { None } else { self.edge_hover.clone() };
+            let add = self.multi();
+            if let Some(e) = hovered.or_else(|| self.pick_edge(pos, px)) {
+                self.select_edge(e, add);
+            } else if !add {
+                // away from the edges: clear the edge selection, keep the object
+                self.clear_edge();
+            }
             return;
         }
         match self.hit(pos) {
@@ -672,6 +714,7 @@ impl AppState {
     /// Hover highlight with the Select tool (pencil hover, trackpad, mouse).
     pub fn update_edge_hover(&mut self) {
         let active = self.tool == Tool::Select
+            && self.pick_mode == PickMode::Edge
             && self.gesture == Gesture::None
             && self.placement.is_none()
             && self.handle_drag.is_none()
@@ -885,11 +928,12 @@ impl AppState {
     pub fn begin_placement(&mut self, pos: [f32; 2]) {
         let Tool::Place(kind) = self.tool else { return };
         self.commit_placement();
+        self.snap_ctx = None;
         let (ro, rd) = self.ray(pos);
         let mut snapped = None;
-        // like 3ds Max: the base is drawn on the ground plane (home grid);
-        // AutoGrid (settings) starts on the face under the pointer instead
-        let surface = if self.settings.autogrid { self.hit(pos) } else { None };
+        // like 3ds Max AutoGrid: the base snaps onto the face under the
+        // pointer (its plane), else it is drawn on the ground plane
+        let surface = if self.settings.snap_faces { self.hit(pos) } else { None };
         let (mut base, normal0, on_surface) = match surface {
             Some((p, n)) => (p, n, true),
             None => {
@@ -939,6 +983,13 @@ impl AppState {
             base = snap_vec(base, 1.0, true);
             snapped = Some("grille");
         }
+        // Snap: start on a vertex or an edge of the objects, when it lies in the base plane
+        if self.snap && !matches!(snapped, Some("centre de la forme") | Some("centre du perçage")) {
+            if let Some((p, what)) = self.snap_point(pos, base, normal) {
+                base = p;
+                snapped = Some(what);
+            }
+        }
         let rot = Quat::from_rotation_arc(Vec3::Y, normal.normalize());
         let base_mode = self.effective_mode();
         let mode = self.resolve_place_mode(base_mode, 1.0);
@@ -972,10 +1023,61 @@ impl AppState {
             anchor: None,
             offset: Vec3::ZERO,
             base_mode,
+            snap_end: None,
         });
         self.selection = Some(id);
         self.apply_placement();
         self.changed();
+    }
+
+    /// A vertex (end of an edge) or an edge point of the objects near the
+    /// pointer, in the plane through `base` square to `normal`.
+    /// The objects as they were before the shape being placed (built once per
+    /// placement), so the new shape never snaps to itself.
+    fn snap_ctx(&mut self) -> std::sync::Arc<SnapCtx> {
+        if let Some(c) = &self.snap_ctx {
+            return c.clone();
+        }
+        let mut scene = self.scene.clone();
+        if let Some(p) = &self.placement {
+            if let Some(n) = scene.node_mut(p.node) {
+                n.visible = false;
+            }
+        }
+        let prog = compile(&scene);
+        let idx = EdgeIndex::new(&scene);
+        let c = std::sync::Arc::new(SnapCtx { scene, prog, idx });
+        self.snap_ctx = Some(c.clone());
+        c
+    }
+
+    pub fn snap_point(&mut self, pos: [f32; 2], base: Vec3, normal: Vec3) -> Option<(Vec3, &'static str)> {
+        const PX: f32 = 14.0;
+        let ctx = self.snap_ctx();
+        let view = self.view();
+        let (ro, rd) = self.ray(pos);
+        let t = ctx.prog.raycast(ro, rd, 20000.0)?;
+        let hit = ro + rd * t;
+        let e = ctx.idx.pick(&ctx.scene, hit, view.pixel_size_at((hit - view.eye).length()) * PX)?;
+        let near = |p: Vec3| view.project(p).map(|s| (s[0] - pos[0]).hypot(s[1] - pos[1]) < PX).unwrap_or(false);
+        // rounded edges run a little off the face plane: project onto it
+        let in_plane = |p: Vec3| -> Option<Vec3> {
+            let d = (p - base).dot(normal);
+            let tol = 2.5f32.max(view.pixel_size_at((p - view.eye).length()) * 6.0);
+            (d.abs() < tol).then_some(p - normal * d)
+        };
+        for c in &e.curves {
+            if c.len() >= 2 && c[0].distance(*c.last().unwrap()) > 1e-3 {
+                for v in [c[0], *c.last().unwrap()] {
+                    if near(v) {
+                        if let Some(v) = in_plane(v) {
+                            return Some((v, "sommet"));
+                        }
+                    }
+                }
+            }
+        }
+        in_plane(e.at).map(|p| (p, "arête"))
     }
 
     /// Add / Carve from the sign of the height (up = +, down = −), swapped by
@@ -1087,7 +1189,15 @@ impl AppState {
                     return;
                 }
                 let t = (p.base - ro).dot(p.normal) / den;
-                let q = ro + rd * t - p.base;
+                let mut q = ro + rd * t - p.base;
+                // the far corner / the radius snaps to the objects' vertices and edges
+                p.snap_end = None;
+                if self.snap {
+                    if let Some((s, what)) = self.snap_point(pos, p.base, p.normal) {
+                        q = s - p.base;
+                        p.snap_end = Some((what, s));
+                    }
+                }
                 let tx = p.rot * Vec3::X;
                 let tz = p.rot * Vec3::Z;
                 p.radius = snap_to(q.length(), 0.5, self.snap).max(0.5);
@@ -1872,7 +1982,7 @@ impl AppState {
         }
         if let Some(p) = &self.placement {
             return match p.phase {
-                PlacePhase::Base => format!("{} — trace la base au sol, relâche, puis monte (+ Add) ou descends (− Carve) · Ctrl inverse", p.kind.label()),
+                PlacePhase::Base => format!("{} — trace la base (sur une face ou au sol), relâche, puis monte (+ Add) ou descends (− Carve) · Ctrl inverse", p.kind.label()),
                 PlacePhase::AwaitHeight if self.pointer_kind == PointerKind::Finger => format!("{} · {} — glisse : vers le haut +, vers le bas −, tap pour valider", p.kind.label(), p.mode.label()),
                 PlacePhase::AwaitHeight => format!("{} · {} — monte (+) ou descends (−), Ctrl inverse, {} pour valider", p.kind.label(), p.mode.label(), tap_word()),
                 PlacePhase::Height => format!("{} · {} — relâche pour valider", p.kind.label(), p.mode.label()),

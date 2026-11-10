@@ -42,9 +42,9 @@ pub struct Settings {
     /// Every primitive and mode (sphere, capsule, Groove, profile, kit…).
     /// Off: Cube and Cylinder, Add (+) / Carve (-) only.
     pub advanced: bool,
-    /// Creation starts on the face under the pointer instead of the ground
-    /// plane (3ds Max AutoGrid).
-    pub autogrid: bool,
+    /// Creation starts on the face under the pointer (3ds Max AutoGrid),
+    /// else on the ground plane. On by default.
+    pub snap_faces: bool,
     /// Viewport and display options (light panel).
     pub display: Display,
 }
@@ -79,7 +79,7 @@ impl Display {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { ui_mode: UiMode::Atelier, advanced: false, autogrid: false, display: Display::default() }
+        Settings { ui_mode: UiMode::Atelier, advanced: false, snap_faces: true, display: Display::default() }
     }
 }
 

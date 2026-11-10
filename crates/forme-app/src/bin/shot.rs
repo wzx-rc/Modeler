@@ -4,7 +4,7 @@
 use egui::{pos2, Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use forme_app::gfx::FrameRenderer;
 use forme_app::settings::UiMode;
-use forme_app::state::{AppState, PointerKind, Tool};
+use forme_app::state::{AppState, PickMode, PointerKind, Tool};
 use forme_app::{theme, AppState as _S};
 use forme_core::{demo, CombineMode, NodeId, PrimKind};
 use forme_render::headless::Gpu;
@@ -486,7 +486,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") {
+    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -1175,6 +1175,42 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.steps(4);
         h.shot("pc-affichage");
         h.st.display_open = false;
+    }
+    if want("pc-snap") {
+        // base on the top face of the socle, far corner snapped to its edge
+        h.pc(part(), UiMode::Atelier);
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.steps(2);
+        h.st.frame_all();
+        h.st.tool = Tool::Place(PrimKind::Box);
+        h.steps(4);
+        let a = h.screen_of(Vec3::new(14.0, 10.0, 4.0));
+        let b = h.screen_of(Vec3::new(25.8, 10.0, 15.6));
+        h.press(a, true);
+        for i in 1..=12 {
+            h.move_to(a + (b - a) * (i as f32 / 12.0));
+        }
+        let p = h.st.placement.clone().unwrap();
+        eprintln!("snap : début {:?} normale {:.2?} · fin {:?}", p.snapped, p.normal, p.snap_end.map(|(w, s)| (w, s)));
+        h.shot("pc-snap-1-coin");
+        h.press(b, false);
+        h.step();
+        for i in 1..=10 {
+            h.move_to(b + egui::vec2(0.0, -6.0 * i as f32));
+        }
+        let p = h.st.placement.clone().unwrap();
+        eprintln!("snap : hauteur {:.1} · {}", p.height, p.mode.label());
+        h.shot("pc-snap-2-hauteur");
+        h.st.commit_placement();
+        // object mode: a click on the palier selects it, no edge
+        h.st.set_pick_mode(PickMode::Object);
+        let c = h.screen_of(Vec3::new(0.0, 30.0, 0.0));
+        h.tap(c);
+        eprintln!("mode objet : sélection {:?}, arêtes {}", h.st.selection.and_then(|id| h.st.scene.node(id)).map(|n| n.name.clone()), h.st.edge_sel.len());
+        h.st.set_pick_mode(PickMode::Edge);
+        h.tap(c);
+        eprintln!("mode arête : arêtes {}", h.st.edge_sel.len());
+        h.shot("pc-snap-3-mode-arete");
     }
     if want("pc-perf") {
         let scenes: [(&str, AppState); 2] = [("support", part()), ("grenade", AppState::default())];
