@@ -451,9 +451,8 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         (free && i.key_pressed(egui::Key::Q), free && i.key_pressed(egui::Key::R), free && i.key_pressed(egui::Key::C))
     });
     if kq {
-        st.commit_placement();
-        st.cancel_profile();
-        st.tool = Tool::Select;
+        // Q = Select tool in object mode (also leaves the edge mode, like 1)
+        st.set_pick_mode(PickMode::Object);
     }
     for (pressed, k) in [(kr, PrimKind::Box), (kc, PrimKind::Cylinder)] {
         if pressed && st.settings.prim_allowed(k) {
