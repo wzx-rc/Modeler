@@ -438,6 +438,11 @@ enum Cons {
     Disc,
     /// Ball corner: stays on the corner's side of the plane square to axis i.
     Oct(usize),
+    /// End of a fillet strip where the next edge of the corner is rounded
+    /// alike and the third is sharp: the two strips meet on the plane
+    /// `so * l[o] - sa * l[ax] = d` (local), this strip on the positive
+    /// side; `face` the other strip.
+    Miter { ax: usize, sa: f64, o: usize, so: f64, d: f64, face: u32 },
     /// Must lie outside (Add) or inside (Carve) the model before the step.
     Prev,
     /// Must lie outside a later shape.
@@ -529,6 +534,11 @@ impl Layout<'_> {
                 (Some((ax, _)), Map::Sph { c, .. }) => (ch.map.to3(q) - c).dot(ax[i]),
                 _ => 1e9,
             },
+            Cons::Miter { ax, sa, o, so, d, .. } => {
+                let sh = &self.shapes[ch.shape];
+                let l = sh.local(ch.map.to3(q));
+                (so * l[o] - sa * l[ax] - d) * sh.pr.sc
+            }
             Cons::Prev => {
                 let sh = &self.shapes[ch.shape];
                 let d = self.prev[ch.shape].as_ref().map(|f| f.dist(ch.map.to3(q))).unwrap_or(1e9);
@@ -569,7 +579,7 @@ impl Layout<'_> {
     fn label(&self, ch: &Chart, k: Cons, q: DVec2) -> FaceId {
         let f = self.label_raw(ch, k, q);
         match k {
-            Cons::Rect(_) | Cons::Arc(_) | Cons::Oct(_) => f,
+            Cons::Rect(_) | Cons::Arc(_) | Cons::Oct(_) | Cons::Miter { .. } => f,
             _ => self.half(f, ch.map.to3(q)),
         }
     }
@@ -580,6 +590,7 @@ impl Layout<'_> {
             Cons::Arc(i) => ch.arcs[i].3,
             Cons::Disc => ch.disc.map(|d| d.1).unwrap_or(ch.id),
             Cons::Oct(i) => ch.ball.map(|b| b.1[i]).unwrap_or(ch.id),
+            Cons::Miter { face, .. } => FaceId { prim: ch.id.prim, face },
             Cons::Prev => {
                 let p = ch.map.to3(q);
                 let me = &self.shapes[ch.shape];
@@ -608,7 +619,7 @@ impl Layout<'_> {
     /// The function whose zero set carries a piece of boundary.
     fn psi(&self, ch: &Chart, k: Cons, l: FaceId, q: DVec2) -> f64 {
         match k {
-            Cons::Rect(_) | Cons::Arc(_) | Cons::Disc | Cons::Oct(_) => self.cval(ch, k, q),
+            Cons::Rect(_) | Cons::Arc(_) | Cons::Disc | Cons::Oct(_) | Cons::Miter { .. } => self.cval(ch, k, q),
             _ => self.across(ch.id, l, ch.map.to3(q)),
         }
     }
@@ -709,7 +720,18 @@ impl Layout<'_> {
         let map = self.charts[c].map;
         let node = if fwd != at_end { ed.a } else { ed.b };
         let q = map.to2(self.nodes[node]);
-        let f = |x: DVec2| self.across(me, id, map.to3(x));
+        // a boundary of the chart's own shape (rail of a fillet, edge of a
+        // ball corner, miter) is a level of the chart's own constraint: the
+        // surface across meets this one tangentially there, its distance
+        // has no usable gradient on this face
+        let ch = &self.charts[c];
+        let p = self.hpts(e, fwd, c);
+        let sample = if at_end { (p[p.len() - 2] + p[p.len() - 1]) * 0.5 } else { (p[0] + p[1]) * 0.5 };
+        let own = self.fmin(ch, sample).1;
+        let f = |x: DVec2| match own {
+            Cons::Rect(_) | Cons::Arc(_) | Cons::Disc | Cons::Oct(_) | Cons::Miter { .. } => self.cval(ch, own, x),
+            _ => self.across(me, id, map.to3(x)),
+        };
         let t = perp(grad2(&f, q, self.node_tol * 5.0)).normalize_or_zero();
         if t == DVec2::ZERO {
             rough
@@ -962,6 +984,7 @@ fn check(field: &Field, steps: &[Step]) -> Result<(), String> {
         if pr.kind == 0 && (0..8u32).any(|k| corner_edges(corner_signs(k)).iter().all(|&e| edge_r(pr, e) > 0.0) && corner_r(pr, k).is_none()) {
             return Err("coin où trois fillets de rayons différents se rejoignent, pas encore géré".into());
         }
+
     }
     Ok(())
 }
@@ -1143,9 +1166,12 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 FaceId { prim: sh.prim, face: (ax * 2 + 1) as u32 },
             ];
             let segs = fillet_segs(rad, FRAC_PI_2, tol_f).max(((rad * FRAC_PI_2 / st.size).round() as usize + 1) / 2 * 2);
-            // an end on a ball corner stops where the ball starts
+            // an end on a ball corner stops where the ball starts; an end
+            // where one more edge of the corner is rounded (the third
+            // sharp) meets that edge's strip on a miter
             let mut side = side;
             let (mut t0, mut t1) = (-s[ax], s[ax]);
+            let mut miters = vec![];
             for (end, sa) in [(1usize, 1.0f64), (3, -1.0)] {
                 let mut sg = DVec3::ZERO;
                 sg[ax] = sa;
@@ -1158,8 +1184,24 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                     } else {
                         t0 = -s[ax] + rc;
                     }
+                    continue;
+                }
+                let ce = corner_edges(sg);
+                let others: Vec<usize> = [b, c].into_iter().filter(|&o| rr(ce[o]) > 0.0).collect();
+                // (equal radii only: other corners, where they show, fail later)
+                if let [o] = others[..].iter().copied().filter(|&o| (rr(ce[o]) - r).abs() < 1e-9).collect::<Vec<_>>()[..] {
+                    side[end] = FaceId { prim: sh.prim, face: FILLET0 + ce[o] as u32 };
+                    miters.push(Cons::Miter { ax, sa, o, so: sg[o], d: s[o] - s[ax], face: FILLET0 + ce[o] as u32 });
+                    // the miter cuts the strip before its end
+                    if sa > 0.0 {
+                        t1 = s[ax] + r;
+                    } else {
+                        t0 = -s[ax] - r;
+                    }
                 }
             }
+            let mut cons = cons_base.clone();
+            cons.extend(miters);
             charts.push(Chart {
                 id: FaceId { prim: sh.prim, face: FILLET0 + e as u32 },
                 shape: si,
@@ -1172,7 +1214,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 ring: None,
                 disc: None,
                 ball: None,
-                cons: cons_base.clone(),
+                cons,
             });
         }
         // ball corners: an octant of sphere, three arcs on the strips
@@ -1652,6 +1694,22 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
     // middle square of a round cap; a loop that would enter one stops in a
     // T on its side, where that side is a line (convex quad, sides flagged)
     let mut keep: Vec<Vec<([DVec2; 4], [bool; 4])>> = vec![vec![]; nc];
+    // the end of a strip on a miter: a loop that reaches its rails there
+    // (the rail of the other fillet, carried around the part, comes back
+    // exactly where the miter starts) ends on the rail in a T instead of
+    // cutting a triangle off the strip against the miter
+    for ci in 0..nc {
+        let ch = &lay.charts[ci];
+        let Some((rad, _)) = ch.strip else { continue };
+        let sc = lay.shapes[ch.shape].pr.sc;
+        for k in &ch.cons {
+            let Cons::Miter { ax, sa, .. } = *k else { continue };
+            let s_ax = lay.shapes[ch.shape].pr.size[ax] * sc;
+            let (x0, x1) = (sa * (s_ax - rad * 1.25), sa * (s_ax + rad));
+            let h = rad * FRAC_PI_2;
+            keep[ci].push(([DVec2::new(x0, 0.0), DVec2::new(x1, 0.0), DVec2::new(x1, h), DVec2::new(x0, h)], [true, false, true, false]));
+        }
+    }
     // the diagonals of the hooks, per chart: a loop meeting one ends there
     // (diagonal from, to; corner of the arc's tangents, walls, arc's middle)
     #[allow(clippy::type_complexity)]
@@ -2210,37 +2268,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
         if exists || keep[ci].iter().any(|(poly, lines)| starts_into(poly, lines, o, d, snap)) {
             continue;
         }
-        let mut best = first_hit(d);
-        // a loop passing right by a node of the boundary on the way (the
-        // extreme of a round, a corner) takes it: about one degree of bend
-        if let Some(b0) = best {
-            let m = lay.charts[ci].map;
-            let mut pass: Option<(f64, usize)> = None;
-            for lp in &lay.bnd[ci] {
-                for &(e, _) in lp {
-                    let n = lay.edges[e].a;
-                    if n == n0 {
-                        continue;
-                    }
-                    let w = m.to2(lay.nodes[n]) - o;
-                    let s = w.dot(d);
-                    let off = (w - d * s).length();
-                    if s > snap && s < b0.0 - snap && off > snap * 0.01 && off < (st.size * 0.3).min(s * 0.02) && pass.is_none_or(|p| s < p.0) {
-                        pass = Some((s, n));
-                    }
-                }
-            }
-            if let Some((_, n)) = pass {
-                let d2 = (m.to2(lay.nodes[n]) - o).normalize();
-                if let Some(b2) = first_hit(d2) {
-                    if std::env::var("DEBUG_LAYOUT").is_ok() {
-                        eprintln!("passe par n{n} {:?}", lay.nodes[n]);
-                    }
-                    d = d2;
-                    best = Some(b2);
-                }
-            }
-        }
+        let best = first_hit(d);
         // a loop node inside the face on the way (where loops cross)
         let mut stop: Option<(f64, usize)> = None;
         for &g in &lay.inner[ci] {
@@ -2832,9 +2860,18 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 ids.push(pos.len() as u32 - 1);
             }
         } else {
+            // across a fillet strip (its end, a miter): evenly in the arc,
+            // so that the rows run on straight; else evenly in length
+            let strip = ed.charts.iter().copied().find(|&c| lay.charts[c].strip.is_some()).filter(|_| fixed[e]);
             let cum: Vec<f64> = std::iter::once(0.0)
                 .chain(ed.pts.windows(2).scan(0.0, |s, w| {
-                    *s += w[0].distance(w[1]);
+                    *s += match strip {
+                        Some(c) => {
+                            let m = lay.charts[c].map;
+                            (m.to2(w[1]).y - m.to2(w[0]).y).abs()
+                        }
+                        None => w[0].distance(w[1]),
+                    };
                     Some(*s)
                 }))
                 .collect();
