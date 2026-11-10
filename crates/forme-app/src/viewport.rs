@@ -406,7 +406,7 @@ fn draw_edges(p: &Painter, st: &AppState) {
         let multi = st.multi();
         if !selected || multi {
             if !selected {
-                draw(e, &st.edge_vis.hover, ACCENT_LIGHT, false);
+                draw(e, &st.edge_vis.hover, accent_light(), false);
             }
             if let Some(h) = st.hover {
                 let r = if e.radius <= 0.0 {
@@ -420,7 +420,7 @@ fn draw_edges(p: &Painter, st: &AppState) {
                     (true, true) => "− ",
                     _ => "",
                 };
-                chip(p, pos2(h[0], h[1]) + vec2(18.0, 16.0), Align2::LEFT_TOP, &format!("{prefix}{} · {r}", e.label), ACCENT_BORDER, ACCENT_TEXT);
+                chip(p, pos2(h[0], h[1]) + vec2(18.0, 16.0), Align2::LEFT_TOP, &format!("{prefix}{} · {r}", e.label), accent_border(), accent_text());
             }
         }
     }
@@ -519,13 +519,13 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                     let s = if hot { 8.5 } else { 7.0 };
                     p.add(Shape::convex_polygon(
                         vec![sp + vec2(0.0, -s), sp + vec2(s, 0.0), sp + vec2(0.0, s), sp + vec2(-s, 0.0)],
-                        if hot { HOT } else { fade(ACCENT_LIGHT, 0.4) },
-                        Stroke::new(1.5, ON_ACCENT),
+                        if hot { HOT } else { fade(accent_light(), 0.4) },
+                        Stroke::new(1.5, on_accent()),
                     ));
                 }
                 Handle::Fillet => {
                     p.line_segment([o, sp], Stroke::new(if hot { 2.5 } else { 1.75 }, EDGE_SEL));
-                    p.circle(sp, if hot { 9.5 } else { 8.0 }, EDGE_SEL, Stroke::new(2.0, ON_ACCENT));
+                    p.circle(sp, if hot { 9.5 } else { 8.0 }, EDGE_SEL, Stroke::new(2.0, on_accent()));
                     if let Some(e) = st.edge_sel.last() {
                         let what = if e.chamfer { "Chanfrein" } else { "Fillet" };
                         let mut t = if e.radius <= 0.0 { "Arête vive · tire pour arrondir".to_string() } else { format!("{what} {} mm", fmt_mm(e.radius)) };
@@ -540,9 +540,9 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                     continue;
                 }
                 _ => {
-                    let c = if hot { HOT } else { fade(ACCENT, 0.4) };
+                    let c = if hot { HOT } else { fade(accent(), 0.4) };
                     p.line_segment([o, sp], Stroke::new(if hot { 2.5 } else { 1.75 }, c));
-                    p.circle(sp, if hot { 8.5 } else { 7.0 }, c, Stroke::new(2.0, ON_ACCENT));
+                    p.circle(sp, if hot { 8.5 } else { 7.0 }, c, Stroke::new(2.0, on_accent()));
                 }
             }
             // value chips on the size handles (bevel only while dragging it)
@@ -568,7 +568,7 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                         Handle::Depth => (sp + vec2(-12.0, 12.0), Align2::RIGHT_TOP),
                         _ => (sp + dir * 14.0, if dir.x >= 0.0 { Align2::LEFT_CENTER } else { Align2::RIGHT_CENTER }),
                     };
-                    chip(p, at, anchor, &t, ACCENT_BORDER, ACCENT_TEXT);
+                    chip(p, at, anchor, &t, accent_border(), accent_text());
                 }
             }
         }
@@ -576,7 +576,7 @@ fn draw_overlay(p: &Painter, st: &AppState) {
 
     // placement measures
     if let Some(pl) = &st.placement {
-        let color = if pl.mode == CombineMode::Add { ACCENT } else { CARVE };
+        let color = if pl.mode == CombineMode::Add { accent() } else { carve() };
         if let Some(b) = view.project(pl.base).map(|q| pos2(q[0], q[1])) {
             p.line_segment([b - vec2(10.0, 0.0), b + vec2(10.0, 0.0)], Stroke::new(1.5, Color32::WHITE));
             p.line_segment([b - vec2(0.0, 10.0), b + vec2(0.0, 10.0)], Stroke::new(1.5, Color32::WHITE));
@@ -584,8 +584,8 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                 if let Some(q) = view.project(s).map(|q| pos2(q[0], q[1])) {
                     // snapped far corner: a diamond on the vertex / edge
                     let r = 7.0;
-                    p.add(Shape::convex_polygon(vec![q + vec2(0.0, -r), q + vec2(r, 0.0), q + vec2(0.0, r), q + vec2(-r, 0.0)], Color32::TRANSPARENT, Stroke::new(2.0, ACCENT_LIGHT)));
-                    chip(p, q + vec2(14.0, -14.0), Align2::LEFT_BOTTOM, &format!("Snap · {what}"), ACCENT_BORDER, ACCENT_TEXT);
+                    p.add(Shape::convex_polygon(vec![q + vec2(0.0, -r), q + vec2(r, 0.0), q + vec2(0.0, r), q + vec2(-r, 0.0)], Color32::TRANSPARENT, Stroke::new(2.0, accent_light())));
+                    chip(p, q + vec2(14.0, -14.0), Align2::LEFT_BOTTOM, &format!("Snap · {what}"), accent_border(), accent_text());
                 }
             }
             if let Some(snap) = pl.snapped {
@@ -605,7 +605,7 @@ fn draw_overlay(p: &Painter, st: &AppState) {
             let anchor = Align2::RIGHT_TOP;
             // compact on desktop (title and value on one line), larger on iPad
             let desk = !cfg!(target_os = "ios");
-            let vcol = if pl.mode == CombineMode::Add { ACCENT_TEXT } else { Color32::from_rgb(0xFF, 0xD2, 0xAE) };
+            let vcol = if pl.mode == CombineMode::Add { accent_text() } else { Color32::from_rgb(0xFF, 0xD2, 0xAE) };
             if desk {
                 let g1 = p.layout_no_wrap(title.to_string(), regular(11.0), TEXT2);
                 let g2 = p.layout_no_wrap(value.clone(), medium(13.0), vcol);

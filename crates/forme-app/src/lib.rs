@@ -30,6 +30,11 @@ pub use state::AppState;
 
 /// Runs the whole UI for one frame.
 pub fn run(ctx: &egui::Context, st: &mut AppState) {
+    // each interface has its own accent (green Établi, orange Studio)
+    theme::set_ambiance(ctx, match st.settings.ui_mode {
+        settings::UiMode::Atelier => theme::Ambiance::Vert,
+        settings::UiMode::Studio => theme::Ambiance::Orange,
+    });
     viewport::show(ctx, st);
     match st.settings.ui_mode {
         settings::UiMode::Atelier => ui::show(ctx, st),

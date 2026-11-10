@@ -478,6 +478,54 @@ fn draw_pill(p: &Painter, r: Rect, g: std::sync::Arc<egui::Galley>, hot: bool, a
     p.galley_with_override_text_color(pos2(r.min.x + 9.0, r.center().y - g.size().y * 0.5), g, f(col));
 }
 
+/// Établi's radial menu: eight sectors of a ring around the press point,
+/// labels inside, the hovered sector filled with the accent.
+fn draw_pie(p: &Painter, st: &AppState, m: &Menu, c: Pos2) {
+    use std::f32::consts::PI;
+    let (r0, r1) = (DEAD + 8.0, RADIUS + 34.0);
+    let acc = crate::theme::accent();
+    let list = items(st, m.ctx);
+    // the disc behind, so the scene does not show through the gaps
+    p.circle_filled(c, r1 + 3.0, Color32::from_rgba_unmultiplied(14, 16, 18, 150));
+    for dir in 0u8..8 {
+        let a = dir as f32 * PI / 4.0;
+        let (a0, a1) = (a - PI / 8.0 + 0.025, a + PI / 8.0 - 0.025);
+        let n = 10;
+        let mut pts = vec![];
+        for i in 0..=n {
+            let t = a0 + (a1 - a0) * i as f32 / n as f32;
+            pts.push(c + vec2(t.sin(), -t.cos()) * r1);
+        }
+        for i in (0..=n).rev() {
+            let t = a0 + (a1 - a0) * i as f32 / n as f32;
+            pts.push(c + vec2(t.sin(), -t.cos()) * r0);
+        }
+        let item = list.iter().find(|i| i.dir == dir);
+        let hot = item.is_some() && m.hover == Some(dir) && m.swatch.is_none() || (item.map(|i| i.act == Act::Material).unwrap_or(false) && m.arc.is_some());
+        // opaque fills: the slices overlap a hair at their seams
+        let mix = |k: f32| Color32::from_rgb((28.0 + (acc.r() as f32 - 28.0) * k) as u8, (31.0 + (acc.g() as f32 - 31.0) * k) as u8, (35.0 + (acc.b() as f32 - 35.0) * k) as u8);
+        let fill = if hot { mix(0.32) } else { Color32::from_rgb(28, 31, 35) };
+        let stroke = if hot { Stroke::new(1.5, acc) } else { Stroke::new(1.0, Color32::from_rgba_unmultiplied(62, 68, 76, 255)) };
+        // a ring sector is not convex: filled as thin convex slices
+        let m1 = n + 1;
+        for i in 0..n {
+            let quad = vec![pts[i], pts[i + 1], pts[2 * m1 - 2 - i], pts[2 * m1 - 1 - i]];
+            p.add(egui::Shape::convex_polygon(quad, fill, egui::Stroke::NONE));
+        }
+        p.add(egui::Shape::closed_line(pts, stroke));
+        if let Some(it) = item {
+            let mid = c + vec2(a.sin(), -a.cos()) * ((r0 + r1) * 0.5);
+            let label = if it.checked { format!("• {}", it.label) } else { it.label.clone() };
+            let g = p.layout(label, regular(10.5), if hot { acc } else { TEXT }, 62.0);
+            p.galley(mid - g.size() * 0.5, g, TEXT);
+        }
+    }
+    p.circle_filled(c, r0 - 6.0, Color32::from_rgba_unmultiplied(20, 22, 25, 240));
+    p.circle_stroke(c, r0 - 6.0, Stroke::new(1.0, Color32::from_rgba_unmultiplied(62, 68, 76, 255)));
+    p.circle_filled(c, 3.0, acc);
+    p.text(c + vec2(0.0, r1 + 8.0), Align2::CENTER_TOP, m.ctx.title(), medium(10.5), Color32::from_rgba_unmultiplied(236, 236, 226, 170));
+}
+
 fn ease_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
@@ -503,6 +551,10 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
     }
     let c = pos2(m.center[0], m.center[1]);
     let pointer = pos2(m.pointer[0], m.pointer[1]);
+    if crate::theme::ambiance() == crate::theme::Ambiance::Vert {
+        // Établi: a radial pie at the cursor, the item under the pointer lit green
+        draw_pie(&p, st, m, c);
+    } else {
     p.circle_filled(c, 4.5, Color32::from_rgba_unmultiplied(236, 236, 226, 200));
     p.circle_stroke(c, DEAD, Stroke::new(1.0, Color32::from_rgba_unmultiplied(236, 236, 226, 70)));
     if m.hover.is_some() {
@@ -514,6 +566,7 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
         let (r, g) = pill_rect(&p, c, item.dir, &label);
         let hot = m.hover == Some(item.dir) && m.swatch.is_none();
         draw_pill(&p, r, g, hot || (item.act == Act::Material && m.arc.is_some()), 1.0);
+    }
     }
     // material arc: the swatches come out one by one
     if let (Some(t0), Ctx::Shape(id)) = (m.arc, m.ctx) {

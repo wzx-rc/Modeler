@@ -535,6 +535,7 @@ impl FrameRenderer {
         s.light_intensity = d.light_intensity;
         s.exposure = d.exposure;
         s.jitter = jitter;
+        s.sel_color = crate::theme::sel_rgb();
         s
     }
 

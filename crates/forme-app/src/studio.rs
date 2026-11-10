@@ -10,7 +10,7 @@ use crate::camera::ViewPreset;
 use crate::icons::{self, Icon};
 use crate::settings::{Navigation, UiMode};
 use crate::state::*;
-use crate::theme::{medium, regular, semibold, tint, AXIS_X, AXIS_Y, AXIS_Z, CARVE, EDGE_SEL};
+use crate::theme::{accent, accent_bg, accent_border, accent_text, carve, medium, regular, semibold, tint, AXIS_X, AXIS_Y, AXIS_Z, EDGE_SEL};
 use crate::ui;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, Id, Order, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui};
 use forme_core::*;
@@ -26,10 +26,6 @@ const LINE: Color32 = Color32::from_rgb(0x2A, 0x2E, 0x35);
 const T1: Color32 = Color32::from_rgb(0xE4, 0xE7, 0xEB);
 const T2: Color32 = Color32::from_rgb(0x9A, 0xA1, 0xAB);
 const T3: Color32 = Color32::from_rgb(0x64, 0x6B, 0x75);
-const SEL: Color32 = Color32::from_rgb(0x1B, 0x28, 0x40);
-const SEL_LINE: Color32 = Color32::from_rgb(0x2F, 0x4E, 0x86);
-const SEL_T: Color32 = Color32::from_rgb(0xDC, 0xE8, 0xFF);
-const AC: Color32 = Color32::from_rgb(0x4D, 0x8D, 0xFF);
 
 const TOP_H: f32 = 38.0;
 const RAIL_W: f32 = 48.0;
@@ -75,8 +71,8 @@ fn studio_style(s: &mut egui::Style) {
     v.override_text_color = Some(T1);
     v.extreme_bg_color = B0;
     v.faint_bg_color = B2;
-    v.selection.bg_fill = SEL;
-    v.selection.stroke = Stroke::new(1.0, AC);
+    v.selection.bg_fill = accent_bg();
+    v.selection.stroke = Stroke::new(1.0, accent());
     v.window_fill = B2;
     v.panel_fill = B1;
     v.window_corner_radius = CornerRadius::same(8);
@@ -91,11 +87,11 @@ fn studio_style(s: &mut egui::Style) {
     v.widgets.inactive.fg_stroke = Stroke::new(1.0, T1);
     v.widgets.hovered.bg_fill = B3;
     v.widgets.hovered.weak_bg_fill = B3;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, SEL_LINE);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, accent_border());
     v.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
-    v.widgets.active.bg_fill = SEL;
-    v.widgets.active.weak_bg_fill = SEL;
-    v.widgets.active.bg_stroke = Stroke::new(1.0, AC);
+    v.widgets.active.bg_fill = accent_bg();
+    v.widgets.active.weak_bg_fill = accent_bg();
+    v.widgets.active.bg_stroke = Stroke::new(1.0, accent());
     v.widgets.open.weak_bg_fill = B3;
     v.widgets.open.bg_fill = B3;
 }
@@ -133,11 +129,11 @@ fn tool_btn(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> Response {
     let (r, resp) = ui.allocate_exact_size(vec2(34.0, 32.0), Sense::click());
     let p = ui.painter();
     if on {
-        p.rect(r, 7.0, SEL, Stroke::new(1.0, SEL_LINE), StrokeKind::Inside);
+        p.rect(r, 7.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
     } else if resp.hovered() {
         p.rect_filled(r, 7.0, B3);
     }
-    icons::paint(p, Rect::from_center_size(r.center(), vec2(17.0, 17.0)), icon, if on { SEL_T } else { Color32::from_rgb(0xC3, 0xC8, 0xCF) });
+    icons::paint(p, Rect::from_center_size(r.center(), vec2(17.0, 17.0)), icon, if on { accent_text() } else { Color32::from_rgb(0xC3, 0xC8, 0xCF) });
     resp.on_hover_text(tip)
 }
 
@@ -145,11 +141,11 @@ fn small_btn(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> Response {
     let (r, resp) = ui.allocate_exact_size(vec2(26.0, 24.0), Sense::click());
     let p = ui.painter();
     if on {
-        p.rect(r, 6.0, SEL, Stroke::new(1.0, SEL_LINE), StrokeKind::Inside);
+        p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
     } else if resp.hovered() {
         p.rect_filled(r, 6.0, B3);
     }
-    icons::paint(p, Rect::from_center_size(r.center(), vec2(14.0, 14.0)), icon, if on { SEL_T } else { T2 });
+    icons::paint(p, Rect::from_center_size(r.center(), vec2(14.0, 14.0)), icon, if on { accent_text() } else { T2 });
     resp.on_hover_text(tip)
 }
 
@@ -159,7 +155,7 @@ fn text_btn(ui: &mut Ui, icon: Option<Icon>, label: &str, primary: bool) -> Resp
     let (r, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
     let p = ui.painter();
     let (fill, fg) = match (primary, resp.hovered()) {
-        (true, false) => (AC, Color32::WHITE),
+        (true, false) => (accent(), Color32::WHITE),
         (true, true) => (Color32::from_rgb(0x6A, 0xA0, 0xFF), Color32::WHITE),
         (false, false) => (B3, T1),
         (false, true) => (B4, Color32::WHITE),
@@ -180,8 +176,8 @@ fn small_label(ui: &mut Ui, text: &str) {
 
 fn mode_color(m: CombineMode) -> Color32 {
     match m {
-        CombineMode::Add => AC,
-        CombineMode::Carve => CARVE,
+        CombineMode::Add => accent(),
+        CombineMode::Carve => carve(),
         _ => Color32::from_rgb(0xC8, 0xCC, 0xD2),
     }
 }
@@ -258,7 +254,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             ui.add_space(9.0);
             let (r, _) = ui.allocate_exact_size(vec2(24.0, 26.0), Sense::hover());
             let logo = Rect::from_center_size(r.center(), vec2(22.0, 22.0));
-            ui.painter().rect_filled(logo, 6.0, AC);
+            ui.painter().rect_filled(logo, 6.0, accent());
             icons::paint(ui.painter(), Rect::from_center_size(logo.center(), vec2(14.0, 14.0)), Icon::Cube, Color32::WHITE);
             ui.add_space(4.0);
             egui::containers::menu::MenuBar::new().config(menu_cfg()).ui(ui, |ui| {
@@ -276,7 +272,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                 // the command palette field
                 let (r, resp) = ui.allocate_exact_size(vec2(300.0, 26.0), Sense::click());
                 let p = ui.painter();
-                p.rect(r, 7.0, if resp.hovered() { B2 } else { B0 }, Stroke::new(1.0, if resp.hovered() { SEL_LINE } else { LINE }), StrokeKind::Inside);
+                p.rect(r, 7.0, if resp.hovered() { B2 } else { B0 }, Stroke::new(1.0, if resp.hovered() { accent_border() } else { LINE }), StrokeKind::Inside);
                 icons::paint(p, Rect::from_min_size(pos2(r.min.x + 9.0, r.center().y - 6.5), vec2(13.0, 13.0)), Icon::Frame, T3);
                 p.text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, "Commande, forme, réglage…", regular(12.0), T3);
                 let kr = Rect::from_min_size(pos2(r.max.x - 56.0, r.min.y + 4.0), vec2(50.0, 18.0));
@@ -544,7 +540,7 @@ fn row_frame(ui: &mut Ui, w: f32, selected: bool, hovered: bool, r: Rect) {
     let p = ui.painter();
     let r = r.shrink2(vec2(8.0, 0.0));
     if selected {
-        p.rect(r, 6.0, SEL, Stroke::new(1.0, SEL_LINE), StrokeKind::Inside);
+        p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
     } else if hovered {
         p.rect_filled(r, 6.0, B2);
     }
@@ -574,12 +570,12 @@ fn scene_row(ui: &mut Ui, st: &mut AppState, id: NodeId, depth: usize, w: f32) {
     } else {
         mode_badge(ui, pos2(x0 + 8.0, r.center().y), n.combine.mode, dim);
     }
-    let fg = if selected { SEL_T } else { tint(T1, dim) };
+    let fg = if selected { accent_text() } else { tint(T1, dim) };
     let mut info = n.type_label();
     if n.mirror.any() {
         info += " · sym.";
     }
-    let ig = ui.painter().layout_no_wrap(info, regular(11.5), if selected { SEL_T } else { tint(T3, dim.max(0.7)) });
+    let ig = ui.painter().layout_no_wrap(info, regular(11.5), if selected { accent_text() } else { tint(T3, dim.max(0.7)) });
     let ix = r.max.x - 36.0 - ig.size().x;
     let name_max = (ix - 8.0 - (x0 + 26.0)).max(20.0);
     let mut job = egui::text::LayoutJob::single_section(n.name.clone(), egui::TextFormat::simple(if selected { medium(12.5) } else { regular(12.5) }, fg));
@@ -626,7 +622,7 @@ fn history_row(ui: &mut Ui, st: &mut AppState, id: NodeId, i: usize, w: f32) {
         Some(sh) => format!("{} · {}", sh.kind.label(), n.combine.mode.label()),
         None => n.type_label(),
     };
-    p.text(pos2(r.min.x + 58.0, r.center().y), Align2::LEFT_CENTER, &n.name, regular(12.0), if selected { SEL_T } else { T1 });
+    p.text(pos2(r.min.x + 58.0, r.center().y), Align2::LEFT_CENTER, &n.name, regular(12.0), if selected { accent_text() } else { T1 });
     p.text(pos2(r.max.x - 16.0, r.center().y), Align2::RIGHT_CENTER, what, regular(11.0), T3);
     if resp.on_hover_text("Sélectionner cette opération").clicked() {
         st.commit_placement();
@@ -781,7 +777,7 @@ fn materials(ui: &mut Ui, st: &mut AppState, target: Option<NodeId>, current: u3
             let on = current as usize == i;
             let c = Color32::from_rgb((m.color[0] * 255.0) as u8, (m.color[1] * 255.0) as u8, (m.color[2] * 255.0) as u8);
             let p = ui.painter();
-            p.rect(r, 6.0, if on { SEL } else { B0 }, Stroke::new(1.0, if on { AC } else { LINE }), StrokeKind::Inside);
+            p.rect(r, 6.0, if on { accent_bg() } else { B0 }, Stroke::new(1.0, if on { accent() } else { LINE }), StrokeKind::Inside);
             p.rect(r.shrink(6.0), 3.0, c, Stroke::new(1.0, tint(Color32::WHITE, 0.15)), StrokeKind::Inside);
             if resp.on_hover_text(&m.name).clicked() {
                 match target {
@@ -1280,11 +1276,11 @@ fn palette(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     let on = i == pal.sel;
                     let p = ui.painter();
                     if on {
-                        p.rect(rr, 6.0, SEL, Stroke::new(1.0, SEL_LINE), StrokeKind::Inside);
+                        p.rect(rr, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
                     } else if resp.hovered() {
                         p.rect_filled(rr, 6.0, B2);
                     }
-                    p.text(rr.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, label, regular(12.5), if on { SEL_T } else { T1 });
+                    p.text(rr.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, label, regular(12.5), if on { accent_text() } else { T1 });
                     if !key.is_empty() {
                         p.text(rr.right_center() - vec2(10.0, 0.0), Align2::RIGHT_CENTER, *key, medium(11.0), T3);
                     }

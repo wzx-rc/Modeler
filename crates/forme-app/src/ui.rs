@@ -23,8 +23,8 @@ pub(crate) fn panel() -> Frame {
 
 pub(crate) fn mode_color(m: CombineMode) -> Color32 {
     match m {
-        CombineMode::Add => ACCENT,
-        CombineMode::Carve => CARVE,
+        CombineMode::Add => accent(),
+        CombineMode::Carve => carve(),
         _ => NEUTRAL_MODE,
     }
 }
@@ -84,29 +84,29 @@ pub fn icon_btn(ui: &mut Ui, icon: Icon, selected: bool, tip: &str, size: f32) -
     let p = ui.painter();
     let rr = if size <= 36.0 { 7.0 } else { 10.0 };
     if selected {
-        p.rect(rect.shrink(0.5), rr, ACCENT_BG, Stroke::new(1.0, ACCENT_BORDER), StrokeKind::Inside);
+        p.rect(rect.shrink(0.5), rr, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
     } else if resp.hovered() || resp.is_pointer_button_down_on() {
         p.rect_filled(rect, rr, RAISED);
     }
-    let c = if selected { ACCENT_TEXT } else { TEXT_ICON };
+    let c = if selected { accent_text() } else { TEXT_ICON };
     let isz = if size < 32.0 { 15.0 } else if size < 40.0 { 17.0 } else { 20.0 };
     icons::paint(p, Rect::from_center_size(rect.center(), vec2(isz, isz)), icon, c);
     resp.on_hover_text(tip)
 }
 
 pub(crate) fn primary_btn(ui: &mut Ui, icon: Option<Icon>, label: &str, width: Option<f32>) -> Response {
-    let galley = ui.painter().layout_no_wrap(label.to_string(), semibold(14.0), ON_ACCENT);
+    let galley = ui.painter().layout_no_wrap(label.to_string(), semibold(14.0), on_accent());
     let w = width.unwrap_or(galley.size().x + 32.0 + if icon.is_some() { 24.0 } else { 0.0 });
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 44.0), Sense::click());
     let p = ui.painter();
-    let fill = if resp.is_pointer_button_down_on() { ACCENT_LIGHT } else { ACCENT };
+    let fill = if resp.is_pointer_button_down_on() { accent_light() } else { accent() };
     p.rect_filled(rect, 10.0, fill);
     let tw = galley.size().x + if icon.is_some() { 24.0 } else { 0.0 };
     let x0 = rect.center().x - tw * 0.5;
     if let Some(i) = icon {
-        icons::paint(p, Rect::from_min_size(pos2(x0, rect.center().y - 8.0), vec2(16.0, 16.0)), i, ON_ACCENT);
+        icons::paint(p, Rect::from_min_size(pos2(x0, rect.center().y - 8.0), vec2(16.0, 16.0)), i, on_accent());
     }
-    p.galley(pos2(x0 + if icon.is_some() { 24.0 } else { 0.0 }, rect.center().y - galley.size().y * 0.5), galley, ON_ACCENT);
+    p.galley(pos2(x0 + if icon.is_some() { 24.0 } else { 0.0 }, rect.center().y - galley.size().y * 0.5), galley, on_accent());
     resp
 }
 
@@ -200,12 +200,12 @@ fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adaptive: 
     let p = ui.painter();
     p.rect_filled(rail, 2.0, Color32::from_rgb(0x3A, 0x3D, 0x44));
     let zero = if min < 0.0 { rail.min.x + (-min / (hi - min)) * rail.width() } else { rail.min.x };
-    p.rect_filled(Rect::from_x_y_ranges(zero.min(kx)..=zero.max(kx), rail.y_range()), 2.0, ACCENT);
+    p.rect_filled(Rect::from_x_y_ranges(zero.min(kx)..=zero.max(kx), rail.y_range()), 2.0, accent());
     let k = pos2(kx, rail.center().y);
     let active = resp.dragged() || resp.is_pointer_button_down_on();
     let (kr, ka) = if DESK { (6.5, 7.5) } else { (9.5, 11.0) };
     p.circle_filled(k + vec2(0.0, 1.0), kr + 1.0, tint(Color32::BLACK, 0.35));
-    p.circle(k, if active { ka } else { kr }, Color32::from_rgb(0xF2, 0xF3, 0xF5), Stroke::new(if active { 2.5 } else { 0.0 }, ACCENT));
+    p.circle(k, if active { ka } else { kr }, Color32::from_rgb(0xF2, 0xF3, 0xF5), Stroke::new(if active { 2.5 } else { 0.0 }, accent()));
     (changed, started && changed || resp.drag_started())
 }
 
@@ -314,9 +314,9 @@ pub(crate) fn toggle_row(ui: &mut Ui, label: &str, on: bool) -> bool {
         ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(if DESK { 12.5 } else { 13.0 }), LABEL);
         let (r, resp) = ui.allocate_exact_size(vec2(tw, th), Sense::click());
         let p = ui.painter();
-        p.rect_filled(r, th * 0.5, if on { ACCENT } else { RAISED });
+        p.rect_filled(r, th * 0.5, if on { accent() } else { RAISED });
         let knob = if on { r.right_center() - vec2(th * 0.5, 0.0) } else { r.left_center() + vec2(th * 0.5, 0.0) };
-        p.circle_filled(knob, kr, if on { ON_ACCENT } else { TEXT2 });
+        p.circle_filled(knob, kr, if on { on_accent() } else { TEXT2 });
         clicked = resp.clicked();
     });
     clicked
@@ -334,9 +334,10 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     st.screen = [screen.width(), screen.height()];
     // free view: between the tool column and the inspector, under the top
     // islands, above the history strip
-    let right = if st.panel_visible { screen.width() - 2.0 * EDGE - RIGHT_W } else { screen.width() - EDGE };
+    // (« menu radial » mood: inspector on the left, shape cards on the right)
+    let left = if st.panel_visible { 2.0 * EDGE + RIGHT_W } else { EDGE };
     // the Bake panel floats over the view: it does not move the camera (Romain)
-    st.set_view_rect([64.0, EDGE + ISLAND_H, right, screen.height() - 72.0]);
+    st.set_view_rect([left, EDGE + ISLAND_H, screen.width() - 2.0 * EDGE - CARDS_W, screen.height() - 72.0]);
     top_bar(ctx, st, screen);
     if st.bake_mode() {
         // BAKE: no tools, no properties, no history to edit; the Bake panel only
@@ -492,7 +493,7 @@ pub(crate) fn chip(ui: &mut Ui, icon: Option<Icon>, label: &str, on: bool, tip: 
     let w = g.size().x + 20.0 + if icon.is_some() { 20.0 } else { 0.0 };
     let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
     let p = ui.painter();
-    let (bg, border, fg) = if on { (ACCENT_BG, ACCENT_BORDER, ACCENT_TEXT) } else if resp.hovered() { (RAISED, DIVIDER, TEXT) } else { (Color32::TRANSPARENT, DIVIDER, TEXT2) };
+    let (bg, border, fg) = if on { (accent_bg(), accent_border(), accent_text()) } else if resp.hovered() { (RAISED, DIVIDER, TEXT) } else { (Color32::TRANSPARENT, DIVIDER, TEXT2) };
     p.rect(r, 7.0, bg, Stroke::new(1.0, border), StrokeKind::Inside);
     let mut x = r.min.x + 10.0;
     if let Some(i) = icon {
@@ -555,7 +556,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
                 let logo = Rect::from_center_size(r.center(), vec2(24.0, 24.0));
-                ui.painter().rect_filled(logo, 7.0, ACCENT);
+                ui.painter().rect_filled(logo, 7.0, accent());
                 icons::paint(ui.painter(), Rect::from_center_size(logo.center(), vec2(15.0, 15.0)), Icon::Cube, Color32::WHITE);
                 let name = st.doc_name.clone();
                 let n = st.scene.shape_count();
@@ -588,20 +589,52 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         island().show(ui, |ui| {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
+                // « menu radial » mood: the active tool in technical capitals,
+                // then ADD / CARVE as a pill, then the helpers as small icons
                 ui.spacing_mut().item_spacing.x = 6.0;
-                let cur = if st.tool == Tool::Select { Some(st.pick_mode) } else { None };
-                let items = [(Some(PickMode::Object), "Objet", "1"), (Some(PickMode::Edge), "Arête", "2")];
-                if let Some(Some(m)) = seg_inline(ui, "isl-pick", &items, cur) {
-                    st.set_pick_mode(m);
+                let tool = match st.tool {
+                    Tool::Place(k) => k.label().to_uppercase(),
+                    _ if st.pick_mode == PickMode::Edge => "SÉLECTION · ARÊTE".to_string(),
+                    _ => "SÉLECTION · OBJET".to_string(),
+                };
+                let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT);
+                let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 20.0, 28.0), Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(r, 7.0, RAISED);
                 }
-                if chip(ui, Some(Icon::Magnet), "Snap", st.snap, "Snap : grille, sommets et arêtes").clicked() {
+                ui.painter().galley(pos2(r.min.x + 10.0, r.center().y - g.size().y * 0.5), g, TEXT);
+                if resp.on_hover_text("Objet ⇄ Arête (1 / 2)").clicked() {
+                    st.set_pick_mode(if st.pick_mode == PickMode::Edge { PickMode::Object } else { PickMode::Edge });
+                }
+                // ADD | CARVE
+                let shown = shown_mode(st);
+                let (well, _) = ui.allocate_exact_size(vec2(2.0 * 62.0 + 6.0, 28.0), Sense::hover());
+                ui.painter().rect(well, 14.0, WELL, Stroke::new(1.0, DIVIDER), StrokeKind::Inside);
+                for (i, m) in MODES.iter().enumerate() {
+                    let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 62.0, 3.0), vec2(62.0, 22.0));
+                    let resp = ui.interact(r, Id::new(("isl-mode", i)), Sense::click());
+                    let on = shown == *m;
+                    let c = mode_color(*m);
+                    if on {
+                        ui.painter().rect_filled(r, 11.0, c);
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(r, 11.0, RAISED);
+                    }
+                    let label = if *m == CombineMode::Add { "ADD" } else { "CARVE" };
+                    ui.painter().text(r.center(), Align2::CENTER_CENTER, label, mono(11.0), if on { on_accent() } else { TEXT2 });
+                    if resp.clicked() {
+                        st.set_mode(*m);
+                    }
+                }
+                island_sep(ui);
+                if icon_btn(ui, Icon::Magnet, st.snap, "Snap : grille, sommets et arêtes", 28.0).clicked() {
                     st.snap = !st.snap;
                 }
-                if chip(ui, Some(Icon::Mirror), "Sym. X", st.sym_x, "Symétrie X : les nouvelles formes sont doublées").clicked() {
+                if icon_btn(ui, Icon::Mirror, st.sym_x, "Symétrie X : les nouvelles formes sont doublées", 28.0).clicked() {
                     st.sym_x = !st.sym_x;
                     st.toast(if st.sym_x { "Symétrie X : les nouvelles formes sont doublées" } else { "Symétrie X désactivée" });
                 }
-                if chip(ui, Some(Icon::Grid), "Grille", st.grid, "Grille au sol").clicked() {
+                if icon_btn(ui, Icon::Grid, st.grid, "Grille au sol", 28.0).clicked() {
                     st.grid = !st.grid;
                     st.view_changed();
                 }
@@ -630,7 +663,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 // the Bake is set aside (Romain, 10 nov.): pure SDF modelling
                 let g = ui.painter().layout_no_wrap("Exporter".to_string(), semibold(12.5), Color32::WHITE);
                 let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 40.0, 28.0), Sense::click());
-                ui.painter().rect_filled(r, 7.0, if resp.hovered() { ACCENT_LIGHT } else { ACCENT });
+                ui.painter().rect_filled(r, 7.0, if resp.hovered() { accent_light() } else { accent() });
                 icons::paint(ui.painter(), Rect::from_min_size(pos2(r.min.x + 10.0, r.center().y - 7.0), vec2(14.0, 14.0)), Icon::Export, Color32::WHITE);
                 ui.painter().galley(pos2(r.min.x + 30.0, r.center().y - g.size().y * 0.5), g, Color32::WHITE);
                 if resp.on_hover_text("Exporter le mesh (OBJ, glTF)").clicked() {
@@ -724,7 +757,7 @@ pub(crate) fn mode_switch(ui: &mut Ui, st: &mut AppState, height: f32) {
         let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * w, 3.0), vec2(w, height - 6.0));
         let resp = ui.interact(r, Id::new(("mode-switch", i)), Sense::click());
         let on = cur == *bake;
-        let c = if *bake { CARVE } else { ACCENT };
+        let c = if *bake { carve() } else { accent() };
         let p = ui.painter();
         if on {
             p.rect(r, 8.0, tint(c, 0.18), Stroke::new(1.5, c), StrokeKind::Inside);
@@ -765,10 +798,10 @@ pub(crate) fn creation_btn(ui: &mut Ui, st: &mut AppState, width: f32, below: bo
     let (r, resp) = ui.allocate_exact_size(vec2(width, 14.0), Sense::click());
     let p = ui.painter();
     let on = st.creation_open;
-    let c = if on { ACCENT } else if resp.hovered() { TEXT } else { Color32::from_rgb(0x7C, 0x81, 0x89) };
+    let c = if on { accent() } else if resp.hovered() { TEXT } else { Color32::from_rgb(0x7C, 0x81, 0x89) };
     // a notch: three small dots on a short bar
     let mid = r.center();
-    p.rect_filled(Rect::from_center_size(mid, vec2(22.0, 10.0)), 5.0, if on { ACCENT_BG } else if resp.hovered() { RAISED } else { Color32::TRANSPARENT });
+    p.rect_filled(Rect::from_center_size(mid, vec2(22.0, 10.0)), 5.0, if on { accent_bg() } else if resp.hovered() { RAISED } else { Color32::TRANSPARENT });
     for i in -1..=1 {
         p.circle_filled(mid + vec2(i as f32 * 5.0, 0.0), 1.4, c);
     }
@@ -790,7 +823,7 @@ pub fn creation_popover(ctx: &egui::Context, st: &mut AppState) {
             ui.set_width(250.0);
             ui.label(egui::RichText::new("Création").font(semibold(13.0)).color(TEXT));
             use crate::settings::Creation;
-            let items = [(Creation::Interactive, "Interactive", ACCENT), (Creation::Direct, "Directe", ACCENT)];
+            let items = [(Creation::Interactive, "Interactive", accent()), (Creation::Direct, "Directe", accent())];
             if let Some(c) = segmented(ui, &items, st.settings.creation, 30.0) {
                 st.settings.creation = c;
                 st.save_settings();
@@ -812,56 +845,68 @@ pub fn creation_popover(ctx: &egui::Context, st: &mut AppState) {
     }
 }
 
+/// Établi (« menu radial » mood): a column of cards on the right, one per
+/// tool and shape, in technical capitals (name, then what it does).
+const CARDS_W: f32 = 150.0;
+
+fn card(ui: &mut Ui, icon: Option<Icon>, name: &str, sub: &str, on: bool, sub_color: Color32, tip: &str) -> Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(CARDS_W - 12.0, 38.0), Sense::click());
+    let p = ui.painter();
+    if on {
+        p.rect(r, 7.0, accent_bg(), Stroke::new(1.0, accent()), StrokeKind::Inside);
+    } else {
+        p.rect(r, 7.0, if resp.hovered() { RAISED } else { tint(RAISED, 0.35) }, Stroke::new(1.0, DIVIDER), StrokeKind::Inside);
+    }
+    let ir = Rect::from_min_size(pos2(r.min.x + 7.0, r.center().y - 12.0), vec2(24.0, 24.0));
+    p.rect(ir, 6.0, if on { tint(accent(), 0.18) } else { WELL }, Stroke::new(1.0, if on { accent_border() } else { DIVIDER }), StrokeKind::Inside);
+    if let Some(i) = icon {
+        icons::paint(p, ir.shrink(5.0), i, if on { accent() } else { TEXT_ICON });
+    }
+    p.text(pos2(ir.max.x + 8.0, r.center().y - 7.0), Align2::LEFT_CENTER, name, mono(11.0), if on { accent_text() } else { TEXT });
+    p.text(pos2(ir.max.x + 8.0, r.center().y + 7.5), Align2::LEFT_CENTER, sub, mono(9.0), sub_color);
+    resp.on_hover_text(tip)
+}
+
 fn rail(ctx: &egui::Context, st: &mut AppState) {
-    // Établi: a slim column floating on the left, centred on the view
-    let b = if DESK { 36.0 } else { 44.0 };
-    let cy = (st.view_rect[1] + st.view_rect[3]) * 0.5;
-    egui::Area::new(Id::new("rail")).order(Order::Middle).pivot(Align2::LEFT_CENTER).fixed_pos(pos2(EDGE, cy)).show(ctx, |ui| {
-        island().show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 3.0;
-            ui.set_width(b);
-            // selection, like 3ds Max: object (1) or edges (2)
+    let top = EDGE + ISLAND_H + 10.0;
+    let screen = ctx.content_rect();
+    egui::Area::new(Id::new("rail")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(screen.max.x - EDGE, top)).show(ctx, |ui| {
+        island().inner_margin(Margin::same(6)).show(ui, |ui| {
+            ui.set_width(CARDS_W - 12.0);
+            ui.spacing_mut().item_spacing.y = 5.0;
             let sel = st.tool == Tool::Select;
-            let r = icon_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (Q ou 1)", b);
-            key_hint(ui, &r, "Q");
-            if r.clicked() {
+            if card(ui, Some(Icon::Select), "SÉLECTION", "OBJET · Q", sel && st.pick_mode == PickMode::Object, TEXT2, "Sélection d'objets (Q ou 1)").clicked() {
                 st.set_pick_mode(PickMode::Object);
             }
-            let r = icon_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins", b);
-            key_hint(ui, &r, "2");
-            if r.clicked() {
+            if card(ui, Some(Icon::Fillet), "ARÊTES", "FILLET · 2", sel && st.pick_mode == PickMode::Edge, TEXT2, "Sélection d'arêtes (2) : fillets, chanfreins").clicked() {
                 st.set_pick_mode(PickMode::Edge);
             }
             divider(ui);
+            let m = st.effective_mode();
+            let mode = if m == CombineMode::Add { "ADD" } else { "CARVE" };
             for k in PRIMS {
-                let tip = match prim_key(k) {
-                    Some(key) => format!("{} ({key})", k.label()),
-                    None => k.label().to_string(),
-                };
-                let r = icon_btn(ui, prim_icon(k), st.tool == Tool::Place(k), &tip, b);
-                if let Some(key) = prim_key(k) {
-                    key_hint(ui, &r, key);
-                }
-                if r.clicked() {
+                let key = prim_key(k).unwrap_or("");
+                let name = k.label().to_uppercase();
+                let on = st.tool == Tool::Place(k);
+                if card(ui, Some(prim_icon(k)), &name, &format!("{mode} · {key}"), on, mode_color(m), &format!("{} ({key})", k.label())).clicked() {
                     st.commit_placement();
                     st.tool = Tool::Place(k);
                 }
             }
             if DESK {
-                creation_btn(ui, st, b, false);
+                creation_btn(ui, st, CARDS_W - 12.0, false);
             }
             divider(ui);
-            // mode of the next shapes (and of the selected one)
-            let shown = shown_mode(st);
-            for m in MODES {
-                if mode_btn(ui, m, shown == m).clicked() {
-                    st.set_mode(m);
-                }
+            let has = st.selection.is_some();
+            if card(ui, Some(Icon::Duplicate), "DUPLIQUER", "CTRL+D", false, TEXT2, "Dupliquer la sélection").clicked() && has {
+                st.duplicate_selected();
+            }
+            if card(ui, Some(Icon::Folder), "GROUPER", "SÉLECTION", false, TEXT2, "Grouper la sélection").clicked() && has {
+                st.group_selected();
             }
         });
     });
 }
-
 /// Mode shown as current: while placing, the placement mode; with the Select
 /// tool, the selected shape's mode.
 fn shown_mode(st: &AppState) -> CombineMode {
@@ -878,19 +923,6 @@ fn shown_mode(st: &AppState) -> CombineMode {
     }
 }
 
-fn mode_btn(ui: &mut Ui, m: CombineMode, on: bool) -> Response {
-    let (r, resp) = ui.allocate_exact_size(if DESK { vec2(36.0, 32.0) } else { vec2(44.0, 38.0) }, Sense::click());
-    let c = mode_color(m);
-    let p = ui.painter();
-    if on {
-        p.rect(r.shrink(0.5), 7.0, tint(c, 0.16), Stroke::new(1.0, tint(c, 0.7)), StrokeKind::Inside);
-    } else if resp.hovered() {
-        p.rect_filled(r, 7.0, RAISED);
-    }
-    paint_mode_glyph(p, r.center(), m, if on { c } else { TEXT_ICON }, 12.0);
-    let tip = if m == CombineMode::Add { "Add : ajoute la forme" } else { "Carve : creuse" };
-    resp.on_hover_text(tip)
-}
 
 /// The operations in evaluation order, as a strip of chips: the history the
 /// Bake replays. A chip selects its operation.
@@ -916,7 +948,7 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 let (sep, _) = ui.allocate_exact_size(vec2(1.0, 36.0), Sense::hover());
                 ui.painter().rect_filled(sep, 0.0, DIVIDER);
                 if rows.is_empty() {
-                    ui.label(egui::RichText::new("Choisis une forme à gauche (R, C, S, A, T), puis glisse dans la vue").font(regular(13.0)).color(TEXT2));
+                    ui.label(egui::RichText::new("Choisis une forme à droite (R, C, S, A, T), puis glisse dans la vue").font(regular(13.0)).color(TEXT2));
                     return;
                 }
                 egui::ScrollArea::horizontal().id_salt("history-scroll").max_width(max_w - 220.0).show(ui, |ui| {
@@ -937,7 +969,7 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 });
                 let (er, _) = ui.allocate_exact_size(vec2(40.0, 44.0), Sense::hover());
                 let p = ui.painter();
-                p.rect_filled(Rect::from_center_size(pos2(er.min.x + 4.0, er.center().y), vec2(3.0, 30.0)), 2.0, ACCENT);
+                p.rect_filled(Rect::from_center_size(pos2(er.min.x + 4.0, er.center().y), vec2(3.0, 30.0)), 2.0, accent());
                 p.text(pos2(er.min.x + 12.0, er.center().y), Align2::LEFT_CENTER, "Fin", regular(12.0), TEXT2);
             });
         });
@@ -963,7 +995,7 @@ fn history_chip(ui: &mut Ui, st: &AppState, id: NodeId, depth: usize) -> Respons
     let selected = st.is_selected(id);
     let p = ui.painter();
     if selected {
-        p.rect(r, 10.0, ACCENT_BG, Stroke::new(1.0, ACCENT_BORDER), StrokeKind::Inside);
+        p.rect(r, 10.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
     } else if resp.hovered() {
         p.rect_filled(r, 10.0, RAISED);
     }
@@ -982,7 +1014,7 @@ fn history_chip(ui: &mut Ui, st: &AppState, id: NodeId, depth: usize) -> Respons
         p.circle_filled(ir.right_bottom() - vec2(1.0, 1.0), 4.0, c);
     }
     let tx = ir.max.x + 8.0;
-    p.galley(pos2(tx, r.center().y - tg.size().y - 0.5), tg, if selected { ACCENT_TEXT } else { tint(TEXT, dim) });
+    p.galley(pos2(tx, r.center().y - tg.size().y - 0.5), tg, if selected { accent_text() } else { tint(TEXT, dim) });
     p.galley(pos2(tx, r.center().y + 1.5), sg, TEXT2);
     resp.on_hover_text("Sélectionner cette opération")
 }
@@ -1042,16 +1074,16 @@ fn thumb_button(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         let p = ui.painter();
         let c = r.center();
         if held {
-            p.circle_filled(c, 50.0, tint(CARVE, 0.22));
-            p.circle(c, 42.0, CARVE, Stroke::new(2.0, Color32::from_rgb(0xFF, 0xC7, 0x9C)));
+            p.circle_filled(c, 50.0, tint(carve(), 0.22));
+            p.circle(c, 42.0, carve(), Stroke::new(2.0, Color32::from_rgb(0xFF, 0xC7, 0x9C)));
             let dark = Color32::from_rgb(0x2A, 0x16, 0x08);
             p.text(c + vec2(0.0, -16.0), Align2::CENTER_CENTER, "−", semibold(22.0), dark);
             p.text(c + vec2(0.0, 4.0), Align2::CENTER_CENTER, "Carve", semibold(13.0), dark);
             p.text(c + vec2(0.0, 20.0), Align2::CENTER_CENTER, "maintenu", semibold(11.0), dark);
         } else {
-            p.circle(c, 42.0, Color32::from_rgb(0x26, 0x23, 0x1F), Stroke::new(2.0, CARVE));
-            p.text(c + vec2(0.0, -16.0), Align2::CENTER_CENTER, "−", semibold(22.0), CARVE_LIGHT);
-            p.text(c + vec2(0.0, 4.0), Align2::CENTER_CENTER, "Carve", semibold(13.0), CARVE_LIGHT);
+            p.circle(c, 42.0, Color32::from_rgb(0x26, 0x23, 0x1F), Stroke::new(2.0, carve()));
+            p.text(c + vec2(0.0, -16.0), Align2::CENTER_CENTER, "−", semibold(22.0), carve_light());
+            p.text(c + vec2(0.0, 4.0), Align2::CENTER_CENTER, "Carve", semibold(13.0), carve_light());
             p.text(c + vec2(0.0, 20.0), Align2::CENTER_CENTER, "maintenir", regular(11.0), Color32::from_rgb(0xB9, 0xAF, 0xA6));
         }
     });
@@ -1085,7 +1117,7 @@ pub(crate) fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     egui::Area::new(Id::new("toast")).order(Order::Tooltip).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(cx, screen.max.y - 92.0)).interactable(false).show(ctx, |ui| {
         let g = ui.painter().layout_no_wrap(text, medium(13.0), TEXT);
         let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 32.0, 36.0), Sense::hover());
-        ui.painter().rect(r, 18.0, Color32::from_rgb(0x2A, 0x2D, 0x33), Stroke::new(1.0, if warn { CARVE } else { ACCENT_BORDER }), StrokeKind::Inside);
+        ui.painter().rect(r, 18.0, Color32::from_rgb(0x2A, 0x2D, 0x33), Stroke::new(1.0, if warn { carve() } else { accent_border() }), StrokeKind::Inside);
         ui.painter().galley(pos2(r.min.x + 16.0, r.center().y - g.size().y * 0.5), g, TEXT);
     });
 }
@@ -1098,7 +1130,7 @@ fn right_column(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     if !st.panel_visible {
         return;
     }
-    let x = screen.max.x - EDGE - RIGHT_W;
+    let x = screen.min.x + EDGE;
     let top = EDGE + ISLAND_H + 10.0;
     let inner_w = RIGHT_W - 24.0;
     let total = screen.max.y - EDGE - top;
@@ -1217,7 +1249,7 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
             st.edit_live("Blend", id, start, |n| n.combine.blend = b);
         }
         if node.combine.blend > 0.0 {
-            let kinds = [(BlendKind::Smooth, "Lisse", ACCENT), (BlendKind::Chamfer, "Chanfrein", ACCENT)];
+            let kinds = [(BlendKind::Smooth, "Lisse", accent()), (BlendKind::Chamfer, "Chanfrein", accent())];
             if let Some(k) = segmented(ui, &kinds, node.combine.kind, 36.0) {
                 st.edit("Type de blend", id, |n| n.combine.kind = k);
             }
@@ -1242,8 +1274,8 @@ fn symmetry_row(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
         for (i, l, on) in items {
             let (r, resp) = ui.allocate_exact_size(vec2(bw, bh), Sense::click());
             let p = ui.painter();
-            p.rect(r, 8.0, if on { ACCENT_BG } else { WELL }, Stroke::new(1.0, if on { ACCENT } else { DIVIDER }), StrokeKind::Inside);
-            p.text(r.center(), Align2::CENTER_CENTER, l, semibold(12.5), if on { ACCENT_TEXT } else { TEXT2 });
+            p.rect(r, 8.0, if on { accent_bg() } else { WELL }, Stroke::new(1.0, if on { accent() } else { DIVIDER }), StrokeKind::Inside);
+            p.text(r.center(), Align2::CENTER_CENTER, l, semibold(12.5), if on { accent_text() } else { TEXT2 });
             if resp.clicked() {
                 st.edit("Symétrie", id, |n| match i {
                     0 => n.mirror.x = !n.mirror.x,
@@ -1347,11 +1379,11 @@ pub(crate) fn material_palette(ui: &mut Ui, st: &mut AppState, target: Option<No
             let (r, resp) = ui.allocate_exact_size(vec2((RIGHT_W - 28.0 - 12.0) / 3.0, 40.0), Sense::click());
             let on = current as usize == i;
             let p = ui.painter();
-            p.rect(r, 9.0, if on { ACCENT_BG } else { WELL }, Stroke::new(1.0, if on { ACCENT } else { Color32::TRANSPARENT }), StrokeKind::Inside);
+            p.rect(r, 9.0, if on { accent_bg() } else { WELL }, Stroke::new(1.0, if on { accent() } else { Color32::TRANSPARENT }), StrokeKind::Inside);
             let c = Color32::from_rgb((m.color[0] * 255.0) as u8, (m.color[1] * 255.0) as u8, (m.color[2] * 255.0) as u8);
             p.rect(Rect::from_min_size(r.min + vec2(8.0, 11.0), vec2(18.0, 18.0)), 5.0, c, Stroke::new(1.0, tint(Color32::WHITE, 0.15)), StrokeKind::Inside);
             let name = m.name.split(' ').next().unwrap_or("").to_string();
-            let fg = if on { ACCENT_TEXT } else { LABEL };
+            let fg = if on { accent_text() } else { LABEL };
             let mut job = egui::text::LayoutJob::single_section(name, egui::text::TextFormat::simple(regular(12.0), fg));
             job.wrap = egui::text::TextWrapping { max_width: r.width() - 38.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
             let g = p.layout_job(job);
@@ -1446,7 +1478,7 @@ fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
     }
     if sh.kind == PrimKind::Profile {
         if let Some(prof) = &sh.profile {
-            let modes = [(ProfileMode::Extrude, "Extrusion", ACCENT), (ProfileMode::Revolve, "Révolution", ACCENT)];
+            let modes = [(ProfileMode::Extrude, "Extrusion", accent()), (ProfileMode::Revolve, "Révolution", accent())];
             if let Some(m) = segmented(ui, &modes, prof.mode, 40.0) {
                 if let Some(p) = s.profile.as_mut() {
                     p.mode = m;
@@ -1466,7 +1498,7 @@ fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
 }
 
 fn scene_panel(ui: &mut Ui, st: &mut AppState) {
-    ui.label(egui::RichText::new("Clique une forme pour l'éditer, ou choisis-en une nouvelle à gauche.").font(regular(12.0)).color(TEXT2));
+    ui.label(egui::RichText::new("Clique une forme pour l'éditer, ou choisis-en une nouvelle dans la colonne de droite.").font(regular(12.0)).color(TEXT2));
     section(ui, "Nouvelles formes");
     let items = MODES.map(|m| (m, m.label(), mode_color(m)));
     if let Some(m) = segmented(ui, &items, st.mode, 40.0) {
@@ -1519,7 +1551,7 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     egui::ScrollArea::vertical().id_salt("tree-scroll").max_height(height - 32.0).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
         if rows.is_empty() {
-            ui.label(egui::RichText::new("Vide · choisis une forme à gauche (R, C, S, A, T)").font(regular(12.0)).color(TEXT2));
+            ui.label(egui::RichText::new("Vide · choisis une forme à droite (R, C, S, A, T)").font(regular(12.0)).color(TEXT2));
         }
         for (id, depth) in rows {
             let Some(n) = st.scene.node(id).cloned() else { continue };
@@ -1528,7 +1560,7 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             let selected = st.is_selected(id);
             let p = ui.painter();
             if selected {
-                p.rect(r, 6.0, ACCENT_BG, Stroke::new(1.0, ACCENT_BORDER), StrokeKind::Inside);
+                p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
             } else if resp.hovered() {
                 p.rect_filled(r, 6.0, RAISED);
             }
@@ -1619,9 +1651,9 @@ pub(crate) fn export_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect
             ui.add_space(6.0);
             section(ui, "Résolution");
             let res = [
-                (ExportRes::Draft, ExportRes::Draft.label(), ACCENT),
-                (ExportRes::Normal, ExportRes::Normal.label(), ACCENT),
-                (ExportRes::Fine, ExportRes::Fine.label(), ACCENT),
+                (ExportRes::Draft, ExportRes::Draft.label(), accent()),
+                (ExportRes::Normal, ExportRes::Normal.label(), accent()),
+                (ExportRes::Fine, ExportRes::Fine.label(), accent()),
             ];
             if let Some(r) = segmented(ui, &res, st.export_res, 40.0) {
                 st.export_res = r;
@@ -1641,7 +1673,7 @@ pub(crate) fn export_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect
             if let Some((_, t0)) = &st.export_job {
                 let el = st.now - t0;
                 ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(18.0).color(ACCENT));
+                    ui.add(egui::Spinner::new().size(18.0).color(accent()));
                     ui.label(egui::RichText::new(format!("Maillage en cours… {:.0} s", el)).color(LABEL));
                 });
                 ctx.request_repaint();
@@ -1721,7 +1753,7 @@ pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
             }
         });
     } else {
-        let q = [(Quality::Draft, "Légère", ACCENT), (Quality::Standard, "Standard", ACCENT), (Quality::Max, "Dense", ACCENT)];
+        let q = [(Quality::Draft, "Légère", accent()), (Quality::Standard, "Standard", accent()), (Quality::Max, "Dense", accent())];
         if let Some(v) = segmented(ui, &q, st.bake.quality, 36.0) {
             if !running {
                 st.bake.quality = v;
@@ -1739,9 +1771,9 @@ pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
         let el = st.now - j.started;
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
         ui.painter().rect_filled(r, 4.0, WELL);
-        ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * f.max(0.02), r.height())), 4.0, ACCENT);
+        ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * f.max(0.02), r.height())), 4.0, accent());
         ui.horizontal(|ui| {
-            ui.add(egui::Spinner::new().size(14.0).color(ACCENT));
+            ui.add(egui::Spinner::new().size(14.0).color(accent()));
             ui.label(egui::RichText::new(format!("{} · {:.0} % · {:.0} s", STAGES.get(stage).copied().unwrap_or(""), f * 100.0, el)).font(medium(12.5)).color(LABEL));
         });
         if secondary_btn(ui, "Annuler le Bake", ui.available_width()).clicked() {
@@ -1797,14 +1829,14 @@ pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
     let s = &b.stats;
     section(ui, "Résultat");
     if st.bake.stale(st.scene_version) {
-        note(ui, "Le modèle a changé depuis ce Bake : relance-le.", CARVE);
+        note(ui, "Le modèle a changé depuis ce Bake : relance-le.", carve());
     }
     let total = b.faces.len().max(1);
     stat_row(ui, "Faces", format!("{}  ({} % quads)", fmt_int(b.faces.len()), s.quads * 100 / total), TEXT);
     stat_row(ui, "Quads · tris · n-gones", format!("{} · {} · {}", fmt_int(s.quads), fmt_int(s.tris), fmt_int(s.ngons)), LABEL);
     stat_row(ui, "Écart", format!("moy. {} · max {} mm", fmt_mm_fine(s.mean_dev), fmt_mm_fine(s.max_dev)), LABEL);
     let defects = s.open_edges + s.nonmanifold_edges;
-    stat_row(ui, "Fermeture", if defects == 0 { "étanche".to_string() } else { format!("{} arêtes à reprendre", fmt_int(defects)) }, if defects == 0 { OK } else { CARVE });
+    stat_row(ui, "Fermeture", if defects == 0 { "étanche".to_string() } else { format!("{} arêtes à reprendre", fmt_int(defects)) }, if defects == 0 { OK } else { carve() });
     stat_row(ui, "Durée", format!("{} patchs · {:.2} s", fmt_int(s.patches), s.seconds).replace('.', ","), LABEL);
 
     section(ui, "Passe secondaire (option)");
@@ -1910,7 +1942,7 @@ pub fn display_panel(ctx: &egui::Context, st: &mut AppState) {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Affichage").font(semibold(16.0)).color(TEXT));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Label::new(egui::RichText::new("Réinitialiser").font(regular(12.0)).color(ACCENT_TEXT)).sense(Sense::click())).clicked() {
+                    if ui.add(egui::Label::new(egui::RichText::new("Réinitialiser").font(regular(12.0)).color(accent_text())).sense(Sense::click())).clicked() {
                         st.settings.display = crate::settings::Display::default();
                         st.save_settings();
                     }
@@ -1926,7 +1958,7 @@ pub fn display_panel(ctx: &egui::Context, st: &mut AppState) {
                 d.ao = !d.ao;
             }
             ui.label(egui::RichText::new("Anticrénelage (image immobile)").font(regular(13.0)).color(LABEL));
-            let items = [(1u32, "Non", NEUTRAL_MODE), (4, "4×", ACCENT), (8, "8×", ACCENT), (16, "16×", ACCENT)];
+            let items = [(1u32, "Non", NEUTRAL_MODE), (4, "4×", accent()), (8, "8×", accent()), (16, "16×", accent())];
             if let Some(v) = segmented(ui, &items, d.aa, 34.0) {
                 d.aa = v;
             }
@@ -1988,16 +2020,16 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                 let (r, resp) = ui.allocate_exact_size(vec2(440.0, 38.0 + blurb.size().y + 10.0), Sense::click());
                 let p = ui.painter();
                 if on {
-                    p.rect(r, 12.0, ACCENT_BG, Stroke::new(1.0, ACCENT_BORDER), StrokeKind::Inside);
+                    p.rect(r, 12.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
                 } else {
                     p.rect(r, 12.0, if resp.hovered() { RAISED } else { Color32::TRANSPARENT }, Stroke::new(1.0, DIVIDER), StrokeKind::Inside);
                 }
                 let c = pos2(r.min.x + 22.0, r.center().y);
-                p.circle_stroke(c, 8.0, Stroke::new(1.5, if on { ACCENT } else { TEXT2 }));
+                p.circle_stroke(c, 8.0, Stroke::new(1.5, if on { accent() } else { TEXT2 }));
                 if on {
-                    p.circle_filled(c, 4.5, ACCENT);
+                    p.circle_filled(c, 4.5, accent());
                 }
-                p.text(pos2(r.min.x + 42.0, r.min.y + 20.0), Align2::LEFT_CENTER, m.label(), semibold(14.0), if on { ACCENT_TEXT } else { TEXT });
+                p.text(pos2(r.min.x + 42.0, r.min.y + 20.0), Align2::LEFT_CENTER, m.label(), semibold(14.0), if on { accent_text() } else { TEXT });
                 p.galley(pos2(r.min.x + 42.0, r.min.y + 32.0), blurb, TEXT2);
                 if resp.clicked() {
                     st.set_ui_mode(m);
@@ -2007,7 +2039,7 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
             section(ui, "Navigation");
             {
                 use crate::settings::Navigation;
-                let items: Vec<(Navigation, &str, Color32)> = Navigation::ALL.iter().map(|n| (*n, n.label(), ACCENT)).collect();
+                let items: Vec<(Navigation, &str, Color32)> = Navigation::ALL.iter().map(|n| (*n, n.label(), accent())).collect();
                 if let Some(n) = segmented(ui, &items, st.settings.navigation, 32.0) {
                     st.settings.navigation = n;
                     st.save_settings();

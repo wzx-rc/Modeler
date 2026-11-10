@@ -789,7 +789,20 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
             h.steps(4);
             h.shot(&format!("pc-ui-{tag}-3-creation"));
             h.st.tool = Tool::Select;
-            if mode == UiMode::Studio {
+            // the marking menu of the Palier (radial pie in Établi)
+            h.st.select(Some(id));
+            h.st.marking.demo = true;
+            let at = h.screen_of(Vec3::new(-30.0, 30.0, 0.0));
+            let mut m = forme_app::marking::Menu::new([at.x, at.y], forme_app::marking::Ctx::Shape(id), true, 0.0);
+            m.pointer = [at.x + 70.0, at.y - 60.0];
+            m.hover = Some(1);
+            m.shown = true;
+            h.st.marking.menu = Some(m);
+            h.steps(3);
+            h.shot(&format!("pc-ui-{tag}-3b-menu"));
+            h.st.marking.menu = None;
+            h.st.marking.demo = false;
+            h.st.select(None);            if mode == UiMode::Studio {
                 let key = |h: &mut Harness, k: egui::Key| {
                     h.pending.push(Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
                     h.step();
