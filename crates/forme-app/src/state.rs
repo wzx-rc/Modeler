@@ -1528,13 +1528,17 @@ impl AppState {
 
     fn finish_placement_toast(&mut self, p: &Placement) {
         let name = self.scene.node(p.node).map(|n| n.name.clone()).unwrap_or_default();
-        // at the finger, back to selection: one finger orbits again
-        if self.pointer_kind == PointerKind::Finger {
-            self.tool = Tool::Select;
-            self.toast(format!("{name} · {} · retouche l'outil pour en créer une autre", p.mode.label()));
-        } else {
-            self.toast(format!("{name} · {}", p.mode.label()));
+        // once created, back to the Select tool with the new shape selected
+        // and its handles (Romain, 10 nov.); at the finger, one finger orbits again
+        self.tool = Tool::Select;
+        self.pick_mode = PickMode::Object;
+        if self.scene.node(p.node).is_some() {
+            self.selection = Some(p.node);
+            self.selection_more.clear();
+            self.edge_sel.clear();
         }
+        let again = if self.pointer_kind == PointerKind::Finger { "retouche l'outil" } else { "R / C ou l'outil" };
+        self.toast(format!("{name} · {} · {again} pour en créer une autre", p.mode.label()));
         self.changed();
     }
 
