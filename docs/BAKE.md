@@ -66,12 +66,41 @@ Résultats : scène de Romain (boîte + coin creusé, fillet 2,2 mm) 390 quads e
   - Scène de Romain : 692 quads, fermée, écart max 0,05 mm, et toujours fermée avec Cube 3 décalé de ±1 à 2 mm. Compromis : au-dessus du rond, la ligne du bas de Cube 3 prolongée passe à 0,87 mm du raccord (la géométrie l'impose).
   - Pas encore : le cylindre déplacé plus près du coin ou de l'encoche (cas `bossage-44/46/48/50` du probe : patch à 3 coins ou comptes impossibles).
 
+### Base de règles sur les objets simples (robustesse, 10 nov.)
+
+Demande de Romain : une fondation qui marche dans le maximum de cas simples avant d'ajouter les complexités une à une. Chaque règle est générale (aucune n'est réglée pour une scène) et se mesure avec `bake_robust` : une plaque de 20 × 10 × 20 mm et une forme (trou, trou borgne, cylindre posé, boîte, poche, avec ou sans raccord) déplacée au pas de 1 mm sur toute la face et au-delà du bord, deux formes, motifs de fillets, tailles, scènes de Romain. 5 939 cas.
+
+| | propres | rangée fine | règle qui casse | pas encore géré |
+|---|---|---|---|---|
+| départ (1ffffe9) | 2 217 (37 %) | 3 % | 45 % | 14 % |
+| aujourd'hui (5e75473) | 3 381 (57 %) | 2 % | 9 % | 33 % |
+
+Une forme seule posée ou creusée sur la face passe à 100 % tant qu'elle reste à au moins 1 mm du bord. La boîte, la poche et le trou traversant passent aussi quand ils coupent le bord (sauf une boîte alignée sur deux parois à la fois, et un trou tangent au bord). Ce qui reste en « règle qui casse » : surtout deux formes qui se chevauchent.
+
+**Les règles, dans l'ordre où elles jouent.**
+
+1. **Faces dans le même plan** (une boîte alignée sur la paroi de la plaque) : la pièce d'avant garde sa face entière, la forme ajoutée commence à l'arête de cette face ; la boucle du bord continue tout droit sous la boîte. Un Carve aligné retire la face. Une face alignée n'est jamais « la face d'en face » d'une ligne : c'est sa voisine qui la porte. Contact face contre face (une boîte posée pile sur le dessus) : la face cachée disparaît.
+2. **Coins de fillets** : trois arêtes arrondies du même rayon, coin en boule ; deux arrondies et la troisième vive, les deux bandes se coupent sur un onglet (plan bissecteur), rangées reliées une à une.
+3. **Le carré d'un trou** (accroche en diagonale, à une case du coin des tangentes de chaque quart d'arc) :
+   - un côté du carré à moins d'un demi-quad d'un bord droit se pose sur le bord (l'option A, en règle générale) ;
+   - un coin de la face dans le quart du carré, à moins d'un quad et demi : la diagonale va dans ce coin ;
+   - une boucle qui croise le chemin d'une diagonale posée au bord : la diagonale atterrit avec elle (moins de 30° d'écart) ;
+   - une autre forme à moins de deux cases au-delà d'un côté : ce côté se place au milieu de l'écart (s'il fait au moins 0,3 quad), l'autre carré s'y cale ;
+   - les deux bouts d'un trou traversant prennent le même carré.
+4. **Trou qui coupe le bord (encoche en U)** : l'arc est coupé là où le cercle est carré aux axes de la face (ses points les plus larges, son fond) ; à un bout posé sur le bord, le côté du carré est perpendiculaire au bord. L'arc entre le bord et le point le plus large n'a pas de carré à lui : il prolonge le côté du suivant. Résultat : un U de boucles autour de l'encoche, quelle que soit sa profondeur.
+5. **Cas limites refusés proprement** (« pas encore géré », jamais un maillage faux) : forme tangente à une face (paroi d'épaisseur nulle) ou à l'arrondi d'une arête ; forme qui entame l'arrondi d'une arête ; fond de trou borgne ou dessous de bossage coupé par le bord.
+
+**Outil.** `OUT=/tmp/x cargo run --release -p forme-core --example bake_robust` (environ 2 min) : une carte PNG par famille (une case = une position, couleur = classe), `results.tsv`, `résumé.txt` (messages les plus fréquents). Noms de familles en arguments (`trou`, `boite`, `fillets`…), `CAS="x 3 z 0"` pour un seul cas, `OBJ=fichier` pour son maillage. Toute nouvelle règle se valide sur le total et sur les scènes de Romain (aucune régression), en plus de `bake_probe`.
+
 ### Encore à faire (renvoie `Err` aujourd'hui)
 
+- Deux formes qui se chevauchent (un trou qui mord dans une boîte, deux trous sécants) : patchs à 3 ou 5 coins.
+- Trou borgne ou bossage coupé par le bord (fond en demi-disque) ; forme qui entame un arrondi ; formes tangentes.
+- Raccord (fillet de jonction) près d'une arête ou d'une autre forme ; l'anneau d'un raccord à 0,5 mm d'une autre forme laisse des rangées fines.
 - Fillets de jonction autres que la boîte posée sur une face (blend d'un Carve, de formes arrondies ou penchées), chanfreins, Intersect, Groove, Tongue.
 - Cylindres arrondis, sphères, profils, tores, coques, taper.
 - Copies (répétitions, symétries), groupes fusionnés (historique en arbre).
-- Coin où trois fillets de rayons différents se rejoignent ; coin arrondi coupé par une autre forme.
+- Coin où trois fillets de rayons différents se rejoignent ; deux arêtes arrondies en coin avec la troisième vive mais de rayons différents ; coin arrondi coupé par une autre forme.
 - Cube test et grenade : en attente de ces cas.
 
 ## Historique des approches (supprimées le 10 nov. 2026)
