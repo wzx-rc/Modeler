@@ -1354,9 +1354,14 @@ impl AppState {
             _ => Vec3::new(r, hh, 0.0),
         };
         // Add grows outwards, cutters go into the matter (top slightly proud)
+        // a sphere (Add) and a torus rest on the base plane instead of sinking
+        // halfway in it; a carved sphere is centred on it (a round pocket)
         let along = match p.kind {
-            PrimKind::Sphere => 0.0,
-            PrimKind::Torus => size.z * 0.5,
+            PrimKind::Sphere if p.mode == CombineMode::Carve => 0.4,
+            PrimKind::Sphere => size.x,
+            PrimKind::Torus => size.z,
+            // half the straight part plus the round end: never shorter than r
+            PrimKind::Capsule => size.y + size.x,
             _ => hh,
         };
         // the shape extrudes from the base plane on the side of the height

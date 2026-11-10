@@ -342,7 +342,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -718,7 +718,43 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         eprintln!("création directe : {} forme(s) ajoutée(s), outil {:?}, sélection {:?}", h.st.scene.nodes.len() - n0, h.st.tool, h.st.selection.and_then(|id| h.st.scene.node(id)).map(|n| n.name.clone()));
         h.st.settings.creation = forme_app::settings::Creation::Interactive;
     }
-    if want("pc-snap") {
+    if want("pc-prims") {
+        // the five primitives created on the ground (base drag, then height)
+        h.pc(AppState::new(forme_core::Scene::new(), "Primitives"), UiMode::Atelier);
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.st.snap = false;
+        h.steps(2);
+        for (i, k) in forme_app::state::PRIMS.iter().enumerate() {
+            h.st.tool = Tool::Place(*k);
+            h.steps(2);
+            let c = Vec3::new(-48.0 + 24.0 * i as f32, 0.0, -30.0);
+            let a = h.screen_of(c);
+            let b = h.screen_of(c + Vec3::new(8.0, 0.0, 6.0));
+            h.press(a, true);
+            for s in 1..=10 {
+                h.move_to(a + (b - a) * (s as f32 / 10.0));
+            }
+            h.press(b, false);
+            h.step();
+            if h.st.placement.is_some() {
+                for s in 1..=10 {
+                    h.move_to(b + egui::vec2(0.0, -5.0 * s as f32));
+                }
+                h.st.commit_placement();
+            }
+            h.steps(2);
+            let id = h.st.selection.unwrap();
+            let n = h.st.scene.node(id).unwrap();
+            let sh = n.shape().unwrap();
+            let pos = h.st.scene.world_matrix(id).transform_point3(Vec3::ZERO);
+            let lo = h.st.scene.bounds().0.y;
+            eprintln!("{:?} : taille {:.1?} · centre y {:.2} · bas de la scène {:.2} · {}", k, sh.size, pos.y, lo, n.combine.mode.label());
+        }
+        h.st.select(None);
+        h.st.frame_all();
+        h.steps(4);
+        h.shot("pc-prims");
+    }    if want("pc-snap") {
         // base on the top face of the socle, far corner snapped to its edge
         h.pc(part(), UiMode::Atelier);
         h.st.pointer_kind = PointerKind::Mouse;
