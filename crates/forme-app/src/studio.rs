@@ -253,9 +253,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
         ui.horizontal(|ui| {
             ui.add_space(9.0);
             let (r, _) = ui.allocate_exact_size(vec2(24.0, 26.0), Sense::hover());
-            let logo = Rect::from_center_size(r.center(), vec2(22.0, 22.0));
-            ui.painter().rect_filled(logo, 6.0, accent());
-            icons::paint(ui.painter(), Rect::from_center_size(logo.center(), vec2(14.0, 14.0)), Icon::Cube, Color32::WHITE);
+            crate::theme::paint_logo(ui, Rect::from_center_size(r.center(), vec2(24.0, 24.0)));
             ui.add_space(4.0);
             egui::containers::menu::MenuBar::new().config(menu_cfg()).ui(ui, |ui| {
                 menus(ui, st);

@@ -215,3 +215,39 @@ pub fn sel_rgb() -> [f32; 3] {
     let c = accent();
     [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0]
 }
+
+// ---------------------------------------------------------------- app icon
+
+/// The app icon (Recraft: a white drilled « F » on a graphite tile), 256 px.
+const ICON_PNG: &[u8] = include_bytes!("../assets/forme-icon.png");
+/// The same, small, for the logo of the interfaces.
+const LOGO_PNG: &[u8] = include_bytes!("../assets/forme-logo-64.png");
+
+fn decode(png: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    Some((img.into_raw(), w, h))
+}
+
+/// Window / taskbar icon.
+pub fn window_icon() -> Option<winit::window::Icon> {
+    let (rgba, w, h) = decode(ICON_PNG)?;
+    winit::window::Icon::from_rgba(rgba, w, h).ok()
+}
+
+/// Draws the app logo in `rect` (texture loaded once).
+pub fn paint_logo(ui: &egui::Ui, rect: egui::Rect) {
+    let key = egui::Id::new("forme-logo-tex");
+    let tex: Option<egui::TextureHandle> = ui.ctx().data(|d| d.get_temp(key));
+    let tex = match tex {
+        Some(t) => t,
+        None => {
+            let Some((rgba, w, h)) = decode(LOGO_PNG) else { return };
+            let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+            let t = ui.ctx().load_texture("forme-logo", img, egui::TextureOptions::LINEAR);
+            ui.ctx().data_mut(|d| d.insert_temp(key, t.clone()));
+            t
+        }
+    };
+    ui.painter().image(tex.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+}

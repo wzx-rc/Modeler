@@ -171,6 +171,8 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes().with_title(forme_app::version_title()).with_inner_size(if cfg!(target_os = "ios") { winit::dpi::LogicalSize::new(1194.0, 834.0) } else { winit::dpi::LogicalSize::new(1600.0, 900.0) });
+        // the app icon (taskbar, title bar): generated with Recraft, see assets/
+        let attrs = attrs.with_window_icon(forme_app::theme::window_icon());
         let window = Arc::new(el.create_window(attrs).expect("window"));
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance.create_surface(window.clone()).expect("surface");

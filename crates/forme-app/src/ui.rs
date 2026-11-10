@@ -555,9 +555,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-                let logo = Rect::from_center_size(r.center(), vec2(24.0, 24.0));
-                ui.painter().rect_filled(logo, 7.0, accent());
-                icons::paint(ui.painter(), Rect::from_center_size(logo.center(), vec2(15.0, 15.0)), Icon::Cube, Color32::WHITE);
+                paint_logo(ui, Rect::from_center_size(r.center(), vec2(26.0, 26.0)));
                 let name = st.doc_name.clone();
                 let n = st.scene.shape_count();
                 let g = ui.painter().layout_no_wrap(name, semibold(13.5), TEXT);
