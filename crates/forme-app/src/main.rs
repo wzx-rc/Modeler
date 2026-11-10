@@ -322,7 +322,28 @@ impl ApplicationHandler for App {
     }
 }
 
+/// A crash (panic) is written to Documents/Forme/crash.log with its location
+/// and backtrace: the app runs without a console, so stderr is lost.
+fn install_crash_log() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let text = format!(
+            "---- crash · {} · unix {secs}\n{info}\n{}\n",
+            forme_app::version_title(),
+            std::backtrace::Backtrace::force_capture()
+        );
+        let path = files::documents_dir().join("crash.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            use std::io::Write;
+            let _ = f.write_all(text.as_bytes());
+        }
+        default(info);
+    }));
+}
+
 fn main() {
+    install_crash_log();
     let event_loop = EventLoop::new().expect("event loop");
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("run");

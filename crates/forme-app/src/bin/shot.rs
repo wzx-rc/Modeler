@@ -754,6 +754,22 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.st.frame_all();
         h.steps(4);
         h.shot("pc-prims");
+        // regression: a torus started very close (tiny base) used to panic
+        // in clamp(min > max)
+        h.st.camera.dist = 1.5;
+        h.st.view_changed();
+        h.st.tool = Tool::Place(PrimKind::Torus);
+        h.steps(2);
+        let c = pos2(700.0, 450.0);
+        h.press(c, true);
+        for s in 1..=6 {
+            h.move_to(c + egui::vec2(s as f32, 0.0));
+        }
+        h.press(c + egui::vec2(6.0, 0.0), false);
+        h.step();
+        h.st.commit_placement();
+        h.steps(2);
+        eprintln!("tore très zoomé : pas de plantage");
     }    if want("pc-snap") {
         // base on the top face of the socle, far corner snapped to its edge
         h.pc(part(), UiMode::Atelier);

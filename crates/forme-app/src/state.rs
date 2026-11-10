@@ -1348,9 +1348,9 @@ impl AppState {
             PrimKind::Box => Vec3::new(p.hx.max(0.2), hh, p.hz.max(0.2)),
             PrimKind::Sphere => Vec3::splat(r),
             PrimKind::Capsule => Vec3::new(r, (hh - r).max(0.0), 0.0),
-            // tube radius under the ring radius; min/max, not clamp: at the start of
-            // the gesture r is 0.2 and r * 0.9 < 0.2 would make clamp panic
-            PrimKind::Torus => Vec3::new(r, 0.0, (p.height * 0.5).max(0.2).min(r * 0.9)),
+            // minor radius from the height, at most 0.9 r (and never a
+            // clamp with min > max: the base starts tiny when zoomed in)
+            PrimKind::Torus => Vec3::new(r, 0.0, (p.height.abs() * 0.5).clamp(0.2, (r * 0.9).max(0.2))),
             PrimKind::Cone => Vec3::new(r, hh, r * 0.35),
             PrimKind::Tube => Vec3::new(r, hh, r * 0.7),
             _ => Vec3::new(r, hh, 0.0),
