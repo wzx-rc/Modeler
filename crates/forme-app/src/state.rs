@@ -344,6 +344,11 @@ pub struct AppState {
     pub display_open: bool,
     /// Selection level: objects or edges.
     pub pick_mode: PickMode,
+    /// Creation popover of the tool strip, anchored at its button.
+    pub creation_open: bool,
+    pub creation_anchor: [f32; 2],
+    /// Radial marking menu (open menu, flash, right press waiting).
+    pub marking: crate::marking::Marking,
     pub display_anchor: [f32; 2],
     pub scene_version: u64,
     pub view_version: u64,
@@ -488,6 +493,9 @@ impl AppState {
             settings_open: false,
             display_open: false,
             pick_mode: PickMode::Object,
+            marking: Default::default(),
+            creation_open: false,
+            creation_anchor: [84.0, 200.0],
             display_anchor: [1180.0, 76.0],
             // unique per document instance: renderer caches never mistake two documents
             scene_version: new_version_base() + 1,
@@ -679,6 +687,13 @@ impl AppState {
             self.edge_hover_at = None;
             self.view_changed();
         }
+    }
+
+    /// The shape under a screen position.
+    pub fn node_at(&mut self, pos: [f32; 2]) -> Option<NodeId> {
+        let (p, _) = self.hit(pos)?;
+        let tol = 1.0 + self.view().pixel_size_at((p - self.camera.eye()).length()) * 6.0;
+        pick_node(&self.scene, p, tol)
     }
 
     pub fn tap_select(&mut self, pos: [f32; 2]) {
@@ -1308,6 +1323,20 @@ impl AppState {
             self.apply_placement();
             self.release_placement();
         }
+    }
+
+    /// Direct creation: one click drops the shape at default size on the face
+    /// or grid under the pointer, selected with its handles to size it.
+    pub fn direct_place(&mut self, pos: [f32; 2]) {
+        self.tap_place(pos);
+        let id = self.placement.as_ref().map(|p| p.node);
+        self.commit_placement();
+        self.tool = Tool::Select;
+        self.pick_mode = PickMode::Object;
+        if id.is_some() {
+            self.selection = id;
+        }
+        self.view_changed();
     }
 
     /// Pencil hover / mouse after the base: the height follows the pointer.

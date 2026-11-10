@@ -22,7 +22,9 @@
 ## PC (clavier + souris)
 
 - Clic gauche : comme le Pencil (créer, sélectionner, poignées). Le survol de la souris met en évidence les arêtes.
-- Clic droit glissé : orbite. Clic molette ou Maj + glisser : pan. Molette : zoom.
+- Clic gauche glissé dans le vide (outil Sélection) : orbite. Clic molette ou Maj + glisser : pan. Molette : zoom.
+- **Marking menu** (façon Maya / WZX Engine, 8 directions, `marking.rs`) : appui droit (geste rapide dans une direction = action directe, maintenu = menu affiché après 0,2 s), ou clic gauche maintenu immobile ~0,3 s. Sur une forme : Matière (arc de couleurs façon BrickIt), Symétrie X, Add / Carve, Cadrer, Supprimer, Masquer, Mode Arête, Dupliquer. Dans le vide : Cube, Cylindre, Snap, Grille, vues, Grouper. Sur une arête (mode Arête) : Fillet, Chanfrein, Arête vive, Cadrer, Mode Objet.
+- Outils : Q sélection, R cube, C cylindre ; 1 / 2 : mode Objet / Arête. Options de création (petit bouton ••• sous les primitives) : interactive (base puis hauteur) ou directe (un clic pose la forme, les poignées la dimensionnent).
 - Alt : Carve. Ctrl / Cmd : ajouter à la sélection d'arêtes.
 - Ctrl+Z / Ctrl+Y (ou Ctrl+Maj+Z) : annuler / rétablir. Ctrl+D : dupliquer.
 - Suppr : supprimer la forme (sur une arête sélectionnée, retire son fillet). Échap : désélectionner, annuler. Entrée : valider. F : cadrer.

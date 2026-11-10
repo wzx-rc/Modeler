@@ -19,6 +19,7 @@ pub mod files;
 pub mod gfx;
 pub mod icons;
 pub mod kit;
+pub mod marking;
 pub mod settings;
 pub mod state;
 pub mod studio;
@@ -36,5 +37,6 @@ pub fn run(ctx: &egui::Context, st: &mut AppState) {
         settings::UiMode::Studio => studio::show(ctx, st),
     }
     ui::display_panel(ctx, st);
+    ui::creation_popover(ctx, st);
     ui::settings_dialog(ctx, st);
 }

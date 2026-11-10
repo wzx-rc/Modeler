@@ -446,20 +446,34 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             }
             vsep(ui);
             let sel = st.tool == Tool::Select;
-            if tool_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (1)").clicked() {
+            let r = tool_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (Q ou 1)");
+            ui::key_hint(ui, &r, "Q");
+            if r.clicked() {
                 st.set_pick_mode(PickMode::Object);
             }
-            if tool_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins").clicked() {
+            let r = tool_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins");
+            ui::key_hint(ui, &r, "2");
+            if r.clicked() {
                 st.set_pick_mode(PickMode::Edge);
             }
             vsep(ui);
             ui.label(RichText::new("Créer").font(regular(11.5)).color(T3));
             for k in st.settings.placeable() {
-                if tool_btn(ui, prim_icon(k), st.tool == Tool::Place(k), &format!("{} : glisser la base, puis la hauteur", k.label())).clicked() {
+                let key = ui::prim_key(k);
+                let tip = format!("{}{} : glisser la base, puis la hauteur", k.label(), key.map(|c| format!(" ({c})")).unwrap_or_default());
+                let r = tool_btn(ui, prim_icon(k), st.tool == Tool::Place(k), &tip);
+                if let Some(c) = key {
+                    ui::key_hint(ui, &r, c);
+                }
+                if r.clicked() {
                     st.commit_placement();
                     st.tool = Tool::Place(k);
                 }
             }
+            ui.vertical(|ui| {
+                ui.add_space(8.0);
+                ui::creation_btn(ui, st, 24.0, true);
+            });
             vsep(ui);
             let shown = st.effective_mode();
             for m in st.settings.modes() {

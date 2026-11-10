@@ -486,7 +486,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -1203,6 +1203,80 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.steps(4);
         h.shot("pc-affichage");
         h.st.display_open = false;
+    }
+    if want("pc-menu") {
+        // marking menu: right button held still on the palier opens it,
+        // release on "Passer en Carve" (east) runs it; then frozen captures
+        h.pc(part(), UiMode::Atelier);
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.steps(2);
+        h.st.frame_all();
+        h.steps(2);
+        let c = h.screen_of(Vec3::new(0.0, 30.0, 0.0));
+        let right = |h: &mut Harness, p: Pos2, down: bool| {
+            h.pending.push(Event::PointerMoved(p));
+            h.pending.push(Event::PointerButton { pos: p, button: PointerButton::Secondary, pressed: down, modifiers: Modifiers::NONE });
+            h.step();
+        };
+        right(h, c, true);
+        h.steps(20); // 0.33 s still
+        eprintln!("menu : ouvert {} · contexte {:?}", h.st.marking.is_open(), h.st.marking.menu.as_ref().map(|m| m.ctx));
+        h.move_to(c + egui::vec2(60.0, 0.0));
+        right(h, c + egui::vec2(60.0, 0.0), false);
+        h.steps(2);
+        let id = h.find("Palier");
+        eprintln!("menu : Palier en {}", h.st.scene.node(id).unwrap().combine.mode.label());
+        h.st.undo();
+        h.steps(2);
+        // frozen captures: on a shape, then in empty space
+        use forme_app::marking::{Ctx, Menu};
+        let empty = h.screen_of(Vec3::new(-55.0, 0.0, 30.0));
+        for (name, at, ctx, arc) in [("pc-menu-forme", c, Ctx::Shape(id), false), ("pc-menu-matiere", c, Ctx::Shape(id), true), ("pc-menu-scene", empty, Ctx::Empty, false)] {
+            if let Ctx::Shape(id) = ctx {
+                h.st.select(Some(id));
+            } else {
+                h.st.select(None);
+            }
+            h.st.marking.demo = true;
+            let mut m = Menu::new([at.x, at.y], ctx, false, 0.0);
+            m.pointer = [at.x + 58.0, at.y - 4.0];
+            m.hover = Some(2);
+            if arc {
+                m.arc = Some(0.0);
+                m.swatch = Some(2);
+                m.hover = Some(0);
+                m.pointer = [at.x + 20.0, at.y - 125.0];
+            }
+            h.st.marking.menu = Some(m);
+            h.steps(3);
+            h.shot(name);
+            h.st.marking.menu = None;
+            h.st.marking.demo = false;
+        }
+        // shortcut letters and the creation popover, both interfaces
+        for (name, mode, anchor) in [("pc-creation-options", UiMode::Atelier, [84.0, 248.0]), ("pc-creation-options-studio", UiMode::Studio, [230.0, 92.0])] {
+            h.pc(part(), mode);
+            h.steps(2);
+            h.st.frame_all();
+            h.st.tool = Tool::Place(PrimKind::Box);
+            h.st.creation_open = true;
+            h.st.creation_anchor = anchor;
+            h.steps(4);
+            h.shot(name);
+            h.st.creation_open = false;
+        }
+        // direct creation: one click drops a cube, selected with its handles
+        h.pc(part(), UiMode::Atelier);
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.st.settings.creation = forme_app::settings::Creation::Direct;
+        h.steps(2);
+        h.st.frame_all();
+        h.st.tool = Tool::Place(PrimKind::Box);
+        h.steps(2);
+        let n0 = h.st.scene.nodes.len();
+        h.tap(h.screen_of(Vec3::new(-45.0, 0.0, 25.0)));
+        eprintln!("création directe : {} forme(s) ajoutée(s), outil {:?}, sélection {:?}", h.st.scene.nodes.len() - n0, h.st.tool, h.st.selection.and_then(|id| h.st.scene.node(id)).map(|n| n.name.clone()));
+        h.st.settings.creation = forme_app::settings::Creation::Interactive;
     }
     if want("pc-snap") {
         // base on the top face of the socle, far corner snapped to its edge

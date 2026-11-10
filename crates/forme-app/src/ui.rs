@@ -445,6 +445,22 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if k1 {
         st.set_pick_mode(PickMode::Object);
     }
+    // tools: Q selection, R cube, C cylinder (never while typing: guarded above)
+    let (kq, kr, kc) = ctx.input(|i| {
+        let free = !i.modifiers.command && !i.modifiers.alt;
+        (free && i.key_pressed(egui::Key::Q), free && i.key_pressed(egui::Key::R), free && i.key_pressed(egui::Key::C))
+    });
+    if kq {
+        st.commit_placement();
+        st.cancel_profile();
+        st.tool = Tool::Select;
+    }
+    for (pressed, k) in [(kr, PrimKind::Box), (kc, PrimKind::Cylinder)] {
+        if pressed && st.settings.prim_allowed(k) {
+            st.commit_placement();
+            st.tool = Tool::Place(k);
+        }
+    }
     if k2 {
         st.set_pick_mode(PickMode::Edge);
     }
@@ -548,6 +564,76 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         });
 }
 
+/// Keyboard shortcut of a primitive tool (Q select, R cube, C cylinder).
+pub(crate) fn prim_key(k: PrimKind) -> Option<&'static str> {
+    match k {
+        PrimKind::Box => Some("R"),
+        PrimKind::Cylinder => Some("C"),
+        _ => None,
+    }
+}
+
+/// The shortcut letter, small, in the bottom-right corner of a tool button.
+pub(crate) fn key_hint(ui: &Ui, r: &Response, key: &str) {
+    if !DESK {
+        return;
+    }
+    let at = r.rect.right_bottom() - vec2(4.0, 3.0);
+    ui.painter().text(at, Align2::RIGHT_BOTTOM, key, medium(9.0), Color32::from_rgb(0x8A, 0x8F, 0x97));
+}
+
+/// Small notched button under the primitives: opens the creation popover.
+pub(crate) fn creation_btn(ui: &mut Ui, st: &mut AppState, width: f32, below: bool) {
+    let (r, resp) = ui.allocate_exact_size(vec2(width, 14.0), Sense::click());
+    let p = ui.painter();
+    let on = st.creation_open;
+    let c = if on { ACCENT } else if resp.hovered() { TEXT } else { Color32::from_rgb(0x7C, 0x81, 0x89) };
+    // a notch: three small dots on a short bar
+    let mid = r.center();
+    p.rect_filled(Rect::from_center_size(mid, vec2(22.0, 10.0)), 5.0, if on { ACCENT_BG } else if resp.hovered() { RAISED } else { Color32::TRANSPARENT });
+    for i in -1..=1 {
+        p.circle_filled(mid + vec2(i as f32 * 5.0, 0.0), 1.4, c);
+    }
+    let resp = resp.on_hover_text("Options de création");
+    if resp.clicked() {
+        st.creation_open = !st.creation_open;
+        st.creation_anchor = if below { [r.left() - 20.0, r.bottom() + 14.0] } else { [r.right() + 10.0, r.top() - 6.0] };
+    }
+}
+
+/// Ephemeral popover with the creation settings (closes on a click outside).
+pub fn creation_popover(ctx: &egui::Context, st: &mut AppState) {
+    if !st.creation_open {
+        return;
+    }
+    let at = pos2(st.creation_anchor[0], st.creation_anchor[1]);
+    let resp = egui::Area::new(Id::new("creation-popover")).order(Order::Foreground).fade_in(false).fixed_pos(at).show(ctx, |ui| {
+        panel().inner_margin(Margin::same(12)).show(ui, |ui| {
+            ui.set_width(250.0);
+            ui.label(egui::RichText::new("Création").font(semibold(13.0)).color(TEXT));
+            use crate::settings::Creation;
+            let items = [(Creation::Interactive, "Interactive", ACCENT), (Creation::Direct, "Directe", ACCENT)];
+            if let Some(c) = segmented(ui, &items, st.settings.creation, 30.0) {
+                st.settings.creation = c;
+                st.save_settings();
+            }
+            let blurb = match st.settings.creation {
+                Creation::Interactive => "Glisse la base, relâche, puis la hauteur : vers le haut +, vers le bas −. Ctrl inverse.",
+                Creation::Direct => "Un clic pose la forme à sa taille par défaut sur la face ou la grille sous le curseur ; ensuite ses poignées la dimensionnent.",
+            };
+            ui.add(egui::Label::new(egui::RichText::new(blurb).font(regular(11.5)).color(TEXT2)).wrap());
+        });
+    });
+    if ctx.input(|i| i.pointer.any_pressed()) {
+        if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
+            let button = Rect::from_center_size(pos2(st.creation_anchor[0], st.creation_anchor[1]), vec2(140.0, 60.0));
+            if !resp.response.rect.contains(p) && !button.contains(p) {
+                st.creation_open = false;
+            }
+        }
+    }
+}
+
 fn rail(ctx: &egui::Context, st: &mut AppState) {
     egui::Area::new(Id::new("rail")).order(Order::Middle).fixed_pos(pos2(12.0, 80.0)).show(ctx, |ui| {
         panel().show(ui, |ui| {
@@ -555,19 +641,34 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
             ui.set_width(44.0);
             // selection, like 3ds Max: object (1) or edges (2)
             let sel = st.tool == Tool::Select;
-            if icon_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (1)", 44.0).clicked() {
+            let r = icon_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (Q ou 1)", 44.0);
+            key_hint(ui, &r, "Q");
+            if r.clicked() {
                 st.set_pick_mode(PickMode::Object);
             }
-            if icon_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins", 44.0).clicked() {
+            let r = icon_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins", 44.0);
+            key_hint(ui, &r, "2");
+            if r.clicked() {
                 st.set_pick_mode(PickMode::Edge);
             }
             divider(ui);
             for k in st.settings.placeable() {
-                if icon_btn(ui, prim_icon(k), st.tool == Tool::Place(k), k.label(), 44.0).clicked() {
+                let tip = match prim_key(k) {
+                    Some(key) => format!("{} ({key})", k.label()),
+                    None => k.label().to_string(),
+                };
+                let r = icon_btn(ui, prim_icon(k), st.tool == Tool::Place(k), &tip, 44.0);
+                if let Some(key) = prim_key(k) {
+                    key_hint(ui, &r, key);
+                }
+                if r.clicked() {
                     st.commit_placement();
                     st.tool = Tool::Place(k);
                     st.kit_open = false;
                 }
+            }
+            if DESK {
+                creation_btn(ui, st, 44.0, false);
             }
             divider(ui);
             // mode of the next shapes (and of the selected one)

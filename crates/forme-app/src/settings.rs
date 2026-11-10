@@ -45,8 +45,21 @@ pub struct Settings {
     /// Creation starts on the face under the pointer (3ds Max AutoGrid),
     /// else on the ground plane. On by default.
     pub snap_faces: bool,
+    /// How a primitive is created (creation popover of the tool strip).
+    pub creation: Creation,
     /// Viewport and display options (light panel).
     pub display: Display,
+}
+
+/// Creation of a primitive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Creation {
+    /// Drag the base, release, then the height (3ds Max).
+    #[default]
+    Interactive,
+    /// One click drops it at default size on the face / grid under the
+    /// pointer; then it is sized with its handles.
+    Direct,
 }
 
 /// Viewport look, set in the light panel next to Réglages.
@@ -79,7 +92,7 @@ impl Display {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { ui_mode: UiMode::Atelier, advanced: false, snap_faces: true, display: Display::default() }
+        Settings { ui_mode: UiMode::Atelier, advanced: false, snap_faces: true, creation: Creation::Interactive, display: Display::default() }
     }
 }
 

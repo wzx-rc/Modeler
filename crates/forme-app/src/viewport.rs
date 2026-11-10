@@ -47,11 +47,18 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_edges(ui.painter(), st);
         draw_overlay(ui.painter(), st);
     });
+    crate::marking::draw(ctx, st);
 }
 
 fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, rect: Rect) {
     st.hover = ctx.input(|i| i.pointer.hover_pos()).map(p2);
     st.interacting = false;
+
+    // marking menu: right press, or left press held still (not on a handle)
+    let on_handle = st.hover.map(|h| handle_at(st, pos2(h[0], h[1])).is_some()).unwrap_or(false);
+    if crate::marking::input(ctx, st, rect, on_handle) {
+        return;
+    }
 
     // two fingers: pan + pinch, always the camera
     if let Some(mt) = ctx.multi_touch() {
@@ -79,12 +86,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         }
     }
 
-    if resp.dragged_by(PointerButton::Secondary) {
-        let d = resp.drag_delta();
-        st.camera.orbit(d.x, d.y);
-        st.view_changed();
-        st.interacting = true;
-    }
+    // the right button is the marking menu (orbit: left drag in empty space)
     if resp.dragged_by(PointerButton::Middle) {
         let d = resp.drag_delta();
         st.camera.pan(d.x, d.y, rect.height());
@@ -183,6 +185,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         }
         match st.tool {
             Tool::Select => st.tap_select(pos),
+            Tool::Place(_) if st.settings.creation == crate::settings::Creation::Direct => st.direct_place(pos),
             Tool::Place(_) => st.tap_place(pos),
             Tool::Profile if !finger => st.profile_point(pos, false),
             Tool::Kit(piece) => st.place_kit(piece, pos),
