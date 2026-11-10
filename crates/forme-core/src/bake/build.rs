@@ -235,7 +235,7 @@ fn outline(faces: &[Vec<u32>], set: &[usize]) -> Vec<Vec<u32>> {
 }
 
 /// Zero-level contour of `f` over a set of faces, as closed polylines.
-fn contour(pos: &[DVec3], faces: &[Vec<u32>], set: &[usize], f: &dyn Fn(DVec3) -> f64) -> Vec<Vec<DVec3>> {
+pub(crate) fn contour(pos: &[DVec3], faces: &[Vec<u32>], set: &[usize], f: &dyn Fn(DVec3) -> f64) -> Vec<Vec<DVec3>> {
     let val: HashMap<u32, f64> = set.iter().flat_map(|&i| faces[i].iter()).map(|&v| (v, f(pos[v as usize]))).collect();
     let mut pts: HashMap<(u32, u32), DVec3> = HashMap::new();
     let mut adj: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();

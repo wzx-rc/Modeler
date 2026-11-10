@@ -43,6 +43,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         st.update_edge_hover();
         st.refresh_edge();
         st.update_edge_vis();
+        draw_construction_lines(ui.painter(), st);
         draw_edges(ui.painter(), st);
         draw_overlay(ui.painter(), st);
     });
@@ -207,6 +208,57 @@ fn arrow(p: &Painter, a: Pos2, b: Pos2, color: Color32, width: f32) {
     let n = vec2(-d.y, d.x);
     let tip = b + d * 9.0;
     p.add(Shape::convex_polygon(vec![tip, b + n * 5.0, b - n * 5.0], color, Stroke::NONE));
+}
+
+/// Bake diagnostics: the construction lines read from the history, sharp
+/// lines yellow, fillet rails orange; faint where the model hides them.
+fn draw_construction_lines(p: &Painter, st: &AppState) {
+    let d = st.bake.diag;
+    if !st.bake.open || !(d.lines || d.rails) {
+        return;
+    }
+    let Some((lv, lines)) = &st.bake.lines else { return };
+    if *lv != st.scene_version {
+        return;
+    }
+    let view = st.view();
+    let vis = &st.bake.lines_vis;
+    let known = vis.key == (st.view_version, *lv);
+    for (li, l) in lines.lines.iter().enumerate() {
+        let rail = l.kind.is_rail();
+        if (rail && !d.rails) || (!rail && !d.lines) {
+            continue;
+        }
+        let color = if rail { LINE_RAIL } else { LINE_SHARP };
+        let mut run: Vec<Pos2> = vec![];
+        let mut run_vis = true;
+        let flush = |run: &mut Vec<Pos2>, visible: bool| {
+            if run.len() >= 2 {
+                if visible {
+                    p.add(Shape::line(run.clone(), Stroke::new(2.0, color)));
+                } else {
+                    p.add(Shape::line(run.clone(), Stroke::new(1.0, tint(color, 0.22))));
+                }
+            }
+            run.clear();
+        };
+        for (i, q) in l.pts.iter().enumerate() {
+            let Some(s) = view.project(q.as_vec3()) else {
+                flush(&mut run, run_vis);
+                continue;
+            };
+            let v = !known || vis.vis.get(li).and_then(|x| x.get(i)).copied().unwrap_or(true);
+            let q = pos2(s[0], s[1]);
+            if !run.is_empty() && v != run_vis {
+                let last = *run.last().unwrap();
+                flush(&mut run, run_vis);
+                run.push(last);
+            }
+            run_vis = v;
+            run.push(q);
+        }
+        flush(&mut run, run_vis);
+    }
 }
 
 /// Hovered and selected edges: a glow on the visible parts, a faint line

@@ -110,3 +110,21 @@ pub fn install(ctx: &egui::Context) {
         v.widgets.active.fg_stroke = Stroke::new(1.5, ACCENT_TEXT);
     });
 }
+
+/// Bake diagnostic colours (linear-ish sRGB 0..1), by face role in the
+/// constructive bake (`bake::build` patches): fillet strips orange, fill
+/// paths and transitions cream, native grids grey, the tool's grid blue-grey.
+pub fn bake_role_color(patch: u32) -> [f32; 3] {
+    use forme_core::bake::build::{P_FILLET, P_LOFT, P_NATIVE, P_TOOL, P_TOOL_LOFT};
+    match patch {
+        P_FILLET => [0.95, 0.52, 0.16],
+        P_LOFT | P_TOOL_LOFT => [0.93, 0.86, 0.68],
+        P_NATIVE => [0.62, 0.63, 0.64],
+        P_TOOL => [0.52, 0.60, 0.70],
+        _ => [0.80, 0.30, 0.55],
+    }
+}
+
+/// Construction lines in the Bake panel: sharp lines and fillet rails.
+pub const LINE_SHARP: Color32 = Color32::from_rgb(0xF5, 0xD0, 0x45);
+pub const LINE_RAIL: Color32 = Color32::from_rgb(0xFF, 0x8A, 0x2E);

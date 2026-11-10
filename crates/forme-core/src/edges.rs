@@ -91,7 +91,7 @@ pub fn junction_owner(scene: &Scene, a: NodeId, b: NodeId) -> NodeId {
     cur
 }
 
-fn grad(f: &dyn Fn(DVec3) -> f64, p: DVec3) -> DVec3 {
+pub(crate) fn grad(f: &dyn Fn(DVec3) -> f64, p: DVec3) -> DVec3 {
     let h = 1e-5;
     DVec3::new(
         f(p + DVec3::X * h) - f(p - DVec3::X * h),
@@ -101,7 +101,7 @@ fn grad(f: &dyn Fn(DVec3) -> f64, p: DVec3) -> DVec3 {
 }
 
 /// Closest point on the curve f1 = f2 = 0 (minimum-norm Gauss–Newton).
-fn solve2(f1: &dyn Fn(DVec3) -> f64, f2: &dyn Fn(DVec3) -> f64, p0: DVec3, cap: f64) -> Option<DVec3> {
+pub(crate) fn solve2(f1: &dyn Fn(DVec3) -> f64, f2: &dyn Fn(DVec3) -> f64, p0: DVec3, cap: f64) -> Option<DVec3> {
     let mut p = p0;
     for _ in 0..40 {
         let (a, b) = (f1(p), f2(p));

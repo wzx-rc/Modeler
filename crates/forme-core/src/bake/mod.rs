@@ -13,6 +13,7 @@ pub mod patch;
 pub mod quad;
 pub mod build;
 pub mod decimate;
+pub mod lines;
 
 use crate::mesh::Mesh;
 use crate::program::compile;

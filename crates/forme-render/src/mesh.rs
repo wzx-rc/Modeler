@@ -115,11 +115,16 @@ struct Uniforms {
 
 /// Flat vertex list (3 per triangle) of a baked mesh.
 pub fn mesh_vertices(b: &Baked, materials: &[Material]) -> Vec<MeshVertex> {
+    mesh_vertices_colored(b, &|f| materials.get(f.mat as usize).map(|m| m.color).unwrap_or([0.6, 0.6, 0.6]))
+}
+
+/// Same, with the colour of each face given by `color` (diagnostic views).
+pub fn mesh_vertices_colored(b: &Baked, color: &dyn Fn(&forme_core::bake::BFace) -> [f32; 3]) -> Vec<MeshVertex> {
     let lin = |c: f32| (c.max(0.0).powf(2.2) * 255.0).round().clamp(0.0, 255.0) as u8;
     let mut out = Vec::with_capacity(b.triangle_count() * 3);
     for f in &b.faces {
         let m = f.verts.len();
-        let c = materials.get(f.mat as usize).map(|m| m.color).unwrap_or([0.6, 0.6, 0.6]);
+        let c = color(f);
         let col = [lin(c[0]), lin(c[1]), lin(c[2]), 255];
         for t in b.triangulate_face(f) {
             let real = |a: usize, c: usize| (a + 1) % m == c || (c + 1) % m == a;

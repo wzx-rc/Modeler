@@ -288,7 +288,8 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     st.screen = [screen.width(), screen.height()];
     // free view: between the rail and the right column, above the history strip
     let right = if st.panel_visible { screen.width() - 308.0 } else { screen.width() - 12.0 };
-    st.view_rect = [84.0, 72.0, right, screen.height() - 84.0];
+    let left = if st.bake.open { 92.0 + BAKE_PANEL_W + 8.0 } else { 84.0 };
+    st.view_rect = [left, 72.0, right, screen.height() - 84.0];
     top_bar(ctx, st, screen);
     rail(ctx, st);
     if matches!(st.tool, Tool::Kit(_)) || st.kit_open {
@@ -302,6 +303,9 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     }
     hud(ctx, st);
     right_column(ctx, st, screen);
+    if st.bake.open {
+        bake_side_panel(ctx, st, screen);
+    }
     dialogs(ctx, st, screen);
     shortcuts(ctx, st);
 }
@@ -311,9 +315,6 @@ pub(crate) fn dialogs(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     toast(ctx, st, screen);
     if st.export_open {
         export_dialog(ctx, st, screen);
-    }
-    if st.bake.open {
-        bake_dialog(ctx, st, screen);
     }
     if st.bake.job.is_some() {
         ctx.request_repaint();
@@ -1498,146 +1499,173 @@ fn stat_row(ui: &mut Ui, label: &str, value: String, color: Color32) {
     });
 }
 
-pub(crate) fn bake_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
-    use forme_core::bake::{BakeSettings, Quality, STAGES};
-    if dim(ctx, screen, "bake-dim") {
-        st.bake.open = false;
-        return;
-    }
-    let cx = st.principal()[0];
-    egui::Area::new(Id::new("bake")).order(Order::Tooltip).pivot(Align2::CENTER_CENTER).fixed_pos(pos2(cx, screen.center().y)).show(ctx, |ui| {
-        panel().inner_margin(Margin::same(20)).show(ui, |ui| {
-            ui.set_width(420.0);
-            ui.label(egui::RichText::new("Bake · maillage propre").font(semibold(18.0)).color(TEXT));
-            ui.label(
-                egui::RichText::new(
-                    "Chaque opération de l'historique construit sa propre topologie : maillage natif des formes, intersections et fillets \
-                     tracés exactement, raccords en boucles de quads. Le résultat n'a plus de lien avec le modèle : toute modification demande un nouveau Bake.",
-                )
-                .font(regular(12.5))
-                .color(TEXT2),
-            );
-            ui.add_space(6.0);
-            section(ui, "Densité");
-            let q = [(Quality::Draft, "Légère", ACCENT), (Quality::Standard, "Standard", ACCENT), (Quality::Max, "Dense", ACCENT)];
-            let running = st.bake.job.is_some();
-            if let Some(v) = segmented(ui, &q, st.bake.quality, 40.0) {
-                if !running {
-                    st.bake.quality = v;
-                }
-            }
-            let s = BakeSettings::preset(st.bake.quality);
-            let plan = st.bake_plan();
-            let line = match plan {
-                Some(size) => format!("Par opération · quads de ~{} mm · fillets en rangées · 100 % quads visé", fmt_mm(size as f32)),
-                None => format!(
-                    "Historique pas encore géré par opération : bake par surfaces (repli) · écart {} mm · {} cœurs",
-                    fmt_mm_fine(s.tol),
-                    s.threads
-                ),
-            };
-            ui.label(egui::RichText::new(line).font(regular(12.0)).color(if plan.is_some() { OK } else { TEXT2 }));
-            ui.add_space(8.0);
-            if let Some(j) = &st.bake.job {
-                let f = j.progress.fraction();
-                let stage = j.progress.stage.load(std::sync::atomic::Ordering::Relaxed) as usize;
-                let el = st.now - j.started;
-                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
-                ui.painter().rect_filled(r, 5.0, WELL);
-                ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * f.max(0.02), r.height())), 5.0, ACCENT);
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
-                    ui.label(egui::RichText::new(format!("{} · {:.0} % · {:.0} s", STAGES.get(stage).copied().unwrap_or(""), f * 100.0, el)).font(medium(13.0)).color(LABEL));
-                });
-                ui.add_space(6.0);
-                if secondary_btn(ui, "Annuler le Bake", ui.available_width()).clicked() {
-                    st.cancel_bake();
-                }
-                return;
-            }
-            if let Some(b) = st.bake.result.clone() {
-                let s = &b.stats;
-                if st.bake.stale(st.scene_version) {
-                    ui.label(egui::RichText::new("Le modèle a changé depuis ce Bake : relance-le pour le mettre à jour.").font(medium(12.5)).color(CARVE));
-                    ui.add_space(4.0);
-                }
-                section(ui, "Résultat");
-                let total = b.faces.len().max(1);
-                stat_row(ui, "Faces", format!("{}  ({} % de quads)", fmt_int(b.faces.len()), s.quads * 100 / total), TEXT);
-                stat_row(ui, "Quads · triangles · n-gones", format!("{} · {} · {}", fmt_int(s.quads), fmt_int(s.tris), fmt_int(s.ngons)), LABEL);
-                stat_row(ui, "Sommets", fmt_int(s.verts), LABEL);
-                stat_row(ui, "Écart à la surface exacte", format!("moy. {} · max {} mm", fmt_mm_fine(s.mean_dev), fmt_mm_fine(s.max_dev)), LABEL);
-                let defects = s.open_edges + s.nonmanifold_edges;
-                stat_row(
-                    ui,
-                    "Fermeture",
-                    if defects == 0 { "étanche".to_string() } else { format!("{} arêtes à reprendre", fmt_int(defects)) },
-                    if defects == 0 { OK } else { CARVE },
-                );
-                if s.constructive {
-                    stat_row(ui, "Calcul", format!("{:.2} s · par opération ({} étapes)", s.seconds, s.patches), LABEL);
-                } else {
-                    stat_row(ui, "Calcul", format!("{:.1} s · {} surfaces (repli)", s.seconds, s.patches), LABEL);
-                }
-                if !s.note.is_empty() {
-                    ui.label(egui::RichText::new(&s.note).font(regular(11.5)).color(EDGE_SEL));
-                }
-                ui.add_space(4.0);
-                if toggle_row(ui, "Afficher le maillage baké", st.bake.show) {
-                    st.bake.show = !st.bake.show && !st.bake.stale(st.scene_version);
-                }
-                if toggle_row(ui, "Filaire (arêtes des polygones)", st.bake.wire) {
-                    st.bake.wire = !st.bake.wire;
-                }
-                section(ui, "Passe secondaire (option)");
-                let deg = forme_core::bake::decimate::FLAT_LOOPS_DEG;
-                if toggle_row(ui, &format!("Retirer les loops plates (< {deg:.0}°)"), st.bake.flat) {
-                    st.set_flat_pass(!st.bake.flat);
-                }
-                let (line, color) = if st.bake.pass.is_some() {
-                    ("Passe en cours…".to_string(), LABEL)
-                } else if st.bake.flat && s.faces_before_flat > 0 {
-                    (
-                        format!(
-                            "{} loops retirées · {} → {} faces · {:.0} ms",
-                            s.flat_loops,
-                            fmt_int(s.faces_before_flat),
-                            fmt_int(b.faces.len()),
-                            s.flat_seconds * 1000.0
-                        ),
-                        OK,
-                    )
-                } else {
-                    ("Fusionne les quads des edge loops fermées qui ne font pas de volume. Désactivée par défaut.".to_string(), TEXT2)
-                };
-                ui.label(egui::RichText::new(line).font(regular(11.5)).color(color));
-                if let Some(m) = &st.bake.last_export {
-                    ui.label(egui::RichText::new(format!("{m} · {}", files::documents_dir().display())).font(regular(11.5)).color(OK));
-                }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if secondary_btn(ui, "OBJ (quads)", 130.0).clicked() {
-                        st.export_bake(true, false);
-                    }
-                    if secondary_btn(ui, "GLB", 90.0).clicked() {
-                        st.export_bake(false, true);
-                    }
-                    if primary_btn(ui, None, "Nouveau Bake", Some(ui.available_width())).clicked() {
-                        st.start_bake();
-                    }
-                });
-            } else {
-                ui.horizontal(|ui| {
-                    if secondary_btn(ui, "Fermer", 120.0).clicked() {
+/// Atelier: the Bake panel docked on the left, next to the rail.
+pub(crate) const BAKE_PANEL_W: f32 = 340.0;
+
+fn bake_side_panel(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+    let rect = Rect::from_min_max(pos2(92.0, 72.0), pos2(92.0 + BAKE_PANEL_W, screen.height() - 84.0));
+    egui::Area::new(Id::new("bake-panel")).order(Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
+        panel().inner_margin(Margin::same(16)).show(ui, |ui| {
+            ui.set_width(rect.width() - 32.0);
+            ui.set_height(rect.height() - 32.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Bake").font(semibold(18.0)).color(TEXT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_btn(ui, Icon::ChevronLeft, false, "Fermer le panneau Bake", 32.0).clicked() {
                         st.bake.open = false;
                     }
-                    if primary_btn(ui, Some(Icon::Cube), "Lancer le Bake", Some(ui.available_width())).clicked() {
-                        st.start_bake();
-                    }
                 });
+            });
+            egui::ScrollArea::vertical().id_salt("bake-panel-scroll").auto_shrink([false, false]).show(ui, |ui| {
+                bake_body(ui, st, false);
+            });
+        });
+    });
+}
+
+/// One on/off option: a switch row in Atelier, a check box in Studio.
+fn opt_row(ui: &mut Ui, compact: bool, label: &str, on: bool) -> bool {
+    if compact {
+        let mut v = on;
+        ui.checkbox(&mut v, label).changed()
+    } else {
+        toggle_row(ui, label, on)
+    }
+}
+
+fn note(ui: &mut Ui, text: impl Into<String>, color: Color32) {
+    ui.add(egui::Label::new(egui::RichText::new(text.into()).font(regular(11.5)).color(color)).wrap());
+}
+
+/// Bake panel content, shared by both interfaces: run, diagnostic layers,
+/// result, optional pass, export.
+pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
+    use forme_core::bake::{BakeSettings, Quality, STAGES};
+    note(ui, "Lignes de construction lues dans l'historique : jaune = arêtes et jonctions, orange = rails de fillet. Le maillage doit partir de ces lignes.", TEXT2);
+    section(ui, "Densité");
+    let running = st.bake.job.is_some();
+    if compact {
+        egui::ComboBox::from_id_salt("bake-quality-panel").width(160.0).selected_text(st.bake.quality.label()).show_ui(ui, |ui| {
+            for q in [Quality::Draft, Quality::Standard, Quality::Max] {
+                ui.selectable_value(&mut st.bake.quality, q, q.label());
             }
         });
+    } else {
+        let q = [(Quality::Draft, "Légère", ACCENT), (Quality::Standard, "Standard", ACCENT), (Quality::Max, "Dense", ACCENT)];
+        if let Some(v) = segmented(ui, &q, st.bake.quality, 36.0) {
+            if !running {
+                st.bake.quality = v;
+            }
+        }
+    }
+    let s = BakeSettings::preset(st.bake.quality);
+    let plan = st.bake_plan();
+    let line = match plan {
+        Some(size) => format!("Par opération · quads de ~{} mm · fillets en rangées", fmt_mm(size as f32)),
+        None => format!("Historique pas encore géré par opération : repli par surfaces · écart {} mm", fmt_mm_fine(s.tol)),
+    };
+    note(ui, line, if plan.is_some() { OK } else { EDGE_SEL });
+    ui.add_space(6.0);
+    if let Some(j) = &st.bake.job {
+        let f = j.progress.fraction();
+        let stage = j.progress.stage.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        let el = st.now - j.started;
+        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
+        ui.painter().rect_filled(r, 4.0, WELL);
+        ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * f.max(0.02), r.height())), 4.0, ACCENT);
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().size(14.0).color(ACCENT));
+            ui.label(egui::RichText::new(format!("{} · {:.0} % · {:.0} s", STAGES.get(stage).copied().unwrap_or(""), f * 100.0, el)).font(medium(12.5)).color(LABEL));
+        });
+        if secondary_btn(ui, "Annuler le Bake", ui.available_width()).clicked() {
+            st.cancel_bake();
+        }
+    } else if primary_btn(ui, Some(Icon::Cube), if st.bake.result.is_some() { "Nouveau Bake" } else { "Lancer le Bake" }, Some(ui.available_width())).clicked() {
+        st.start_bake();
+    }
+
+    // what the algorithm sees and builds
+    section(ui, "Diagnostic");
+    if opt_row(ui, compact, "Lignes de construction (jaune)", st.bake.diag.lines) {
+        st.bake.diag.lines = !st.bake.diag.lines;
+    }
+    if opt_row(ui, compact, "Rails de fillet (orange)", st.bake.diag.rails) {
+        st.bake.diag.rails = !st.bake.diag.rails;
+    }
+    match &st.bake.lines {
+        Some((v, l)) if *v == st.scene_version => {
+            let rails = l.lines.iter().filter(|x| x.kind.is_rail()).count();
+            note(
+                ui,
+                format!("{} lignes : {} d'arêtes, {} de jonctions, dont {} rails · {:.0} ms", l.lines.len(), l.count(false), l.count(true), rails, l.seconds * 1000.0),
+                LABEL,
+            );
+        }
+        _ if st.bake.diag.lines || st.bake.diag.rails => note(ui, "Lecture des lignes…", TEXT2),
+        _ => {}
+    }
+    let has = st.bake.result.is_some();
+    if opt_row(ui, compact, "Afficher le maillage baké", st.bake.show) && has {
+        st.bake.show = !st.bake.show && !st.bake.stale(st.scene_version);
+    }
+    if opt_row(ui, compact, "Rôles (fillets / paths)", st.bake.diag.roles) {
+        st.bake.diag.roles = !st.bake.diag.roles;
+        if st.bake.diag.roles && has {
+            st.bake.show = !st.bake.stale(st.scene_version);
+        }
+    }
+    if opt_row(ui, compact, "Filaire (arêtes des polygones)", st.bake.wire) {
+        st.bake.wire = !st.bake.wire;
+    }
+
+    let Some(b) = st.bake.result.clone() else { return };
+    let s = &b.stats;
+    section(ui, "Résultat");
+    if st.bake.stale(st.scene_version) {
+        note(ui, "Le modèle a changé depuis ce Bake : relance-le.", CARVE);
+    }
+    if st.bake.diag.roles && !s.constructive {
+        note(ui, "Repli par surfaces : ce maillage n'a pas de rôles (fillets, paths) à colorer.", EDGE_SEL);
+    }
+    let total = b.faces.len().max(1);
+    stat_row(ui, "Faces", format!("{}  ({} % quads)", fmt_int(b.faces.len()), s.quads * 100 / total), TEXT);
+    stat_row(ui, "Quads · tris · n-gones", format!("{} · {} · {}", fmt_int(s.quads), fmt_int(s.tris), fmt_int(s.ngons)), LABEL);
+    stat_row(ui, "Écart", format!("moy. {} · max {} mm", fmt_mm_fine(s.mean_dev), fmt_mm_fine(s.max_dev)), LABEL);
+    let defects = s.open_edges + s.nonmanifold_edges;
+    stat_row(ui, "Fermeture", if defects == 0 { "étanche".to_string() } else { format!("{} arêtes à reprendre", fmt_int(defects)) }, if defects == 0 { OK } else { CARVE });
+    stat_row(
+        ui,
+        "Méthode",
+        if s.constructive { format!("par opération · {:.2} s", s.seconds) } else { format!("repli par surfaces · {:.1} s", s.seconds) },
+        if s.constructive { OK } else { EDGE_SEL },
+    );
+    if !s.note.is_empty() {
+        note(ui, format!("Pourquoi le repli : {}", s.note), EDGE_SEL);
+    }
+
+    section(ui, "Passe secondaire (option)");
+    let deg = forme_core::bake::decimate::FLAT_LOOPS_DEG;
+    if opt_row(ui, compact, &format!("Retirer les loops plates (< {deg:.0}°)"), st.bake.flat) {
+        st.set_flat_pass(!st.bake.flat);
+    }
+    if st.bake.pass.is_some() {
+        note(ui, "Passe en cours…", LABEL);
+    } else if st.bake.flat && s.faces_before_flat > 0 {
+        note(ui, format!("{} loops retirées · {} → {} faces", s.flat_loops, fmt_int(s.faces_before_flat), fmt_int(b.faces.len())), OK);
+    }
+
+    section(ui, "Export");
+    if let Some(m) = &st.bake.last_export {
+        note(ui, format!("{m} · {}", files::documents_dir().display()), OK);
+    }
+    ui.horizontal(|ui| {
+        let w = (ui.available_width() - 8.0) * 0.5;
+        if secondary_btn(ui, "OBJ (quads)", w).clicked() {
+            st.export_bake(true, false);
+        }
+        if secondary_btn(ui, "GLB", w).clicked() {
+            st.export_bake(false, true);
+        }
     });
 }
 

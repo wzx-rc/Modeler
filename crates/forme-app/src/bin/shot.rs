@@ -486,7 +486,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") {
+    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -1248,6 +1248,46 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.st.tool = Tool::Place(PrimKind::Cylinder);
         h.steps(6);
         h.shot("pc-atelier-creation");
+    }
+    if want("bake-diag") {
+        // Romain's scene (box with a carved, filleted corner) and the test part:
+        // construction lines, then the bake coloured by role, both interfaces
+        let romain = forme_core::Scene::from_json(include_str!("../../../forme-core/examples/scenes/romain-coin.forme")).expect("scène");
+        for (name, scene, mode) in [("romain", romain.clone(), UiMode::Atelier), ("support", support_axe(), UiMode::Atelier), ("romain-studio", romain, UiMode::Studio)] {
+            h.pc(AppState::new(scene, name), mode);
+            h.st.bake.open = true;
+            h.steps(2);
+            h.st.frame_all();
+            if name.starts_with("romain") {
+                let t = h.st.camera.target;
+                let d = h.st.camera.dist;
+                h.cam(t, d, -2.4, 0.55);
+            }
+            let wait = |h: &mut Harness| {
+                for _ in 0..600 {
+                    h.step();
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                    let st = &h.st;
+                    if let Some((lv, _)) = &st.bake.lines {
+                        if st.bake.lines_vis.key == (st.view_version, *lv) {
+                            break;
+                        }
+                    }
+                }
+                h.steps(4);
+            };
+            wait(h);
+            h.shot(&format!("bake-diag-{name}-lignes"));
+            h.st.start_bake();
+            while h.st.bake.job.is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                h.step();
+            }
+            h.st.bake.diag.roles = true;
+            h.st.toast = None;
+            wait(h);
+            h.shot(&format!("bake-diag-{name}-roles"));
+        }
     }
     if want("pc-studio") {
         h.pc(part(), UiMode::Studio);

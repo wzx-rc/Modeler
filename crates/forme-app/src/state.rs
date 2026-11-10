@@ -255,6 +255,40 @@ pub struct BakeState {
     pub base_scene: Option<Scene>,
     /// Second pass running in the background.
     pub pass: Option<mpsc::Receiver<forme_core::bake::Baked>>,
+    /// Diagnostic layers of the Bake panel.
+    pub diag: BakeDiag,
+    /// Construction lines of the current scene (for its version), computed
+    /// in the background while the layer is on.
+    pub lines: Option<(u64, std::sync::Arc<forme_core::bake::lines::Lines>)>,
+    pub lines_job: Option<(u64, mpsc::Receiver<forme_core::bake::lines::Lines>)>,
+    /// Which line points are in front of the model, for (view, lines) keys.
+    pub lines_vis: LinesVis,
+}
+
+/// What the Bake panel draws over the model or the baked mesh.
+#[derive(Clone, Copy, Debug)]
+pub struct BakeDiag {
+    /// Construction lines read from the history (sharp edges, junctions).
+    pub lines: bool,
+    /// Fillet rails (edges of the fillet strips), orange.
+    pub rails: bool,
+    /// Baked faces coloured by role: fillet strips orange, fill paths cream.
+    pub roles: bool,
+}
+
+impl Default for BakeDiag {
+    fn default() -> Self {
+        BakeDiag { lines: true, rails: true, roles: false }
+    }
+}
+
+#[derive(Default)]
+pub struct LinesVis {
+    pub key: (u64, u64),
+    pub vis: Vec<Vec<bool>>,
+    pub job: Option<((u64, u64), mpsc::Receiver<Vec<Vec<bool>>>)>,
+    /// Last view version seen and when it changed.
+    seen: (u64, f64),
 }
 
 impl BakeState {
@@ -478,6 +512,10 @@ impl AppState {
                 base: None,
                 base_scene: None,
                 pass: None,
+                diag: BakeDiag::default(),
+                lines: None,
+                lines_job: None,
+                lines_vis: LinesVis::default(),
             },
             files_open: false,
             kit_open: false,
@@ -1825,6 +1863,78 @@ impl AppState {
         self.bake.pass = None;
     }
 
+    /// Construction lines for the diagnostic layers: computed in the
+    /// background for the current scene version, while the Bake panel shows
+    /// them; their visibility follows the view once it stops moving.
+    fn update_lines(&mut self) {
+        let want = self.bake.open && (self.bake.diag.lines || self.bake.diag.rails);
+        if !want {
+            return;
+        }
+        let v = self.scene_version;
+        if let Some((jv, rx)) = &self.bake.lines_job {
+            if let Ok(l) = rx.try_recv() {
+                self.bake.lines = Some((*jv, std::sync::Arc::new(l)));
+                self.bake.lines_job = None;
+            }
+        }
+        let fresh = self.bake.lines.as_ref().is_some_and(|(lv, _)| *lv == v);
+        let running = self.bake.lines_job.as_ref().is_some_and(|(jv, _)| *jv == v);
+        if !fresh && !running {
+            let scene = self.scene.clone();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(forme_core::bake::lines::construction_lines(&scene));
+            });
+            self.bake.lines_job = Some((v, rx));
+        }
+        // visibility, once the view holds still (computed off the UI thread)
+        let Some((lv, lines)) = self.bake.lines.clone() else { return };
+        let key = (self.view_version, lv);
+        let vis = &mut self.bake.lines_vis;
+        if let Some((k, rx)) = &vis.job {
+            if let Ok(r) = rx.try_recv() {
+                vis.key = *k;
+                vis.vis = r;
+                vis.job = None;
+            }
+        }
+        if vis.seen.0 != self.view_version {
+            vis.seen = (self.view_version, self.now);
+        }
+        let moving = vis.seen.1 > self.now - 0.12;
+        if vis.key == key || moving || vis.job.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        let prog = self.program().clone();
+        let view = self.view();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let r: Vec<Vec<bool>> = lines
+                .lines
+                .iter()
+                .map(|l| {
+                    l.pts
+                        .iter()
+                        .map(|p| {
+                            let p = p.as_vec3();
+                            let Some(s) = view.project(p) else { return false };
+                            let (ro, rd) = view.ray(s[0], s[1]);
+                            let tp = (p - ro).dot(rd);
+                            let eps = view.pixel_size_at(tp.abs()) * 4.0 + 1e-3;
+                            match prog.raycast(ro, rd, tp + eps) {
+                                Some(t) => t >= tp - eps,
+                                None => true,
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let _ = tx.send(r);
+        });
+        self.bake.lines_vis.job = Some((key, rx));
+    }
+
     /// Optional second pass on or off: runs it on the current bake in the
     /// background, or goes back to the bake without it.
     pub fn set_flat_pass(&mut self, on: bool) {
@@ -1892,6 +2002,7 @@ impl AppState {
     /// Called every frame.
     pub fn tick(&mut self, now: f64) {
         self.now = now;
+        self.update_lines();
         let mut finished = None;
         if let Some(j) = &self.bake.job {
             if let Ok(r) = j.rx.try_recv() {

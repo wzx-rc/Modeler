@@ -447,6 +447,10 @@ fn main() {
     if what == "piece" {
         piece();
     }
+    if what == "construction" {
+        construction();
+        return;
+    }
     if what == "decime" {
         decime();
     }
@@ -1513,6 +1517,51 @@ fn face_dev(b: &bake::Baked, full: &Field) -> (f64, f64) {
         }
     }
     (v.iter().cloned().fold(0.0, f64::max), v.iter().sum::<f64>() / v.len() as f64)
+}
+
+/// Romain's case: a cube with a cylinder carved at one corner, no fillet.
+pub fn coin(blend: f32) -> Scene {
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::new(20.0, 20.0, 20.0);
+    s.add(root, NodeSpec::shape("Cube", b).at(Vec3::new(0.0, 20.0, 0.0)));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(9.0, 22.0, 0.0);
+    s.add(root, NodeSpec::shape("Cylindre", c).at(Vec3::new(20.0, 20.0, 20.0)).mode(CombineMode::Carve).blend(blend));
+    s
+}
+
+/// Construction lines read from the history (bake::lines), over the part.
+fn construction() {
+    use glam::DVec3;
+    let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp".into());
+    let romain = Scene::from_json(include_str!("scenes/romain-coin.forme")).expect("scène de Romain");
+    let front = DVec3::new(0.8, 0.7, 1.0);
+    let cases = [
+        ("romain", romain, DVec3::new(39.5, 19.4, 51.5), 80.0, DVec3::new(-0.8, 0.7, -1.0)),
+        ("coin", coin(0.0), DVec3::new(0.0, 20.0, 0.0), 70.0, front),
+        ("coin-fillet", coin(1.5), DVec3::new(0.0, 20.0, 0.0), 70.0, front),
+        ("support", support(4), DVec3::new(0.0, 10.0, 0.0), 64.0, front),
+    ];
+    for (name, scene, target, ext, eye) in cases {
+        let l = bake::lines::construction_lines(&scene);
+        println!(
+            "{name} : {} lignes ({} d'arêtes, {} de jonctions, {} rails) en {:.0} ms",
+            l.lines.len(),
+            l.count(false),
+            l.count(true),
+            l.lines.iter().filter(|x| x.kind.is_rail()).count(),
+            l.seconds * 1000.0
+        );
+        for x in &l.lines {
+            println!("  {:?} {} · {} points · r {:.2}", x.kind, x.label, x.pts.len(), x.radius);
+        }
+        let part = bake::bake_blocking(&scene, bake::Quality::Standard);
+        let lines: Vec<(&Vec<DVec3>, [u8; 3], bool, bool)> =
+            l.lines.iter().map(|x| (&x.pts, if x.kind.is_rail() { [255, 140, 40] } else { [250, 215, 70] }, false, false)).collect();
+        render_lines(Some(&part), None, &lines, &format!("{out}/construction-{name}.png"), eye, target, ext, 1400, 1050);
+    }
 }
 
 fn decime() {

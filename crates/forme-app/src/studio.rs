@@ -54,7 +54,12 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
 
     menu_bar(ctx, st, Rect::from_min_size(screen.min, vec2(screen.width(), MENU_H)));
     toolbar(ctx, st, Rect::from_min_size(screen.min + vec2(0.0, MENU_H), vec2(screen.width(), TOOL_H)));
-    explorer(ctx, st, Rect::from_min_max(pos2(screen.min.x, top), pos2(screen.min.x + LEFT_W, bottom)));
+    let left = Rect::from_min_max(pos2(screen.min.x, top), pos2(screen.min.x + LEFT_W, bottom));
+    if st.bake.open {
+        bake_panel(ctx, st, left);
+    } else {
+        explorer(ctx, st, left);
+    }
     command_panel(ctx, st, Rect::from_min_max(pos2(screen.max.x - RIGHT_W, top), pos2(screen.max.x, screen.max.y - STATUS_H)));
     history_bar(ctx, st, Rect::from_min_max(pos2(screen.min.x, bottom), pos2(screen.max.x - RIGHT_W, screen.max.y - STATUS_H)));
     status_bar(ctx, st, Rect::from_min_max(pos2(screen.min.x, screen.max.y - STATUS_H), screen.max));
@@ -494,6 +499,30 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
 }
 
 // ---------------------------------------------------------- scene explorer
+
+/// The Bake panel in place of the scene explorer (left column), with its
+/// diagnostic layers; « Explorateur » goes back.
+fn bake_panel(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
+    dock(ctx, "studio-bake", rect, B1, |ui| {
+        ui.painter().line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, LINE));
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Bake").font(semibold(12.5)).color(T1));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(6.0);
+                if text_btn(ui, None, "Explorateur", false).clicked() {
+                    st.bake.open = false;
+                }
+            });
+        });
+        egui::ScrollArea::vertical().id_salt("studio-bake-scroll").auto_shrink([false, false]).show(ui, |ui| {
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                ui.set_width(rect.width() - 22.0);
+                ui::bake_body(ui, st, true);
+            });
+        });
+    });
+}
 
 fn explorer(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
     dock(ctx, "studio-explorer", rect, B1, |ui| {

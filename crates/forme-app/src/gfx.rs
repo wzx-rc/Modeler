@@ -257,12 +257,19 @@ impl FrameRenderer {
             self.uploaded = (st.scene_version, sel);
         }
 
-        if self.mesh_version != st.bake.version {
+        // diagnostic colours: the faces' role in the constructive bake
+        let roles = st.bake.diag.roles && st.bake.open && st.bake.result.as_ref().is_some_and(|b| b.stats.constructive);
+        let key = st.bake.version * 2 + roles as u64;
+        if self.mesh_version != key {
             if let Some(b) = &st.bake.result {
-                let verts = forme_render::mesh::mesh_vertices(b, &st.scene.materials);
+                let verts = if roles {
+                    forme_render::mesh::mesh_vertices_colored(b, &|f| crate::theme::bake_role_color(f.patch))
+                } else {
+                    forme_render::mesh::mesh_vertices(b, &st.scene.materials)
+                };
                 self.mesh.upload(device, queue, &verts);
             }
-            self.mesh_version = st.bake.version;
+            self.mesh_version = key;
         }
         let show_bake = st.bake.show && self.mesh.has_mesh();
         self.mesh.wire = st.bake.wire;
