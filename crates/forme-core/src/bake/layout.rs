@@ -737,6 +737,21 @@ impl Layout<'_> {
                         return FaceId { prim: me.prim, face: BLEND0 + i as u32 };
                     }
                 }
+                // on the junction fillet of an earlier shape (a box added
+                // later, through a cylinder's ring): that fillet
+                for (j, sj) in self.shapes.iter().enumerate() {
+                    if sj.k <= 0.0 || sj.step >= me.step {
+                        continue;
+                    }
+                    let Some(pf) = self.prev[j].as_ref() else { continue };
+                    let (dj, dp) = (sj.d(p), pf.dist(p));
+                    let eps = sj.k * 1e-4;
+                    if dj > eps && dp > eps && dj < sj.k && dp < sj.k {
+                        if let Some(id) = self.blends.iter().find(|b| b.shape == j).and_then(|b| self.blend_at(j, b.a, p)) {
+                            return id;
+                        }
+                    }
+                }
                 f
             }
             Cons::Later(j) => {
@@ -956,6 +971,28 @@ impl Layout<'_> {
                     self.split(e2, w);
                 }
             }
+        }
+    }
+
+    /// The chart of junction fillet `f` when it stands on face `on` (the
+    /// two labels of a corner where they meet tangent).
+    fn blend_rail(&self, f: FaceId, on: FaceId) -> Option<usize> {
+        if f.face < BLEND0 || self.blends.get((f.face - BLEND0) as usize)?.a != on {
+            return None;
+        }
+        self.charts.iter().position(|c| c.id == f && matches!(c.map, Map::Ring { .. } | Map::Blend { .. }))
+    }
+
+    /// Signed distance, on the face it stands on, to the outer rail of a
+    /// junction fillet's chart (around a cylinder, along a box's wall).
+    fn rail_fn(&self, c: usize, p: DVec3) -> f64 {
+        match self.charts[c].map {
+            Map::Ring { c, a, r, k, .. } => {
+                let d = p - c;
+                (d - a * d.dot(a)).length() - (r + k)
+            }
+            Map::Blend { o, nb, k, .. } => (p - o).dot(nb) - k,
+            _ => 0.0,
         }
     }
 
@@ -1732,6 +1769,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
     let mut lay = Layout { field: &field, shapes, prev, charts, nodes: vec![], edges: vec![], bnd: vec![], rays: vec![], inner: vec![], origins: vec![], node_tol: extent * 2e-6, walls: vec![], blends };
     let fd = extent * 1e-7;
 
+    let mut seamed: Vec<u32> = vec![];
     // a cylinder wall is cut open where it does not show: its seam
     // (θ = ±π in its chart) goes in the middle of the largest hidden gap.
     // Seen all around (a round hole), it is cut in two halves along its
@@ -1817,14 +1855,36 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
             continue;
         }
         let phi = -PI + (best.1 as f64 + best.0 as f64 * 0.5) * TAU / nth as f64 + PI;
-        lay.charts[ci].map = Map::Cyl { o, a, b: b * phi.cos() + c * phi.sin(), c: c * phi.cos() - b * phi.sin(), r };
+        let (wb, wc) = (b * phi.cos() + c * phi.sin(), c * phi.cos() - b * phi.sin());
+        lay.charts[ci].map = Map::Cyl { o, a, b: wb, c: wc, r };
         for x in rims {
             lay.charts[x].map = turned(lay.charts[x].map, phi);
         }
+        // the ring of its junction fillet, the same: one chart all around
+        // with the same seam (its half B is not used)
+        let prim = lay.charts[ci].id.prim;
+        for x in 0..lay.charts.len() {
+            let cx = &mut lay.charts[x];
+            let Map::Ring { c, a, r, rr, k, .. } = cx.map else { continue };
+            if cx.id.prim != prim {
+                continue;
+            }
+            if cx.side[2].face == CYL_SIDE {
+                cx.map = Map::Ring { c, a, b: wb, e: wc, r, rr, k };
+                cx.lo.x = -PI * rr;
+                cx.hi.x = PI * rr;
+                cx.side[1] = cx.id;
+                cx.side[3] = cx.id;
+            } else {
+                cx.hi = cx.lo;
+            }
+        }
+        seamed.push(prim);
     }
-    // a ring of junction fillet goes with the two halves of its wall
+    // a ring of junction fillet goes with the two halves of its wall, or
+    // its seam
     for sh in &lay.shapes {
-        if sh.k > 0.0 && sh.pr.kind == 1 && !lay.walls.iter().any(|w| w.0 == sh.prim) {
+        if sh.k > 0.0 && sh.pr.kind == 1 && !lay.walls.iter().any(|w| w.0 == sh.prim) && !seamed.contains(&sh.prim) {
             return Err("fillet de jonction : cylindre caché en partie, pas encore géré".into());
         }
     }
@@ -1888,7 +1948,24 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 let fb = |x: DVec2| lay.psi(ch, kb, gb, x);
                 // (one curve, the face across changes: no crossing to solve)
                 let same = ka == kb && !matches!(ka, Cons::Prev | Cons::Later(_));
-                let mut node = if same { None } else { solve_cross(&fa, &fb, (qa + qb) * 0.5, fd).filter(|x| x.distance((qa + qb) * 0.5) < grid * 3.0) };
+                // from a face to the junction fillet standing on it (seen on
+                // a later shape's face): the two meet tangent, the corner is
+                // on the fillet's rail
+                let rail = if ka == Cons::Prev && kb == Cons::Prev {
+                    [(la, lb, kb, gb), (lb, la, ka, ga)].into_iter().find_map(|(x, y, ky, gy)| lay.blend_rail(x, y).map(|r| (r, ky, gy)))
+                } else {
+                    None
+                };
+                let mut node = if same {
+                    None
+                } else if let Some((ri, kx, gx)) = rail {
+                    let fx = |x: DVec2| lay.psi(ch, kx, gx, x);
+                    let fr = |x: DVec2| lay.rail_fn(ri, ch.map.to3(x));
+                    let r = solve_cross(&fx, &fr, (qa + qb) * 0.5, fd);
+                    r.filter(|x| x.distance((qa + qb) * 0.5) < grid * 3.0)
+                } else {
+                    solve_cross(&fa, &fb, (qa + qb) * 0.5, fd).filter(|x| x.distance((qa + qb) * 0.5) < grid * 3.0)
+                };
                 if node.is_none() {
                     // tangent change: bisection on which curve is under the point
                     let (mut s0, mut s1) = (0.0, 1.0);
@@ -2060,12 +2137,12 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 // carried across the rim strip below)
                 let square = match (sm, lay.charts[ci].map) {
                     (Map::Cyl { a, .. }, Map::Plane { u, v, .. }) => lay.charts[other].strip.is_none() && a.dot(u.cross(v)).abs() > 0.999 && total.abs() > 0.6,
-                    (Map::Tor { a, .. }, Map::Plane { u, v, .. }) => a.dot(u.cross(v)).abs() > 0.999 && total.abs() > 0.6,
+                    (Map::Tor { a, .. } | Map::Ring { a, .. }, Map::Plane { u, v, .. }) => a.dot(u.cross(v)).abs() > 0.999 && total.abs() > 0.6,
                     _ => false,
                 };
                 let centre = match sm {
                     Map::Cyl { o, .. } => Some(o),
-                    Map::Tor { c, .. } => Some(c),
+                    Map::Tor { c, .. } | Map::Ring { c, .. } => Some(c),
                     _ => None,
                 };
                 if let (Some(o), true) = (centre, square) {
@@ -2103,7 +2180,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                             lay.split(cur, x);
                             cur = lay.edges.len() - 1;
                         }
-                        if matches!(sm, Map::Tor { .. }) {
+                        if matches!(sm, Map::Tor { .. } | Map::Ring { .. }) {
                             lay.carry_across(other, &xs);
                         }
                         continue;
@@ -2175,6 +2252,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
     // their wall are a floor, not a fixed count, since the arcs left between
     // the cuts no longer split the turn evenly
     let mut notched: Vec<u32> = vec![];
+    let mut even_segs: Vec<(usize, DVec3, DVec3)> = vec![];
     for ci in 0..nc {
         let Some((rad, _)) = lay.charts[ci].disc else { continue };
         if matches!(lay.charts[ci].map, Map::Rev { .. }) {
@@ -2360,6 +2438,10 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                             // the cut carries the side
                             ray(&mut lay, g, pts[0].1);
                             ray(&mut lay, pts[1].1, g2);
+                            // (short pieces of side beside the cut: evenly
+                            // spaced, as the arc across them)
+                            even_segs.push((ci, lay.nodes[g], lay.nodes[pts[0].1]));
+                            even_segs.push((ci, lay.nodes[pts[1].1], lay.nodes[g2]));
                         } else {
                             // lines from its ends square to the side
                             let feet: Vec<usize> = pts.iter().map(|&(t, _)| lay.node(map.to3(gq + side * t))).collect();
@@ -2472,7 +2554,27 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                     // middle, in the curved chart (a whole row on a strip)
                     let sm = lay.charts[other].map;
                     let (na, nb) = (lay.edges[e].a, lay.edges[e].b);
-                    let (qa, qb) = (sm.to2(lay.nodes[na]), sm.to2(lay.nodes[nb]));
+                    let (mut qa, mut qb) = (sm.to2(lay.nodes[na]), sm.to2(lay.nodes[nb]));
+                    // the rail of a cylinder's junction ring: an end on a
+                    // straight cut is taken where the cut's line meets the
+                    // wall itself, as on the cylinder's top, so that the
+                    // columns run straight down the wall and across the ring
+                    if let (Map::Ring { c, r, .. }, Map::Plane { .. }) = (sm, lay.charts[ci].map) {
+                        let map = lay.charts[ci].map;
+                        let c2 = map.to2(c);
+                        for (v, q) in [(na, &mut qa), (nb, &mut qb)] {
+                            let Some(d) = lay.straight_at(ci, e, v) else { continue };
+                            let p2 = map.to2(lay.nodes[v]) - c2;
+                            // |p2 + d s| = r, the root nearest to the end
+                            let (bq, cq) = (p2.dot(d), p2.length_squared() - r * r);
+                            let disc = bq * bq - cq;
+                            if disc < 0.0 {
+                                continue;
+                            }
+                            let s = [-bq - disc.sqrt(), -bq + disc.sqrt()].into_iter().min_by(|x, y| x.abs().total_cmp(&y.abs())).unwrap();
+                            q.x = sm.to2(map.to3(c2 + p2 + d * s)).x;
+                        }
+                    }
                     let mut mid = (qa + qb) * 0.5;
                     if lay.charts[other].strip.is_some() {
                         let row = lay.charts[other].row();
@@ -2495,7 +2597,9 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                     // ends square to the edge) has no square of its own, it
                     // is part of the next one's side
                     let (vs, ve) = if fwd { (na, nb) } else { (nb, na) };
-                    let hole = lay.charts[other].strip.is_none() && matches!(sm, Map::Cyl { .. });
+                    // (or the ring of a cylinder's junction fillet, on the face
+                    // it stands on: the same round foot, a strip's width out)
+                    let hole = (lay.charts[other].strip.is_none() && matches!(sm, Map::Cyl { .. })) || matches!(sm, Map::Ring { .. });
                     let square_to = |t: DVec2, v: usize| -> (DVec2, bool) {
                         match lay.straight_at(ci, e, v).filter(|_| hole) {
                             Some(d) if (-d).perp_dot(t).abs() > 0.17 || (-d).dot(t) < 0.0 => {
@@ -3539,6 +3643,20 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
             }
         }
     }
+    for e in 0..ne {
+        let ed = &lay.edges[e];
+        if !ed.alive || !ed.ray {
+            continue;
+        }
+        let on = |x: DVec3, a: DVec3, b: DVec3| {
+            let ab = b - a;
+            let t = ((x - a).dot(ab) / ab.length_squared().max(1e-30)).clamp(0.0, 1.0);
+            (a + ab * t).distance(x) < lay.node_tol * 10.0
+        };
+        if even_segs.iter().any(|&(c, a, b)| c == ed.charts[0] && on(lay.nodes[ed.a], a, b) && on(lay.nodes[ed.b], a, b)) {
+            even[e] = true;
+        }
+    }
     let sum = |side: &Vec<(usize, bool)>, count: &Vec<usize>| -> usize { side.iter().map(|x| count[x.0]).sum() };
     let mut it = 0;
     let mut settled = true;
@@ -3894,7 +4012,24 @@ fn inward(lay: &Layout, c: usize, n: usize) -> Option<DVec2> {
                 let (eb, fb) = lp[(i + 1) % k];
                 // exact tangents (the polyline drifts where an arc meets a
                 // line, and a loop square to it would drift across the face)
-                let t = (lay.tangent(ea, fa, c, true) + lay.tangent(eb, fb, c, false)).normalize_or_zero();
+                let (t1, t2) = (lay.tangent(ea, fa, c, true), lay.tangent(eb, fb, c, false));
+                let mut t = (t1 + t2).normalize_or_zero();
+                // a line running on smoothly into a curve (a face meeting a
+                // fillet tangent, seen in section on another face): the
+                // line's own direction, exact
+                if t1.dot(t2) > 0.95 {
+                    let straight = |e: usize| {
+                        let p = lay.pts2(e, c);
+                        let (pa, pb) = (p[0], p[p.len() - 1]);
+                        let d = (pb - pa).normalize_or_zero();
+                        d != DVec2::ZERO && p.iter().all(|&x| (x - pa).perp_dot(d).abs() < lay.node_tol * 10.0)
+                    };
+                    if straight(ea) && !straight(eb) {
+                        t = t1;
+                    } else if straight(eb) && !straight(ea) {
+                        t = t2;
+                    }
+                }
                 return (t != DVec2::ZERO).then(|| perp(t));
             }
         }

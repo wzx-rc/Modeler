@@ -262,7 +262,19 @@ fn families() -> Vec<Family> {
         let tag = if rim { "romain-cylindre-arrondi sans raccord" } else { "romain-cylindre-arrondi vif sans raccord" };
         cases.push(Case { cell: (col, 1), tag: tag.into(), scene: sc });
     }
-    out.push(Family { name: "romain", what: "tes scènes (la dernière : pas encore réglée ; en dessous, la dernière sans le raccord du cylindre)", cols: 5, rows: 2, map: false, cases });
+    // and with Cube 3 after the cylinder in the history: the blend stays at
+    // its foot, Cube 3 cuts it sharp
+    {
+        let mut sc = Scene::from_json(include_str!("scenes/romain-cylindre-arrondi.forme")).expect("romain-cylindre-arrondi");
+        let root = sc.root;
+        let c3 = sc.nodes.keys().copied().find(|&id| sc.node(id).is_some_and(|n| n.name == "Cube 3"));
+        if let (Some(c3), Some(NodeKind::Group { children, .. })) = (c3, sc.node_mut(root).map(|n| &mut n.kind)) {
+            children.retain(|&c| c != c3);
+            children.push(c3);
+        }
+        cases.push(Case { cell: (2, 1), tag: "romain-cylindre-arrondi, Cube 3 après le cylindre".into(), scene: sc });
+    }
+    out.push(Family { name: "romain", what: "tes scènes (la dernière : pas encore réglée ; en dessous, la dernière sans le raccord du cylindre, puis avec Cube 3 après le cylindre)", cols: 5, rows: 2, map: false, cases });
     out
 }
 

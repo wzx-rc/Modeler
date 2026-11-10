@@ -337,6 +337,16 @@ fn par_lignes() {
         }
         sc
     };
+    let c3_after = |mut sc: Scene| {
+        let root = sc.root;
+        let ids: Vec<NodeId> = sc.nodes.keys().copied().collect();
+        let c3 = ids.iter().copied().find(|&id| sc.node(id).is_some_and(|n| n.name == "Cube 3"));
+        if let (Some(c3), Some(NodeKind::Group { children, .. })) = (c3, sc.node_mut(root).map(|n| &mut n.kind)) {
+            children.retain(|&c| c != c3);
+            children.push(c3);
+        }
+        sc
+    };
     let cases = [
         ("arrondi", arrondi_var(true, true, true), t, 80.0, true, front),
         ("arrondi-seul", arrondi_var(true, false, false), t, 80.0, true, front),
@@ -345,6 +355,10 @@ fn par_lignes() {
         ("arrondi-vif", arrondi_var(false, true, true), t, 80.0, true, front),
         ("arrondi-vif-sans-raccord", arrondi_var(false, false, true), t, 80.0, true, front),
         ("arrondi-vif-sans-cube3", arrondi_var(false, true, false), t, 80.0, true, front),
+        // Cube 3 moved after the cylinder: the blend stays at the foot,
+        // Cube 3 cuts it sharp
+        ("arrondi-c3-apres", c3_after(arrondi_var(true, true, true)), t, 80.0, true, front),
+        ("arrondi-vif-c3-apres", c3_after(arrondi_var(false, true, true)), t, 80.0, true, front),
         ("bossage-c3z+1", cube3_at(0.0, 1.0), t, 80.0, true, front),
         ("bossage-c3z+2", cube3_at(0.0, 2.0), t, 80.0, true, front),
         ("bossage-c3x+1", cube3_at(1.0, 0.0), t, 80.0, true, front),
