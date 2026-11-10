@@ -54,6 +54,34 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     st.hover = ctx.input(|i| i.pointer.hover_pos()).map(p2);
     st.interacting = false;
 
+    // Maya navigation: Alt + left = orbit, Alt + middle = pan, Alt + right =
+    // zoom, whatever the tool (nothing is created or selected meanwhile)
+    let (alt, d, l, m, r) = ctx.input(|i| {
+        (
+            i.modifiers.alt,
+            i.pointer.delta(),
+            i.pointer.button_down(PointerButton::Primary),
+            i.pointer.button_down(PointerButton::Middle),
+            i.pointer.button_down(PointerButton::Secondary),
+        )
+    });
+    if alt && (resp.hovered() || resp.dragged() || l || m || r) && !st.marking.is_open() && st.placement.as_ref().map(|p| p.phase != PlacePhase::Base).unwrap_or(true) {
+        if (l || m || r) && d != egui::Vec2::ZERO {
+            if l {
+                st.camera.orbit(d.x, d.y);
+            } else if m {
+                st.camera.pan(d.x, d.y, rect.height());
+            } else {
+                st.camera.zoom(((d.x + d.y) * 0.004).exp());
+            }
+            st.view_changed();
+            st.interacting = true;
+        }
+        if l || m || r || resp.clicked() || resp.drag_stopped() {
+            return;
+        }
+    }
+
     // marking menu: right press, or left press held still (not on a handle)
     let on_handle = st.hover.map(|h| handle_at(st, pos2(h[0], h[1])).is_some()).unwrap_or(false);
     if crate::marking::input(ctx, st, rect, on_handle) {

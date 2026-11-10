@@ -399,10 +399,13 @@ fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                     small_label(ui, "Raccourcis");
                     for (k, what) in [
                         ("Ctrl+Z / Ctrl+Y", "annuler / rétablir"),
-                        ("Alt maintenu", "creuser (Carve)"),
+                        ("Alt + clic gauche", "orbite"),
+                        ("Alt + clic molette", "pan"),
+                        ("Alt + clic droit · molette", "zoom"),
+                        ("Clic droit · clic maintenu", "marking menu"),
+                        ("Q · R · C", "sélection · cube · cylindre"),
+                        ("Ctrl pendant la création", "inverse + / −"),
                         ("Ctrl + clic", "ajouter une arête"),
-                        ("Clic droit glissé", "orbite"),
-                        ("Molette · Maj + glisser", "zoom · pan"),
                         ("F", "cadrer la sélection"),
                         ("Suppr", "supprimer"),
                         ("Échap", "désélectionner"),
@@ -812,7 +815,7 @@ fn create_tab(ui: &mut Ui, st: &mut AppState) {
             "Glisser dans la vue : la base (le cube se trace coin à coin, le cylindre depuis le centre).",
             "Relâcher, puis monter ou descendre pour la hauteur ; clic pour valider.",
             "Clic simple : taille par défaut.",
-            "Alt maintenu : la forme creuse (Carve).",
+            "Vers le haut : Add (+), vers le bas : Carve (−) ; Ctrl inverse.",
         ] {
             ui.label(RichText::new(line).font(regular(12.0)).color(T2));
         }

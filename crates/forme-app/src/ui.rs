@@ -464,8 +464,9 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if k2 {
         st.set_pick_mode(PickMode::Edge);
     }
-    // Alt = keyboard version of the thumb button, Ctrl / Cmd of the CTRL button
-    st.alt_carve = alt;
+    // Alt is the Maya navigation (viewport.rs); Ctrl / Cmd = the CTRL button
+    let _ = alt;
+    st.alt_carve = false;
     st.key_ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
 }
 
@@ -756,7 +757,7 @@ fn mode_btn(ui: &mut Ui, m: CombineMode, on: bool) -> Response {
     paint_mode_glyph(p, r.center(), m, if on { c } else { TEXT_ICON }, 14.0);
     let tip = match m {
         CombineMode::Add => "Add : ajoute la forme",
-        CombineMode::Carve => "Carve : creuse (Alt maintenu)",
+        CombineMode::Carve => "Carve : creuse",
         CombineMode::Intersect => "Intersect : garde la partie commune",
         CombineMode::Groove => "Groove : rainure le long du contact",
         CombineMode::Tongue => "Tongue : languette le long du contact",
