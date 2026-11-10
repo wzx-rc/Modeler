@@ -264,7 +264,7 @@ pub(crate) fn toggle_row(ui: &mut Ui, label: &str, on: bool) -> bool {
     let mut clicked = false;
     ui.horizontal(|ui| {
         ui.set_height(44.0);
-        let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 56.0, 40.0), Sense::hover());
+        let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 52.0 - ui.spacing().item_spacing.x, 40.0), Sense::hover());
         ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(13.0), LABEL);
         let (r, resp) = ui.allocate_exact_size(vec2(52.0, 32.0), Sense::click());
         let p = ui.painter();
@@ -361,7 +361,9 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if dup {
         st.duplicate_selected();
     }
-    if esc && st.settings_open {
+    if esc && st.display_open {
+        st.display_open = false;
+    } else if esc && st.settings_open {
         st.settings_open = false;
     } else if esc {
         if !st.edge_sel.is_empty() {
@@ -419,6 +421,8 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             if icon_btn(ui, Icon::Redo, false, "Rétablir (tap à 3 doigts)", 44.0).clicked() {
                 st.redo();
             }
+            let r = icon_btn(ui, Icon::Light, st.display_open, "Affichage : lumière, ombres, anticrénelage", 44.0);
+            light_toggle(st, &r);
             if icon_btn(ui, Icon::Settings, st.settings_open, "Réglages (interface Atelier ou Studio)", 44.0).clicked() {
                 st.settings_open = !st.settings_open;
             }
@@ -1689,6 +1693,75 @@ pub(crate) fn files_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect)
 
 // ---------------------------------------------------------------- settings
 
+/// Light panel: viewport and display options, applied live and kept in
+/// settings.json. Floating under its button, the viewport stays usable.
+pub fn display_panel(ctx: &egui::Context, st: &mut AppState) {
+    if !st.display_open {
+        return;
+    }
+    let at = pos2(st.display_anchor[0], st.display_anchor[1] + 8.0);
+    let resp = egui::Area::new(Id::new("display-panel")).order(Order::Foreground).fade_in(false).pivot(Align2::RIGHT_TOP).fixed_pos(at).show(ctx, |ui| {
+        panel().inner_margin(Margin::same(16)).show(ui, |ui| {
+            ui.set_width(320.0);
+            ui.set_max_width(320.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Affichage").font(semibold(16.0)).color(TEXT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(egui::Label::new(egui::RichText::new("Réinitialiser").font(regular(12.0)).color(ACCENT_TEXT)).sense(Sense::click())).clicked() {
+                        st.settings.display = crate::settings::Display::default();
+                        st.save_settings();
+                    }
+                });
+            });
+            let d0 = st.settings.display;
+            let d = &mut st.settings.display;
+            section(ui, "Rendu");
+            if toggle_row(ui, "Ombres", d.shadows) {
+                d.shadows = !d.shadows;
+            }
+            if toggle_row(ui, "Occlusion ambiante", d.ao) {
+                d.ao = !d.ao;
+            }
+            ui.label(egui::RichText::new("Anticrénelage (image immobile)").font(regular(13.0)).color(LABEL));
+            let items = [(1u32, "Non", NEUTRAL_MODE), (4, "4×", ACCENT), (8, "8×", ACCENT), (16, "16×", ACCENT)];
+            if let Some(v) = segmented(ui, &items, d.aa, 34.0) {
+                d.aa = v;
+            }
+            section(ui, "Lumière");
+            slider_row(ui, "Orientation", &mut d.light_azimuth, -180.0..=180.0, 5.0, "°");
+            slider_row(ui, "Hauteur", &mut d.light_elevation, 5.0..=90.0, 5.0, "°");
+            slider_row(ui, "Intensité", &mut d.light_intensity, 0.0..=2.0, 0.05, "");
+            slider_row(ui, "Exposition", &mut d.exposure, 0.3..=2.5, 0.05, "");
+            section(ui, "Vue");
+            let grid = st.grid;
+            if toggle_row(ui, "Grille au sol", grid) {
+                st.grid = !st.grid;
+            }
+            if st.settings.display != d0 {
+                st.save_settings();
+            }
+        });
+    });
+    // a click outside (not on the light button) closes it
+    if ctx.input(|i| i.pointer.any_pressed()) {
+        let p = ctx.input(|i| i.pointer.interact_pos());
+        let button = Rect::from_center_size(pos2(st.display_anchor[0] - 22.0, st.display_anchor[1] - 22.0), vec2(48.0, 48.0));
+        if let Some(p) = p {
+            if !resp.response.rect.contains(p) && !button.contains(p) {
+                st.display_open = false;
+            }
+        }
+    }
+}
+
+/// Light button: opens the display panel under it.
+pub(crate) fn light_toggle(st: &mut AppState, resp: &Response) {
+    if resp.clicked() {
+        st.display_open = !st.display_open;
+        st.display_anchor = [resp.rect.right(), resp.rect.bottom()];
+    }
+}
+
 /// Settings: the interface (Atelier or Studio) and the advanced functions.
 /// Shown over both interfaces.
 pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
@@ -1735,7 +1808,17 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                 st.enforce_basics();
             }
             ui.label(
-                egui::RichText::new("Désactivé : Cube et Cylindre, Add, Carve et Intersect. Activé : sphère, capsule, tore, cône, prisme, tube, profil, kit, Groove, Tongue, répétitions.")
+                egui::RichText::new("Désactivé : Cube et Cylindre, Add (+) et Carve (−). Activé : Intersect, sphère, capsule, tore, cône, prisme, tube, profil, kit, Groove, Tongue, répétitions.")
+                    .font(regular(11.5))
+                    .color(TEXT2),
+            );
+            section(ui, "Création");
+            if toggle_row(ui, "AutoGrid : partir de la face sous le curseur", st.settings.autogrid) {
+                st.settings.autogrid = !st.settings.autogrid;
+                st.save_settings();
+            }
+            ui.label(
+                egui::RichText::new("Désactivé (comme 3ds Max) : la base se trace sur le plan du sol. Monte pour ajouter (+), descends pour creuser (−), Ctrl inverse pendant la création.")
                     .font(regular(11.5))
                     .color(TEXT2),
             );

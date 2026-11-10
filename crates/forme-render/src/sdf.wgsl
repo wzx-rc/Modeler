@@ -14,6 +14,8 @@ struct Globals {
     params: vec4<f32>,    // x max steps, y main program present, z shadows (0/1), w ao (0/1)
     mats: array<vec4<f32>, 16>,  // rgb, metal
     mats2: array<vec4<f32>, 16>, // roughness, -, -, -
+    light: vec4<f32>,     // xyz towards the key light (unit), w intensity
+    extra: vec4<f32>,     // xy sub-pixel jitter (anti-aliasing), z exposure
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -506,9 +508,16 @@ fn box_hit(ro: vec3<f32>, rd: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> vec2<f
     return vec2<f32>(a, b);
 }
 
-fn soft_shadow(ro: vec3<f32>, rd: vec3<f32>, tmax: f32) -> f32 {
+fn soft_shadow(ro: vec3<f32>, rd: vec3<f32>, tmax_in: f32) -> f32 {
+    // only the part of the ray inside the scene bounds can be shadowed: rays
+    // that miss them (most of the ground) cost nothing
+    let span = box_hit(ro, rd, g.scene_lo.xyz - vec3<f32>(2.0), g.scene_hi.xyz + vec3<f32>(2.0));
+    if (span.x >= span.y) {
+        return 1.0;
+    }
+    let tmax = min(tmax_in, span.y);
     var res = 1.0;
-    var t = 0.8;
+    var t = max(0.8, span.x);
     for (var i = 0; i < 28; i = i + 1) {
         let h = map(ro + rd * t).x;
         res = min(res, 10.0 * h / t);
@@ -553,7 +562,8 @@ fn shade(p: vec3<f32>, n: vec3<f32>, rd: vec3<f32>, mat: u32) -> vec3<f32> {
     let base = g.mats[mi].rgb;
     let metal = g.mats[mi].w;
     let rough = clamp(g.mats2[mi].x, 0.05, 1.0);
-    let key = normalize(vec3<f32>(-0.55, 0.85, 0.65));
+    let key = g.light.xyz;
+    let kint = g.light.w;
     let fill = normalize(vec3<f32>(0.8, 0.25, 0.35));
     let rim = normalize(vec3<f32>(0.3, 0.5, -0.85));
     var sh = 1.0;
@@ -568,13 +578,13 @@ fn shade(p: vec3<f32>, n: vec3<f32>, rd: vec3<f32>, mat: u32) -> vec3<f32> {
     let ndl = max(dot(n, key), 0.0);
     let ndv = max(dot(n, v), 0.0);
     let fres = pow(1.0 - ndv, 5.0);
-    let diffuse = ndl * sh * vec3<f32>(1.0, 0.97, 0.92) * 1.15
+    let diffuse = ndl * sh * vec3<f32>(1.0, 0.97, 0.92) * 1.15 * kint
         + max(dot(n, fill), 0.0) * vec3<f32>(0.55, 0.62, 0.75) * 0.35
         + (0.5 + 0.5 * n.y) * vec3<f32>(0.32, 0.34, 0.38) * 0.45 * ao
         + max(dot(n, rim), 0.0) * vec3<f32>(0.6, 0.65, 0.75) * 0.25;
     let shin = mix(160.0, 8.0, rough);
     let h = normalize(key + v);
-    let spec = pow(max(dot(n, h), 0.0), shin) * (shin + 2.0) / 8.0 * ndl * sh;
+    let spec = pow(max(dot(n, h), 0.0), shin) * (shin + 2.0) / 8.0 * ndl * sh * kint;
     let f0 = mix(vec3<f32>(0.04), base, metal);
     let fr = f0 + (vec3<f32>(1.0) - f0) * fres * (1.0 - rough * 0.7);
     let refl = reflect(rd, n);
@@ -587,7 +597,7 @@ fn shade(p: vec3<f32>, n: vec3<f32>, rd: vec3<f32>, mat: u32) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let frag = in.pos.xy;
+    let frag = in.pos.xy + g.extra.xy;
     let half_h = g.viewport.y * 0.5;
     let sx = (frag.x - g.viewport.z) / half_h;
     let sy = -(frag.y - g.viewport.w) / half_h;
@@ -648,7 +658,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let contact = clamp(d / 24.0, 0.0, 1.0);
             var shadow = 1.0;
             if (g.params.z > 0.5) {
-                shadow = soft_shadow(gp + vec3<f32>(0.0, 0.3, 0.0), normalize(vec3<f32>(-0.55, 0.85, 0.65)), 300.0);
+                shadow = soft_shadow(gp + vec3<f32>(0.0, 0.3, 0.0), g.light.xyz, 300.0);
             }
             gcol = gcol * mix(0.25, 1.0, contact) * mix(0.45, 1.0, shadow);
         }
@@ -665,7 +675,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let ds = run(u32(sel_start), p).x;
             let band = 0.25 + t_hit * px * 1.2;
             if (abs(ds) < band) {
-                let lum = 0.35 + 0.65 * max(dot(n, normalize(vec3<f32>(-0.55, 0.85, 0.65))), 0.0);
+                let lum = 0.35 + 0.65 * max(dot(n, g.light.xyz), 0.0);
                 col = mix(col, g.sel_color.rgb * lum, 0.42);
             }
         }
@@ -700,5 +710,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    return vec4<f32>(aces(col * 1.9), 1.0);
+    return vec4<f32>(aces(col * 1.9 * g.extra.z), 1.0);
 }

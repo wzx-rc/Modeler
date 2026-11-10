@@ -191,6 +191,38 @@ impl Harness {
         ms
     }
 
+    /// One interactive frame, timed until the GPU is done (no readback).
+    fn frame_timed(&mut self) -> f32 {
+        self.t += 1.0 / 60.0;
+        let raw = self.raw();
+        self.st.tick(self.t);
+        let st = &mut self.st;
+        let mut out = self.ctx.run_pass(raw, |ctx| forme_app::run(ctx, st));
+        let paint = self.ctx.tessellate(std::mem::take(&mut out.shapes), out.pixels_per_point);
+        let w = (self.size[0] * self.ppp) as u32;
+        let h = (self.size[1] * self.ppp) as u32;
+        let tex = self.gpu.target(w, h, FMT);
+        let view = tex.create_view(&Default::default());
+        let t0 = Instant::now();
+        self.fr.render(&self.gpu.device, &self.gpu.queue, &view, [w, h], self.ppp, &mut self.st, &paint, &mut out.textures_delta, false);
+        let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        t0.elapsed().as_secs_f32() * 1000.0
+    }
+
+    /// Orbits the camera for `n` frames at full resolution: (mean, worst) ms.
+    fn orbit_bench(&mut self, n: usize) -> (f32, f32) {
+        let _ = self.frame_timed();
+        let mut times = vec![];
+        for _ in 0..n {
+            self.st.camera.orbit(6.0, 0.0);
+            self.st.view_changed();
+            times.push(self.frame_timed());
+        }
+        let mean = times.iter().sum::<f32>() / n as f32;
+        let worst = times.iter().cloned().fold(0.0, f32::max);
+        (mean, worst)
+    }
+
     fn find(&self, name: &str) -> NodeId {
         self.st.scene.nodes.values().find(|n| n.name == name).map(|n| n.id).unwrap_or_else(|| panic!("node {name}"))
     }
@@ -454,7 +486,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-studio") {
+    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -1100,6 +1132,70 @@ fn support_axe() -> forme_core::Scene {
 /// The two desktop interfaces (1600 × 900) on the test part, and the settings.
 fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
     let part = || AppState::new(support_axe(), "Support d'axe");
+    if want("pc-creation") {
+        // 3ds Max style: base on the ground plane, then up = Add, down = Carve,
+        // Ctrl swaps; mouse hover drives the height after the release
+        h.pc(part(), UiMode::Atelier);
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.steps(2);
+        h.st.frame_all();
+        h.st.tool = Tool::Place(PrimKind::Box);
+        h.steps(4);
+        let a = h.screen_of(Vec3::new(-20.0, 0.0, 30.0));
+        let b = h.screen_of(Vec3::new(20.0, 0.0, 50.0));
+        h.press(a, true);
+        for i in 1..=12 {
+            h.move_to(a + (b - a) * (i as f32 / 12.0));
+        }
+        h.shot("pc-creation-1-base");
+        h.press(b, false);
+        h.step();
+        let report = |h: &Harness, what: &str| {
+            let p = h.st.placement.as_ref().unwrap();
+            eprintln!("{what} : hauteur {:.1} mm · {}", p.height, p.mode.label());
+        };
+        h.move_to(b + egui::vec2(0.0, -2.0));
+        for i in 1..=12 {
+            h.move_to(b + egui::vec2(0.0, -2.0 - 12.0 * i as f32));
+        }
+        report(h, "monte");
+        h.shot("pc-creation-2-monte-add");
+        h.st.ctrl_held = true;
+        h.steps(2);
+        report(h, "monte + Ctrl");
+        h.shot("pc-creation-3-ctrl-carve");
+        h.st.ctrl_held = false;
+        for i in 1..=24 {
+            h.move_to(b + egui::vec2(0.0, -146.0 + 12.0 * i as f32));
+        }
+        report(h, "descend");
+        h.shot("pc-creation-4-descend-carve");
+        h.st.display_open = true;
+        h.st.display_anchor = [520.0, 56.0];
+        h.steps(4);
+        h.shot("pc-affichage");
+        h.st.display_open = false;
+    }
+    if want("pc-perf") {
+        let scenes: [(&str, AppState); 2] = [("support", part()), ("grenade", AppState::default())];
+        for (name, scene) in scenes {
+            for mode in [UiMode::Atelier, UiMode::Studio] {
+                h.pc(AppState::new(scene.scene.clone(), name), mode);
+                h.ppp = 2.0;
+                h.steps(2);
+                h.st.frame_all();
+                for (sh, ao) in [(true, true), (false, true), (true, false), (false, false)] {
+                    h.st.settings.display.shadows = sh;
+                    h.st.settings.display.ao = ao;
+                    let (mean, worst) = h.orbit_bench(60);
+                    eprintln!("perf {name} {} ombres {sh} AO {ao} : {:.0}×{:.0} px · orbite {:.2} ms en moyenne, {:.2} ms au pire", mode.label(), h.size[0] * h.ppp, h.size[1] * h.ppp, mean, worst);
+                }
+                if mode == UiMode::Studio {
+                    break;
+                }
+            }
+        }
+    }
     if want("pc-atelier") {
         h.pc(part(), UiMode::Atelier);
         h.steps(2);

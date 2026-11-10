@@ -35,6 +35,7 @@ pub enum Icon {
     Cube,
     Frame,
     Settings,
+    Light,
     Fillet,
     Bake,
 }
@@ -224,6 +225,15 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(17.0, 13.0), (17.0, 17.0), (13.0, 17.0)]);
             pen.line(&[(7.0, 17.0), (3.0, 17.0), (3.0, 13.0)]);
             pen.circle(10.0, 10.0, 2.5);
+        }
+        Icon::Light => {
+            // a light bulb with its rays
+            pen.arc(10.0, 8.6, 4.2, 4.2, PI * 0.78, PI * 2.22);
+            pen.line(&[(7.4, 11.9), (7.9, 14.2), (12.1, 14.2), (12.6, 11.9)]);
+            pen.line(&[(8.2, 16.3), (11.8, 16.3)]);
+            pen.line(&[(10.0, 1.4), (10.0, 2.6)]);
+            pen.line(&[(3.4, 4.0), (4.3, 4.9)]);
+            pen.line(&[(16.6, 4.0), (15.7, 4.9)]);
         }
         Icon::Settings => {
             pen.circle(10.0, 10.0, 2.6);

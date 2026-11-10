@@ -22,6 +22,10 @@ pub struct Globals {
     pub params: [f32; 4],
     pub mats: [[f32; 4]; 16],
     pub mats2: [[f32; 4]; 16],
+    /// xyz towards the key light, w its intensity.
+    pub light: [f32; 4],
+    /// xy sub-pixel jitter (anti-aliasing), z exposure, w unused.
+    pub extra: [f32; 4],
 }
 
 /// Camera and framing for one frame. Sizes in physical pixels.
@@ -97,6 +101,12 @@ pub struct Settings {
     pub ghost_color: [f32; 3],
     /// Background and ground only (another pass draws the content).
     pub hide_scene: bool,
+    /// Towards the key light (normalised by the renderer).
+    pub light_dir: [f32; 3],
+    pub light_intensity: f32,
+    pub exposure: f32,
+    /// Sub-pixel offset of the rays (accumulated anti-aliasing).
+    pub jitter: [f32; 2],
 }
 
 impl Default for Settings {
@@ -109,12 +119,18 @@ impl Default for Settings {
             sel_color: [0.24, 0.55, 1.0],
             ghost_color: [1.0, 0.45, 0.12],
             hide_scene: false,
+            light_dir: [-0.55, 0.85, 0.65],
+            light_intensity: 1.0,
+            exposure: 1.0,
+            jitter: [0.0, 0.0],
         }
     }
 }
 
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
+    /// Same pass, blended with a constant weight: accumulates jittered samples.
+    accumulate: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     globals: wgpu::Buffer,
     code: wgpu::Buffer,
@@ -165,31 +181,37 @@ impl Renderer {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("forme-raymarch"),
-            layout: Some(&pl),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let make = |label: &str, blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = make("forme-raymarch", None);
+        // dst = src * w + dst * (1 - w), w set per draw (blend constant)
+        let mix = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Constant,
+            dst_factor: wgpu::BlendFactor::OneMinusConstant,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let accumulate = make("forme-accumulate", Some(wgpu::BlendState { color: mix, alpha: mix }));
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("forme-globals"),
             size: std::mem::size_of::<Globals>() as u64,
@@ -203,6 +225,7 @@ impl Renderer {
         let bind_group = Self::make_bind_group(device, &layout, &globals, &code, &aux);
         Renderer {
             pipeline,
+            accumulate,
             layout,
             globals,
             code,
@@ -331,12 +354,26 @@ impl Renderer {
             ],
             mats: self.mats,
             mats2: self.mats2,
+            light: {
+                let l = Vec3::from(settings.light_dir).normalize_or(Vec3::new(-0.55, 0.85, 0.65).normalize());
+                [l.x, l.y, l.z, settings.light_intensity]
+            },
+            extra: [settings.jitter[0], settings.jitter[1], settings.exposure, 0.0],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Blends this pass over the target with weight `w` (sample k of an
+    /// accumulation uses w = 1 / (k + 1)).
+    pub fn draw_blend(&self, pass: &mut wgpu::RenderPass<'_>, w: f32) {
+        pass.set_pipeline(&self.accumulate);
+        pass.set_blend_constant(wgpu::Color { r: w as f64, g: w as f64, b: w as f64, a: w as f64 });
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.draw(0..3, 0..1);
     }

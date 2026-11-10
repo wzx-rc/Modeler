@@ -35,5 +35,6 @@ pub fn run(ctx: &egui::Context, st: &mut AppState) {
         settings::UiMode::Atelier => ui::show(ctx, st),
         settings::UiMode::Studio => studio::show(ctx, st),
     }
+    ui::display_panel(ctx, st);
     ui::settings_dialog(ctx, st);
 }

@@ -28,6 +28,21 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 }
 "#;
 
+/// Scene images are kept in half floats: jittered samples accumulate
+/// without banding, and the blit converts to the screen format.
+const SCENE_FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// Radical inverse in base `b` (Halton sequence), in [0, 1).
+fn halton(mut i: u32, b: u32) -> f32 {
+    let (mut f, mut r) = (1.0f32, 0.0f32);
+    while i > 0 {
+        f /= b as f32;
+        r += f * (i % b) as f32;
+        i /= b;
+    }
+    r
+}
+
 struct Offscreen {
     view: wgpu::TextureView,
     bind: wgpu::BindGroup,
@@ -43,6 +58,8 @@ struct StateKey {
     grid: bool,
     cam: [u32; 6],
     bake: (bool, u64, bool),
+    /// Display settings (light panel): shadows, AO, light, exposure.
+    display: [u32; 6],
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -64,6 +81,7 @@ pub struct FrameRenderer {
     /// Quick image (while moving, and as a preview) and full-quality image.
     low: Option<Offscreen>,
     high: Option<Offscreen>,
+    #[allow(dead_code)]
     format: wgpu::TextureFormat,
     uploaded: (u64, Option<NodeId>),
     key_low: Option<RenderKey>,
@@ -92,6 +110,14 @@ pub struct FrameRenderer {
     last_state: Option<StateKey>,
     last_change: Option<std::time::Instant>,
     pub renders: u64,
+    /// Desktop: one full-resolution image with the same shading while moving
+    /// (no quick low-res image, no band refinement), then jittered samples
+    /// accumulated while still (anti-aliasing). Off on iPad (pixel budgets).
+    pub stable: bool,
+    /// Samples accumulated in the current image, and how many to reach
+    /// (stable mode).
+    accum: u32,
+    accum_target: u32,
 }
 
 impl FrameRenderer {
@@ -149,8 +175,8 @@ impl FrameRenderer {
             ..Default::default()
         });
         FrameRenderer {
-            scene: Renderer::new(device, format),
-            mesh: forme_render::mesh::MeshRenderer::new(device, format),
+            scene: Renderer::new(device, SCENE_FMT),
+            mesh: forme_render::mesh::MeshRenderer::new(device, SCENE_FMT),
             mesh_version: 0,
             egui: egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions::default()),
             blit,
@@ -178,6 +204,9 @@ impl FrameRenderer {
             last_state: None,
             last_change: None,
             renders: 0,
+            stable: !cfg!(target_os = "ios"),
+            accum: 0,
+            accum_target: 1,
         }
     }
 
@@ -188,7 +217,7 @@ impl FrameRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: self.format,
+            format: SCENE_FMT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -248,6 +277,17 @@ impl FrameRenderer {
             grid: st.grid,
             cam: [cam.target.x.to_bits(), cam.target.y.to_bits(), cam.yaw.to_bits(), cam.pitch.to_bits(), cam.dist.to_bits(), cam.ortho as u32],
             bake: (show_bake, self.mesh_version, st.bake.wire),
+            display: {
+                let d = st.settings.display;
+                [
+                    d.shadows as u32 | (d.ao as u32) << 1,
+                    d.light_azimuth.to_bits(),
+                    d.light_elevation.to_bits(),
+                    d.light_intensity.to_bits(),
+                    d.exposure.to_bits(),
+                    0,
+                ]
+            },
         };
         if self.last_state != Some(state) {
             self.last_state = Some(state);
@@ -287,7 +327,12 @@ impl FrameRenderer {
 
         // what to draw this frame: (full quality?, rows from, rows to)
         let mut job: Option<(bool, u32, u32)> = None;
-        if force_full {
+        if self.stable {
+            // heavy scenes only: if frames get slow while moving, fewer pixels
+            // (same shading); back to full resolution as soon as it stops
+            let size = if moving && !force_full && self.adapt < 0.999 { dims(full_scale * self.adapt.max(0.5)) } else { high_size };
+            self.render_stable(device, queue, size_px, ppp, st, size, state, moving, force_full, show_bake);
+        } else if force_full {
             self.key_high = Some(RenderKey { state, size: high_size, full: true });
             if self.high.as_ref().map(|o| o.size) != Some(high_size) {
                 self.high = Some(self.make_offscreen(device, high_size));
@@ -344,14 +389,12 @@ impl FrameRenderer {
                 principal: [pv.principal[0] * k, pv.principal[1] * k],
             };
             if self.uniforms != Some(key) {
-                let mut settings = self.settings;
-                settings.grid = st.grid;
-                settings.shadows = full && self.settings.shadows;
-                settings.ao = full && self.settings.ao;
+                let mut settings = self.scene_settings(st, show_bake, [0.0, 0.0]);
+                settings.shadows &= full;
+                settings.ao &= full;
                 if !full {
                     settings.max_steps = 110;
                 }
-                settings.hide_scene = show_bake;
                 self.scene.update_view(queue, &view, &settings);
                 self.uniforms = Some(key);
             }
@@ -428,6 +471,109 @@ impl FrameRenderer {
         textures.clear();
     }
 
+    /// Renderer settings from the app state and the light panel.
+    fn scene_settings(&self, st: &AppState, show_bake: bool, jitter: [f32; 2]) -> Settings {
+        let d = st.settings.display;
+        let mut s = self.settings;
+        s.grid = st.grid;
+        s.shadows = self.settings.shadows && d.shadows;
+        s.ao = self.settings.ao && d.ao;
+        s.hide_scene = show_bake;
+        s.light_dir = d.light_dir();
+        s.light_intensity = d.light_intensity;
+        s.exposure = d.exposure;
+        s.jitter = jitter;
+        s
+    }
+
+    /// View for an image of `size` pixels shown over a `size_px` target.
+    fn image_view(st: &AppState, size: [u32; 2], size_px: [u32; 2], ppp: f32) -> View {
+        let pv = st.view();
+        let k = (size[0] as f32) / (size_px[0] as f32 / ppp);
+        View {
+            eye: pv.eye,
+            target: pv.target,
+            fov_y: pv.fov_y,
+            size: [size[0] as f32, size[1] as f32],
+            principal: [pv.principal[0] * k, pv.principal[1] * k],
+        }
+    }
+
+    /// Stable mode: a new image is rendered at full resolution with the full
+    /// shading as soon as anything changes; once still, jittered samples are
+    /// blended into it (sample k with weight 1 / (k + 1)) up to the
+    /// anti-aliasing count of the light panel.
+    #[allow(clippy::too_many_arguments)]
+    fn render_stable(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        size_px: [u32; 2],
+        ppp: f32,
+        st: &AppState,
+        size: [u32; 2],
+        state: StateKey,
+        moving: bool,
+        force_full: bool,
+        show_bake: bool,
+    ) {
+        let key = RenderKey { state, size, full: true };
+        let target = if show_bake { 1 } else { st.settings.display.aa.clamp(1, 64) };
+        self.accum_target = target;
+        let fresh = self.key_low != Some(key);
+        if fresh {
+            self.accum = 0;
+        }
+        if self.low.as_ref().map(|o| o.size) != Some(size) {
+            self.low = Some(self.make_offscreen(device, size));
+        }
+        self.show_high = false;
+        let n = if force_full {
+            target.saturating_sub(self.accum)
+        } else if self.accum < target && (fresh || !moving) {
+            1
+        } else {
+            0
+        };
+        let view = Self::image_view(st, size, size_px, ppp);
+        for _ in 0..n {
+            let i = self.accum;
+            let jitter = if i == 0 { [0.0, 0.0] } else { [halton(i, 2) - 0.5, halton(i, 3) - 0.5] };
+            let settings = self.scene_settings(st, show_bake, jitter);
+            self.scene.update_view(queue, &view, &settings);
+            let off = self.low.as_ref().unwrap();
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scene-sample") });
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("scene"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &off.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: if i == 0 { wgpu::LoadOp::Clear(wgpu::Color::BLACK) } else { wgpu::LoadOp::Load },
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                if i == 0 {
+                    self.scene.draw(&mut pass);
+                } else {
+                    self.scene.draw_blend(&mut pass, 1.0 / (i as f32 + 1.0));
+                }
+            }
+            if i == 0 && show_bake {
+                self.mesh.draw(device, queue, &mut enc, &off.view, size, &view);
+            }
+            queue.submit([enc.finish()]);
+            self.accum += 1;
+            self.renders += 1;
+        }
+        self.key_low = Some(key);
+        self.uniforms = None;
+    }
+
     /// Uploads egui texture changes without drawing (headless intermediate frames).
     pub fn apply_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, textures: &mut egui::TexturesDelta) {
         for (id, deltas) in &textures.set {
@@ -443,6 +589,20 @@ impl FrameRenderer {
 
     /// True while the full-quality image is still being refined.
     pub fn needs_refine(&self) -> bool {
-        !self.show_high
+        if self.stable {
+            self.accum < self.accum_target
+        } else {
+            !self.show_high
+        }
+    }
+
+    /// Smoothed time between frames while the image moves (ms).
+    pub fn motion_frame_ms(&self) -> f32 {
+        self.frame_ms
+    }
+
+    /// Samples accumulated in the image shown (stable mode).
+    pub fn samples(&self) -> u32 {
+        self.accum
     }
 }

@@ -40,13 +40,46 @@ impl UiMode {
 pub struct Settings {
     pub ui_mode: UiMode,
     /// Every primitive and mode (sphere, capsule, Groove, profile, kit…).
-    /// Off: Cube and Cylinder, Add / Carve / Intersect only.
+    /// Off: Cube and Cylinder, Add (+) / Carve (-) only.
     pub advanced: bool,
+    /// Creation starts on the face under the pointer instead of the ground
+    /// plane (3ds Max AutoGrid).
+    pub autogrid: bool,
+    /// Viewport and display options (light panel).
+    pub display: Display,
 }
 
+/// Viewport look, set in the light panel next to Réglages.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Display {
+    pub shadows: bool,
+    pub ao: bool,
+    /// Samples accumulated when the image is still (1 = off).
+    pub aa: u32,
+    /// Key light: azimuth and elevation (degrees), intensity.
+    pub light_azimuth: f32,
+    pub light_elevation: f32,
+    pub light_intensity: f32,
+    pub exposure: f32,
+}
+
+impl Default for Display {
+    fn default() -> Self {
+        Display { shadows: true, ao: true, aa: 16, light_azimuth: -40.0, light_elevation: 45.0, light_intensity: 1.0, exposure: 1.0 }
+    }
+}
+
+impl Display {
+    /// Unit vector towards the key light.
+    pub fn light_dir(&self) -> [f32; 3] {
+        let (az, el) = (self.light_azimuth.to_radians(), self.light_elevation.to_radians());
+        [el.cos() * az.sin(), el.sin(), el.cos() * az.cos()]
+    }
+}
 impl Default for Settings {
     fn default() -> Self {
-        Settings { ui_mode: UiMode::Atelier, advanced: false }
+        Settings { ui_mode: UiMode::Atelier, advanced: false, autogrid: false, display: Display::default() }
     }
 }
 
@@ -83,7 +116,7 @@ impl Settings {
     pub fn modes(&self) -> Vec<CombineMode> {
         CombineMode::ALL
             .into_iter()
-            .filter(|m| self.advanced || matches!(m, CombineMode::Add | CombineMode::Carve | CombineMode::Intersect))
+            .filter(|m| self.advanced || matches!(m, CombineMode::Add | CombineMode::Carve))
             .collect()
     }
 }

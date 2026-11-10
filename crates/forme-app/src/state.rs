@@ -68,6 +68,10 @@ pub struct Placement {
     /// Centre of the base relative to where the drag started (a box is drawn
     /// corner to corner, like in 3ds Max; round shapes from their centre).
     pub offset: Vec3,
+    /// Mode chosen before the drag (Add, or Carve with the Carve button / Alt).
+    /// For Add / Carve the sign of the height decides: up = +, down = −, and
+    /// Ctrl swaps them while creating.
+    pub base_mode: CombineMode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,6 +285,9 @@ pub struct AppState {
     /// Preferences (interface, advanced functions), saved in settings.json.
     pub settings: Settings,
     pub settings_open: bool,
+    /// Light panel (viewport and display), anchored under its button.
+    pub display_open: bool,
+    pub display_anchor: [f32; 2],
     pub scene_version: u64,
     pub view_version: u64,
     pub interacting: bool,
@@ -420,6 +427,8 @@ impl AppState {
             panel_visible: true,
             settings: Settings::default(),
             settings_open: false,
+            display_open: false,
+            display_anchor: [1180.0, 76.0],
             // unique per document instance: renderer caches never mistake two documents
             scene_version: new_version_base() + 1,
             view_version: new_version_base() + 1,
@@ -878,7 +887,10 @@ impl AppState {
         self.commit_placement();
         let (ro, rd) = self.ray(pos);
         let mut snapped = None;
-        let (mut base, normal0, on_surface) = match self.hit(pos) {
+        // like 3ds Max: the base is drawn on the ground plane (home grid);
+        // AutoGrid (settings) starts on the face under the pointer instead
+        let surface = if self.settings.autogrid { self.hit(pos) } else { None };
+        let (mut base, normal0, on_surface) = match surface {
             Some((p, n)) => (p, n, true),
             None => {
                 // ground plane, else a plane through the target facing the camera
@@ -928,7 +940,8 @@ impl AppState {
             snapped = Some("grille");
         }
         let rot = Quat::from_rotation_arc(Vec3::Y, normal.normalize());
-        let mode = self.effective_mode();
+        let base_mode = self.effective_mode();
+        let mode = self.resolve_place_mode(base_mode, 1.0);
         let parent = self.insertion_parent();
         let count = self.scene.nodes.values().filter(|n| n.shape().map(|s| s.kind == kind).unwrap_or(false)).count() + 1;
         let mut shape = Shape::new(kind);
@@ -950,23 +963,83 @@ impl AppState {
             radius: px * 2.0,
             hx: px * 2.0,
             hz: px * 2.0,
-            height: px * 4.0,
+            // a flat plate while the base is drawn, extruded afterwards
+            height: if kind == PrimKind::Sphere { px * 4.0 } else { 0.0 },
             phase: PlacePhase::Base,
             mode,
             snapped,
             started_on_surface: on_surface,
             anchor: None,
             offset: Vec3::ZERO,
+            base_mode,
         });
         self.selection = Some(id);
         self.apply_placement();
         self.changed();
     }
 
+    /// Add / Carve from the sign of the height (up = +, down = −), swapped by
+    /// Ctrl while creating, and by the Carve button / Alt held at the start.
+    /// Other modes (Intersect, Groove, Tongue) stay as chosen.
+    pub fn resolve_place_mode(&self, base_mode: CombineMode, height: f32) -> CombineMode {
+        match base_mode {
+            CombineMode::Add | CombineMode::Carve => {
+                let inverted = (base_mode == CombineMode::Carve) != self.multi();
+                if (height >= 0.0) != inverted {
+                    CombineMode::Add
+                } else {
+                    CombineMode::Carve
+                }
+            }
+            m => m,
+        }
+    }
+
+    /// Re-applies the placement when Ctrl changes the mode without moving.
+    pub fn refresh_placement_mode(&mut self) {
+        let Some(p) = &self.placement else { return };
+        if self.resolve_place_mode(p.base_mode, p.height) != p.mode {
+            self.apply_placement();
+        }
+    }
+
+    /// Height under the pointer, measured along the base normal (the vertical
+    /// line through the base, like 3ds Max). None when looking along it.
+    fn axis_height(&self, base: Vec3, normal: Vec3, pos: [f32; 2]) -> Option<f32> {
+        let (ro, rd) = self.ray(pos);
+        let b = rd.dot(normal);
+        let den = 1.0 - b * b;
+        if den < 0.06 {
+            return None;
+        }
+        let w = ro - base;
+        Some((w.dot(normal) - b * w.dot(rd)) / den)
+    }
+
+    /// Height gesture from its anchor: along the axis when possible, else
+    /// from the vertical screen drag.
+    fn height_from(&self, p: &Placement, pos: [f32; 2]) -> f32 {
+        let (a, h0) = p.anchor.unwrap_or((pos, p.height));
+        let h = match (self.axis_height(p.base, p.normal, a), self.axis_height(p.base, p.normal, pos)) {
+            (Some(ha), Some(hp)) => h0 + (hp - ha),
+            _ => {
+                let px = self.view().pixel_size_at((p.base - self.camera.eye()).length());
+                h0 + (a[1] - pos[1]) * px
+            }
+        };
+        snap_to(h, 0.5, self.snap)
+    }
+
     fn apply_placement(&mut self) {
-        let Some(p) = self.placement.clone() else { return };
+        let Some(mut p) = self.placement.clone() else { return };
+        p.mode = self.resolve_place_mode(p.base_mode, p.height);
+        if let Some(n) = self.scene.node_mut(p.node) {
+            n.combine.mode = p.mode;
+        }
+        self.placement = Some(p.clone());
+        let up = if p.height >= 0.0 { 1.0 } else { -1.0 };
         let r = p.radius.max(0.2);
-        let hh = (p.height * 0.5).max(0.2);
+        let hh = (p.height.abs() * 0.5).max(0.2);
         let size = match p.kind {
             PrimKind::Box => Vec3::new(p.hx.max(0.2), hh, p.hz.max(0.2)),
             PrimKind::Sphere => Vec3::splat(r),
@@ -982,12 +1055,13 @@ impl AppState {
             PrimKind::Torus => size.z * 0.5,
             _ => hh,
         };
-        let embed = (along * 0.15).min(0.6);
+        // the shape extrudes from the base plane on the side of the height
+        let n = p.normal * up;
         let center = p.offset + match p.mode {
-            // grows outwards, slightly embedded so it fuses
-            CombineMode::Add => p.base + p.normal * (along - embed),
-            // cutters go into the matter, top slightly proud of the surface
-            CombineMode::Carve | CombineMode::Intersect => p.base - p.normal * (along - 0.4),
+            // on a face, slightly embedded so it fuses
+            CombineMode::Add => p.base + n * (along - if p.started_on_surface { (along * 0.15).min(0.6) } else { 0.0 }),
+            // cutters start slightly before the plane so the cut is clean
+            CombineMode::Carve | CombineMode::Intersect => p.base + n * (along - 0.4),
             // line operators work where their surface crosses the matter
             CombineMode::Groove | CombineMode::Tongue => p.base,
         };
@@ -1026,20 +1100,16 @@ impl AppState {
                     p.hz = snap_to(qz.abs() * 0.5, 0.5, self.snap).max(0.5);
                     p.offset = tx * (p.hx * qx.signum()) + tz * (p.hz * qz.signum());
                     p.radius = p.hx.max(p.hz);
-                    p.height = p.hx.min(p.hz).max(1.0);
-                } else {
-                    p.height = (p.radius * 1.0).max(1.0);
                 }
-                if p.kind == PrimKind::Torus {
-                    p.height = p.radius * 0.4;
+                // the base stays a flat plate until the height gesture
+                match p.kind {
+                    PrimKind::Torus => p.height = p.radius * 0.4,
+                    PrimKind::Sphere => p.height = p.radius,
+                    _ => p.height = 0.0,
                 }
             }
             PlacePhase::Height => {
-                // vertical screen drag, one pixel = one pixel of surface at the base
-                let (a, h0) = p.anchor.unwrap_or((pos, p.height));
-                let px = self.view().pixel_size_at((p.base - ro).length());
-                let h = h0 + (a[1] - pos[1]) * px;
-                p.height = snap_to(h.max(0.5), 0.5, self.snap).max(0.5);
+                p.height = self.height_from(&p, pos);
                 let _ = rd;
             }
             PlacePhase::AwaitHeight => {}
@@ -1095,16 +1165,12 @@ impl AppState {
         if p.phase != PlacePhase::AwaitHeight {
             return;
         }
-        let (a, h0) = match p.anchor {
-            Some(a) => a,
-            None => {
-                p.anchor = Some((pos, p.height));
-                self.placement = Some(p);
-                return;
-            }
-        };
-        let px = self.view().pixel_size_at((p.base - self.camera.eye()).length());
-        let h = snap_to((h0 + (a[1] - pos[1]) * px).max(0.5), 0.5, self.snap).max(0.5);
+        if p.anchor.is_none() {
+            p.anchor = Some((pos, p.height));
+            self.placement = Some(p);
+            return;
+        }
+        let h = self.height_from(&p, pos);
         if (h - p.height).abs() > 1e-4 {
             p.height = h;
             self.placement = Some(p);
@@ -1806,9 +1872,9 @@ impl AppState {
         }
         if let Some(p) = &self.placement {
             return match p.phase {
-                PlacePhase::Base => format!("{} · {} — étire la base", p.kind.label(), p.mode.label()),
-                PlacePhase::AwaitHeight if self.pointer_kind == PointerKind::Finger => format!("{} · {} — glisse pour la hauteur, tap pour valider", p.kind.label(), p.mode.label()),
-                PlacePhase::AwaitHeight => format!("{} · {} — monte ou descends pour la hauteur, {} pour valider", p.kind.label(), p.mode.label(), tap_word()),
+                PlacePhase::Base => format!("{} — trace la base au sol, relâche, puis monte (+ Add) ou descends (− Carve) · Ctrl inverse", p.kind.label()),
+                PlacePhase::AwaitHeight if self.pointer_kind == PointerKind::Finger => format!("{} · {} — glisse : vers le haut +, vers le bas −, tap pour valider", p.kind.label(), p.mode.label()),
+                PlacePhase::AwaitHeight => format!("{} · {} — monte (+) ou descends (−), Ctrl inverse, {} pour valider", p.kind.label(), p.mode.label(), tap_word()),
                 PlacePhase::Height => format!("{} · {} — relâche pour valider", p.kind.label(), p.mode.label()),
             };
         }

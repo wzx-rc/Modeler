@@ -480,6 +480,8 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                 if text_btn(ui, Some(Icon::Export), "Exporter", false).clicked() {
                     st.export_open = true;
                 }
+                let r = tool_btn(ui, Icon::Light, st.display_open, "Affichage : lumière, ombres, anticrénelage");
+                ui::light_toggle(st, &r);
                 if tool_btn(ui, Icon::Settings, st.settings_open, "Réglages").clicked() {
                     st.settings_open = true;
                 }

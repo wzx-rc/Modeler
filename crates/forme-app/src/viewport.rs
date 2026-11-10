@@ -93,6 +93,8 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
 
     let finger = st.pointer_kind == PointerKind::Finger;
     let shift = ctx.input(|i| i.modifiers.shift);
+    // Ctrl swaps + and − while creating, even without moving
+    st.refresh_placement_mode();
 
     // like 3ds Max: once the base is down, the height follows the Pencil
     // hover (or the mouse) until the next tap
@@ -386,8 +388,8 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                     _ => ("Rayon", format!("{} mm", fmt_mm(pl.radius))),
                 },
                 _ => (
-                    if pl.mode == CombineMode::Add { "Hauteur" } else { "Profondeur" },
-                    format!("{} mm", fmt_mm(if pl.kind == PrimKind::Torus { pl.height * 0.5 } else { pl.height })),
+                    if pl.height >= 0.0 { "Hauteur" } else { "Profondeur" },
+                    format!("{}{} mm", if pl.mode == CombineMode::Add { "+ " } else if pl.mode == CombineMode::Carve { "− " } else { "" }, fmt_mm(if pl.kind == PrimKind::Torus { pl.height * 0.5 } else { pl.height.abs() })),
                 ),
             };
             let at = st.hover.map(|h| pos2(h[0], h[1])).unwrap_or(b) + vec2(-30.0, 26.0);
