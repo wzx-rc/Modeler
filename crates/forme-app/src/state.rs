@@ -569,6 +569,37 @@ impl AppState {
         self.last_change = self.now;
     }
 
+    /// BAKE mode (the Bake panel open): the model is read-only, only the
+    /// camera, the diagnostics, the options and the Bake itself. BUILD mode:
+    /// modelling, the Bake panel hidden.
+    pub fn bake_mode(&self) -> bool {
+        self.bake.open
+    }
+
+    pub fn set_bake_mode(&mut self, on: bool) {
+        if on == self.bake.open {
+            return;
+        }
+        if on {
+            // leave every edit in progress before freezing the model
+            self.commit_placement();
+            self.cancel_profile();
+            self.cancel_gestures();
+            self.tool = Tool::Select;
+            self.marking = Default::default();
+            self.marquee = None;
+            self.creation_open = false;
+            self.kit_open = false;
+            self.renaming = false;
+        } else {
+            // the baked preview belongs to the BAKE mode
+            self.bake.show = false;
+        }
+        self.bake.open = on;
+        self.toast(if on { "Mode BAKE : modèle en lecture seule" } else { "Mode BUILD" });
+        self.view_changed();
+    }
+
     /// Free 3D area of the interface (centres the camera). A change re-renders
     /// the image, so the overlays (lines, handles) never drift from it.
     pub fn set_view_rect(&mut self, r: [f32; 4]) {
@@ -939,7 +970,8 @@ impl AppState {
             && self.placement.is_none()
             && self.handle_drag.is_none()
             && self.pointer_kind != PointerKind::Finger
-            && !self.bake.show;
+            && !self.bake.show
+            && !self.bake.open;
         let pos = if active { self.hover } else { None };
         if pos.is_none() {
             self.edge_hover = None;

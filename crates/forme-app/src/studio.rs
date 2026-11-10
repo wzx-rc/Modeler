@@ -60,8 +60,21 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     } else {
         explorer(ctx, st, left);
     }
-    command_panel(ctx, st, Rect::from_min_max(pos2(screen.max.x - RIGHT_W, top), pos2(screen.max.x, screen.max.y - STATUS_H)));
-    history_bar(ctx, st, Rect::from_min_max(pos2(screen.min.x, bottom), pos2(screen.max.x - RIGHT_W, screen.max.y - STATUS_H)));
+    let cmd = Rect::from_min_max(pos2(screen.max.x - RIGHT_W, top), pos2(screen.max.x, screen.max.y - STATUS_H));
+    let hist = Rect::from_min_max(pos2(screen.min.x, bottom), pos2(screen.max.x - RIGHT_W, screen.max.y - STATUS_H));
+    if st.bake_mode() {
+        // BAKE: no command panel nor history to edit, the model is frozen
+        dock(ctx, "studio-commands", cmd, B1, |ui| {
+            ui.add_space(14.0);
+            ui.label(RichText::new("Mode BAKE").font(semibold(13.0)).color(T1));
+            ui.add_space(4.0);
+            ui.label(RichText::new("Modèle en lecture seule : diagnostic, options et Bake dans le panneau de gauche. BUILD (ou Échap) pour modifier.").font(regular(12.0)).color(T2));
+        });
+        dock(ctx, "studio-history", hist, B1, |_| {});
+    } else {
+        command_panel(ctx, st, cmd);
+        history_bar(ctx, st, hist);
+    }
     status_bar(ctx, st, Rect::from_min_max(pos2(screen.min.x, screen.max.y - STATUS_H), screen.max));
     view_frame(ctx, st, view);
     ui::dialogs(ctx, st, screen);
@@ -284,7 +297,7 @@ fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                         st.export_open = true;
                     }
                     if ui.button("Bake et export en quads…").clicked() {
-                        st.bake.open = true;
+                        st.set_bake_mode(true);
                     }
                     ui.separator();
                     if ui.button("Réglages…").clicked() {
@@ -292,6 +305,9 @@ fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                     }
                 });
                 ui.menu_button("Édition", |ui| {
+                    if st.bake_mode() {
+                        ui.disable(); // BAKE: the model is frozen
+                    }
                     if ui.add(egui::Button::new("Annuler").shortcut_text("Ctrl+Z")).clicked() {
                         st.undo();
                     }
@@ -320,6 +336,9 @@ fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                     }
                 });
                 ui.menu_button("Créer", |ui| {
+                    if st.bake_mode() {
+                        ui.disable(); // BAKE: the model is frozen
+                    }
                     for k in st.settings.placeable() {
                         if ui.add(egui::Button::new(k.label()).selected(st.tool == Tool::Place(k))).clicked() {
                             st.commit_placement();
@@ -335,6 +354,9 @@ fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                     }
                 });
                 ui.menu_button("Modifier", |ui| {
+                    if st.bake_mode() {
+                        ui.disable(); // BAKE: the model is frozen
+                    }
                     let target = st.selection.filter(|id| st.scene.node(*id).map(|n| n.shape().is_some()).unwrap_or(false));
                     small_label(ui, "Combinaison de la sélection");
                     for m in st.settings.modes() {
@@ -380,7 +402,7 @@ fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                         st.start_bake();
                     }
                     if ui.button("Fenêtre Bake et export…").clicked() {
-                        st.bake.open = true;
+                        st.set_bake_mode(true);
                     }
                     ui.separator();
                     let has = st.bake.result.is_some();
@@ -442,6 +464,9 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             ui.add_space(6.0);
+            let bake = st.bake_mode();
+            // BAKE: the editing tools are gone, only the view toggles stay
+            if !bake {
             if tool_btn(ui, Icon::Undo, false, "Annuler (Ctrl+Z)").clicked() {
                 st.undo();
             }
@@ -492,6 +517,7 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             if tool_btn(ui, Icon::Magnet, st.snap, "Snap").clicked() {
                 st.snap = !st.snap;
             }
+            }
             if tool_btn(ui, Icon::Grid, st.grid, "Grille").clicked() {
                 st.grid = !st.grid;
                 st.view_changed();
@@ -499,10 +525,7 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.add_space(6.0);
-                let running = st.bake.job.is_some();
-                if text_btn(ui, Some(Icon::Bake), if running { "Bake…" } else { "Bake" }, true).clicked() {
-                    st.bake.open = true;
-                }
+                ui::mode_switch(ui, st, 26.0);
                 if text_btn(ui, Some(Icon::Export), "Exporter", false).clicked() {
                     st.export_open = true;
                 }
@@ -529,7 +552,7 @@ fn bake_panel(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(6.0);
                 if text_btn(ui, None, "Explorateur", false).clicked() {
-                    st.bake.open = false;
+                    st.set_bake_mode(false);
                 }
             });
         });

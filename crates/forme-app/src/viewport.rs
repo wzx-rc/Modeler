@@ -83,6 +83,41 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         }
     }
 
+    // BAKE mode: the model is read-only, only the camera moves (left or right
+    // drag = orbit, middle = pan, wheel = zoom, F = frame)
+    if st.bake_mode() {
+        if resp.hovered() {
+            let (scroll, zoom) = ctx.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
+            if (zoom - 1.0).abs() > 1e-4 {
+                st.camera.zoom(zoom);
+                st.view_changed();
+            } else if scroll.y.abs() > 0.0 {
+                st.camera.zoom((scroll.y * 0.0022).exp());
+                st.view_changed();
+            }
+        }
+        if let Some(mt) = ctx.multi_touch() {
+            if mt.num_touches >= 2 {
+                st.camera.zoom(mt.zoom_delta);
+                st.camera.pan(mt.translation_delta.x, mt.translation_delta.y, rect.height());
+                st.view_changed();
+                st.interacting = true;
+                return;
+            }
+        }
+        if (l || m || r) && d != egui::Vec2::ZERO && (resp.dragged() || resp.hovered()) {
+            if m {
+                st.camera.pan(d.x, d.y, rect.height());
+            } else {
+                st.camera.orbit(d.x, d.y);
+            }
+            st.view_changed();
+            st.interacting = true;
+        }
+        st.gesture = Gesture::None;
+        return;
+    }
+
     // marking menu: right press, or left press held still (not on a handle)
     let on_handle = st.hover.map(|h| handle_at(st, pos2(h[0], h[1])).is_some()).unwrap_or(false);
     if crate::marking::input(ctx, st, rect, on_handle) {
@@ -309,7 +344,7 @@ fn draw_construction_lines(p: &Painter, st: &AppState) {
 /// Hovered and selected edges: a glow on the visible parts, a faint line
 /// where the model hides them.
 fn draw_edges(p: &Painter, st: &AppState) {
-    if st.placement.is_some() || st.profile.is_some() || st.bake.show {
+    if st.placement.is_some() || st.profile.is_some() || st.bake.show || st.bake_mode() {
         return;
     }
     let view = st.view();
@@ -389,7 +424,7 @@ fn draw_overlay(p: &Painter, st: &AppState) {
     let view = st.view();
 
     // selection handles
-    if st.placement.is_none() && st.profile.is_none() && st.tool == Tool::Select {
+    if st.placement.is_none() && st.profile.is_none() && st.tool == Tool::Select && !st.bake_mode() {
         let active = st.handle_drag.as_ref().map(|d| d.handle);
         let node = st.selection.and_then(|id| st.scene.node(id));
         for (h, sp) in handle_points(st) {

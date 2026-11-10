@@ -349,6 +349,14 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     // the Bake panel floats over the view: it does not move the camera (Romain)
     st.set_view_rect([84.0, 72.0, right, screen.height() - 84.0]);
     top_bar(ctx, st, screen);
+    if st.bake_mode() {
+        // BAKE: no tools, no properties, no history to edit; the Bake panel only
+        hud(ctx, st);
+        bake_side_panel(ctx, st, screen);
+        dialogs(ctx, st, screen);
+        shortcuts(ctx, st);
+        return;
+    }
     rail(ctx, st);
     if matches!(st.tool, Tool::Kit(_)) || st.kit_open {
         kit_popup(ctx, st);
@@ -361,9 +369,6 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     }
     hud(ctx, st);
     right_column(ctx, st, screen);
-    if st.bake.open {
-        bake_side_panel(ctx, st, screen);
-    }
     dialogs(ctx, st, screen);
     shortcuts(ctx, st);
 }
@@ -402,6 +407,22 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     });
     if save {
         st.save();
+    }
+    if st.bake_mode() {
+        // BAKE: nothing edits the model; Esc goes back to BUILD, F frames
+        if esc && st.display_open {
+            st.display_open = false;
+        } else if esc && st.settings_open {
+            st.settings_open = false;
+        } else if esc {
+            st.set_bake_mode(false);
+        }
+        if f {
+            st.frame_selection();
+        }
+        let _ = (undo, redo, del, dup, enter, alt);
+        st.key_ctrl = false;
+        return;
     }
     if undo {
         st.undo();
@@ -496,11 +517,13 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 st.files_open = !st.files_open;
             }
             ui.add_space(6.0);
-            if icon_btn(ui, Icon::Undo, false, "Annuler (tap à 2 doigts)", 44.0).clicked() {
-                st.undo();
-            }
-            if icon_btn(ui, Icon::Redo, false, "Rétablir (tap à 3 doigts)", 44.0).clicked() {
-                st.redo();
+            if !st.bake_mode() {
+                if icon_btn(ui, Icon::Undo, false, "Annuler (tap à 2 doigts)", 44.0).clicked() {
+                    st.undo();
+                }
+                if icon_btn(ui, Icon::Redo, false, "Rétablir (tap à 3 doigts)", 44.0).clicked() {
+                    st.redo();
+                }
             }
             let r = icon_btn(ui, Icon::Light, st.display_open, "Affichage : lumière, ombres, anticrénelage", 44.0);
             light_toggle(st, &r);
@@ -539,12 +562,14 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     }
                 }
                 ui.add_space(4.0);
-                if toggle_chip(ui, Icon::Mirror, "Sym. X", st.sym_x).clicked() {
-                    st.sym_x = !st.sym_x;
-                    st.toast(if st.sym_x { "Symétrie X : les nouvelles formes sont doublées" } else { "Symétrie X désactivée" });
-                }
-                if toggle_chip(ui, Icon::Magnet, "Snap", st.snap).clicked() {
-                    st.snap = !st.snap;
+                if !st.bake_mode() {
+                    if toggle_chip(ui, Icon::Mirror, "Sym. X", st.sym_x).clicked() {
+                        st.sym_x = !st.sym_x;
+                        st.toast(if st.sym_x { "Symétrie X : les nouvelles formes sont doublées" } else { "Symétrie X désactivée" });
+                    }
+                    if toggle_chip(ui, Icon::Magnet, "Snap", st.snap).clicked() {
+                        st.snap = !st.snap;
+                    }
                 }
                 if toggle_chip(ui, Icon::Grid, "Grille", st.grid).clicked() {
                     st.grid = !st.grid;
@@ -552,15 +577,40 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 }
                 let (sep, _) = ui.allocate_exact_size(vec2(9.0, 24.0), Sense::hover());
                 ui.painter().rect_filled(Rect::from_center_size(sep.center(), vec2(1.0, 24.0)), 0.0, DIVIDER);
-                let baking = st.bake.job.is_some();
-                if toggle_chip(ui, Icon::Cube, if baking { "Bake…" } else { "Bake" }, st.bake.open || st.bake.show).clicked() {
-                    st.bake.open = !st.bake.open;
-                }
+                mode_switch(ui, st, 44.0);
                 if primary_btn(ui, Some(Icon::Export), "Exporter", None).clicked() {
                     st.export_open = !st.export_open;
                 }
             });
         });
+}
+
+/// BUILD | BAKE switch (both interfaces). BAKE freezes the model: only the
+/// camera, the diagnostics, the options and the Bake.
+pub(crate) fn mode_switch(ui: &mut Ui, st: &mut AppState, height: f32) {
+    let baking = st.bake.job.is_some();
+    let items = [(false, "BUILD"), (true, if baking { "BAKE…" } else { "BAKE" })];
+    let w = 66.0;
+    let (well, _) = ui.allocate_exact_size(vec2(2.0 * w + 6.0, height), Sense::hover());
+    ui.painter().rect_filled(well, 10.0, WELL);
+    let cur = st.bake_mode();
+    for (i, (bake, label)) in items.iter().enumerate() {
+        let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * w, 3.0), vec2(w, height - 6.0));
+        let resp = ui.interact(r, Id::new(("mode-switch", i)), Sense::click());
+        let on = cur == *bake;
+        let c = if *bake { CARVE } else { ACCENT };
+        let p = ui.painter();
+        if on {
+            p.rect(r, 8.0, tint(c, 0.18), Stroke::new(1.5, c), StrokeKind::Inside);
+        } else if resp.hovered() {
+            p.rect_filled(r, 8.0, RAISED);
+        }
+        p.text(r.center(), Align2::CENTER_CENTER, *label, semibold(12.5), if on { TEXT_STRONG } else { TEXT2 });
+        let tip = if *bake { "Mode BAKE : modèle figé, diagnostic et Bake (Échap pour revenir)" } else { "Mode BUILD : modélisation" };
+        if resp.on_hover_text(tip).clicked() {
+            st.set_bake_mode(*bake);
+        }
+    }
 }
 
 /// Keyboard shortcut of a primitive tool (Q select, R cube, C cylinder).
@@ -1682,7 +1732,7 @@ fn bake_side_panel(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.label(egui::RichText::new("Bake").font(semibold(18.0)).color(TEXT));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icon_btn(ui, Icon::ChevronLeft, false, "Fermer le panneau Bake", 32.0).clicked() {
-                        st.bake.open = false;
+                        st.set_bake_mode(false);
                     }
                 });
             });

@@ -171,7 +171,7 @@ pub fn run(st: &mut AppState, act: Act, ctx: Ctx) {
         Act::Snap => st.snap = !st.snap,
         Act::Grid => st.grid = !st.grid,
         Act::View(p) => st.camera.preset(p),
-        Act::Bake => st.bake.open = !st.bake.open,
+        Act::Bake => st.set_bake_mode(!st.bake_mode()),
         Act::Fillet | Act::Chamfer => {
             let r = st.edge_sel.last().map(|e| e.radius).unwrap_or(0.0);
             st.set_fillet(if r > 0.0 { r } else { 1.0 }, act == Act::Chamfer, true);
