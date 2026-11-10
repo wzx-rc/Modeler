@@ -38,6 +38,8 @@ const FILLET0: u32 = 6;
 const CYL_SIDE: u32 = 0;
 const CYL_TOP: u32 = 1;
 const CYL_BOTTOM: u32 = 2;
+/// Second half of a cylinder wall seen all around (a round hole).
+const CYL_SIDE_B: u32 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 struct FaceId {
@@ -102,7 +104,7 @@ impl Shape<'_> {
         let s = self.pr.size;
         if self.pr.kind == 1 {
             return match f {
-                CYL_SIDE => DVec2::new(l.x, l.z).length() - s.x,
+                CYL_SIDE | CYL_SIDE_B => DVec2::new(l.x, l.z).length() - s.x,
                 CYL_TOP => l.y - s.y,
                 _ => -l.y - s.y,
             };
@@ -249,6 +251,9 @@ struct Layout<'a> {
     inner: Vec<Vec<usize>>,
     origins: Vec<usize>,
     node_tol: f64,
+    /// Cylinder walls cut in two halves: prim and the chart map of half A
+    /// (half A is where |θ| ≤ π/2 in that map).
+    walls: Vec<(u32, Map)>,
 }
 
 impl Layout<'_> {
@@ -293,7 +298,26 @@ impl Layout<'_> {
         best
     }
 
+    /// Which half of a cut cylinder wall a point on it belongs to.
+    fn half(&self, f: FaceId, p: DVec3) -> FaceId {
+        if f.face != CYL_SIDE {
+            return f;
+        }
+        match self.walls.iter().find(|w| w.0 == f.prim) {
+            Some(&(_, m @ Map::Cyl { r, .. })) if m.to2(p).y.abs() > FRAC_PI_2 * r => FaceId { prim: f.prim, face: CYL_SIDE_B },
+            _ => f,
+        }
+    }
+
     fn label(&self, ch: &Chart, k: Cons, q: DVec2) -> FaceId {
+        let f = self.label_raw(ch, k, q);
+        match k {
+            Cons::Rect(_) | Cons::Arc(_) => f,
+            _ => self.half(f, ch.map.to3(q)),
+        }
+    }
+
+    fn label_raw(&self, ch: &Chart, k: Cons, q: DVec2) -> FaceId {
         match k {
             Cons::Rect(s) => ch.side[s],
             Cons::Arc(i) => ch.arcs[i].3,
@@ -773,16 +797,14 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
     }
     progress.set(1, charts.len() as u32);
 
-    let mut lay = Layout { field: &field, shapes, prev, charts, nodes: vec![], edges: vec![], bnd: vec![], rays: vec![], inner: vec![], origins: vec![], node_tol: extent * 2e-6 };
-    let nc = lay.charts.len();
-    lay.bnd = vec![vec![]; nc];
-    lay.rays = vec![vec![]; nc];
-    lay.inner = vec![vec![]; nc];
+    let mut lay = Layout { field: &field, shapes, prev, charts, nodes: vec![], edges: vec![], bnd: vec![], rays: vec![], inner: vec![], origins: vec![], node_tol: extent * 2e-6, walls: vec![] };
     let fd = extent * 1e-7;
 
     // a cylinder wall is cut open where it does not show: its seam
-    // (θ = ±π in its chart) goes in the middle of the largest hidden gap
-    for ci in 0..nc {
+    // (θ = ±π in its chart) goes in the middle of the largest hidden gap.
+    // Seen all around (a round hole), it is cut in two halves along its
+    // local x axis, each half a chart of its own.
+    for ci in 0..lay.charts.len() {
         let ch = &lay.charts[ci];
         let (Some(_), Map::Cyl { o, a, b, c, r }) = (ch.ring, ch.map) else { continue };
         let (nth, nt) = (720usize, 48usize);
@@ -811,12 +833,32 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             }
         }
         if best.0 < 4 {
-            return Err("par lignes : cylindre visible sur tout le tour (trou rond) pas encore géré".into());
+            let id = ch.id;
+            let rot = |phi: f64| Map::Cyl { o, a, b: b * phi.cos() + c * phi.sin(), c: c * phi.cos() - b * phi.sin(), r };
+            let (ma, mb) = (rot(FRAC_PI_2), rot(-FRAC_PI_2));
+            let ida = id;
+            let idb = FaceId { prim: id.prim, face: CYL_SIDE_B };
+            let mut hb = Chart { id: idb, map: mb, lo: DVec2::new(ch.lo.x, -FRAC_PI_2 * r), hi: DVec2::new(ch.hi.x, FRAC_PI_2 * r), side: ch.side, arcs: vec![], cons: ch.cons.clone(), ..*ch };
+            hb.side[0] = ida;
+            hb.side[2] = ida;
+            let ha = &mut lay.charts[ci];
+            ha.map = ma;
+            ha.lo.y = -FRAC_PI_2 * r;
+            ha.hi.y = FRAC_PI_2 * r;
+            ha.side[0] = idb;
+            ha.side[2] = idb;
+            lay.charts.push(hb);
+            lay.walls.push((id.prim, ma));
+            continue;
         }
         let phi = -PI + (best.1 as f64 + best.0 as f64 * 0.5) * TAU / nth as f64 + PI;
         let (b2, c2) = (b * phi.cos() + c * phi.sin(), c * phi.cos() - b * phi.sin());
         lay.charts[ci].map = Map::Cyl { o, a, b: b2, c: c2, r };
     }
+    let nc = lay.charts.len();
+    lay.bnd = vec![vec![]; nc];
+    lay.rays = vec![vec![]; nc];
+    lay.inner = vec![vec![]; nc];
 
     // 1. pieces of boundary of every chart, between nodes
     struct Piece {
@@ -969,6 +1011,39 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         for lp in &chart_loops[ci] {
             let l: Vec<(usize, bool)> = lp.iter().map(|&i| piece_edge[i].unwrap()).collect();
             lay.bnd[ci].push(l);
+        }
+    }
+
+    // arcs longer than a quarter turn (a half or a whole hole) are cut
+    // into quarters, each hooked on its own
+    for ci in 0..nc {
+        if !matches!(lay.charts[ci].map, Map::Plane { .. }) {
+            continue;
+        }
+        let loops = lay.bnd[ci].clone();
+        for lp in loops {
+            for &(e, fwd) in &lp {
+                let other = lay.edges[e].charts.iter().copied().find(|&c| c != ci).unwrap_or(ci);
+                let sm = lay.charts[other].map;
+                if !matches!(sm, Map::Cyl { .. }) {
+                    continue;
+                }
+                let pp = lay.hpts(e, fwd, ci);
+                let total: f64 = pp.windows(3).map(|w| turn(w[1] - w[0], w[2] - w[1])).sum();
+                let k = (total.abs() / FRAC_PI_2).round() as usize;
+                if k < 2 {
+                    continue;
+                }
+                let (qa, qb) = (sm.to2(lay.nodes[lay.edges[e].a]), sm.to2(lay.nodes[lay.edges[e].b]));
+                let me = lay.charts[ci].id;
+                let Some(sh) = lay.shape_of(me.prim) else { continue };
+                let cuts: Vec<DVec3> = (1..k).map(|j| sm.to3(proj1(&|x| sh.face_fn(me.face, sm.to3(x)), qa.lerp(qb, j as f64 / k as f64), fd))).collect();
+                let mut cur = e;
+                for x in cuts {
+                    lay.split(cur, x);
+                    cur = lay.edges.len() - 1;
+                }
+            }
         }
     }
 

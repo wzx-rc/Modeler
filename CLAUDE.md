@@ -33,7 +33,7 @@ OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- anneau   # 
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- support  # test part, junction by junction (par opération or why not)
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- raccord  # test part: bearing front face joining the two rings (topologies A and B)
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- liaison  # test part: front face (A) welded to the bearing / base fillet
-OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes  # bake from the construction lines (bake/layout.rs): Romain's scene, without fillet, box with one rounded edge, cylinder carved in a corner (CASE=coin for one)
+OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes  # bake from the construction lines (bake/layout.rs): Romain's scene, without fillet, box with one rounded edge, cylinder carved in a corner, plate with a round hole (CASE=coin|trou for one)
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- piece    # test part: the whole part, fillets first (orange) then fill paths (cream), closed
 DEG=5 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- decime  # dissolve the closed edge loops whose cross path bends less than DEG out of the surface (same code as the optional pass)
 ```

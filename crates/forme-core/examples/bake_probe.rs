@@ -1536,6 +1536,19 @@ pub fn coin(blend: f32) -> Scene {
     s
 }
 
+/// A plate with a round hole through its middle (no fillet).
+pub fn trou() -> Scene {
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::new(20.0, 10.0, 20.0);
+    s.add(root, NodeSpec::shape("Plaque", b).at(Vec3::new(0.0, 10.0, 0.0)));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(6.0, 14.0, 0.0);
+    s.add(root, NodeSpec::shape("Trou", c).at(Vec3::new(0.0, 10.0, 0.0)).mode(CombineMode::Carve));
+    s
+}
+
 /// Bake from the construction lines (bake::layout) on Romain's scene and
 /// its variants: fillet strips orange, fill patches blue (BY_STEP colours).
 fn par_lignes() {
@@ -1563,6 +1576,7 @@ fn par_lignes() {
         ("romain-vif", vif, t, 80.0, true, back),
         ("boite-arrondie", seul, DVec3::ZERO, 32.0, true, back),
         ("coin", coin(0.0), DVec3::new(0.0, 20.0, 0.0), 70.0, true, front),
+        ("trou", trou(), DVec3::new(0.0, 10.0, 0.0), 70.0, true, front),
     ];
     std::env::set_var("BY_STEP", "1");
     for (name, scene, target, ext, diagonal, eye) in cases {

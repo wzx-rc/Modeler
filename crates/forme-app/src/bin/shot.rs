@@ -1114,6 +1114,20 @@ fn coin_cylindre() -> forme_core::Scene {
     s
 }
 
+/// Plate with a round hole through its middle (no fillet).
+fn plaque_trou() -> forme_core::Scene {
+    use forme_core::scene::{NodeSpec, Scene, Shape};
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::new(20.0, 10.0, 20.0);
+    s.add(root, NodeSpec::shape("Plaque", b).at(Vec3::new(0.0, 10.0, 0.0)));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(6.0, 14.0, 0.0);
+    s.add(root, NodeSpec::shape("Trou", c).at(Vec3::new(0.0, 10.0, 0.0)).mode(CombineMode::Carve));
+    s
+}
+
 fn support_axe() -> forme_core::Scene {
     use forme_core::scene::{Mirror, NodeSpec, Scene, Shape};
     let mut s = Scene::new();
@@ -1268,7 +1282,7 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         // construction lines, then the bake coloured by role, both interfaces
         let romain = forme_core::Scene::from_json(include_str!("../../../forme-core/examples/scenes/romain-coin.forme")).expect("scène");
         let only = std::env::var("BAKE_DIAG").ok();
-        for (name, scene, mode) in [("romain", romain.clone(), UiMode::Atelier), ("coin", coin_cylindre(), UiMode::Atelier), ("support", support_axe(), UiMode::Atelier), ("romain-studio", romain, UiMode::Studio)] {
+        for (name, scene, mode) in [("romain", romain.clone(), UiMode::Atelier), ("coin", coin_cylindre(), UiMode::Atelier), ("trou", plaque_trou(), UiMode::Atelier), ("support", support_axe(), UiMode::Atelier), ("romain-studio", romain, UiMode::Studio)] {
             if only.as_deref().is_some_and(|o| o != name) {
                 continue;
             }
@@ -1281,7 +1295,7 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
                 let d = h.st.camera.dist;
                 h.cam(t, d, -2.4, 0.55);
             }
-            if name == "coin" {
+            if name == "coin" || name == "trou" {
                 let t = h.st.camera.target;
                 let d = h.st.camera.dist;
                 h.cam(t, d, 0.75, 0.55);
