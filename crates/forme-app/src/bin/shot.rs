@@ -1100,6 +1100,20 @@ fn raster_mesh(mesh: &forme_core::mesh::Mesh, st: &AppState, w: u32, h: u32, pat
 
 /// Desktop test part: a pillow block made only of cubes and cylinders,
 /// with the three basic modes.
+/// Cube with a cylinder carved at one vertical corner (no fillet).
+fn coin_cylindre() -> forme_core::Scene {
+    use forme_core::scene::{NodeSpec, Scene, Shape};
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::new(20.0, 20.0, 20.0);
+    s.add(root, NodeSpec::shape("Cube", b).at(Vec3::new(0.0, 20.0, 0.0)));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(9.0, 22.0, 0.0);
+    s.add(root, NodeSpec::shape("Cylindre", c).at(Vec3::new(20.0, 20.0, 20.0)).mode(CombineMode::Carve));
+    s
+}
+
 fn support_axe() -> forme_core::Scene {
     use forme_core::scene::{Mirror, NodeSpec, Scene, Shape};
     let mut s = Scene::new();
@@ -1253,7 +1267,11 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         // Romain's scene (box with a carved, filleted corner) and the test part:
         // construction lines, then the bake coloured by role, both interfaces
         let romain = forme_core::Scene::from_json(include_str!("../../../forme-core/examples/scenes/romain-coin.forme")).expect("scène");
-        for (name, scene, mode) in [("romain", romain.clone(), UiMode::Atelier), ("support", support_axe(), UiMode::Atelier), ("romain-studio", romain, UiMode::Studio)] {
+        let only = std::env::var("BAKE_DIAG").ok();
+        for (name, scene, mode) in [("romain", romain.clone(), UiMode::Atelier), ("coin", coin_cylindre(), UiMode::Atelier), ("support", support_axe(), UiMode::Atelier), ("romain-studio", romain, UiMode::Studio)] {
+            if only.as_deref().is_some_and(|o| o != name) {
+                continue;
+            }
             h.pc(AppState::new(scene, name), mode);
             h.st.bake.open = true;
             h.steps(2);
@@ -1262,6 +1280,11 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
                 let t = h.st.camera.target;
                 let d = h.st.camera.dist;
                 h.cam(t, d, -2.4, 0.55);
+            }
+            if name == "coin" {
+                let t = h.st.camera.target;
+                let d = h.st.camera.dist;
+                h.cam(t, d, 0.75, 0.55);
             }
             let wait = |h: &mut Harness| {
                 for _ in 0..600 {

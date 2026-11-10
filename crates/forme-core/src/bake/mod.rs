@@ -1004,7 +1004,18 @@ pub(crate) fn finish(field: &Field, out: &mut Baked, st: &BakeSettings, progress
             .verts
             .iter()
             .map(|&v| {
-                let nv = vnorm[v as usize];
+                let mut nv = vnorm[v as usize];
+                if nface != DVec3::ZERO && nv.dot(nface) < 0.999 {
+                    // on a sharp edge the gradient mixes both sides: take it
+                    // just inside this face instead
+                    let p = pos[v as usize];
+                    let to_c = c - p;
+                    let step = (to_c.length() * 1e-4).max(1e-5).min(to_c.length() * 0.5);
+                    let g = field.grad(p + to_c.normalize_or_zero() * step).normalize_or_zero();
+                    if g.dot(nv) < 0.999 {
+                        nv = g;
+                    }
+                }
                 if nv.dot(nface) > 0.9 || nface == DVec3::ZERO {
                     nv
                 } else {

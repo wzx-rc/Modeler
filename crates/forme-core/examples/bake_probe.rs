@@ -1555,9 +1555,22 @@ fn par_lignes() {
     let r0 = seul.root;
     seul.add(r0, NodeSpec::shape("Boîte", b));
     let t = DVec3::new(39.5, 19.4, 51.5);
-    let cases = [("romain", romain.clone(), t, 80.0, true), ("romain-droit", romain, t, 80.0, false), ("romain-vif", vif, t, 80.0, true), ("boite-arrondie", seul, DVec3::ZERO, 32.0, true)];
+    let back = DVec3::new(-0.8, 0.7, -1.0);
+    let front = DVec3::new(0.8, 0.7, 1.0);
+    let cases = [
+        ("romain", romain.clone(), t, 80.0, true, back),
+        ("romain-droit", romain, t, 80.0, false, back),
+        ("romain-vif", vif, t, 80.0, true, back),
+        ("boite-arrondie", seul, DVec3::ZERO, 32.0, true, back),
+        ("coin", coin(0.0), DVec3::new(0.0, 20.0, 0.0), 70.0, true, front),
+    ];
     std::env::set_var("BY_STEP", "1");
-    for (name, scene, target, ext, diagonal) in cases {
+    for (name, scene, target, ext, diagonal, eye) in cases {
+        if let Ok(only) = std::env::var("CASE") {
+            if only != name {
+                continue;
+            }
+        }
         let st = bake::BakeSettings::preset(bake::Quality::Standard);
         let size = bake::build::plan(&scene, &st).unwrap_or(5.0);
         let ls = bake::layout::LayoutSettings { size, tol: st.tol * 2.0, threads: st.threads, diagonal };
@@ -1576,7 +1589,31 @@ fn par_lignes() {
                     s.open_edges,
                     s.seconds * 1000.0
                 );
-                render(&b, &format!("{out}/parlignes-{name}-a.png"), DVec3::new(-0.8, 0.7, -1.0), target, ext, 1400, 1050);
+                // faces whose normal leaves the surface (folds, twisted quads)
+                let field = Field::new(&compile(&scene));
+                let mut worst = (1.0f64, 0usize);
+                let mut bad = 0;
+                for (i, f) in b.faces.iter().enumerate() {
+                    let p: Vec<DVec3> = f.verts.iter().map(|&v| b.positions[v as usize]).collect();
+                    if p.len() != 4 {
+                        continue;
+                    }
+                    let c = (p[0] + p[1] + p[2] + p[3]) * 0.25;
+                    let g = field.grad(c).normalize_or_zero();
+                    for k in 0..4 {
+                        let n = (p[(k + 1) % 4] - p[k]).cross(p[(k + 3) % 4] - p[k]).normalize_or_zero();
+                        let d = n.dot(g);
+                        if d < worst.0 {
+                            worst = (d, i);
+                        }
+                        if d < 0.9 {
+                            bad += 1;
+                        }
+                    }
+                }
+                let wf = &b.faces[worst.1];
+                println!("  coins de quad hors surface (< 0.9) : {bad}, pire {:.3} face {} {:?}", worst.0, worst.1, wf.verts.iter().map(|&v| b.positions[v as usize]).collect::<Vec<_>>());
+                render(&b, &format!("{out}/parlignes-{name}-a.png"), eye, target, ext, 1400, 1050);
                 render(&b, &format!("{out}/parlignes-{name}-b.png"), DVec3::new(0.9, -0.6, 0.8), target, ext, 1400, 1050);
                 render(&b, &format!("{out}/parlignes-{name}-dessus.png"), DVec3::new(0.001, 1.0, 0.0), target, ext * 0.6, 1400, 1050);
             }
