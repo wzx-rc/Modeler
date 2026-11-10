@@ -75,6 +75,8 @@ Demande de Romain : une fondation qui marche dans le maximum de cas simples avan
 | départ (1ffffe9) | 2 217 (37 %) | 3 % | 45 % | 14 % |
 | aujourd'hui (5e75473) | 3 381 (57 %) | 2 % | 9 % | 33 % |
 
+Le 10 nov. au soir, avec les cylindres arrondis : 4 familles de plus (bossage arrondi, avec raccord, fond de trou borgne arrondi, tailles de l'arrondi), 7 607 cas, 3 908 propres. Les familles arrondies passent exactement là où passent les mêmes formes vives (169, 121, 169 positions), aucune régression ailleurs.
+
 Une forme seule posée ou creusée sur la face passe à 100 % tant qu'elle reste à au moins 1 mm du bord. La boîte, la poche et le trou traversant passent aussi quand ils coupent le bord (sauf une boîte alignée sur deux parois à la fois, et un trou tangent au bord). Ce qui reste en « règle qui casse » : surtout deux formes qui se chevauchent.
 
 **Les règles, dans l'ordre où elles jouent.**
@@ -88,7 +90,8 @@ Une forme seule posée ou creusée sur la face passe à 100 % tant qu'elle reste
    - une autre forme à moins de deux cases au-delà d'un côté : ce côté se place au milieu de l'écart (s'il fait au moins 0,3 quad), l'autre carré s'y cale ;
    - les deux bouts d'un trou traversant prennent le même carré.
 4. **Trou qui coupe le bord (encoche en U)** : l'arc est coupé là où le cercle est carré aux axes de la face (ses points les plus larges, son fond) ; à un bout posé sur le bord, le côté du carré est perpendiculaire au bord. L'arc entre le bord et le point le plus large n'a pas de carré à lui : il prolonge le côté du suivant. Résultat : un U de boucles autour de l'encoche, quelle que soit sa profondeur.
-5. **Cas limites refusés proprement** (« pas encore géré », jamais un maillage faux) : forme tangente à une face (paroi d'épaisseur nulle) ou à l'arrondi d'une arête ; forme qui entame l'arrondi d'une arête ; fond de trou borgne ou dessous de bossage coupé par le bord.
+5. **Bord arrondi d'un cylindre** (dessus d'un bossage, fond d'un trou borgne ; scène de Romain du 10 nov., 16 h) : une bande autour du cylindre (quart de tore, `Map::Tor`), comme la bande d'une arête de boîte. Elle suit la paroi : même couture cachée, ou mêmes deux moitiés quand la paroi se voit tout autour. Autour, ses deux rails prennent les segments de la paroi, si bien que le dessus en o-grid, la bande, la paroi et le raccord ont les mêmes colonnes. Les coupes en quarts du dessus passent sur l'autre rail de la bande (pareil pour l'anneau d'un raccord). Elle peut être coupée le long d'une rangée (le bossage posé sur son pied arrondi, le fond arrondi qui s'ouvre sur la face) ; coupée en travers par une autre forme, c'est « pas encore géré ». Il faut une paroi droite et un dessus plat (rayon plus petit que le rayon du cylindre et que sa demi-hauteur).
+6. **Cas limites refusés proprement** (« pas encore géré », jamais un maillage faux) : forme tangente à une face (paroi d'épaisseur nulle) ou à l'arrondi d'une arête ; forme qui entame l'arrondi d'une arête ; fond de trou borgne ou dessous de bossage coupé par le bord ; bord arrondi d'un cylindre coupé en travers.
 
 **Outil.** `OUT=/tmp/x cargo run --release -p forme-core --example bake_robust` (environ 2 min) : une carte PNG par famille (une case = une position, couleur = classe), `results.tsv`, `résumé.txt` (messages les plus fréquents). Noms de familles en arguments (`trou`, `boite`, `fillets`…), `CAS="x 3 z 0"` pour un seul cas, `OBJ=fichier` pour son maillage. Toute nouvelle règle se valide sur le total et sur les scènes de Romain (aucune régression), en plus de `bake_probe`.
 
@@ -98,7 +101,8 @@ Une forme seule posée ou creusée sur la face passe à 100 % tant qu'elle reste
 - Trou borgne ou bossage coupé par le bord (fond en demi-disque) ; forme qui entame un arrondi ; formes tangentes.
 - Raccord (fillet de jonction) près d'une arête ou d'une autre forme ; l'anneau d'un raccord à 0,5 mm d'une autre forme laisse des rangées fines.
 - Fillets de jonction autres que la boîte posée sur une face (blend d'un Carve, de formes arrondies ou penchées), chanfreins, Intersect, Groove, Tongue.
-- Cylindres arrondis, sphères, profils, tores, coques, taper.
+- Bord arrondi d'un cylindre coupé en travers par une autre forme (sa scène du 10 nov., 16 h : Cube 3 traverse le cylindre) ; cylindre arrondi sans paroi droite ou sans dessus plat ; chanfrein d'un cylindre.
+- Sphères, profils, tores, coques, taper.
 - Copies (répétitions, symétries), groupes fusionnés (historique en arbre).
 - Coin où trois fillets de rayons différents se rejoignent ; coin arrondi coupé par une autre forme.
 - Deux arêtes du dessus arrondies en coin, les autres vives (motif « 2 arêtes en coin ») : les côtés droits du bout de chaque bande font le tour de la pièce et reviennent buter sur l'autre bande juste à côté de l'onglet (comptes impossibles). Le motif voulu à ce coin reste à dessiner avec Romain. Le tour du dessus entier passe.

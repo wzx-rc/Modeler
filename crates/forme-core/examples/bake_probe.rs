@@ -311,7 +311,40 @@ fn par_lignes() {
         }
         sc
     };
+    // his scene of 10 nov, 16:07: the cylinder's top rim rounded 0.7 mm, its
+    // 1 mm junction blend, and Cube 3 now crossing the cylinder; cut down:
+    // rim (rounded or sharp), blend (on or off), Cube 3 (kept or removed)
+    let arrondi = Scene::from_json(include_str!("scenes/romain-cylindre-arrondi.forme")).expect("scène de Romain (cylindre arrondi)");
+    let arrondi_var = |rim: bool, blend: bool, cube3: bool| {
+        let mut sc = arrondi.clone();
+        let ids: Vec<NodeId> = sc.nodes.keys().copied().collect();
+        for id in ids {
+            let name = sc.node(id).map(|n| n.name.clone()).unwrap_or_default();
+            if name == "Cube 3" && !cube3 {
+                sc.remove(id);
+            } else if name == "Cylindre 1" {
+                if let Some(n) = sc.node_mut(id) {
+                    if !blend {
+                        n.combine.blend = 0.0;
+                    }
+                    if let Some(sh) = n.shape_mut() {
+                        if !rim {
+                            sh.edges.clear();
+                        }
+                    }
+                }
+            }
+        }
+        sc
+    };
     let cases = [
+        ("arrondi", arrondi_var(true, true, true), t, 80.0, true, front),
+        ("arrondi-seul", arrondi_var(true, false, false), t, 80.0, true, front),
+        ("arrondi-raccord", arrondi_var(true, true, false), t, 80.0, true, front),
+        ("arrondi-cube3", arrondi_var(true, false, true), t, 80.0, true, front),
+        ("arrondi-vif", arrondi_var(false, true, true), t, 80.0, true, front),
+        ("arrondi-vif-sans-raccord", arrondi_var(false, false, true), t, 80.0, true, front),
+        ("arrondi-vif-sans-cube3", arrondi_var(false, true, false), t, 80.0, true, front),
         ("bossage-c3z+1", cube3_at(0.0, 1.0), t, 80.0, true, front),
         ("bossage-c3z+2", cube3_at(0.0, 2.0), t, 80.0, true, front),
         ("bossage-c3x+1", cube3_at(1.0, 0.0), t, 80.0, true, front),

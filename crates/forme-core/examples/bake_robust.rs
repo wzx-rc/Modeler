@@ -39,6 +39,18 @@ fn cyl(s: &mut Scene, name: &str, r: f32, half: f32, at: Vec3, mode: CombineMode
     s.add(root, NodeSpec::shape(name, c).at(at).mode(mode).blend(blend));
 }
 
+/// A cylinder with rounded rims (`rims`: top, bottom radius, 0 sharp).
+#[allow(clippy::too_many_arguments)]
+fn cyl_rims(s: &mut Scene, name: &str, r: f32, half: f32, at: Vec3, mode: CombineMode, blend: f32, rims: [f32; 2]) {
+    let root = s.root;
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(r, half, 0.0);
+    for (i, &v) in rims.iter().enumerate() {
+        c.set_edge(i, v);
+    }
+    s.add(root, NodeSpec::shape(name, c).at(at).mode(mode).blend(blend));
+}
+
 fn boxe(s: &mut Scene, name: &str, half: Vec3, at: Vec3, mode: CombineMode, blend: f32) {
     let root = s.root;
     let mut c = Shape::new(PrimKind::Box);
@@ -106,6 +118,21 @@ fn families() -> Vec<Family> {
         grid("bossage-raccord", "cylindre posé r 3, raccord 1,5", |x, z| {
             let mut s = plate(&[]);
             cyl(&mut s, "Bossage", 3.0, 2.5, Vec3::new(x, 12.0, z), Add, 1.5);
+            s
+        }),
+        grid("bossage-arrondi", "cylindre posé r 3, bord du dessus arrondi 0,7", |x, z| {
+            let mut s = plate(&[]);
+            cyl_rims(&mut s, "Bossage", 3.0, 2.5, Vec3::new(x, 12.0, z), Add, 0.0, [0.7, 0.0]);
+            s
+        }),
+        grid("bossage-arrondi-raccord", "cylindre posé r 3, bord du dessus arrondi 0,7, raccord 1", |x, z| {
+            let mut s = plate(&[]);
+            cyl_rims(&mut s, "Bossage", 3.0, 2.5, Vec3::new(x, 12.0, z), Add, 1.0, [0.7, 0.0]);
+            s
+        }),
+        grid("trou-borgne-arrondi", "trou borgne r 3, 3 mm de fond, fond arrondi 1", |x, z| {
+            let mut s = plate(&[]);
+            cyl_rims(&mut s, "Trou", 3.0, 3.0, Vec3::new(x, 10.0, z), Carve, 0.0, [0.0, 1.0]);
             s
         }),
         grid("boite", "boîte posée 4 x 6, vive", |x, z| {
@@ -184,6 +211,27 @@ fn families() -> Vec<Family> {
     }
     out.push(Family { name: "tailles", what: "au centre : trou r, bossage r (0,5 à 9,5), raccord k du bossage r 3 et de la boîte (0,25 à 4,75)", cols: 19, rows: 4, map: false, cases });
 
+    // rounded rims of a cylinder, centred: the rim radius (0 sharp, 0,25 to 4,75)
+    // on a boss, a boss with a junction blend, a blind hole's floor, and a
+    // boss rounded at both ends standing on its rounded foot
+    let mut cases = vec![];
+    for (col, i) in (0..=19).enumerate() {
+        let r = i as f32 * 0.25;
+        let mut s = plate(&[]);
+        cyl_rims(&mut s, "Bossage", 5.0, 2.5, Vec3::new(0.0, 12.0, 0.0), Add, 0.0, [r, 0.0]);
+        cases.push(Case { cell: (col, 0), tag: format!("bossage r 5, bord r {r}"), scene: s });
+        let mut s = plate(&[]);
+        cyl_rims(&mut s, "Bossage", 5.0, 2.5, Vec3::new(0.0, 12.0, 0.0), Add, 1.0, [r, 0.0]);
+        cases.push(Case { cell: (col, 1), tag: format!("bossage r 5, bord r {r}, raccord 1"), scene: s });
+        let mut s = plate(&[]);
+        cyl_rims(&mut s, "Trou", 5.0, 3.0, Vec3::new(0.0, 10.0, 0.0), Carve, 0.0, [0.0, r]);
+        cases.push(Case { cell: (col, 2), tag: format!("trou borgne r 5, fond r {r}"), scene: s });
+        let mut s = plate(&[]);
+        cyl_rims(&mut s, "Bossage", 5.0, 2.5, Vec3::new(0.0, 12.0, 0.0), Add, 0.0, [r, r]);
+        cases.push(Case { cell: (col, 3), tag: format!("bossage r 5, deux bords r {r}"), scene: s });
+    }
+    out.push(Family { name: "cylindre-arrondi", what: "au centre : bord arrondi du cylindre r 0 (vif) à 4,75 (bossage, bossage avec raccord 1, fond de trou borgne, bossage arrondi aux deux bouts)", cols: 20, rows: 4, map: false, cases });
+
     // Romain's scenes, as validated
     let mut cases = vec![];
     for (col, (name, json)) in [
@@ -191,13 +239,14 @@ fn families() -> Vec<Family> {
         ("romain-aretes", include_str!("scenes/romain-aretes.forme")),
         ("romain-cylindre", include_str!("scenes/romain-cylindre.forme")),
         ("romain-bossage", include_str!("scenes/romain-bossage.forme")),
+        ("romain-cylindre-arrondi", include_str!("scenes/romain-cylindre-arrondi.forme")),
     ]
     .into_iter()
     .enumerate()
     {
         cases.push(Case { cell: (col, 0), tag: name.into(), scene: Scene::from_json(json).expect(name) });
     }
-    out.push(Family { name: "romain", what: "tes scènes réglées", cols: 4, rows: 1, map: false, cases });
+    out.push(Family { name: "romain", what: "tes scènes (la dernière : pas encore réglée)", cols: 5, rows: 1, map: false, cases });
     out
 }
 

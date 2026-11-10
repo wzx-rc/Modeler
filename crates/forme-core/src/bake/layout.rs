@@ -39,6 +39,12 @@ const CYL_TOP: u32 = 1;
 const CYL_BOTTOM: u32 = 2;
 /// Second half of a cylinder wall seen all around (a round hole).
 const CYL_SIDE_B: u32 = 3;
+/// Rounded rims of a cylinder: CYL_RIM0 + 0 the top one, + 1 the bottom one
+/// (the same numbers as the box's rounded edges, FILLET0 + rim); their
+/// second halves, with the wall's, CYL_RIM_B0 + rim.
+const CYL_RIM0: u32 = FILLET0;
+const CYL_RIM1: u32 = FILLET0 + 1;
+const CYL_RIM_B0: u32 = FILLET0 + 2;
 /// Faces of a box: 18 + k a rounded corner (ball) where three edges rounded
 /// alike meet; k from the signs, bit 0 x < 0, bit 1 y < 0, bit 2 z < 0.
 const CORNER0: u32 = 18;
@@ -96,6 +102,17 @@ fn corner_edges(sg: DVec3) -> [usize; 3] {
 }
 
 /// Radius of a box corner rounded as a ball (its three edges rounded alike).
+/// Radius of a cylinder's rounded rim (0 top, 1 bottom), local units, as
+/// the distance function clamps it; 0 when sharp.
+fn cyl_rim(pr: &PrimDef, rim: usize) -> f64 {
+    let r = edge_r(pr, rim);
+    if pr.kind != 1 || r <= 0.0 {
+        0.0
+    } else {
+        r.min(pr.size.x).min(pr.size.y)
+    }
+}
+
 fn corner_r(pr: &PrimDef, k: u32) -> Option<f64> {
     if pr.kind != 0 {
         return None;
@@ -156,6 +173,14 @@ impl Shape<'_> {
         let l = self.local(p);
         let mut best = (f64::INFINITY, 0u32);
         if self.pr.kind == 1 {
+            // (the rounded rims first: where the point is past both rails)
+            for rim in 0..2u32 {
+                let r = cyl_rim(self.pr, rim as usize);
+                let sg = if rim == 0 { 1.0 } else { -1.0 };
+                if r > 0.0 && CYL_RIM0 + rim != skip && l.y * sg >= self.pr.size.y - r && DVec2::new(l.x, l.z).length() >= self.pr.size.x - r {
+                    return CYL_RIM0 + rim;
+                }
+            }
             for f in [CYL_SIDE, CYL_TOP, CYL_BOTTOM] {
                 if f == skip {
                     continue;
@@ -208,6 +233,13 @@ impl Shape<'_> {
             return match f {
                 CYL_SIDE | CYL_SIDE_B => DVec2::new(l.x, l.z).length() - s.x,
                 CYL_TOP => l.y - s.y,
+                CYL_RIM0.. => {
+                    // the tube of a rounded rim (a torus)
+                    let rim = ((f - CYL_RIM0) % 2) as usize;
+                    let r = cyl_rim(self.pr, rim);
+                    let sg = if rim == 0 { 1.0 } else { -1.0 };
+                    DVec2::new(DVec2::new(l.x, l.z).length() - (s.x - r), l.y * sg - (s.y - r)).length() - r
+                }
                 _ => -l.y - s.y,
             };
         }
@@ -402,6 +434,12 @@ enum Map {
     /// `r`); around (angle × `rr` from direction `b` toward `e`) × arc length
     /// across, from the rail on the plane (y = 0) to the rail on the wall.
     Ring { c: DVec3, a: DVec3, b: DVec3, e: DVec3, r: f64, rr: f64, k: f64 },
+    /// Rounded rim of a cylinder (a quarter of a torus): around (angle ×
+    /// `rr` from direction `b` toward `e`) × arc length across, from the
+    /// rail on the wall (y = 0) to the rail on the cap; `c` the centre of the
+    /// tube's circle on the axis, `a` the axis out of the cap, `rm` the
+    /// radius of the tube's circle, `r` the tube's radius.
+    Tor { c: DVec3, a: DVec3, b: DVec3, e: DVec3, rm: f64, r: f64, rr: f64 },
 }
 
 impl Map {
@@ -422,6 +460,10 @@ impl Map {
                 let th = q.x / rr;
                 let t = blend_t(q.y / k);
                 c + (b * th.cos() + e * th.sin()) * (r + k * (1.0 - t) * (1.0 - t)) + a * (k * t * t)
+            }
+            Map::Tor { c, a, b, e, rm, r, rr } => {
+                let (th, ph) = (q.x / rr, q.y / r);
+                c + (b * th.cos() + e * th.sin()) * (rm + r * ph.cos()) + a * (r * ph.sin())
             }
         }
     }
@@ -457,6 +499,12 @@ impl Map {
                 let (su, sv) = (h.max(0.0).sqrt(), (w.length() - r).max(0.0).sqrt());
                 let t = if su + sv > 1e-300 { su / (su + sv) } else { 0.5 };
                 DVec2::new(w.dot(e).atan2(w.dot(b)) * rr, k * blend_s(t))
+            }
+            Map::Tor { c, a, b, e, rm, r, rr } => {
+                let d = p - c;
+                let h = d.dot(a);
+                let w = d - a * h;
+                DVec2::new(w.dot(e).atan2(w.dot(b)) * rr, h.atan2(w.length() - rm) * r)
             }
         }
     }
@@ -628,11 +676,13 @@ impl Layout<'_> {
 
     /// Which half of a cut cylinder wall a point on it belongs to.
     fn half(&self, f: FaceId, p: DVec3) -> FaceId {
-        if f.face != CYL_SIDE {
-            return f;
-        }
+        let b = match f.face {
+            CYL_SIDE => CYL_SIDE_B,
+            CYL_RIM0 | CYL_RIM1 if self.shape_of(f.prim).is_some_and(|s| s.pr.kind == 1) => CYL_RIM_B0 + (f.face - CYL_RIM0),
+            _ => return f,
+        };
         match self.walls.iter().find(|w| w.0 == f.prim) {
-            Some(&(_, m @ Map::Cyl { r, .. })) if m.to2(p).y.abs() > FRAC_PI_2 * r => FaceId { prim: f.prim, face: CYL_SIDE_B },
+            Some(&(_, m @ Map::Cyl { r, .. })) if m.to2(p).y.abs() > FRAC_PI_2 * r => FaceId { prim: f.prim, face: b },
             _ => f,
         }
     }
@@ -872,6 +922,23 @@ impl Layout<'_> {
         None
     }
 
+    /// The boundary edge of chart `c` that runs through `x` (not at one of
+    /// its ends).
+    fn edge_through(&self, c: usize, x: DVec3) -> Option<usize> {
+        let near = self.node_tol * 10.0;
+        self.bnd[c].iter().flatten().map(|&(e, _)| e).find(|&e| {
+            let ed = &self.edges[e];
+            if !ed.alive || self.nodes[ed.a].distance(x) < near || self.nodes[ed.b].distance(x) < near {
+                return false;
+            }
+            ed.pts.windows(2).any(|w| {
+                let ab = w[1] - w[0];
+                let t = ((x - w[0]).dot(ab) / ab.length_squared().max(1e-30)).clamp(0.0, 1.0);
+                (w[0] + ab * t).distance(x) < near
+            })
+        })
+    }
+
     /// Splits edge `e` at the 3D point `x` (on it); returns the node.
     fn split(&mut self, e: usize, x: DVec3) -> usize {
         let n = self.node(x);
@@ -1091,8 +1158,12 @@ fn check(field: &Field, steps: &[Step]) -> Result<(), String> {
         if pr.kind > 1 || pr.taper.abs() > 1e-6 || pr.shell > 0.0 {
             return Err("seulement des boîtes et des cylindres pour l'instant".into());
         }
-        if pr.kind == 1 && (pr.round > 0.0 || pr.chamfer > 0.0 || pr.edges.iter().any(|r| *r != 0.0)) {
-            return Err("cylindre arrondi pas encore géré".into());
+        // a cylinder's rounded rims: a flat cap and a straight wall must remain
+        if pr.kind == 1 {
+            let (r0, r1) = (cyl_rim(pr, 0), cyl_rim(pr, 1));
+            if r0.max(r1) > pr.size.x * (1.0 - 1e-6) || r0 + r1 > 2.0 * pr.size.y * (1.0 - 1e-6) {
+                return Err("cylindre arrondi jusqu'au bout (sans dessus plat ou sans paroi droite) : pas encore géré".into());
+            }
         }
         if field.instances(s.prim).len() != 1 {
             return Err("copies pas encore gérées".into());
@@ -1104,7 +1175,9 @@ fn check(field: &Field, steps: &[Step]) -> Result<(), String> {
             if s.mode != 0 {
                 return Err("fillet de jonction d'une forme creusée pas encore géré".into());
             }
-            if pr.round > 0.0 || pr.chamfer > 0.0 || pr.edges.iter().any(|r| *r != 0.0) {
+            // (a cylinder's rounded rims: the profile check below says whether
+            // they come near the fillet)
+            if pr.kind == 0 && (pr.round > 0.0 || pr.chamfer > 0.0 || pr.edges.iter().any(|r| *r != 0.0)) {
                 return Err("fillet de jonction : seulement une boîte à arêtes vives ou un cylindre posés sur une face, pour l'instant".into());
             }
         }
@@ -1259,14 +1332,19 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
             let cm = tw.transform_vector3(unit(2)).normalize();
             let wall = FaceId { prim: sh.prim, face: CYL_SIDE };
             let (top, bottom) = (FaceId { prim: sh.prim, face: CYL_TOP }, FaceId { prim: sh.prim, face: CYL_BOTTOM });
+            // rounded rims (world radius) and the face next to the wall and
+            // to the cap at each end: the rim's strip, or each other
+            let rims = [cyl_rim(pr, 0) * sc, cyl_rim(pr, 1) * sc];
+            let rim_id = |i: usize| FaceId { prim: sh.prim, face: CYL_RIM0 + i as u32 };
+            let end = |i: usize, cap: FaceId| if rims[i] > 0.0 { rim_id(i) } else { cap };
             let step = 2.0 * (1.0 - (tol_f / rad).min(0.9)).acos();
             charts.push(Chart {
                 id: wall,
                 shape: si,
                 map: Map::Cyl { o, a: am, b: bm, c: cm, r: rad },
-                lo: DVec2::new(-h, -PI * rad),
-                hi: DVec2::new(h, PI * rad),
-                side: [wall, top, wall, bottom],
+                lo: DVec2::new(-h + rims[1], -PI * rad),
+                hi: DVec2::new(h - rims[0], PI * rad),
+                side: [wall, end(0, top), wall, end(1, bottom)],
                 arcs: vec![],
                 strip: None,
                 ring: Some((rad * step).min(st.size)),
@@ -1274,7 +1352,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 ball: None,
                 cons: cons_base.clone(),
             });
-            for (sg, id) in [(1.0, top), (-1.0, bottom)] {
+            for (i, (sg, id)) in [(1.0, top), (-1.0, bottom)].into_iter().enumerate() {
                 let w = rad * 1.02;
                 let mut cons = cons_base.clone();
                 cons.push(Cons::Disc);
@@ -1288,10 +1366,35 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                     arcs: vec![],
                     strip: None,
                     ring: None,
-                    disc: Some((rad, wall)),
+                    disc: Some((rad - rims[i], end(i, wall))),
                     ball: None,
                     cons,
                 });
+                // the rim's strip, all around (cut open or in two halves
+                // with the wall, below)
+                let r = rims[i];
+                if r > 0.0 {
+                    let rm = rad - r;
+                    let rr = rm + r * 0.64;
+                    let segs = fillet_segs(r, FRAC_PI_2, tol_f).max(((r * FRAC_PI_2 / st.size).round() as usize + 1) / 2 * 2);
+                    // (around, both rails take the wall's segments: `ring` is
+                    // the wall's row, in this chart's units)
+                    let row = (rad * step).min(st.size) * rr / rad;
+                    charts.push(Chart {
+                        id: rim_id(i),
+                        shape: si,
+                        map: Map::Tor { c: o + am * (sg * (h - r)), a: am * sg, b: bm, e: cm, rm, r, rr },
+                        lo: DVec2::new(-PI * rr, 0.0),
+                        hi: DVec2::new(PI * rr, r * FRAC_PI_2),
+                        side: [wall, rim_id(i), id, rim_id(i)],
+                        arcs: vec![],
+                        strip: Some((r, segs)),
+                        ring: Some(row),
+                        disc: None,
+                        ball: None,
+                        cons: cons_base.clone(),
+                    });
+                }
             }
             continue;
         }
@@ -1612,18 +1715,29 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
     // a cylinder wall is cut open where it does not show: its seam
     // (θ = ±π in its chart) goes in the middle of the largest hidden gap.
     // Seen all around (a round hole), it is cut in two halves along its
-    // local x axis, each half a chart of its own.
+    // local x axis, each half a chart of its own. The strips of its rounded
+    // rims go with it (the same seam, or the same two halves).
     for ci in 0..lay.charts.len() {
         let ch = &lay.charts[ci];
         let (Some(_), Map::Cyl { o, a, b, c, r }) = (ch.ring, ch.map) else { continue };
+        let rims: Vec<usize> = (0..lay.charts.len()).filter(|&x| lay.charts[x].id.prim == ch.id.prim && matches!(lay.charts[x].map, Map::Tor { .. })).collect();
         let (nth, nt) = (720usize, 48usize);
+        // (a point of chart x at angle th, j of nt across)
+        let at = |x: usize, th: f64, j: usize| -> DVec2 {
+            let cx = &lay.charts[x];
+            match cx.map {
+                Map::Tor { rr, .. } => DVec2::new(th * rr, cx.hi.y * j as f64 / nt as f64),
+                _ => DVec2::new(cx.lo.x + (cx.hi.x - cx.lo.x) * j as f64 / nt as f64, th * r),
+            }
+        };
+        let shows = |x: usize, th: f64| -> bool {
+            let cx = &lay.charts[x];
+            (0..=nt).any(|j| cx.cons.iter().filter(|k| matches!(k, Cons::Prev | Cons::Later(_))).all(|&k| lay.cval(cx, k, at(x, th, j)) > 0.0))
+        };
         let mut vis = vec![false; nth];
         for (k, v) in vis.iter_mut().enumerate() {
             let th = -PI + (k as f64 + 0.5) * TAU / nth as f64;
-            *v = (0..=nt).any(|j| {
-                let q = DVec2::new(ch.lo.x + (ch.hi.x - ch.lo.x) * j as f64 / nt as f64, th * r);
-                ch.cons.iter().filter(|k| matches!(k, Cons::Prev | Cons::Later(_))).all(|&k| lay.cval(ch, k, q) > 0.0)
-            });
+            *v = std::iter::once(ci).chain(rims.iter().copied()).any(|x| shows(x, th));
         }
         if !vis.iter().any(|&v| v) {
             continue;
@@ -1641,13 +1755,18 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 best = (l, s);
             }
         }
+        let turned = |m: Map, phi: f64| match m {
+            Map::Cyl { o, a, b, c, r } => Map::Cyl { o, a, b: b * phi.cos() + c * phi.sin(), c: c * phi.cos() - b * phi.sin(), r },
+            Map::Tor { c, a, b, e, rm, r, rr } => Map::Tor { c, a, b: b * phi.cos() + e * phi.sin(), e: e * phi.cos() - b * phi.sin(), rm, r, rr },
+            m => m,
+        };
         if best.0 < 4 {
             let id = ch.id;
-            let rot = |phi: f64| Map::Cyl { o, a, b: b * phi.cos() + c * phi.sin(), c: c * phi.cos() - b * phi.sin(), r };
-            let (ma, mb) = (rot(FRAC_PI_2), rot(-FRAC_PI_2));
+            let (ma, mb) = (turned(ch.map, FRAC_PI_2), turned(ch.map, -FRAC_PI_2));
             let ida = id;
             let idb = FaceId { prim: id.prim, face: CYL_SIDE_B };
-            let mut hb = Chart { id: idb, map: mb, lo: DVec2::new(ch.lo.x, -FRAC_PI_2 * r), hi: DVec2::new(ch.hi.x, FRAC_PI_2 * r), side: ch.side, arcs: vec![], cons: ch.cons.clone(), ..*ch };
+            let to_b = |f: FaceId| if f.prim == id.prim && (f.face == CYL_RIM0 || f.face == CYL_RIM1) { FaceId { prim: f.prim, face: CYL_RIM_B0 + (f.face - CYL_RIM0) } } else { f };
+            let mut hb = Chart { id: idb, map: mb, lo: DVec2::new(ch.lo.x, -FRAC_PI_2 * r), hi: DVec2::new(ch.hi.x, FRAC_PI_2 * r), side: ch.side.map(to_b), arcs: vec![], cons: ch.cons.clone(), ..*ch };
             hb.side[0] = ida;
             hb.side[2] = ida;
             let ha = &mut lay.charts[ci];
@@ -1658,11 +1777,30 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
             ha.side[2] = idb;
             lay.charts.push(hb);
             lay.walls.push((id.prim, ma));
+            for x in rims {
+                let ra = lay.charts[x].id;
+                let rb = to_b(ra);
+                let Map::Tor { rr, .. } = lay.charts[x].map else { continue };
+                let m = lay.charts[x].map;
+                let mut tb = Chart { id: rb, map: turned(m, -FRAC_PI_2), arcs: vec![], cons: lay.charts[x].cons.clone(), ..lay.charts[x] };
+                tb.lo.x = -FRAC_PI_2 * rr;
+                tb.hi.x = FRAC_PI_2 * rr;
+                tb.side = [idb, ra, tb.side[2], ra];
+                let ta = &mut lay.charts[x];
+                ta.map = turned(m, FRAC_PI_2);
+                ta.lo.x = -FRAC_PI_2 * rr;
+                ta.hi.x = FRAC_PI_2 * rr;
+                ta.side[1] = rb;
+                ta.side[3] = rb;
+                lay.charts.push(tb);
+            }
             continue;
         }
         let phi = -PI + (best.1 as f64 + best.0 as f64 * 0.5) * TAU / nth as f64 + PI;
-        let (b2, c2) = (b * phi.cos() + c * phi.sin(), c * phi.cos() - b * phi.sin());
-        lay.charts[ci].map = Map::Cyl { o, a, b: b2, c: c2, r };
+        lay.charts[ci].map = Map::Cyl { o, a, b: b * phi.cos() + c * phi.sin(), c: c * phi.cos() - b * phi.sin(), r };
+        for x in rims {
+            lay.charts[x].map = turned(lay.charts[x].map, phi);
+        }
     }
     // a ring of junction fillet goes with the two halves of its wall
     for sh in &lay.shapes {
@@ -1793,6 +1931,20 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
     }
     for (ci, raw) in raw_loops {
         let mut ids = vec![];
+        // a cylinder's rounded rim meets another shape only along a row
+        // for now (a plane square to the axis: the part's face where the
+        // cylinder stands on its rounded foot, the face a hole's rounded
+        // floor opens on)
+        if let (Map::Tor { r, .. }, true) = (lay.charts[ci].map, matches!(lay.charts[ci].map, Map::Tor { .. })) {
+            let m = lay.charts[ci].map;
+            let across = raw.iter().any(|(l, pts)| {
+                let y: Vec<f64> = pts.iter().map(|p| m.to2(*p).y).collect();
+                l.prim != lay.charts[ci].id.prim && y.iter().any(|v| (v - y[0]).abs() > r * 0.01)
+            });
+            if across {
+                return Err("bord arrondi d'un cylindre coupé par une autre forme ou par le bord de la pièce : pas encore géré".into());
+            }
+        }
         for (label, pts) in raw {
             let a = lay.node(pts[0]);
             let b = lay.node(*pts.last().unwrap());
@@ -1866,7 +2018,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
             for &(e, fwd) in &lp {
                 let other = lay.edges[e].charts.iter().copied().find(|&c| c != ci).unwrap_or(ci);
                 let sm = lay.charts[other].map;
-                if !matches!(sm, Map::Cyl { .. } | Map::Ring { .. }) {
+                if !matches!(sm, Map::Cyl { .. } | Map::Ring { .. } | Map::Tor { .. }) {
                     continue;
                 }
                 let pp = lay.hpts(e, fwd, ci);
@@ -1927,9 +2079,29 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 }
                 let cuts: Vec<DVec3> = (1..k).map(|j| sm.to3(proj1(&|x| sh.face_fn(me.face, sm.to3(x)), qa.lerp(qb, j as f64 / k as f64), fd))).collect();
                 let mut cur = e;
-                for x in cuts {
+                for &x in &cuts {
                     lay.split(cur, x);
                     cur = lay.edges.len() - 1;
+                }
+                // a strip around a cylinder (its rounded rim, a junction
+                // fillet's ring): the same cuts on the strip's other rail,
+                // along the wall (cut at the same angles at its other end),
+                // so that the wall's columns run straight
+                if matches!(sm, Map::Tor { .. } | Map::Ring { .. }) {
+                    let (lo, hi) = (lay.charts[other].lo.y, lay.charts[other].hi.y);
+                    for &x in &cuts {
+                        let q = sm.to2(x);
+                        // (the rails other than the one cut, where they show)
+                        for y in [lo, hi] {
+                            if (q.y - y).abs() < (hi - lo) * 0.01 {
+                                continue;
+                            }
+                            let w = sm.to3(DVec2::new(q.x, y));
+                            if let Some(e2) = lay.edge_through(other, w) {
+                                lay.split(e2, w);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1990,7 +2162,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
         let map = lay.charts[ci].map;
         let wall = |lay: &Layout, e: usize| -> Option<usize> {
             let other = lay.edges[e].charts.iter().copied().find(|&c| c != ci).unwrap_or(ci);
-            (lay.charts[other].id.prim == me.prim && matches!(lay.charts[other].map, Map::Cyl { .. })).then_some(other)
+            (lay.charts[other].id.prim == me.prim && matches!(lay.charts[other].map, Map::Cyl { .. } | Map::Tor { .. })).then_some(other)
         };
         let quarter = loops[0].len() == 4
             && loops[0].iter().all(|&(e, fwd)| {
@@ -2101,7 +2273,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 let total: f64 = pp.windows(3).map(|w| turn(w[1] - w[0], w[2] - w[1])).sum();
                 let planar = matches!(lay.charts[ci].map, Map::Plane { .. });
                 let rev = matches!(lay.charts[other].map, Map::Rev { .. });
-                if planar && (matches!(lay.charts[other].map, Map::Cyl { .. } | Map::Ring { .. }) || rev) && total.abs() > 0.6 {
+                if planar && (matches!(lay.charts[other].map, Map::Cyl { .. } | Map::Ring { .. } | Map::Tor { .. }) || rev) && total.abs() > 0.6 {
                     // an arc against a fillet strip or a cylinder wall: its
                     // middle, in the curved chart (a whole row on a strip)
                     let sm = lay.charts[other].map;
@@ -3140,6 +3312,11 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                     fixed[e] = true;
                     let rows = d.y.abs() / ch.row();
                     count[e] = (if ch.strip.is_some() { rows.round() } else { (rows - 0.1).ceil() } as usize).max(1);
+                } else if let (Map::Tor { .. }, Some(row)) = (m, ch.ring) {
+                    // along a cylinder's rounded rim: the wall's segments,
+                    // on both rails (the cap's side as the wall's)
+                    fixed[e] = true;
+                    count[e] = ((d.x.abs() / row - 0.1).ceil() as usize).max(1);
                 }
             }
         }
@@ -3332,7 +3509,18 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
         } else {
             // across a fillet strip (its end, a miter): evenly in the arc,
             // so that the rows run on straight; else evenly in length
-            let strip = ed.charts.iter().copied().find(|&c| lay.charts[c].strip.is_some()).filter(|_| fixed[e]);
+            // (a strip it runs across, not along: the rail between a strip
+            // and a cylinder wall is fixed by the wall, along the strip)
+            let strip = ed
+                .charts
+                .iter()
+                .copied()
+                .find(|&c| {
+                    let m = lay.charts[c].map;
+                    let d = m.to2(lay.nodes[ed.b]) - m.to2(lay.nodes[ed.a]);
+                    lay.charts[c].strip.is_some() && d.y.abs() > d.x.abs()
+                })
+                .filter(|_| fixed[e]);
             let cum: Vec<f64> = std::iter::once(0.0)
                 .chain(ed.pts.windows(2).scan(0.0, |s, w| {
                     *s += match strip {
