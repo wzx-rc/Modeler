@@ -838,8 +838,21 @@ fn plan_field(field: &Field, st: &BakeSettings) -> Option<f64> {
 pub fn build_auto(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Result<Baked, String> {
     let size = plan(scene, st).ok_or_else(|| "historique pas encore géré (groupes fusionnés, coques, Groove/Tongue, copies de la forme de base)".to_string())?;
     let bs = BuildSettings { size, tol: (st.tol * 2.0).max(0.01), fillet_rows: 0, threads: st.threads };
-    let mut b = build(scene, &bs, progress)?;
+    // first from the construction lines, then the older builder
+    let ls = super::layout::LayoutSettings { size, tol: bs.tol, threads: st.threads };
+    let why_lines = match super::layout::build(scene, &ls, progress) {
+        Ok(mut b) => {
+            b.stats.quad_size = size;
+            return Ok(b);
+        }
+        Err(why) => why,
+    };
+    if progress.cancelled() {
+        return Err("annulé".into());
+    }
+    let mut b = build(scene, &bs, progress).map_err(|why| format!("{why} ({why_lines})"))?;
     b.stats.quad_size = size;
+    b.stats.note = why_lines;
     Ok(b)
 }
 

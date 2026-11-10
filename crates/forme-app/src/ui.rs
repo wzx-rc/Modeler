@@ -1636,11 +1636,18 @@ pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
     stat_row(
         ui,
         "Méthode",
-        if s.constructive { format!("par opération · {:.2} s", s.seconds) } else { format!("repli par surfaces · {:.1} s", s.seconds) },
-        if s.constructive { OK } else { EDGE_SEL },
+        if s.lines {
+            format!("par lignes · {:.2} s", s.seconds)
+        } else if s.constructive {
+            format!("par opération · {:.2} s", s.seconds)
+        } else {
+            format!("repli par surfaces · {:.1} s", s.seconds)
+        },
+        if s.lines { OK } else { EDGE_SEL },
     );
     if !s.note.is_empty() {
-        note(ui, format!("Pourquoi le repli : {}", s.note), EDGE_SEL);
+        let why = if s.constructive { "Pas encore par lignes" } else { "Pourquoi le repli" };
+        note(ui, format!("{why} : {}", s.note), EDGE_SEL);
     }
 
     section(ui, "Passe secondaire (option)");

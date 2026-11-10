@@ -13,6 +13,7 @@ pub mod patch;
 pub mod quad;
 pub mod build;
 pub mod decimate;
+pub mod layout;
 pub mod lines;
 
 use crate::mesh::Mesh;
@@ -122,6 +123,8 @@ pub struct BakeStats {
     pub stage_seconds: [f64; 5],
     /// Built operation by operation (all-quad topology), not by surfaces.
     pub constructive: bool,
+    /// Built from the construction lines (`layout`).
+    pub lines: bool,
     /// Bake par opération: target quad size (mm).
     pub quad_size: f64,
     /// Why the bake par opération was not used (empty when it was).

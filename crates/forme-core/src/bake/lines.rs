@@ -76,7 +76,7 @@ fn order(scene: &Scene) -> Vec<NodeId> {
 }
 
 /// Fillet of one own edge (negative: chamfer).
-fn edge_r(pr: &PrimDef, e: usize) -> f64 {
+pub(crate) fn edge_r(pr: &PrimDef, e: usize) -> f64 {
     match pr.edges.get(e) {
         Some(r) => *r,
         None if pr.chamfer > 0.0 => -pr.chamfer,

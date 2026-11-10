@@ -30,6 +30,17 @@ Sur les bakes de l'app : cube 20 mm 384 → 6 faces, cube arrondi 864 → 150, c
 
 Limite : une loop n'est retirée qu'entière. Celles qui passent par un trou, un éventail de fillet ou un pôle (coin du carré d'un trou) restent, même sur leurs morceaux plats (dessous du socle).
 
+## Bake par lignes (`layout.rs`, 10 nov. 2026)
+
+Demande de Romain : le maillage se déduit des **lignes de construction** (arêtes des formes, rails de leurs arrondis, ligne de jonction entre deux formes), en commençant par la ligne de contour entre deux formes. C'est le premier essai du Bake, avant `build.rs`.
+
+1. **Cartes** : chaque face de chaque boîte (face plate = rectangle dans son plan, arête arrondie = bande « le long de l'arête × le long de l'arc ») est découpée par les autres formes. Les bords de la région sont tracés en 2D puis posés exactement sur la face voisine ; les coins sont résolus à l'intersection exacte des deux faces. Chaque bord est partagé par les deux faces qu'il sépare (mêmes sommets des deux côtés).
+2. **Fillets d'abord** : le nombre de rangées à travers chaque bande est fixé (tolérance de corde, pair), rôle orange.
+3. **Boucles** : depuis chaque coin rentrant (vif, ou le milieu d'un fillet concave) des lignes partent tout droit à travers la face et continuent de face en face jusqu'à se refermer. Pour un fillet convexe (coin arrondi d'une face), ses rails continuent en boucles et son milieu devient le coin du patch arrondi.
+4. **Patchs** : chaque face est alors coupée en patchs à 4 coins. Les nombres de segments sont accordés (côtés opposés égaux), l'espacement des lignes libres reprend celui de la ligne d'en face (les rangées du fillet continuent droites), puis chaque patch est rempli par interpolation transfinie dans sa carte.
+
+Résultats : scène de Romain (boîte + coin creusé, fillet 2,2 mm) 432 quads, fermé, écart max 0,04 mm ; même scène sans fillet 318 quads ; boîte à une arête arrondie 450 quads (`bake_probe parlignes`). Pour l'instant : boîtes seulement, Add / Carve sans fillet de jonction. Le reste renvoie `Err` et passe à `build.rs`, puis au repli par surfaces ; la raison s'affiche dans le panneau (« Pas encore par lignes : … »).
+
 ## Historique des approches
 
 1. **Bake par surfaces** (`patch.rs`, encore utilisé en repli). Patchs paramétriques par primitive, découpés exactement le long des courbes de jonction puis cousus. C'est précis (écart moyen 0,002 mm), mais la topologie est mauvaise : raffinements adaptatifs, triangles. **Refusé par Romain.**

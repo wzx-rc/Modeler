@@ -33,6 +33,7 @@ OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- anneau   # 
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- support  # test part, junction by junction (par opération or why not)
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- raccord  # test part: bearing front face joining the two rings (topologies A and B)
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- liaison  # test part: front face (A) welded to the bearing / base fillet
+OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes  # bake from the construction lines (bake/layout.rs): Romain's scene, without fillet, box with one rounded edge
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- piece    # test part: the whole part, fillets first (orange) then fill paths (cream), closed
 DEG=5 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- decime  # dissolve the closed edge loops whose cross path bends less than DEG out of the surface (same code as the optional pass)
 ```
@@ -56,6 +57,7 @@ The iPad `.ipa` is built by GitHub Actions on every push to `main` (repository `
 - `Shape.edges` empty = uniform fillet (`round` / `chamfer`). Negative value = chamfer. `set_edge` collapses back to uniform when every edge is equal.
 - Bake build order (validated by Romain): **fillets first**, as quad strips shown in orange in debug renders, **then the fill paths** (flat faces, walls) between them, reusing the strips' edge vertices exactly. See `docs/BAKE.md`.
 - The flat-loop pass (`bake/decimate.rs`) is an **option, off by default** (validated by Romain): never call it from `bake()`. It runs only when the toggle in the Bake window is on, on a copy of the result.
+- The Bake tries, in order: by construction lines (`bake/layout.rs`), by operation (`bake/build.rs`), by surfaces. Each step returns `Err(reason)` for a history it does not handle; the reason shows in the Bake panel.
 - Bake by operation (`bake/build.rs`): any history it does not handle must return `Err(reason)`. `bake()` then falls back to the surface bake and shows the reason in the dialog. Never return a broken mesh in silence.
 - Renderer: an image is "moving" when it changes from frame to frame (not just because a tool is active). The full-quality image is refined in bands, so it never blocks the UI.
 - Both interfaces drive the same `AppState`: a feature goes in `state.rs`, then gets a control in `ui.rs` (Atelier) and in `studio.rs` (Studio). Each interface sets `st.view_rect` every frame (the free 3D area), which centres the camera.

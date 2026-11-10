@@ -451,6 +451,10 @@ fn main() {
         construction();
         return;
     }
+    if what == "parlignes" {
+        par_lignes();
+        return;
+    }
     if what == "decime" {
         decime();
     }
@@ -1530,6 +1534,55 @@ pub fn coin(blend: f32) -> Scene {
     c.size = Vec3::new(9.0, 22.0, 0.0);
     s.add(root, NodeSpec::shape("Cylindre", c).at(Vec3::new(20.0, 20.0, 20.0)).mode(CombineMode::Carve).blend(blend));
     s
+}
+
+/// Bake from the construction lines (bake::layout) on Romain's scene and
+/// its variants: fillet strips orange, fill patches blue (BY_STEP colours).
+fn par_lignes() {
+    use glam::DVec3;
+    let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp".into());
+    let romain = Scene::from_json(include_str!("scenes/romain-coin.forme")).expect("scène de Romain");
+    let mut vif = romain.clone();
+    for id in vif.nodes.keys().copied().collect::<Vec<_>>() {
+        if let Some(sh) = vif.node_mut(id).and_then(|n| n.shape_mut()) {
+            sh.edges.clear();
+        }
+    }
+    let mut seul = Scene::new();
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::new(10.0, 10.0, 10.0);
+    b.set_edge(4, 3.0);
+    let r0 = seul.root;
+    seul.add(r0, NodeSpec::shape("Boîte", b));
+    let t = DVec3::new(39.5, 19.4, 51.5);
+    let cases = [("romain", romain, t, 80.0), ("romain-vif", vif, t, 80.0), ("boite-arrondie", seul, DVec3::ZERO, 32.0)];
+    std::env::set_var("BY_STEP", "1");
+    for (name, scene, target, ext) in cases {
+        let st = bake::BakeSettings::preset(bake::Quality::Standard);
+        let size = bake::build::plan(&scene, &st).unwrap_or(5.0);
+        let ls = bake::layout::LayoutSettings { size, tol: st.tol * 2.0, threads: st.threads };
+        match bake::layout::build(&scene, &ls, &bake::Progress::default()) {
+            Ok(b) => {
+                let s = &b.stats;
+                println!(
+                    "{name} : {} faces ({} quads, {} tris, {} n-gones), {} patchs, écart moy {:.4} max {:.4} mm, {} bords ouverts, {:.0} ms",
+                    b.faces.len(),
+                    s.quads,
+                    s.tris,
+                    s.ngons,
+                    s.patches,
+                    s.mean_dev,
+                    s.max_dev,
+                    s.open_edges,
+                    s.seconds * 1000.0
+                );
+                render(&b, &format!("{out}/parlignes-{name}-a.png"), DVec3::new(-0.8, 0.7, -1.0), target, ext, 1400, 1050);
+                render(&b, &format!("{out}/parlignes-{name}-b.png"), DVec3::new(0.9, -0.6, 0.8), target, ext, 1400, 1050);
+                render(&b, &format!("{out}/parlignes-{name}-dessus.png"), DVec3::new(0.001, 1.0, 0.0), target, ext * 0.6, 1400, 1050);
+            }
+            Err(e) => println!("{name} : ÉCHEC {e}"),
+        }
+    }
 }
 
 /// Construction lines read from the history (bake::lines), over the part.

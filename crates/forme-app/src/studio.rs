@@ -642,7 +642,7 @@ fn bake_box(ui: &mut Ui, st: &mut AppState) {
             let s = &b.stats;
             let faces = b.faces.len().max(1);
             let mut rows: Vec<(String, String)> = vec![
-                ("Méthode".into(), if s.constructive { "Par opération".into() } else { "Par surfaces (repli)".into() }),
+                ("Méthode".into(), if s.lines { "Par lignes".into() } else if s.constructive { "Par opération".into() } else { "Par surfaces (repli)".into() }),
                 ("Faces".into(), fmt_int(b.faces.len())),
                 ("Quads".into(), format!("{:.0} %", 100.0 * s.quads as f64 / faces as f64)),
                 ("Bords ouverts".into(), fmt_int(s.open_edges)),
