@@ -459,6 +459,17 @@ fn rail(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                 }
             });
         }
+        group(ui, "GIZMO");
+        for (g, icon, tip, key) in [(GizmoMode::Move, Icon::Move, "Déplacer et dimensionner (W)", "W"), (GizmoMode::Rotate, Icon::Rotate, "Tourner : anneaux X / Y / Z, vue, trackball (E)", "E")] {
+            centred(ui, &mut |ui| {
+                let r = tool_btn(ui, icon, st.gizmo == g, tip);
+                ui::key_hint(ui, &r, key);
+                if r.clicked() {
+                    st.gizmo = g;
+                    st.set_pick_mode(PickMode::Object);
+                }
+            });
+        }
         group(ui, "ÉDITION");
         let has = st.selection.is_some();
         let mirrored = st.selection.and_then(|id| st.scene.node(id)).map(|n| n.mirror.x).unwrap_or(false);

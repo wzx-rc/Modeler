@@ -113,9 +113,27 @@ pub enum Handle {
     Round,
     /// Fillet of the selected edge (junction blend or shape rounding).
     Fillet,
+    /// Rotation rings (WZX Engine / Maya): about X, Y, Z (front half drawn),
+    /// about the view axis (outer ring), free trackball (inside).
+    RotX,
+    RotY,
+    RotZ,
+    RotView,
+    RotFree,
+}
+
+/// What the gizmo of the selection does: move and size (W) or rotate (E).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GizmoMode {
+    #[default]
+    Move,
+    Rotate,
 }
 
 impl Handle {
+    pub fn is_rot(self) -> bool {
+        matches!(self, Handle::RotX | Handle::RotY | Handle::RotZ | Handle::RotView | Handle::RotFree)
+    }
     pub fn is_plane(self) -> bool {
         matches!(self, Handle::PlaneXY | Handle::PlaneYZ | Handle::PlaneXZ)
     }
@@ -139,6 +157,7 @@ impl Handle {
             Handle::Depth => "Profondeur",
             Handle::Round => "Bevel",
             Handle::Fillet => "Fillet",
+            Handle::RotX | Handle::RotY | Handle::RotZ | Handle::RotView | Handle::RotFree => "Rotation",
         }
     }
     /// Size handles: scaled with the opposite face fixed (box anchor).
@@ -157,6 +176,11 @@ impl Handle {
             Handle::Radius | Handle::Height | Handle::Depth => "Face opposée fixe · Ctrl : symétrique",
             Handle::Round => "Bevel de toutes les arêtes",
             Handle::Fillet => "Fillet des arêtes sélectionnées",
+            Handle::RotX => "Tourner autour de X · Snap : 15°",
+            Handle::RotY => "Tourner autour de Y · Snap : 15°",
+            Handle::RotZ => "Tourner autour de Z · Snap : 15°",
+            Handle::RotView => "Tourner face à la vue",
+            Handle::RotFree => "Rotation libre (trackball)",
         }
     }
 }
@@ -166,6 +190,11 @@ impl Handle {
 pub const PLANE0: f32 = 0.60;
 pub const PLANE1: f32 = 0.74;
 pub const PLANE_MID: f32 = (PLANE0 + PLANE1) * 0.5;
+/// Rotation rings: radius in units of the axis length, the outer view ring,
+/// and the snap step (WZX Engine: kRing 0.85, kViewRing 1.08, 15°).
+pub const ROT_RING: f32 = 0.85;
+pub const ROT_VIEW: f32 = 1.08;
+pub const ROT_STEP: f32 = std::f32::consts::PI / 12.0;
 
 #[derive(Clone, Debug)]
 pub struct HandleInfo {
@@ -190,6 +219,32 @@ pub struct HandleDrag {
     pub reach: f32,
     /// Size handles: the fixed face (world), None when scaling about the centre.
     pub anchor: Option<Vec3>,
+    /// Rotation rings: the drag state.
+    pub rot: Option<RotDrag>,
+}
+
+/// A rotation drag (WZX Engine's manipulator): the angle is measured in the
+/// ring's plane, or along its screen tangent when the ring is seen edge-on.
+#[derive(Clone, Debug)]
+pub struct RotDrag {
+    pub pivot: Vec3,
+    /// Rotation axis (world).
+    pub n: Vec3,
+    /// From the pivot to the grab point, in the ring's plane.
+    pub v0: Vec3,
+    /// Accumulated angle (radians), and the last measured one.
+    pub angle: f32,
+    last: f32,
+    /// Edge-on ring: screen direction of the drag.
+    tangent: Option<[f32; 2]>,
+    mouse0: [f32; 2],
+    prev: [f32; 2],
+    /// Trackball: accumulated rotation.
+    free: Quat,
+    /// World rotation at the start.
+    start_rot: Quat,
+    /// Ring radius on screen (points), for the tangent drag.
+    pub radius_px: f32,
 }
 
 /// Smooth framing: the camera glides from where it is to the framed box.
@@ -350,6 +405,8 @@ pub struct AppState {
     pub handle_drag: Option<HandleDrag>,
     /// Handle under the pointer (pre-selection, drawn hot before the click).
     pub handle_hover: Option<Handle>,
+    /// Move / size (W) or rotate (E).
+    pub gizmo: GizmoMode,
     /// Smooth framing (F) in progress.
     pub cam_anim: Option<CamAnim>,
     pub pointer_kind: PointerKind,
@@ -507,6 +564,7 @@ impl AppState {
             placement: None,
             handle_drag: None,
             handle_hover: None,
+            gizmo: GizmoMode::Move,
             cam_anim: None,
             pointer_kind: PointerKind::Mouse,
             screen: [1194.0, 834.0],
@@ -1639,6 +1697,10 @@ impl AppState {
             return vec![HandleInfo { handle: Handle::Fillet, world: e.at + n * len, origin: e.at, axis: n }];
         }
         let Some(n) = self.scene.node(id) else { return vec![] };
+        // rotation: the rings are drawn and picked on their own (rot_gizmo)
+        if self.gizmo == GizmoMode::Rotate {
+            return vec![];
+        }
         let m = self.scene.world_matrix(id);
         let (s, r, o) = m.to_scale_rotation_translation();
         let s = s.x;
@@ -1698,7 +1760,134 @@ impl AppState {
         out
     }
 
+    /// Rotation gizmo of the selection: pivot and ring radius (world), or None
+    /// when there is nothing to rotate (or the move gizmo is shown).
+    pub fn rot_gizmo(&self) -> Option<(Vec3, f32)> {
+        if self.gizmo != GizmoMode::Rotate || self.tool != Tool::Select || !self.edge_sel.is_empty() {
+            return None;
+        }
+        let id = self.selection?;
+        self.scene.node(id)?;
+        let o = self.scene.world_matrix(id).transform_point3(Vec3::ZERO);
+        let view = self.view();
+        Some((o, view.pixel_size_at((o - view.eye).length()) * 110.0 * ROT_RING))
+    }
+
+    fn begin_rotate(&mut self, info: &HandleInfo, pos: [f32; 2]) {
+        let Some((pivot, rr)) = self.rot_gizmo() else { return };
+        let Some(id) = self.selection else { return };
+        let Some(start) = self.scene.node(id).cloned() else { return };
+        let (_, start_rot, _) = self.scene.world_matrix(id).to_scale_rotation_translation();
+        let view = self.view();
+        let look = (pivot - view.eye).normalize_or(Vec3::Z);
+        let n = if info.handle == Handle::RotView { -look } else { info.axis };
+        let (ro, rd) = self.ray(pos);
+        let mut v0 = n.any_orthonormal_vector();
+        let mut tangent = None;
+        if info.handle == Handle::RotView || n.dot(look).abs() > 0.25 {
+            if let Some(hit) = ray_plane(ro, rd, pivot, n) {
+                v0 = (hit - pivot).normalize_or(v0);
+            }
+        } else if info.handle != Handle::RotFree {
+            // ring seen edge-on: drag along its screen tangent at the nearest point
+            let (a, b) = (n.any_orthonormal_vector(), n.cross(n.any_orthonormal_vector()));
+            let mut best = (f32::MAX, 0.0f32);
+            for i in 0..72 {
+                let ang = i as f32 * std::f32::consts::TAU / 72.0;
+                if let Some(p) = view.project(pivot + (a * ang.cos() + b * ang.sin()) * rr) {
+                    let d = (p[0] - pos[0]).hypot(p[1] - pos[1]);
+                    if d < best.0 {
+                        best = (d, ang);
+                    }
+                }
+            }
+            let dir = a * best.1.cos() + b * best.1.sin();
+            let tan = a * -best.1.sin() + b * best.1.cos();
+            v0 = dir;
+            tangent = Some([1.0, 0.0]);
+            if let (Some(p0), Some(p1)) = (view.project(pivot + dir * rr), view.project(pivot + (dir + tan * 0.1) * rr)) {
+                let (tx, ty) = (p1[0] - p0[0], p1[1] - p0[1]);
+                let l = tx.hypot(ty);
+                if l > 1e-4 {
+                    tangent = Some([tx / l, ty / l]);
+                }
+            }
+        }
+        self.history.record("Rotation", &self.scene);
+        let radius_px = rr / view.pixel_size_at((pivot - view.eye).length()).max(1e-6);
+        self.handle_drag = Some(HandleDrag {
+            node: id,
+            handle: info.handle,
+            origin: pivot,
+            axis: n,
+            t0: 0.0,
+            start,
+            scale: 1.0,
+            start_hit: pivot,
+            reach: 0.0,
+            anchor: None,
+            rot: Some(RotDrag { pivot, n, v0, angle: 0.0, last: 0.0, tangent, mouse0: pos, prev: pos, free: Quat::IDENTITY, start_rot, radius_px }),
+        });
+    }
+
+    fn drag_rotate(&mut self, pos: [f32; 2]) {
+        let Some(mut d) = self.handle_drag.clone() else { return };
+        let Some(mut r) = d.rot.clone() else { return };
+        let dq = if d.handle == Handle::RotFree {
+            // trackball: horizontal = about the view's up, vertical = about its right
+            let (_, right, up) = self.view().basis();
+            let (dx, dy) = (pos[0] - r.prev[0], pos[1] - r.prev[1]);
+            let k = 1.0 / 92.0;
+            r.free = (Quat::from_axis_angle(up, dx * k) * Quat::from_axis_angle(right, dy * k) * r.free).normalize();
+            r.free
+        } else {
+            if let Some(t) = r.tangent {
+                r.angle = ((pos[0] - r.mouse0[0]) * t[0] + (pos[1] - r.mouse0[1]) * t[1]) / r.radius_px.max(1.0);
+            } else {
+                let (ro, rd) = self.ray(pos);
+                if let Some(hit) = ray_plane(ro, rd, r.pivot, r.n) {
+                    let v = hit - r.pivot;
+                    let cur = r.n.dot(r.v0.cross(v)).atan2(r.v0.dot(v));
+                    let mut step = cur - r.last;
+                    while step > std::f32::consts::PI {
+                        step -= std::f32::consts::TAU;
+                    }
+                    while step < -std::f32::consts::PI {
+                        step += std::f32::consts::TAU;
+                    }
+                    r.angle += step;
+                    r.last = cur;
+                }
+            }
+            let ang = if self.snap { (r.angle / ROT_STEP).round() * ROT_STEP } else { r.angle };
+            Quat::from_axis_angle(r.n, ang)
+        };
+        r.prev = pos;
+        let rot = (dq * r.start_rot).normalize();
+        self.set_world(d.node, r.pivot, rot);
+        if let Some(n) = self.scene.node_mut(d.node) {
+            n.transform.scale = d.start.transform.scale;
+        }
+        d.rot = Some(r);
+        self.handle_drag = Some(d);
+        self.changed();
+    }
+
+    /// Angle of the rotation being dragged (degrees, snapped like the shape).
+    pub fn rot_angle(&self) -> Option<f32> {
+        let d = self.handle_drag.as_ref()?;
+        let r = d.rot.as_ref()?;
+        if d.handle == Handle::RotFree {
+            return None;
+        }
+        let a = if self.snap { (r.angle / ROT_STEP).round() * ROT_STEP } else { r.angle };
+        Some(a.to_degrees())
+    }
+
     pub fn begin_handle(&mut self, info: &HandleInfo, pos: [f32; 2]) {
+        if info.handle.is_rot() {
+            return self.begin_rotate(info, pos);
+        }
         let Some(id) = self.selection else { return };
         let Some(start) = self.scene.node(id).cloned() else { return };
         let (ro, rd) = self.ray(pos);
@@ -1718,10 +1907,14 @@ impl AppState {
             start_hit,
             reach,
             anchor: None,
+            rot: None,
         });
     }
 
     pub fn drag_handle(&mut self, pos: [f32; 2]) {
+        if self.handle_drag.as_ref().map(|d| d.rot.is_some()).unwrap_or(false) {
+            return self.drag_rotate(pos);
+        }
         let Some(d) = self.handle_drag.clone() else { return };
         let (ro, rd) = self.ray(pos);
         let t = line_param(d.origin, d.axis, ro, rd);

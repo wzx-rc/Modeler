@@ -20,9 +20,81 @@ fn handle_points(st: &AppState) -> Vec<(HandleInfo, Pos2)> {
         .collect()
 }
 
+/// The two in-plane axes of a rotation ring.
+fn ring_basis(n: glam::Vec3) -> (glam::Vec3, glam::Vec3) {
+    use glam::Vec3;
+    if n == Vec3::X {
+        (Vec3::Y, Vec3::Z)
+    } else if n == Vec3::Y {
+        (Vec3::Z, Vec3::X)
+    } else {
+        (Vec3::X, Vec3::Y)
+    }
+}
+
+fn dist_seg(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let t = ((p - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
+}
+
+/// Screen points of a rotation ring; `front` keeps only its half facing the
+/// camera (a None breaks the line).
+fn ring_points(st: &AppState, pivot: glam::Vec3, rr: f32, n: glam::Vec3, front: bool) -> Vec<Option<Pos2>> {
+    let view = st.view();
+    let to_cam = (view.eye - pivot).normalize_or(glam::Vec3::Z);
+    let (u, v) = ring_basis(n);
+    (0..=72)
+        .map(|i| {
+            let a = i as f32 * std::f32::consts::TAU / 72.0;
+            let dir = u * a.cos() + v * a.sin();
+            if front && dir.dot(to_cam) <= -0.05 {
+                return None;
+            }
+            view.project(pivot + dir * rr).map(|q| pos2(q[0], q[1]))
+        })
+        .collect()
+}
+
+/// Rotation gizmo (WZX Engine): the X / Y / Z ring under the pointer (front
+/// half, within 10 px), else the outer view ring, else the free trackball.
+fn rot_hit(st: &AppState, pos: Pos2) -> Option<HandleInfo> {
+    let (pv, rr) = st.rot_gizmo()?;
+    let view = st.view();
+    let pc = view.project(pv).map(|q| pos2(q[0], q[1]))?;
+    let info = |handle, axis| HandleInfo { handle, world: pv, origin: pv, axis };
+    let mut best: (f32, Option<HandleInfo>) = (10.0, None);
+    for (h, n) in [(Handle::RotX, glam::Vec3::X), (Handle::RotY, glam::Vec3::Y), (Handle::RotZ, glam::Vec3::Z)] {
+        let pts = ring_points(st, pv, rr, n, true);
+        for w in pts.windows(2) {
+            if let (Some(a), Some(b)) = (w[0], w[1]) {
+                let d = dist_seg(pos, a, b);
+                if d < best.0 {
+                    best = (d, Some(info(h, n)));
+                }
+            }
+        }
+    }
+    if best.1.is_some() {
+        return best.1;
+    }
+    let r_px = rr / view.pixel_size_at((pv - view.eye).length()).max(1e-6);
+    let d = pos.distance(pc);
+    if (d - r_px / ROT_RING * ROT_VIEW).abs() < 10.0 {
+        return Some(info(Handle::RotView, glam::Vec3::Z));
+    }
+    if d < r_px {
+        return Some(info(Handle::RotFree, glam::Vec3::Y));
+    }
+    None
+}
+
 fn handle_at(st: &AppState, pos: Pos2) -> Option<HandleInfo> {
     if st.tool != Tool::Select {
         return None;
+    }
+    if st.rot_gizmo().is_some() {
+        return rot_hit(st, pos);
     }
     let mut best: Option<(HandleInfo, f32)> = None;
     for (h, sp) in handle_points(st) {
@@ -439,6 +511,63 @@ const HOT: Color32 = Color32::from_rgb(255, 226, 102);
 
 fn draw_overlay(p: &Painter, st: &AppState) {
     let view = st.view();
+
+    // rotation gizmo (WZX Engine): trackball disc, X / Y / Z rings (front
+    // half), outer view ring, the angle swept while dragging
+    if let (Some((pv, rr)), None) = (st.rot_gizmo(), &st.placement) {
+        if let Some(pc) = view.project(pv).map(|q| pos2(q[0], q[1])) {
+            let drag = st.handle_drag.as_ref().filter(|d| d.rot.is_some());
+            let active = drag.map(|d| d.handle);
+            let hot = |h: Handle| active == Some(h) || (active.is_none() && st.handle_hover == Some(h));
+            let r_px = rr / view.pixel_size_at((pv - view.eye).length()).max(1e-6);
+            let ball = hot(Handle::RotFree);
+            p.circle_filled(pc, r_px, if ball && active.is_some() { tint(HOT, 0.09) } else { Color32::from_rgba_unmultiplied(200, 200, 200, 10) });
+            p.circle_stroke(pc, r_px, Stroke::new(1.0, if ball { tint(HOT, 0.6) } else { Color32::from_rgba_unmultiplied(170, 176, 186, 90) }));
+            // the swept angle, a yellow wedge
+            if let (Some(d), Some(deg)) = (drag, st.rot_angle()) {
+                if let Some(r) = &d.rot {
+                    let ang = deg.to_radians();
+                    let ring = if d.handle == Handle::RotView { rr / ROT_RING * ROT_VIEW } else { rr };
+                    let n = ((ang.abs() / std::f32::consts::TAU * 72.0) as usize + 2).max(2);
+                    let pts: Vec<Pos2> = (0..=n).filter_map(|i| view.project(pv + glam::Quat::from_axis_angle(r.n, ang * i as f32 / n as f32) * r.v0 * ring).map(|q| pos2(q[0], q[1]))).collect();
+                    for w in pts.windows(2) {
+                        p.add(Shape::convex_polygon(vec![pc, w[0], w[1]], tint(HOT, 0.22), Stroke::NONE));
+                    }
+                    if let (Some(a), Some(b)) = (pts.first(), pts.last()) {
+                        p.line_segment([pc, *a], Stroke::new(1.0, tint(HOT, 0.6)));
+                        p.line_segment([pc, *b], Stroke::new(1.5, HOT));
+                    }
+                }
+            }
+            for (h, n, c) in [(Handle::RotX, glam::Vec3::X, AXIS_X), (Handle::RotY, glam::Vec3::Y, AXIS_Y), (Handle::RotZ, glam::Vec3::Z, AXIS_Z)] {
+                let lit = hot(h);
+                let col = if lit { HOT } else if active.is_some() { tint(c, 0.35) } else { c };
+                let pts = ring_points(st, pv, rr, n, active.is_none() || !lit);
+                for w in pts.windows(2) {
+                    if let (Some(a), Some(b)) = (w[0], w[1]) {
+                        p.line_segment([a, b], Stroke::new(if lit { 2.6 } else { 1.6 }, col));
+                    }
+                }
+            }
+            let vh = hot(Handle::RotView);
+            p.circle_stroke(pc, r_px / ROT_RING * ROT_VIEW, Stroke::new(if vh { 2.4 } else { 1.2 }, if vh { HOT } else { Color32::from_rgba_unmultiplied(205, 210, 218, 150) }));
+            p.circle_filled(pc, 3.0, Color32::WHITE);
+            // what the drag will do, then the angle while dragging
+            if let Some(a) = st.rot_angle() {
+                let axis = match active {
+                    Some(Handle::RotX) => "X",
+                    Some(Handle::RotY) => "Y",
+                    Some(Handle::RotZ) => "Z",
+                    _ => "vue",
+                };
+                let at = st.hover.map(|h| pos2(h[0], h[1])).unwrap_or(pc) + vec2(18.0, -18.0);
+                chip(p, at, Align2::LEFT_BOTTOM, &format!("Rotation {axis} · {}°", fmt_mm(a)), tint(HOT, 0.5), HOT);
+            } else if let (None, Some(h)) = (active, st.handle_hover.filter(|h| h.is_rot())) {
+                let at = st.hover.map(|q| pos2(q[0], q[1])).unwrap_or(pc) + vec2(18.0, -18.0);
+                chip(p, at, Align2::LEFT_BOTTOM, h.hint(), tint(HOT, 0.5), HOT);
+            }
+        }
+    }
 
     // selection handles
     if st.placement.is_none() && st.tool == Tool::Select && !st.bake_mode() {

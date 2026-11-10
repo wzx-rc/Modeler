@@ -578,6 +578,15 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         // Q = Select tool in object mode (also leaves the edge mode, like 1)
         st.set_pick_mode(PickMode::Object);
     }
+    // W move gizmo, E rotation gizmo (Maya, WZX Engine)
+    let (kw, ke) = ctx.input(|i| {
+        let free = !i.modifiers.command && !i.modifiers.alt;
+        (free && i.key_pressed(egui::Key::W), free && i.key_pressed(egui::Key::E))
+    });
+    if kw || ke {
+        st.set_pick_mode(PickMode::Object);
+        st.gizmo = if ke { GizmoMode::Rotate } else { GizmoMode::Move };
+    }
     for (pressed, k) in [(kr, PrimKind::Box), (kc, PrimKind::Cylinder), (ks, PrimKind::Sphere), (ka, PrimKind::Capsule), (kt, PrimKind::Torus)] {
         if pressed {
             st.commit_placement();
@@ -841,6 +850,11 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                 }
                 let (r, _) = ui.allocate_exact_size(vec2(7.0, 28.0), Sense::hover());
                 ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(1.0, 18.0)), 0.0, DIVIDER);
+                // W move / E rotate: the gizmo of the selection
+                let rot = st.gizmo == GizmoMode::Rotate;
+                if icon_btn(ui, if rot { Icon::Move } else { Icon::Rotate }, false, if rot { "Gizmo de déplacement (W)" } else { "Gizmo de rotation (E)" }, 28.0).clicked() {
+                    st.gizmo = if rot { GizmoMode::Move } else { GizmoMode::Rotate };
+                }
                 if icon_btn(ui, Icon::Duplicate, false, "Dupliquer (Ctrl+D)", 28.0).clicked() {
                     st.duplicate_selected();
                 }

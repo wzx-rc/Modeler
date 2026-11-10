@@ -36,6 +36,10 @@ pub enum Icon {
     Light,
     Fillet,
     Bake,
+    /// Rotation gizmo (E).
+    Rotate,
+    /// Move gizmo (W).
+    Move,
 }
 
 struct Pen<'a> {
@@ -231,6 +235,19 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.arc(10.0, 10.0, 6.5, 6.5, PI, 1.5 * PI);
             pen.line(&[(3.5, 10.0), (3.5, 17.0)]);
             pen.line(&[(10.0, 3.5), (17.0, 3.5)]);
+        }
+        Icon::Rotate => {
+            // a circular arrow
+            pen.arc(10.0, 10.0, 6.5, 6.5, -PI * 0.35, PI * 1.35);
+            pen.line(&[(14.6, 2.4), (15.3, 5.4), (12.2, 6.0)]);
+        }
+        Icon::Move => {
+            pen.line(&[(10.0, 2.5), (10.0, 17.5)]);
+            pen.line(&[(2.5, 10.0), (17.5, 10.0)]);
+            pen.line(&[(8.0, 4.5), (10.0, 2.5), (12.0, 4.5)]);
+            pen.line(&[(8.0, 15.5), (10.0, 17.5), (12.0, 15.5)]);
+            pen.line(&[(4.5, 8.0), (2.5, 10.0), (4.5, 12.0)]);
+            pen.line(&[(15.5, 8.0), (17.5, 10.0), (15.5, 12.0)]);
         }
         Icon::Bake => {
             pen.closed(&[(3.0, 3.0), (17.0, 3.0), (17.0, 17.0), (3.0, 17.0)]);

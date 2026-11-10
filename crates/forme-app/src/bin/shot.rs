@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -771,7 +771,48 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.st.commit_placement();
         h.steps(2);
         eprintln!("tore très zoomé : pas de plantage");
-    }    if want("pc-ui") {
+    }    if want("pc-rot") {
+        // rotation gizmo (E): rings X / Y / Z, view ring, trackball, 15° snap
+        h.pc(AppState::new(support_axe(), "Support d'axe"), UiMode::Atelier);
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.steps(2);
+        h.st.frame_all();
+        h.steps(30);
+        let id = h.find("Palier");
+        h.st.select(Some(id));
+        h.st.gizmo = forme_app::state::GizmoMode::Rotate;
+        h.steps(3);
+        let (pv, rr) = h.st.rot_gizmo().expect("rotation gizmo");
+        // ring Y: from 30° to 70° (from +Z towards +X): about 40°, 45° snapped
+        let ry = |deg: f32| { let a = deg.to_radians(); Vec3::Z * a.cos() + Vec3::X * a.sin() };
+        let a = h.screen_of(pv + ry(30.0) * rr);
+        h.move_to(a);
+        h.steps(2);
+        eprintln!("survol anneau : {:?}", h.st.handle_hover);
+        h.shot("pc-rot-1-survol");
+        let b = h.screen_of(pv + ry(70.0) * rr);
+        let r0 = h.st.scene.node(id).unwrap().transform.rot;
+        h.drag(a, b, 12, false);
+        eprintln!("angle pendant le glisser : {:?}°", h.st.rot_angle());
+        h.shot("pc-rot-2-glisser");
+        h.press(b, false);
+        h.steps(2);
+        let r1 = h.st.scene.node(id).unwrap().transform.rot;
+        eprintln!("rotation : {:.1}° (snap {})", (r1 * r0.inverse()).to_axis_angle().1.to_degrees(), h.st.snap);
+        h.st.undo();
+        // the view ring
+        let c = h.screen_of(pv);
+        let rpx = (h.screen_of(pv + Vec3::Z * rr) - c).length().max((h.screen_of(pv + Vec3::X * rr) - c).length());
+        let _ = rpx;
+        h.move_to(c + egui::vec2(0.0, -110.0 * forme_app::state::ROT_VIEW));
+        h.steps(2);
+        eprintln!("survol anneau de vue : {:?}", h.st.handle_hover);
+        h.move_to(c + egui::vec2(20.0, 20.0));
+        h.steps(2);
+        eprintln!("survol trackball : {:?}", h.st.handle_hover);
+        h.st.gizmo = forme_app::state::GizmoMode::Move;
+    }
+    if want("pc-ui") {
         // the two interfaces of the redesign, same scene and same moments:
         // nothing selected, the Palier selected, a creation tool armed
         for (tag, mode) in [("etabli", UiMode::Atelier), ("studio", UiMode::Studio), ("focus", UiMode::Focus)] {
