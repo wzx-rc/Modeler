@@ -296,9 +296,6 @@ fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                     if ui.button("Exporter le mesh…").clicked() {
                         st.export_open = true;
                     }
-                    if ui.button("Bake et export en quads…").clicked() {
-                        st.set_bake_mode(true);
-                    }
                     ui.separator();
                     if ui.button("Réglages…").clicked() {
                         st.settings_open = true;
@@ -394,27 +391,6 @@ fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                     ui.separator();
                     if ui.button("Passer à l'interface Atelier").clicked() {
                         st.set_ui_mode(UiMode::Atelier);
-                    }
-                });
-                ui.menu_button("Bake", |ui| {
-                    let running = st.bake.job.is_some();
-                    if ui.add_enabled(!running, egui::Button::new("Lancer le Bake")).clicked() {
-                        st.start_bake();
-                    }
-                    if ui.button("Fenêtre Bake et export…").clicked() {
-                        st.set_bake_mode(true);
-                    }
-                    ui.separator();
-                    let has = st.bake.result.is_some();
-                    let mut show = st.bake.show;
-                    if ui.add_enabled(has, egui::Checkbox::new(&mut show, "Afficher le maillage baké")).changed() {
-                        st.bake.show = show;
-                        st.view_changed();
-                    }
-                    let mut wire = st.bake.wire;
-                    if ui.add_enabled(has, egui::Checkbox::new(&mut wire, "Filaire")).changed() {
-                        st.bake.wire = wire;
-                        st.view_changed();
                     }
                 });
                 ui.menu_button("Aide", |ui| {
@@ -525,7 +501,7 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.add_space(6.0);
-                ui::mode_switch(ui, st, 26.0);
+                // the Bake is set aside (Romain, 10 nov.): pure SDF modelling
                 if text_btn(ui, Some(Icon::Export), "Exporter", false).clicked() {
                     st.export_open = true;
                 }
@@ -1138,22 +1114,6 @@ fn display_tab(ui: &mut Ui, st: &mut AppState) {
             }
         });
     });
-    rollout(ui, "d-bake", "Maillage baké", true, |ui| {
-        let has = st.bake.result.is_some();
-        let mut show = st.bake.show;
-        if ui.add_enabled(has, egui::Checkbox::new(&mut show, "Afficher le maillage baké")).changed() {
-            st.bake.show = show;
-            st.view_changed();
-        }
-        let mut wire = st.bake.wire;
-        if ui.add_enabled(has, egui::Checkbox::new(&mut wire, "Filaire")).changed() {
-            st.bake.wire = wire;
-            st.view_changed();
-        }
-        if !has {
-            ui.label(RichText::new("Lance un Bake (en bas de l'explorateur) pour voir le maillage en quads.").font(regular(12.0)).color(T2));
-        }
-    });
     rollout(ui, "d-ui", "Interface", true, |ui| {
         ui.label(RichText::new("Studio : panneaux ancrés, façon 3ds Max.").font(regular(12.0)).color(T2));
         if text_btn(ui, None, "Passer à l'interface Atelier", false).clicked() {
@@ -1288,7 +1248,7 @@ fn view_frame(ctx: &egui::Context, st: &mut AppState, view: Rect) {
             ui.spacing_mut().item_spacing.x = 4.0;
             let cur = st.camera.preset_of();
             let name = presets().iter().find(|(p, _)| *p == cur).map(|(_, l)| *l).unwrap_or("Perspective");
-            let shading = if st.bake.show && st.bake.result.is_some() { "Maillage baké" } else { "Ombré" };
+            let shading = "Ombré";
             ui.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::from_black_alpha(90);
             ui.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::NONE;
             ui.menu_button(RichText::new(format!("[{name}]")).font(regular(12.0)).color(T1), |ui| {
@@ -1304,15 +1264,6 @@ fn view_frame(ctx: &egui::Context, st: &mut AppState, view: Rect) {
                 }
             });
             ui.menu_button(RichText::new(format!("[{shading}]")).font(regular(12.0)).color(T1), |ui| {
-                let has = st.bake.result.is_some();
-                if ui.radio(!st.bake.show || !has, "Ombré").clicked() {
-                    st.bake.show = false;
-                    st.view_changed();
-                }
-                if ui.add_enabled(has, egui::RadioButton::new(st.bake.show && has, "Maillage baké")).clicked() {
-                    st.bake.show = true;
-                    st.view_changed();
-                }
                 let mut g = st.grid;
                 if ui.checkbox(&mut g, "Grille").changed() {
                     st.grid = g;

@@ -577,7 +577,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 }
                 let (sep, _) = ui.allocate_exact_size(vec2(9.0, 24.0), Sense::hover());
                 ui.painter().rect_filled(Rect::from_center_size(sep.center(), vec2(1.0, 24.0)), 0.0, DIVIDER);
-                mode_switch(ui, st, 44.0);
+                // the Bake is set aside (Romain, 10 nov.): pure SDF modelling
                 if primary_btn(ui, Some(Icon::Export), "Exporter", None).clicked() {
                     st.export_open = !st.export_open;
                 }
