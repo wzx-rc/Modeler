@@ -32,6 +32,8 @@ pub enum Gesture {
     None,
     Orbit,
     Pan,
+    /// Selection rectangle (Select tool, mouse).
+    Marquee,
     Place,
     Height,
     Handle,
@@ -316,12 +318,14 @@ pub struct EdgeVis {
 pub struct AppState {
     pub scene: Scene,
     pub history: History,
+    /// Active shape: its handles, its panel.
     pub selection: Option<NodeId>,
+    /// Other selected shapes (selection rectangle, Ctrl + click). Delete,
+    /// duplicate, group, mode and material act on all of them.
+    pub selection_more: Vec<NodeId>,
     pub tool: Tool,
     pub mode: CombineMode,
     pub carve_held: bool,
-    /// Alt key (desktop) acts like the thumb button.
-    pub alt_carve: bool,
     pub camera: OrbitCamera,
     pub doc_name: String,
     pub sym_x: bool,
@@ -369,6 +373,8 @@ pub struct AppState {
     pub autosave: bool,
     pub renaming: bool,
     pub gesture: Gesture,
+    /// Selection rectangle being drawn: press point, current point.
+    pub marquee: Option<([f32; 2], [f32; 2])>,
     pub hover: Option<[f32; 2]>,
     /// Edge under the pointer (Select tool) and the selected edge.
     pub edge_hover: Option<EdgePick>,
@@ -387,7 +393,7 @@ pub struct AppState {
     program: Program,
     program_version: u64,
     sel_program: Program,
-    sel_key: (u64, Option<NodeId>),
+    sel_key: (u64, Vec<NodeId>),
 }
 
 /// Fillet size and kind held by a node for an edge.
@@ -472,10 +478,10 @@ impl AppState {
             scene,
             history: History::new(),
             selection: None,
+            selection_more: vec![],
             tool: Tool::Select,
             mode: CombineMode::Add,
             carve_held: false,
-            alt_carve: false,
             camera: OrbitCamera::default(),
             doc_name: name.to_string(),
             sym_x: false,
@@ -537,6 +543,7 @@ impl AppState {
             autosave: true,
             renaming: false,
             gesture: Gesture::None,
+            marquee: None,
             hover: None,
             edge_hover: None,
             edge_sel: vec![],
@@ -550,7 +557,7 @@ impl AppState {
             program: Program::default(),
             program_version: 0,
             sel_program: Program::default(),
-            sel_key: (0, None),
+            sel_key: (0, vec![]),
         }
     }
 
@@ -574,7 +581,7 @@ impl AppState {
     }
 
     pub fn effective_mode(&self) -> CombineMode {
-        if self.carve_held || self.alt_carve {
+        if self.carve_held {
             CombineMode::Carve
         } else {
             self.mode
@@ -590,24 +597,169 @@ impl AppState {
     }
 
     pub fn selection_program(&mut self) -> (&Program, SelMode) {
-        let sel = self.selection.filter(|id| self.scene.node(*id).is_some());
-        let key = (self.scene_version, sel);
-        if self.sel_key != key {
-            self.sel_program = match sel {
-                Some(id) => compile_single(&self.scene, id),
-                None => Program::default(),
-            };
-            self.sel_key = key;
+        let ids = self.selected_ids();
+        if self.sel_key.0 != self.scene_version || self.sel_key.1 != ids {
+            self.sel_program = if ids.is_empty() { Program::default() } else { compile_set(&self.scene, &ids) };
+            self.sel_key = (self.scene_version, ids.clone());
         }
-        let mode = match sel.and_then(|id| self.scene.node(id)) {
+        let cutters = ids.iter().all(|id| self.scene.node(*id).map(|n| n.combine.mode.is_cutter()).unwrap_or(false));
+        let mode = if !self.edge_sel.is_empty() || ids.is_empty() {
             // an edge is selected: its highlight says it all
-            _ if !self.edge_sel.is_empty() => SelMode::None,
-            None => SelMode::None,
-            Some(n) if n.combine.mode.is_cutter() => SelMode::Ghost,
-            Some(n) if n.is_group() => SelMode::Tint,
-            Some(_) => SelMode::Tint,
+            SelMode::None
+        } else if cutters {
+            SelMode::Ghost
+        } else {
+            SelMode::Tint
         };
         (&self.sel_program, mode)
+    }
+
+    /// Every selected node, the active one first; none inside another one.
+    pub fn selected_ids(&self) -> Vec<NodeId> {
+        let mut ids: Vec<NodeId> = vec![];
+        for id in self.selection.iter().chain(self.selection_more.iter()) {
+            if self.scene.node(*id).is_some() && !ids.contains(id) {
+                ids.push(*id);
+            }
+        }
+        let keep: Vec<bool> = ids.iter().map(|id| !self.scene.ancestors(*id).iter().any(|a| ids.contains(a))).collect();
+        ids.into_iter().zip(keep).filter(|(_, k)| *k).map(|(id, _)| id).collect()
+    }
+
+    pub fn is_selected(&self, id: NodeId) -> bool {
+        self.selection == Some(id) || self.selection_more.contains(&id)
+    }
+
+    /// Ctrl + click on a shape: adds it (it becomes the active one), or
+    /// removes it when it was already selected.
+    pub fn toggle_in_selection(&mut self, id: NodeId) {
+        if self.selection == Some(id) {
+            self.selection = if self.selection_more.is_empty() { None } else { Some(self.selection_more.remove(0)) };
+        } else if let Some(i) = self.selection_more.iter().position(|x| *x == id) {
+            self.selection_more.remove(i);
+        } else {
+            if let Some(cur) = self.selection {
+                self.selection_more.push(cur);
+            }
+            self.selection = Some(id);
+        }
+        self.edge_sel.clear();
+        self.renaming = false;
+        self.view_changed();
+    }
+
+    /// Selection rectangle (screen points). Object mode: the shapes it
+    /// touches, their visible parts found by rays, plus the shapes whose
+    /// centre falls inside (cutters, shapes behind others). Edge mode: the
+    /// edges seen inside it. `add` keeps the current selection.
+    pub fn marquee_select(&mut self, a: [f32; 2], b: [f32; 2], add: bool) {
+        let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
+        let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
+        let inside = |q: [f32; 2]| q[0] >= x0 && q[0] <= x1 && q[1] >= y0 && q[1] <= y1;
+        // about 2500 rays at most, never sparser than 4 points apart
+        let step = (((x1 - x0) * (y1 - y0)) / 2500.0).sqrt().max(4.0);
+        let (nx, ny) = (((x1 - x0) / step).ceil() as usize + 1, ((y1 - y0) / step).ceil() as usize + 1);
+        let mut samples = vec![];
+        for j in 0..ny {
+            for i in 0..nx {
+                let fx = if nx > 1 { i as f32 / (nx - 1) as f32 } else { 0.5 };
+                let fy = if ny > 1 { j as f32 / (ny - 1) as f32 } else { 0.5 };
+                samples.push([x0 + (x1 - x0) * fx, y0 + (y1 - y0) * fy]);
+            }
+        }
+        let view = self.view();
+
+        if self.pick_mode == PickMode::Edge {
+            let idx = self.edges();
+            let mut found: Vec<EdgePick> = vec![];
+            for q in samples {
+                let Some((p, _)) = self.hit(q) else { continue };
+                let tol = view.pixel_size_at((p - view.eye).length()) * step * 0.75;
+                let Some(e) = idx.pick(&self.scene, p, tol) else { continue };
+                let seen = view.project(e.at).map(inside).unwrap_or(false);
+                if seen && !found.iter().any(|f| f.kind.same(&e.kind)) {
+                    found.push(e);
+                }
+            }
+            if !add {
+                self.edge_sel.clear();
+            }
+            self.selection_more.clear();
+            let n = found.len();
+            for e in found {
+                if !self.edge_selected(&e) {
+                    self.select_edge(e, true);
+                }
+            }
+            if n > 1 {
+                self.toast(format!("{n} arêtes sélectionnées"));
+            }
+            self.view_changed();
+            return;
+        }
+
+        let shapes: Vec<(NodeId, Program, bool)> = self
+            .scene
+            .nodes
+            .iter()
+            .filter(|(id, n)| n.shape().is_some() && visible_chain(&self.scene, **id))
+            .map(|(id, n)| (*id, compile_single(&self.scene, *id), n.combine.mode.is_cutter()))
+            .collect();
+        let mut found: Vec<NodeId> = vec![];
+        for q in samples {
+            let Some((p, _)) = self.hit(q) else { continue };
+            let tol = 1.0 + view.pixel_size_at((p - view.eye).length()) * 6.0;
+            let best = shapes
+                .iter()
+                .map(|(id, prog, cutter)| (*id, prog.dist(p).abs() * if *cutter { 0.8 } else { 1.0 }))
+                .min_by(|x, y| x.1.total_cmp(&y.1));
+            if let Some((id, d)) = best {
+                if d <= tol && !found.contains(&id) {
+                    found.push(id);
+                }
+            }
+        }
+        for (id, _, _) in &shapes {
+            let Some((lo, hi)) = self.scene.shape_world_aabb(*id) else { continue };
+            if !found.contains(id) && view.project((lo + hi) * 0.5).map(inside).unwrap_or(false) {
+                found.push(*id);
+            }
+        }
+        let order = tree_order(&self.scene);
+        found.sort_by_key(|id| order.iter().position(|o| o == id).unwrap_or(usize::MAX));
+        let mut all = if add { self.selected_ids() } else { vec![] };
+        for id in found {
+            if !all.contains(&id) {
+                all.push(id);
+            }
+        }
+        let n = all.len();
+        if n > 1 {
+            self.toast(format!("{n} formes sélectionnées"));
+        }
+        // the active shape stays active when it is still selected
+        let active = self.selection.filter(|id| all.contains(id)).or(all.first().copied());
+        self.selection = active;
+        self.selection_more = all.into_iter().filter(|id| Some(*id) != active).collect();
+        self.edge_sel.clear();
+        self.renaming = false;
+        self.view_changed();
+    }
+
+    /// Same edit on every selected node (one history entry); on `id` alone
+    /// when it is not part of the selection.
+    pub fn edit_selection<F: FnMut(&mut Node)>(&mut self, label: &str, id: NodeId, mut f: F) {
+        let ids = if self.is_selected(id) { self.selected_ids() } else { vec![id] };
+        let before = self.scene.clone();
+        for i in ids {
+            if let Some(n) = self.scene.node_mut(i) {
+                f(n);
+            }
+        }
+        if self.scene != before {
+            self.history.record(label, &before);
+            self.changed();
+        }
     }
 
     /// Centre of the free 3D view area, in points.
@@ -668,6 +820,7 @@ impl AppState {
 
     pub fn select(&mut self, id: Option<NodeId>) {
         self.selection = id;
+        self.selection_more.clear();
         self.edge_sel.clear();
         self.renaming = false;
         self.view_changed();
@@ -710,13 +863,14 @@ impl AppState {
             }
             return;
         }
-        match self.hit(pos) {
-            Some((p, _)) => {
-                let tol = 1.0 + self.view().pixel_size_at((p - self.camera.eye()).length()) * 6.0;
-                let id = pick_node(&self.scene, p, tol);
-                self.select(id);
-            }
-            None => self.select(None),
+        let id = self.hit(pos).and_then(|(p, _)| {
+            let tol = 1.0 + self.view().pixel_size_at((p - self.camera.eye()).length()) * 6.0;
+            pick_node(&self.scene, p, tol)
+        });
+        match id {
+            Some(id) if self.multi() => self.toggle_in_selection(id),
+            _ if self.multi() => {}
+            _ => self.select(id),
         }
     }
 
@@ -805,6 +959,7 @@ impl AppState {
         } else {
             self.edge_sel = vec![e];
         }
+        self.selection_more.clear();
         self.selection = self.edge_sel.last().map(|e| e.owner).or(self.selection);
         self.renaming = false;
         self.edge_sel_version = self.scene_version;
@@ -1686,33 +1841,50 @@ impl AppState {
             return;
         }
         if let Some(id) = self.selection {
-            if self.scene.node(id).map(|n| n.shape().is_some() || matches!(n.kind, NodeKind::Group { combined: true, .. })).unwrap_or(false) {
-                self.edit("Mode", id, |n| n.combine.mode = m);
-            }
+            self.edit_selection("Mode", id, |n| {
+                if n.shape().is_some() || matches!(n.kind, NodeKind::Group { combined: true, .. }) {
+                    n.combine.mode = m;
+                }
+            });
         }
     }
 
     pub fn delete_selected(&mut self) {
-        if let Some(id) = self.selection {
-            self.history.record("Supprimer", &self.scene);
-            self.scene.remove(id);
-            self.selection = None;
-            self.changed();
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
         }
+        self.history.record("Supprimer", &self.scene);
+        for id in ids {
+            self.scene.remove(id);
+        }
+        self.selection = None;
+        self.selection_more.clear();
+        self.changed();
     }
 
+    /// Duplicates every selected node; the copies become the selection.
     pub fn duplicate_selected(&mut self) {
-        if let Some(id) = self.selection {
-            self.history.record("Dupliquer", &self.scene);
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
+        }
+        self.history.record("Dupliquer", &self.scene);
+        let mut copies = vec![];
+        for id in ids {
             if let Some(c) = self.scene.duplicate(id) {
                 if let Some(n) = self.scene.node_mut(c) {
                     n.name = format!("{} copie", n.name);
                     n.transform.pos += Vec3::new(8.0, 0.0, 0.0);
                 }
-                self.selection = Some(c);
+                copies.push(c);
             }
-            self.changed();
         }
+        if !copies.is_empty() {
+            self.selection = Some(copies.remove(0));
+            self.selection_more = copies;
+        }
+        self.changed();
     }
 
     pub fn toggle_visible(&mut self, id: NodeId) {
@@ -1731,17 +1903,40 @@ impl AppState {
         }
     }
 
+    /// Puts the selected nodes in a new group, where the first one (in the
+    /// tree order) was.
     pub fn group_selected(&mut self) {
-        let Some(id) = self.selection else { return };
-        let Some(parent) = self.scene.parent_of(id) else { return };
-        let idx = self.scene.node(parent).and_then(|p| p.children().iter().position(|c| *c == id)).unwrap_or(0);
+        let mut ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
+        }
+        // tree order, so the group keeps the shapes' stacking
+        let order = tree_order(&self.scene);
+        ids.sort_by_key(|id| order.iter().position(|o| o == id).unwrap_or(usize::MAX));
+        let first = ids[0];
+        let Some(parent) = self.scene.parent_of(first) else { return };
+        let idx = self.scene.node(parent).and_then(|p| p.children().iter().position(|c| *c == first)).unwrap_or(0);
         self.history.record("Grouper", &self.scene);
         let g = self.scene.insert(parent, NodeSpec::group("Groupe", false), Some(idx));
-        self.scene.reparent(id, g, 0);
+        let frame = self.scene.parent_matrix(first);
+        for (i, id) in ids.iter().enumerate() {
+            // a node from another branch keeps its place in the world
+            let world = self.scene.parent_matrix(*id);
+            self.scene.reparent(*id, g, i);
+            if world != frame {
+                if let Some(n) = self.scene.node_mut(*id) {
+                    let m = frame.inverse() * world * n.transform.matrix();
+                    let (sc, rot, pos) = m.to_scale_rotation_translation();
+                    n.transform.pos = pos;
+                    n.transform.rot = rot.normalize();
+                    n.transform.scale = (sc.x + sc.y + sc.z) / 3.0;
+                }
+            }
+        }
         if let Some(n) = self.scene.node_mut(g) {
             n.expanded = true;
         }
-        self.selection = Some(g);
+        self.select(Some(g));
         self.changed();
     }
 
@@ -2189,4 +2384,19 @@ fn tap_word() -> &'static str {
     } else {
         "clic"
     }
+}
+
+/// Every node of the tree, depth first (root excluded).
+fn tree_order(scene: &Scene) -> Vec<NodeId> {
+    fn walk(s: &Scene, id: NodeId, out: &mut Vec<NodeId>) {
+        if let Some(n) = s.node(id) {
+            for c in n.children() {
+                out.push(*c);
+                walk(s, *c, out);
+            }
+        }
+    }
+    let mut out = vec![];
+    walk(scene, scene.root, &mut out);
+    out
 }

@@ -486,7 +486,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -1203,6 +1203,54 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.steps(4);
         h.shot("pc-affichage");
         h.st.display_open = false;
+    }
+    if want("pc-marquee") {
+        // Select tool + mouse: left drag draws a selection rectangle
+        for (tag, mode) in [("atelier", UiMode::Atelier), ("studio", UiMode::Studio)] {
+            h.pc(part(), mode);
+            h.st.pointer_kind = PointerKind::Mouse;
+            h.steps(2);
+            h.st.frame_all();
+            h.steps(2);
+            let (lo, hi) = h.st.scene.bounds();
+            let mut sb = egui::Rect::NOTHING;
+            for i in 0..8 {
+                let c = Vec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z });
+                sb.extend_with(h.screen_of(c));
+            }
+            let a = sb.left_top() + egui::vec2(-24.0, -24.0);
+            let b = sb.center() + egui::vec2(sb.width() * 0.05, sb.height() * 0.12);
+            h.drag(a, b, 10, false);
+            h.steps(2);
+            h.shot(&format!("pc-marquee-1-rectangle-{tag}"));
+            let t = std::time::Instant::now();
+            h.press(b, false);
+            eprintln!("rectangle ({tag}) : {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+            h.steps(3);
+            let names: Vec<String> = h.st.selected_ids().iter().filter_map(|id| h.st.scene.node(*id).map(|n| n.name.clone())).collect();
+            eprintln!("rectangle ({tag}) : {} formes : {}", names.len(), names.join(", "));
+            h.shot(&format!("pc-marquee-2-selection-{tag}"));
+        }
+        // edge mode: the edges seen inside the rectangle
+        h.st.set_pick_mode(PickMode::Edge);
+        h.steps(2);
+        let (lo, hi) = h.st.scene.bounds();
+        let mut sb = egui::Rect::NOTHING;
+        for i in 0..8 {
+            let c = Vec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z });
+            sb.extend_with(h.screen_of(c));
+        }
+        // the upper half: bearing, its bore, the fixing holes
+        let a = sb.left_top() + egui::vec2(-20.0, -20.0);
+        let b = sb.right_center() + egui::vec2(20.0, 30.0);
+        h.drag(a, b, 10, false);
+        h.steps(2);
+        h.shot("pc-marquee-3-aretes-rectangle");
+        let t = std::time::Instant::now();
+        h.press(b, false);
+        eprintln!("rectangle (arêtes) : {} arêtes en {:.0} ms", h.st.edge_sel.len(), t.elapsed().as_secs_f64() * 1000.0);
+        h.steps(3);
+        h.shot("pc-marquee-4-aretes");
     }
     if want("pc-menu") {
         // marking menu: right button held still on the palier opens it,

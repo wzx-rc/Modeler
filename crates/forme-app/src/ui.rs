@@ -466,7 +466,6 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     }
     // Alt is the Maya navigation (viewport.rs); Ctrl / Cmd = the CTRL button
     let _ = alt;
-    st.alt_carve = false;
     st.key_ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
 }
 
@@ -738,7 +737,7 @@ fn shown_mode(st: &AppState) -> CombineMode {
     } else {
         None
     };
-    if st.carve_held || st.alt_carve {
+    if st.carve_held {
         current
     } else {
         target.unwrap_or(current)
@@ -833,7 +832,7 @@ fn history_chip(ui: &mut Ui, st: &AppState, id: NodeId, depth: usize) -> Respons
     let sg = ui.painter().layout_no_wrap(sub, regular(11.0), TEXT2);
     let w = 8.0 + depth.saturating_sub(1) as f32 * 6.0 + 28.0 + 8.0 + tg.size().x.max(sg.size().x) + 12.0;
     let (r, resp) = ui.allocate_exact_size(vec2(w, 44.0), Sense::click());
-    let selected = st.selection == Some(id);
+    let selected = st.is_selected(id);
     let p = ui.painter();
     if selected {
         p.rect(r, 10.0, ACCENT_BG, Stroke::new(1.0, ACCENT_BORDER), StrokeKind::Inside);
@@ -911,7 +910,7 @@ fn thumb_button(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         } else if resp.drag_stopped() || resp.clicked() {
             st.carve_held = false;
         }
-        let held = st.carve_held || st.alt_carve;
+        let held = st.carve_held;
         let p = ui.painter();
         let c = r.center();
         if held {
@@ -1527,7 +1526,7 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             let Some(n) = st.scene.node(id).cloned() else { continue };
             let w = ui.available_width();
             let (r, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
-            let selected = st.selection == Some(id);
+            let selected = st.is_selected(id);
             let p = ui.painter();
             if selected {
                 p.rect(r, 8.0, ACCENT_BG, Stroke::new(1.0, ACCENT_BORDER), StrokeKind::Inside);
@@ -1582,7 +1581,11 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
                 }
             } else if resp.clicked() {
                 st.tool = Tool::Select;
-                st.select(Some(id));
+                if st.multi() || ui.input(|i| i.modifiers.shift) {
+                    st.toggle_in_selection(id);
+                } else {
+                    st.select(Some(id));
+                }
             }
         }
     });

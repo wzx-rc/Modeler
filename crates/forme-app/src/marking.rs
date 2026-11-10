@@ -140,7 +140,8 @@ pub fn run(st: &mut AppState, act: Act, ctx: Ctx) {
         Act::Duplicate => st.duplicate_selected(),
         Act::MirrorX => {
             if let Ctx::Shape(id) = ctx {
-                st.edit("Symétrie", id, |n| n.mirror.x = !n.mirror.x);
+                let v = !st.scene.node(id).map(|n| n.mirror.x).unwrap_or(false);
+                st.edit_selection("Symétrie", id, |n| n.mirror.x = v);
             }
         }
         Act::ToggleCarve => {
@@ -149,14 +150,15 @@ pub fn run(st: &mut AppState, act: Act, ctx: Ctx) {
                     Some(CombineMode::Carve) => CombineMode::Add,
                     _ => CombineMode::Carve,
                 };
-                st.edit("Mode", id, |n| n.combine.mode = m);
+                st.edit_selection("Mode", id, |n| n.combine.mode = m);
             }
         }
         Act::Frame => st.frame_selection(),
         Act::Delete => st.delete_selected(),
         Act::Hide => {
             if let Ctx::Shape(id) = ctx {
-                st.toggle_visible(id);
+                let v = !st.scene.node(id).map(|n| n.visible).unwrap_or(true);
+                st.edit_selection("Visibilité", id, |n| n.visible = v);
             }
         }
         Act::Group => st.group_selected(),
@@ -253,8 +255,15 @@ fn context_at(st: &mut AppState, pos: [f32; 2]) -> Ctx {
     }
     match st.node_at(pos) {
         Some(id) => {
-            if st.selection != Some(id) {
+            if !st.is_selected(id) {
                 st.select(Some(id));
+            } else if st.selection != Some(id) {
+                // part of a multiple selection: it becomes the active one
+                st.selection_more.retain(|x| *x != id);
+                if let Some(old) = st.selection {
+                    st.selection_more.push(old);
+                }
+                st.selection = Some(id);
             }
             match st.scene.node(id).map(|n| &n.kind) {
                 Some(NodeKind::Shape(_)) | Some(NodeKind::Group { .. }) => Ctx::Shape(id),
@@ -360,7 +369,7 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect, on_handle: bool
         let menu = st.marking.menu.take().unwrap();
         if let (Some(k), Ctx::Shape(id)) = (menu.swatch, menu.ctx) {
             let name = st.scene.materials.get(k).map(|m| m.name.clone()).unwrap_or_default();
-            st.edit("Matière", id, |n| n.material = k as u32);
+            st.edit_selection("Matière", id, |n| n.material = k as u32);
             st.toast(format!("Matière : {name}"));
         } else if let Some(d) = menu.hover {
             let list = items(st, menu.ctx);

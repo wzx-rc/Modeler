@@ -46,6 +46,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_construction_lines(ui.painter(), st);
         draw_edges(ui.painter(), st);
         draw_overlay(ui.painter(), st);
+        draw_marquee(ui.painter(), st);
     });
     crate::marking::draw(ctx, st);
 }
@@ -138,8 +139,11 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     if resp.drag_started_by(PointerButton::Primary) {
         let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
         let awaiting = st.placement.as_ref().map(|p| p.phase == PlacePhase::AwaitHeight).unwrap_or(false);
+        // the Select tool with a mouse draws a selection rectangle (orbit is
+        // Alt + left, Maya style); Shift or Ctrl adds to the selection
+        let marquee = st.tool == Tool::Select && st.pointer_kind == PointerKind::Mouse;
         // 3ds Max style, finger or Pencil: drag the base, release, drag the height
-        st.gesture = if shift {
+        st.gesture = if shift && !marquee {
             Gesture::Pan
         } else if awaiting {
             st.begin_height(p2(origin));
@@ -154,6 +158,10 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                     Gesture::Place
                 }
                 Tool::Profile if !finger => Gesture::ProfileDrag,
+                _ if marquee => {
+                    st.marquee = Some((p2(origin), p2(origin)));
+                    Gesture::Marquee
+                }
                 _ => Gesture::Orbit,
             }
         };
@@ -175,6 +183,11 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
             (Gesture::Place | Gesture::Height, Some(p)) => st.drag_placement(p),
             (Gesture::Handle, Some(p)) => st.drag_handle(p),
+            (Gesture::Marquee, Some(p)) => {
+                if let Some(m) = &mut st.marquee {
+                    m.1 = p;
+                }
+            }
             _ => {}
         }
     }
@@ -185,6 +198,12 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 st.release_placement();
             }
             Gesture::Handle => st.end_handle(),
+            Gesture::Marquee => {
+                if let Some((a, b)) = st.marquee.take() {
+                    let add = shift || st.multi();
+                    st.marquee_select(a, b, add);
+                }
+            }
             Gesture::ProfileDrag => {
                 if let Some(p) = st.hover.or(resp.interact_pointer_pos().map(p2)) {
                     st.profile_point(p, true);
@@ -361,6 +380,15 @@ fn draw_edges(p: &Painter, st: &AppState) {
         }
     }
 }
+
+/// Selection rectangle: thin outline, faint fill.
+fn draw_marquee(p: &Painter, st: &AppState) {
+    let Some((a, b)) = st.marquee else { return };
+    let r = Rect::from_two_pos(pos2(a[0], a[1]), pos2(b[0], b[1]));
+    p.rect(r, 0.0, tint(MARQUEE, 0.08), Stroke::new(1.0, tint(MARQUEE, 0.85)), egui::StrokeKind::Middle);
+}
+
+const MARQUEE: Color32 = Color32::from_rgb(0xD8, 0xE4, 0xF2);
 
 fn draw_overlay(p: &Painter, st: &AppState) {
     let view = st.view();

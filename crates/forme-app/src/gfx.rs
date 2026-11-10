@@ -120,7 +120,8 @@ pub struct FrameRenderer {
     high: Option<Offscreen>,
     #[allow(dead_code)]
     format: wgpu::TextureFormat,
-    uploaded: (u64, Option<NodeId>),
+    /// Scene version, selected nodes, edges selected (no tint then).
+    uploaded: (u64, Vec<NodeId>, bool),
     key_low: Option<RenderKey>,
     key_high: Option<RenderKey>,
     /// Rows of the full-quality image already rendered.
@@ -227,7 +228,7 @@ impl FrameRenderer {
             low: None,
             high: None,
             format,
-            uploaded: (0, None),
+            uploaded: (0, vec![], false),
             key_low: None,
             key_high: None,
             high_rows: 0,
@@ -290,13 +291,13 @@ impl FrameRenderer {
         force_full: bool,
     ) {
         // 1. scene upload
-        let sel = st.selection;
-        if self.uploaded != (st.scene_version, sel) {
+        let up = (st.scene_version, st.selected_ids(), !st.edge_sel.is_empty());
+        if self.uploaded != up {
             let main = st.program().clone();
             let (sp, mode) = st.selection_program();
             let sp = sp.clone();
             self.scene.set_scene(device, queue, &st.scene, &main, Some((&sp, mode)));
-            self.uploaded = (st.scene_version, sel);
+            self.uploaded = up;
         }
 
         // diagnostic colours: the faces' role in the constructive bake
@@ -322,7 +323,7 @@ impl FrameRenderer {
         let state = StateKey {
             scene: st.scene_version,
             view: st.view_version,
-            sel,
+            sel: st.selection,
             grid: st.grid,
             cam: [cam.target.x.to_bits(), cam.target.y.to_bits(), cam.yaw.to_bits(), cam.pitch.to_bits(), cam.dist.to_bits(), cam.ortho as u32],
             bake: (show_bake, self.mesh_version, st.bake.wire),

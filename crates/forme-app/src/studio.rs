@@ -405,7 +405,8 @@ fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                         ("Clic droit · clic maintenu", "marking menu"),
                         ("Q · R · C", "sélection · cube · cylindre"),
                         ("Ctrl pendant la création", "inverse + / −"),
-                        ("Ctrl + clic", "ajouter une arête"),
+                        ("Glisser (outil Q)", "rectangle de sélection"),
+                        ("Ctrl + clic · Maj + glisser", "ajouter à la sélection"),
                         ("F", "cadrer la sélection"),
                         ("Suppr", "supprimer"),
                         ("Échap", "désélectionner"),
@@ -581,7 +582,7 @@ fn explorer(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
 fn explorer_row(ui: &mut Ui, st: &mut AppState, id: NodeId, depth: usize, i: usize, w: f32) {
     let Some(n) = st.scene.node(id).cloned() else { return };
     let (r, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::click());
-    let selected = st.selection == Some(id);
+    let selected = st.is_selected(id);
     let dim = if n.visible { 1.0 } else { 0.45 };
     let p = ui.painter();
     if selected {
@@ -627,7 +628,11 @@ fn explorer_row(ui: &mut Ui, st: &mut AppState, id: NodeId, depth: usize, i: usi
     } else if resp.clicked() {
         st.commit_placement();
         st.tool = Tool::Select;
-        st.select(Some(id));
+        if st.multi() || ui.input(|i| i.modifiers.shift) {
+            st.toggle_in_selection(id);
+        } else {
+            st.select(Some(id));
+        }
     } else if resp.double_clicked() {
         st.frame_selection();
     }
@@ -1194,6 +1199,7 @@ fn status_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             let sel = match (st.selection, st.edge_sel.len()) {
                 (_, n) if n > 1 => format!("{n} arêtes sélectionnées"),
                 (_, 1) => "1 arête sélectionnée".to_string(),
+                (Some(_), _) if st.selected_ids().len() > 1 => format!("{} objets sélectionnés", st.selected_ids().len()),
                 (Some(_), _) => "1 objet sélectionné".to_string(),
                 (None, _) => "Aucune sélection".to_string(),
             };

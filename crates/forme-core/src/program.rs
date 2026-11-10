@@ -253,18 +253,26 @@ pub fn compile(scene: &Scene) -> Program {
 /// Compiles a single node (with its ancestors' placement) as a standalone
 /// volume, used to highlight the selection and to show cutters as ghosts.
 pub fn compile_single(scene: &Scene, id: NodeId) -> Program {
+    compile_set(scene, &[id])
+}
+
+/// Union of several nodes, each as `compile_single` places it (the
+/// highlight of a multiple selection).
+pub fn compile_set(scene: &Scene, ids: &[NodeId]) -> Program {
     let mut b = Builder { scene, prog: Program::default() };
     b.op(OP_EMPTY, 0.0, 0.0, 0.0);
-    let mut chain = ancestor_chain(scene, id);
-    if let Some(root) = scene.node(scene.root) {
-        let mut c = node_ops(scene, root);
-        c.extend(chain);
-        chain = c;
-    }
-    if let Some(n) = scene.node(id) {
-        if n.visible {
-            let add = Combine { mode: CombineMode::Add, blend: 0.0, ..n.combine };
-            b.node(id, &chain, Some(add));
+    for &id in ids {
+        let mut chain = ancestor_chain(scene, id);
+        if let Some(root) = scene.node(scene.root) {
+            let mut c = node_ops(scene, root);
+            c.extend(chain);
+            chain = c;
+        }
+        if let Some(n) = scene.node(id) {
+            if n.visible {
+                let add = Combine { mode: CombineMode::Add, blend: 0.0, ..n.combine };
+                b.node(id, &chain, Some(add));
+            }
         }
     }
     b.op(OP_END, 0.0, 0.0, 0.0);

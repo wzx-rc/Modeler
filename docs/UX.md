@@ -22,7 +22,8 @@
 ## PC (clavier + souris)
 
 - Clic gauche : comme le Pencil (créer, sélectionner, poignées). Le survol de la souris met en évidence les arêtes.
-- Clic gauche glissé dans le vide (outil Sélection) : orbite. Clic molette ou Maj + glisser : pan. Molette : zoom.
+- Clic gauche glissé (outil Sélection, Q) : rectangle de sélection. En mode Objet, il prend les formes qu'il touche (parties visibles trouvées par rayons, plus les formes dont le centre est dedans : outils Carve, formes cachées) ; en mode Arête, les arêtes vues dedans. Ctrl ou Maj : ajoute à la sélection. Ctrl + clic sur une forme (vue ou arbre) : l'ajoute ou la retire. Clic molette : pan. Molette : zoom.
+- Sélection multiple : la forme active (la dernière ajoutée) porte les poignées et le panneau ; Supprimer, Dupliquer, Grouper, le mode (Add / Carve…), la Matière, la symétrie X et Masquer agissent sur toutes. Le déplacement par poignées ne bouge encore que la forme active.
 - **Marking menu** (façon Maya / WZX Engine, 8 directions, `marking.rs`) : appui droit (geste rapide dans une direction = action directe, maintenu = menu affiché après 0,2 s), ou clic gauche maintenu immobile ~0,3 s. Sur une forme : Matière (arc de couleurs façon BrickIt), Symétrie X, Add / Carve, Cadrer, Supprimer, Masquer, Mode Arête, Dupliquer. Dans le vide : Cube, Cylindre, Snap, Grille, vues, Grouper. Sur une arête (mode Arête) : Fillet, Chanfrein, Arête vive, Cadrer, Mode Objet.
 - Outils : Q sélection, R cube, C cylindre ; 1 / 2 : mode Objet / Arête. Options de création (petit bouton ••• sous les primitives) : interactive (base puis hauteur) ou directe (un clic pose la forme, les poignées la dimensionnent).
 - Navigation façon Maya : Alt + clic gauche = orbite, Alt + clic molette = pan, Alt + clic droit glissé = zoom (avec n'importe quel outil). Ctrl / Cmd : ajouter à la sélection d'arêtes ; pendant la création, inverse + / −.

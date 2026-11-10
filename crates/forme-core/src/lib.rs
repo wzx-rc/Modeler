@@ -12,12 +12,12 @@ pub mod scene;
 
 pub use glam;
 pub use history::History;
-pub use program::{compile, compile_single, Program};
+pub use program::{compile, compile_set, compile_single, Program};
 pub use scene::*;
 
 use glam::Vec3;
 
-fn visible_chain(scene: &Scene, id: NodeId) -> bool {
+pub fn visible_chain(scene: &Scene, id: NodeId) -> bool {
     scene.node(id).map(|n| n.visible).unwrap_or(false)
         && scene.ancestors(id).iter().all(|a| scene.nodes[a].visible)
 }
