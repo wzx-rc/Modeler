@@ -335,6 +335,15 @@ fn grade(scene: &Scene) -> Outcome {
         Ok(Err(e)) => return Outcome::Rule(e),
         Ok(Ok(b)) => b,
     };
+    // BEVEL=0.25: grade the mesh with the optional pair bevel on its sharp edges
+    let bevelled = std::env::var("BEVEL").ok().and_then(|w| w.parse::<f64>().ok()).is_some();
+    let b = match std::env::var("BEVEL").ok().and_then(|w| w.parse::<f64>().ok()) {
+        Some(w) => match bake::bevel::bevel_sharp(scene, &b, w) {
+            Ok(bb) => bb,
+            Err(e) => return Outcome::Rule(e),
+        },
+        None => b,
+    };
     if let Ok(path) = std::env::var("OBJ") {
         // the mesh, for a look: "v x y z", "f a b c d role"
         let mut o = String::new();
@@ -369,7 +378,7 @@ fn grade(scene: &Scene) -> Outcome {
         for k in 0..4 {
             let (a, c) = (p[(k + 1) % 4] - p[k], p[(k + 3) % 4] - p[k]);
             let n = a.cross(c).normalize_or_zero();
-            if n.dot(g) < 0.5 {
+            if n.dot(g) < 0.5 && !(bevelled && f.patch == bake::P_FILLET) {
                 fold = true;
             }
             let ang = a.normalize_or_zero().dot(c.normalize_or_zero()).clamp(-1.0, 1.0).acos().to_degrees();

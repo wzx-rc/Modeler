@@ -7,6 +7,7 @@
 //! Bake panel: there is no fallback mesh.
 //! One shot: the result does not keep any link with the scene.
 
+pub mod bevel;
 pub mod decimate;
 pub mod field;
 pub mod gen;
@@ -115,6 +116,11 @@ pub struct BakeStats {
     /// Faces before that pass.
     pub faces_before_flat: usize,
     pub flat_seconds: f64,
+    /// Optional pass (`bevel`): sharp edges bevelled, 0 when off.
+    pub bevel_edges: usize,
+    /// Corners where the bevel had to be narrower (faces too small).
+    pub bevel_clamped: usize,
+    pub bevel_seconds: f64,
 }
 
 /// Role of a face, in `BFace::patch`: drawn in the role view.

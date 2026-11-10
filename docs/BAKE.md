@@ -30,6 +30,23 @@ Sur les bakes de l'app : cube 20 mm 384 → 6 faces, cube arrondi 864 → 150, c
 
 Limite : une loop n'est retirée qu'entière. Celles qui passent par un trou, un éventail de fillet ou un pôle (coin du carré d'un trou) restent, même sur leurs morceaux plats (dessous du socle).
 
+### Passe secondaire : bevel des arêtes vives (10 nov. 2026, option)
+
+Référence de Romain : `docs/references/romain-correctif-topo.obj`, son export de la scène du cylindre arrondi repris dans Maya. Son geste : « toutes les arêtes sélectionnées et un Bevel en paire comme le bevel Maya, puis connexion en diagonale dans les coins ». Code : `bake/bevel.rs` (`bevel_sharp`, largeur `BEVEL_WIDTH` = 0,25 mm, seuil `SHARP_DEG` = 20°). Le SDF reste vif : le bevel n'existe que dans le maillage exporté. Comme la passe des loops plates, elle tourne sur une copie du résultat du Bake, jamais dans `bake()`.
+
+- **Arête vive** : la surface exacte plie de plus de 20° à travers elle (gradient pris juste à l'intérieur de chacune des deux faces, aux deux bouts de l'arête). Les rangées d'un fillet ne comptent jamais, même grossières.
+- Chaque arête vive reçoit **deux rangées de quads** (rôle orange), la ligne du milieu sur un profil rond.
+- Autour d'un sommet, les faces entre deux arêtes vives forment un **secteur**. Le sommet du secteur se pose où les deux lignes décalées de la largeur se croisent (l'onglet) ; sur une arête droite, c'est le décalage lui-même.
+- **Coin de 3 arêtes vives ou plus** : un quad par secteur autour d'un sommet central (3 quads à un coin de boîte, comme Maya).
+- **Coin rentrant** (secteur de 3 faces ouvert à plus de 225°) : règle de Romain. Les deux lignes de la face qui prolongent les arêtes restent droites, le sommet se pose sur chacune à la largeur, et la face du milieu est coupée en diagonale, de son coin opposé à l'onglet (les diagonales vertes de sa référence). Identique à sa référence aux pieds de la plaque et aux coins du U de Cube 3. Sur une face du milieu longue et fine, la diagonale ferait un quad presque triangle (un angle hors de 12° à 170°) : on prend l'onglet s'il tient, sinon on garde la diagonale (c'est ce que fait sa référence au coin du U, sur la bande de 0,29 mm).
+- Secteur de 2 faces dont l'onglet tombe hors d'une petite face : le sommet glisse le long de la ligne entre les deux faces, comme Maya.
+- **Face trop étroite** pour la largeur : ses coins sur des arêtes vives (et leurs voisins le long de ces arêtes) prennent 0,6 de leur largeur et le bevel recommence, jusqu'à 15 % de la largeur (comme le « clamp » de Maya, mais coin par coin). Compté dans `stats.bevel_clamped` (« coins réduits »). Au-delà, `Err` « … trop large pour une face près de (x, y, z) » et le maillage reste sans bevel.
+- **Arête vive qui s'arrête** au milieu d'une surface lisse (elle s'efface dans un raccord) : ses deux rangées se referment sur le sommet, un quad de chaque côté. Deux arêtes qui s'arrêtent aux deux bouts d'une même arête de face (les côtés d'une rainure qui entre dans un raccord) : la bande entre elles est faite de deux quads le long de cette arête.
+
+Résultats (10 nov. au soir) : sa scène (cylindre arrondi + Cube 3, sans raccord) 181 arêtes, 734 → 1 164 quads, aucun coin réduit, fermé ; romain-cylindre 186 arêtes, 722 → 1 144 ; romain-aretes 129 arêtes, 840 → 1 136, 15 coins réduits. `bake_robust` avec `BEVEL=0.25` : 3 632 propres sur 7 610 (3 911 sans le bevel), aucun refus ajouté sur un cas propre, 283 cas propres passent en « défaut » (quads écrasés ou fins) là où une forme touche presque le bord ou une autre forme : il reste moins de 0,5 mm entre deux bevels. Le coin du U de sa scène compte lui-même comme un quad écrasé.
+
+Mise au point : `BEVEL=0.25` dans `bake_probe parlignes` (ligne « bevel … sur n arêtes, a → b faces », `OBJ=1` écrit le maillage) et dans `bake_robust` (un refus du bevel compte en « règle »). `DEBUG_BEVEL=1` décrit les secteurs refusés.
+
 ## Le Bake : par lignes (`layout.rs`), seul algorithme depuis le 10 nov. 2026
 
 Demande de Romain : le maillage se déduit des **lignes de construction** (arêtes des formes, rails de leurs arrondis, ligne de jonction entre deux formes), en commençant par la ligne de contour entre deux formes.

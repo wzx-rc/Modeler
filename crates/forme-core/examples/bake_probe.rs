@@ -1,6 +1,6 @@
 //! Bake by construction lines (`bake::layout`): test scenes, CPU renders.
 //!
-//! cargo run --release -p forme-core --example bake_probe -- parlignes   (CASE=name for one, OUT=dir)
+//! cargo run --release -p forme-core --example bake_probe -- parlignes   (CASE=name for one, OUT=dir, BEVEL=0.25 for the pair bevel, OBJ=1 writes the mesh)
 //! cargo run --release -p forme-core --example bake_probe -- lignes      (construction lines over the part)
 //! cargo run --release -p forme-core --example bake_probe -- decime      (optional flat-loop pass, DEG=5)
 use forme_core::bake::{self, field::Field};
@@ -405,7 +405,22 @@ fn par_lignes() {
         let st = bake::BakeSettings::preset(q);
         let size = bake::plan(&scene, &st).unwrap_or(5.0);
         let ls = bake::layout::LayoutSettings { size, tol: st.tol * 2.0, threads: st.threads, diagonal };
-        match bake::layout::build(&scene, &ls, &bake::Progress::default()) {
+        // BEVEL=0.25: the optional pair bevel on the sharp edges, on top
+        let built = bake::layout::build(&scene, &ls, &bake::Progress::default());
+        let built = match (built, std::env::var("BEVEL").ok().and_then(|w| w.parse::<f64>().ok())) {
+            (Ok(b), Some(w)) => match bake::bevel::bevel_sharp(&scene, &b, w) {
+                Ok(bb) => {
+                    println!("{name} : bevel {w} mm sur {} arêtes, {} coins réduits, {} → {} faces, {:.0} ms", bb.stats.bevel_edges, bb.stats.bevel_clamped, b.faces.len(), bb.faces.len(), bb.stats.bevel_seconds * 1000.0);
+                    Ok(bb)
+                }
+                Err(e) => {
+                    println!("{name} : bevel impossible : {e}");
+                    Ok(b)
+                }
+            },
+            (r, _) => r,
+        };
+        match built {
             Ok(b) => {
                 let s = &b.stats;
                 println!(
@@ -444,6 +459,9 @@ fn par_lignes() {
                 }
                 let wf = &b.faces[worst.1];
                 println!("  coins de quad hors surface (< 0.9) : {bad}, pire {:.3} face {} {:?}", worst.0, worst.1, wf.verts.iter().map(|&v| b.positions[v as usize]).collect::<Vec<_>>());
+                if std::env::var("OBJ").is_ok() {
+                    let _ = std::fs::write(format!("{out}/{name}.obj"), b.to_obj(&scene.materials, name));
+                }
                 render(&b, &format!("{out}/parlignes-{name}-a.png"), eye, target, ext, 1400, 1050);
                 render(&b, &format!("{out}/parlignes-{name}-b.png"), DVec3::new(0.9, -0.6, 0.8), target, ext, 1400, 1050);
                 render(&b, &format!("{out}/parlignes-{name}-dessus.png"), DVec3::new(0.001, 1.0, 0.0), target, ext * 0.6, 1400, 1050);

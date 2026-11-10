@@ -24,10 +24,10 @@ cargo run --release -p forme-app --bin forme-shot -- shots          # every capt
 cargo run --release -p forme-app --bin forme-shot -- /tmp/x max     # one scenario (prefix): max, user, live, 22, 19, ui-ipad…
 cargo run --release -p forme-app --bin forme-shot -- /tmp/x pc-atelier pc-studio   # the two PC interfaces at 1600×900
 IPAD_ZOOM=0.84 cargo run --release -p forme-app --bin forme-shot -- /tmp/x ui-ipad   # layout as on the iPad
-OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes  # the Bake on its test scenes, CPU renders (CASE=romain-aretes|rc|raccord|boss|bossage|bossage-c3z+1|rc-sans-raccord|ra-coin3|romain|coin|trou|… for one, DEBUG_LAYOUT=1 for the rays, DEBUG_FACE="prim face file" dumps one face's lines, DEBUG_COUNTS=file dumps the segment-count system when it does not settle, QUALITE=legere|dense)
+OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes  # the Bake on its test scenes, CPU renders (CASE=romain-aretes|rc|raccord|boss|bossage|bossage-c3z+1|rc-sans-raccord|ra-coin3|romain|coin|trou|… for one, DEBUG_LAYOUT=1 for the rays, DEBUG_FACE="prim face file" dumps one face's lines, DEBUG_COUNTS=file dumps the segment-count system when it does not settle, QUALITE=legere|dense, BEVEL=0.25 applies the optional sharp-edge bevel pass, OBJ=1 writes each mesh)
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- lignes     # construction lines (bake/lines.rs) over the baked part
 DEG=5 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- decime  # optional pass: dissolve the closed edge loops whose cross path bends less than DEG (same code as the toggle)
-OUT=/tmp/x cargo run --release -p forme-core --example bake_robust              # robustness: ~6000 simple cases (plate + one shape moved on a 1 mm grid, fillet patterns, sizes, Romain's scenes), maps + results.tsv + résumé.txt; family names as args (trou, boite, fillets…), CAS="x 3 z 0" OBJ=file for one case
+OUT=/tmp/x cargo run --release -p forme-core --example bake_robust              # robustness: ~6000 simple cases (plate + one shape moved on a 1 mm grid, fillet patterns, sizes, Romain's scenes), maps + results.tsv + résumé.txt; family names as args (trou, boite, fillets…), CAS="x 3 z 0" OBJ=file for one case, BEVEL=0.25 grades the bevelled mesh
 ```
 
 The window title shows the version, branch, commit and commit date (`crates/forme-app/build.rs`, `forme_app::version_title()`), also at the bottom of Réglages: check it before saying which version Romain is running.
