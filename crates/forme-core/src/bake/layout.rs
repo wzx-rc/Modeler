@@ -939,6 +939,26 @@ impl Layout<'_> {
         })
     }
 
+    /// Cuts made on one rail of a strip around a cylinder (its rounded rim,
+    /// a junction fillet's ring), made again at the same angles on its
+    /// other rail, where it shows.
+    fn carry_across(&mut self, c: usize, cuts: &[DVec3]) {
+        let sm = self.charts[c].map;
+        let (lo, hi) = (self.charts[c].lo.y, self.charts[c].hi.y);
+        for &x in cuts {
+            let q = sm.to2(x);
+            for y in [lo, hi] {
+                if (q.y - y).abs() < (hi - lo) * 0.01 {
+                    continue;
+                }
+                let w = sm.to3(DVec2::new(q.x, y));
+                if let Some(e2) = self.edge_through(c, w) {
+                    self.split(e2, w);
+                }
+            }
+        }
+    }
+
     /// Splits edge `e` at the 3D point `x` (on it); returns the node.
     fn split(&mut self, e: usize, x: DVec3) -> usize {
         let n = self.node(x);
@@ -1931,15 +1951,19 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
     }
     for (ci, raw) in raw_loops {
         let mut ids = vec![];
-        // a cylinder's rounded rim meets another shape only along a row
-        // for now (a plane square to the axis: the part's face where the
-        // cylinder stands on its rounded foot, the face a hole's rounded
-        // floor opens on)
+        // a cylinder's rounded rim meets another shape along a row (a plane
+        // square to the axis: the part's face where the cylinder stands on
+        // its rounded foot, the face a hole's rounded floor opens on) or
+        // right across, from rail to rail (a box through the rim): the
+        // strip then ends there; a cut into the strip that stays on one
+        // rail is not handled yet
         if let (Map::Tor { r, .. }, true) = (lay.charts[ci].map, matches!(lay.charts[ci].map, Map::Tor { .. })) {
             let m = lay.charts[ci].map;
+            let (lo, hi) = (lay.charts[ci].lo.y, lay.charts[ci].hi.y);
             let across = raw.iter().any(|(l, pts)| {
                 let y: Vec<f64> = pts.iter().map(|p| m.to2(*p).y).collect();
-                l.prim != lay.charts[ci].id.prim && y.iter().any(|v| (v - y[0]).abs() > r * 0.01)
+                let (y0, y1) = y.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+                l.prim != lay.charts[ci].id.prim && y1 - y0 > r * 0.01 && !(y0 - lo < r * 0.01 && hi - y1 < r * 0.01)
             });
             if across {
                 return Err("bord arrondi d'un cylindre coupé par une autre forme ou par le bord de la pièce : pas encore géré".into());
@@ -2032,11 +2056,19 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 // face's axes (its widest points and its bottom), as on a
                 // whole hole, so that its squares stand square to the edge
                 let (ea, eb) = (lay.edges[e].a, lay.edges[e].b);
+                // (the same on the flat cap of a rounded rim, the cut
+                // carried across the rim strip below)
                 let square = match (sm, lay.charts[ci].map) {
                     (Map::Cyl { a, .. }, Map::Plane { u, v, .. }) => lay.charts[other].strip.is_none() && a.dot(u.cross(v)).abs() > 0.999 && total.abs() > 0.6,
+                    (Map::Tor { a, .. }, Map::Plane { u, v, .. }) => a.dot(u.cross(v)).abs() > 0.999 && total.abs() > 0.6,
                     _ => false,
                 };
-                if let (Map::Cyl { o, .. }, true) = (sm, square) {
+                let centre = match sm {
+                    Map::Cyl { o, .. } => Some(o),
+                    Map::Tor { c, .. } => Some(c),
+                    _ => None,
+                };
+                if let (Some(o), true) = (centre, square) {
                     if lay.straight_at(ci, e, ea).is_some() || lay.straight_at(ci, e, eb).is_some() {
                         let map = lay.charts[ci].map;
                         let p2 = lay.pts2(e, ci);
@@ -2067,9 +2099,12 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                         cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
                         let xs: Vec<DVec3> = cuts.iter().map(|&(_, q)| sm.to3(proj1(&|x| sh.face_fn(me.face, sm.to3(x)), sm.to2(map.to3(q)), fd))).collect();
                         let mut cur = e;
-                        for x in xs {
+                        for &x in &xs {
                             lay.split(cur, x);
                             cur = lay.edges.len() - 1;
+                        }
+                        if matches!(sm, Map::Tor { .. }) {
+                            lay.carry_across(other, &xs);
                         }
                         continue;
                     }
@@ -2088,20 +2123,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 // along the wall (cut at the same angles at its other end),
                 // so that the wall's columns run straight
                 if matches!(sm, Map::Tor { .. } | Map::Ring { .. }) {
-                    let (lo, hi) = (lay.charts[other].lo.y, lay.charts[other].hi.y);
-                    for &x in &cuts {
-                        let q = sm.to2(x);
-                        // (the rails other than the one cut, where they show)
-                        for y in [lo, hi] {
-                            if (q.y - y).abs() < (hi - lo) * 0.01 {
-                                continue;
-                            }
-                            let w = sm.to3(DVec2::new(q.x, y));
-                            if let Some(e2) = lay.edge_through(other, w) {
-                                lay.split(e2, w);
-                            }
-                        }
-                    }
+                    lay.carry_across(other, &cuts);
                 }
             }
         }
@@ -2149,6 +2171,10 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
     // the four quarter arcs, where the wall's lines come in; nothing
     // crosses the disc
     let mut ogrid = vec![false; nc];
+    // cylinders whose cap is cut through (a notch): the segments around
+    // their wall are a floor, not a fixed count, since the arcs left between
+    // the cuts no longer split the turn evenly
+    let mut notched: Vec<u32> = vec![];
     for ci in 0..nc {
         let Some((rad, _)) = lay.charts[ci].disc else { continue };
         if matches!(lay.charts[ci].map, Map::Rev { .. }) {
@@ -2170,19 +2196,187 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 let total: f64 = pp.windows(3).map(|w| turn(w[1] - w[0], w[2] - w[1])).sum();
                 wall(&lay, e).is_some() && (total.abs() - FRAC_PI_2).abs() < 0.2
             });
-        if !quarter {
-            // a cap cut by a flat face of another shape (a blind hole or a
-            // boss through the face's edge, its floor or underside a half
-            // disc): not yet. (Half an o-grid lays the cap out, but its lines
-            // and the notch's edges then run around the part and meet the
-            // square on the top face in Ts that no segment counts satisfy)
-            let cut = loops[0].iter().any(|&(e, _)| {
+        if !quarter && std::env::var("DEBUG_LAYOUT").is_ok() {
+            for &(e, fwd) in &loops[0] {
+                let pp = lay.hpts(e, fwd, ci);
+                let total: f64 = pp.windows(3).map(|w| turn(w[1] - w[0], w[2] - w[1])).sum();
                 let other = lay.edges[e].charts.iter().copied().find(|&c| c != ci).unwrap_or(ci);
-                wall(&lay, e).is_none() && lay.charts[other].id.prim != me.prim && matches!(lay.charts[other].map, Map::Plane { .. })
-            }) && loops[0].iter().any(|&(e, _)| wall(&lay, e).is_some());
-            if cut {
-                return Err("fond de trou borgne ou dessous de bossage coupé par le bord de la pièce : pas encore géré".into());
+                eprintln!("dessus {:?} : vers {:?} tour {:.2} de {:?} à {:?}", me, lay.charts[other].id, total, pp[0], pp[pp.len() - 1]);
             }
+        }
+        if !quarter {
+            // a cap cut by flat faces of other shapes (a box through the top
+            // of a boss, the part's edge through a blind hole's floor): the
+            // same o-grid, if the cuts are square to the chart's axes and
+            // leave the four diagonals. A cut parallel to a side of the
+            // square ("floor") within half a quad of it carries that side;
+            // farther out, lines from its ends run square to the side
+            if !loops[0].iter().any(|&(e, _)| wall(&lay, e).is_some()) {
+                continue;
+            }
+            let mut floors: Vec<(usize, f64, [usize; 2])> = vec![];
+            // (the axis a cut piece runs along, by its place in the loop)
+            let mut cut_ax: Vec<Option<usize>> = vec![None; loops[0].len()];
+            for (i, &(e, fwd)) in loops[0].iter().enumerate() {
+                if wall(&lay, e).is_some() {
+                    continue;
+                }
+                let other = lay.edges[e].charts.iter().copied().find(|&c| c != ci).unwrap_or(ci);
+                if lay.charts[other].id.prim == me.prim || !matches!(lay.charts[other].map, Map::Plane { .. }) {
+                    return Err("dessus ou fond d'un cylindre coupé par une forme courbe : pas encore géré".into());
+                }
+                let pp = lay.hpts(e, fwd, ci);
+                let (pa, pb) = (pp[0], pp[pp.len() - 1]);
+                let d = pb - pa;
+                let tol = lay.node_tol * 10.0;
+                let ax = if pp.iter().all(|q| (q.x - pa.x).abs() < tol) {
+                    0
+                } else if pp.iter().all(|q| (q.y - pa.y).abs() < tol) {
+                    1
+                } else {
+                    return Err("dessus ou fond d'un cylindre coupé en biais par une autre forme : pas encore géré".into());
+                };
+                cut_ax[i] = Some(ax);
+                // (a piece along the side of a sector, not across it)
+                let mid = (pa + pb) * 0.5;
+                let along_side = if ax == 0 { mid.x.abs() > mid.y.abs() } else { mid.y.abs() > mid.x.abs() };
+                if along_side && d.length() > tol {
+                    let (na, nb) = if fwd { (lay.edges[e].a, lay.edges[e].b) } else { (lay.edges[e].b, lay.edges[e].a) };
+                    let sector = if ax == 0 { if mid.x > 0.0 { 0 } else { 2 } } else if mid.y > 0.0 { 1 } else { 3 };
+                    floors.push((sector, if ax == 0 { mid.x.abs() } else { mid.y.abs() }, [na, nb]));
+                }
+            }
+            // the middles of the arcs between the cuts, one per quarter of
+            // the chart, where the hooks at the foot of the wall take theirs
+            // (the middle angle between the arc's ends; an end on a cut is
+            // taken where the cut's line meets the wall's own radius, so that
+            // the columns run straight down a rounded rim and the wall)
+            let r_wall = {
+                let sh = &lay.shapes[lay.charts[ci].shape];
+                sh.pr.size.x * sh.pr.sc
+            };
+            let dir_at = |lay: &Layout, node: usize, ax: Option<usize>| -> DVec2 {
+                let q = map.to2(lay.nodes[node]);
+                match ax {
+                    Some(0) => DVec2::new(q.x, q.y.signum() * (r_wall * r_wall - q.x * q.x).max(0.0).sqrt()).normalize(),
+                    Some(_) => DVec2::new(q.x.signum() * (r_wall * r_wall - q.y * q.y).max(0.0).sqrt(), q.y).normalize(),
+                    None => q.normalize(),
+                }
+            };
+            let nl = loops[0].len();
+            let mut quarters: [Option<(usize, usize, DVec2)>; 4] = [None; 4];
+            for (i, &(e, fwd)) in loops[0].iter().enumerate() {
+                let Some(other) = wall(&lay, e) else { continue };
+                let (na, nb) = if fwd { (lay.edges[e].a, lay.edges[e].b) } else { (lay.edges[e].b, lay.edges[e].a) };
+                let m2 = (dir_at(&lay, na, cut_ax[(i + nl - 1) % nl]) + dir_at(&lay, nb, cut_ax[(i + 1) % nl])).normalize_or_zero() * rad;
+                let q = (m2.y.atan2(m2.x).rem_euclid(TAU) / FRAC_PI_2) as usize % 4;
+                let x = map.to3(m2);
+                // (an arc shorter than a half turn: its middle is between)
+                let pp = lay.hpts(e, fwd, ci);
+                let on = pp.windows(3).map(|w| turn(w[1] - w[0], w[2] - w[1])).sum::<f64>().abs() < PI * 0.9;
+                if std::env::var("DEBUG_LAYOUT").is_ok() {
+                    eprintln!("milieu {:?} quart {q} sur l'arc {on} ({:?} -> {:?})", m2, map.to2(lay.nodes[na]), map.to2(lay.nodes[nb]));
+                }
+                if !on || quarters[q].is_some() || m2.x.abs().min(m2.y.abs()) < rad * 0.05 {
+                    return Err("dessus ou fond d'un cylindre coupé sur une diagonale de son o-grid : pas encore géré".into());
+                }
+                let m = lay.split(e, x);
+                quarters[q] = Some((m, other, m2));
+            }
+            let Some(mids) = quarters.iter().copied().collect::<Option<Vec<(usize, usize, DVec2)>>>() else {
+                return Err("dessus ou fond d'un cylindre coupé sur une diagonale de son o-grid : pas encore géré".into());
+            };
+            // the square: its sides, as levels along each sector's axis
+            // (sector 0: +x of the chart, 1: +y, 2: -x, 3: -y)
+            let s0 = rad * 0.6 * std::f64::consts::FRAC_1_SQRT_2;
+            let axis = [DVec2::X, DVec2::Y, -DVec2::X, -DVec2::Y];
+            let mut level = [s0; 4];
+            let mut snapped = [false; 4];
+            let mut ends: [Option<(f64, [usize; 2])>; 4] = [None; 4];
+            for &(sector, l, nn) in &floors {
+                if ends[sector].is_some() {
+                    return Err("dessus ou fond d'un cylindre coupé deux fois du même côté : pas encore géré".into());
+                }
+                if l < s0 - st.size * 0.5 {
+                    return Err("dessus ou fond d'un cylindre coupé trop près de son centre : pas encore géré".into());
+                }
+                if (l - s0).abs() < st.size * 0.5 {
+                    level[sector] = l;
+                    snapped[sector] = true;
+                }
+                ends[sector] = Some((l, nn));
+            }
+            let corner = |q: usize| -> DVec2 {
+                // corner in the quarter between sectors q and q + 1, facing
+                // its middle as on a whole cap; on a side the cut carries,
+                // moved onto the cut
+                let mut g = mids[q].2 * 0.6;
+                for k in [q, (q + 1) % 4] {
+                    if snapped[k] {
+                        g += axis[k] * (level[k] - g.dot(axis[k]));
+                    }
+                }
+                g
+            };
+            ogrid[ci] = true;
+            notched.push(me.prim);
+            // corners: mids[q] is in the quarter between sectors q and q + 1
+            let mut gs: Vec<(usize, DVec2)> = vec![];
+            for q in 0..4 {
+                let g2 = corner(q);
+                let g = lay.node(map.to3(g2));
+                // (a corner of every patch around it, even where the line
+                // from the arc's middle comes in flat, beside a cut)
+                forced.push((ci, g));
+                gs.push((g, g2));
+            }
+            let ray = |lay: &mut Layout, a: usize, b: usize| {
+                let re = lay.edges.len();
+                lay.edges.push(GEdge { a, b, pts: vec![lay.nodes[a], lay.nodes[b]], charts: [ci, ci], ray: true, alive: true });
+                lay.rays[ci].push(re);
+            };
+            for j in 0..4 {
+                let (m, other, _) = mids[j];
+                let (g, gq) = gs[j];
+                let (g2, gq2) = gs[(j + 1) % 4];
+                lay.origins.push(m);
+                lay.origins.push(g);
+                lay.inner[ci].push(g);
+                ray(&mut lay, m, g);
+                // the side from g to g2 faces sector (j + 1) % 4
+                let sector = (j + 1) % 4;
+                match ends[sector] {
+                    None => ray(&mut lay, g, g2),
+                    Some((_, nn)) => {
+                        // the cut's ends along the side, from g
+                        let side = (gq2 - gq).normalize();
+                        let mut pts: Vec<(f64, usize)> = nn.iter().map(|&n| ((map.to2(lay.nodes[n]) - gq).dot(side), n)).collect();
+                        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+                        let span = gq.distance(gq2);
+                        if pts[0].0 < lay.node_tol * 10.0 || pts[1].0 > span - lay.node_tol * 10.0 {
+                            return Err("dessus ou fond d'un cylindre coupé plus large que le carré de son o-grid : pas encore géré".into());
+                        }
+                        if snapped[sector] {
+                            // the cut carries the side
+                            ray(&mut lay, g, pts[0].1);
+                            ray(&mut lay, pts[1].1, g2);
+                        } else {
+                            // lines from its ends square to the side
+                            let feet: Vec<usize> = pts.iter().map(|&(t, _)| lay.node(map.to3(gq + side * t))).collect();
+                            for k in 0..2 {
+                                lay.inner[ci].push(feet[k]);
+                                ray(&mut lay, pts[k].1, feet[k]);
+                            }
+                            ray(&mut lay, g, feet[0]);
+                            ray(&mut lay, feet[0], feet[1]);
+                            ray(&mut lay, feet[1], g2);
+                        }
+                    }
+                }
+                // the wall's line from the arc's middle
+                queue.push_back((other, m, DVec2::ZERO));
+            }
+            keep[ci].push(([gs[0].1, gs[1].1, gs[2].1, gs[3].1], [true; 4]));
             continue;
         }
         ogrid[ci] = true;
@@ -2827,6 +3021,15 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
         } else {
             d0.normalize()
         };
+        // into a strip from its end, between its rails: along the row,
+        // even where the end is cut slightly slanted (a box through the
+        // rounded rim of a cylinder)
+        if d0 == DVec2::ZERO && lay.charts[ci].strip.is_some() {
+            let (lo, hi) = (lay.charts[ci].lo.y, lay.charts[ci].hi.y);
+            if o.y - lo > (hi - lo) * 0.01 && hi - o.y > (hi - lo) * 0.01 && d.x.abs() > d.y.abs() {
+                d = DVec2::new(d.x.signum(), 0.0);
+            }
+        }
         // a loop entering a rounded corner of the face from its arc (a row
         // of the strip) crosses the corner patch to the opposite side:
         // from the half next to a rail it runs along that rail
@@ -3285,6 +3488,10 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
     let ne = lay.edges.len();
     let mut count = vec![0usize; ne];
     let mut fixed = vec![false; ne];
+    let mut minc = vec![1usize; ne];
+    // (segments around a cylinder that stay evenly spaced, as the wall's
+    // columns, though their count is free)
+    let mut even = vec![false; ne];
     let mut target = vec![1.0f64; ne];
     for e in 0..ne {
         let ed = &lay.edges[e];
@@ -3308,15 +3515,26 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                 // rows of a fillet, or segments around a cylinder (chord)
                 let m = ch.map;
                 let d = m.to2(lay.nodes[ed.b]) - m.to2(lay.nodes[ed.a]);
+                let soft = ch.ring.is_some() && notched.contains(&ch.id.prim);
                 if d.y.abs() > d.x.abs() {
-                    fixed[e] = true;
                     let rows = d.y.abs() / ch.row();
                     count[e] = (if ch.strip.is_some() { rows.round() } else { (rows - 0.1).ceil() } as usize).max(1);
+                    if soft {
+                        minc[e] = minc[e].max(count[e]);
+                        even[e] = true;
+                    } else {
+                        fixed[e] = true;
+                    }
                 } else if let (Map::Tor { .. }, Some(row)) = (m, ch.ring) {
                     // along a cylinder's rounded rim: the wall's segments,
                     // on both rails (the cap's side as the wall's)
-                    fixed[e] = true;
                     count[e] = ((d.x.abs() / row - 0.1).ceil() as usize).max(1);
+                    if soft {
+                        minc[e] = minc[e].max(count[e]);
+                        even[e] = true;
+                    } else {
+                        fixed[e] = true;
+                    }
                 }
             }
         }
@@ -3350,7 +3568,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
             count[e] += 1;
             continue;
         }
-        let down = big.iter().filter(|x| !fixed[x.0] && count[x.0] > 1).min_by(|x, y| (target[x.0] / count[x.0] as f64).total_cmp(&(target[y.0] / count[y.0] as f64)));
+        let down = big.iter().filter(|x| !fixed[x.0] && count[x.0] > minc[x.0]).min_by(|x, y| (target[x.0] / count[x.0] as f64).total_cmp(&(target[y.0] / count[y.0] as f64)));
         match down {
             Some(&(e, _)) => count[e] -= 1,
             None => {
@@ -3382,7 +3600,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
         let _ = std::fs::write(path, out);
     }
     if !settled {
-        min_conflicts(&patches, &mut count, &fixed, &target).map_err(|why| {
+        min_conflicts(&patches, &mut count, &fixed, &minc, &target).map_err(|why| {
             if std::env::var("DEBUG_LAYOUT").is_ok() {
                 eprintln!("{why}");
                 for (ci, sd) in &patches {
@@ -3468,7 +3686,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
             }
         }
         for e in 0..ne {
-            if fixed[e] || par[e].is_empty() {
+            if fixed[e] || even[e] || par[e].is_empty() {
                 continue;
             }
             let c = count[e] as f64;
@@ -3744,7 +3962,7 @@ fn orient(pos: &[DVec3], faces: &mut [Vec<u32>], field: &Field) {
 /// line of an unbalanced patch, the one that leaves the fewest unbalanced
 /// sides, then the closest to the line's target), with a short tabu so it
 /// does not undo its last moves.
-fn min_conflicts(patches: &[(usize, [Vec<(usize, bool)>; 4])], count: &mut [usize], fixed: &[bool], target: &[f64]) -> Result<(), String> {
+fn min_conflicts(patches: &[(usize, [Vec<(usize, bool)>; 4])], count: &mut [usize], fixed: &[bool], minc: &[usize], target: &[f64]) -> Result<(), String> {
     let ne = count.len();
     let mut cons: Vec<(Vec<usize>, Vec<usize>)> = vec![];
     for (_, sd) in patches {
@@ -3781,7 +3999,7 @@ fn min_conflicts(patches: &[(usize, [Vec<(usize, bool)>; 4])], count: &mut [usiz
                     continue;
                 }
                 let delta = -sgn * s;
-                if (count[e] as i64 + delta) < 1 || (tabu[e].0 > it && tabu[e].1 == -delta) {
+                if (count[e] as i64 + delta) < minc[e] as i64 || (tabu[e].0 > it && tabu[e].1 == -delta) {
                     continue;
                 }
                 let dv: i64 = of_edge[e].iter().map(|&(ci, s2)| (v[ci] + s2 * delta).abs() - v[ci].abs()).sum();

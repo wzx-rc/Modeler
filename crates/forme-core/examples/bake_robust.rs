@@ -246,7 +246,23 @@ fn families() -> Vec<Family> {
     {
         cases.push(Case { cell: (col, 0), tag: name.into(), scene: Scene::from_json(json).expect(name) });
     }
-    out.push(Family { name: "romain", what: "tes scènes (la dernière : pas encore réglée)", cols: 5, rows: 1, map: false, cases });
+    // the last one cut down, on the way: without the cylinder's junction
+    // blend (rim rounded, then sharp)
+    for (col, rim) in [(0, true), (1, false)] {
+        let mut sc = Scene::from_json(include_str!("scenes/romain-cylindre-arrondi.forme")).expect("romain-cylindre-arrondi");
+        let ids: Vec<NodeId> = sc.nodes.keys().copied().collect();
+        for id in ids {
+            if let Some(n) = sc.node_mut(id).filter(|n| n.name == "Cylindre 1") {
+                n.combine.blend = 0.0;
+                if let Some(sh) = n.shape_mut().filter(|_| !rim) {
+                    sh.edges.clear();
+                }
+            }
+        }
+        let tag = if rim { "romain-cylindre-arrondi sans raccord" } else { "romain-cylindre-arrondi vif sans raccord" };
+        cases.push(Case { cell: (col, 1), tag: tag.into(), scene: sc });
+    }
+    out.push(Family { name: "romain", what: "tes scènes (la dernière : pas encore réglée ; en dessous, la dernière sans le raccord du cylindre)", cols: 5, rows: 2, map: false, cases });
     out
 }
 
