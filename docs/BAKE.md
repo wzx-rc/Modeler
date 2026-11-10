@@ -100,7 +100,8 @@ Une forme seule posée ou creusée sur la face passe à 100 % tant qu'elle reste
 - Fillets de jonction autres que la boîte posée sur une face (blend d'un Carve, de formes arrondies ou penchées), chanfreins, Intersect, Groove, Tongue.
 - Cylindres arrondis, sphères, profils, tores, coques, taper.
 - Copies (répétitions, symétries), groupes fusionnés (historique en arbre).
-- Coin où trois fillets de rayons différents se rejoignent ; deux arêtes arrondies en coin avec la troisième vive mais de rayons différents ; coin arrondi coupé par une autre forme.
+- Coin où trois fillets de rayons différents se rejoignent ; coin arrondi coupé par une autre forme.
+- Deux arêtes du dessus arrondies en coin, les autres vives (motif « 2 arêtes en coin ») : les côtés droits du bout de chaque bande font le tour de la pièce et reviennent buter sur l'autre bande juste à côté de l'onglet (comptes impossibles). Le motif voulu à ce coin reste à dessiner avec Romain. Le tour du dessus entier passe.
 - Cube test et grenade : en attente de ces cas.
 
 ## Historique des approches (supprimées le 10 nov. 2026)
