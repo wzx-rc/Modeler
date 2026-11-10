@@ -15,6 +15,9 @@ use glam::{EulerRot, Quat, Vec3};
 
 const RIGHT_W: f32 = 276.0;
 
+/// Desktop layout: compact rows for the mouse (the iPad keeps 44 pt targets).
+const DESK: bool = !cfg!(target_os = "ios");
+
 pub(crate) fn panel() -> Frame {
     Frame::new().fill(PANEL).stroke(Stroke::new(1.0, PANEL_BORDER)).corner_radius(CornerRadius::same(16)).inner_margin(Margin::same(8))
 }
@@ -86,7 +89,8 @@ pub fn icon_btn(ui: &mut Ui, icon: Icon, selected: bool, tip: &str, size: f32) -
         p.rect_filled(rect, 10.0, RAISED);
     }
     let c = if selected { ACCENT_TEXT } else { TEXT_ICON };
-    icons::paint(p, Rect::from_center_size(rect.center(), vec2(20.0, 20.0)), icon, c);
+    let isz = if size < 36.0 { 16.0 } else { 20.0 };
+    icons::paint(p, Rect::from_center_size(rect.center(), vec2(isz, isz)), icon, c);
     resp.on_hover_text(tip)
 }
 
@@ -129,6 +133,7 @@ pub(crate) fn secondary_btn(ui: &mut Ui, label: &str, width: f32) -> Response {
 
 /// Segmented control. Returns the picked value.
 pub(crate) fn segmented<T: PartialEq + Copy>(ui: &mut Ui, items: &[(T, &str, Color32)], current: T, height: f32) -> Option<T> {
+    let height = if DESK { height.min(28.0) } else { height };
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     ui.painter().rect_filled(rect, 11.0, WELL);
@@ -146,7 +151,7 @@ pub(crate) fn segmented<T: PartialEq + Copy>(ui: &mut Ui, items: &[(T, &str, Col
         } else if resp.hovered() {
             p.rect_filled(r, 8.0, RAISED);
         }
-        p.text(r.center(), Align2::CENTER_CENTER, *label, semibold(12.0), if on { TEXT_STRONG } else { Color32::from_rgb(0xAE, 0xB3, 0xBA) });
+        p.text(r.center(), Align2::CENTER_CENTER, *label, semibold(if DESK { 11.5 } else { 12.0 }), if on { TEXT_STRONG } else { Color32::from_rgb(0xAE, 0xB3, 0xBA) });
         if resp.clicked() {
             picked = Some(*v);
         }
@@ -175,7 +180,7 @@ fn nice_ceil(x: f32) -> f32 {
 /// Touch-friendly slider (44 pt tall hit area). Sizes use an adaptive range so the
 /// knob sits mid-track whatever the scale; the range is frozen while dragging.
 fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adaptive: bool, step: f32, width: f32) -> (bool, bool) {
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::click_and_drag());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, if DESK { 22.0 } else { 34.0 }), Sense::click_and_drag());
     let resp = ui.interact(rect.expand2(vec2(0.0, 5.0)), id, Sense::click_and_drag());
     let key = id.with("frozen-max");
     let soft = if adaptive { nice_ceil((v.abs() * 2.0).max(max)) } else { max };
@@ -186,7 +191,7 @@ fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adaptive: 
     if resp.dragged() || resp.drag_stopped() {
         hi = ui.data(|d| d.get_temp::<f32>(key)).unwrap_or(soft);
     }
-    let rail = Rect::from_center_size(rect.center(), vec2(width - 20.0, 4.0));
+    let rail = Rect::from_center_size(rect.center(), vec2(width - if DESK { 12.0 } else { 20.0 }, if DESK { 3.0 } else { 4.0 }));
     let mut changed = false;
     let started = resp.drag_started() || resp.clicked();
     if resp.dragged() || resp.clicked() || resp.drag_started() {
@@ -210,15 +215,66 @@ fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adaptive: 
     p.rect_filled(Rect::from_x_y_ranges(zero.min(kx)..=zero.max(kx), rail.y_range()), 2.0, ACCENT);
     let k = pos2(kx, rail.center().y);
     let active = resp.dragged() || resp.is_pointer_button_down_on();
-    p.circle_filled(k + vec2(0.0, 1.0), 10.5, tint(Color32::BLACK, 0.35));
-    p.circle(k, if active { 11.0 } else { 9.5 }, Color32::from_rgb(0xF2, 0xF3, 0xF5), Stroke::new(if active { 3.0 } else { 0.0 }, ACCENT));
+    let (kr, ka) = if DESK { (6.5, 7.5) } else { (9.5, 11.0) };
+    p.circle_filled(k + vec2(0.0, 1.0), kr + 1.0, tint(Color32::BLACK, 0.35));
+    p.circle(k, if active { ka } else { kr }, Color32::from_rgb(0xF2, 0xF3, 0xF5), Stroke::new(if active { 2.5 } else { 0.0 }, ACCENT));
     (changed, started && changed || resp.drag_started())
+}
+
+/// Number field in mm / ° / ×, French decimals, typed or dragged, fixed width
+/// (the panel never changes width with the value).
+fn value_field(ui: &mut Ui, v: &mut f32, range: std::ops::RangeInclusive<f32>, step: f64, suffix: &str, width: f32) -> egui::Response {
+    let sfx = if suffix.is_empty() { String::new() } else { format!(" {suffix}") };
+    let parse_sfx = suffix.to_string();
+    let field = egui::DragValue::new(v)
+        .speed(step)
+        .range(range)
+        .custom_formatter(move |x, _| format!("{}{}", fmt_mm(x as f32), sfx))
+        .custom_parser(move |s| s.trim().trim_end_matches(parse_sfx.as_str()).trim().replace(',', ".").parse::<f64>().ok());
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        w.inactive.weak_bg_fill = WELL;
+        w.inactive.bg_stroke = Stroke::new(1.0, DIVIDER);
+        w.hovered.weak_bg_fill = RAISED;
+        w.inactive.fg_stroke.color = TEXT_STRONG;
+        w.inactive.corner_radius = CornerRadius::same(6);
+        w.hovered.corner_radius = CornerRadius::same(6);
+        w.active.corner_radius = CornerRadius::same(6);
+        ui.style_mut().override_font_id = Some(regular(12.5));
+        // a DragValue is as wide as its text, at least interact_size: pin both
+        ui.spacing_mut().interact_size = vec2(width, 22.0);
+        ui.spacing_mut().button_padding = vec2(4.0, 1.0);
+        ui.add(field)
+    })
+    .inner
 }
 
 /// label · slider · value. Returns (changed, gesture started).
 fn slider_row(ui: &mut Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, step: f64, suffix: &str) -> (bool, bool) {
     let mut out = (false, false);
     let id = ui.make_persistent_id(("slider", label));
+    if DESK {
+        // desktop: compact row, the value is a field you can type into
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.set_height(26.0);
+            let total = ui.available_width();
+            let (lw, vw) = (74.0, 68.0);
+            let (lr, _) = ui.allocate_exact_size(vec2(lw, 22.0), Sense::hover());
+            ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(12.5), LABEL);
+            let sw = (total - lw - vw - 12.0).max(40.0);
+            let (min, max) = (*range.start(), *range.end());
+            let adaptive = suffix == "mm" && min >= 0.0 && max > 20.0;
+            let hint = if adaptive { 10.0 } else { max };
+            out = touch_slider(ui, id, v, min, hint.min(max), adaptive, step as f32, sw);
+            let r = value_field(ui, v, range.clone(), step, suffix, vw);
+            if r.changed() {
+                out = (true, out.1 || r.drag_started() || !r.dragged());
+            }
+            *v = v.clamp(min, max);
+        });
+        return out;
+    }
     ui.horizontal(|ui| {
         ui.set_height(34.0);
         let (lr, _) = ui.allocate_exact_size(vec2(84.0, 30.0), Sense::hover());
@@ -263,14 +319,16 @@ fn stepper(ui: &mut Ui, label: &str, value: u32, min: u32, max: u32) -> Option<u
 pub(crate) fn toggle_row(ui: &mut Ui, label: &str, on: bool) -> bool {
     let mut clicked = false;
     ui.horizontal(|ui| {
-        ui.set_height(44.0);
-        let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 52.0 - ui.spacing().item_spacing.x, 40.0), Sense::hover());
-        ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(13.0), LABEL);
-        let (r, resp) = ui.allocate_exact_size(vec2(52.0, 32.0), Sense::click());
+        // desktop: a small switch on a 28 pt row; iPad: 44 pt touch target
+        let (row, tw, th, kr) = if DESK { (28.0, 34.0, 18.0, 7.0) } else { (44.0, 52.0, 32.0, 13.0) };
+        ui.set_height(row);
+        let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - tw - ui.spacing().item_spacing.x, row - 4.0), Sense::hover());
+        ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(if DESK { 12.5 } else { 13.0 }), LABEL);
+        let (r, resp) = ui.allocate_exact_size(vec2(tw, th), Sense::click());
         let p = ui.painter();
-        p.rect_filled(r, 16.0, if on { ACCENT } else { RAISED });
-        let knob = if on { r.right_center() - vec2(16.0, 0.0) } else { r.left_center() + vec2(16.0, 0.0) };
-        p.circle_filled(knob, 13.0, if on { ON_ACCENT } else { TEXT2 });
+        p.rect_filled(r, th * 0.5, if on { ACCENT } else { RAISED });
+        let knob = if on { r.right_center() - vec2(th * 0.5, 0.0) } else { r.left_center() + vec2(th * 0.5, 0.0) };
+        p.circle_filled(knob, kr, if on { ON_ACCENT } else { TEXT2 });
         clicked = resp.clicked();
     });
     clicked
@@ -856,7 +914,7 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
                         st.renaming = false;
                     }
                 } else {
-                    let r = ui.add(egui::Label::new(egui::RichText::new(&node.name).font(semibold(17.0)).color(TEXT)).sense(Sense::click()).truncate());
+                    let r = ui.add(egui::Label::new(egui::RichText::new(&node.name).font(semibold(if DESK { 15.0 } else { 17.0 })).color(TEXT)).sense(Sense::click()).truncate());
                     if r.double_clicked() {
                         st.renaming = true;
                     }
@@ -869,18 +927,19 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
             });
         });
     });
+    let ib = if DESK { 30.0 } else { 44.0 };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        if icon_btn(ui, Icon::Duplicate, false, "Dupliquer", 44.0).clicked() {
+        if icon_btn(ui, Icon::Duplicate, false, "Dupliquer", ib).clicked() {
             st.duplicate_selected();
         }
-        if icon_btn(ui, if node.visible { Icon::Eye } else { Icon::EyeOff }, false, "Masquer", 44.0).clicked() {
+        if icon_btn(ui, if node.visible { Icon::Eye } else { Icon::EyeOff }, false, "Masquer", ib).clicked() {
             st.toggle_visible(id);
         }
-        if icon_btn(ui, Icon::Frame, false, "Cadrer", 44.0).clicked() {
+        if icon_btn(ui, Icon::Frame, false, "Cadrer", ib).clicked() {
             st.frame_selection();
         }
-        if icon_btn(ui, Icon::Trash, false, "Supprimer", 44.0).clicked() {
+        if icon_btn(ui, Icon::Trash, false, "Supprimer", ib).clicked() {
             st.delete_selected();
             return;
         }
@@ -1009,13 +1068,14 @@ fn repeat_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
 
 fn symmetry_row(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
     ui.horizontal(|ui| {
-        ui.set_height(40.0);
-        let (lr, _) = ui.allocate_exact_size(vec2(84.0, 36.0), Sense::hover());
-        ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, "Symétrie", regular(13.0), LABEL);
+        let (row, bw, bh) = if DESK { (28.0, 40.0, 24.0) } else { (40.0, 52.0, 36.0) };
+        ui.set_height(row);
+        let (lr, _) = ui.allocate_exact_size(vec2(if DESK { 74.0 } else { 84.0 }, bh), Sense::hover());
+        ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, "Symétrie", regular(if DESK { 12.5 } else { 13.0 }), LABEL);
         let m = node.mirror;
         let items = [(0, "X", m.x), (1, "Y", m.y), (2, "Z", m.z)];
         for (i, l, on) in items {
-            let (r, resp) = ui.allocate_exact_size(vec2(52.0, 36.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(bw, bh), Sense::click());
             let p = ui.painter();
             p.rect(r, 8.0, if on { ACCENT_BG } else { WELL }, Stroke::new(1.0, if on { ACCENT } else { DIVIDER }), StrokeKind::Inside);
             p.text(r.center(), Align2::CENTER_CENTER, l, semibold(12.5), if on { ACCENT_TEXT } else { TEXT2 });
@@ -1037,16 +1097,22 @@ fn position_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
     let mut rot = Vec3::new(ex.to_degrees(), ey.to_degrees(), ez.to_degrees());
     let mut changed_pos = false;
     let mut changed_rot = false;
+    // three fixed-width fields per row: the panel never changes width
+    let field_w = ((ui.available_width() - 3.0 * 22.0 - 5.0 * 4.0) / 3.0).floor();
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
         for (i, (l, c)) in [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AXIS_Z)].iter().enumerate() {
-            ui.label(egui::RichText::new(*l).font(semibold(12.0)).color(*c));
-            changed_pos |= ui.add(egui::DragValue::new(&mut pos[i]).speed(0.25).max_decimals(1).suffix(" mm")).changed();
+            let (lr, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+            ui.painter().text(lr.center(), Align2::CENTER_CENTER, *l, semibold(11.5), *c);
+            changed_pos |= value_field(ui, &mut pos[i], -10000.0..=10000.0, 0.25, "", field_w).changed();
         }
     });
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
         for (i, (l, c)) in [("rX", AXIS_X), ("rY", AXIS_Y), ("rZ", AXIS_Z)].iter().enumerate() {
-            ui.label(egui::RichText::new(*l).font(semibold(12.0)).color(*c));
-            changed_rot |= ui.add(egui::DragValue::new(&mut rot[i]).speed(1.0).max_decimals(0).suffix("°")).changed();
+            let (lr, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+            ui.painter().text(lr.center(), Align2::CENTER_CENTER, *l, semibold(11.5), *c);
+            changed_rot |= value_field(ui, &mut rot[i], -360.0..=360.0, 1.0, "°", field_w).changed();
         }
     });
     if changed_pos {

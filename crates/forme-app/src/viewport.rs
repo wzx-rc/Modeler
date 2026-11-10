@@ -454,14 +454,27 @@ fn draw_overlay(p: &Painter, st: &AppState) {
             };
             let at = st.hover.map(|h| pos2(h[0], h[1])).unwrap_or(b) + vec2(-30.0, 26.0);
             let anchor = Align2::RIGHT_TOP;
-            let g1 = p.layout_no_wrap(title.to_string(), regular(11.5), TEXT2);
-            let g2 = p.layout_no_wrap(value.clone(), semibold(20.0), if pl.mode == CombineMode::Add { ACCENT_TEXT } else { Color32::from_rgb(0xFF, 0xD2, 0xAE) });
-            let size = vec2(g1.size().x.max(g2.size().x) + 24.0, g1.size().y + g2.size().y + 18.0);
-            let r = anchor.anchor_size(at, size);
-            p.rect(r, 10.0, tint(Color32::from_rgb(0x14, 0x16, 0x19), 0.94), Stroke::new(1.5, color), egui::StrokeKind::Inside);
-            let gh = g1.size().y;
-            p.galley(r.min + vec2(12.0, 8.0), g1, TEXT2);
-            p.galley(r.min + vec2(12.0, 10.0 + gh), g2, TEXT);
+            // compact on desktop (title and value on one line), larger on iPad
+            let desk = !cfg!(target_os = "ios");
+            let vcol = if pl.mode == CombineMode::Add { ACCENT_TEXT } else { Color32::from_rgb(0xFF, 0xD2, 0xAE) };
+            if desk {
+                let g1 = p.layout_no_wrap(title.to_string(), regular(11.0), TEXT2);
+                let g2 = p.layout_no_wrap(value.clone(), medium(13.0), vcol);
+                let size = vec2(g1.size().x + g2.size().x + 26.0, g2.size().y.max(g1.size().y) + 10.0);
+                let r = anchor.anchor_size(at, size);
+                p.rect(r, 6.0, tint(Color32::from_rgb(0x14, 0x16, 0x19), 0.92), Stroke::new(1.0, tint(color, 0.7)), egui::StrokeKind::Inside);
+                p.galley(pos2(r.min.x + 9.0, r.center().y - g1.size().y * 0.5), g1.clone(), TEXT2);
+                p.galley(pos2(r.min.x + 17.0 + g1.size().x, r.center().y - g2.size().y * 0.5), g2, TEXT);
+            } else {
+                let g1 = p.layout_no_wrap(title.to_string(), regular(11.5), TEXT2);
+                let g2 = p.layout_no_wrap(value.clone(), semibold(20.0), vcol);
+                let size = vec2(g1.size().x.max(g2.size().x) + 24.0, g1.size().y + g2.size().y + 18.0);
+                let r = anchor.anchor_size(at, size);
+                p.rect(r, 10.0, tint(Color32::from_rgb(0x14, 0x16, 0x19), 0.94), Stroke::new(1.5, color), egui::StrokeKind::Inside);
+                let gh = g1.size().y;
+                p.galley(r.min + vec2(12.0, 8.0), g1, TEXT2);
+                p.galley(r.min + vec2(12.0, 10.0 + gh), g2, TEXT);
+            }
         }
     }
 

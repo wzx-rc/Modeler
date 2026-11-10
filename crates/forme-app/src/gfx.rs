@@ -26,6 +26,41 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 @fragment fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     return textureSample(tex, samp, i.uv);
 }
+
+// FXAA (console variant): smooths the edges of an image with one sample per
+// pixel, used while the image moves (the still image accumulates samples).
+fn luma(c: vec3<f32>) -> f32 {
+    return dot(sqrt(max(c, vec3<f32>(0.0))), vec3<f32>(0.299, 0.587, 0.114));
+}
+fn at(uv: vec2<f32>) -> vec3<f32> {
+    return textureSampleLevel(tex, samp, uv, 0.0).rgb;
+}
+@fragment fn fs_fxaa(i: VsOut) -> @location(0) vec4<f32> {
+    let px = 1.0 / vec2<f32>(textureDimensions(tex));
+    let uv = i.uv;
+    let m = at(uv);
+    let l_nw = luma(at(uv + vec2<f32>(-0.5, -0.5) * px));
+    let l_ne = luma(at(uv + vec2<f32>(0.5, -0.5) * px));
+    let l_sw = luma(at(uv + vec2<f32>(-0.5, 0.5) * px));
+    let l_se = luma(at(uv + vec2<f32>(0.5, 0.5) * px));
+    let l_m = luma(m);
+    let l_min = min(l_m, min(min(l_nw, l_ne), min(l_sw, l_se)));
+    let l_max = max(l_m, max(max(l_nw, l_ne), max(l_sw, l_se)));
+    if (l_max - l_min < max(0.03, l_max * 0.1)) {
+        return vec4<f32>(m, 1.0);
+    }
+    var dir = vec2<f32>(-((l_nw + l_ne) - (l_sw + l_se)), (l_nw + l_sw) - (l_ne + l_se));
+    let reduce = max((l_nw + l_ne + l_sw + l_se) * 0.03125, 1.0 / 128.0);
+    let rcp = 1.0 / (min(abs(dir.x), abs(dir.y)) + reduce);
+    dir = clamp(dir * rcp, vec2<f32>(-8.0), vec2<f32>(8.0)) * px;
+    let a = 0.5 * (at(uv + dir * (1.0 / 3.0 - 0.5)) + at(uv + dir * (2.0 / 3.0 - 0.5)));
+    let b = a * 0.5 + 0.25 * (at(uv - dir * 0.5) + at(uv + dir * 0.5));
+    let l_b = luma(b);
+    if (l_b < l_min || l_b > l_max) {
+        return vec4<f32>(a, 1.0);
+    }
+    return vec4<f32>(b, 1.0);
+}
 "#;
 
 /// Scene images are kept in half floats: jittered samples accumulate
@@ -76,6 +111,8 @@ pub struct FrameRenderer {
     mesh_version: u64,
     pub egui: egui_wgpu::Renderer,
     blit: wgpu::RenderPipeline,
+    /// Same blit with FXAA: edges stay smooth while the image moves.
+    blit_fxaa: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// Quick image (while moving, and as a preview) and full-quality image.
@@ -152,22 +189,26 @@ impl FrameRenderer {
             bind_group_layouts: &[Some(&blit_layout)],
             immediate_size: 0,
         });
-        let blit = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("blit"),
-            layout: Some(&pl),
-            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let make = |entry: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(entry),
+                    targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let blit = make("fs_main");
+        let blit_fxaa = make("fs_fxaa");
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("blit-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -180,6 +221,7 @@ impl FrameRenderer {
             mesh_version: 0,
             egui: egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions::default()),
             blit,
+            blit_fxaa,
             blit_layout,
             sampler,
             low: None,
@@ -466,7 +508,9 @@ impl FrameRenderer {
                     ..Default::default()
                 })
                 .forget_lifetime();
-            pass.set_pipeline(&self.blit);
+            // few accumulated samples (moving image, baked mesh): FXAA on top
+            let fxaa = self.stable && self.accum < 4;
+            pass.set_pipeline(if fxaa { &self.blit_fxaa } else { &self.blit });
             pass.set_bind_group(0, &off.bind, &[]);
             pass.draw(0..3, 0..1);
             self.egui.render(&mut pass, paint, &sd);

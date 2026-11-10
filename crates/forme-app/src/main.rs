@@ -206,6 +206,9 @@ impl ApplicationHandler for App {
             // the layout was drawn for 1194 × 834 pt: a bit tighter on the device
             self.ctx.set_zoom_factor(UI_ZOOM);
         }
+        // desktop: a bit tighter too (Romain works on a 4K screen)
+        #[cfg(not(target_os = "ios"))]
+        self.ctx.set_zoom_factor(std::env::var("FORME_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(0.9));
         let es = egui_winit::State::new(
             self.ctx.clone(),
             egui::ViewportId::ROOT,
