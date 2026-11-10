@@ -50,7 +50,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     let top = screen.min.y + MENU_H + TOOL_H;
     let bottom = screen.max.y - STATUS_H - HIST_H;
     let view = Rect::from_min_max(pos2(screen.min.x + LEFT_W, top), pos2(screen.max.x - RIGHT_W, bottom));
-    st.view_rect = [view.min.x, view.min.y, view.max.x, view.max.y];
+    st.set_view_rect([view.min.x, view.min.y, view.max.x, view.max.y]);
 
     menu_bar(ctx, st, Rect::from_min_size(screen.min, vec2(screen.width(), MENU_H)));
     toolbar(ctx, st, Rect::from_min_size(screen.min + vec2(0.0, MENU_H), vec2(screen.width(), TOOL_H)));

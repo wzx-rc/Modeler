@@ -569,6 +569,15 @@ impl AppState {
         self.last_change = self.now;
     }
 
+    /// Free 3D area of the interface (centres the camera). A change re-renders
+    /// the image, so the overlays (lines, handles) never drift from it.
+    pub fn set_view_rect(&mut self, r: [f32; 4]) {
+        if self.view_rect != r {
+            self.view_rect = r;
+            self.view_changed();
+        }
+    }
+
     pub fn view_changed(&mut self) {
         self.view_version += 1;
     }

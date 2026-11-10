@@ -346,8 +346,8 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     st.screen = [screen.width(), screen.height()];
     // free view: between the rail and the right column, above the history strip
     let right = if st.panel_visible { screen.width() - 308.0 } else { screen.width() - 12.0 };
-    let left = if st.bake.open { 92.0 + BAKE_PANEL_W + 8.0 } else { 84.0 };
-    st.view_rect = [left, 72.0, right, screen.height() - 84.0];
+    // the Bake panel floats over the view: it does not move the camera (Romain)
+    st.set_view_rect([84.0, 72.0, right, screen.height() - 84.0]);
     top_bar(ctx, st, screen);
     rail(ctx, st);
     if matches!(st.tool, Tool::Kit(_)) || st.kit_open {
