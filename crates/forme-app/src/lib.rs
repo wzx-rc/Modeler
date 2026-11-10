@@ -3,6 +3,17 @@
 //! Two desktop interfaces share the state and the renderer: `ui` (Atelier)
 //! and `studio` (Studio), chosen in the settings.
 
+/// "Forme 0.1.0 — forme-pc · 3f2a1bc · 10/11/2026 05:30": version, branch,
+/// commit and commit date (see build.rs). Shown in the window title.
+pub fn version_title() -> String {
+    let parts: Vec<&str> = [env!("FORME_GIT_BRANCH"), env!("FORME_GIT_COMMIT"), env!("FORME_GIT_DATE")].into_iter().filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        format!("Forme {}", env!("CARGO_PKG_VERSION"))
+    } else {
+        format!("Forme {} — {}", env!("CARGO_PKG_VERSION"), parts.join(" · "))
+    }
+}
+
 pub mod camera;
 pub mod files;
 pub mod gfx;

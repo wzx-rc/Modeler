@@ -1575,6 +1575,28 @@ pub(crate) fn bake_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) 
                 if toggle_row(ui, "Filaire (arêtes des polygones)", st.bake.wire) {
                     st.bake.wire = !st.bake.wire;
                 }
+                section(ui, "Passe secondaire (option)");
+                let deg = forme_core::bake::decimate::FLAT_LOOPS_DEG;
+                if toggle_row(ui, &format!("Retirer les loops plates (< {deg:.0}°)"), st.bake.flat) {
+                    st.set_flat_pass(!st.bake.flat);
+                }
+                let (line, color) = if st.bake.pass.is_some() {
+                    ("Passe en cours…".to_string(), LABEL)
+                } else if st.bake.flat && s.faces_before_flat > 0 {
+                    (
+                        format!(
+                            "{} loops retirées · {} → {} faces · {:.0} ms",
+                            s.flat_loops,
+                            fmt_int(s.faces_before_flat),
+                            fmt_int(b.faces.len()),
+                            s.flat_seconds * 1000.0
+                        ),
+                        OK,
+                    )
+                } else {
+                    ("Fusionne les quads des edge loops fermées qui ne font pas de volume. Désactivée par défaut.".to_string(), TEXT2)
+                };
+                ui.label(egui::RichText::new(line).font(regular(11.5)).color(color));
                 if let Some(m) = &st.bake.last_export {
                     ui.label(egui::RichText::new(format!("{m} · {}", files::documents_dir().display())).font(regular(11.5)).color(OK));
                 }
@@ -1718,6 +1740,7 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                     .color(TEXT2),
             );
             ui.add_space(10.0);
+            ui.add(egui::Label::new(egui::RichText::new(crate::version_title()).font(regular(11.0)).color(TEXT2)).wrap());
             ui.add(egui::Label::new(egui::RichText::new(format!("Fichier : {}", crate::settings::Settings::path().display())).font(regular(11.0)).color(TEXT2)).wrap());
             ui.add_space(6.0);
             if primary_btn(ui, None, "Fermer", Some(440.0)).clicked() {

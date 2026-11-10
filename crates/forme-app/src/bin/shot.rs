@@ -1143,6 +1143,16 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.st.toast = None;
         h.steps(10);
         h.shot("pc-studio-bake");
+        // optional second pass from the Studio bake box
+        h.st.set_flat_pass(true);
+        while h.st.bake.pass.is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            h.step();
+        }
+        h.st.toast = None;
+        h.steps(10);
+        h.shot("pc-studio-bake-passe");
+        h.st.set_flat_pass(false);
     }
 }
 
@@ -1278,6 +1288,22 @@ fn bake_cube(h: &mut Harness) {
     h.cam(Vec3::new(2.0, 8.0, 2.0), 34.0, 0.62, 0.8);
     h.steps(10);
     h.shot("21-cube-bake-zoom");
+    // optional second pass (off by default): flat loops dissolved
+    h.st.frame_all();
+    h.st.bake.open = true;
+    h.st.set_flat_pass(true);
+    while h.st.bake.pass.is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        h.step();
+    }
+    h.steps(30);
+    h.shot("19-cube-passe-loops-plates");
+    h.st.bake.open = false;
+    h.st.toast = None;
+    h.cam(Vec3::new(3.0, 0.0, 0.0), 78.0, 0.72, 0.52);
+    h.steps(20);
+    h.shot("20-cube-passe-filaire");
+    h.st.set_flat_pass(false);
 }
 
 fn bake_grenade(h: &mut Harness) {

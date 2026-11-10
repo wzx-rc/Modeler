@@ -505,7 +505,7 @@ fn explorer(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             p.text(pos2(hr.max.x - 78.0, hr.center().y), Align2::LEFT_CENTER, "Mode", regular(11.5), T3);
             p.line_segment([hr.left_bottom(), hr.right_bottom()], Stroke::new(1.0, B3));
         }
-        let bake_h = 196.0;
+        let bake_h = 224.0;
         let list_h = (rect.height() - 24.0 - 22.0 - bake_h).max(60.0);
         let rows = st.scene.rows();
         egui::ScrollArea::vertical().id_salt("explorer-rows").max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
@@ -589,6 +589,7 @@ fn bake_box(ui: &mut Ui, st: &mut AppState) {
     let stale = st.bake.stale(st.scene_version);
     let (state, color) = match (&st.bake.job, &st.bake.result) {
         (Some(_), _) => ("En cours…", AC),
+        (None, Some(_)) if st.bake.pass.is_some() => ("Passe en cours…", AC),
         (None, Some(_)) if stale => ("Périmé", CARVE),
         (None, Some(_)) => ("À jour", OK),
         (None, None) => ("Pas encore baké", T3),
@@ -606,7 +607,7 @@ fn bake_box(ui: &mut Ui, st: &mut AppState) {
         Some(b) => {
             let s = &b.stats;
             let faces = b.faces.len().max(1);
-            vec![
+            let mut rows: Vec<(String, String)> = vec![
                 ("Méthode".into(), if s.constructive { "Par opération".into() } else { "Par surfaces (repli)".into() }),
                 ("Faces".into(), fmt_int(b.faces.len())),
                 ("Quads".into(), format!("{:.0} %", 100.0 * s.quads as f64 / faces as f64)),
@@ -614,7 +615,11 @@ fn bake_box(ui: &mut Ui, st: &mut AppState) {
                 ("Non-manifold".into(), fmt_int(s.nonmanifold_edges)),
                 ("Écart max".into(), format!("{:.3} mm", s.max_dev).replace('.', ",")),
                 ("Durée".into(), if s.seconds < 1.0 { format!("{:.0} ms", s.seconds * 1000.0) } else { format!("{:.1} s", s.seconds).replace('.', ",") }),
-            ]
+            ];
+            if st.bake.flat && s.faces_before_flat > 0 {
+                rows.push(("Loops plates".into(), format!("{} · {} → {}", s.flat_loops, fmt_int(s.faces_before_flat), fmt_int(b.faces.len()))));
+            }
+            rows
         }
         None => vec![("Méthode".into(), "—".into()), ("Faces".into(), "—".into()), ("Quads".into(), "—".into())],
     };
@@ -624,7 +629,18 @@ fn bake_box(ui: &mut Ui, st: &mut AppState) {
         p.text(pos2(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, k, regular(12.0), T2);
         p.text(pos2(r.max.x - 10.0, r.center().y), Align2::RIGHT_CENTER, v, medium(12.0), T1);
     }
-    ui.add_space(6.0);
+    ui.add_space(4.0);
+    // optional second pass, off by default
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        let mut on = st.bake.flat;
+        let deg = forme_core::bake::decimate::FLAT_LOOPS_DEG;
+        let r = ui.checkbox(&mut on, format!("Retirer les loops plates (< {deg:.0}°)"));
+        if r.on_hover_text("Passe secondaire en option, désactivée par défaut : fusionne les quads des edge loops fermées qui ne font pas de volume.").changed() {
+            st.set_flat_pass(on);
+        }
+    });
+    ui.add_space(4.0);
     // density + action on one line
     ui.horizontal(|ui| {
         ui.add_space(8.0);
