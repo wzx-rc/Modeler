@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Headless screenshots of the real app: drives it with synthetic input events
 //! (Pencil, fingers, taps, drags) and renders frames with the same code as iPad.
 
@@ -773,7 +774,7 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
     }    if want("pc-ui") {
         // the two interfaces of the redesign, same scene and same moments:
         // nothing selected, the Palier selected, a creation tool armed
-        for (tag, mode) in [("etabli", UiMode::Atelier), ("studio", UiMode::Studio)] {
+        for (tag, mode) in [("etabli", UiMode::Atelier), ("studio", UiMode::Studio), ("focus", UiMode::Focus)] {
             h.pc(AppState::new(support_axe(), "Support d'axe"), mode);
             h.st.pointer_kind = PointerKind::Mouse;
             h.steps(2);
@@ -784,7 +785,26 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
             h.st.select(Some(id));
             h.steps(4);
             h.shot(&format!("pc-ui-{tag}-2-selection"));
-            h.st.select(None);
+            if mode == UiMode::Focus {
+                // the scene drawer open
+                h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("focus-drawer"), true));
+                h.steps(4);
+                h.shot("pc-ui-focus-2b-tiroir");
+                h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("focus-drawer"), false));
+                // Réglages: interface and ambiance
+                h.st.settings_open = true;
+                h.steps(3);
+                h.shot("pc-ui-reglages");
+                h.st.settings_open = false;
+                // a combination: Studio in green
+                h.st.settings.ui_mode = UiMode::Studio;
+                h.st.settings.ambiance = forme_app::settings::AmbianceChoice::Vert;
+                h.steps(4);
+                h.shot("pc-ui-studio-vert");
+                h.st.settings.ambiance = forme_app::settings::AmbianceChoice::Auto;
+                h.st.settings.ui_mode = UiMode::Focus;
+                h.steps(2);
+            }            h.st.select(None);
             h.st.tool = Tool::Place(PrimKind::Box);
             h.steps(4);
             h.shot(&format!("pc-ui-{tag}-3-creation"));

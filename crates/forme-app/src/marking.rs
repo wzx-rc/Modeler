@@ -551,8 +551,8 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
     }
     let c = pos2(m.center[0], m.center[1]);
     let pointer = pos2(m.pointer[0], m.pointer[1]);
-    if crate::theme::ambiance() == crate::theme::Ambiance::Vert {
-        // Établi: a radial pie at the cursor, the item under the pointer lit green
+    if st.settings.ui_mode != crate::settings::UiMode::Studio {
+        // Établi and Focus: a radial pie at the cursor, the item under the pointer lit green
         draw_pie(&p, st, m, c);
     } else {
     p.circle_filled(c, 4.5, Color32::from_rgba_unmultiplied(236, 236, 226, 200));

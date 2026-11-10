@@ -146,19 +146,25 @@ pub enum Ambiance {
     Vert,
     /// Studio: orange accent.
     Orange,
+    /// Focus: blue accent (the first mock-up).
+    Bleu,
 }
 
 pub fn ambiance() -> Ambiance {
-    if AMBIANCE.load(std::sync::atomic::Ordering::Relaxed) == 1 {
-        Ambiance::Orange
-    } else {
-        Ambiance::Vert
+    match AMBIANCE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Ambiance::Orange,
+        2 => Ambiance::Bleu,
+        _ => Ambiance::Vert,
     }
 }
 
 /// Sets the ambiance and the egui colours that depend on it.
 pub fn set_ambiance(ctx: &egui::Context, a: Ambiance) {
-    let code = if a == Ambiance::Orange { 1 } else { 0 };
+    let code = match a {
+        Ambiance::Vert => 0,
+        Ambiance::Orange => 1,
+        Ambiance::Bleu => 2,
+    };
     let before = AMBIANCE.swap(code, std::sync::atomic::Ordering::Relaxed);
     let key = egui::Id::new("ambiance-styled");
     let styled: Option<u8> = ctx.data(|d| d.get_temp(key));
@@ -177,38 +183,38 @@ pub fn set_ambiance(ctx: &egui::Context, a: Ambiance) {
     }
 }
 
-fn by(vert: Color32, orange: Color32) -> Color32 {
-    if ambiance() == Ambiance::Orange {
-        orange
-    } else {
-        vert
+fn by(vert: Color32, orange: Color32, bleu: Color32) -> Color32 {
+    match ambiance() {
+        Ambiance::Vert => vert,
+        Ambiance::Orange => orange,
+        Ambiance::Bleu => bleu,
     }
 }
 
 pub fn accent() -> Color32 {
-    by(Color32::from_rgb(0x8F, 0xDB, 0x5B), Color32::from_rgb(0xF2, 0x8C, 0x38))
+    by(Color32::from_rgb(0x8F, 0xDB, 0x5B), Color32::from_rgb(0xF2, 0x8C, 0x38), Color32::from_rgb(0x4D, 0x8D, 0xFF))
 }
 pub fn accent_light() -> Color32 {
-    by(Color32::from_rgb(0xB6, 0xEC, 0x92), Color32::from_rgb(0xFF, 0xB8, 0x7A))
+    by(Color32::from_rgb(0xB6, 0xEC, 0x92), Color32::from_rgb(0xFF, 0xB8, 0x7A), Color32::from_rgb(0x8F, 0xB7, 0xFF))
 }
 pub fn accent_bg() -> Color32 {
-    by(Color32::from_rgb(0x1C, 0x2B, 0x17), Color32::from_rgb(0x34, 0x22, 0x14))
+    by(Color32::from_rgb(0x1C, 0x2B, 0x17), Color32::from_rgb(0x34, 0x22, 0x14), Color32::from_rgb(0x1B, 0x28, 0x40))
 }
 pub fn accent_border() -> Color32 {
-    by(Color32::from_rgb(0x3A, 0x5C, 0x2B), Color32::from_rgb(0x74, 0x43, 0x1E))
+    by(Color32::from_rgb(0x3A, 0x5C, 0x2B), Color32::from_rgb(0x74, 0x43, 0x1E), Color32::from_rgb(0x2F, 0x4E, 0x86))
 }
 pub fn accent_text() -> Color32 {
-    by(Color32::from_rgb(0xE2, 0xF7, 0xD5), Color32::from_rgb(0xFF, 0xE4, 0xCC))
+    by(Color32::from_rgb(0xE2, 0xF7, 0xD5), Color32::from_rgb(0xFF, 0xE4, 0xCC), Color32::from_rgb(0xDC, 0xEB, 0xFF))
 }
 /// Text and icons drawn on a filled accent.
 pub fn on_accent() -> Color32 {
-    by(Color32::from_rgb(0x10, 0x1C, 0x0A), Color32::from_rgb(0x22, 0x12, 0x06))
+    by(Color32::from_rgb(0x10, 0x1C, 0x0A), Color32::from_rgb(0x22, 0x12, 0x06), Color32::from_rgb(0xFF, 0xFF, 0xFF))
 }
 pub fn carve() -> Color32 {
-    by(Color32::from_rgb(0xF0, 0x8A, 0x3C), Color32::from_rgb(0x5B, 0x9B, 0xFF))
+    by(Color32::from_rgb(0xF0, 0x8A, 0x3C), Color32::from_rgb(0x5B, 0x9B, 0xFF), Color32::from_rgb(0xF0, 0x8A, 0x3C))
 }
 pub fn carve_light() -> Color32 {
-    by(Color32::from_rgb(0xFF, 0xB2, 0x7A), Color32::from_rgb(0x9C, 0xC3, 0xFF))
+    by(Color32::from_rgb(0xFF, 0xB2, 0x7A), Color32::from_rgb(0x9C, 0xC3, 0xFF), Color32::from_rgb(0xFF, 0xB2, 0x7A))
 }
 /// Selection tint of the 3D view (0..1).
 pub fn sel_rgb() -> [f32; 3] {

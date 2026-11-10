@@ -355,12 +355,129 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         ctrl_button(ctx, st, screen);
     }
     hud(ctx, st);
-    right_column(ctx, st, screen);
+    if st.panel_visible {
+        right_column(ctx, st, screen, screen.min.x + EDGE);
+    }
     context_bar(ctx, st);
     dialogs(ctx, st, screen);
     shortcuts(ctx, st);
 }
 
+// -------------------------------------------------------------------- Focus
+
+/// Focus: almost nothing on screen. The document chip top left, the hint on
+/// top, a dock at the bottom (tools, shapes, Add / Carve, undo, settings),
+/// the radial menu on the right button, the scene in a drawer on the right.
+pub fn show_focus(ctx: &egui::Context, st: &mut AppState) {
+    let screen = ctx.content_rect();
+    st.screen = [screen.width(), screen.height()];
+    let drawer_id = Id::new("focus-drawer");
+    let drawer: bool = ctx.data(|d| d.get_temp(drawer_id)).unwrap_or(false);
+    let right = if drawer { screen.max.x - 2.0 * EDGE - RIGHT_W } else { screen.max.x - 48.0 };
+    st.set_view_rect([EDGE, EDGE + ISLAND_H, right, screen.max.y - 80.0]);
+    // the document, small
+    egui::Area::new(Id::new("focus-doc")).order(Order::Middle).fixed_pos(screen.min + vec2(EDGE, EDGE)).show(ctx, |ui| {
+        island().show(ui, |ui| {
+            ui.set_height(ISLAND_H - 10.0);
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
+                paint_logo(ui, Rect::from_center_size(r.center(), vec2(26.0, 26.0)));
+                let name = st.doc_name.clone();
+                let r = ui.add(egui::Label::new(egui::RichText::new(name).font(semibold(13.0)).color(TEXT)).sense(Sense::click()));
+                if r.on_hover_text("Ouvrir · Nouveau · Enregistrer").clicked() {
+                    st.files_open = !st.files_open;
+                }
+                let what = match st.selection.and_then(|id| st.scene.node(id)) {
+                    Some(n) => n.name.clone(),
+                    None => format!("{} formes", st.scene.shape_count()),
+                };
+                ui.label(egui::RichText::new(what).font(regular(12.0)).color(TEXT2));
+                ui.add_space(4.0);
+            });
+        });
+    });
+    hud(ctx, st);
+    // the drawer tab, on the right edge
+    let tab_x = if drawer { screen.max.x - 2.0 * EDGE - RIGHT_W - 34.0 } else { screen.max.x - 34.0 };
+    egui::Area::new(Id::new("focus-tab")).order(Order::Middle).pivot(Align2::LEFT_CENTER).fixed_pos(pos2(tab_x, screen.center().y)).show(ctx, |ui| {
+        let (r, resp) = ui.allocate_exact_size(vec2(34.0, 120.0), Sense::click());
+        let p = ui.painter();
+        p.rect(r, CornerRadius { nw: 10, sw: 10, ne: 0, se: 0 }, if resp.hovered() { RAISED } else { tint(PANEL, 0.96) }, Stroke::new(1.0, PANEL_BORDER), StrokeKind::Inside);
+        icons::paint(p, Rect::from_center_size(pos2(r.center().x, r.min.y + 20.0), vec2(15.0, 15.0)), if drawer { Icon::ChevronRight } else { Icon::ChevronLeft }, TEXT2);
+        let g = p.layout_no_wrap(format!("SCÈNE · {}", st.scene.shape_count()), mono(10.0), TEXT2);
+        // vertical label: one letter per line would be too tall, so the text turns
+        let tg = egui::epaint::TextShape::new(pos2(r.center().x + g.size().y * 0.5, r.min.y + 36.0), g, TEXT2).with_angle(std::f32::consts::FRAC_PI_2);
+        p.add(tg);
+        if resp.on_hover_text("Scène et propriétés").clicked() {
+            ctx.data_mut(|d| d.insert_temp(drawer_id, !drawer));
+        }
+    });
+    if drawer {
+        right_column(ctx, st, screen, screen.max.x - EDGE - RIGHT_W);
+    }
+    focus_dock(ctx, st, screen);
+    context_bar(ctx, st);
+    dialogs(ctx, st, screen);
+    shortcuts(ctx, st);
+}
+
+fn focus_dock(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+    let cx = st.principal()[0];
+    egui::Area::new(Id::new("focus-dock")).order(Order::Middle).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(cx, screen.max.y - EDGE)).show(ctx, |ui| {
+        island().inner_margin(Margin::same(6)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let b = 40.0;
+                let sel = st.tool == Tool::Select;
+                let r = icon_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (Q ou 1)", b);
+                key_hint(ui, &r, "Q");
+                if r.clicked() {
+                    st.set_pick_mode(PickMode::Object);
+                }
+                let r = icon_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins", b);
+                key_hint(ui, &r, "2");
+                if r.clicked() {
+                    st.set_pick_mode(PickMode::Edge);
+                }
+                island_sep(ui);
+                for k in PRIMS {
+                    let key = prim_key(k).unwrap_or("");
+                    let r = icon_btn(ui, prim_icon(k), st.tool == Tool::Place(k), &format!("{} ({key})", k.label()), b);
+                    key_hint(ui, &r, key);
+                    if r.clicked() {
+                        st.commit_placement();
+                        st.tool = Tool::Place(k);
+                    }
+                }
+                island_sep(ui);
+                let shown = shown_mode(st);
+                let items = [(CombineMode::Add, "+ Add", ""), (CombineMode::Carve, "− Carve", "")];
+                ui.vertical(|ui| {
+                    ui.add_space(5.0);
+                    if let Some(m) = seg_inline(ui, "focus-mode", &items, shown) {
+                        st.set_mode(m);
+                    }
+                });
+                island_sep(ui);
+                if icon_btn(ui, Icon::Undo, false, "Annuler (Ctrl+Z)", b).clicked() {
+                    st.undo();
+                }
+                if icon_btn(ui, Icon::Magnet, st.snap, "Snap", b).clicked() {
+                    st.snap = !st.snap;
+                }
+                let r = icon_btn(ui, Icon::Light, st.display_open, "Affichage", b);
+                light_toggle(st, &r);
+                if icon_btn(ui, Icon::Settings, st.settings_open, "Réglages", b).clicked() {
+                    st.settings_open = !st.settings_open;
+                }
+                if icon_btn(ui, Icon::Export, st.export_open, "Exporter le mesh", b).clicked() {
+                    st.export_open = !st.export_open;
+                }
+            });
+        });
+    });
+}
 /// Toast and modal dialogs (both interfaces).
 pub(crate) fn dialogs(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     toast(ctx, st, screen);
@@ -1124,11 +1241,7 @@ pub(crate) fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 
 /// Établi: one inspector on the right, the scene on top and the selected
 /// shape below (or the defaults of the new shapes when nothing is selected).
-fn right_column(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
-    if !st.panel_visible {
-        return;
-    }
-    let x = screen.min.x + EDGE;
+fn right_column(ctx: &egui::Context, st: &mut AppState, screen: Rect, x: f32) {
     let top = EDGE + ISLAND_H + 10.0;
     let inner_w = RIGHT_W - 24.0;
     let total = screen.max.y - EDGE - top;
@@ -1995,7 +2108,7 @@ pub(crate) fn light_toggle(st: &mut AppState, resp: &Response) {
     }
 }
 
-/// Settings: the interface (Atelier or Studio) and the creation options.
+/// Settings: the interface (Établi, Studio, Focus), the ambiance and the creation options.
 /// Shown over both interfaces.
 pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
     if !st.settings_open {
@@ -2015,7 +2128,7 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
             for m in UiMode::ALL {
                 let on = st.settings.ui_mode == m;
                 let blurb = ui.painter().layout(m.blurb().to_string(), regular(12.0), TEXT2, 440.0 - 58.0);
-                let (r, resp) = ui.allocate_exact_size(vec2(440.0, 38.0 + blurb.size().y + 10.0), Sense::click());
+                let (r, resp) = ui.allocate_exact_size(vec2(440.0, 34.0 + blurb.size().y + 8.0), Sense::click());
                 let p = ui.painter();
                 if on {
                     p.rect(r, 12.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
@@ -2033,8 +2146,27 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                     st.set_ui_mode(m);
                 }
             }
-            ui.label(egui::RichText::new("Le choix est gardé pour les prochaines sessions.").font(regular(11.5)).color(TEXT2));
-            section(ui, "Navigation");
+            section(ui, "Ambiance");
+            {
+                use crate::settings::AmbianceChoice;
+                let col = |a: AmbianceChoice| match a {
+                    AmbianceChoice::Auto => TEXT2,
+                    AmbianceChoice::Vert => Color32::from_rgb(0x8F, 0xDB, 0x5B),
+                    AmbianceChoice::Orange => Color32::from_rgb(0xF2, 0x8C, 0x38),
+                    AmbianceChoice::Bleu => Color32::from_rgb(0x4D, 0x8D, 0xFF),
+                };
+                let items: Vec<(AmbianceChoice, &str, Color32)> = AmbianceChoice::ALL.iter().map(|a| (*a, a.label(), col(*a))).collect();
+                if let Some(a) = segmented(ui, &items, st.settings.ambiance, 32.0) {
+                    st.settings.ambiance = a;
+                    st.save_settings();
+                }
+                let what = match st.settings.ambiance {
+                    AmbianceChoice::Auto => "Chaque interface garde la sienne : Établi vert, Studio orange, Focus bleu.",
+                    _ => "La même couleur d'accent pour les trois interfaces (Add, sélection, outil actif).",
+                };
+                ui.label(egui::RichText::new(what).font(regular(11.5)).color(TEXT2));
+            }
+            ui.label(egui::RichText::new("Les choix sont gardés pour les prochaines sessions.").font(regular(11.5)).color(TEXT2));            section(ui, "Navigation");
             {
                 use crate::settings::Navigation;
                 let items: Vec<(Navigation, &str, Color32)> = Navigation::ALL.iter().map(|n| (*n, n.label(), accent())).collect();

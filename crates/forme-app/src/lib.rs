@@ -31,14 +31,18 @@ pub use state::AppState;
 /// Runs the whole UI for one frame.
 pub fn run(ctx: &egui::Context, st: &mut AppState) {
     // each interface has its own accent (green Établi, orange Studio)
-    theme::set_ambiance(ctx, match st.settings.ui_mode {
-        settings::UiMode::Atelier => theme::Ambiance::Vert,
-        settings::UiMode::Studio => theme::Ambiance::Orange,
+    // (or the one chosen in Réglages for all)
+    use settings::{AmbianceChoice, UiMode};
+    theme::set_ambiance(ctx, match (st.settings.ambiance, st.settings.ui_mode) {
+        (AmbianceChoice::Vert, _) | (AmbianceChoice::Auto, UiMode::Atelier) => theme::Ambiance::Vert,
+        (AmbianceChoice::Orange, _) | (AmbianceChoice::Auto, UiMode::Studio) => theme::Ambiance::Orange,
+        (AmbianceChoice::Bleu, _) | (AmbianceChoice::Auto, UiMode::Focus) => theme::Ambiance::Bleu,
     });
     viewport::show(ctx, st);
     match st.settings.ui_mode {
         settings::UiMode::Atelier => ui::show(ctx, st),
         settings::UiMode::Studio => studio::show(ctx, st),
+        settings::UiMode::Focus => ui::show_focus(ctx, st),
     }
     ui::display_panel(ctx, st);
     ui::creation_popover(ctx, st);

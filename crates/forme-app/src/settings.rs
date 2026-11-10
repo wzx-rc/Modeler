@@ -14,15 +14,19 @@ pub enum UiMode {
     Atelier,
     /// « Studio »: docked CAD station (menus, command palette, fixed panel, typed sizes).
     Studio,
+    /// « Focus »: almost nothing on screen, a dock at the bottom, the radial
+    /// menu first, the scene in a drawer.
+    Focus,
 }
 
 impl UiMode {
-    pub const ALL: [UiMode; 2] = [UiMode::Atelier, UiMode::Studio];
+    pub const ALL: [UiMode; 3] = [UiMode::Atelier, UiMode::Studio, UiMode::Focus];
 
     pub fn label(self) -> &'static str {
         match self {
             UiMode::Atelier => "Établi",
             UiMode::Studio => "Studio",
+            UiMode::Focus => "Focus",
         }
     }
 
@@ -30,6 +34,7 @@ impl UiMode {
         match self {
             UiMode::Atelier => "La 3D en plein écran, des îlots flottants : colonne de formes, inspecteur, barre d'actions sur la sélection, historique en frise.",
             UiMode::Studio => "Poste CAD ancré façon Plasticity : menus, palette de commandes (Espace), panneau fixe, cotes au clavier, barre d'état.",
+            UiMode::Focus => "Presque rien à l'écran : un dock en bas, le menu radial au clic droit, la scène dans un tiroir à droite.",
         }
     }
 }
@@ -47,6 +52,31 @@ pub struct Settings {
     pub display: Display,
     /// Camera navigation with the mouse.
     pub navigation: Navigation,
+    /// Accent colour: each interface's own, or one for all.
+    pub ambiance: AmbianceChoice,
+}
+
+/// Accent colour of the interface (Réglages).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AmbianceChoice {
+    /// Établi green, Studio orange, Focus blue.
+    #[default]
+    Auto,
+    Vert,
+    Orange,
+    Bleu,
+}
+
+impl AmbianceChoice {
+    pub const ALL: [AmbianceChoice; 4] = [AmbianceChoice::Auto, AmbianceChoice::Vert, AmbianceChoice::Orange, AmbianceChoice::Bleu];
+    pub fn label(self) -> &'static str {
+        match self {
+            AmbianceChoice::Auto => "Auto",
+            AmbianceChoice::Vert => "Vert",
+            AmbianceChoice::Orange => "Orange",
+            AmbianceChoice::Bleu => "Bleu",
+        }
+    }
 }
 
 /// Camera navigation with the mouse (Réglages).
@@ -119,7 +149,7 @@ impl Display {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { ui_mode: UiMode::Atelier, snap_faces: true, creation: Creation::Interactive, display: Display::default(), navigation: Navigation::Maya }
+        Settings { ui_mode: UiMode::Atelier, snap_faces: true, creation: Creation::Interactive, display: Display::default(), navigation: Navigation::Maya, ambiance: AmbianceChoice::Auto }
     }
 }
 
@@ -134,7 +164,8 @@ impl Settings {
         let mut s: Settings = std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         match std::env::var("FORME_UI").map(|v| v.to_lowercase()).as_deref() {
             Ok("studio") => s.ui_mode = UiMode::Studio,
-            Ok("atelier") => s.ui_mode = UiMode::Atelier,
+            Ok("atelier") | Ok("etabli") => s.ui_mode = UiMode::Atelier,
+            Ok("focus") => s.ui_mode = UiMode::Focus,
             _ => {}
         }
         s
