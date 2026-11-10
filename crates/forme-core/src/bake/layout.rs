@@ -1171,6 +1171,66 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
         let k = if i > 0 && s.mode == 0 && !s.chamfer { s.k } else { 0.0 };
         shapes.push(Shape { pr: &field.prims[s.prim as usize], inst: inst[0], prim: s.prim, step: i, carve: i > 0 && s.mode == 1, k });
     }
+    // a cylinder whose wall touches a flat face of a box along a line (a
+    // hole or a boss tangent to the part's edge): a wall of no thickness
+    // there, not yet
+    for c in shapes.iter().filter(|s| s.pr.kind == 1) {
+        let a = c.inst.to_world.transform_vector3(unit(1)).normalize();
+        let o = c.inst.to_world.transform_point3(DVec3::ZERO);
+        let (r, h) = (c.pr.size.x * c.pr.sc, c.pr.size.y * c.pr.sc);
+        for b in shapes.iter().filter(|s| s.pr.kind != 1) {
+            for f in 0..6u32 {
+                let Some(n) = b.flat_normal(f) else { continue };
+                let d = b.face_fn(f, o);
+                if a.dot(n).abs() > 1e-6 || (d.abs() - r).abs() > extent * 2e-6 {
+                    continue;
+                }
+                let touch = (0..=8).any(|i| {
+                    let p = o - n * d + a * (h * (i as f64 / 4.0 - 1.0));
+                    b.d(p).abs() < extent * 2e-6 && b.face_at(p) == f
+                });
+                if touch {
+                    return Err("forme tangente à une face de la pièce (contact sur une ligne) : pas encore géré".into());
+                }
+            }
+            // or standing on a face, its circle touching the rail of one of
+            // the face's rounded edges (the flat part pinched to a point)
+            let l = b.local(o);
+            let al = b.inst.to_local.transform_vector3(a).normalize();
+            let s = b.pr.size;
+            let rl = r / b.pr.sc;
+            for ax in 0..3usize {
+                if al[ax].abs() < 1.0 - 1e-6 {
+                    continue;
+                }
+                for sg in [1.0, -1.0] {
+                    // (the cylinder reaches that face's plane)
+                    if ((sg * s[ax] - l[ax]) * al[ax].signum()).abs() > h / b.pr.sc + 1e-9 {
+                        continue;
+                    }
+                    for (b1, b2) in [((ax + 1) % 3, (ax + 2) % 3), ((ax + 2) % 3, (ax + 1) % 3)] {
+                        for sb in [1.0, -1.0] {
+                            let mut sv = DVec3::ZERO;
+                            sv[ax] = sg;
+                            sv[b1] = sb;
+                            let re = edge_r(b.pr, edge_index(b2, sv[(b2 + 1) % 3], sv[(b2 + 2) % 3]));
+                            if re <= 0.0 {
+                                continue;
+                            }
+                            let rail = sb * (s[b1] - re);
+                            if ((l[b1] - rail).abs() - rl).abs() < extent * 2e-6 / b.pr.sc && l[b2].abs() < s[b2] {
+                                return Err("forme tangente à l'arrondi d'une arête (contact en un point) : pas encore géré".into());
+                            }
+                            // (its circle across the rail: into the rounded edge)
+                            if (l[b1] - rail).abs() < rl && (l[b1] - sb * s[b1]).abs() > 1e-9 && l[b2].abs() < s[b2] - re {
+                                return Err("forme qui entame l'arrondi d'une arête : pas encore géré".into());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let prev: Vec<Option<Field>> = (0..shapes.len()).map(|i| (i > 0).then(|| field.prefix(&steps, i))).collect();
     let tol_f = (st.tol * 2.0).max(0.02);
 
@@ -1923,18 +1983,34 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
             continue;
         }
         let loops = lay.bnd[ci].clone();
-        if loops.len() != 1 || loops[0].len() != 4 {
+        if loops.len() != 1 {
             continue;
         }
         let me = lay.charts[ci].id;
         let map = lay.charts[ci].map;
-        let quarter = loops[0].iter().all(|&(e, fwd)| {
+        let wall = |lay: &Layout, e: usize| -> Option<usize> {
             let other = lay.edges[e].charts.iter().copied().find(|&c| c != ci).unwrap_or(ci);
-            let pp = lay.hpts(e, fwd, ci);
-            let total: f64 = pp.windows(3).map(|w| turn(w[1] - w[0], w[2] - w[1])).sum();
-            lay.charts[other].id.prim == me.prim && matches!(lay.charts[other].map, Map::Cyl { .. }) && (total.abs() - FRAC_PI_2).abs() < 0.2
-        });
+            (lay.charts[other].id.prim == me.prim && matches!(lay.charts[other].map, Map::Cyl { .. })).then_some(other)
+        };
+        let quarter = loops[0].len() == 4
+            && loops[0].iter().all(|&(e, fwd)| {
+                let pp = lay.hpts(e, fwd, ci);
+                let total: f64 = pp.windows(3).map(|w| turn(w[1] - w[0], w[2] - w[1])).sum();
+                wall(&lay, e).is_some() && (total.abs() - FRAC_PI_2).abs() < 0.2
+            });
         if !quarter {
+            // a cap cut by a flat face of another shape (a blind hole or a
+            // boss through the face's edge, its floor or underside a half
+            // disc): not yet. (Half an o-grid lays the cap out, but its lines
+            // and the notch's edges then run around the part and meet the
+            // square on the top face in Ts that no segment counts satisfy)
+            let cut = loops[0].iter().any(|&(e, _)| {
+                let other = lay.edges[e].charts.iter().copied().find(|&c| c != ci).unwrap_or(ci);
+                wall(&lay, e).is_none() && lay.charts[other].id.prim != me.prim && matches!(lay.charts[other].map, Map::Plane { .. })
+            }) && loops[0].iter().any(|&(e, _)| wall(&lay, e).is_some());
+            if cut {
+                return Err("fond de trou borgne ou dessous de bossage coupé par le bord de la pièce : pas encore géré".into());
+            }
             continue;
         }
         ogrid[ci] = true;
