@@ -12,7 +12,7 @@ use egui::{pos2, vec2, Align2, Color32, CornerRadius, Frame, Id, Margin, Order, 
 use forme_core::*;
 use glam::{EulerRot, Quat, Vec3};
 
-const RIGHT_W: f32 = 276.0;
+const RIGHT_W: f32 = 296.0;
 
 /// Desktop layout: compact rows for the mouse (the iPad keeps 44 pt targets).
 const DESK: bool = !cfg!(target_os = "ios");
@@ -82,27 +82,16 @@ pub(crate) fn prim_icon(k: PrimKind) -> Icon {
 pub fn icon_btn(ui: &mut Ui, icon: Icon, selected: bool, tip: &str, size: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
     let p = ui.painter();
+    let rr = if size <= 36.0 { 7.0 } else { 10.0 };
     if selected {
-        p.rect(rect.shrink(0.75), 10.0, ACCENT_BG, Stroke::new(1.5, ACCENT), StrokeKind::Inside);
+        p.rect(rect.shrink(0.5), rr, ACCENT_BG, Stroke::new(1.0, ACCENT_BORDER), StrokeKind::Inside);
     } else if resp.hovered() || resp.is_pointer_button_down_on() {
-        p.rect_filled(rect, 10.0, RAISED);
+        p.rect_filled(rect, rr, RAISED);
     }
     let c = if selected { ACCENT_TEXT } else { TEXT_ICON };
-    let isz = if size < 36.0 { 16.0 } else { 20.0 };
+    let isz = if size < 32.0 { 15.0 } else if size < 40.0 { 17.0 } else { 20.0 };
     icons::paint(p, Rect::from_center_size(rect.center(), vec2(isz, isz)), icon, c);
     resp.on_hover_text(tip)
-}
-
-pub(crate) fn toggle_chip(ui: &mut Ui, icon: Icon, label: &str, on: bool) -> Response {
-    let galley = ui.painter().layout_no_wrap(label.to_string(), medium(13.0), TEXT);
-    let w = galley.size().x + 24.0 + 22.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 44.0), Sense::click());
-    let p = ui.painter();
-    let (bg, border, fg) = if on { (ACCENT_BG, ACCENT_BORDER, ACCENT_TEXT) } else { (Color32::TRANSPARENT, DIVIDER, TEXT_ICON) };
-    p.rect(rect.shrink(0.5), 10.0, bg, Stroke::new(1.0, border), StrokeKind::Inside);
-    icons::paint(p, Rect::from_min_size(rect.min + vec2(12.0, 14.0), vec2(16.0, 16.0)), icon, fg);
-    p.text(rect.min + vec2(34.0, 22.0), Align2::LEFT_CENTER, label, medium(13.0), fg);
-    resp
 }
 
 pub(crate) fn primary_btn(ui: &mut Ui, icon: Option<Icon>, label: &str, width: Option<f32>) -> Response {
@@ -343,10 +332,11 @@ pub(crate) fn divider(ui: &mut Ui) {
 pub fn show(ctx: &egui::Context, st: &mut AppState) {
     let screen = ctx.content_rect();
     st.screen = [screen.width(), screen.height()];
-    // free view: between the rail and the right column, above the history strip
-    let right = if st.panel_visible { screen.width() - 308.0 } else { screen.width() - 12.0 };
+    // free view: between the tool column and the inspector, under the top
+    // islands, above the history strip
+    let right = if st.panel_visible { screen.width() - 2.0 * EDGE - RIGHT_W } else { screen.width() - EDGE };
     // the Bake panel floats over the view: it does not move the camera (Romain)
-    st.set_view_rect([84.0, 72.0, right, screen.height() - 84.0]);
+    st.set_view_rect([64.0, EDGE + ISLAND_H, right, screen.height() - 72.0]);
     top_bar(ctx, st, screen);
     if st.bake_mode() {
         // BAKE: no tools, no properties, no history to edit; the Bake panel only
@@ -365,6 +355,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     }
     hud(ctx, st);
     right_column(ctx, st, screen);
+    context_bar(ctx, st);
     dialogs(ctx, st, screen);
     shortcuts(ctx, st);
 }
@@ -458,16 +449,18 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if k1 {
         st.set_pick_mode(PickMode::Object);
     }
-    // tools: Q selection, R cube, C cylinder (never while typing: guarded above)
-    let (kq, kr, kc) = ctx.input(|i| {
+    // tools: Q selection, R cube, C cylinder, S sphere, A capsule, T torus
+    // (never while typing: guarded above)
+    let (kq, kr, kc, ks, ka, kt) = ctx.input(|i| {
         let free = !i.modifiers.command && !i.modifiers.alt;
-        (free && i.key_pressed(egui::Key::Q), free && i.key_pressed(egui::Key::R), free && i.key_pressed(egui::Key::C))
+        let k = |key| free && i.key_pressed(key);
+        (k(egui::Key::Q), k(egui::Key::R), k(egui::Key::C), k(egui::Key::S), k(egui::Key::A), k(egui::Key::T))
     });
     if kq {
         // Q = Select tool in object mode (also leaves the edge mode, like 1)
         st.set_pick_mode(PickMode::Object);
     }
-    for (pressed, k) in [(kr, PrimKind::Box), (kc, PrimKind::Cylinder)] {
+    for (pressed, k) in [(kr, PrimKind::Box), (kc, PrimKind::Cylinder), (ks, PrimKind::Sphere), (ka, PrimKind::Capsule), (kt, PrimKind::Torus)] {
         if pressed {
             st.commit_placement();
             st.tool = Tool::Place(k);
@@ -481,100 +474,240 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     st.key_ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
 }
 
+// --------------------------------------------------------- Établi islands
+
+/// Établi: the margin between the floating islands and the screen edges.
+const EDGE: f32 = 14.0;
+/// Établi: height of the top islands.
+const ISLAND_H: f32 = 40.0;
+
+/// A floating island (graphite card, thin border).
+pub(crate) fn island() -> Frame {
+    Frame::new().fill(tint(PANEL, 0.96)).stroke(Stroke::new(1.0, PANEL_BORDER)).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(5))
+}
+
+/// Compact icon + label toggle (28 pt), for the islands and the Studio view.
+pub(crate) fn chip(ui: &mut Ui, icon: Option<Icon>, label: &str, on: bool, tip: &str) -> Response {
+    let g = ui.painter().layout_no_wrap(label.to_string(), medium(12.5), TEXT);
+    let w = g.size().x + 20.0 + if icon.is_some() { 20.0 } else { 0.0 };
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
+    let p = ui.painter();
+    let (bg, border, fg) = if on { (ACCENT_BG, ACCENT_BORDER, ACCENT_TEXT) } else if resp.hovered() { (RAISED, DIVIDER, TEXT) } else { (Color32::TRANSPARENT, DIVIDER, TEXT2) };
+    p.rect(r, 7.0, bg, Stroke::new(1.0, border), StrokeKind::Inside);
+    let mut x = r.min.x + 10.0;
+    if let Some(i) = icon {
+        icons::paint(p, Rect::from_min_size(pos2(x, r.center().y - 7.5), vec2(15.0, 15.0)), i, fg);
+        x += 20.0;
+    }
+    p.text(pos2(x, r.center().y), Align2::LEFT_CENTER, label, medium(12.5), fg);
+    resp.on_hover_text(tip)
+}
+
+/// Inline segmented control sized by its labels (28 pt): (value, label, key hint).
+pub(crate) fn seg_inline<T: PartialEq + Copy>(ui: &mut Ui, id: &str, items: &[(T, &str, &str)], current: T) -> Option<T> {
+    let font = medium(12.5);
+    let widths: Vec<f32> = items
+        .iter()
+        .map(|(_, l, k)| ui.painter().layout_no_wrap(l.to_string(), font.clone(), TEXT).size().x + 22.0 + if k.is_empty() { 0.0 } else { 14.0 })
+        .collect();
+    let total: f32 = widths.iter().sum::<f32>() + 4.0 + 2.0 * (items.len() as f32 - 1.0);
+    let (well, _) = ui.allocate_exact_size(vec2(total, 30.0), Sense::hover());
+    ui.painter().rect(well, 8.0, WELL, Stroke::new(1.0, DIVIDER), StrokeKind::Inside);
+    let mut x = well.min.x + 2.0;
+    let mut picked = None;
+    for (i, ((v, l, k), w)) in items.iter().zip(widths).enumerate() {
+        let r = Rect::from_min_size(pos2(x, well.min.y + 2.0), vec2(w, 26.0));
+        x += w + 2.0;
+        let resp = ui.interact(r, Id::new((id, i)), Sense::click());
+        let on = *v == current;
+        let p = ui.painter();
+        if on {
+            p.rect(r, 6.0, RAISED, Stroke::new(1.0, Color32::from_rgb(0x35, 0x3A, 0x42)), StrokeKind::Inside);
+        } else if resp.hovered() {
+            p.rect_filled(r, 6.0, tint(RAISED, 0.6));
+        }
+        let tx = r.min.x + 11.0;
+        let g = p.layout_no_wrap(l.to_string(), font.clone(), if on { TEXT } else { TEXT2 });
+        let gw = g.size().x;
+        p.galley(pos2(tx, r.center().y - g.size().y * 0.5), g, TEXT);
+        if !k.is_empty() {
+            p.text(pos2(tx + gw + 5.0, r.center().y + 1.0), Align2::LEFT_CENTER, *k, medium(9.5), Color32::from_rgb(0x64, 0x6B, 0x75));
+        }
+        if resp.clicked() {
+            picked = Some(*v);
+        }
+    }
+    picked
+}
+
+/// Small separator between groups of an island.
+fn island_sep(ui: &mut Ui) {
+    let (r, _) = ui.allocate_exact_size(vec2(9.0, 20.0), Sense::hover());
+    ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(1.0, 20.0)), 0.0, DIVIDER);
+}
+
 fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
-    let bar = Rect::from_min_size(screen.min + vec2(12.0, 12.0), vec2(screen.width() - 24.0, 56.0));
-    egui::Area::new(Id::new("topbar-bg")).order(Order::Middle).fixed_pos(bar.min).interactable(false).show(ctx, |ui| {
-        let (r, _) = ui.allocate_exact_size(bar.size(), Sense::hover());
-        ui.painter().rect(r, 16.0, PANEL, Stroke::new(1.0, PANEL_BORDER), StrokeKind::Inside);
-    });
-    egui::Area::new(Id::new("topbar-left")).order(Order::Foreground).fixed_pos(bar.min + vec2(12.0, 6.0)).show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            let (r, _) = ui.allocate_exact_size(vec2(30.0, 44.0), Sense::hover());
-            let logo = Rect::from_center_size(r.center(), vec2(30.0, 30.0));
-            ui.painter().rect_filled(logo, 9.0, ACCENT);
-            icons::paint(ui.painter(), Rect::from_center_size(logo.center(), vec2(18.0, 18.0)), Icon::Cube, ON_ACCENT);
-            ui.label(egui::RichText::new("Forme").font(semibold(16.0)).color(TEXT));
-            let (sep, _) = ui.allocate_exact_size(vec2(1.0, 24.0), Sense::hover());
-            ui.painter().rect_filled(sep, 0.0, DIVIDER);
-            let name = st.doc_name.clone();
-            let g = ui.painter().layout_no_wrap(name.clone(), medium(14.0), TEXT);
-            let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 34.0, 44.0), Sense::click());
-            if resp.hovered() {
-                ui.painter().rect_filled(r, 10.0, RAISED);
-            }
-            ui.painter().galley(pos2(r.min.x + 8.0, r.center().y - g.size().y * 0.5), g, TEXT);
-            icons::paint(ui.painter(), Rect::from_min_size(pos2(r.max.x - 22.0, r.center().y - 7.0), vec2(14.0, 14.0)), Icon::Chevron, TEXT2);
-            if resp.clicked() {
-                st.files_open = !st.files_open;
-            }
-            ui.add_space(6.0);
-            if !st.bake_mode() {
-                if icon_btn(ui, Icon::Undo, false, "Annuler (tap à 2 doigts)", 44.0).clicked() {
+    // left island: the document
+    egui::Area::new(Id::new("isl-doc")).order(Order::Middle).fixed_pos(screen.min + vec2(EDGE, EDGE)).show(ctx, |ui| {
+        island().show(ui, |ui| {
+            ui.set_height(ISLAND_H - 10.0);
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
+                let logo = Rect::from_center_size(r.center(), vec2(24.0, 24.0));
+                ui.painter().rect_filled(logo, 7.0, ACCENT);
+                icons::paint(ui.painter(), Rect::from_center_size(logo.center(), vec2(15.0, 15.0)), Icon::Cube, Color32::WHITE);
+                let name = st.doc_name.clone();
+                let n = st.scene.shape_count();
+                let g = ui.painter().layout_no_wrap(name, semibold(13.5), TEXT);
+                let sub = ui.painter().layout_no_wrap(format!("· {n} forme{}", if n > 1 { "s" } else { "" }), regular(12.0), TEXT2);
+                let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + sub.size().x + 36.0, 28.0), Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(r, 7.0, RAISED);
+                }
+                let gw = g.size().x;
+                ui.painter().galley(pos2(r.min.x + 6.0, r.center().y - g.size().y * 0.5), g, TEXT);
+                ui.painter().galley(pos2(r.min.x + 12.0 + gw, r.center().y - sub.size().y * 0.5), sub, TEXT2);
+                icons::paint(ui.painter(), Rect::from_min_size(pos2(r.max.x - 18.0, r.center().y - 6.0), vec2(12.0, 12.0)), Icon::Chevron, TEXT2);
+                if resp.on_hover_text("Ouvrir · Nouveau · Enregistrer").clicked() {
+                    st.files_open = !st.files_open;
+                }
+                island_sep(ui);
+                if icon_btn(ui, Icon::Undo, false, "Annuler (Ctrl+Z)", 28.0).clicked() {
                     st.undo();
                 }
-                if icon_btn(ui, Icon::Redo, false, "Rétablir (tap à 3 doigts)", 44.0).clicked() {
+                if icon_btn(ui, Icon::Redo, false, "Rétablir (Ctrl+Y)", 28.0).clicked() {
                     st.redo();
                 }
-            }
-            let r = icon_btn(ui, Icon::Light, st.display_open, "Affichage : lumière, ombres, anticrénelage", 44.0);
-            light_toggle(st, &r);
-            if icon_btn(ui, Icon::Settings, st.settings_open, "Réglages (interface Atelier ou Studio)", 44.0).clicked() {
-                st.settings_open = !st.settings_open;
-            }
+            });
         });
     });
-    egui::Area::new(Id::new("topbar-right"))
-        .order(Order::Foreground)
-        .anchor(Align2::RIGHT_TOP, vec2(-20.0, 18.0))
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
+
+    // centre island: what a click picks, and the helpers
+    egui::Area::new(Id::new("isl-modes")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(pos2(st.principal()[0], screen.min.y + EDGE)).show(ctx, |ui| {
+        island().show(ui, |ui| {
+            ui.set_height(ISLAND_H - 10.0);
+            ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                // view presets
-                let cur = st.camera.preset_of();
-                let presets = [
-                    (ViewPreset::Perspective, "3D"),
-                    (ViewPreset::Front, "Face"),
-                    (ViewPreset::Right, "Droite"),
-                    (ViewPreset::Top, "Dessus"),
-                ];
-                let (well, _) = ui.allocate_exact_size(vec2(4.0 * 58.0 + 6.0, 44.0), Sense::hover());
-                ui.painter().rect_filled(well, 12.0, WELL);
-                for (i, (p, l)) in presets.iter().enumerate() {
-                    let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 58.0, 3.0), vec2(58.0, 38.0));
-                    let resp = ui.interact(r, Id::new(("preset", i)), Sense::click());
-                    let on = cur == *p;
-                    if on {
-                        ui.painter().rect_filled(r, 9.0, Color32::from_rgb(0x2D, 0x30, 0x36));
-                    }
-                    ui.painter().text(r.center(), Align2::CENTER_CENTER, *l, if on { semibold(13.0) } else { medium(13.0) }, if on { TEXT_STRONG } else { Color32::from_rgb(0xAE, 0xB3, 0xBA) });
-                    if resp.clicked() {
-                        st.camera.preset(*p);
-                        st.view_changed();
-                    }
+                let cur = if st.tool == Tool::Select { Some(st.pick_mode) } else { None };
+                let items = [(Some(PickMode::Object), "Objet", "1"), (Some(PickMode::Edge), "Arête", "2")];
+                if let Some(Some(m)) = seg_inline(ui, "isl-pick", &items, cur) {
+                    st.set_pick_mode(m);
                 }
-                ui.add_space(4.0);
-                if !st.bake_mode() {
-                    if toggle_chip(ui, Icon::Mirror, "Sym. X", st.sym_x).clicked() {
-                        st.sym_x = !st.sym_x;
-                        st.toast(if st.sym_x { "Symétrie X : les nouvelles formes sont doublées" } else { "Symétrie X désactivée" });
-                    }
-                    if toggle_chip(ui, Icon::Magnet, "Snap", st.snap).clicked() {
-                        st.snap = !st.snap;
-                    }
+                if chip(ui, Some(Icon::Magnet), "Snap", st.snap, "Snap : grille, sommets et arêtes").clicked() {
+                    st.snap = !st.snap;
                 }
-                if toggle_chip(ui, Icon::Grid, "Grille", st.grid).clicked() {
+                if chip(ui, Some(Icon::Mirror), "Sym. X", st.sym_x, "Symétrie X : les nouvelles formes sont doublées").clicked() {
+                    st.sym_x = !st.sym_x;
+                    st.toast(if st.sym_x { "Symétrie X : les nouvelles formes sont doublées" } else { "Symétrie X désactivée" });
+                }
+                if chip(ui, Some(Icon::Grid), "Grille", st.grid, "Grille au sol").clicked() {
                     st.grid = !st.grid;
                     st.view_changed();
                 }
-                let (sep, _) = ui.allocate_exact_size(vec2(9.0, 24.0), Sense::hover());
-                ui.painter().rect_filled(Rect::from_center_size(sep.center(), vec2(1.0, 24.0)), 0.0, DIVIDER);
+            });
+        });
+    });
+
+    // right island: the view, the display, the settings, the export
+    egui::Area::new(Id::new("isl-view")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(screen.max.x - EDGE, screen.min.y + EDGE)).show(ctx, |ui| {
+        island().show(ui, |ui| {
+            ui.set_height(ISLAND_H - 10.0);
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let cur = st.camera.preset_of();
+                let presets = [(ViewPreset::Perspective, "3D", ""), (ViewPreset::Front, "Face", ""), (ViewPreset::Right, "Droite", ""), (ViewPreset::Top, "Dessus", "")];
+                if let Some(p) = seg_inline(ui, "isl-preset", &presets, cur) {
+                    st.camera.preset(p);
+                    st.view_changed();
+                }
+                island_sep(ui);
+                let r = icon_btn(ui, Icon::Light, st.display_open, "Affichage : lumière, ombres, anticrénelage", 28.0);
+                light_toggle(st, &r);
+                if icon_btn(ui, Icon::Settings, st.settings_open, "Réglages : interface, navigation, création", 28.0).clicked() {
+                    st.settings_open = !st.settings_open;
+                }
                 // the Bake is set aside (Romain, 10 nov.): pure SDF modelling
-                if primary_btn(ui, Some(Icon::Export), "Exporter", None).clicked() {
+                let g = ui.painter().layout_no_wrap("Exporter".to_string(), semibold(12.5), Color32::WHITE);
+                let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 40.0, 28.0), Sense::click());
+                ui.painter().rect_filled(r, 7.0, if resp.hovered() { ACCENT_LIGHT } else { ACCENT });
+                icons::paint(ui.painter(), Rect::from_min_size(pos2(r.min.x + 10.0, r.center().y - 7.0), vec2(14.0, 14.0)), Icon::Export, Color32::WHITE);
+                ui.painter().galley(pos2(r.min.x + 30.0, r.center().y - g.size().y * 0.5), g, Color32::WHITE);
+                if resp.on_hover_text("Exporter le mesh (OBJ, glTF)").clicked() {
                     st.export_open = !st.export_open;
                 }
             });
         });
+    });
+}
+
+/// Établi: the actions of the selected shape, floating just above it.
+fn context_bar(ctx: &egui::Context, st: &mut AppState) {
+    if st.tool != Tool::Select || st.placement.is_some() || st.marking.is_open() || st.handle_drag.is_some() || !st.edge_sel.is_empty() {
+        return;
+    }
+    let Some(id) = st.selection else { return };
+    let Some(node) = st.scene.node(id).cloned() else { return };
+    let Some((lo, hi)) = st.scene.shape_world_aabb(id).or_else(|| {
+        let o = st.scene.world_matrix(id).transform_point3(Vec3::ZERO);
+        Some((o - Vec3::splat(5.0), o + Vec3::splat(5.0)))
+    }) else {
+        return;
+    };
+    let view = st.view();
+    let mut top = f32::INFINITY;
+    let (mut x0, mut x1) = (f32::INFINITY, f32::NEG_INFINITY);
+    for i in 0..8 {
+        let c = Vec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z });
+        if let Some(p) = view.project(c) {
+            top = top.min(p[1]);
+            x0 = x0.min(p[0]);
+            x1 = x1.max(p[0]);
+        }
+    }
+    if !top.is_finite() {
+        return;
+    }
+    let vr = st.view_rect;
+    let at = pos2(((x0 + x1) * 0.5).clamp(vr[0] + 120.0, vr[2] - 120.0), (top - 16.0).clamp(vr[1] + 56.0, vr[3] - 40.0));
+    egui::Area::new(Id::new("ctx-bar")).order(Order::Middle).pivot(Align2::CENTER_BOTTOM).fixed_pos(at).show(ctx, |ui| {
+        island().inner_margin(Margin::same(3)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let is_shape = node.shape().is_some();
+                if is_shape && icon_btn(ui, Icon::Fillet, false, "Arêtes : fillets et chanfreins (2)", 28.0).clicked() {
+                    st.set_pick_mode(PickMode::Edge);
+                }
+                if is_shape || matches!(node.kind, NodeKind::Group { combined: true, .. }) {
+                    // Add ⇄ Carve in one click, drawn in the colour of the current mode
+                    let m = node.combine.mode;
+                    let (r, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+                    let c = mode_color(m);
+                    ui.painter().rect(r, 7.0, tint(c, if resp.hovered() { 0.24 } else { 0.14 }), Stroke::new(1.0, tint(c, 0.6)), StrokeKind::Inside);
+                    paint_mode_glyph(ui.painter(), r.center(), m, c, 11.0);
+                    let next = if m == CombineMode::Add { CombineMode::Carve } else { CombineMode::Add };
+                    if resp.on_hover_text(format!("{} : passer en {}", m.label(), next.label())).clicked() {
+                        st.mode = next;
+                        st.edit("Mode", id, |n| n.combine.mode = next);
+                    }
+                }
+                let (r, _) = ui.allocate_exact_size(vec2(7.0, 28.0), Sense::hover());
+                ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(1.0, 18.0)), 0.0, DIVIDER);
+                if icon_btn(ui, Icon::Duplicate, false, "Dupliquer (Ctrl+D)", 28.0).clicked() {
+                    st.duplicate_selected();
+                }
+                if icon_btn(ui, Icon::Mirror, node.mirror.x, "Symétrie X de la forme", 28.0).clicked() {
+                    st.edit("Symétrie", id, |n| n.mirror.x = !n.mirror.x);
+                }
+                if icon_btn(ui, Icon::Frame, false, "Cadrer (F)", 28.0).clicked() {
+                    st.frame_selection();
+                }
+                if icon_btn(ui, Icon::Trash, false, "Supprimer (Suppr)", 28.0).clicked() {
+                    st.delete_selected();
+                }
+            });
+        });
+    });
 }
 
 /// BUILD | BAKE switch (both interfaces). BAKE freezes the model: only the
@@ -606,11 +739,14 @@ pub(crate) fn mode_switch(ui: &mut Ui, st: &mut AppState, height: f32) {
     }
 }
 
-/// Keyboard shortcut of a primitive tool (Q select, R cube, C cylinder).
+/// Keyboard shortcut of a primitive tool (R cube, C cylinder, S sphere, A capsule, T torus).
 pub(crate) fn prim_key(k: PrimKind) -> Option<&'static str> {
     match k {
         PrimKind::Box => Some("R"),
         PrimKind::Cylinder => Some("C"),
+        PrimKind::Sphere => Some("S"),
+        PrimKind::Capsule => Some("A"),
+        PrimKind::Torus => Some("T"),
         _ => None,
     }
 }
@@ -677,18 +813,21 @@ pub fn creation_popover(ctx: &egui::Context, st: &mut AppState) {
 }
 
 fn rail(ctx: &egui::Context, st: &mut AppState) {
-    egui::Area::new(Id::new("rail")).order(Order::Middle).fixed_pos(pos2(12.0, 80.0)).show(ctx, |ui| {
-        panel().show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
-            ui.set_width(44.0);
+    // Établi: a slim column floating on the left, centred on the view
+    let b = if DESK { 36.0 } else { 44.0 };
+    let cy = (st.view_rect[1] + st.view_rect[3]) * 0.5;
+    egui::Area::new(Id::new("rail")).order(Order::Middle).pivot(Align2::LEFT_CENTER).fixed_pos(pos2(EDGE, cy)).show(ctx, |ui| {
+        island().show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            ui.set_width(b);
             // selection, like 3ds Max: object (1) or edges (2)
             let sel = st.tool == Tool::Select;
-            let r = icon_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (Q ou 1)", 44.0);
+            let r = icon_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (Q ou 1)", b);
             key_hint(ui, &r, "Q");
             if r.clicked() {
                 st.set_pick_mode(PickMode::Object);
             }
-            let r = icon_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins", 44.0);
+            let r = icon_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins", b);
             key_hint(ui, &r, "2");
             if r.clicked() {
                 st.set_pick_mode(PickMode::Edge);
@@ -699,7 +838,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
                     Some(key) => format!("{} ({key})", k.label()),
                     None => k.label().to_string(),
                 };
-                let r = icon_btn(ui, prim_icon(k), st.tool == Tool::Place(k), &tip, 44.0);
+                let r = icon_btn(ui, prim_icon(k), st.tool == Tool::Place(k), &tip, b);
                 if let Some(key) = prim_key(k) {
                     key_hint(ui, &r, key);
                 }
@@ -709,7 +848,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
                 }
             }
             if DESK {
-                creation_btn(ui, st, 44.0, false);
+                creation_btn(ui, st, b, false);
             }
             divider(ui);
             // mode of the next shapes (and of the selected one)
@@ -740,15 +879,15 @@ fn shown_mode(st: &AppState) -> CombineMode {
 }
 
 fn mode_btn(ui: &mut Ui, m: CombineMode, on: bool) -> Response {
-    let (r, resp) = ui.allocate_exact_size(vec2(44.0, 38.0), Sense::click());
+    let (r, resp) = ui.allocate_exact_size(if DESK { vec2(36.0, 32.0) } else { vec2(44.0, 38.0) }, Sense::click());
     let c = mode_color(m);
     let p = ui.painter();
     if on {
-        p.rect(r.shrink(0.75), 10.0, tint(c, 0.16), Stroke::new(1.5, c), StrokeKind::Inside);
+        p.rect(r.shrink(0.5), 7.0, tint(c, 0.16), Stroke::new(1.0, tint(c, 0.7)), StrokeKind::Inside);
     } else if resp.hovered() {
-        p.rect_filled(r, 10.0, RAISED);
+        p.rect_filled(r, 7.0, RAISED);
     }
-    paint_mode_glyph(p, r.center(), m, if on { c } else { TEXT_ICON }, 14.0);
+    paint_mode_glyph(p, r.center(), m, if on { c } else { TEXT_ICON }, 12.0);
     let tip = if m == CombineMode::Add { "Add : ajoute la forme" } else { "Carve : creuse" };
     resp.on_hover_text(tip)
 }
@@ -777,7 +916,7 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 let (sep, _) = ui.allocate_exact_size(vec2(1.0, 36.0), Sense::hover());
                 ui.painter().rect_filled(sep, 0.0, DIVIDER);
                 if rows.is_empty() {
-                    ui.label(egui::RichText::new("Choisis Cube ou Cylindre à gauche, puis glisse dans la vue").font(regular(13.0)).color(TEXT2));
+                    ui.label(egui::RichText::new("Choisis une forme à gauche (R, C, S, A, T), puis glisse dans la vue").font(regular(13.0)).color(TEXT2));
                     return;
                 }
                 egui::ScrollArea::horizontal().id_salt("history-scroll").max_width(max_w - 220.0).show(ui, |ui| {
@@ -928,11 +1067,11 @@ pub(crate) fn hud(ctx: &egui::Context, st: &mut AppState) {
             _ => st.selection.and_then(|id| st.scene.node(id)).map(|n| mode_color(n.combine.mode)).unwrap_or(TEXT2),
         },
     };
-    egui::Area::new(Id::new("hud")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(pos2(cx, 82.0)).interactable(false).show(ctx, |ui| {
-        let g = ui.painter().layout_no_wrap(text, regular(13.0), LABEL);
-        let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 44.0, 32.0), Sense::hover());
+    egui::Area::new(Id::new("hud")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(pos2(cx, EDGE + ISLAND_H + 12.0)).interactable(false).show(ctx, |ui| {
+        let g = ui.painter().layout_no_wrap(text, regular(12.0), LABEL);
+        let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 40.0, 26.0), Sense::hover());
         let p = ui.painter();
-        p.rect(r, 16.0, tint(PANEL, 0.92), Stroke::new(1.0, PANEL_BORDER), StrokeKind::Inside);
+        p.rect(r, 13.0, tint(PANEL, 0.88), Stroke::new(1.0, PANEL_BORDER), StrokeKind::Inside);
         p.circle_filled(pos2(r.min.x + 18.0, r.center().y), 4.0, color);
         p.galley(pos2(r.min.x + 30.0, r.center().y - g.size().y * 0.5), g, LABEL);
     });
@@ -953,16 +1092,30 @@ pub(crate) fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 
 // ------------------------------------------------------------ right column
 
+/// Établi: one inspector on the right, the scene on top and the selected
+/// shape below (or the defaults of the new shapes when nothing is selected).
 fn right_column(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
-    let x = screen.max.x - 12.0 - RIGHT_W;
-    let show_tree = st.show_tree;
-    let tree_h = if show_tree { 268.0 } else { 0.0 };
-    let props_max = screen.height() - 80.0 - 12.0 - if show_tree { tree_h + 12.0 } else { 0.0 };
-    egui::Area::new(Id::new("props")).order(Order::Middle).fixed_pos(pos2(x, 80.0)).show(ctx, |ui| {
-        panel().inner_margin(Margin::same(14)).show(ui, |ui| {
-            ui.set_width(RIGHT_W - 28.0);
-            egui::ScrollArea::vertical().id_salt("props-scroll").max_height(props_max - 28.0).min_scrolled_height(props_max - 28.0).auto_shrink([false, false]).show(ui, |ui| {
-                ui.set_width(RIGHT_W - 28.0);
+    if !st.panel_visible {
+        return;
+    }
+    let x = screen.max.x - EDGE - RIGHT_W;
+    let top = EDGE + ISLAND_H + 10.0;
+    let inner_w = RIGHT_W - 24.0;
+    let total = screen.max.y - EDGE - top;
+    let rows = st.scene.rows().len().max(1) as f32;
+    let tree_h = if st.show_tree { (rows * 28.0 + 34.0).clamp(96.0, (total * 0.36).max(120.0)) } else { 0.0 };
+    egui::Area::new(Id::new("props")).order(Order::Middle).fixed_pos(pos2(x, top)).show(ctx, |ui| {
+        island().inner_margin(Margin::same(12)).show(ui, |ui| {
+            ui.set_width(inner_w);
+            if st.show_tree {
+                tree(ui, st, tree_h);
+                ui.add_space(4.0);
+                divider(ui);
+                ui.add_space(6.0);
+            }
+            let props_max = (total - tree_h - 40.0).max(160.0);
+            egui::ScrollArea::vertical().id_salt("props-scroll").max_height(props_max).min_scrolled_height(props_max).auto_shrink([false, true]).show(ui, |ui| {
+                ui.set_width(inner_w);
                 if st.selection.and_then(|id| st.scene.node(id)).is_some() {
                     properties(ui, st);
                 } else {
@@ -971,15 +1124,6 @@ fn right_column(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             });
         });
     });
-    if show_tree {
-        egui::Area::new(Id::new("tree")).order(Order::Middle).fixed_pos(pos2(x, screen.max.y - 12.0 - tree_h)).show(ctx, |ui| {
-            panel().inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
-                ui.set_width(RIGHT_W - 20.0);
-                ui.set_height(tree_h - 16.0);
-                tree(ui, st, tree_h - 16.0);
-            });
-        });
-    }
 }
 
 fn properties(ui: &mut Ui, st: &mut AppState) {
@@ -1322,11 +1466,7 @@ fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
 }
 
 fn scene_panel(ui: &mut Ui, st: &mut AppState) {
-    ui.label(egui::RichText::new("Scène").font(regular(12.0)).color(TEXT2));
-    ui.label(egui::RichText::new(st.doc_name.clone()).font(semibold(17.0)).color(TEXT));
-    ui.label(egui::RichText::new(format!("{} formes · touche une forme pour l'éditer", st.scene.shape_count())).font(regular(12.0)).color(TEXT2));
-    ui.add_space(4.0);
-    divider(ui);
+    ui.label(egui::RichText::new("Clique une forme pour l'éditer, ou choisis-en une nouvelle à gauche.").font(regular(12.0)).color(TEXT2));
     section(ui, "Nouvelles formes");
     let items = MODES.map(|m| (m, m.label(), mode_color(m)));
     if let Some(m) = segmented(ui, &items, st.mode, 40.0) {
@@ -1353,38 +1493,44 @@ fn scene_panel(ui: &mut Ui, st: &mut AppState) {
 }
 
 fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
+    let row_h = if DESK { 28.0 } else { 34.0 };
+    let n_shapes = st.scene.shape_count();
     ui.horizontal(|ui| {
-        ui.set_height(36.0);
-        let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 3.0 * 38.0, 36.0), Sense::hover());
-        ui.painter().text(lr.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, "Arbre de formes", semibold(13.0), TEXT);
+        ui.set_height(26.0);
+        let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 3.0 * 28.0, 26.0), Sense::hover());
+        ui.painter().text(lr.left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, "SCÈNE", semibold(10.5), TEXT2);
+        ui.painter().text(lr.left_center() + vec2(52.0, 0.0), Align2::LEFT_CENTER, format!("{n_shapes} forme{}", if n_shapes > 1 { "s" } else { "" }), regular(11.5), Color32::from_rgb(0x64, 0x6B, 0x75));
         ui.spacing_mut().item_spacing.x = 2.0;
-        if icon_btn(ui, Icon::Folder, false, "Grouper la sélection", 36.0).clicked() {
+        if icon_btn(ui, Icon::Folder, false, "Grouper la sélection", 26.0).clicked() {
             st.group_selected();
         }
-        if icon_btn(ui, Icon::Up, false, "Monter (évalué plus tôt)", 36.0).clicked() {
+        if icon_btn(ui, Icon::Up, false, "Monter (évalué plus tôt)", 26.0).clicked() {
             if let Some(id) = st.selection {
                 st.move_in_parent(id, -1);
             }
         }
-        if icon_btn(ui, Icon::Down, false, "Descendre (évalué plus tard)", 36.0).clicked() {
+        if icon_btn(ui, Icon::Down, false, "Descendre (évalué plus tard)", 26.0).clicked() {
             if let Some(id) = st.selection {
                 st.move_in_parent(id, 1);
             }
         }
     });
     let rows = st.scene.rows();
-    egui::ScrollArea::vertical().max_height(height - 40.0).auto_shrink([false, false]).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
+    egui::ScrollArea::vertical().id_salt("tree-scroll").max_height(height - 32.0).auto_shrink([false, true]).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        if rows.is_empty() {
+            ui.label(egui::RichText::new("Vide · choisis une forme à gauche (R, C, S, A, T)").font(regular(12.0)).color(TEXT2));
+        }
         for (id, depth) in rows {
             let Some(n) = st.scene.node(id).cloned() else { continue };
             let w = ui.available_width();
-            let (r, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(w, row_h), Sense::click());
             let selected = st.is_selected(id);
             let p = ui.painter();
             if selected {
-                p.rect(r, 8.0, ACCENT_BG, Stroke::new(1.0, ACCENT_BORDER), StrokeKind::Inside);
+                p.rect(r, 6.0, ACCENT_BG, Stroke::new(1.0, ACCENT_BORDER), StrokeKind::Inside);
             } else if resp.hovered() {
-                p.rect_filled(r, 8.0, RAISED);
+                p.rect_filled(r, 6.0, RAISED);
             }
             let x0 = r.min.x + 6.0 + depth as f32 * 16.0;
             let dim = if n.visible { 1.0 } else { 0.4 };

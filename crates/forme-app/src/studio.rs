@@ -1,96 +1,73 @@
-//! Studio interface: docked panels in the spirit of 3ds Max. Menu bar and
-//! toolbar on top, scene explorer on the left, command panel (Créer /
-//! Modifier / Affichage) on the right, history slider and status bar at the
-//! bottom; the 3D view fills the centre. Same state, tools and renderer as
-//! the Atelier interface (`ui.rs`), whose dialogs it reuses.
+//! Studio interface: a docked CAD station in the spirit of Plasticity. Top bar
+//! with the menus, the document and the command palette (Espace); a slim tool
+//! column on the left; a fixed panel on the right (scene, properties,
+//! history); a status bar with the shortcuts of the chosen navigation. Its own
+//! components: the command palette and the sizes panel (typed dimensions while
+//! a creation tool is armed). Same state, tools and renderer as Établi
+//! (`ui.rs`), whose dialogs it reuses.
 
 use crate::camera::ViewPreset;
 use crate::icons::{self, Icon};
-use crate::settings::UiMode;
+use crate::settings::{Navigation, UiMode};
 use crate::state::*;
-use crate::theme::{medium, regular, semibold, AXIS_X, AXIS_Y, AXIS_Z, CARVE, EDGE_SEL, ERROR, OK};
+use crate::theme::{medium, regular, semibold, tint, AXIS_X, AXIS_Y, AXIS_Z, CARVE, EDGE_SEL};
 use crate::ui;
-use egui::{pos2, vec2, Align2, Color32, CornerRadius, Id, LayerId, Order, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui};
+use egui::{pos2, vec2, Align2, Color32, CornerRadius, Id, Order, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui};
 use forme_core::*;
 use glam::{EulerRot, Quat, Vec3};
 
-// Neutral greys of a classic DCC, one blue accent, yellow for the active view.
-const B0: Color32 = Color32::from_rgb(0x1D, 0x1E, 0x20);
-const B1: Color32 = Color32::from_rgb(0x26, 0x27, 0x2A);
-const B2: Color32 = Color32::from_rgb(0x2E, 0x30, 0x34);
-const B3: Color32 = Color32::from_rgb(0x3A, 0x3C, 0x41);
-const B4: Color32 = Color32::from_rgb(0x46, 0x49, 0x4F);
-const LINE: Color32 = Color32::from_rgb(0x15, 0x16, 0x18);
-const T1: Color32 = Color32::from_rgb(0xD9, 0xDC, 0xE0);
-const T2: Color32 = Color32::from_rgb(0x9A, 0xA0, 0xA8);
-const T3: Color32 = Color32::from_rgb(0x6C, 0x72, 0x7B);
-const SEL: Color32 = Color32::from_rgb(0x2F, 0x4F, 0x73);
-const SEL_T: Color32 = Color32::from_rgb(0xE4, 0xEF, 0xFC);
-const AC: Color32 = Color32::from_rgb(0x4B, 0x93, 0xE0);
-const ACTIVE: Color32 = Color32::from_rgb(0xF2, 0xC1, 0x2E);
-const PROMPT: Color32 = Color32::from_rgb(0xE6, 0xC3, 0x5C);
+// Graphite of the redesign (same family as Établi, flatter: docked panels).
+const B0: Color32 = Color32::from_rgb(0x0F, 0x11, 0x14);
+const B1: Color32 = Color32::from_rgb(0x17, 0x19, 0x1D);
+const B2: Color32 = Color32::from_rgb(0x1E, 0x21, 0x26);
+const B3: Color32 = Color32::from_rgb(0x25, 0x29, 0x30);
+const B4: Color32 = Color32::from_rgb(0x2C, 0x31, 0x39);
+const LINE: Color32 = Color32::from_rgb(0x2A, 0x2E, 0x35);
+const T1: Color32 = Color32::from_rgb(0xE4, 0xE7, 0xEB);
+const T2: Color32 = Color32::from_rgb(0x9A, 0xA1, 0xAB);
+const T3: Color32 = Color32::from_rgb(0x64, 0x6B, 0x75);
+const SEL: Color32 = Color32::from_rgb(0x1B, 0x28, 0x40);
+const SEL_LINE: Color32 = Color32::from_rgb(0x2F, 0x4E, 0x86);
+const SEL_T: Color32 = Color32::from_rgb(0xDC, 0xE8, 0xFF);
+const AC: Color32 = Color32::from_rgb(0x4D, 0x8D, 0xFF);
 
-const MENU_H: f32 = 26.0;
-const TOOL_H: f32 = 38.0;
-const HIST_H: f32 = 34.0;
-const STATUS_H: f32 = 26.0;
-const LEFT_W: f32 = 262.0;
-const RIGHT_W: f32 = 300.0;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab {
-    Create,
-    Modify,
-    Display,
-}
+const TOP_H: f32 = 38.0;
+const RAIL_W: f32 = 48.0;
+const RIGHT_W: f32 = 316.0;
+const STATUS_H: f32 = 28.0;
+const HIST_H: f32 = 168.0;
 
 pub fn show(ctx: &egui::Context, st: &mut AppState) {
     let screen = ctx.content_rect();
     st.screen = [screen.width(), screen.height()];
-    let top = screen.min.y + MENU_H + TOOL_H;
-    let bottom = screen.max.y - STATUS_H - HIST_H;
-    let view = Rect::from_min_max(pos2(screen.min.x + LEFT_W, top), pos2(screen.max.x - RIGHT_W, bottom));
+    let view = Rect::from_min_max(pos2(screen.min.x + RAIL_W, screen.min.y + TOP_H), pos2(screen.max.x - RIGHT_W, screen.max.y - STATUS_H));
     st.set_view_rect([view.min.x, view.min.y, view.max.x, view.max.y]);
 
-    menu_bar(ctx, st, Rect::from_min_size(screen.min, vec2(screen.width(), MENU_H)));
-    toolbar(ctx, st, Rect::from_min_size(screen.min + vec2(0.0, MENU_H), vec2(screen.width(), TOOL_H)));
-    let left = Rect::from_min_max(pos2(screen.min.x, top), pos2(screen.min.x + LEFT_W, bottom));
-    if st.bake.open {
-        bake_panel(ctx, st, left);
-    } else {
-        explorer(ctx, st, left);
-    }
-    let cmd = Rect::from_min_max(pos2(screen.max.x - RIGHT_W, top), pos2(screen.max.x, screen.max.y - STATUS_H));
-    let hist = Rect::from_min_max(pos2(screen.min.x, bottom), pos2(screen.max.x - RIGHT_W, screen.max.y - STATUS_H));
-    if st.bake_mode() {
-        // BAKE: no command panel nor history to edit, the model is frozen
-        dock(ctx, "studio-commands", cmd, B1, |ui| {
-            ui.add_space(14.0);
-            ui.label(RichText::new("Mode BAKE").font(semibold(13.0)).color(T1));
-            ui.add_space(4.0);
-            ui.label(RichText::new("Modèle en lecture seule : diagnostic, options et Bake dans le panneau de gauche. BUILD (ou Échap) pour modifier.").font(regular(12.0)).color(T2));
-        });
-        dock(ctx, "studio-history", hist, B1, |_| {});
-    } else {
-        command_panel(ctx, st, cmd);
-        history_bar(ctx, st, hist);
-    }
-    status_bar(ctx, st, Rect::from_min_max(pos2(screen.min.x, screen.max.y - STATUS_H), screen.max));
-    view_frame(ctx, st, view);
+    top_bar(ctx, st, Rect::from_min_size(screen.min, vec2(screen.width(), TOP_H)));
+    rail(ctx, st, Rect::from_min_max(pos2(screen.min.x, view.min.y), pos2(view.min.x, view.max.y)));
+    side_panel(ctx, st, Rect::from_min_max(pos2(view.max.x, view.min.y), pos2(screen.max.x, view.max.y)));
+    status_bar(ctx, st, Rect::from_min_max(pos2(screen.min.x, view.max.y), screen.max));
+    view_chips(ctx, st, view);
+    sizes_panel(ctx, st, view);
+    palette(ctx, st, screen);
     ui::dialogs(ctx, st, screen);
+    // Espace: the command palette (never while typing)
+    if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+        open_palette(ctx);
+    }
     ui::shortcuts(ctx, st);
 }
 
 // ------------------------------------------------------------------ style
 
-/// Dense desktop widgets: small text, 20 pt rows, square-ish corners.
+/// Dense desktop widgets: small text, 22 pt rows, 6 pt corners.
 fn studio_style(s: &mut egui::Style) {
     s.text_styles.insert(egui::TextStyle::Body, regular(12.5));
     s.text_styles.insert(egui::TextStyle::Button, regular(12.5));
     s.text_styles.insert(egui::TextStyle::Small, regular(11.0));
     s.spacing.item_spacing = vec2(6.0, 4.0);
-    s.spacing.button_padding = vec2(6.0, 2.0);
-    s.spacing.interact_size = vec2(40.0, 20.0);
+    s.spacing.button_padding = vec2(8.0, 3.0);
+    s.spacing.interact_size = vec2(40.0, 22.0);
     s.spacing.icon_width = 12.0;
     s.spacing.icon_width_inner = 6.0;
     s.spacing.indent = 14.0;
@@ -102,32 +79,32 @@ fn studio_style(s: &mut egui::Style) {
     v.selection.stroke = Stroke::new(1.0, AC);
     v.window_fill = B2;
     v.panel_fill = B1;
-    v.window_corner_radius = CornerRadius::same(4);
-    v.menu_corner_radius = CornerRadius::same(4);
+    v.window_corner_radius = CornerRadius::same(8);
+    v.menu_corner_radius = CornerRadius::same(8);
     v.window_stroke = Stroke::new(1.0, LINE);
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-        w.corner_radius = CornerRadius::same(3);
+        w.corner_radius = CornerRadius::same(6);
     }
-    v.widgets.inactive.bg_fill = B3;
-    v.widgets.inactive.weak_bg_fill = B3;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(0x4A, 0x4D, 0x53));
+    v.widgets.inactive.bg_fill = B0;
+    v.widgets.inactive.weak_bg_fill = B0;
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, LINE);
     v.widgets.inactive.fg_stroke = Stroke::new(1.0, T1);
-    v.widgets.hovered.bg_fill = B4;
-    v.widgets.hovered.weak_bg_fill = B4;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, AC);
+    v.widgets.hovered.bg_fill = B3;
+    v.widgets.hovered.weak_bg_fill = B3;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, SEL_LINE);
     v.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
     v.widgets.active.bg_fill = SEL;
     v.widgets.active.weak_bg_fill = SEL;
     v.widgets.active.bg_stroke = Stroke::new(1.0, AC);
-    v.widgets.open.weak_bg_fill = B4;
-    v.widgets.open.bg_fill = B4;
+    v.widgets.open.weak_bg_fill = B3;
+    v.widgets.open.bg_fill = B3;
 }
 
 fn menu_cfg() -> egui::containers::menu::MenuConfig {
     egui::containers::menu::MenuConfig::new().style(|s: &mut egui::Style| {
         egui::containers::menu::menu_style(s);
         studio_style(s);
-        s.spacing.button_padding = vec2(8.0, 3.0);
+        s.spacing.button_padding = vec2(10.0, 4.0);
     })
 }
 
@@ -144,39 +121,36 @@ fn dock(ctx: &egui::Context, id: &str, rect: Rect, fill: Color32, add: impl FnOn
     });
 }
 
-fn header(ui: &mut Ui, title: &str) {
-    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+/// Section title of the side panel: « SCÈNE  4 formes ».
+fn section_head(ui: &mut Ui, title: &str, info: &str) {
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(r, 0.0, B2);
-    p.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, LINE));
-    p.text(r.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, title, semibold(12.0), T1);
+    p.text(r.left_center() + vec2(12.0, 0.0), Align2::LEFT_CENTER, title, semibold(10.5), T2);
+    p.text(r.right_center() - vec2(12.0, 0.0), Align2::RIGHT_CENTER, info, regular(11.5), T3);
 }
 
 fn tool_btn(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> Response {
-    let (r, resp) = ui.allocate_exact_size(vec2(30.0, 28.0), Sense::click());
+    let (r, resp) = ui.allocate_exact_size(vec2(34.0, 32.0), Sense::click());
     let p = ui.painter();
     if on {
-        p.rect(r, 3.0, Color32::from_rgb(0x3D, 0x5F, 0x86), Stroke::new(1.0, Color32::from_rgb(0x5D, 0x8F, 0xCA)), StrokeKind::Inside);
+        p.rect(r, 7.0, SEL, Stroke::new(1.0, SEL_LINE), StrokeKind::Inside);
     } else if resp.hovered() {
-        p.rect_filled(r, 3.0, B3);
+        p.rect_filled(r, 7.0, B3);
     }
-    icons::paint(p, Rect::from_center_size(r.center(), vec2(17.0, 17.0)), icon, if on { Color32::WHITE } else { T1 });
+    icons::paint(p, Rect::from_center_size(r.center(), vec2(17.0, 17.0)), icon, if on { SEL_T } else { Color32::from_rgb(0xC3, 0xC8, 0xCF) });
     resp.on_hover_text(tip)
 }
 
-fn mode_tool_btn(ui: &mut Ui, m: CombineMode, on: bool) -> Response {
-    let g = ui.painter().layout_no_wrap(m.label().to_string(), regular(12.0), T1);
-    let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 28.0, 26.0), Sense::click());
-    let c = mode_color(m);
+fn small_btn(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(26.0, 24.0), Sense::click());
     let p = ui.painter();
     if on {
-        p.rect(r, 3.0, crate::theme::tint(c, 0.18), Stroke::new(1.0, c), StrokeKind::Inside);
+        p.rect(r, 6.0, SEL, Stroke::new(1.0, SEL_LINE), StrokeKind::Inside);
     } else if resp.hovered() {
-        p.rect_filled(r, 3.0, B3);
+        p.rect_filled(r, 6.0, B3);
     }
-    ui::paint_mode_glyph(p, pos2(r.min.x + 11.0, r.center().y), m, c, 10.0);
-    p.galley(pos2(r.min.x + 21.0, r.center().y - g.size().y * 0.5), g, if on { Color32::WHITE } else { T1 });
-    resp.on_hover_text("Mode des nouvelles formes (et de la forme sélectionnée)")
+    icons::paint(p, Rect::from_center_size(r.center(), vec2(14.0, 14.0)), icon, if on { SEL_T } else { T2 });
+    resp.on_hover_text(tip)
 }
 
 fn text_btn(ui: &mut Ui, icon: Option<Icon>, label: &str, primary: bool) -> Response {
@@ -184,25 +158,20 @@ fn text_btn(ui: &mut Ui, icon: Option<Icon>, label: &str, primary: bool) -> Resp
     let w = g.size().x + 20.0 + if icon.is_some() { 20.0 } else { 0.0 };
     let (r, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
     let p = ui.painter();
-    let fill = match (primary, resp.hovered()) {
-        (true, false) => AC,
-        (true, true) => Color32::from_rgb(0x5E, 0xA3, 0xEC),
-        (false, false) => B3,
-        (false, true) => B4,
+    let (fill, fg) = match (primary, resp.hovered()) {
+        (true, false) => (AC, Color32::WHITE),
+        (true, true) => (Color32::from_rgb(0x6A, 0xA0, 0xFF), Color32::WHITE),
+        (false, false) => (B3, T1),
+        (false, true) => (B4, Color32::WHITE),
     };
-    p.rect_filled(r, 3.0, fill);
+    p.rect_filled(r, 6.0, fill);
     let mut x = r.min.x + 10.0;
     if let Some(i) = icon {
-        icons::paint(p, Rect::from_min_size(pos2(x, r.center().y - 7.5), vec2(15.0, 15.0)), i, Color32::WHITE);
+        icons::paint(p, Rect::from_min_size(pos2(x, r.center().y - 7.5), vec2(15.0, 15.0)), i, fg);
         x += 20.0;
     }
-    p.galley(pos2(x, r.center().y - g.size().y * 0.5), g, Color32::WHITE);
+    p.galley(pos2(x, r.center().y - g.size().y * 0.5), g, fg);
     resp
-}
-
-fn vsep(ui: &mut Ui) {
-    let (r, _) = ui.allocate_exact_size(vec2(9.0, 22.0), Sense::hover());
-    ui.painter().line_segment([r.center_top(), r.center_bottom()], Stroke::new(1.0, B4));
 }
 
 fn small_label(ui: &mut Ui, text: &str) {
@@ -217,20 +186,6 @@ fn mode_color(m: CombineMode) -> Color32 {
     }
 }
 
-fn prim_icon(k: PrimKind) -> Icon {
-    match k {
-        PrimKind::Box => Icon::Box,
-        PrimKind::Cylinder => Icon::Cylinder,
-        PrimKind::Sphere => Icon::Sphere,
-        PrimKind::Capsule => Icon::Capsule,
-        PrimKind::Torus => Icon::Torus,
-        PrimKind::Cone => Icon::Cone,
-        PrimKind::Prism => Icon::Prism,
-        PrimKind::Tube => Icon::Tube,
-        PrimKind::Profile => Icon::Profile,
-    }
-}
-
 /// True on the first change of a drag or typed edit: one history entry per
 /// gesture.
 fn live_start(ui: &Ui, resp: &Response) -> bool {
@@ -242,8 +197,6 @@ fn live_start(ui: &Ui, resp: &Response) -> bool {
     start
 }
 
-/// "Label :  [ value ⇕ ]" row, label right-aligned like 3ds Max rollouts.
-/// Returns (changed, first change of the gesture).
 /// A millimetre field with a French decimal comma.
 fn mm_drag(v: &mut f32, decimals: usize) -> egui::DragValue<'_> {
     egui::DragValue::new(v)
@@ -253,14 +206,21 @@ fn mm_drag(v: &mut f32, decimals: usize) -> egui::DragValue<'_> {
         .custom_parser(|t| t.replace(',', ".").trim_end_matches(|c: char| c.is_alphabetic() || c == ' ').parse().ok())
 }
 
+/// « Label   [ value ] » row. Returns (changed, first change of the gesture).
 fn spin(ui: &mut Ui, label: &str, v: &mut f32, speed: f64, range: std::ops::RangeInclusive<f32>, suffix: &str, decimals: usize) -> (bool, bool) {
     let mut out = (false, false);
     ui.horizontal(|ui| {
-        let (lr, _) = ui.allocate_exact_size(vec2(118.0, 20.0), Sense::hover());
-        ui.painter().text(lr.right_center() - vec2(4.0, 0.0), Align2::RIGHT_CENTER, label, regular(12.0), T2);
+        let (lr, _) = ui.allocate_exact_size(vec2(104.0, 22.0), Sense::hover());
+        ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(12.0), T2);
         let resp = ui.add_sized(
-            vec2(ui.available_width().min(132.0), 20.0),
-            egui::DragValue::new(v).speed(speed).range(range).suffix(suffix).fixed_decimals(decimals).custom_formatter(move |x, _| format!("{:.*}", decimals, x).replace('.', ",") + "").custom_parser(|t| t.replace(',', ".").trim_end_matches(|c: char| c.is_alphabetic() || c == ' ').parse().ok()),
+            vec2(ui.available_width().min(150.0), 22.0),
+            egui::DragValue::new(v)
+                .speed(speed)
+                .range(range)
+                .suffix(suffix)
+                .fixed_decimals(decimals)
+                .custom_formatter(move |x, _| format!("{:.*}", decimals, x).replace('.', ","))
+                .custom_parser(|t| t.replace(',', ".").trim_end_matches(|c: char| c.is_alphabetic() || c == ' ' || c == '°').parse().ok()),
         );
         let start = live_start(ui, &resp);
         out = (resp.changed(), start);
@@ -268,362 +228,377 @@ fn spin(ui: &mut Ui, label: &str, v: &mut f32, speed: f64, range: std::ops::Rang
     out
 }
 
-fn rollout(ui: &mut Ui, id: &str, title: &str, open: bool, add: impl FnOnce(&mut Ui)) {
-    egui::CollapsingHeader::new(RichText::new(title).font(semibold(12.0)).color(T1)).id_salt(id).default_open(open).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 5.0;
-        add(ui);
-        ui.add_space(2.0);
-    });
-}
-
-// --------------------------------------------------------------- menu bar
-
-fn menu_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
-    dock(ctx, "studio-menu", rect, B1, |ui| {
-        ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, LINE));
-        ui.add_space(3.0);
-        ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            egui::containers::menu::MenuBar::new().config(menu_cfg()).ui(ui, |ui| {
-                ui.menu_button("Fichier", |ui| {
-                    if ui.add(egui::Button::new("Nouveau · Ouvrir…")).clicked() {
-                        st.files_open = true;
-                    }
-                    if ui.add(egui::Button::new("Enregistrer").shortcut_text("Ctrl+S")).clicked() {
-                        st.save();
-                    }
-                    ui.separator();
-                    if ui.button("Exporter le mesh…").clicked() {
-                        st.export_open = true;
-                    }
-                    ui.separator();
-                    if ui.button("Réglages…").clicked() {
-                        st.settings_open = true;
-                    }
-                });
-                ui.menu_button("Édition", |ui| {
-                    if st.bake_mode() {
-                        ui.disable(); // BAKE: the model is frozen
-                    }
-                    if ui.add(egui::Button::new("Annuler").shortcut_text("Ctrl+Z")).clicked() {
-                        st.undo();
-                    }
-                    if ui.add(egui::Button::new("Rétablir").shortcut_text("Ctrl+Y")).clicked() {
-                        st.redo();
-                    }
-                    ui.separator();
-                    let has = st.selection.is_some();
-                    if ui.add_enabled(has, egui::Button::new("Dupliquer").shortcut_text("Ctrl+D")).clicked() {
-                        st.duplicate_selected();
-                    }
-                    if ui.add_enabled(has, egui::Button::new("Supprimer").shortcut_text("Suppr")).clicked() {
-                        st.delete_selected();
-                    }
-                    if ui.add_enabled(has, egui::Button::new("Grouper")).clicked() {
-                        st.group_selected();
-                    }
-                    ui.separator();
-                    if ui.add_enabled(has || !st.edge_sel.is_empty(), egui::Button::new("Désélectionner").shortcut_text("Échap")).clicked() {
-                        st.clear_edge();
-                        st.select(None);
-                    }
-                    ui.separator();
-                    if ui.button("Réglages…").clicked() {
-                        st.settings_open = true;
-                    }
-                });
-                ui.menu_button("Créer", |ui| {
-                    if st.bake_mode() {
-                        ui.disable(); // BAKE: the model is frozen
-                    }
-                    for k in PRIMS {
-                        if ui.add(egui::Button::new(k.label()).selected(st.tool == Tool::Place(k))).clicked() {
-                            st.commit_placement();
-                            st.tool = Tool::Place(k);
-                        }
-                    }
-                    ui.separator();
-                    small_label(ui, "Mode des nouvelles formes");
-                    for m in MODES {
-                        if ui.radio(st.mode == m, m.label()).clicked() {
-                            st.mode = m;
-                        }
-                    }
-                });
-                ui.menu_button("Modifier", |ui| {
-                    if st.bake_mode() {
-                        ui.disable(); // BAKE: the model is frozen
-                    }
-                    let target = st.selection.filter(|id| st.scene.node(*id).map(|n| n.shape().is_some()).unwrap_or(false));
-                    small_label(ui, "Combinaison de la sélection");
-                    for m in MODES {
-                        let cur = target.and_then(|id| st.scene.node(id)).map(|n| n.combine.mode);
-                        if ui.add_enabled(target.is_some(), egui::RadioButton::new(cur == Some(m), m.label())).clicked() {
-                            if let Some(id) = target {
-                                st.edit("Mode", id, |n| n.combine.mode = m);
-                            }
-                        }
-                    }
-                    ui.separator();
-                    if ui.checkbox(&mut st.sym_x, "Symétrie X des nouvelles formes").changed() {
-                        st.view_changed();
-                    }
-                    if ui.add_enabled(st.selection.is_some(), egui::Button::new("Cadrer la sélection").shortcut_text("F")).clicked() {
-                        st.frame_selection();
-                    }
-                });
-                ui.menu_button("Affichage", |ui| {
-                    let cur = st.camera.preset_of();
-                    for (p, l) in presets() {
-                        if ui.radio(cur == p, l).clicked() {
-                            st.camera.preset(p);
-                            st.view_changed();
-                        }
-                    }
-                    ui.separator();
-                    if ui.checkbox(&mut st.grid, "Grille").changed() {
-                        st.view_changed();
-                    }
-                    ui.checkbox(&mut st.snap, "Snap");
-                    if ui.button("Cadrer toute la scène").clicked() {
-                        st.frame_all();
-                    }
-                    ui.separator();
-                    if ui.button("Passer à l'interface Atelier").clicked() {
-                        st.set_ui_mode(UiMode::Atelier);
-                    }
-                });
-                ui.menu_button("Aide", |ui| {
-                    small_label(ui, "Raccourcis");
-                    for (k, what) in [
-                        ("Ctrl+Z / Ctrl+Y", "annuler / rétablir"),
-                        ("Alt + clic gauche", "orbite"),
-                        ("Alt + clic molette", "pan"),
-                        ("Alt + clic droit · molette", "zoom"),
-                        ("Clic droit · clic maintenu", "marking menu"),
-                        ("Q · R · C", "sélection · cube · cylindre"),
-                        ("Ctrl pendant la création", "inverse + / −"),
-                        ("Glisser (outil Q)", "rectangle de sélection"),
-                        ("Ctrl + clic · Maj + glisser", "ajouter à la sélection"),
-                        ("F", "cadrer la sélection"),
-                        ("Suppr", "supprimer"),
-                        ("Échap", "désélectionner"),
-                    ] {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(k).font(medium(12.0)).color(T1));
-                            ui.label(RichText::new(what).font(regular(12.0)).color(T2));
-                        });
-                    }
-                });
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-                let r = ui.add(egui::Label::new(RichText::new("Interface : Studio").font(regular(12.0)).color(T2)).sense(Sense::click()));
-                if r.on_hover_text("Changer d'interface (Réglages)").clicked() {
-                    st.settings_open = true;
-                }
-            });
-        });
-    });
+fn sub_head(ui: &mut Ui, title: &str) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(title.to_uppercase()).font(semibold(10.0)).color(T3));
 }
 
 fn presets() -> [(ViewPreset, &'static str); 4] {
     [(ViewPreset::Perspective, "Perspective"), (ViewPreset::Front, "Face"), (ViewPreset::Right, "Droite"), (ViewPreset::Top, "Dessus")]
 }
 
-// ---------------------------------------------------------------- toolbar
+// ---------------------------------------------------------------- top bar
 
-fn toolbar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
-    dock(ctx, "studio-tools", rect, B2, |ui| {
+fn top_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
+    dock(ctx, "studio-top", rect, B1, |ui| {
         ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, LINE));
+        // the document, centred
+        let name = st.doc_name.clone();
+        let dirty = st.scene_version != st.saved_version;
+        let g = ui.painter().layout_no_wrap(name, semibold(13.0), T1);
+        let sub = ui.painter().layout_no_wrap(if dirty { "· modifié".to_string() } else { "· enregistré".to_string() }, regular(11.5), T3);
+        let total = g.size().x + 6.0 + sub.size().x;
+        let x0 = rect.center().x - total * 0.5;
+        let gw = g.size().x;
+        ui.painter().galley(pos2(x0, rect.center().y - g.size().y * 0.5), g, T1);
+        ui.painter().galley(pos2(x0 + gw + 6.0, rect.center().y - sub.size().y * 0.5), sub, T3);
+
         ui.add_space(5.0);
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.add_space(6.0);
-            let bake = st.bake_mode();
-            // BAKE: the editing tools are gone, only the view toggles stay
-            if !bake {
-            if tool_btn(ui, Icon::Undo, false, "Annuler (Ctrl+Z)").clicked() {
-                st.undo();
+            ui.add_space(9.0);
+            let (r, _) = ui.allocate_exact_size(vec2(24.0, 26.0), Sense::hover());
+            let logo = Rect::from_center_size(r.center(), vec2(22.0, 22.0));
+            ui.painter().rect_filled(logo, 6.0, AC);
+            icons::paint(ui.painter(), Rect::from_center_size(logo.center(), vec2(14.0, 14.0)), Icon::Cube, Color32::WHITE);
+            ui.add_space(4.0);
+            egui::containers::menu::MenuBar::new().config(menu_cfg()).ui(ui, |ui| {
+                menus(ui, st);
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.add_space(8.0);
+                if small_btn(ui, Icon::Settings, st.settings_open, "Réglages : interface, navigation, création").clicked() {
+                    st.settings_open = !st.settings_open;
+                }
+                let r = small_btn(ui, Icon::Light, st.display_open, "Affichage : lumière, ombres, anticrénelage");
+                ui::light_toggle(st, &r);
+                ui.add_space(6.0);
+                // the command palette field
+                let (r, resp) = ui.allocate_exact_size(vec2(300.0, 26.0), Sense::click());
+                let p = ui.painter();
+                p.rect(r, 7.0, if resp.hovered() { B2 } else { B0 }, Stroke::new(1.0, if resp.hovered() { SEL_LINE } else { LINE }), StrokeKind::Inside);
+                icons::paint(p, Rect::from_min_size(pos2(r.min.x + 9.0, r.center().y - 6.5), vec2(13.0, 13.0)), Icon::Frame, T3);
+                p.text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, "Commande, forme, réglage…", regular(12.0), T3);
+                let kr = Rect::from_min_size(pos2(r.max.x - 56.0, r.min.y + 4.0), vec2(50.0, 18.0));
+                p.rect(kr, 4.0, B2, Stroke::new(1.0, LINE), StrokeKind::Inside);
+                p.text(kr.center(), Align2::CENTER_CENTER, "Espace", medium(10.5), T2);
+                if resp.on_hover_text("Palette de commandes (Espace)").clicked() {
+                    open_palette(ui.ctx());
+                }
+            });
+        });
+    });
+}
+
+fn menus(ui: &mut Ui, st: &mut AppState) {
+    ui.menu_button("Fichier", |ui| {
+        if ui.add(egui::Button::new("Nouveau · Ouvrir…")).clicked() {
+            st.files_open = true;
+        }
+        if ui.add(egui::Button::new("Enregistrer").shortcut_text("Ctrl+S")).clicked() {
+            st.save();
+        }
+        ui.separator();
+        if ui.button("Exporter le mesh…").clicked() {
+            st.export_open = true;
+        }
+        ui.separator();
+        if ui.button("Réglages…").clicked() {
+            st.settings_open = true;
+        }
+    });
+    ui.menu_button("Édition", |ui| {
+        if ui.add(egui::Button::new("Annuler").shortcut_text("Ctrl+Z")).clicked() {
+            st.undo();
+        }
+        if ui.add(egui::Button::new("Rétablir").shortcut_text("Ctrl+Y")).clicked() {
+            st.redo();
+        }
+        ui.separator();
+        let has = st.selection.is_some();
+        if ui.add_enabled(has, egui::Button::new("Dupliquer").shortcut_text("Ctrl+D")).clicked() {
+            st.duplicate_selected();
+        }
+        if ui.add_enabled(has, egui::Button::new("Supprimer").shortcut_text("Suppr")).clicked() {
+            st.delete_selected();
+        }
+        if ui.add_enabled(has, egui::Button::new("Grouper")).clicked() {
+            st.group_selected();
+        }
+        if ui.add_enabled(has, egui::Button::new("Symétrie X de la sélection")).clicked() {
+            if let Some(id) = st.selection {
+                st.edit("Symétrie", id, |n| n.mirror.x = !n.mirror.x);
             }
-            if tool_btn(ui, Icon::Redo, false, "Rétablir (Ctrl+Y)").clicked() {
-                st.redo();
+        }
+        ui.separator();
+        if ui.add_enabled(has || !st.edge_sel.is_empty(), egui::Button::new("Désélectionner").shortcut_text("Échap")).clicked() {
+            st.clear_edge();
+            st.select(None);
+        }
+    });
+    ui.menu_button("Créer", |ui| {
+        for k in PRIMS {
+            let key = ui::prim_key(k).unwrap_or("");
+            if ui.add(egui::Button::new(k.label()).shortcut_text(key).selected(st.tool == Tool::Place(k))).clicked() {
+                st.commit_placement();
+                st.tool = Tool::Place(k);
             }
-            vsep(ui);
-            let sel = st.tool == Tool::Select;
+        }
+        ui.separator();
+        small_label(ui, "Mode des nouvelles formes");
+        for m in MODES {
+            if ui.radio(st.mode == m, m.label()).clicked() {
+                st.mode = m;
+            }
+        }
+        if ui.checkbox(&mut st.sym_x, "Symétrie X des nouvelles formes").changed() {
+            st.view_changed();
+        }
+    });
+    ui.menu_button("Vue", |ui| {
+        let cur = st.camera.preset_of();
+        for (p, l) in presets() {
+            if ui.radio(cur == p, l).clicked() {
+                st.camera.preset(p);
+                st.view_changed();
+            }
+        }
+        ui.separator();
+        if ui.add(egui::Button::new("Cadrer la sélection").shortcut_text("F")).clicked() {
+            st.frame_selection();
+        }
+        if ui.button("Cadrer toute la scène").clicked() {
+            let (lo, hi) = st.scene.bounds();
+            st.frame_smooth(lo, hi);
+        }
+        ui.separator();
+        if ui.checkbox(&mut st.grid, "Grille").changed() {
+            st.view_changed();
+        }
+        ui.checkbox(&mut st.snap, "Snap");
+        ui.separator();
+        if ui.button("Passer à l'interface Établi").clicked() {
+            st.set_ui_mode(UiMode::Atelier);
+        }
+    });
+    ui.menu_button("Aide", |ui| {
+        small_label(ui, "Raccourcis");
+        for (k, what) in [
+            ("Espace", "palette de commandes"),
+            ("Q · 1 · 2", "sélection · objet · arête"),
+            ("R · C · S · A · T", "cube · cylindre · sphère · capsule · tore"),
+            ("Tab · Entrée", "cotes au clavier pendant la création"),
+            ("Ctrl pendant la création", "inverse + / −"),
+            ("F", "cadrer la sélection"),
+            ("Ctrl+Z / Ctrl+Y", "annuler / rétablir"),
+            ("Ctrl+D · Suppr", "dupliquer · supprimer"),
+            ("Échap", "désélectionner"),
+        ] {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(k).font(medium(12.0)).color(T1));
+                ui.label(RichText::new(what).font(regular(12.0)).color(T2));
+            });
+        }
+    });
+}
+
+// ------------------------------------------------------------- tool column
+
+fn rail(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
+    dock(ctx, "studio-rail", rect, B1, |ui| {
+        ui.painter().line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, LINE));
+        ui.spacing_mut().item_spacing.y = 3.0;
+        ui.add_space(8.0);
+        let group = |ui: &mut Ui, title: &str| {
+            let (r, _) = ui.allocate_exact_size(vec2(RAIL_W, 18.0), Sense::hover());
+            ui.painter().text(r.center() + vec2(0.0, 2.0), Align2::CENTER_CENTER, title, semibold(8.5), T3);
+        };
+        let centred = |ui: &mut Ui, f: &mut dyn FnMut(&mut Ui)| {
+            ui.horizontal(|ui| {
+                ui.add_space((RAIL_W - 34.0) * 0.5);
+                f(ui);
+            });
+        };
+        let sel = st.tool == Tool::Select;
+        centred(ui, &mut |ui| {
             let r = tool_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (Q ou 1)");
             ui::key_hint(ui, &r, "Q");
             if r.clicked() {
                 st.set_pick_mode(PickMode::Object);
             }
+        });
+        centred(ui, &mut |ui| {
             let r = tool_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins");
             ui::key_hint(ui, &r, "2");
             if r.clicked() {
                 st.set_pick_mode(PickMode::Edge);
             }
-            vsep(ui);
-            ui.label(RichText::new("Créer").font(regular(11.5)).color(T3));
-            for k in PRIMS {
-                let key = ui::prim_key(k);
-                let tip = format!("{}{} : glisser la base, puis la hauteur", k.label(), key.map(|c| format!(" ({c})")).unwrap_or_default());
-                let r = tool_btn(ui, prim_icon(k), st.tool == Tool::Place(k), &tip);
-                if let Some(c) = key {
-                    ui::key_hint(ui, &r, c);
-                }
+        });
+        group(ui, "FORMES");
+        for k in PRIMS {
+            centred(ui, &mut |ui| {
+                let key = ui::prim_key(k).unwrap_or("");
+                let r = tool_btn(ui, ui::prim_icon(k), st.tool == Tool::Place(k), &format!("{} ({key}) : glisser, ou taper les cotes", k.label()));
+                ui::key_hint(ui, &r, key);
                 if r.clicked() {
                     st.commit_placement();
                     st.tool = Tool::Place(k);
                 }
-            }
-            ui.vertical(|ui| {
-                ui.add_space(8.0);
-                ui::creation_btn(ui, st, 24.0, true);
             });
-            vsep(ui);
-            let shown = st.effective_mode();
-            for m in MODES {
-                if mode_tool_btn(ui, m, shown == m).clicked() {
+        }
+        group(ui, "MODE");
+        let shown = st.effective_mode();
+        for m in MODES {
+            centred(ui, &mut |ui| {
+                let (r, resp) = ui.allocate_exact_size(vec2(34.0, 30.0), Sense::click());
+                let c = mode_color(m);
+                let on = shown == m;
+                let p = ui.painter();
+                if on {
+                    p.rect(r, 7.0, tint(c, 0.16), Stroke::new(1.0, tint(c, 0.7)), StrokeKind::Inside);
+                } else if resp.hovered() {
+                    p.rect_filled(r, 7.0, B3);
+                }
+                ui::paint_mode_glyph(p, r.center(), m, if on { c } else { T2 }, 12.0);
+                if resp.on_hover_text(if m == CombineMode::Add { "Add : ajoute la forme" } else { "Carve : creuse (Ctrl inverse pendant la création)" }).clicked() {
                     st.set_mode(m);
                 }
-            }
-            vsep(ui);
-            if tool_btn(ui, Icon::Mirror, st.sym_x, "Symétrie X des nouvelles formes").clicked() {
-                st.sym_x = !st.sym_x;
-            }
-            if tool_btn(ui, Icon::Magnet, st.snap, "Snap").clicked() {
-                st.snap = !st.snap;
-            }
-            }
-            if tool_btn(ui, Icon::Grid, st.grid, "Grille").clicked() {
-                st.grid = !st.grid;
-                st.view_changed();
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.add_space(6.0);
-                // the Bake is set aside (Romain, 10 nov.): pure SDF modelling
-                if text_btn(ui, Some(Icon::Export), "Exporter", false).clicked() {
-                    st.export_open = true;
-                }
-                let r = tool_btn(ui, Icon::Light, st.display_open, "Affichage : lumière, ombres, anticrénelage");
-                ui::light_toggle(st, &r);
-                if tool_btn(ui, Icon::Settings, st.settings_open, "Réglages").clicked() {
-                    st.settings_open = true;
-                }
             });
-        });
-    });
-}
-
-// ---------------------------------------------------------- scene explorer
-
-/// The Bake panel in place of the scene explorer (left column), with its
-/// diagnostic layers; « Explorateur » goes back.
-fn bake_panel(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
-    dock(ctx, "studio-bake", rect, B1, |ui| {
-        ui.painter().line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, LINE));
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Bake").font(semibold(12.5)).color(T1));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(6.0);
-                if text_btn(ui, None, "Explorateur", false).clicked() {
-                    st.set_bake_mode(false);
-                }
-            });
-        });
-        egui::ScrollArea::vertical().id_salt("studio-bake-scroll").auto_shrink([false, false]).show(ui, |ui| {
-            egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
-                ui.set_width(rect.width() - 22.0);
-                ui::bake_body(ui, st, true);
-            });
-        });
-    });
-}
-
-fn explorer(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
-    dock(ctx, "studio-explorer", rect, B1, |ui| {
-        ui.painter().line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, LINE));
-        ui.spacing_mut().item_spacing.y = 0.0;
-        header(ui, "Explorateur de scène");
-        let w = rect.width() - 1.0;
-        // column titles
-        let (hr, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
-        {
-            let p = ui.painter();
-            p.text(pos2(hr.min.x + 8.0, hr.center().y), Align2::LEFT_CENTER, "Nom", regular(11.5), T3);
-            p.text(pos2(hr.max.x - 138.0, hr.center().y), Align2::LEFT_CENTER, "Type", regular(11.5), T3);
-            p.text(pos2(hr.max.x - 78.0, hr.center().y), Align2::LEFT_CENTER, "Mode", regular(11.5), T3);
-            p.line_segment([hr.left_bottom(), hr.right_bottom()], Stroke::new(1.0, B3));
         }
-        let bake_h = 224.0;
-        let list_h = (rect.height() - 24.0 - 22.0 - bake_h).max(60.0);
+        group(ui, "ÉDITION");
+        let has = st.selection.is_some();
+        let mirrored = st.selection.and_then(|id| st.scene.node(id)).map(|n| n.mirror.x).unwrap_or(false);
+        centred(ui, &mut |ui| {
+            if tool_btn(ui, Icon::Mirror, mirrored, "Symétrie X de la sélection").clicked() && has {
+                if let Some(id) = st.selection {
+                    st.edit("Symétrie", id, |n| n.mirror.x = !n.mirror.x);
+                }
+            }
+        });
+        centred(ui, &mut |ui| {
+            if tool_btn(ui, Icon::Duplicate, false, "Dupliquer (Ctrl+D)").clicked() && has {
+                st.duplicate_selected();
+            }
+        });
+        centred(ui, &mut |ui| {
+            if tool_btn(ui, Icon::Folder, false, "Grouper la sélection").clicked() && has {
+                st.group_selected();
+            }
+        });
+    });
+}
+
+// ------------------------------------------------------------- side panel
+
+fn side_panel(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
+    dock(ctx, "studio-side", rect, B1, |ui| {
+        ui.painter().line_segment([rect.left_top(), rect.left_bottom()], Stroke::new(1.0, LINE));
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let w = rect.width() - 1.0;
         let rows = st.scene.rows();
-        egui::ScrollArea::vertical().id_salt("explorer-rows").max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+        let n = st.scene.shape_count();
+        // scene
+        ui.add_space(6.0);
+        section_head(ui, "SCÈNE", &format!("{n} forme{}", if n > 1 { "s" } else { "" }));
+        let list_h = (rows.len().max(1) as f32 * 27.0 + 4.0).min(rect.height() * 0.3);
+        egui::ScrollArea::vertical().id_salt("studio-scene").max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
             if rows.is_empty() {
-                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Scène vide · Créer > Cube ou Cylindre").font(regular(12.0)).color(T2));
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("Scène vide · R, C, S, A ou T pour créer").font(regular(12.0)).color(T2));
                 });
             }
-            for (i, (id, depth)) in rows.iter().enumerate() {
-                explorer_row(ui, st, *id, *depth, i, w);
+            for (id, depth) in rows.iter() {
+                scene_row(ui, st, *id, *depth, w);
             }
         });
-        // bake summary
+        ui.add_space(6.0);
         let (sep, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
         ui.painter().rect_filled(sep, 0.0, LINE);
-        bake_box(ui, st);
+        // properties
+        let props_h = rect.height() - list_h - 6.0 - 26.0 - 7.0 - HIST_H;
+        egui::ScrollArea::vertical().id_salt("studio-props").max_height(props_h).min_scrolled_height(props_h).auto_shrink([false, false]).show(ui, |ui| {
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+                ui.set_width(w - 26.0);
+                ui.spacing_mut().item_spacing = vec2(6.0, 5.0);
+                properties(ui, st);
+            });
+        });
+        // history
+        let (sep, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
+        ui.painter().rect_filled(sep, 0.0, LINE);
+        ui.add_space(6.0);
+        section_head(ui, "HISTORIQUE", &format!("{} opération{}", rows.len(), if rows.len() > 1 { "s" } else { "" }));
+        egui::ScrollArea::vertical().id_salt("studio-hist").auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            for (i, (id, _)) in rows.iter().enumerate() {
+                history_row(ui, st, *id, i, w);
+            }
+        });
     });
 }
 
-fn explorer_row(ui: &mut Ui, st: &mut AppState, id: NodeId, depth: usize, i: usize, w: f32) {
+fn row_frame(ui: &mut Ui, w: f32, selected: bool, hovered: bool, r: Rect) {
+    let _ = w;
+    let p = ui.painter();
+    let r = r.shrink2(vec2(8.0, 0.0));
+    if selected {
+        p.rect(r, 6.0, SEL, Stroke::new(1.0, SEL_LINE), StrokeKind::Inside);
+    } else if hovered {
+        p.rect_filled(r, 6.0, B2);
+    }
+}
+
+/// Mode badge of a row: « + » blue, « − » orange.
+fn mode_badge(ui: &Ui, at: egui::Pos2, m: CombineMode, dim: f32) {
+    let c = mode_color(m);
+    let r = Rect::from_center_size(at, vec2(16.0, 16.0));
+    ui.painter().rect_filled(r, 4.0, tint(c, 0.16 * dim));
+    ui::paint_mode_glyph(ui.painter(), r.center(), m, tint(c, dim), 9.0);
+}
+
+fn scene_row(ui: &mut Ui, st: &mut AppState, id: NodeId, depth: usize, w: f32) {
     let Some(n) = st.scene.node(id).cloned() else { return };
-    let (r, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::click());
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
     let selected = st.is_selected(id);
     let dim = if n.visible { 1.0 } else { 0.45 };
-    let p = ui.painter();
-    if selected {
-        p.rect_filled(r, 0.0, SEL);
-    } else if resp.hovered() {
-        p.rect_filled(r, 0.0, B2);
-    } else if i % 2 == 1 {
-        p.rect_filled(r, 0.0, Color32::from_rgb(0x29, 0x2A, 0x2D));
-    }
-    let x0 = r.min.x + 8.0 + depth as f32 * 14.0;
-    let fg = if selected { SEL_T } else { crate::theme::tint(T1, dim) };
-    let fg2 = if selected { SEL_T } else { crate::theme::tint(T2, dim) };
+    row_frame(ui, w, selected, resp.hovered(), r);
+    let x0 = r.min.x + 16.0 + depth.saturating_sub(1) as f32 * 14.0;
     let mut toggled = false;
     if n.is_group() {
         let cr = Rect::from_min_size(pos2(x0, r.center().y - 5.0), vec2(10.0, 10.0));
-        icons::paint(p, cr, if n.expanded { Icon::Chevron } else { Icon::ChevronRight }, fg2);
-        toggled = ui.interact(cr.expand(5.0), Id::new(("x-exp", id)), Sense::click()).clicked();
+        icons::paint(ui.painter(), cr, if n.expanded { Icon::Chevron } else { Icon::ChevronRight }, T2);
+        toggled = ui.interact(cr.expand(5.0), Id::new(("s-exp", id)), Sense::click()).clicked();
+        icons::paint(ui.painter(), Rect::from_min_size(pos2(x0 + 14.0, r.center().y - 7.0), vec2(14.0, 14.0)), Icon::Folder, tint(T2, dim));
+    } else {
+        mode_badge(ui, pos2(x0 + 8.0, r.center().y), n.combine.mode, dim);
     }
-    let p = ui.painter();
-    let icon = n.shape().map(|s| prim_icon(s.kind)).unwrap_or(Icon::Folder);
-    icons::paint(p, Rect::from_min_size(pos2(x0 + 12.0, r.center().y - 7.0), vec2(14.0, 14.0)), icon, fg2);
-    let name_max = (r.max.x - 142.0) - (x0 + 32.0);
-    let mut job = egui::text::LayoutJob::single_section(n.name.clone(), egui::TextFormat::simple(regular(12.0), fg));
-    job.wrap = egui::text::TextWrapping { max_width: name_max.max(20.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let fg = if selected { SEL_T } else { tint(T1, dim) };
+    let mut info = n.type_label();
+    if n.mirror.any() {
+        info += " · sym.";
+    }
+    let ig = ui.painter().layout_no_wrap(info, regular(11.5), if selected { SEL_T } else { tint(T3, dim.max(0.7)) });
+    let ix = r.max.x - 36.0 - ig.size().x;
+    let name_max = (ix - 8.0 - (x0 + 26.0)).max(20.0);
+    let mut job = egui::text::LayoutJob::single_section(n.name.clone(), egui::TextFormat::simple(if selected { medium(12.5) } else { regular(12.5) }, fg));
+    job.wrap = egui::text::TextWrapping { max_width: name_max, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
     let g = ui.painter().layout_job(job);
     let p = ui.painter();
-    p.galley(pos2(x0 + 32.0, r.center().y - g.size().y * 0.5), g, fg);
-    p.text(pos2(r.max.x - 138.0, r.center().y), Align2::LEFT_CENTER, n.type_label(), regular(12.0), fg2);
-    if n.shape().is_some() || matches!(n.kind, NodeKind::Group { combined: true, .. }) {
-        let c = mode_color(n.combine.mode);
-        p.circle_filled(pos2(r.max.x - 74.0, r.center().y), 3.5, c);
-        p.text(pos2(r.max.x - 66.0, r.center().y), Align2::LEFT_CENTER, n.combine.mode.label(), regular(12.0), fg2);
-    }
-    let er = Rect::from_center_size(pos2(r.max.x - 12.0, r.center().y), vec2(13.0, 13.0));
-    icons::paint(p, er, if n.visible { Icon::Eye } else { Icon::EyeOff }, fg2);
-    let eye = ui.interact(er.expand(4.0), Id::new(("x-eye", id)), Sense::click());
+    p.galley(pos2(x0 + 26.0, r.center().y - g.size().y * 0.5), g, fg);
+    p.galley(pos2(ix, r.center().y - ig.size().y * 0.5), ig, T3);
+    let er = Rect::from_center_size(pos2(r.max.x - 22.0, r.center().y), vec2(13.0, 13.0));
+    icons::paint(p, er, if n.visible { Icon::Eye } else { Icon::EyeOff }, tint(T2, 0.8));
+    let eye = ui.interact(er.expand(4.0), Id::new(("s-eye", id)), Sense::click());
     if eye.clicked() {
         st.toggle_visible(id);
     } else if toggled {
         if let Some(nm) = st.scene.node_mut(id) {
             nm.expanded = !nm.expanded;
         }
+    } else if resp.double_clicked() {
+        st.frame_selection();
     } else if resp.clicked() {
         st.commit_placement();
         st.tool = Tool::Select;
@@ -632,195 +607,40 @@ fn explorer_row(ui: &mut Ui, st: &mut AppState, id: NodeId, depth: usize, i: usi
         } else {
             st.select(Some(id));
         }
-    } else if resp.double_clicked() {
-        st.frame_selection();
     }
 }
 
-fn bake_box(ui: &mut Ui, st: &mut AppState) {
-    use forme_core::bake::Quality;
-    let w = ui.available_width();
-    ui.add_space(6.0);
-    let stale = st.bake.stale(st.scene_version);
-    let error = st.bake.error.clone();
-    let (state, color) = match (&st.bake.job, &st.bake.result) {
-        (Some(_), _) => ("En cours…", AC),
-        _ if error.is_some() => ("Impossible", ERROR),
-        (None, Some(_)) if st.bake.pass.is_some() => ("Passe en cours…", AC),
-        (None, Some(_)) if stale => ("Périmé", CARVE),
-        (None, Some(_)) => ("À jour", OK),
-        (None, None) => ("Pas encore baké", T3),
+/// The operations in evaluation order, numbered: a click selects one.
+fn history_row(ui: &mut Ui, st: &mut AppState, id: NodeId, i: usize, w: f32) {
+    let Some(n) = st.scene.node(id).cloned() else { return };
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click());
+    let selected = st.is_selected(id);
+    row_frame(ui, w, selected, resp.hovered(), r);
+    let p = ui.painter();
+    p.text(pos2(r.min.x + 18.0, r.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), medium(11.0), T3);
+    if n.shape().is_some() {
+        mode_badge(ui, pos2(r.min.x + 42.0, r.center().y), n.combine.mode, 1.0);
+    }
+    let p = ui.painter();
+    let what = match n.shape() {
+        Some(sh) => format!("{} · {}", sh.kind.label(), n.combine.mode.label()),
+        None => n.type_label(),
     };
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        ui.label(RichText::new("Bake").font(semibold(12.0)).color(T1));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(8.0);
-            ui.label(RichText::new(state).font(medium(11.5)).color(color));
-        });
-    });
-    ui.add_space(4.0);
-    let rows: Vec<(String, String)> = match &st.bake.result {
-        _ if error.is_some() => vec![],
-        Some(b) => {
-            let s = &b.stats;
-            let faces = b.faces.len().max(1);
-            let mut rows: Vec<(String, String)> = vec![
-                ("Patchs".into(), fmt_int(s.patches)),
-                ("Faces".into(), fmt_int(b.faces.len())),
-                ("Quads".into(), format!("{:.0} %", 100.0 * s.quads as f64 / faces as f64)),
-                ("Bords ouverts".into(), fmt_int(s.open_edges)),
-                ("Non-manifold".into(), fmt_int(s.nonmanifold_edges)),
-                ("Écart max".into(), format!("{:.3} mm", s.max_dev).replace('.', ",")),
-                ("Durée".into(), if s.seconds < 1.0 { format!("{:.0} ms", s.seconds * 1000.0) } else { format!("{:.1} s", s.seconds).replace('.', ",") }),
-            ];
-            if st.bake.flat && s.faces_before_flat > 0 {
-                rows.push(("Loops plates".into(), format!("{} · {} → {}", s.flat_loops, fmt_int(s.faces_before_flat), fmt_int(b.faces.len()))));
-            }
-            rows
-        }
-        None => vec![("Faces".into(), "—".into()), ("Quads".into(), "—".into())],
-    };
-    // no fallback mesh: what the bake does not handle yet, or will not
-    let why = match (&error, st.bake.job.is_some()) {
-        (Some((_, why)), false) => Some((format!("Bake impossible : {why}"), ERROR)),
-        _ => st.bake_plan().err().map(|why| (format!("Bake : {why}"), ERROR)),
-    };
-    if let Some((text, color)) = why {
+    p.text(pos2(r.min.x + 58.0, r.center().y), Align2::LEFT_CENTER, &n.name, regular(12.0), if selected { SEL_T } else { T1 });
+    p.text(pos2(r.max.x - 16.0, r.center().y), Align2::RIGHT_CENTER, what, regular(11.0), T3);
+    if resp.on_hover_text("Sélectionner cette opération").clicked() {
+        st.commit_placement();
+        st.tool = Tool::Select;
+        st.select(Some(id));
+    }
+}
+
+fn properties(ui: &mut Ui, st: &mut AppState) {
+    let Some(id) = st.selection else {
+        ui.label(RichText::new("Aucune sélection").font(semibold(13.0)).color(T1));
+        ui.label(RichText::new("Clique une forme dans la vue ou dans la scène. Pour créer : une forme à gauche, puis glisse dans la vue ou tape ses cotes.").font(regular(12.0)).color(T2));
+        sub_head(ui, "Nouvelles formes");
         ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.add(egui::Label::new(RichText::new(text).font(regular(11.5)).color(color)).wrap());
-        });
-        ui.add_space(2.0);
-    }
-    for (k, v) in rows {
-        let (r, _) = ui.allocate_exact_size(vec2(w, 17.0), Sense::hover());
-        let p = ui.painter();
-        p.text(pos2(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, k, regular(12.0), T2);
-        p.text(pos2(r.max.x - 10.0, r.center().y), Align2::RIGHT_CENTER, v, medium(12.0), T1);
-    }
-    ui.add_space(4.0);
-    // optional second pass, off by default
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        let mut on = st.bake.flat;
-        let deg = forme_core::bake::decimate::FLAT_LOOPS_DEG;
-        let r = ui.checkbox(&mut on, format!("Retirer les loops plates (< {deg:.0}°)"));
-        if r.on_hover_text("Passe secondaire en option, désactivée par défaut : fusionne les quads des edge loops fermées qui ne font pas de volume.").changed() {
-            st.set_flat_pass(on);
-        }
-    });
-    ui.add_space(4.0);
-    // density + action on one line
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        egui::ComboBox::from_id_salt("bake-quality").width(110.0).selected_text(format!("Densité : {}", st.bake.quality.label())).show_ui(ui, |ui| {
-            for q in [Quality::Draft, Quality::Standard, Quality::Max] {
-                ui.selectable_value(&mut st.bake.quality, q, q.label());
-            }
-        });
-        if st.bake.job.is_some() {
-            if text_btn(ui, None, "Annuler", false).clicked() {
-                st.cancel_bake();
-            }
-        } else if text_btn(ui, Some(Icon::Bake), "Bake", true).clicked() {
-            st.start_bake();
-        }
-    });
-}
-
-// ----------------------------------------------------------- command panel
-
-fn command_panel(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
-    let tab_id = Id::new("studio-tab");
-    let mut tab = ctx.data(|d| d.get_temp::<u8>(tab_id)).map(|t| match t {
-        0 => Tab::Create,
-        2 => Tab::Display,
-        _ => Tab::Modify,
-    });
-    // like 3ds Max: picking another object opens Modifier, starting a
-    // placement opens Créer; otherwise the tab stays where the user put it
-    let seen_id = Id::new("studio-tab-seen");
-    let now = (st.selection, matches!(st.tool, Tool::Place(_)));
-    let seen = ctx.data(|d| d.get_temp::<(Option<NodeId>, bool)>(seen_id));
-    if seen != Some(now) {
-        if now.1 && st.selection.is_none() && seen.map_or(true, |s| !s.1) {
-            tab = Some(Tab::Create);
-        } else if st.selection.is_some() && seen.map_or(true, |s| s.0 != st.selection) {
-            tab = Some(Tab::Modify);
-        }
-        ctx.data_mut(|d| d.insert_temp(seen_id, now));
-    }
-    let mut tab = tab.unwrap_or(if st.selection.is_some() { Tab::Modify } else { Tab::Create });
-    dock(ctx, "studio-command", rect, B1, |ui| {
-        ui.painter().line_segment([rect.left_top(), rect.left_bottom()], Stroke::new(1.0, LINE));
-        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-        let w = rect.width();
-        let (tr, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
-        ui.painter().rect_filled(tr, 0.0, B2);
-        ui.painter().line_segment([tr.left_bottom(), tr.right_bottom()], Stroke::new(1.0, LINE));
-        let tabs = [(Tab::Create, Icon::Box, "Créer"), (Tab::Modify, Icon::Settings, "Modifier"), (Tab::Display, Icon::Eye, "Affichage")];
-        let tw = w / 3.0;
-        for (i, (t, icon, label)) in tabs.iter().enumerate() {
-            let r = Rect::from_min_size(tr.min + vec2(i as f32 * tw, 0.0), vec2(tw, 30.0));
-            let resp = ui.interact(r, Id::new(("ctab", i)), Sense::click());
-            let on = tab == *t;
-            let p = ui.painter();
-            if on {
-                p.rect_filled(r, 0.0, B1);
-                p.rect_filled(Rect::from_min_size(r.min, vec2(r.width(), 2.0)), 0.0, AC);
-            } else if resp.hovered() {
-                p.rect_filled(r, 0.0, B3);
-            }
-            if i > 0 {
-                p.line_segment([r.left_top(), r.left_bottom()], Stroke::new(1.0, LINE));
-            }
-            let g = p.layout_no_wrap(label.to_string(), medium(12.0), if on { T1 } else { T2 });
-            let x0 = r.center().x - (g.size().x + 20.0) * 0.5;
-            icons::paint(p, Rect::from_min_size(pos2(x0, r.center().y - 7.0), vec2(14.0, 14.0)), *icon, if on { T1 } else { T2 });
-            p.galley(pos2(x0 + 20.0, r.center().y - g.size().y * 0.5), g, if on { T1 } else { T2 });
-            if resp.clicked() {
-                tab = *t;
-            }
-        }
-        let body_h = rect.height() - 30.0;
-        egui::ScrollArea::vertical().id_salt("command-scroll").max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
-            egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 8)).show(ui, |ui| {
-                ui.set_width(w - 18.0);
-                ui.spacing_mut().item_spacing = vec2(6.0, 5.0);
-                match tab {
-                    Tab::Create => create_tab(ui, st),
-                    Tab::Modify => modify_tab(ui, st),
-                    Tab::Display => display_tab(ui, st),
-                }
-            });
-        });
-    });
-    let code = match tab {
-        Tab::Create => 0u8,
-        Tab::Modify => 1,
-        Tab::Display => 2,
-    };
-    ctx.data_mut(|d| d.insert_temp(tab_id, code));
-}
-
-fn create_tab(ui: &mut Ui, st: &mut AppState) {
-    rollout(ui, "c-prims", "Primitives", true, |ui| {
-        for k in PRIMS {
-            let on = st.tool == Tool::Place(k);
-            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
-            let p = ui.painter();
-            p.rect(r, 3.0, if on { SEL } else if resp.hovered() { B4 } else { B3 }, Stroke::new(1.0, if on { AC } else { Color32::from_rgb(0x4A, 0x4D, 0x53) }), StrokeKind::Inside);
-            icons::paint(p, Rect::from_min_size(pos2(r.min.x + 10.0, r.center().y - 8.0), vec2(16.0, 16.0)), prim_icon(k), if on { Color32::WHITE } else { T1 });
-            p.text(pos2(r.min.x + 34.0, r.center().y), Align2::LEFT_CENTER, k.label(), medium(12.5), if on { Color32::WHITE } else { T1 });
-            if resp.clicked() {
-                st.commit_placement();
-                st.tool = Tool::Place(k);
-            }
-        }
-    });
-    rollout(ui, "c-mode", "Mode des nouvelles formes", true, |ui| {
-        ui.horizontal_wrapped(|ui| {
             for m in MODES {
                 if ui.radio(st.mode == m, m.label()).clicked() {
                     st.mode = m;
@@ -828,141 +648,123 @@ fn create_tab(ui: &mut Ui, st: &mut AppState) {
             }
         });
         ui.checkbox(&mut st.sym_x, "Symétrie X (doubler les nouvelles formes)");
-    });
-    rollout(ui, "c-how", "Méthode", true, |ui| {
-        for line in [
-            "Glisser dans la vue : la base (le cube se trace coin à coin, le cylindre depuis le centre).",
-            "Relâcher, puis monter ou descendre pour la hauteur ; clic pour valider.",
-            "Clic simple : taille par défaut.",
-            "Vers le haut : Add (+), vers le bas : Carve (−) ; Ctrl inverse.",
-        ] {
-            ui.label(RichText::new(line).font(regular(12.0)).color(T2));
-        }
-    });
-}
-
-fn modify_tab(ui: &mut Ui, st: &mut AppState) {
-    let Some(id) = st.selection else {
-        ui.label(RichText::new("Aucune sélection").font(semibold(12.5)).color(T1));
-        ui.label(RichText::new("Clique une forme dans la vue ou dans l'explorateur de scène.").font(regular(12.0)).color(T2));
+        sub_head(ui, "Matière par défaut");
+        let cur = st.material;
+        materials(ui, st, None, cur);
         return;
     };
     let Some(node) = st.scene.node(id).cloned() else { return };
 
-    // name + summary of the operation, as a modifier stack
-    let mut name = node.name.clone();
-    let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY).font(medium(12.5)));
-    if r.changed() {
-        st.edit("Renommer", id, |n| n.name = name.clone());
-    }
-    small_label(ui, "Pile d'opérations");
-    egui::Frame::new().fill(B0).stroke(Stroke::new(1.0, B3)).corner_radius(CornerRadius::same(3)).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let w = ui.available_width();
-        let mut lines: Vec<(String, String, bool)> = vec![];
-        if let Some(sh) = node.shape() {
-            let edges = if sh.edges.is_empty() {
-                if sh.round > 0.0 || sh.chamfer > 0.0 {
-                    "uniformes".to_string()
-                } else {
-                    "vives".to_string()
-                }
-            } else {
-                format!("{} réglées", sh.edges.iter().filter(|r| **r != 0.0).count())
-            };
-            lines.push(("Arêtes".into(), edges, false));
-            lines.push((format!("Combinaison · {}", node.combine.mode.label()), if node.combine.blend > 0.0 { format!("raccord {}", fmt_mm2(node.combine.blend)) } else { "vif".into() }, false));
-            lines.push((sh.kind.label().to_string(), "forme de base".into(), true));
-        } else {
-            lines.push((node.type_label(), format!("{} éléments", node.children().len()), true));
-        }
-        for (a, b, base) in lines {
-            let (r, _) = ui.allocate_exact_size(vec2(w, 21.0), Sense::hover());
-            let p = ui.painter();
-            if base {
-                p.rect_filled(r, 0.0, SEL);
-            }
-            p.circle(pos2(r.min.x + 12.0, r.center().y), 4.0, Color32::from_rgb(0xE7, 0xE9, 0xEC), Stroke::new(1.0, Color32::from_gray(0x88)));
-            p.text(pos2(r.min.x + 24.0, r.center().y), Align2::LEFT_CENTER, a, regular(12.0), if base { Color32::WHITE } else { T1 });
-            p.text(pos2(r.max.x - 8.0, r.center().y), Align2::RIGHT_CENTER, b, regular(11.5), if base { SEL_T } else { T3 });
-        }
-    });
+    // name, type, mode, actions
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        if tool_btn(ui, Icon::Duplicate, false, "Dupliquer (Ctrl+D)").clicked() {
-            st.duplicate_selected();
+        let mut name = node.name.clone();
+        let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(150.0).font(semibold(13.5)));
+        if r.changed() {
+            st.edit("Renommer", id, |n| n.name = name.clone());
         }
-        if tool_btn(ui, if node.visible { Icon::Eye } else { Icon::EyeOff }, false, "Masquer / afficher").clicked() {
-            st.toggle_visible(id);
-        }
-        if tool_btn(ui, Icon::Frame, false, "Cadrer (F)").clicked() {
-            st.frame_selection();
-        }
-        if tool_btn(ui, Icon::Trash, false, "Supprimer (Suppr)").clicked() {
-            st.delete_selected();
-        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 1.0;
+            if small_btn(ui, Icon::Trash, false, "Supprimer (Suppr)").clicked() {
+                st.delete_selected();
+            }
+            if small_btn(ui, Icon::Frame, false, "Cadrer (F)").clicked() {
+                st.frame_selection();
+            }
+            if small_btn(ui, if node.visible { Icon::Eye } else { Icon::EyeOff }, false, "Masquer / afficher").clicked() {
+                st.toggle_visible(id);
+            }
+            if small_btn(ui, Icon::Duplicate, false, "Dupliquer (Ctrl+D)").clicked() {
+                st.duplicate_selected();
+            }
+        });
     });
     if st.selection.is_none() {
         return;
     }
+    let what = match node.shape() {
+        Some(sh) => format!("{} · {}", sh.kind.label(), node.combine.mode.label()),
+        None => node.type_label(),
+    };
+    ui.label(RichText::new(what).font(regular(11.5)).color(T3));
 
     if let Some(sh) = node.shape().cloned() {
-        rollout(ui, "m-params", "Paramètres", true, |ui| shape_params(ui, st, id, &sh));
+        sub_head(ui, "Forme");
+        shape_params(ui, st, id, &sh);
     }
     if node.shape().is_some() || matches!(node.kind, NodeKind::Group { combined: true, .. }) {
-        rollout(ui, "m-combine", "Combinaison", true, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for m in MODES {
-                    if ui.radio(node.combine.mode == m, m.label()).clicked() {
-                        st.mode = m;
-                        st.edit("Mode", id, |n| n.combine.mode = m);
-                    }
-                }
-            });
+        sub_head(ui, "Combinaison");
+        let items = MODES.map(|m| (m, m.label(), mode_color(m)));
+        if let Some(m) = ui::segmented(ui, &items, node.combine.mode, 28.0) {
+            st.mode = m;
+            st.edit("Mode", id, |n| n.combine.mode = m);
+        }
+        let mut b = node.combine.blend;
+        let (ch, start) = spin(ui, "Raccord", &mut b, 0.05, 0.0..=12.0, " mm", 2);
+        if ch {
+            st.edit_live("Raccord", id, start, |n| n.combine.blend = b);
+        }
+        if node.combine.blend > 0.0 {
             ui.horizontal(|ui| {
-                if ui.radio(node.combine.kind == BlendKind::Smooth, "Raccord lisse").clicked() {
+                if ui.radio(node.combine.kind == BlendKind::Smooth, "Lisse").clicked() {
                     st.edit("Type de raccord", id, |n| n.combine.kind = BlendKind::Smooth);
                 }
                 if ui.radio(node.combine.kind == BlendKind::Chamfer, "Chanfrein").clicked() {
                     st.edit("Type de raccord", id, |n| n.combine.kind = BlendKind::Chamfer);
                 }
             });
-            let mut b = node.combine.blend;
-            let (ch, start) = spin(ui, "Rayon du raccord :", &mut b, 0.05, 0.0..=12.0, " mm", 2);
-            if ch {
-                st.edit_live("Raccord", id, start, |n| n.combine.blend = b);
-            }
-        });
+        }
     }
-    rollout(ui, "m-edges", "Arêtes", true, |ui| edges_rollout(ui, st));
-    rollout(ui, "m-sym", "Symétrie", false, |ui| {
-        ui.horizontal(|ui| {
-            let m = node.mirror;
-            for (i, l, on) in [(0, "X", m.x), (1, "Y", m.y), (2, "Z", m.z)] {
-                let mut v = on;
-                if ui.checkbox(&mut v, l).changed() {
-                    st.edit("Symétrie", id, |n| match i {
-                        0 => n.mirror.x = v,
-                        1 => n.mirror.y = v,
-                        _ => n.mirror.z = v,
-                    });
-                }
+    if !st.edge_sel.is_empty() || node.shape().is_some() {
+        sub_head(ui, "Arêtes");
+        edges(ui, st);
+    }
+    sub_head(ui, "Position");
+    position(ui, st, id, &node);
+    sub_head(ui, "Symétrie");
+    ui.horizontal(|ui| {
+        let m = node.mirror;
+        for (i, l, on) in [(0, "X", m.x), (1, "Y", m.y), (2, "Z", m.z)] {
+            let mut v = on;
+            if ui.checkbox(&mut v, l).changed() {
+                st.edit("Symétrie", id, |n| match i {
+                    0 => n.mirror.x = v,
+                    1 => n.mirror.y = v,
+                    _ => n.mirror.z = v,
+                });
             }
-        });
+        }
     });
-    rollout(ui, "m-xform", "Transformation", false, |ui| {
-        let mut pos = node.transform.pos;
-        for (i, l) in ["Position X :", "Position Y :", "Position Z :"].iter().enumerate() {
-            let (ch, start) = spin(ui, l, &mut pos[i], 0.1, -10000.0..=10000.0, " mm", 2);
-            if ch {
+    sub_head(ui, "Matière");
+    materials(ui, st, Some(id), node.material);
+}
+
+/// X Y Z and rX rY rZ fields, three per row, coloured by axis.
+fn position(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
+    let mut pos = node.transform.pos;
+    let (ex, ey, ez) = node.transform.rot.to_euler(EulerRot::XYZ);
+    let mut rot = Vec3::new(ex.to_degrees(), ey.to_degrees(), ez.to_degrees());
+    let fw = ((ui.available_width() - 3.0 * 20.0 - 5.0 * 4.0) / 3.0).floor();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (i, (l, c)) in [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AXIS_Z)].iter().enumerate() {
+            ui.add_sized(vec2(16.0, 22.0), egui::Label::new(RichText::new(*l).font(semibold(11.5)).color(*c)));
+            let resp = ui.add_sized(vec2(fw, 22.0), mm_drag(&mut pos[i], 1).suffix(""));
+            let start = live_start(ui, &resp);
+            if resp.changed() {
                 st.edit_live("Position", id, start, |n| n.transform.pos = pos);
             }
         }
-        let (ex, ey, ez) = node.transform.rot.to_euler(EulerRot::XYZ);
-        let mut rot = Vec3::new(ex.to_degrees(), ey.to_degrees(), ez.to_degrees());
-        for (i, l) in ["Rotation X :", "Rotation Y :", "Rotation Z :"].iter().enumerate() {
-            let (ch, start) = spin(ui, l, &mut rot[i], 0.5, -360.0..=360.0, "°", 1);
-            if ch {
+    });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (i, (l, c)) in [("rX", AXIS_X), ("rY", AXIS_Y), ("rZ", AXIS_Z)].iter().enumerate() {
+            ui.add_sized(vec2(16.0, 22.0), egui::Label::new(RichText::new(*l).font(semibold(11.0)).color(*c)));
+            let resp = ui.add_sized(
+                vec2(fw, 22.0),
+                egui::DragValue::new(&mut rot[i]).speed(0.5).range(-360.0..=360.0).suffix("°").custom_formatter(|x, _| format!("{:.0}", x.round() + 0.0)),
+            );
+            let start = live_start(ui, &resp);
+            if resp.changed() {
                 let q = Quat::from_euler(EulerRot::XYZ, rot.x.to_radians(), rot.y.to_radians(), rot.z.to_radians());
                 st.edit_live("Rotation", id, start, |n| n.transform.rot = q);
             }
@@ -970,8 +772,25 @@ fn modify_tab(ui: &mut Ui, st: &mut AppState) {
     });
 }
 
-fn fmt_mm2(v: f32) -> String {
-    format!("{:.2} mm", v).replace('.', ",")
+fn materials(ui: &mut Ui, st: &mut AppState, target: Option<NodeId>, current: u32) {
+    let mats = st.scene.materials.clone();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+        for (i, m) in mats.iter().enumerate() {
+            let (r, resp) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
+            let on = current as usize == i;
+            let c = Color32::from_rgb((m.color[0] * 255.0) as u8, (m.color[1] * 255.0) as u8, (m.color[2] * 255.0) as u8);
+            let p = ui.painter();
+            p.rect(r, 6.0, if on { SEL } else { B0 }, Stroke::new(1.0, if on { AC } else { LINE }), StrokeKind::Inside);
+            p.rect(r.shrink(6.0), 3.0, c, Stroke::new(1.0, tint(Color32::WHITE, 0.15)), StrokeKind::Inside);
+            if resp.on_hover_text(&m.name).clicked() {
+                match target {
+                    Some(id) => st.edit("Matière", id, |n| n.material = i as u32),
+                    None => st.material = i as u32,
+                }
+            }
+        }
+    });
 }
 
 /// Dimensions as the user reads them (full width / height, radius).
@@ -982,7 +801,7 @@ fn shape_params(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
     {
         let mut row = |ui: &mut Ui, label: &str, v: &mut f32, scale: f32, max: f32| {
             let mut shown = *v * scale;
-            let (c, s0) = spin(ui, label, &mut shown, 0.1, 0.1..=max, " mm", 2);
+            let (c, s0) = spin(ui, label, &mut shown, 0.1, 0.1..=max, " mm", 1);
             if c {
                 *v = shown / scale;
                 any = true;
@@ -991,39 +810,39 @@ fn shape_params(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
         };
         match sh.kind {
             PrimKind::Box => {
-                row(ui, "Largeur :", &mut s.size.x, 2.0, 400.0);
-                row(ui, "Hauteur :", &mut s.size.y, 2.0, 400.0);
-                row(ui, "Profondeur :", &mut s.size.z, 2.0, 400.0);
+                row(ui, "Largeur", &mut s.size.x, 2.0, 400.0);
+                row(ui, "Hauteur", &mut s.size.y, 2.0, 400.0);
+                row(ui, "Profondeur", &mut s.size.z, 2.0, 400.0);
             }
             PrimKind::Cylinder | PrimKind::Prism => {
-                row(ui, "Rayon :", &mut s.size.x, 1.0, 200.0);
-                row(ui, "Hauteur :", &mut s.size.y, 2.0, 400.0);
+                row(ui, "Rayon", &mut s.size.x, 1.0, 200.0);
+                row(ui, "Hauteur", &mut s.size.y, 2.0, 400.0);
             }
             PrimKind::Sphere => {
-                row(ui, "Rayon X :", &mut s.size.x, 1.0, 200.0);
-                row(ui, "Rayon Y :", &mut s.size.y, 1.0, 200.0);
-                row(ui, "Rayon Z :", &mut s.size.z, 1.0, 200.0);
+                row(ui, "Rayon X", &mut s.size.x, 1.0, 200.0);
+                row(ui, "Rayon Y", &mut s.size.y, 1.0, 200.0);
+                row(ui, "Rayon Z", &mut s.size.z, 1.0, 200.0);
             }
             PrimKind::Capsule => {
-                row(ui, "Rayon :", &mut s.size.x, 1.0, 200.0);
-                row(ui, "Longueur :", &mut s.size.y, 2.0, 400.0);
+                row(ui, "Rayon", &mut s.size.x, 1.0, 200.0);
+                row(ui, "Longueur", &mut s.size.y, 2.0, 400.0);
             }
             PrimKind::Torus => {
-                row(ui, "Rayon :", &mut s.size.x, 1.0, 200.0);
-                row(ui, "Épaisseur :", &mut s.size.z, 1.0, 80.0);
+                row(ui, "Rayon", &mut s.size.x, 1.0, 200.0);
+                row(ui, "Épaisseur", &mut s.size.z, 1.0, 80.0);
             }
             PrimKind::Cone => {
-                row(ui, "Rayon bas :", &mut s.size.x, 1.0, 200.0);
-                row(ui, "Rayon haut :", &mut s.size.z, 1.0, 200.0);
-                row(ui, "Hauteur :", &mut s.size.y, 2.0, 400.0);
+                row(ui, "Rayon bas", &mut s.size.x, 1.0, 200.0);
+                row(ui, "Rayon haut", &mut s.size.z, 1.0, 200.0);
+                row(ui, "Hauteur", &mut s.size.y, 2.0, 400.0);
             }
             PrimKind::Tube => {
-                row(ui, "Rayon ext. :", &mut s.size.x, 1.0, 200.0);
-                row(ui, "Rayon int. :", &mut s.size.z, 1.0, 200.0);
-                row(ui, "Hauteur :", &mut s.size.y, 2.0, 400.0);
+                row(ui, "Rayon ext.", &mut s.size.x, 1.0, 200.0);
+                row(ui, "Rayon int.", &mut s.size.z, 1.0, 200.0);
+                row(ui, "Hauteur", &mut s.size.y, 2.0, 400.0);
             }
             PrimKind::Profile => {
-                row(ui, "Épaisseur :", &mut s.size.z, 2.0, 200.0);
+                row(ui, "Épaisseur", &mut s.size.z, 2.0, 200.0);
             }
         }
     }
@@ -1033,17 +852,17 @@ fn shape_params(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
             _ => s.size.x.min(s.size.y.max(0.1)),
         };
         let (r0, c0) = (s.round, s.chamfer);
-        let (c, s0) = spin(ui, "Arrondi (toutes) :", &mut s.round, 0.05, 0.0..=max_round.max(0.1), " mm", 2);
+        let (c, s0) = spin(ui, "Arrondi", &mut s.round, 0.05, 0.0..=max_round.max(0.1), " mm", 2);
         any |= c;
         start |= s0;
-        let (c, s0) = spin(ui, "Chanfrein (toutes) :", &mut s.chamfer, 0.05, 0.0..=max_round.max(0.1), " mm", 2);
+        let (c, s0) = spin(ui, "Chanfrein", &mut s.chamfer, 0.05, 0.0..=max_round.max(0.1), " mm", 2);
         any |= c;
         start |= s0;
         if s.round != r0 || s.chamfer != c0 {
             s.edges.clear();
         }
         if !sh.edges.is_empty() {
-            ui.label(RichText::new("Arêtes réglées une par une : les valeurs « toutes » les remettent pareilles.").font(regular(11.5)).color(EDGE_SEL));
+            ui.label(RichText::new("Arêtes réglées une par une : Arrondi / Chanfrein les remettent pareilles.").font(regular(11.5)).color(EDGE_SEL));
         }
     }
     if any {
@@ -1055,9 +874,9 @@ fn shape_params(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
     }
 }
 
-fn edges_rollout(ui: &mut Ui, st: &mut AppState) {
+fn edges(ui: &mut Ui, st: &mut AppState) {
     let Some(e) = st.edge_sel.last().cloned() else {
-        ui.label(RichText::new("Survole une arête dans la vue puis clique. Ctrl + clic pour en ajouter ou en retirer.").font(regular(12.0)).color(T2));
+        ui.label(RichText::new("Mode Arête (2) : survole une arête puis clique, Ctrl + clic pour en ajouter.").font(regular(12.0)).color(T2));
         return;
     };
     let n = st.edge_sel.len();
@@ -1077,7 +896,7 @@ fn edges_rollout(ui: &mut Ui, st: &mut AppState) {
     });
     let max = st.fillet_max().max(0.1);
     let mut r = e.radius;
-    let (ch, start) = spin(ui, if e.chamfer { "Chanfrein :" } else { "Rayon :" }, &mut r, 0.05, 0.0..=max, " mm", 2);
+    let (ch, start) = spin(ui, if e.chamfer { "Chanfrein" } else { "Rayon" }, &mut r, 0.05, 0.0..=max, " mm", 2);
     if ch {
         st.set_fillet(r, e.chamfer, start);
     }
@@ -1091,167 +910,73 @@ fn edges_rollout(ui: &mut Ui, st: &mut AppState) {
     });
 }
 
-fn display_tab(ui: &mut Ui, st: &mut AppState) {
-    rollout(ui, "d-view", "Vue", true, |ui| {
-        let cur = st.camera.preset_of();
-        ui.horizontal_wrapped(|ui| {
-            for (p, l) in presets() {
-                if ui.radio(cur == p, l).clicked() {
-                    st.camera.preset(p);
-                    st.view_changed();
-                }
-            }
-        });
-        if ui.checkbox(&mut st.grid, "Grille").changed() {
-            st.view_changed();
-        }
-        ui.horizontal(|ui| {
-            if text_btn(ui, Some(Icon::Frame), "Cadrer tout", false).clicked() {
-                st.frame_all();
-            }
-            if text_btn(ui, None, "Cadrer la sélection", false).clicked() {
-                st.frame_selection();
-            }
-        });
-    });
-    rollout(ui, "d-ui", "Interface", true, |ui| {
-        ui.label(RichText::new("Studio : panneaux ancrés, façon 3ds Max.").font(regular(12.0)).color(T2));
-        if text_btn(ui, None, "Passer à l'interface Atelier", false).clicked() {
-            st.set_ui_mode(UiMode::Atelier);
-        }
-    });
-}
-
-// ----------------------------------------------------- history and status
-
-fn history_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
-    dock(ctx, "studio-history", rect, B2, |ui| {
-        ui.painter().line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, LINE));
-        let rows: Vec<NodeId> = st.scene.rows().into_iter().map(|(id, _)| id).collect();
-        let cur = st.selection.and_then(|s| rows.iter().position(|r| *r == s));
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Historique").font(semibold(12.0)).color(T2));
-            let prev = tool_btn(ui, Icon::ChevronLeft, false, "Opération précédente");
-            let track_w = ui.available_width() - 44.0;
-            let (tr, _) = ui.allocate_exact_size(vec2(track_w, 22.0), Sense::hover());
-            let next = tool_btn(ui, Icon::ChevronRight, false, "Opération suivante");
-            let p = ui.painter();
-            p.rect(tr, 3.0, B0, Stroke::new(1.0, B3), StrokeKind::Inside);
-            let n = rows.len();
-            if n == 0 {
-                p.text(tr.center(), Align2::CENTER_CENTER, "Aucune opération", regular(11.5), T3);
-            }
-            let x_of = |i: usize| tr.min.x + 34.0 + (tr.width() - 68.0) * if n > 1 { i as f32 / (n - 1) as f32 } else { 0.5 };
-            if let Some(c) = cur {
-                p.rect_filled(Rect::from_min_max(tr.min, pos2(x_of(c), tr.max.y)), 3.0, Color32::from_rgba_unmultiplied(0x4B, 0x93, 0xE0, 40));
-            }
-            for (i, id) in rows.iter().enumerate() {
-                let x = x_of(i);
-                let name = st.scene.node(*id).map(|n| n.name.clone()).unwrap_or_default();
-                let on = cur == Some(i);
-                let mut job = egui::text::LayoutJob::single_section(format!("{} · {}", i + 1, name), egui::TextFormat::simple(regular(11.0), if on { Color32::WHITE } else { T2 }));
-                job.wrap = egui::text::TextWrapping { max_width: 140.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-                let g = p.layout_job(job);
-                // the label stays inside the track at both ends
-                let half = g.size().x * 0.5 + 4.0;
-                let cx = x.clamp(tr.min.x + half + 2.0, (tr.max.x - half - 2.0).max(tr.min.x + half + 2.0));
-                let hit = Rect::from_center_size(pos2(cx, tr.center().y), vec2(half * 2.0, 22.0));
-                let resp = ui.interact(hit, Id::new(("hist-tick", i)), Sense::click());
-                let p = ui.painter();
-                p.line_segment([pos2(x, tr.min.y), pos2(x, tr.min.y + 5.0)], Stroke::new(1.0, B4));
-                if on {
-                    p.rect_filled(hit, 3.0, Color32::from_rgb(0x5D, 0x8F, 0xCA));
-                } else if resp.hovered() {
-                    p.rect_filled(hit, 3.0, B3);
-                }
-                p.galley(hit.center() - g.size() * 0.5, g, T2);
-                if resp.on_hover_text("Sélectionner cette opération").clicked() {
-                    st.commit_placement();
-                    st.tool = Tool::Select;
-                    st.select(Some(*id));
-                }
-            }
-            if n > 0 {
-                if prev.clicked() {
-                    let i = cur.map(|c| c.saturating_sub(1)).unwrap_or(n - 1);
-                    st.select(Some(rows[i]));
-                }
-                if next.clicked() {
-                    let i = cur.map(|c| (c + 1).min(n - 1)).unwrap_or(0);
-                    st.select(Some(rows[i]));
-                }
-            }
-        });
-    });
-}
+// ------------------------------------------------------------- status bar
 
 fn status_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
-    dock(ctx, "studio-status", rect, B0, |ui| {
+    dock(ctx, "studio-status", rect, B1, |ui| {
         ui.painter().line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, LINE));
-        ui.add_space(3.0);
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            ui.add_space(8.0);
-            let sel = match (st.selection, st.edge_sel.len()) {
-                (_, n) if n > 1 => format!("{n} arêtes sélectionnées"),
-                (_, 1) => "1 arête sélectionnée".to_string(),
-                (Some(_), _) if st.selected_ids().len() > 1 => format!("{} objets sélectionnés", st.selected_ids().len()),
-                (Some(_), _) => "1 objet sélectionné".to_string(),
-                (None, _) => "Aucune sélection".to_string(),
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.add_space(10.0);
+            let key = |ui: &mut Ui, k: &str, what: &str| {
+                let g = ui.painter().layout_no_wrap(k.to_string(), medium(10.5), T1);
+                let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 10.0, 18.0), Sense::hover());
+                ui.painter().rect(r, 4.0, B2, Stroke::new(1.0, LINE), StrokeKind::Inside);
+                ui.painter().galley(r.center() - g.size() * 0.5, g, T1);
+                ui.label(RichText::new(what).font(regular(11.5)).color(T2));
+                ui.add_space(8.0);
             };
-            ui.label(RichText::new(sel).font(regular(12.0)).color(T2));
-            vsep(ui);
-            let right_w = 470.0;
-            let hint_w = (ui.available_width() - right_w).max(80.0);
-            let mut job = egui::text::LayoutJob::single_section(st.hint(), egui::TextFormat::simple(regular(12.0), PROMPT));
-            job.wrap = egui::text::TextWrapping { max_width: hint_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-            let g = ui.painter().layout_job(job);
-            let (hr, _) = ui.allocate_exact_size(vec2(hint_w, 20.0), Sense::hover());
-            ui.painter().galley(pos2(hr.min.x, hr.center().y - g.size().y * 0.5), g, PROMPT);
-            // exact position of the selection
-            let target = st.selection.and_then(|id| st.scene.node(id).map(|n| (id, n.transform.pos)));
-            for (i, (l, c)) in [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AXIS_Z)].iter().enumerate() {
-                ui.label(RichText::new(*l).font(semibold(12.0)).color(*c));
-                match target {
-                    Some((id, mut pos)) => {
-                        let resp = ui.add_sized(vec2(78.0, 18.0), mm_drag(&mut pos[i], 2));
-                        let start = live_start(ui, &resp);
-                        if resp.changed() {
-                            st.edit_live("Position", id, start, |n| n.transform.pos = pos);
-                        }
-                    }
-                    None => {
-                        ui.add_sized(vec2(78.0, 18.0), egui::Label::new(RichText::new("—").color(T3)));
-                    }
-                }
+            match st.settings.navigation {
+                Navigation::Maya => key(ui, "Alt", "+ gauche orbite · + molette pan · + droit zoom"),
+                Navigation::Tripo => key(ui, "Glisser", "gauche orbite · droit pan · molette zoom"),
             }
-            vsep(ui);
-            ui.label(RichText::new(if st.snap { "Snap activé" } else { "Snap désactivé" }).font(regular(12.0)).color(T2));
-            if tool_btn(ui, Icon::Frame, false, "Cadrer la sélection (F)").clicked() {
-                st.frame_selection();
-            }
+            key(ui, "Clic droit", "marking menu");
+            key(ui, "Espace", "commandes");
+            key(ui, "F", "cadrer");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(10.0);
+                ui.label(RichText::new(crate::version_title()).font(regular(11.0)).color(T3));
+                ui.add_space(12.0);
+                let hint = st.hint();
+                let mut job = egui::text::LayoutJob::single_section(hint, egui::TextFormat::simple(regular(11.5), T2));
+                job.wrap = egui::text::TextWrapping { max_width: (ui.available_width() - 20.0).max(60.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+                let g = ui.painter().layout_job(job);
+                let (r, _) = ui.allocate_exact_size(vec2(g.size().x, 18.0), Sense::hover());
+                ui.painter().galley(pos2(r.min.x, r.center().y - g.size().y * 0.5), g, T2);
+            });
         });
     });
 }
 
-// ------------------------------------------------------------ view frame
+// --------------------------------------------------------- viewport chips
 
-/// Border and label of the 3D view: "[Perspective] [Ombré]", the view menu.
-fn view_frame(ctx: &egui::Context, st: &mut AppState, view: Rect) {
-    let p = ctx.layer_painter(LayerId::new(Order::Middle, Id::new("studio-view-border")));
-    p.rect_stroke(view.shrink(1.0), 0.0, Stroke::new(2.0, ACTIVE), StrokeKind::Inside);
-    egui::Area::new(Id::new("studio-view-label")).order(Order::Foreground).fixed_pos(view.min + vec2(8.0, 6.0)).show(ctx, |ui| {
+/// Over the 3D view: what a click picks and the helpers (top left), the view
+/// and the display (top right).
+fn view_chips(ctx: &egui::Context, st: &mut AppState, view: Rect) {
+    egui::Area::new(Id::new("studio-chips-l")).order(Order::Foreground).fixed_pos(view.min + vec2(10.0, 10.0)).show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let cur = if st.tool == Tool::Select { Some(st.pick_mode) } else { None };
+            let items = [(Some(PickMode::Object), "Objet", "1"), (Some(PickMode::Edge), "Arête", "2")];
+            if let Some(Some(m)) = ui::seg_inline(ui, "studio-pick", &items, cur) {
+                st.set_pick_mode(m);
+            }
+            if ui::chip(ui, Some(Icon::Magnet), "Snap", st.snap, "Snap : grille, sommets et arêtes").clicked() {
+                st.snap = !st.snap;
+            }
+            if ui::chip(ui, Some(Icon::Mirror), "Sym. X", st.sym_x, "Symétrie X des nouvelles formes").clicked() {
+                st.sym_x = !st.sym_x;
+            }
+        });
+    });
+    egui::Area::new(Id::new("studio-chips-r")).order(Order::Foreground).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(view.max.x - 10.0, view.min.y + 10.0)).show(ctx, |ui| {
         studio_style(ui.style_mut());
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = 6.0;
             let cur = st.camera.preset_of();
             let name = presets().iter().find(|(p, _)| *p == cur).map(|(_, l)| *l).unwrap_or("Perspective");
-            let shading = "Ombré";
-            ui.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::from_black_alpha(90);
-            ui.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::NONE;
-            ui.menu_button(RichText::new(format!("[{name}]")).font(regular(12.0)).color(T1), |ui| {
+            ui.menu_button(RichText::new(name).font(medium(12.0)).color(T1), |ui| {
                 for (p, l) in presets() {
                     if ui.radio(cur == p, l).clicked() {
                         st.camera.preset(p);
@@ -1260,16 +985,330 @@ fn view_frame(ctx: &egui::Context, st: &mut AppState, view: Rect) {
                 }
                 ui.separator();
                 if ui.button("Cadrer tout").clicked() {
-                    st.frame_all();
+                    let (lo, hi) = st.scene.bounds();
+                    st.frame_smooth(lo, hi);
                 }
             });
-            ui.menu_button(RichText::new(format!("[{shading}]")).font(regular(12.0)).color(T1), |ui| {
-                let mut g = st.grid;
-                if ui.checkbox(&mut g, "Grille").changed() {
-                    st.grid = g;
-                    st.view_changed();
+            if ui::chip(ui, Some(Icon::Grid), "Grille", st.grid, "Grille au sol").clicked() {
+                st.grid = !st.grid;
+                st.view_changed();
+            }
+        });
+    });
+}
+
+// ------------------------------------------------------------ sizes panel
+
+/// Studio: while a creation tool is armed, its dimensions can be typed.
+/// Tab goes to the next field, Entrée creates the shape at the centre of the
+/// view (on the face or the grid there), Échap leaves the tool.
+fn sizes_panel(ctx: &egui::Context, st: &mut AppState, view: Rect) {
+    let Tool::Place(kind) = st.tool else { return };
+    if st.placement.is_some() {
+        return;
+    }
+    let key = Id::new(("studio-sizes", kind.label()));
+    let mut d: [f32; 3] = ctx.data(|m| m.get_temp(key)).unwrap_or(match kind {
+        PrimKind::Box => [20.0, 20.0, 10.0],
+        PrimKind::Cylinder => [8.0, 16.0, 0.0],
+        PrimKind::Sphere => [8.0, 0.0, 0.0],
+        PrimKind::Capsule => [5.0, 20.0, 0.0],
+        PrimKind::Torus => [10.0, 3.0, 0.0],
+        _ => [10.0, 10.0, 10.0],
+    });
+    let fields: &[&str] = match kind {
+        PrimKind::Box => &["Largeur", "Profondeur", "Hauteur"],
+        PrimKind::Cylinder => &["Rayon", "Hauteur"],
+        PrimKind::Sphere => &["Rayon"],
+        PrimKind::Capsule => &["Rayon", "Longueur"],
+        PrimKind::Torus => &["Rayon", "Épaisseur"],
+        _ => &[],
+    };
+    let mut create = false;
+    egui::Area::new(Id::new("studio-sizes")).order(Order::Foreground).fixed_pos(view.min + vec2(10.0, 50.0)).show(ctx, |ui| {
+        studio_style(ui.style_mut());
+        ui::island().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+            ui.set_width(232.0);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.horizontal(|ui| {
+                icons::paint(ui.painter(), Rect::from_min_size(ui.cursor().min + vec2(0.0, 2.0), vec2(15.0, 15.0)), ui::prim_icon(kind), T1);
+                ui.add_space(20.0);
+                ui.label(RichText::new(format!("Nouveau {}", kind.label().to_lowercase())).font(semibold(13.0)).color(T1));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let m = st.effective_mode();
+                    let c = mode_color(m);
+                    let (r, resp) = ui.allocate_exact_size(vec2(26.0, 22.0), Sense::click());
+                    ui.painter().rect(r, 6.0, tint(c, 0.16), Stroke::new(1.0, tint(c, 0.7)), StrokeKind::Inside);
+                    ui::paint_mode_glyph(ui.painter(), r.center(), m, c, 10.0);
+                    if resp.on_hover_text("Add ⇄ Carve").clicked() {
+                        st.set_mode(if m == CombineMode::Add { CombineMode::Carve } else { CombineMode::Add });
+                    }
+                });
+            });
+            for (i, label) in fields.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let (lr, _) = ui.allocate_exact_size(vec2(76.0, 24.0), Sense::hover());
+                    ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, *label, regular(12.0), T2);
+                    // a text field: typing replaces the value (all selected on focus)
+                    let fid = key.with(("field", i));
+                    let mut text: String = ctx.data(|m| m.get_temp(fid)).unwrap_or_else(|| format!("{}", d[i]).replace('.', ","));
+                    let resp = ui.add(egui::TextEdit::singleline(&mut text).id(fid).desired_width(ui.available_width() - 30.0).horizontal_align(egui::Align::RIGHT).font(medium(12.5)));
+                    ui.label(RichText::new("mm").font(regular(11.5)).color(T3));
+                    let first = i == 0 && ctx.data(|m| m.get_temp::<bool>(key.with("focused"))).is_none();
+                    if first {
+                        // first time the panel shows for this tool: the first field takes the keys
+                        resp.request_focus();
+                        ctx.data_mut(|m| m.insert_temp(key.with("focused"), true));
+                    }
+                    if first || resp.gained_focus() {
+                        if let Some(mut s) = egui::TextEdit::load_state(ctx, fid) {
+                            let n = text.chars().count();
+                            s.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(n))));
+                            s.store(ctx, fid);
+                        }
+                    }
+                    if let Ok(v) = text.trim().replace(',', ".").parse::<f32>() {
+                        d[i] = v.clamp(0.5, 400.0);
+                    }
+                    ctx.data_mut(|m| m.insert_temp(fid, text));
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Tab · Entrée crée · Échap").font(regular(11.0)).color(T3));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if text_btn(ui, None, "Créer", true).clicked() {
+                        create = true;
+                    }
+                });
+            });
+        });
+    });
+    ctx.data_mut(|m| m.insert_temp(key, d));
+    if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+        create = true;
+    }
+    if create {
+        let at = st.principal();
+        st.place_sized(at, kind, d);
+        ctx.data_mut(|m| {
+            m.remove::<bool>(key.with("focused"));
+            for i in 0..3 {
+                m.remove::<String>(key.with(("field", i)));
+            }
+        });
+        ctx.memory_mut(|m| m.request_focus(Id::NULL));
+    }
+}
+
+// --------------------------------------------------------- command palette
+
+#[derive(Clone, Copy)]
+enum Cmd {
+    Place(PrimKind),
+    Mode(CombineMode),
+    Pick(PickMode),
+    Duplicate,
+    Delete,
+    Group,
+    MirrorSel,
+    Frame,
+    FrameAll,
+    View(ViewPreset),
+    Snap,
+    SymX,
+    Grid,
+    Undo,
+    Redo,
+    Save,
+    Open,
+    Export,
+    Settings,
+    Display,
+    Etabli,
+}
+
+fn commands() -> Vec<(String, &'static str, Cmd)> {
+    let mut v: Vec<(String, &'static str, Cmd)> = vec![];
+    for k in PRIMS {
+        v.push((format!("Créer : {}", k.label()), ui::prim_key(k).unwrap_or(""), Cmd::Place(k)));
+    }
+    v.extend([
+        ("Mode Add (nouvelles formes)".to_string(), "", Cmd::Mode(CombineMode::Add)),
+        ("Mode Carve (nouvelles formes)".to_string(), "", Cmd::Mode(CombineMode::Carve)),
+        ("Sélection d'objets".to_string(), "Q", Cmd::Pick(PickMode::Object)),
+        ("Sélection d'arêtes (fillets)".to_string(), "2", Cmd::Pick(PickMode::Edge)),
+        ("Dupliquer".to_string(), "Ctrl+D", Cmd::Duplicate),
+        ("Supprimer".to_string(), "Suppr", Cmd::Delete),
+        ("Grouper la sélection".to_string(), "", Cmd::Group),
+        ("Symétrie X de la sélection".to_string(), "", Cmd::MirrorSel),
+        ("Cadrer la sélection".to_string(), "F", Cmd::Frame),
+        ("Cadrer toute la scène".to_string(), "", Cmd::FrameAll),
+        ("Vue perspective".to_string(), "", Cmd::View(ViewPreset::Perspective)),
+        ("Vue de face".to_string(), "", Cmd::View(ViewPreset::Front)),
+        ("Vue de droite".to_string(), "", Cmd::View(ViewPreset::Right)),
+        ("Vue de dessus".to_string(), "", Cmd::View(ViewPreset::Top)),
+        ("Snap (activer / couper)".to_string(), "", Cmd::Snap),
+        ("Symétrie X des nouvelles formes".to_string(), "", Cmd::SymX),
+        ("Grille (afficher / cacher)".to_string(), "", Cmd::Grid),
+        ("Annuler".to_string(), "Ctrl+Z", Cmd::Undo),
+        ("Rétablir".to_string(), "Ctrl+Y", Cmd::Redo),
+        ("Enregistrer".to_string(), "Ctrl+S", Cmd::Save),
+        ("Ouvrir · Nouveau…".to_string(), "", Cmd::Open),
+        ("Exporter le mesh…".to_string(), "", Cmd::Export),
+        ("Réglages…".to_string(), "", Cmd::Settings),
+        ("Affichage : lumière, ombres…".to_string(), "", Cmd::Display),
+        ("Passer à l'interface Établi".to_string(), "", Cmd::Etabli),
+    ]);
+    v
+}
+
+fn run(st: &mut AppState, c: Cmd) {
+    match c {
+        Cmd::Place(k) => {
+            st.commit_placement();
+            st.tool = Tool::Place(k);
+        }
+        Cmd::Mode(m) => st.mode = m,
+        Cmd::Pick(m) => st.set_pick_mode(m),
+        Cmd::Duplicate => st.duplicate_selected(),
+        Cmd::Delete => st.delete_selected(),
+        Cmd::Group => st.group_selected(),
+        Cmd::MirrorSel => {
+            if let Some(id) = st.selection {
+                st.edit("Symétrie", id, |n| n.mirror.x = !n.mirror.x);
+            }
+        }
+        Cmd::Frame => st.frame_selection(),
+        Cmd::FrameAll => {
+            let (lo, hi) = st.scene.bounds();
+            st.frame_smooth(lo, hi);
+        }
+        Cmd::View(p) => {
+            st.camera.preset(p);
+            st.view_changed();
+        }
+        Cmd::Snap => st.snap = !st.snap,
+        Cmd::SymX => st.sym_x = !st.sym_x,
+        Cmd::Grid => {
+            st.grid = !st.grid;
+            st.view_changed();
+        }
+        Cmd::Undo => st.undo(),
+        Cmd::Redo => st.redo(),
+        Cmd::Save => st.save(),
+        Cmd::Open => st.files_open = true,
+        Cmd::Export => st.export_open = true,
+        Cmd::Settings => st.settings_open = true,
+        Cmd::Display => st.display_open = true,
+        Cmd::Etabli => st.set_ui_mode(UiMode::Atelier),
+    }
+}
+
+/// Lower case without accents: « créer » matches « creer ».
+fn fold(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'à' | 'â' => 'a',
+            'î' | 'ï' => 'i',
+            'ô' => 'o',
+            'ù' | 'û' => 'u',
+            'ç' => 'c',
+            _ => c,
+        })
+        .collect()
+}
+
+#[derive(Clone, Default)]
+struct Palette {
+    open: bool,
+    query: String,
+    sel: usize,
+    fresh: bool,
+}
+
+fn open_palette(ctx: &egui::Context) {
+    ctx.data_mut(|m| m.insert_temp(Id::new("studio-palette"), Palette { open: true, query: String::new(), sel: 0, fresh: true }));
+}
+
+fn palette(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+    let id = Id::new("studio-palette");
+    let mut pal: Palette = ctx.data(|m| m.get_temp(id)).unwrap_or_default();
+    if !pal.open {
+        return;
+    }
+    if ui::dim(ctx, screen, "studio-palette-dim") {
+        pal.open = false;
+    }
+    let all = commands();
+    let q = fold(pal.query.trim());
+    let words: Vec<&str> = q.split_whitespace().collect();
+    let hits: Vec<&(String, &'static str, Cmd)> = all.iter().filter(|(l, _, _)| {
+        let f = fold(l);
+        words.iter().all(|w| f.contains(w))
+    }).collect();
+    let (up, down, enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+    if down && !hits.is_empty() {
+        pal.sel = (pal.sel + 1).min(hits.len() - 1);
+    }
+    if up {
+        pal.sel = pal.sel.saturating_sub(1);
+    }
+    pal.sel = pal.sel.min(hits.len().saturating_sub(1));
+    let mut chosen: Option<Cmd> = None;
+    egui::Area::new(Id::new("studio-palette-box")).order(Order::Tooltip).pivot(Align2::CENTER_TOP).fixed_pos(pos2(screen.center().x, screen.min.y + 90.0)).show(ctx, |ui| {
+        studio_style(ui.style_mut());
+        ui::island().inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+            ui.set_width(520.0);
+            let r = ui.add(egui::TextEdit::singleline(&mut pal.query).hint_text("Tape une commande : cylindre, carve, vue de dessus, exporter…").font(regular(14.0)).desired_width(f32::INFINITY).margin(vec2(10.0, 8.0)));
+            if pal.fresh {
+                r.request_focus();
+                pal.fresh = false;
+            }
+            if r.changed() {
+                pal.sel = 0;
+            }
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                if hits.is_empty() {
+                    ui.label(RichText::new("Aucune commande ne correspond.").font(regular(12.5)).color(T2));
+                }
+                for (i, (label, key, cmd)) in hits.iter().enumerate() {
+                    let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+                    let on = i == pal.sel;
+                    let p = ui.painter();
+                    if on {
+                        p.rect(rr, 6.0, SEL, Stroke::new(1.0, SEL_LINE), StrokeKind::Inside);
+                    } else if resp.hovered() {
+                        p.rect_filled(rr, 6.0, B2);
+                    }
+                    p.text(rr.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, label, regular(12.5), if on { SEL_T } else { T1 });
+                    if !key.is_empty() {
+                        p.text(rr.right_center() - vec2(10.0, 0.0), Align2::RIGHT_CENTER, *key, medium(11.0), T3);
+                    }
+                    if on && (up || down) {
+                        resp.scroll_to_me(None);
+                    }
+                    if resp.clicked() {
+                        chosen = Some(*cmd);
+                    }
                 }
             });
         });
     });
+    if enter {
+        if let Some((_, _, c)) = hits.get(pal.sel) {
+            chosen = Some(*c);
+        }
+    }
+    if esc {
+        pal.open = false;
+    }
+    if let Some(c) = chosen {
+        pal.open = false;
+        run(st, c);
+    }
+    ctx.data_mut(|m| m.insert_temp(id, pal));
 }

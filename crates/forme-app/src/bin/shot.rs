@@ -342,7 +342,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -770,7 +770,58 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.st.commit_placement();
         h.steps(2);
         eprintln!("tore très zoomé : pas de plantage");
-    }    if want("pc-gizmo") {
+    }    if want("pc-ui") {
+        // the two interfaces of the redesign, same scene and same moments:
+        // nothing selected, the Palier selected, a creation tool armed
+        for (tag, mode) in [("etabli", UiMode::Atelier), ("studio", UiMode::Studio)] {
+            h.pc(AppState::new(support_axe(), "Support d'axe"), mode);
+            h.st.pointer_kind = PointerKind::Mouse;
+            h.steps(2);
+            h.st.frame_all();
+            h.steps(4);
+            h.shot(&format!("pc-ui-{tag}-1-scene"));
+            let id = h.find("Palier");
+            h.st.select(Some(id));
+            h.steps(4);
+            h.shot(&format!("pc-ui-{tag}-2-selection"));
+            h.st.select(None);
+            h.st.tool = Tool::Place(PrimKind::Box);
+            h.steps(4);
+            h.shot(&format!("pc-ui-{tag}-3-creation"));
+            h.st.tool = Tool::Select;
+            if mode == UiMode::Studio {
+                let key = |h: &mut Harness, k: egui::Key| {
+                    h.pending.push(Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+                    h.step();
+                    h.pending.push(Event::Key { key: k, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });
+                    h.step();
+                };
+                // Espace: the command palette, « cyl », Entrée arms the cylinder
+                h.move_to(pos2(700.0, 450.0));
+                key(h, egui::Key::Space);
+                h.steps(2);
+                h.pending.push(Event::Text("cyl".into()));
+                h.steps(3);
+                h.shot("pc-ui-studio-4-palette");
+                key(h, egui::Key::Enter);
+                h.steps(3);
+                eprintln!("palette : outil {:?}", h.st.tool);
+                // the sizes panel: Entrée creates a cylinder of the typed size
+                let n0 = h.st.scene.shape_count();
+                h.steps(2);
+                h.pending.push(Event::Text("12".into()));
+                h.steps(2);
+                h.shot("pc-ui-studio-5-cotes");
+                key(h, egui::Key::Enter);
+                h.steps(3);
+                let sz = h.st.selection.and_then(|id| h.st.scene.node(id)).and_then(|n| n.shape()).map(|s| s.size);
+                eprintln!("cotes : {} → {} formes, taille {:?}, outil {:?}", n0, h.st.scene.shape_count(), sz, h.st.tool);
+                h.steps(4);
+                h.shot("pc-ui-studio-6-cree");
+            }
+        }
+    }
+    if want("pc-gizmo") {
         // transform tools: équerres far from the centre, pre-selection
         // highlight, size handles anchored on the opposite face (Ctrl: centre)
         h.pc(AppState::new(forme_core::Scene::new(), "Gizmo"), UiMode::Atelier);

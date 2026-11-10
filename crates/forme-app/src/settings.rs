@@ -9,10 +9,10 @@ use std::path::PathBuf;
 /// renderer; only the screen organisation and the way of working differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UiMode {
-    /// Viewport first, floating panels, history strip (Plasticity / Spline feel).
+    /// « Établi »: viewport first, floating islands, context bar, history strip.
     #[default]
     Atelier,
-    /// Docked panels, menus, command panel, status bar (3ds Max feel).
+    /// « Studio »: docked CAD station (menus, command palette, fixed panel, typed sizes).
     Studio,
 }
 
@@ -21,15 +21,15 @@ impl UiMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            UiMode::Atelier => "Atelier",
+            UiMode::Atelier => "Établi",
             UiMode::Studio => "Studio",
         }
     }
 
     pub fn blurb(self) -> &'static str {
         match self {
-            UiMode::Atelier => "Viewport en plein écran, panneaux flottants, historique en bas.",
-            UiMode::Studio => "Panneaux ancrés, menus, panneau de commandes et barre d'état, façon 3ds Max.",
+            UiMode::Atelier => "La 3D en plein écran, des îlots flottants : colonne de formes, inspecteur, barre d'actions sur la sélection, historique en frise.",
+            UiMode::Studio => "Poste CAD ancré façon Plasticity : menus, palette de commandes (Espace), panneau fixe, cotes au clavier, barre d'état.",
         }
     }
 }

@@ -1539,6 +1539,47 @@ impl AppState {
         self.view_changed();
     }
 
+    /// Typed sizes (Studio's sizes panel): a shape of exact dimensions, in mm
+    /// as the panel shows them, dropped on the face or the grid under a screen
+    /// point, then selected. `d`: Box width, depth, height; Cylinder radius,
+    /// height; Sphere radius; Capsule radius, length; Torus radius, thickness.
+    pub fn place_sized(&mut self, pos: [f32; 2], kind: PrimKind, d: [f32; 3]) {
+        self.tool = Tool::Place(kind);
+        self.begin_placement(pos);
+        let Some(mut p) = self.placement.clone() else { return };
+        let pos_mm = |v: f32| v.max(0.5);
+        match kind {
+            PrimKind::Box => {
+                p.hx = pos_mm(d[0]) * 0.5;
+                p.hz = pos_mm(d[1]) * 0.5;
+                p.height = pos_mm(d[2]);
+                p.radius = p.hx.max(p.hz);
+            }
+            PrimKind::Cylinder => {
+                p.radius = pos_mm(d[0]);
+                p.height = pos_mm(d[1]);
+            }
+            PrimKind::Sphere => {
+                p.radius = pos_mm(d[0]);
+                p.height = p.radius;
+            }
+            PrimKind::Capsule => {
+                p.radius = pos_mm(d[0]);
+                p.height = pos_mm(d[1]).max(p.radius * 2.0);
+            }
+            PrimKind::Torus => {
+                p.radius = pos_mm(d[0]);
+                p.height = pos_mm(d[1]).min(p.radius * 0.9) * 2.0;
+            }
+            _ => {}
+        }
+        p.offset = Vec3::ZERO;
+        self.placement = Some(p);
+        self.apply_placement();
+        self.commit_placement();
+        self.view_changed();
+    }
+
     /// Pencil hover / mouse after the base: the height follows the pointer.
     pub fn hover_height(&mut self, pos: [f32; 2]) {
         let Some(mut p) = self.placement.clone() else { return };

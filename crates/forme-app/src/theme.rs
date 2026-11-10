@@ -1,37 +1,41 @@
-//! Visual identity from the mock-up: graphite panels, Inter, blue = Add, orange = Carve.
+//! Visual identity of the redesign (Établi / Studio): graphite with a cold blue bias,
+//! one blue accent (Add, selection), orange for Carve, yellow for what the pointer grabs.
 
 use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke};
 use std::sync::Arc;
 
-pub const BG: Color32 = Color32::from_rgb(0x17, 0x18, 0x1B);
-pub const PANEL: Color32 = Color32::from_rgb(0x20, 0x22, 0x26);
-pub const PANEL_BORDER: Color32 = Color32::from_rgb(0x2F, 0x32, 0x37);
-pub const RAISED: Color32 = Color32::from_rgb(0x2A, 0x2D, 0x33);
-pub const WELL: Color32 = Color32::from_rgb(0x17, 0x18, 0x1B);
-pub const DIVIDER: Color32 = Color32::from_rgb(0x34, 0x37, 0x3D);
-pub const TEXT: Color32 = Color32::from_rgb(0xEC, 0xED, 0xEF);
+pub const BG: Color32 = Color32::from_rgb(0x0F, 0x11, 0x14);
+pub const PANEL: Color32 = Color32::from_rgb(0x17, 0x19, 0x1D);
+pub const PANEL_BORDER: Color32 = Color32::from_rgb(0x2A, 0x2E, 0x35);
+pub const RAISED: Color32 = Color32::from_rgb(0x25, 0x29, 0x30);
+pub const WELL: Color32 = Color32::from_rgb(0x0F, 0x11, 0x14);
+pub const DIVIDER: Color32 = Color32::from_rgb(0x2A, 0x2E, 0x35);
+pub const TEXT: Color32 = Color32::from_rgb(0xE4, 0xE7, 0xEB);
 pub const TEXT_STRONG: Color32 = Color32::from_rgb(0xF2, 0xF3, 0xF5);
-pub const TEXT2: Color32 = Color32::from_rgb(0xA3, 0xA7, 0xAE);
-pub const TEXT_ICON: Color32 = Color32::from_rgb(0xB4, 0xB8, 0xBF);
-pub const LABEL: Color32 = Color32::from_rgb(0xC9, 0xCC, 0xD1);
-pub const ACCENT: Color32 = Color32::from_rgb(0x5A, 0xA9, 0xFF);
-pub const ACCENT_LIGHT: Color32 = Color32::from_rgb(0x9C, 0xCB, 0xFF);
-pub const ACCENT_BG: Color32 = Color32::from_rgb(0x22, 0x34, 0x4B);
-pub const ACCENT_BORDER: Color32 = Color32::from_rgb(0x36, 0x55, 0x7A);
+pub const TEXT2: Color32 = Color32::from_rgb(0x9A, 0xA1, 0xAB);
+pub const TEXT_ICON: Color32 = Color32::from_rgb(0xC3, 0xC8, 0xCF);
+pub const LABEL: Color32 = Color32::from_rgb(0xB8, 0xBE, 0xC6);
+pub const ACCENT: Color32 = Color32::from_rgb(0x4D, 0x8D, 0xFF);
+pub const ACCENT_LIGHT: Color32 = Color32::from_rgb(0x8F, 0xB7, 0xFF);
+pub const ACCENT_BG: Color32 = Color32::from_rgb(0x1B, 0x28, 0x40);
+pub const ACCENT_BORDER: Color32 = Color32::from_rgb(0x2F, 0x4E, 0x86);
 pub const ACCENT_TEXT: Color32 = Color32::from_rgb(0xDC, 0xEB, 0xFF);
-pub const ON_ACCENT: Color32 = Color32::from_rgb(0x0B, 0x14, 0x22);
-pub const CARVE: Color32 = Color32::from_rgb(0xFF, 0x9A, 0x4D);
+pub const ON_ACCENT: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
+pub const CARVE: Color32 = Color32::from_rgb(0xF0, 0x8A, 0x3C);
 pub const CARVE_LIGHT: Color32 = Color32::from_rgb(0xFF, 0xB2, 0x7A);
 pub const NEUTRAL_MODE: Color32 = Color32::from_rgb(0xC8, 0xCC, 0xD2);
-pub const AXIS_X: Color32 = Color32::from_rgb(0xE0, 0x7A, 0x5F);
-pub const AXIS_Y: Color32 = Color32::from_rgb(0x8F, 0xC2, 0x7A);
-pub const AXIS_Z: Color32 = Color32::from_rgb(0x6F, 0xA8, 0xF5);
+pub const AXIS_X: Color32 = Color32::from_rgb(0xF0, 0x60, 0x5A);
+pub const AXIS_Y: Color32 = Color32::from_rgb(0x7C, 0xCB, 0x5B);
+pub const AXIS_Z: Color32 = Color32::from_rgb(0x4D, 0x8D, 0xFF);
 /// Selected edge (fillet tool).
 pub const EDGE_SEL: Color32 = Color32::from_rgb(0xFF, 0xCF, 0x5A);
 pub const EDGE_SEL_DIM: Color32 = Color32::from_rgb(0x6B, 0x55, 0x22);
 pub const OK: Color32 = Color32::from_rgb(0x8F, 0xC2, 0x7A);
 /// A bake that could not be made, a hard error.
 pub const ERROR: Color32 = Color32::from_rgb(0xF2, 0x5F, 0x5C);
+
+/// Handle under the pointer or being dragged (WZX Engine's hot yellow).
+pub const HOT: Color32 = Color32::from_rgb(0xFF, 0xE2, 0x66);
 
 pub fn tint(c: Color32, a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 255.0) as u8)
@@ -89,12 +93,12 @@ pub fn install(ctx: &egui::Context) {
         v.override_text_color = Some(TEXT);
         v.selection.bg_fill = ACCENT_BG;
         v.selection.stroke = Stroke::new(1.5, ACCENT);
-        v.window_corner_radius = CornerRadius::same(16);
+        v.window_corner_radius = CornerRadius::same(10);
         v.window_stroke = Stroke::new(1.0, PANEL_BORDER);
         v.slider_trailing_fill = true;
         v.handle_shape = egui::style::HandleShape::Circle;
         for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-            w.corner_radius = CornerRadius::same(10);
+            w.corner_radius = CornerRadius::same(7);
         }
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, PANEL_BORDER);
         v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
@@ -102,8 +106,8 @@ pub fn install(ctx: &egui::Context) {
         v.widgets.inactive.weak_bg_fill = RAISED;
         v.widgets.inactive.bg_stroke = Stroke::NONE;
         v.widgets.inactive.fg_stroke = Stroke::new(1.5, TEXT);
-        v.widgets.hovered.bg_fill = Color32::from_rgb(0x33, 0x37, 0x3E);
-        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(0x33, 0x37, 0x3E);
+        v.widgets.hovered.bg_fill = Color32::from_rgb(0x2C, 0x31, 0x39);
+        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(0x2C, 0x31, 0x39);
         v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT_BORDER);
         v.widgets.hovered.fg_stroke = Stroke::new(1.5, TEXT_STRONG);
         v.widgets.active.bg_fill = ACCENT_BG;
