@@ -116,12 +116,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     }
 
     // the right button is the marking menu (orbit: left drag in empty space)
-    if resp.dragged_by(PointerButton::Middle) {
-        let d = resp.drag_delta();
-        st.camera.pan(d.x, d.y, rect.height());
-        st.view_changed();
-        st.interacting = true;
-    }
+    // the middle button alone does not move the camera (Romain): pan is Alt + middle
 
     let finger = st.pointer_kind == PointerKind::Finger;
     let shift = ctx.input(|i| i.modifiers.shift);
