@@ -184,6 +184,43 @@ fn perp(v: DVec2) -> DVec2 {
     DVec2::new(-v.y, v.x)
 }
 
+/// Where a ray from `o` along `d` enters the convex quad `poly`, through a
+/// side that is a line (`lines`) and on into its inside (not grazing along
+/// a side or a corner, `margin`); None from inside the quad or on it.
+fn enter_poly(poly: &[DVec2; 4], lines: &[bool; 4], o: DVec2, d: DVec2, margin: f64) -> Option<f64> {
+    let area: f64 = (0..4).map(|i| poly[i].perp_dot(poly[(i + 1) % 4])).sum();
+    let n: Vec<DVec2> = (0..4).map(|i| perp(poly[(i + 1) % 4] - poly[i]).normalize_or_zero() * area.signum()).collect();
+    if (0..4).all(|i| (o - poly[i]).dot(n[i]) > -margin) {
+        return None;
+    }
+    let clip = |m: f64| -> Option<(f64, f64, Option<usize>)> {
+        let (mut lo, mut hi, mut k) = (f64::NEG_INFINITY, f64::INFINITY, None);
+        for i in 0..4 {
+            let num = (o - poly[i]).dot(n[i]) - m;
+            let den = d.dot(n[i]);
+            if den.abs() < 1e-12 {
+                if num < 0.0 {
+                    return None;
+                }
+            } else if den > 0.0 {
+                if -num / den > lo {
+                    lo = -num / den;
+                    k = Some(i);
+                }
+            } else {
+                hi = hi.min(-num / den);
+            }
+        }
+        Some((lo, hi, k))
+    };
+    let (lo, hi, _) = clip(margin)?;
+    if lo >= hi || hi <= 0.0 {
+        return None;
+    }
+    let (t, _, k) = clip(0.0)?;
+    (k.is_some_and(|k| lines[k]) && t > 0.0).then_some(t)
+}
+
 /// Signed turn from direction `a` to `b` (left positive).
 fn turn(a: DVec2, b: DVec2) -> f64 {
     a.perp_dot(b).atan2(a.dot(b))
@@ -1176,6 +1213,60 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
     let strip_rows = |id: FaceId| lay.charts.iter().find(|c| c.id == id).and_then(|c| c.strip).map(|s| s.1).unwrap_or(0);
     let mut rounded: Vec<Vec<(DVec2, f64, [DVec2; 2], usize)>> =
         lay.charts.iter().map(|ch| ch.arcs.iter().map(|&(c, r, sg, id)| (c, r, [DVec2::new(sg.x, 0.0), DVec2::new(0.0, sg.y)], strip_rows(id))).collect()).collect();
+    // areas of a face that loops from elsewhere do not cut into: the
+    // square around a hooked concave arc (a round hole's ring) and the
+    // middle square of a round cap; a loop that would enter one stops in a
+    // T on its side, where that side is a line (convex quad, sides flagged)
+    let mut keep: Vec<Vec<([DVec2; 4], [bool; 4])>> = vec![vec![]; nc];
+    // round caps seen whole (a blind hole's floor, the top of a cylinder):
+    // an o-grid, a square in the middle whose corners face the middles of
+    // the four quarter arcs, where the wall's lines come in; nothing
+    // crosses the disc
+    let mut ogrid = vec![false; nc];
+    for ci in 0..nc {
+        let Some((rad, _)) = lay.charts[ci].disc else { continue };
+        let loops = lay.bnd[ci].clone();
+        if loops.len() != 1 || loops[0].len() != 4 {
+            continue;
+        }
+        let me = lay.charts[ci].id;
+        let map = lay.charts[ci].map;
+        let quarter = loops[0].iter().all(|&(e, fwd)| {
+            let other = lay.edges[e].charts.iter().copied().find(|&c| c != ci).unwrap_or(ci);
+            let pp = lay.hpts(e, fwd, ci);
+            let total: f64 = pp.windows(3).map(|w| turn(w[1] - w[0], w[2] - w[1])).sum();
+            lay.charts[other].id.prim == me.prim && matches!(lay.charts[other].map, Map::Cyl { .. }) && (total.abs() - FRAC_PI_2).abs() < 0.2
+        });
+        if !quarter {
+            continue;
+        }
+        ogrid[ci] = true;
+        let mut mids: Vec<(f64, usize, DVec2, usize)> = vec![];
+        for &(e, _) in &loops[0] {
+            let other = lay.edges[e].charts.iter().copied().find(|&c| c != ci).unwrap_or(ci);
+            let (qa, qb) = (map.to2(lay.nodes[lay.edges[e].a]), map.to2(lay.nodes[lay.edges[e].b]));
+            let m2 = (qa.normalize() + qb.normalize()).normalize() * rad;
+            let m = lay.split(e, map.to3(m2));
+            mids.push((m2.y.atan2(m2.x), m, m2, other));
+        }
+        mids.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let gs: Vec<(usize, DVec2)> = mids.iter().map(|&(_, _, m2, _)| (lay.node(map.to3(m2 * 0.6)), m2 * 0.6)).collect();
+        for (j, &(_, m, _, other)) in mids.iter().enumerate() {
+            let (g, _) = gs[j];
+            let (g2, _) = gs[(j + 1) % 4];
+            lay.origins.push(m);
+            lay.origins.push(g);
+            lay.inner[ci].push(g);
+            for (a, b) in [(m, g), (g, g2)] {
+                let re = lay.edges.len();
+                lay.edges.push(GEdge { a, b, pts: vec![lay.nodes[a], lay.nodes[b]], charts: [ci, ci], ray: true, alive: true });
+                lay.rays[ci].push(re);
+            }
+            // the wall's line from the arc's middle
+            queue.push_back((other, m, DVec2::ZERO));
+        }
+        keep[ci].push(([gs[0].1, gs[1].1, gs[2].1, gs[3].1], [true; 4]));
+    }
     // ball corners: three quads around the centre, a loop from the middle
     // of each arc on into its strip (the strip's middle row)
     for ci in 0..nc {
@@ -1199,7 +1290,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         }
     }
     for ci in 0..nc {
-        if lay.charts[ci].strip.is_some() {
+        if lay.charts[ci].strip.is_some() || ogrid[ci] {
             continue;
         }
         let loops = lay.bnd[ci].clone();
@@ -1247,6 +1338,19 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                         let s = (q0 - p0).perp_dot(t_out) / den;
                         let x = p0 + a1 * s;
                         let g2 = x + (a1 + a2) * st.size;
+                        // the square between the arc's centre and the hook
+                        // node: its two sides through the node are loops
+                        let (n0, n1) = (perp(t_in), perp(t_out));
+                        let dn = n0.perp_dot(n1);
+                        let dd = a1.perp_dot(a2);
+                        if dn.abs() > 1e-9 && dd.abs() > 1e-9 {
+                            let c = p0 + n0 * ((q0 - p0).perp_dot(n1) / dn);
+                            let w = g2 - c;
+                            let (al, be) = (w.perp_dot(a2) / dd, a1.perp_dot(w) / dd);
+                            if al > 0.0 && be > 0.0 {
+                                keep[ci].push(([c, c + a1 * al, g2, c + a2 * be], [false, true, true, false]));
+                            }
+                        }
                         let g = lay.node(map.to3(g2));
                         lay.origins.push(g);
                         lay.inner[ci].push(g);
@@ -1459,6 +1563,13 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             }
             if let Some(t) = enter {
                 if best.is_none_or(|b| t < b.0 - snap) && tee.is_none_or(|x| t < x.0) {
+                    tee = Some((t, o + d * t));
+                }
+            }
+        }
+        for (poly, lines) in &keep[ci] {
+            if let Some(t) = enter_poly(poly, lines, o, d, snap) {
+                if t > extent * 1e-6 && best.is_none_or(|b| t < b.0 - snap) && tee.is_none_or(|x| t < x.0) {
                     tee = Some((t, o + d * t));
                 }
             }

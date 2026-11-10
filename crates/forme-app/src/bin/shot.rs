@@ -1402,9 +1402,11 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         let romain = forme_core::Scene::from_json(include_str!("../../../forme-core/examples/scenes/romain-coin.forme")).expect("scène");
         let only = std::env::var("BAKE_DIAG").ok();
         let aretes = forme_core::Scene::from_json(include_str!("../../../forme-core/examples/scenes/romain-aretes.forme")).expect("scène");
+        let cylindre = forme_core::Scene::from_json(include_str!("../../../forme-core/examples/scenes/romain-cylindre.forme")).expect("scène");
         for (name, scene, mode) in [
             ("romain", romain.clone(), UiMode::Atelier),
             ("romain-aretes", aretes.clone(), UiMode::Atelier),
+            ("romain-cylindre", cylindre, UiMode::Atelier),
             ("coin", coin_cylindre(), UiMode::Atelier),
             ("trou", plaque_trou(), UiMode::Atelier),
             ("support", support_axe(), UiMode::Atelier),
@@ -1416,7 +1418,6 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
                 continue;
             }
             h.pc(AppState::new(scene, name), mode);
-            h.st.bake.open = true;
             h.steps(2);
             h.st.frame_all();
             if name.starts_with("romain") {
@@ -1442,6 +1443,11 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
                 }
                 h.steps(4);
             };
+            // the same view with the panel closed: opening it must not move
+            // the model (the panel floats over the 3D view)
+            h.steps(4);
+            h.shot(&format!("bake-diag-{name}-ferme"));
+            h.st.set_bake_mode(true);
             wait(h);
             h.shot(&format!("bake-diag-{name}-lignes"));
             h.st.start_bake();

@@ -341,6 +341,21 @@ mod tests {
     }
 
     #[test]
+    fn bake_blind_round_hole() {
+        // Romain's scene of 10 nov: a blind round hole (o-grid floor) next to
+        // a notch with a concave fillet; its junction blend is not handled yet
+        let mut s = Scene::from_json(include_str!("../examples/scenes/romain-cylindre.forme")).expect("scène");
+        assert!(bake::plan(&s, &bake::BakeSettings::preset(bake::Quality::Standard)).is_err());
+        let ids: Vec<_> = s.nodes.keys().copied().collect();
+        for id in ids {
+            if let Some(n) = s.node_mut(id) {
+                n.combine.blend = 0.0;
+            }
+        }
+        bake_ok(&s);
+    }
+
+    #[test]
     fn flat_loops_pass_is_optional_and_keeps_the_mesh_closed() {
         let s = plate_with_hole();
         let out = bake_ok(&s);

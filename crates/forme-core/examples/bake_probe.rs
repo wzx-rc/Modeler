@@ -235,7 +235,29 @@ fn par_lignes() {
         }
         sc
     };
+    // Romain's scene of 10 nov: notch, carved cylinder on top, small box added
+    // with a junction blend; and the same without the blend / without the box
+    let cyl = Scene::from_json(include_str!("scenes/romain-cylindre.forme")).expect("scène de Romain (cylindre creusé)");
+    let cyl_var = |blend: bool, fin: bool| {
+        let mut sc = cyl.clone();
+        let ids: Vec<NodeId> = sc.nodes.keys().copied().collect();
+        for id in ids {
+            if sc.node(id).is_some_and(|n| n.name == "Cube 3") {
+                if !fin {
+                    sc.remove(id);
+                } else if !blend {
+                    if let Some(n) = sc.node_mut(id) {
+                        n.combine.blend = 0.0;
+                    }
+                }
+            }
+        }
+        sc
+    };
     let cases = [
+        ("rc", cyl.clone(), t, 80.0, true, front),
+        ("rc-sans-raccord", cyl_var(false, true), t, 80.0, true, front),
+        ("rc-sans-cube3", cyl_var(false, false), t, 80.0, true, front),
         ("romain-aretes", aretes.clone(), t, 80.0, true, front),
         ("ra-coin3", variante(&[3, 5, 8], false, false), t, 80.0, true, front),
         ("ra-encoche9", variante(&[9], false, true), t, 80.0, true, front),
