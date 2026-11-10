@@ -1570,7 +1570,35 @@ fn par_lignes() {
     let t = DVec3::new(39.5, 19.4, 51.5);
     let back = DVec3::new(-0.8, 0.7, -1.0);
     let front = DVec3::new(0.8, 0.7, 1.0);
+    let aretes = Scene::from_json(include_str!("scenes/romain-aretes.forme")).expect("scène de Romain (fillets par arête)");
+    // the same scene cut down: which part the lines bake does not handle yet
+    let variante = |edges: &[usize], hole: bool, notch: bool| {
+        let mut sc = aretes.clone();
+        let ids: Vec<NodeId> = sc.nodes.keys().copied().collect();
+        for id in ids {
+            let name = sc.node(id).map(|n| n.name.clone()).unwrap_or_default();
+            if name == "Cube 3" && !hole || name == "Cube 10" && !notch {
+                sc.remove(id);
+            } else if name == "Boîte 5" {
+                if let Some(sh) = sc.node_mut(id).and_then(|n| n.shape_mut()) {
+                    let all = sh.edges.clone();
+                    sh.edges = vec![0.0; 12];
+                    for &e in edges {
+                        sh.edges[e] = all[e];
+                    }
+                }
+            }
+        }
+        sc
+    };
     let cases = [
+        ("romain-aretes", aretes.clone(), t, 80.0, true, front),
+        ("ra-coin3", variante(&[3, 5, 8], false, false), t, 80.0, true, front),
+        ("ra-encoche9", variante(&[9], false, true), t, 80.0, true, front),
+        ("ra-encoche10", variante(&[10], false, true), t, 80.0, true, front),
+        ("ra-encoche3", variante(&[3], false, true), t, 80.0, true, front),
+        ("ra-trou", variante(&[], true, false), t, 80.0, true, front),
+        ("ra-sans-coin", variante(&[9, 10], true, true), t, 80.0, true, front),
         ("romain", romain.clone(), t, 80.0, true, back),
         ("romain-droit", romain, t, 80.0, false, back),
         ("romain-vif", vif, t, 80.0, true, back),

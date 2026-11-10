@@ -996,6 +996,14 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 dx.total_cmp(&dy)
             });
         let Some(j) = twin else {
+            if std::env::var("DEBUG_LAYOUT").is_ok() {
+                eprintln!("sans partenaire : {:?} -> {:?}, coins {} {:?} / {} {:?}, {} points, milieu {:?}", me, p.label, p.a, lay.nodes[p.a], p.b, lay.nodes[p.b], p.pts.len(), mid);
+                for (j, q) in pieces.iter().enumerate() {
+                    if q.chart == other && q.label == me {
+                        eprintln!("  en face {j} : coins {} {:?} / {} {:?} libre {}", q.a, lay.nodes[q.a], q.b, lay.nodes[q.b], piece_edge[j].is_none());
+                    }
+                }
+            }
             return Err("par lignes : ligne sans partenaire de l'autre côté".into());
         };
         let e = lay.edges.len();
@@ -1207,6 +1215,9 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         }
         if let Some((_, g)) = stop {
             let re = lay.edges.len();
+            if std::env::var("DEBUG_LAYOUT").is_ok() {
+                eprintln!("ray {:?} e{re} n{n0} {:?} dir {:?} -> stop n{g} {:?}", lay.charts[ci].id, lay.nodes[n0], d, lay.nodes[g]);
+            }
             lay.edges.push(GEdge { a: n0, b: g, pts: vec![lay.nodes[n0], lay.nodes[g]], charts: [ci, ci], ray: true, alive: true });
             lay.rays[ci].push(re);
             continue;
@@ -1216,9 +1227,14 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         };
         let ed = lay.edges[e].clone();
         let x = ed.pts[i].lerp(ed.pts[i + 1], w.clamp(0.0, 1.0));
-        let n1 = if x.distance(lay.nodes[ed.a]) < snap {
+        // a loop landing close to a node takes it, rather than leaving a
+        // sliver row next to it (a hole's side passing by an arc's end)
+        // (only a small bend of a long loop: about one degree)
+        let near = (st.size * 0.3).min(x.distance(lay.nodes[n0]) * 0.02).max(snap);
+        let (da, db) = (x.distance(lay.nodes[ed.a]), x.distance(lay.nodes[ed.b]));
+        let n1 = if da < near && da <= db {
             ed.a
-        } else if x.distance(lay.nodes[ed.b]) < snap {
+        } else if db < near {
             ed.b
         } else {
             lay.split(e, x)
@@ -1227,6 +1243,9 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             continue;
         }
         let re = lay.edges.len();
+        if std::env::var("DEBUG_LAYOUT").is_ok() {
+            eprintln!("ray {:?} e{re} n{n0} {:?} dir {:?} -> n{n1} {:?}", lay.charts[ci].id, lay.nodes[n0], d, lay.nodes[n1]);
+        }
         lay.edges.push(GEdge { a: n0, b: n1, pts: vec![lay.nodes[n0], lay.nodes[n1]], charts: [ci, ci], ray: true, alive: true });
         lay.rays[ci].push(re);
         if lay.origins.contains(&n1) {
@@ -1236,6 +1255,10 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         let next = ed.charts.iter().copied().find(|&c| c != ci);
         if let Some(nc2) = next {
             if corner_angle(&lay, nc2, n1).is_some_and(|t| t.abs() > 0.5) {
+                continue;
+            }
+            // a loop already leaves this node across: this one closes on it
+            if lay.rays[nc2].iter().any(|&r| lay.edges[r].a == n1 || lay.edges[r].b == n1) {
                 continue;
             }
             queue.push_back((nc2, n1, DVec2::ZERO));
@@ -1700,7 +1723,9 @@ fn inward(lay: &Layout, c: usize, n: usize) -> Option<DVec2> {
             let end = if fa { lay.edges[ea].b } else { lay.edges[ea].a };
             if end == n {
                 let (eb, fb) = lp[(i + 1) % k];
-                let t = (lay.end_dir(ea, fa, c) + lay.start_dir(eb, fb, c)).normalize_or_zero();
+                // exact tangents (the polyline drifts where an arc meets a
+                // line, and a loop square to it would drift across the face)
+                let t = (lay.tangent(ea, fa, c, true) + lay.tangent(eb, fb, c, false)).normalize_or_zero();
                 return (t != DVec2::ZERO).then(|| perp(t));
             }
         }
