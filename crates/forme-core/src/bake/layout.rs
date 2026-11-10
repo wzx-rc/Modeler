@@ -294,6 +294,53 @@ fn starts_into(poly: &[DVec2; 4], lines: &[bool; 4], o: DVec2, d: DVec2, margin:
     })
 }
 
+/// Where a ray from `o` along `d` first meets the boundary of chart `c`:
+/// (edge, point).
+fn boundary_hit(lay: &Layout, c: usize, o: DVec2, d: DVec2) -> Option<(usize, DVec3)> {
+    let mut best: Option<(f64, usize, usize, f64)> = None;
+    let eps = lay.node_tol * 10.0;
+    for lp in &lay.bnd[c] {
+        for &(e, _) in lp {
+            let p2 = lay.pts2(e, c);
+            for i in 0..p2.len() - 1 {
+                let (p, q) = (p2[i], p2[i + 1]);
+                let r = q - p;
+                let den = d.perp_dot(r);
+                if den.abs() < 1e-14 {
+                    continue;
+                }
+                let s = (p - o).perp_dot(r) / den;
+                let w = (p - o).perp_dot(d) / den;
+                if s > eps && (-1e-9..=1.0 + 1e-9).contains(&w) && best.is_none_or(|b| s < b.0) {
+                    best = Some((s, e, i, w));
+                }
+            }
+        }
+    }
+    let (_, e, i, w) = best?;
+    let ed = &lay.edges[e];
+    Some((e, ed.pts[i].lerp(ed.pts[i + 1], w.clamp(0.0, 1.0))))
+}
+
+/// An end of boundary edge `e` within `near` of `x`.
+fn boundary_end(lay: &Layout, e: usize, x: DVec3, near: f64) -> Option<usize> {
+    let ed = &lay.edges[e];
+    let (da, db) = (x.distance(lay.nodes[ed.a]), x.distance(lay.nodes[ed.b]));
+    if da < near && da <= db {
+        Some(ed.a)
+    } else if db < near {
+        Some(ed.b)
+    } else {
+        None
+    }
+}
+
+/// Node of the boundary at `x` on edge `e`: an end of it within `near`, or
+/// a new one there.
+fn boundary_node(lay: &mut Layout, e: usize, x: DVec3, near: f64) -> usize {
+    boundary_end(lay, e, x, near).unwrap_or_else(|| lay.split(e, x))
+}
+
 /// Signed turn from direction `a` to `b` (left positive).
 fn turn(a: DVec2, b: DVec2) -> f64 {
     a.perp_dot(b).atan2(a.dot(b))
@@ -919,8 +966,39 @@ fn check(field: &Field, steps: &[Step]) -> Result<(), String> {
     Ok(())
 }
 
+/// Where a hook's square should have a side: a loop that came across its
+/// rows on a pass (from another face, around an edge). Its chart, the
+/// arc's middle, which side (0: offset along a1, 1: along a2) and how far
+/// from the corner of the arc's tangents.
+#[derive(Clone, Copy, Debug)]
+struct Hint {
+    chart: usize,
+    m: DVec3,
+    w: usize,
+    c: f64,
+}
+
 /// Bake by construction lines.
 pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<Baked, String> {
+    // a loop coming round from another face across a hook's rows (a notch
+    // seen on the top and the bottom of a part, its squares placed apart):
+    // once more, with that hook's square on the loop
+    let mut hints: Vec<Hint> = vec![];
+    loop {
+        let mut found = vec![];
+        let r = build_pass(scene, st, progress, &hints, &mut found);
+        let new: Vec<Hint> = found
+            .into_iter()
+            .filter(|h| !hints.iter().any(|k| k.chart == h.chart && k.w == h.w && k.m.distance(h.m) < 1e-6))
+            .collect();
+        if new.is_empty() || hints.len() > 32 {
+            return r;
+        }
+        hints.extend(new);
+    }
+}
+
+fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[Hint], found: &mut Vec<Hint>) -> Result<Baked, String> {
     let t0 = Instant::now();
     let field = Field::new(&compile(scene));
     let steps: Vec<Step> = field.steps().ok_or("historique en arbre")?;
@@ -1574,6 +1652,10 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
     // middle square of a round cap; a loop that would enter one stops in a
     // T on its side, where that side is a line (convex quad, sides flagged)
     let mut keep: Vec<Vec<([DVec2; 4], [bool; 4])>> = vec![vec![]; nc];
+    // the diagonals of the hooks, per chart: a loop meeting one ends there
+    // (diagonal from, to; corner of the arc's tangents, walls, arc's middle)
+    #[allow(clippy::type_complexity)]
+    let mut diags: Vec<Vec<(DVec2, DVec2, DVec2, DVec2, DVec2, DVec3)>> = vec![vec![]; nc];
     // round caps seen whole (a blind hole's floor, the top of a cylinder):
     // an o-grid, a square in the middle whose corners face the middles of
     // the four quarter arcs, where the wall's lines come in; nothing
@@ -1652,6 +1734,26 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         if lay.charts[ci].strip.is_some() || ogrid[ci] || matches!(lay.charts[ci].map, Map::Rev { .. }) {
             continue;
         }
+        // hooks with no room inside the face, placed once every loop of
+        // the face is planned (they meet the boundary where a loop does)
+        let mut tight: Vec<(usize, DVec2, DVec2, bool, usize, DVec2, Option<DVec2>)> = vec![];
+        // sharp re-entrant corners (first: hooks below align on their loops)
+        let loops = lay.bnd[ci].clone();
+        for lp in loops {
+            let n = lp.len();
+            for k in 0..n {
+                let (ea, fa) = lp[k];
+                let (eb, fb) = lp[(k + 1) % n];
+                let ti = lay.end_dir(ea, fa, ci);
+                let to = lay.start_dir(eb, fb, ci);
+                if turn(ti, to) < -0.5 {
+                    let v = if fa { lay.edges[ea].b } else { lay.edges[ea].a };
+                    lay.origins.push(v);
+                    queue.push_back((ci, v, ti));
+                    queue.push_back((ci, v, -to));
+                }
+            }
+        }
         let loops = lay.bnd[ci].clone();
         for lp in loops {
             let n = lp.len();
@@ -1704,12 +1806,29 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                         // (a hole or a junction close to the face's edge)
                         let mut hook = st.size;
                         let mut g2 = x + (a1 + a2) * hook;
+                        let mq = map.to2(lay.nodes[m]);
+                        // (the node on the face, and the diagonal to it too:
+                        // not across a hole or a shape)
+                        let clear = |g: DVec2, h: f64| lay.fmin(&lay.charts[ci], g).0 > h * 0.1 && (1..8).all(|i| lay.fmin(&lay.charts[ci], mq.lerp(g, i as f64 / 8.0)).0 > 0.0);
                         for _ in 0..8 {
-                            if lay.fmin(&lay.charts[ci], g2).0 > hook * 0.1 {
+                            if clear(g2, hook) {
                                 break;
                             }
                             hook *= 0.7;
                             g2 = x + (a1 + a2) * hook;
+                        }
+                        // no room for a hook inside the face (an edge, a hole
+                        // or a shape right there, less than ~half a quad): the
+                        // diagonal runs on to that boundary, where a loop
+                        // planned nearby meets it if there is one, and the
+                        // sides of the square there are the boundary itself
+                        if hook < st.size * 0.6 {
+                            // (the arc's centre: on both ends' normals)
+                            let (n0, n1) = (perp(t_in), perp(t_out));
+                            let dn = n0.perp_dot(n1);
+                            let c = (dn.abs() > 1e-9).then(|| p0 + n0 * ((q0 - p0).perp_dot(n1) / dn));
+                            tight.push((m, a1, a2, rev, other, x, c));
+                            continue;
                         }
                         // on a loop already planned nearby, parallel to one
                         // of the walls (a hole's ring, another hook): there,
@@ -1722,9 +1841,41 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                                     continue;
                                 }
                                 let c = (map.to2(lay.nodes[qn]) - x).dot(ax);
-                                if c > hook * 0.35 && c < hook * 1.6 && best.is_none_or(|b| (c - hook).abs() < (b - hook).abs()) {
+                                if c > hook * 0.05 && c < hook * 1.6 && best.is_none_or(|b| (c - hook).abs() < (b - hook).abs()) {
                                     best = Some(c);
                                 }
+                            }
+                            // or where that side lands on the boundary right
+                            // by a node of it (an arc's end, a corner): through
+                            // it, rather than a sliver row along the face's edge
+                            if best.is_none() {
+                                let b = [a2, a1][w];
+                                let gt = x + (a1 + a2) * hook;
+                                for dir in [b, -b] {
+                                    let Some((e, x3)) = boundary_hit(&lay, ci, gt, dir) else { continue };
+                                    // (a straight edge: by an arc's node the loop
+                                    // just lands on the arc)
+                                    let p2 = lay.pts2(e, ci);
+                                    let (pa, pb) = (p2[0], p2[p2.len() - 1]);
+                                    if p2.iter().any(|&p| (p - pa).perp_dot((pb - pa).normalize_or_zero()).abs() > lay.node_tol * 10.0) {
+                                        continue;
+                                    }
+                                    for n in [lay.edges[e].a, lay.edges[e].b] {
+                                        let c = (map.to2(lay.nodes[n]) - x).dot(ax);
+                                        if lay.nodes[n].distance(x3) < st.size * 0.2 && c > hook * 0.05 && (c - hook).abs() < st.size * 0.2 && best.is_none_or(|b| (c - hook).abs() < (b - hook).abs()) {
+                                            if std::env::var("DEBUG_LAYOUT").is_ok() {
+                                                eprintln!("côté du carré par n{n} {:?} ({c:.2} au lieu de {hook:.2})", lay.nodes[n]);
+                                            }
+                                            best = Some(c);
+                                        }
+                                    }
+                                }
+                            }
+                            // or where a loop from another face came across
+                            // the rows on the last pass
+                            let mm = lay.nodes[m];
+                            if let Some(h) = hints.iter().find(|h| h.chart == ci && h.w == w && h.m.distance(mm) < lay.node_tol * 10.0 && h.c > hook * 0.05 && h.c < hook * 1.6) {
+                                best = Some(h.c);
                             }
                             if let Some(c) = best {
                                 hk[w] = c;
@@ -1763,6 +1914,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                         }
                         let re = lay.edges.len();
                         lay.edges.push(GEdge { a: m, b: g, pts: vec![lay.nodes[m], lay.nodes[g]], charts: [ci, ci], ray: true, alive: true });
+                        diags[ci].push((mq, map.to2(lay.nodes[g]), x, a1, a2, lay.nodes[m]));
                         lay.rays[ci].push(re);
                         for d in [a1, -a1, a2, -a2] {
                             queue.push_back((ci, g, d));
@@ -1815,21 +1967,103 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 }
             }
         }
-        // sharp re-entrant corners
-        let loops = lay.bnd[ci].clone();
-        for lp in loops {
-            let n = lp.len();
-            for k in 0..n {
-                let (ea, fa) = lp[k];
-                let (eb, fb) = lp[(k + 1) % n];
-                let ti = lay.end_dir(ea, fa, ci);
-                let to = lay.start_dir(eb, fb, ci);
-                if turn(ti, to) < -0.5 {
-                    let v = if fa { lay.edges[ea].b } else { lay.edges[ea].a };
-                    lay.origins.push(v);
-                    queue.push_back((ci, v, ti));
-                    queue.push_back((ci, v, -to));
+        for (m, a1, a2, rev, other, x, c) in tight {
+            let map = lay.charts[ci].map;
+            let o2 = map.to2(lay.nodes[m]);
+            let dd = a1.perp_dot(a2);
+            // a point seen from the corner of the arc's tangents, along both
+            // walls: the gaps between the arc and the square's sides there
+            let gaps = |y: DVec2| {
+                let w = y - x;
+                (w.perp_dot(a2) / dd, a1.perp_dot(w) / dd)
+            };
+            let Some((e, x3)) = boundary_hit(&lay, ci, o2, (a1 + a2).normalize()) else {
+                return Err("accroche sans place ni bord en face".into());
+            };
+            let xq = map.to2(x3);
+            // the loops planned on the face, parallel to a wall, and where
+            // they land on the boundary
+            let mut landings: Vec<(f64, usize, DVec3)> = vec![];
+            for &(qc, qn, qd) in queue.iter() {
+                if qc != ci || qd == DVec2::ZERO {
+                    continue;
                 }
+                let qd = qd.normalize();
+                let side = if qd.dot(a2).abs() > 0.999 {
+                    0
+                } else if qd.dot(a1).abs() > 0.999 {
+                    1
+                } else {
+                    continue;
+                };
+                let q = map.to2(lay.nodes[qn]);
+                let off = [gaps(q).0, gaps(q).1][side];
+                if let Some((e2, y3)) = boundary_hit(&lay, ci, q, qd) {
+                    landings.push((off, e2, y3));
+                }
+            }
+            // (edge, point, snap): where a loop planned nearby will land if
+            // there is one, else the boundary's node there or a new one
+            let mut best = (e, x3, st.size * 0.3);
+            let mut bd = st.size * 0.6;
+            for &(_, e2, y3) in &landings {
+                let dist = map.to2(y3).distance(xq);
+                if dist < bd {
+                    bd = dist;
+                    best = (e2, y3, st.size * 0.02);
+                }
+            }
+            // a corner of the boundary (another shape's) right at the corner
+            // of the square: its loops would graze the arc. The square's
+            // corner is rather where the side of the next hook's square
+            // meets the boundary, and the loops grazing the arc from the
+            // square's sides end there. (Not instead of a loop's landing:
+            // that loop is there anyway, the square's side is on it)
+            let reserve = c;
+            let y = boundary_end(&lay, best.0, best.1, best.2).map_or(best.1, |n| lay.nodes[n]);
+            let (ga, gb) = gaps(map.to2(y));
+            if bd >= st.size * 0.6 && ga.min(gb) < st.size * 0.3 {
+                let mut alt: Option<(f64, usize, DVec3)> = None;
+                for &(off, e2, y3) in &landings {
+                    let y2 = map.to2(y3);
+                    let (ya, yb) = gaps(y2);
+                    let dist = y2.distance(xq);
+                    let clear = (1..8).all(|i| lay.fmin(&lay.charts[ci], o2.lerp(y2, i as f64 / 8.0)).0 > 0.0);
+                    if off >= st.size * 0.3 && ya > 0.0 && yb > 0.0 && dist < st.size && clear && alt.is_none_or(|a| dist < a.0) {
+                        alt = Some((dist, e2, y3));
+                    }
+                }
+                if let Some((_, e2, y3)) = alt {
+                    best = (e2, y3, st.size * 0.02);
+                }
+            }
+            let g = boundary_node(&mut lay, best.0, best.1, best.2);
+            lay.origins.push(g);
+            if std::env::var("DEBUG_LAYOUT").is_ok() {
+                eprintln!("accroche au bord {:?} n{m} -> n{g} {:?}", lay.charts[ci].id, lay.nodes[g]);
+            }
+            let gq = map.to2(lay.nodes[g]);
+            if let Some(c) = reserve {
+                let w = gq - c;
+                let (al, be) = (w.perp_dot(a2) / dd, a1.perp_dot(w) / dd);
+                if al > 0.0 && be > 0.0 {
+                    keep[ci].push(([c, c + a1 * al, gq, c + a2 * be], [false, true, true, false]));
+                }
+            }
+            let re = lay.edges.len();
+            lay.edges.push(GEdge { a: m, b: g, pts: vec![lay.nodes[m], lay.nodes[g]], charts: [ci, ci], ray: true, alive: true });
+            diags[ci].push((o2, gq, x, a1, a2, lay.nodes[m]));
+            lay.rays[ci].push(re);
+            for d in [a1, -a1, a2, -a2] {
+                // only into the face (not along its edge)
+                if lay.fmin(&lay.charts[ci], gq + d * (st.size * 0.2)).0 > st.size * 0.1 {
+                    queue.push_back((ci, g, d));
+                }
+            }
+            if rev {
+                forced.push((other, m));
+            } else {
+                queue.push_back((other, m, DVec2::ZERO));
             }
         }
     }
@@ -1976,7 +2210,37 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         if exists || keep[ci].iter().any(|(poly, lines)| starts_into(poly, lines, o, d, snap)) {
             continue;
         }
-        let best = first_hit(d);
+        let mut best = first_hit(d);
+        // a loop passing right by a node of the boundary on the way (the
+        // extreme of a round, a corner) takes it: about one degree of bend
+        if let Some(b0) = best {
+            let m = lay.charts[ci].map;
+            let mut pass: Option<(f64, usize)> = None;
+            for lp in &lay.bnd[ci] {
+                for &(e, _) in lp {
+                    let n = lay.edges[e].a;
+                    if n == n0 {
+                        continue;
+                    }
+                    let w = m.to2(lay.nodes[n]) - o;
+                    let s = w.dot(d);
+                    let off = (w - d * s).length();
+                    if s > snap && s < b0.0 - snap && off > snap * 0.01 && off < (st.size * 0.3).min(s * 0.02) && pass.is_none_or(|p| s < p.0) {
+                        pass = Some((s, n));
+                    }
+                }
+            }
+            if let Some((_, n)) = pass {
+                let d2 = (m.to2(lay.nodes[n]) - o).normalize();
+                if let Some(b2) = first_hit(d2) {
+                    if std::env::var("DEBUG_LAYOUT").is_ok() {
+                        eprintln!("passe par n{n} {:?}", lay.nodes[n]);
+                    }
+                    d = d2;
+                    best = Some(b2);
+                }
+            }
+        }
         // a loop node inside the face on the way (where loops cross)
         let mut stop: Option<(f64, usize)> = None;
         for &g in &lay.inner[ci] {
@@ -2025,16 +2289,39 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 }
             }
         }
+        // a loop running into a hook's diagonal (across the rows round
+        // a hole or a notch): it ends there, a T on the diagonal, rather
+        // than cutting a corner off both patches beside it
+        let mut across: Option<Hint> = None;
+        for &(a, b, x, a1, a2, m3) in &diags[ci] {
+            let r = b - a;
+            let den = d.perp_dot(r);
+            if den.abs() < 1e-12 {
+                continue;
+            }
+            let t = (a - o).perp_dot(r) / den;
+            let w = (a - o).perp_dot(d) / den;
+            let q = o + d * t;
+            if t > snap && w > 0.0 && w < 1.0 && q.distance(a) > snap && q.distance(b) > snap && best.is_none_or(|b| t < b.0 - snap) && tee.is_none_or(|x| t < x.0) {
+                tee = Some((t, q));
+                // (where the square's side would have to be for this loop)
+                across = [a2, a1].into_iter().position(|v| v.dot(d).abs() > 0.999).map(|k| Hint { chart: ci, m: m3, w: k, c: (q - x).dot([a1, a2][k]) });
+            }
+        }
         for (poly, lines) in &keep[ci] {
             if let Some(t) = enter_poly(poly, lines, o, d, snap) {
                 if t > extent * 1e-6 && best.is_none_or(|b| t < b.0 - snap) && tee.is_none_or(|x| t < x.0) {
                     tee = Some((t, o + d * t));
+                    across = None;
                 }
             }
         }
         let mut new_tee = false;
         if let Some((t, q)) = tee {
             if stop.is_none_or(|x| t < x.0 + snap) {
+                if let Some(h) = across {
+                    found.push(h);
+                }
                 // the T of a loop already there, or a new one
                 let m = lay.charts[ci].map;
                 let near = lay.inner[ci].iter().copied().find(|&g| m.to2(lay.nodes[g]).distance(q) < snap);
@@ -2398,6 +2685,27 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         }
     }
 
+    if let (false, Ok(path)) = (settled, std::env::var("DEBUG_COUNTS")) {
+        // the count system, to look at it elsewhere: one line per patch,
+        // "chart|side0|side1|side2|side3", a side "e:count:fixed:target,..."
+        let mut out = String::new();
+        for (ci, sd) in &patches {
+            out += &format!("{:?}", lay.charts[*ci].id);
+            for side in sd {
+                out += "|";
+                let v: Vec<String> = side
+                    .iter()
+                    .map(|y| {
+                        let (a, b) = (lay.nodes[lay.edges[y.0].a], lay.nodes[lay.edges[y.0].b]);
+                        format!("{}:{}:{}:{:.2}:({:.1} {:.1} {:.1})-({:.1} {:.1} {:.1})", y.0, count[y.0], fixed[y.0] as u8, target[y.0], a.x, a.y, a.z, b.x, b.y, b.z)
+                    })
+                    .collect();
+                out += &v.join(",");
+            }
+            out += "\n";
+        }
+        let _ = std::fs::write(path, out);
+    }
     if !settled {
         min_conflicts(&patches, &mut count, &fixed, &target).map_err(|why| {
             if std::env::var("DEBUG_LAYOUT").is_ok() {

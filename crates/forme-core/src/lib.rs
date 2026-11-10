@@ -357,6 +357,16 @@ mod tests {
     }
 
     #[test]
+    fn bake_boss_close_to_face_edge() {
+        // Romain's scene of 10 nov: a standing cylinder with a 2.8 mm junction
+        // blend, 1.7 mm from the front edge, next to a notch: the hook square
+        // around the blend rests on the face boundary (diagonals to the edge)
+        let s = Scene::from_json(include_str!("../examples/scenes/romain-bossage.forme")).expect("scène");
+        let b = bake_ok(&s);
+        assert!(b.faces.iter().any(|f| f.patch == bake::P_FILLET), "no fillet strip");
+    }
+
+    #[test]
     fn bake_junction_blend_box_on_face() {
         // a fin standing on a block, joined by a smooth union (blend): strips
         // along the four walls, corners split in three quads

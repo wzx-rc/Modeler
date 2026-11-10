@@ -1403,10 +1403,12 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         let only = std::env::var("BAKE_DIAG").ok();
         let aretes = forme_core::Scene::from_json(include_str!("../../../forme-core/examples/scenes/romain-aretes.forme")).expect("scène");
         let cylindre = forme_core::Scene::from_json(include_str!("../../../forme-core/examples/scenes/romain-cylindre.forme")).expect("scène");
+        let bossage = forme_core::Scene::from_json(include_str!("../../../forme-core/examples/scenes/romain-bossage.forme")).expect("scène");
         for (name, scene, mode) in [
             ("romain", romain.clone(), UiMode::Atelier),
             ("romain-aretes", aretes.clone(), UiMode::Atelier),
             ("romain-cylindre", cylindre, UiMode::Atelier),
+            ("romain-bossage", bossage, UiMode::Atelier),
             ("coin", coin_cylindre(), UiMode::Atelier),
             ("trou", plaque_trou(), UiMode::Atelier),
             ("support", support_axe(), UiMode::Atelier),
@@ -1459,6 +1461,14 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
             h.st.toast = None;
             wait(h);
             h.shot(&format!("bake-diag-{name}-roles"));
+            if name == "romain-bossage" {
+                // closer, from above: the round and its square of loops
+                // against the face's edge, Cube 3 and the notch
+                let d = h.st.camera.dist;
+                h.cam(Vec3::new(38.8, 39.4, 47.0), d * 0.5, -2.4, 1.15);
+                wait(h);
+                h.shot(&format!("bake-diag-{name}-dessus"));
+            }
         }
     }
     if want("pc-studio") {

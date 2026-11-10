@@ -57,7 +57,14 @@ Résultats : scène de Romain (boîte + coin creusé, fillet 2,2 mm) 390 quads e
 - **Fillet de jonction (raccord, blend d'un Add)** : pour l'instant une boîte à arêtes vives posée d'aplomb sur une face plane. Le profil est exact (smin quadratique entre deux plans : √u + √v = √k, longueur ≈ 1,62 k). Quatre bandes le long des parois (cartes `Map::Blend`, rangées comme un fillet), et à chaque coin de la boîte un quart de révolution autour du pied de l'arête (`Map::Rev`), coupé en trois quads autour d'un nœud, comme le coin en boule. Le pied de l'arête vive reste une pointe (c'est la forme du smin, pas un défaut du maillage). La face autour reçoit une accroche en diagonale au milieu de chaque coin, et ces accroches se recalent sur les boucles déjà prévues (anneau d'un trou voisin) ou partagent un nœud proche. Scène `romain-cylindre.forme` avec le raccord de 3,1 mm : 794 quads, fermée, écart max 0,09 mm. Pas encore : blend sur un Carve, boîte arrondie ou penchée, autre forme, raccord trop près d'une arête ou d'une autre forme (`Err`).
 
 - **Raccord sous un cylindre debout** (blend d'un cylindre posé sur une face plane) : le même profil tourné autour de l'axe, un anneau de rangées (`Map::Ring`), en deux moitiés comme le mur du cylindre (mêmes coutures). La face autour le voit comme un trou rond : quatre quarts accrochés en diagonale. Cas simple (bossage Ø 6 sur un socle, raccord 2 mm) : 296 quads, fermé. Pas encore : cylindre caché en partie, couché, arrondi.
-- **Pas la place d'une accroche** : quand le raccord ou le trou arrive à moins d'environ un demi-quad d'un bord ou d'une autre forme (scène `romain-bossage.forme` : 1,7 mm du bord avant pour des quads de 5 mm), les règles actuelles laissent des rangées fines ou des patchs à 3/5 coins : `Err`. Règle à décider avec Romain.
+- **Pas la place d'une accroche : diagonales jusqu'au bord** (option A choisie par Romain le 10 nov.) : quand le raccord ou le trou arrive à moins d'environ 0,6 quad d'un bord ou d'une autre forme (scène `romain-bossage.forme` : 1,7 mm du bord avant pour des quads de 5 mm), la diagonale ne s'arrête pas à une case du coin : elle va jusqu'au bord en face, et le carré d'accroche s'appuie sur ce bord. Jamais de rangée fine.
+  - La diagonale vise de préférence une ligne déjà prévue qui touche ce bord (moins de 0,6 quad), sinon le point du bord lui-même.
+  - Quand le coin d'une autre forme tombe presque sur le coin du carré (Cube 3 de la scène), on prend une autre ligne prévue à au moins 0,3 quad, si la diagonale y passe librement : pas de pincement ni de pointe.
+  - Le carré de ces accroches est réservé comme les autres (une boucle venue d'ailleurs s'arrête en T sur ses côtés-lignes), et une boucle qui croise la diagonale d'une accroche s'y arrête en T.
+  - Un côté du carré qui tombe à moins de 0,2 quad du bout d'une arête droite du bord passe par ce bout.
+  - Deux faces voisines doivent voir le même carré (encoche partagée) : si une boucle s'arrête en T sur la diagonale d'une accroche, le Bake refait une passe avec ce côté du carré recalé sur le point d'arrêt (au plus quelques passes).
+  - Scène de Romain : 692 quads, fermée, écart max 0,05 mm, et toujours fermée avec Cube 3 décalé de ±1 à 2 mm. Compromis : au-dessus du rond, la ligne du bas de Cube 3 prolongée passe à 0,87 mm du raccord (la géométrie l'impose).
+  - Pas encore : le cylindre déplacé plus près du coin ou de l'encoche (cas `bossage-44/46/48/50` du probe : patch à 3 coins ou comptes impossibles).
 
 ### Encore à faire (renvoie `Err` aujourd'hui)
 
@@ -77,6 +84,6 @@ Le code est dans l'historique git (commit avant le nettoyage du 10 nov.) si une 
 
 ## Outils de mise au point
 
-- `OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes` : le Bake sur ses scènes de test, rendus CPU (`CASE=romain-aretes` pour une seule, `DEBUG_LAYOUT=1` pour les rayons tracés et les patchs refusés). Bandes de fillet en orange, remplissage en bleu.
+- `OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes` : le Bake sur ses scènes de test, rendus CPU (`CASE=romain-aretes` pour une seule, `DEBUG_LAYOUT=1` pour les rayons tracés et les patchs refusés, `DEBUG_COUNTS=fichier` écrit le système des nombres de segments quand il ne s'accorde pas : une ligne par patch, `carte|côté…`, arête `e:nombre:fixé:cible:(a)-(b)`). Bandes de fillet en orange, remplissage en bleu.
 - `… bake_probe -- lignes` : lignes de construction (`lines.rs`) sur la pièce bakée. `… bake_probe -- decime` : la passe optionnelle.
 - `forme-shot -- /tmp/x 19` (cube test dans l'app : montre le message « pas encore géré »), `22` (fillets par arête, bake), `user` (scène de test de Romain).

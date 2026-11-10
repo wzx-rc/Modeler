@@ -299,7 +299,23 @@ fn par_lignes() {
         }
         sc
     };
+    // Cube 3 moved by (dx, dz): its corner nearly on the ring's square in his scene
+    let cube3_at = |dx: f32, dz: f32| {
+        let mut sc = bossage_r.clone();
+        let ids: Vec<NodeId> = sc.nodes.keys().copied().collect();
+        for id in ids {
+            if let Some(n) = sc.node_mut(id).filter(|n| n.name == "Cube 3") {
+                n.transform.pos.x += dx;
+                n.transform.pos.z += dz;
+            }
+        }
+        sc
+    };
     let cases = [
+        ("bossage-c3z+1", cube3_at(0.0, 1.0), t, 80.0, true, front),
+        ("bossage-c3z+2", cube3_at(0.0, 2.0), t, 80.0, true, front),
+        ("bossage-c3x+1", cube3_at(1.0, 0.0), t, 80.0, true, front),
+        ("bossage-c3z-1", cube3_at(0.0, -1.0), t, 80.0, true, front),
         ("bossage-48", bossage_at(40.0, 48.0), t, 80.0, true, front),
         ("bossage-46", bossage_at(38.83, 46.0), t, 80.0, true, front),
         ("bossage-50", bossage_at(36.0, 50.0), t, 80.0, true, front),
