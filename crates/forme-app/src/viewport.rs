@@ -63,7 +63,8 @@ fn rot_hit(st: &AppState, pos: Pos2) -> Option<HandleInfo> {
     let view = st.view();
     let pc = view.project(pv).map(|q| pos2(q[0], q[1]))?;
     let info = |handle, axis| HandleInfo { handle, world: pv, origin: pv, axis };
-    let mut best: (f32, Option<HandleInfo>) = (10.0, None);
+    // the solid bands are about 16 px wide: grab within 12 px of their middle
+    let mut best: (f32, Option<HandleInfo>) = (12.0, None);
     for (h, n) in [(Handle::RotX, glam::Vec3::X), (Handle::RotY, glam::Vec3::Y), (Handle::RotZ, glam::Vec3::Z)] {
         let pts = ring_points(st, pv, rr, n, true);
         for w in pts.windows(2) {
@@ -80,7 +81,7 @@ fn rot_hit(st: &AppState, pos: Pos2) -> Option<HandleInfo> {
     }
     let r_px = rr / view.pixel_size_at((pv - view.eye).length()).max(1e-6);
     let d = pos.distance(pc);
-    if (d - r_px / ROT_RING * ROT_VIEW).abs() < 10.0 {
+    if (d - r_px / ROT_RING * ROT_VIEW).abs() < 11.0 {
         return Some(info(Handle::RotView, glam::Vec3::Z));
     }
     if d < r_px {
@@ -539,18 +540,72 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                     }
                 }
             }
-            for (h, n, c) in [(Handle::RotX, glam::Vec3::X, AXIS_X), (Handle::RotY, glam::Vec3::Y, AXIS_Y), (Handle::RotZ, glam::Vec3::Z, AXIS_Z)] {
-                let lit = hot(h);
-                let col = if lit { HOT } else if active.is_some() { tint(c, 0.35) } else { c };
-                let pts = ring_points(st, pv, rr, n, active.is_none() || !lit);
-                for w in pts.windows(2) {
-                    if let (Some(a), Some(b)) = (w[0], w[1]) {
-                        p.line_segment([a, b], Stroke::new(if lit { 2.6 } else { 1.6 }, col));
+            // solid rings (Romain): flat bands in the ring planes, so they read
+            // as 3D objects (thin when seen edge-on); the back half faint and
+            // drawn first, the front half solid and shaded by how it faces us
+            let to_cam = (view.eye - pv).normalize_or(glam::Vec3::Z);
+            let band = if active.is_some() { 0.07 } else { 0.085 };
+            let rings = [(Handle::RotX, glam::Vec3::X, AXIS_X), (Handle::RotY, glam::Vec3::Y, AXIS_Y), (Handle::RotZ, glam::Vec3::Z, AXIS_Z)];
+            for front in [false, true] {
+                for (h, n, c) in rings {
+                    let lit = hot(h);
+                    let base = if lit { HOT } else { c };
+                    // brighter when the ring's plane faces the camera
+                    let k = 0.62 + 0.38 * n.dot(to_cam).abs();
+                    let shade = |col: Color32, a: f32| {
+                        Color32::from_rgba_unmultiplied((col.r() as f32 * k) as u8, (col.g() as f32 * k) as u8, (col.b() as f32 * k) as u8, (a * 255.0) as u8)
+                    };
+                    let alpha: f32 = match (front, lit, active.is_some()) {
+                        (_, true, _) => 0.95,
+                        (true, false, false) => 0.88,
+                        (true, false, true) => 0.25,
+                        (false, false, false) => 0.16,
+                        (false, false, true) => 0.07,
+                    };
+                    // the dragged ring shows all around
+                    let show_back = lit && active.is_some();
+                    let (u, v) = ring_basis(n);
+                    let w = band * if lit { 1.25 } else { 1.0 };
+                    let pt = |a: f32, r: f32| {
+                        let dir = u * a.cos() + v * a.sin();
+                        view.project(pv + dir * rr * r).map(|q| pos2(q[0], q[1]))
+                    };
+                    let mut mesh = egui::epaint::Mesh::default();
+                    let mut edges: Vec<(Pos2, Pos2, Color32)> = vec![];
+                    for i in 0..72 {
+                        let (a0, a1) = (i as f32 * std::f32::consts::TAU / 72.0, (i + 1) as f32 * std::f32::consts::TAU / 72.0);
+                        let mid = u * ((a0 + a1) * 0.5).cos() + v * ((a0 + a1) * 0.5).sin();
+                        let is_front = mid.dot(to_cam) > -0.05;
+                        if is_front != front && !(show_back && front) {
+                            continue;
+                        }
+                        if let (Some(o0), Some(o1), Some(i1), Some(i0)) = (pt(a0, 1.0 + w), pt(a1, 1.0 + w), pt(a1, 1.0 - w), pt(a0, 1.0 - w)) {
+                            let a = if is_front || show_back { alpha } else { alpha.min(0.16) };
+                            // one mesh for the whole band: no anti-aliasing seams between segments
+                            let col = shade(base, a);
+                            let k0 = mesh.vertices.len() as u32;
+                            for q in [o0, o1, i1, i0] {
+                                mesh.colored_vertex(q, col);
+                            }
+                            mesh.add_triangle(k0, k0 + 1, k0 + 2);
+                            mesh.add_triangle(k0, k0 + 2, k0 + 3);
+                            if is_front && front {
+                                // a darker outer edge gives the band its thickness
+                                edges.push((o0, o1, shade(Color32::from_rgb(base.r() / 2, base.g() / 2, base.b() / 2), a)));
+                            }
+                        }
+                    }
+                    p.add(Shape::mesh(mesh));
+                    for (a, b, c) in edges {
+                        p.line_segment([a, b], Stroke::new(1.0, c));
                     }
                 }
             }
+            // view ring: a solid circle band around everything
             let vh = hot(Handle::RotView);
-            p.circle_stroke(pc, r_px / ROT_RING * ROT_VIEW, Stroke::new(if vh { 2.4 } else { 1.2 }, if vh { HOT } else { Color32::from_rgba_unmultiplied(205, 210, 218, 150) }));
+            let vr = r_px / ROT_RING * ROT_VIEW;
+            p.circle_stroke(pc, vr, Stroke::new(if vh { 7.0 } else { 5.0 }, if vh { tint(HOT, 0.9) } else { Color32::from_rgba_unmultiplied(205, 210, 218, 70) }));
+            p.circle_stroke(pc, vr + if vh { 3.5 } else { 2.5 }, Stroke::new(1.0, if vh { HOT } else { Color32::from_rgba_unmultiplied(205, 210, 218, 120) }));
             p.circle_filled(pc, 3.0, Color32::WHITE);
             // what the drag will do, then the angle while dragging
             if let Some(a) = st.rot_angle() {
