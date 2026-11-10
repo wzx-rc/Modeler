@@ -47,15 +47,18 @@ pub struct BakeSettings {
     pub threads: usize,
     /// Quads across the first shape's largest side.
     pub divisions: f64,
+    /// Width (mm) of the pair bevel on the sharp edges (`bevel.rs`, Romain's
+    /// Maya reference of 10 nov. 2026); 0 = sharp edges left as they are.
+    pub bevel: f64,
 }
 
 impl BakeSettings {
     pub fn preset(q: Quality) -> Self {
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(16);
         match q {
-            Quality::Draft => BakeSettings { tol: 0.05, threads, divisions: 5.0 },
-            Quality::Standard => BakeSettings { tol: 0.015, threads, divisions: 8.0 },
-            Quality::Max => BakeSettings { tol: 0.006, threads, divisions: 12.0 },
+            Quality::Draft => BakeSettings { tol: 0.05, threads, divisions: 5.0, bevel: bevel::BEVEL_WIDTH },
+            Quality::Standard => BakeSettings { tol: 0.015, threads, divisions: 8.0, bevel: bevel::BEVEL_WIDTH },
+            Quality::Max => BakeSettings { tol: 0.006, threads, divisions: 12.0, bevel: bevel::BEVEL_WIDTH },
         }
     }
 }
@@ -184,7 +187,13 @@ pub fn bake(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Result<Bak
     if progress.cancelled() {
         return Err("annulé".into());
     }
-    r
+    // the bevel on the sharp edges is part of the Bake (Romain, 10 nov.
+    // 2026): a corner it cannot bevel is an Err like any other
+    let b = r?;
+    if st.bevel > 0.0 {
+        return bevel::bevel_sharp(scene, &b, st.bevel);
+    }
+    Ok(b)
 }
 
 pub(crate) fn finish(field: &Field, out: &mut Baked, st: &BakeSettings, progress: &Progress) {

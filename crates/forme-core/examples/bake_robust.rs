@@ -325,6 +325,11 @@ fn scope(e: &str) -> bool {
 fn grade(scene: &Scene) -> Outcome {
     let mut st = bake::BakeSettings::preset(bake::Quality::Standard);
     st.threads = 1;
+    // the Bake as in the app, bevel included; BEVEL=0 grades the layout alone
+    if let Some(w) = std::env::var("BEVEL").ok().and_then(|w| w.parse::<f64>().ok()) {
+        st.bevel = w;
+    }
+    let bevelled = st.bevel > 0.0;
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bake::bake(scene, &st, &bake::Progress::default())));
     let b = match r {
         Err(p) => {
@@ -334,15 +339,6 @@ fn grade(scene: &Scene) -> Outcome {
         Ok(Err(e)) if scope(&e) => return Outcome::Scope(e),
         Ok(Err(e)) => return Outcome::Rule(e),
         Ok(Ok(b)) => b,
-    };
-    // BEVEL=0.25: grade the mesh with the optional pair bevel on its sharp edges
-    let bevelled = std::env::var("BEVEL").ok().and_then(|w| w.parse::<f64>().ok()).is_some();
-    let b = match std::env::var("BEVEL").ok().and_then(|w| w.parse::<f64>().ok()) {
-        Some(w) => match bake::bevel::bevel_sharp(scene, &b, w) {
-            Ok(bb) => bb,
-            Err(e) => return Outcome::Rule(e),
-        },
-        None => b,
     };
     if let Ok(path) = std::env::var("OBJ") {
         // the mesh, for a look: "v x y z", "f a b c d role"

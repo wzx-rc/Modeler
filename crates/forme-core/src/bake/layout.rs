@@ -3969,7 +3969,7 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
     for (f, r) in faces.into_iter().zip(roles) {
         b.faces.push(BFace { verts: f, normals: vec![], mat: 0, patch: r });
     }
-    let bs = BakeSettings { tol: st.tol, threads: st.threads, divisions: 0.0 };
+    let bs = BakeSettings { tol: st.tol, threads: st.threads, divisions: 0.0, bevel: 0.0 };
     progress.set(3, b.faces.len() as u32);
     finish(&field, &mut b, &bs, progress);
     if b.stats.open_edges > 0 || b.stats.nonmanifold_edges > 0 {

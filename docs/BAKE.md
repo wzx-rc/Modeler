@@ -30,9 +30,9 @@ Sur les bakes de l'app : cube 20 mm 384 → 6 faces, cube arrondi 864 → 150, c
 
 Limite : une loop n'est retirée qu'entière. Celles qui passent par un trou, un éventail de fillet ou un pôle (coin du carré d'un trou) restent, même sur leurs morceaux plats (dessous du socle).
 
-### Passe secondaire : bevel des arêtes vives (10 nov. 2026, option)
+### Bevel des arêtes vives (10 nov. 2026, dans le Bake)
 
-Référence de Romain : `docs/references/romain-correctif-topo.obj`, son export de la scène du cylindre arrondi repris dans Maya. Son geste : « toutes les arêtes sélectionnées et un Bevel en paire comme le bevel Maya, puis connexion en diagonale dans les coins ». Code : `bake/bevel.rs` (`bevel_sharp`, largeur `BEVEL_WIDTH` = 0,25 mm, seuil `SHARP_DEG` = 20°). Le SDF reste vif : le bevel n'existe que dans le maillage exporté. Comme la passe des loops plates, elle tourne sur une copie du résultat du Bake, jamais dans `bake()`.
+Référence de Romain : `docs/references/romain-correctif-topo.obj`, son export de la scène du cylindre arrondi repris dans Maya. Son geste : « toutes les arêtes sélectionnées et un Bevel en paire comme le bevel Maya, puis connexion en diagonale dans les coins ». Code : `bake/bevel.rs` (`bevel_sharp`, largeur `BEVEL_WIDTH` = 0,25 mm, seuil `SHARP_DEG` = 20°). Le SDF reste vif : le bevel n'existe que dans le maillage exporté. D'abord écrit comme une option ; Romain, 10 nov. 18 h 32 : « Pourquoi il faut un bouton bevel ? » Il fait donc partie de `bake()`, toujours actif : largeur `BakeSettings.bevel` (0,25 mm par défaut, 0 = arêtes laissées vives). Un coin qu'il ne sait pas biseauter rend `Err` comme le reste du Bake.
 
 - **Arête vive** : la surface exacte plie de plus de 20° à travers elle (gradient pris juste à l'intérieur de chacune des deux faces, aux deux bouts de l'arête). Les rangées d'un fillet ne comptent jamais, même grossières.
 - Chaque arête vive reçoit **deux rangées de quads** (rôle orange), la ligne du milieu sur un profil rond.
@@ -45,7 +45,7 @@ Référence de Romain : `docs/references/romain-correctif-topo.obj`, son export 
 
 Résultats (10 nov. au soir) : sa scène (cylindre arrondi + Cube 3, sans raccord) 181 arêtes, 734 → 1 164 quads, aucun coin réduit, fermé ; romain-cylindre 186 arêtes, 722 → 1 144 ; romain-aretes 129 arêtes, 840 → 1 136, 15 coins réduits. `bake_robust` avec `BEVEL=0.25` : 3 632 propres sur 7 610 (3 911 sans le bevel), aucun refus ajouté sur un cas propre, 283 cas propres passent en « défaut » (quads écrasés ou fins) là où une forme touche presque le bord ou une autre forme : il reste moins de 0,5 mm entre deux bevels. Le coin du U de sa scène compte lui-même comme un quad écrasé.
 
-Mise au point : `BEVEL=0.25` dans `bake_probe parlignes` (ligne « bevel … sur n arêtes, a → b faces », `OBJ=1` écrit le maillage) et dans `bake_robust` (un refus du bevel compte en « règle »). `DEBUG_BEVEL=1` décrit les secteurs refusés.
+Mise au point : `bake_probe parlignes` et `bake_robust` font le bevel comme l'app ; `BEVEL=0` pour juger le Bake par lignes seul (c'est la référence des règles de `layout.rs` : 3 911 propres), `BEVEL=w` pour une autre largeur. Ligne « bevel … sur n arêtes, k coins réduits, a → b faces » dans `bake_probe`, `OBJ=1` écrit le maillage. `DEBUG_BEVEL=1` décrit les secteurs refusés.
 
 ## Le Bake : par lignes (`layout.rs`), seul algorithme depuis le 10 nov. 2026
 

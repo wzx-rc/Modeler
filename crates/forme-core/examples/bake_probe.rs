@@ -1,6 +1,6 @@
 //! Bake by construction lines (`bake::layout`): test scenes, CPU renders.
 //!
-//! cargo run --release -p forme-core --example bake_probe -- parlignes   (CASE=name for one, OUT=dir, BEVEL=0.25 for the pair bevel, OBJ=1 writes the mesh)
+//! cargo run --release -p forme-core --example bake_probe -- parlignes   (CASE=name for one, OUT=dir, BEVEL=0 for the layout without the bevel, OBJ=1 writes the mesh)
 //! cargo run --release -p forme-core --example bake_probe -- lignes      (construction lines over the part)
 //! cargo run --release -p forme-core --example bake_probe -- decime      (optional flat-loop pass, DEG=5)
 use forme_core::bake::{self, field::Field};
@@ -405,9 +405,11 @@ fn par_lignes() {
         let st = bake::BakeSettings::preset(q);
         let size = bake::plan(&scene, &st).unwrap_or(5.0);
         let ls = bake::layout::LayoutSettings { size, tol: st.tol * 2.0, threads: st.threads, diagonal };
-        // BEVEL=0.25: the optional pair bevel on the sharp edges, on top
+        // the bevel on the sharp edges, as bake() does (BEVEL=0: the layout
+        // alone, BEVEL=w another width); a refused bevel keeps the layout
         let built = bake::layout::build(&scene, &ls, &bake::Progress::default());
-        let built = match (built, std::env::var("BEVEL").ok().and_then(|w| w.parse::<f64>().ok())) {
+        let w = std::env::var("BEVEL").ok().and_then(|w| w.parse::<f64>().ok()).unwrap_or(bake::bevel::BEVEL_WIDTH);
+        let built = match (built, (w > 0.0).then_some(w)) {
             (Ok(b), Some(w)) => match bake::bevel::bevel_sharp(&scene, &b, w) {
                 Ok(bb) => {
                     println!("{name} : bevel {w} mm sur {} arêtes, {} coins réduits, {} → {} faces, {:.0} ms", bb.stats.bevel_edges, bb.stats.bevel_clamped, b.faces.len(), bb.faces.len(), bb.stats.bevel_seconds * 1000.0);

@@ -30,7 +30,7 @@ pub fn dissolve_flat_loops(scene: &Scene, b: &Baked, max_deg: f64, threads: usiz
     let (mut out, loops) = dissolve(&field, b, max_deg);
     let s = &b.stats;
     out.stats = BakeStats { patches: s.patches, seconds: s.seconds, quad_size: s.quad_size, ..Default::default() };
-    let bs = BakeSettings { tol: 0.01, threads, divisions: 0.0 };
+    let bs = BakeSettings { tol: 0.01, threads, divisions: 0.0, bevel: 0.0 };
     finish(&field, &mut out, &bs, &Progress::default());
     out.stats.flat_loops = loops.len();
     out.stats.faces_before_flat = b.faces.len();
