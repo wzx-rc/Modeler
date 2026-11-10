@@ -522,8 +522,9 @@ fn draw_overlay(p: &Painter, st: &AppState) {
             let hot = |h: Handle| active == Some(h) || (active.is_none() && st.handle_hover == Some(h));
             let r_px = rr / view.pixel_size_at((pv - view.eye).length()).max(1e-6);
             let ball = hot(Handle::RotFree);
-            p.circle_filled(pc, r_px, if ball && active.is_some() { tint(HOT, 0.09) } else { Color32::from_rgba_unmultiplied(200, 200, 200, 10) });
-            p.circle_stroke(pc, r_px, Stroke::new(1.0, if ball { tint(HOT, 0.6) } else { Color32::from_rgba_unmultiplied(170, 176, 186, 90) }));
+            // the trackball: a dark glass disc with a thin border (Focus's dock)
+            p.circle_filled(pc, r_px, if ball && active.is_some() { tint(HOT, 0.08) } else { tint(PANEL, 0.22) });
+            p.circle_stroke(pc, r_px, Stroke::new(1.0, if ball { tint(HOT, 0.6) } else { tint(PANEL_BORDER, 0.9) }));
             // the swept angle, a yellow wedge
             if let (Some(d), Some(deg)) = (drag, st.rot_angle()) {
                 if let Some(r) = &d.rot {
@@ -556,11 +557,12 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                         Color32::from_rgba_unmultiplied((col.r() as f32 * k) as u8, (col.g() as f32 * k) as u8, (col.b() as f32 * k) as u8, (a * 255.0) as u8)
                     };
                     let alpha: f32 = match (front, lit, active.is_some()) {
-                        (_, true, _) => 0.95,
-                        (true, false, false) => 0.88,
-                        (true, false, true) => 0.25,
-                        (false, false, false) => 0.16,
-                        (false, false, true) => 0.07,
+                        // translucent glass bands (like Focus's dock), a crisp rim
+                        (_, true, _) => 0.55,
+                        (true, false, false) => 0.34,
+                        (true, false, true) => 0.12,
+                        (false, false, false) => 0.08,
+                        (false, false, true) => 0.04,
                     };
                     // the dragged ring shows all around
                     let show_back = lit && active.is_some();
@@ -590,14 +592,16 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                             mesh.add_triangle(k0, k0 + 1, k0 + 2);
                             mesh.add_triangle(k0, k0 + 2, k0 + 3);
                             if is_front && front {
-                                // a darker outer edge gives the band its thickness
-                                edges.push((o0, o1, shade(Color32::from_rgb(base.r() / 2, base.g() / 2, base.b() / 2), a)));
+                                // crisp rims on both edges: the band reads as glass
+                                let rim = if lit { 1.0 } else if active.is_some() { 0.3 } else { 0.85 };
+                                edges.push((o0, o1, shade(base, rim)));
+                                edges.push((i0, i1, shade(base, rim * 0.7)));
                             }
                         }
                     }
                     p.add(Shape::mesh(mesh));
                     for (a, b, c) in edges {
-                        p.line_segment([a, b], Stroke::new(1.0, c));
+                        p.line_segment([a, b], Stroke::new(1.2, c));
                     }
                 }
             }
@@ -720,6 +724,30 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                         let right = sp.x < st.principal()[0];
                         let anchor = if right { Align2::LEFT_CENTER } else { Align2::RIGHT_CENTER };
                         chip(p, sp + vec2(if right { 16.0 } else { -16.0 }, 0.0), anchor, &t, EDGE_SEL_DIM, EDGE_SEL);
+                    }
+                    continue;
+                }
+                Handle::ScaleX | Handle::ScaleY | Handle::ScaleZ | Handle::ScaleAll => {
+                    // WZX Engine's scale tool: a line and a cube per axis, a
+                    // bigger cube in the middle for all three
+                    let c = match h.handle {
+                        Handle::ScaleX => AXIS_X,
+                        Handle::ScaleY => AXIS_Y,
+                        Handle::ScaleZ => AXIS_Z,
+                        _ => Color32::from_rgb(0xD8, 0xDC, 0xE2),
+                    };
+                    let c = if hot { HOT } else { fade(c, 0.35) };
+                    let s = if h.handle == Handle::ScaleAll { 7.0 } else { 5.5 } * if hot { 1.25 } else { 1.0 };
+                    if h.handle != Handle::ScaleAll {
+                        p.line_segment([o, sp], Stroke::new(if hot { 2.6 } else { 1.8 }, c));
+                    }
+                    p.rect(Rect::from_center_size(sp, vec2(s, s) * 2.0), 2.0, c, Stroke::new(1.0, tint(Color32::BLACK, 0.5)), egui::StrokeKind::Middle);
+                    if hot {
+                        if let Some(k) = st.scale_factor {
+                            chip(p, sp + vec2(16.0, -16.0), Align2::LEFT_BOTTOM, &format!("× {}", fmt_mm(k)), tint(HOT, 0.5), HOT);
+                        } else if active.is_none() {
+                            chip(p, sp + vec2(16.0, -16.0), Align2::LEFT_BOTTOM, h.handle.hint(), tint(HOT, 0.5), HOT);
+                        }
                     }
                     continue;
                 }

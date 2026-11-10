@@ -231,9 +231,11 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     }
     let x = screen.max.x - TREE_W - 10.0 - INSP_W;
     let max_h = screen.height() - STATUS_H - 62.0 - 10.0;
-    egui::Area::new(Id::new("plaque-inspector")).order(Order::Middle).fixed_pos(pos2(x, screen.min.y + 62.0)).show(ctx, |ui| {
+    let off = ui::panel_offset(ctx, "plaque-inspector");
+    egui::Area::new(Id::new("plaque-inspector")).order(Order::Middle).fixed_pos(pos2(x, screen.min.y + 62.0) + off).show(ctx, |ui| {
         card().inner_margin(Margin::same(12)).show(ui, |ui| {
             ui.set_width(INSP_W - 24.0);
+            ui::grip(ui, "plaque-inspector");
             egui::ScrollArea::vertical().id_salt("plaque-insp").max_height(max_h - 24.0).min_scrolled_height(max_h - 24.0).auto_shrink([false, true]).show(ui, |ui| {
                 ui.set_width(INSP_W - 24.0);
                 ui::properties(ui, st);

@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -771,7 +771,38 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.st.commit_placement();
         h.steps(2);
         eprintln!("tore très zoomé : pas de plantage");
-    }    if want("pc-multi") {
+    }    if want("pc-scale") {
+        // scale tool (R), translucent rings, pills marking menu, panel grip
+        h.pc(AppState::new(support_axe(), "Support d'axe"), UiMode::Atelier);
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.steps(2);
+        h.st.frame_all();
+        h.steps(30);
+        let id = h.find("Socle");
+        h.st.select(Some(id));
+        h.st.gizmo = forme_app::state::GizmoMode::Scale;
+        h.steps(3);
+        let hx = h.st.handles().into_iter().find(|i| i.handle == forme_app::state::Handle::ScaleX).expect("scale X");
+        let a = h.screen_of(hx.world);
+        let b = h.screen_of(hx.origin + (hx.world - hx.origin) * 1.5);
+        let s0 = h.st.scene.node(id).unwrap().shape().unwrap().size;
+        h.drag(a, b, 10, false);
+        h.shot("pc-scale-1-glisser");
+        h.press(b, false);
+        h.steps(2);
+        let s1 = h.st.scene.node(id).unwrap().shape().unwrap().size;
+        eprintln!("échelle X : taille {:.1?} → {:.1?}", s0, s1);
+        h.st.gizmo = forme_app::state::GizmoMode::Rotate;
+        h.steps(3);
+        h.shot("pc-scale-2-anneaux");
+        h.st.gizmo = forme_app::state::GizmoMode::Move;
+        // the inspector moved by its grip
+        h.ctx.data_mut(|d| d.insert_persisted(egui::Id::new(("panel-offset", "props")), egui::vec2(40.0, 60.0)));
+        h.steps(3);
+        h.shot("pc-scale-3-panneau");
+        h.ctx.data_mut(|d| d.insert_persisted(egui::Id::new(("panel-offset", "props")), egui::Vec2::ZERO));
+    }
+    if want("pc-multi") {
         // several shapes moved at once, a clean repetition, a shell
         h.pc(AppState::new(support_axe(), "Support d'axe"), UiMode::Atelier);
         h.st.pointer_kind = PointerKind::Mouse;
@@ -1206,7 +1237,7 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
     if want("pc-themes") {
         // the two looks: Plaque (A) and Radial (B), selection, creation,
         // marking menu
-        for (tag, mode) in [("plaque", UiMode::Plaque), ("radial", UiMode::Radial)] {
+        for (tag, mode) in [("plaque", UiMode::Plaque)] {
             h.pc(part(), mode);
             h.steps(2);
             h.st.frame_all();

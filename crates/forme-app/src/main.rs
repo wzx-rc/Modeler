@@ -197,6 +197,7 @@ impl ApplicationHandler for App {
         surface.configure(&device, &config);
         #[allow(unused_mut)]
         let mut fr = FrameRenderer::new(&device, config.format);
+        fr.follow_settings = true;
         #[cfg(target_os = "ios")]
         {
             // pixel budgets: iPad Pro screens are 4 to 5.6 Mpx, the raymarcher

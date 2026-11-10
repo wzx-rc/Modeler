@@ -578,7 +578,7 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         // Q = Select tool in object mode (also leaves the edge mode, like 1)
         st.set_pick_mode(PickMode::Object);
     }
-    // W move gizmo, E rotation gizmo (Maya, WZX Engine)
+    // W move gizmo, E rotation gizmo, R scale gizmo (Maya, WZX Engine)
     let (kw, ke) = ctx.input(|i| {
         let free = !i.modifiers.command && !i.modifiers.alt;
         (free && i.key_pressed(egui::Key::W), free && i.key_pressed(egui::Key::E))
@@ -587,7 +587,12 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.set_pick_mode(PickMode::Object);
         st.gizmo = if ke { GizmoMode::Rotate } else { GizmoMode::Move };
     }
-    for (pressed, k) in [(kr, PrimKind::Box), (kc, PrimKind::Cylinder), (ks, PrimKind::Sphere), (ka, PrimKind::Capsule), (kt, PrimKind::Torus)] {
+    // R: the scale gizmo (the cube has no shortcut for now, Romain)
+    if kr {
+        st.set_pick_mode(PickMode::Object);
+        st.gizmo = GizmoMode::Scale;
+    }
+    for (pressed, k) in [(kc, PrimKind::Cylinder), (ks, PrimKind::Sphere), (ka, PrimKind::Capsule), (kt, PrimKind::Torus)] {
         if pressed {
             st.commit_placement();
             st.tool = Tool::Place(k);
@@ -850,10 +855,11 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                 }
                 let (r, _) = ui.allocate_exact_size(vec2(7.0, 28.0), Sense::hover());
                 ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(1.0, 18.0)), 0.0, DIVIDER);
-                // W move / E rotate: the gizmo of the selection
-                let rot = st.gizmo == GizmoMode::Rotate;
-                if icon_btn(ui, if rot { Icon::Move } else { Icon::Rotate }, false, if rot { "Gizmo de déplacement (W)" } else { "Gizmo de rotation (E)" }, 28.0).clicked() {
-                    st.gizmo = if rot { GizmoMode::Move } else { GizmoMode::Rotate };
+                // the gizmo of the selection: move (W), rotate (E), scale (R)
+                for (g, icon, tip) in [(GizmoMode::Move, Icon::Move, "Déplacer et dimensionner (W)"), (GizmoMode::Rotate, Icon::Rotate, "Tourner (E)"), (GizmoMode::Scale, Icon::Scale, "Échelle (R)")] {
+                    if icon_btn(ui, icon, st.gizmo == g, tip, 28.0).clicked() {
+                        st.gizmo = g;
+                    }
                 }
                 if icon_btn(ui, Icon::Duplicate, false, "Dupliquer (Ctrl+D)", 28.0).clicked() {
                     st.duplicate_selected();
@@ -901,10 +907,9 @@ pub(crate) fn mode_switch(ui: &mut Ui, st: &mut AppState, height: f32) {
     }
 }
 
-/// Keyboard shortcut of a primitive tool (R cube, C cylinder, S sphere, A capsule, T torus).
+/// Keyboard shortcut of a primitive tool (C cylinder, S sphere, A capsule, T torus; R is the scale gizmo).
 pub(crate) fn prim_key(k: PrimKind) -> Option<&'static str> {
     match k {
-        PrimKind::Box => Some("R"),
         PrimKind::Cylinder => Some("C"),
         PrimKind::Sphere => Some("S"),
         PrimKind::Capsule => Some("A"),
@@ -999,9 +1004,11 @@ fn card(ui: &mut Ui, icon: Option<Icon>, name: &str, sub: &str, on: bool, sub_co
 fn rail(ctx: &egui::Context, st: &mut AppState) {
     let top = EDGE + ISLAND_H + 10.0;
     let screen = ctx.content_rect();
-    egui::Area::new(Id::new("rail")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(screen.max.x - EDGE, top)).show(ctx, |ui| {
+    let off = panel_offset(ctx, "rail");
+    egui::Area::new(Id::new("rail")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(screen.max.x - EDGE, top) + off).show(ctx, |ui| {
         island().inner_margin(Margin::same(6)).show(ui, |ui| {
             ui.set_width(CARDS_W - 12.0);
+            grip(ui, "rail");
             ui.spacing_mut().item_spacing.y = 5.0;
             let sel = st.tool == Tool::Select;
             if card(ui, Some(Icon::Select), "SÉLECTION", "OBJET · Q", sel && st.pick_mode == PickMode::Object, TEXT2, "Sélection d'objets (Q ou 1)").clicked() {
@@ -1017,7 +1024,9 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
                 let key = prim_key(k).unwrap_or("");
                 let name = k.label().to_uppercase();
                 let on = st.tool == Tool::Place(k);
-                if card(ui, Some(prim_icon(k)), &name, &format!("{mode} · {key}"), on, mode_color(m), &format!("{} ({key})", k.label())).clicked() {
+                let sub = if key.is_empty() { mode.to_string() } else { format!("{mode} · {key}") };
+                let tip = if key.is_empty() { k.label().to_string() } else { format!("{} ({key})", k.label()) };
+                if card(ui, Some(prim_icon(k)), &name, &sub, on, mode_color(m), &tip).clicked() {
                     st.commit_placement();
                     st.tool = Tool::Place(k);
                 }
@@ -1059,8 +1068,10 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     let rows = st.scene.rows();
     let cx = st.principal()[0];
     let max_w = (st.view_rect[2] - st.view_rect[0] - 24.0).max(320.0);
-    egui::Area::new(Id::new("history")).order(Order::Middle).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(cx, screen.max.y - 14.0)).show(ctx, |ui| {
+    let off = panel_offset(ctx, "history");
+    egui::Area::new(Id::new("history")).order(Order::Middle).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(cx, screen.max.y - 14.0) + off).show(ctx, |ui| {
         panel().inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+            grip(ui, "history");
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.vertical(|ui| {
@@ -1077,7 +1088,7 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 let (sep, _) = ui.allocate_exact_size(vec2(1.0, 36.0), Sense::hover());
                 ui.painter().rect_filled(sep, 0.0, DIVIDER);
                 if rows.is_empty() {
-                    ui.label(egui::RichText::new("Choisis une forme à droite (R, C, S, A, T), puis glisse dans la vue").font(regular(13.0)).color(TEXT2));
+                    ui.label(egui::RichText::new("Choisis une forme à droite, puis glisse dans la vue").font(regular(13.0)).color(TEXT2));
                     return;
                 }
                 egui::ScrollArea::horizontal().id_salt("history-scroll").max_width(max_w - 220.0).show(ui, |ui| {
@@ -1251,6 +1262,45 @@ pub(crate) fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     });
 }
 
+// ------------------------------------------------------------ panel grips
+
+/// Where the user moved a floating panel (offset from its place), kept
+/// between sessions in egui's memory.
+pub(crate) fn panel_offset(ctx: &egui::Context, key: &str) -> egui::Vec2 {
+    ctx.data_mut(|d| d.get_persisted::<egui::Vec2>(Id::new(("panel-offset", key)))).unwrap_or(egui::Vec2::ZERO)
+}
+
+/// A grip on top of a floating panel: drag it to move the panel, double-click
+/// to put it back. Six dots, lit when hovered.
+pub(crate) fn grip(ui: &mut Ui, key: &str) {
+    // (a wide panel such as the history strip keeps its own width)
+    let w = ui.available_width().min(400.0);
+    let (r, _) = ui.allocate_exact_size(vec2(w, 12.0), Sense::hover());
+    let hit = Rect::from_center_size(r.center(), vec2(64.0, 14.0));
+    let resp = ui.interact(hit, Id::new(("panel-grip", key)), Sense::click_and_drag());
+    let id = Id::new(("panel-offset", key));
+    if resp.dragged() {
+        let d = resp.drag_delta();
+        ui.ctx().data_mut(|m| {
+            let o = m.get_persisted::<egui::Vec2>(id).unwrap_or(egui::Vec2::ZERO);
+            m.insert_persisted(id, o + d);
+        });
+    }
+    if resp.double_clicked() {
+        ui.ctx().data_mut(|m| m.insert_persisted(id, egui::Vec2::ZERO));
+    }
+    let lit = resp.hovered() || resp.dragged();
+    let c = if lit { TEXT } else { Color32::from_rgb(0x5A, 0x61, 0x6B) };
+    for row in [-2.5f32, 2.5] {
+        for col in [-8.0f32, 0.0, 8.0] {
+            ui.painter().circle_filled(r.center() + vec2(col, row), 1.6, c);
+        }
+    }
+    let resp = resp.on_hover_text("Glisser pour déplacer le panneau · double-clic : le remettre en place");
+    if lit {
+        ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+    }
+}
 // ------------------------------------------------------------ right column
 
 /// Établi: one inspector on the right, the scene on top and the selected
@@ -1261,9 +1311,11 @@ fn right_column(ctx: &egui::Context, st: &mut AppState, screen: Rect, x: f32) {
     let total = screen.max.y - EDGE - top;
     let rows = st.scene.rows().len().max(1) as f32;
     let tree_h = if st.show_tree { (rows * 28.0 + 34.0).clamp(96.0, (total * 0.36).max(120.0)) } else { 0.0 };
-    egui::Area::new(Id::new("props")).order(Order::Middle).fixed_pos(pos2(x, top)).show(ctx, |ui| {
+    let off = panel_offset(ctx, "props");
+    egui::Area::new(Id::new("props")).order(Order::Middle).fixed_pos(pos2(x, top) + off).show(ctx, |ui| {
         island().inner_margin(Margin::same(12)).show(ui, |ui| {
             ui.set_width(inner_w);
+            grip(ui, "props");
             if st.show_tree {
                 tree(ui, st, tree_h);
                 ui.add_space(4.0);
@@ -1740,7 +1792,7 @@ pub(crate) fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     egui::ScrollArea::vertical().id_salt("tree-scroll").max_height(height - 32.0).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
         if rows.is_empty() {
-            ui.label(egui::RichText::new("Vide · choisis une forme à droite (R, C, S, A, T)").font(regular(12.0)).color(TEXT2));
+            ui.label(egui::RichText::new("Vide · choisis une forme à droite (C, S, A, T…)").font(regular(12.0)).color(TEXT2));
         }
         for (id, depth) in rows {
             let Some(n) = st.scene.node(id).cloned() else { continue };
@@ -2140,6 +2192,20 @@ pub fn display_panel(ctx: &egui::Context, st: &mut AppState) {
             let d0 = st.settings.display;
             let d = &mut st.settings.display;
             section(ui, "Rendu");
+            // pixel budget of the viewport: the main lever on a 4K screen
+            {
+                use crate::settings::ViewQuality;
+                let items: Vec<(ViewQuality, &str, Color32)> = ViewQuality::ALL.iter().map(|q| (*q, q.label(), accent())).collect();
+                if let Some(q) = segmented(ui, &items, d.quality, 30.0) {
+                    d.quality = q;
+                }
+                let what = match d.quality {
+                    ViewQuality::Performance => "Léger : moins de pixels calculés, l'image est agrandie. Pour les grosses scènes ou un GPU modeste.",
+                    ViewQuality::Equilibre => "Net et fluide : environ 4,5 Mpx à l'arrêt, 8× d'anticrénelage au plus.",
+                    ViewQuality::Qualite => "La pleine résolution de l'écran : le plus net, le plus lourd en 4K.",
+                };
+                ui.add(egui::Label::new(egui::RichText::new(what).font(regular(11.5)).color(TEXT2)).wrap());
+            }
             if toggle_row(ui, "Ombres", d.shadows) {
                 d.shadows = !d.shadows;
             }
@@ -2239,7 +2305,7 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                     st.save_settings();
                 }
                 let what = match st.settings.ambiance {
-                    AmbianceChoice::Auto => "Chaque interface garde la sienne : Établi et Radial en vert, Studio et Plaque en orange, Focus en bleu.",
+                    AmbianceChoice::Auto => "Chaque interface garde la sienne : Établi en vert, Studio et Plaque en orange, Focus en bleu.",
                     _ => "La même couleur d'accent pour les trois interfaces (Add, sélection, outil actif).",
                 };
                 ui.label(egui::RichText::new(what).font(regular(11.5)).color(TEXT2));

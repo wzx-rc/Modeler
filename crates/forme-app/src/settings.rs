@@ -10,7 +10,9 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UiMode {
     /// « Établi »: viewport first, floating islands, context bar, history strip.
+    /// (« Radial », removed on 10 nov., opens as Établi.)
     #[default]
+    #[serde(alias = "Radial")]
     Atelier,
     /// « Studio »: docked CAD station (menus, command palette, fixed panel, typed sizes).
     Studio,
@@ -20,13 +22,10 @@ pub enum UiMode {
     /// « Plaque » (mood A): sober Plasticity look, thin tool bar on the left,
     /// floating inspector in mm, docked scene tree, status bar; orange.
     Plaque,
-    /// « Radial » (mood B): tool pill with ADD / CARVE on top, tool cards on
-    /// the right, wedge marking menu, contextual inspector; green, mono labels.
-    Radial,
 }
 
 impl UiMode {
-    pub const ALL: [UiMode; 5] = [UiMode::Atelier, UiMode::Studio, UiMode::Focus, UiMode::Plaque, UiMode::Radial];
+    pub const ALL: [UiMode; 4] = [UiMode::Atelier, UiMode::Studio, UiMode::Focus, UiMode::Plaque];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -34,7 +33,6 @@ impl UiMode {
             UiMode::Studio => "Studio",
             UiMode::Focus => "Focus",
             UiMode::Plaque => "Plaque",
-            UiMode::Radial => "Radial",
         }
     }
 
@@ -44,7 +42,6 @@ impl UiMode {
             UiMode::Studio => "Poste CAD ancré façon Plasticity : menus, palette de commandes (Espace), panneau fixe, cotes au clavier, barre d'état.",
             UiMode::Focus => "Presque rien à l'écran : un dock en bas, le menu radial au clic droit, la scène dans un tiroir à droite.",
             UiMode::Plaque => "Sobre, façon Plasticity, en orange : outils fins à gauche, inspecteur en mm, arbre de la scène à droite, barre d'état.",
-            UiMode::Radial => "En vert : outil actif et ADD / CARVE en haut, cartes d'outils à droite, menu radial au clic droit, inspecteur qui suit la sélection.",
         }
     }
 }
@@ -142,11 +139,53 @@ pub struct Display {
     pub light_elevation: f32,
     pub light_intensity: f32,
     pub exposure: f32,
+    /// Pixel budget of the viewport (PC): lighter or sharper.
+    pub quality: ViewQuality,
+}
+
+/// How many pixels the raymarcher computes (PC, 4K screens): the image is
+/// upscaled when it is fewer than the screen's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ViewQuality {
+    /// About 2.5 Mpx still, 0.45 Mpx moving, 4 AA samples: light on any GPU.
+    Performance,
+    /// About 4.5 Mpx still, 0.8 Mpx moving, 8 AA samples.
+    #[default]
+    Equilibre,
+    /// The screen's own resolution, 1.5 Mpx moving, AA as set.
+    Qualite,
+}
+
+impl ViewQuality {
+    pub const ALL: [ViewQuality; 3] = [ViewQuality::Performance, ViewQuality::Equilibre, ViewQuality::Qualite];
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewQuality::Performance => "Fluide",
+            ViewQuality::Equilibre => "Équilibré",
+            ViewQuality::Qualite => "Qualité",
+        }
+    }
+    /// (still, moving) pixel budgets; 0 = the screen's resolution.
+    pub fn budgets(self) -> (f32, f32) {
+        match self {
+            ViewQuality::Performance => (2.5e6, 4.5e5),
+            ViewQuality::Equilibre => (4.5e6, 8.0e5),
+            ViewQuality::Qualite => (0.0, 1.5e6),
+        }
+    }
+    /// Most AA samples accumulated when the image is still.
+    pub fn max_aa(self) -> u32 {
+        match self {
+            ViewQuality::Performance => 4,
+            ViewQuality::Equilibre => 8,
+            ViewQuality::Qualite => 64,
+        }
+    }
 }
 
 impl Default for Display {
     fn default() -> Self {
-        Display { shadows: true, ao: true, aa: 16, light_azimuth: -40.0, light_elevation: 45.0, light_intensity: 1.0, exposure: 1.0 }
+        Display { shadows: true, ao: true, aa: 16, light_azimuth: -40.0, light_elevation: 45.0, light_intensity: 1.0, exposure: 1.0, quality: ViewQuality::Equilibre }
     }
 }
 
@@ -177,7 +216,6 @@ impl Settings {
             Ok("atelier") | Ok("etabli") => s.ui_mode = UiMode::Atelier,
             Ok("focus") => s.ui_mode = UiMode::Focus,
             Ok("plaque") => s.ui_mode = UiMode::Plaque,
-            Ok("radial") => s.ui_mode = UiMode::Radial,
             _ => {}
         }
         s

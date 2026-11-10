@@ -380,7 +380,8 @@ fn menus(ui: &mut Ui, st: &mut AppState) {
         for (k, what) in [
             ("Espace", "palette de commandes"),
             ("Q · 1 · 2", "sélection · objet · arête"),
-            ("R · C · S · A · T", "cube · cylindre · sphère · capsule · tore"),
+            ("C · S · A · T", "cylindre · sphère · capsule · tore"),
+            ("W · E · R", "déplacer · tourner · échelle"),
             ("Tab · Entrée", "cotes au clavier pendant la création"),
             ("Ctrl pendant la création", "inverse + / −"),
             ("F", "cadrer la sélection"),
@@ -460,7 +461,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             });
         }
         group(ui, "GIZMO");
-        for (g, icon, tip, key) in [(GizmoMode::Move, Icon::Move, "Déplacer et dimensionner (W)", "W"), (GizmoMode::Rotate, Icon::Rotate, "Tourner : anneaux X / Y / Z, vue, trackball (E)", "E")] {
+        for (g, icon, tip, key) in [(GizmoMode::Move, Icon::Move, "Déplacer et dimensionner (W)", "W"), (GizmoMode::Rotate, Icon::Rotate, "Tourner : anneaux X / Y / Z, vue, trackball (E)", "E"), (GizmoMode::Scale, Icon::Scale, "Échelle : étirer selon les axes de la forme, ou tout (R)", "R")] {
             centred(ui, &mut |ui| {
                 let r = tool_btn(ui, icon, st.gizmo == g, tip);
                 ui::key_hint(ui, &r, key);

@@ -120,6 +120,11 @@ pub enum Handle {
     RotZ,
     RotView,
     RotFree,
+    /// Scale gizmo (R): along the shape's own X / Y / Z, or all at once.
+    ScaleX,
+    ScaleY,
+    ScaleZ,
+    ScaleAll,
 }
 
 /// What the gizmo of the selection does: move and size (W) or rotate (E).
@@ -128,9 +133,13 @@ pub enum GizmoMode {
     #[default]
     Move,
     Rotate,
+    Scale,
 }
 
 impl Handle {
+    pub fn is_scale(self) -> bool {
+        matches!(self, Handle::ScaleX | Handle::ScaleY | Handle::ScaleZ | Handle::ScaleAll)
+    }
     pub fn is_rot(self) -> bool {
         matches!(self, Handle::RotX | Handle::RotY | Handle::RotZ | Handle::RotView | Handle::RotFree)
     }
@@ -158,6 +167,7 @@ impl Handle {
             Handle::Round => "Bevel",
             Handle::Fillet => "Fillet",
             Handle::RotX | Handle::RotY | Handle::RotZ | Handle::RotView | Handle::RotFree => "Rotation",
+            Handle::ScaleX | Handle::ScaleY | Handle::ScaleZ | Handle::ScaleAll => "Échelle",
         }
     }
     /// Size handles: scaled with the opposite face fixed (box anchor).
@@ -181,6 +191,10 @@ impl Handle {
             Handle::RotZ => "Tourner autour de Z · Snap : 15°",
             Handle::RotView => "Tourner face à la vue",
             Handle::RotFree => "Rotation libre (trackball)",
+            Handle::ScaleX => "Étirer en X (axe de la forme)",
+            Handle::ScaleY => "Étirer en Y (axe de la forme)",
+            Handle::ScaleZ => "Étirer en Z (axe de la forme)",
+            Handle::ScaleAll => "Échelle uniforme : glisser vers la droite agrandit",
         }
     }
 }
@@ -224,6 +238,8 @@ pub struct HandleDrag {
     /// The other selected shapes, moved / turned with the gizmo: id, world
     /// position and rotation at the start, own scale.
     pub others: Vec<(NodeId, Vec3, Quat, f32)>,
+    /// Scale: the other selected shapes as they were.
+    pub others_start: Vec<(NodeId, Node)>,
 }
 
 /// A rotation drag (WZX Engine's manipulator): the angle is measured in the
@@ -408,8 +424,10 @@ pub struct AppState {
     pub handle_drag: Option<HandleDrag>,
     /// Handle under the pointer (pre-selection, drawn hot before the click).
     pub handle_hover: Option<Handle>,
-    /// Move / size (W) or rotate (E).
+    /// Move / size (W), rotate (E) or scale (R).
     pub gizmo: GizmoMode,
+    /// Scale being dragged: the factor (shown by the gizmo).
+    pub scale_factor: Option<f32>,
     /// Smooth framing (F) in progress.
     pub cam_anim: Option<CamAnim>,
     pub pointer_kind: PointerKind,
@@ -513,6 +531,37 @@ fn snap_vec(v: Vec3, step: f32, on: bool) -> Vec3 {
     Vec3::new(snap_to(v.x, step, on), snap_to(v.y, step, on), snap_to(v.z, step, on))
 }
 
+/// A shape scaled by  along its own axes: boxes and spheres per axis; round
+/// shapes keep a round section (the larger of the X / Z factors).
+pub fn scaled_shape(sh0: &Shape, f: Vec3) -> Shape {
+    let mut s = sh0.clone();
+    let rf = if (f.x - 1.0).abs() >= (f.z - 1.0).abs() { f.x } else { f.z };
+    match sh0.kind {
+        PrimKind::Box | PrimKind::Sphere => s.size = sh0.size * f,
+        PrimKind::Capsule => {
+            s.size.x = sh0.size.x * rf;
+            let half = (sh0.size.y + sh0.size.x) * f.y;
+            s.size.y = (half - s.size.x).max(0.0);
+        }
+        PrimKind::Torus => {
+            s.size.x = sh0.size.x * rf;
+            s.size.z = (sh0.size.z * f.y).min(s.size.x * 0.95);
+        }
+        PrimKind::Profile => s.size.z = sh0.size.z * f.z,
+        _ => {
+            s.size.x = sh0.size.x * rf;
+            s.size.z = sh0.size.z * rf;
+            s.size.y = sh0.size.y * f.y;
+        }
+    }
+    s.size = s.size.max(Vec3::splat(0.1));
+    let m = f.min_element().min(1.0);
+    s.round = sh0.round * m;
+    s.chamfer = sh0.chamfer * m;
+    s.shell = sh0.shell * m;
+    s
+}
+
 pub fn ray_plane(ro: Vec3, rd: Vec3, o: Vec3, n: Vec3) -> Option<Vec3> {
     let den = rd.dot(n);
     if den.abs() < 1e-6 {
@@ -568,6 +617,7 @@ impl AppState {
             handle_drag: None,
             handle_hover: None,
             gizmo: GizmoMode::Move,
+            scale_factor: None,
             cam_anim: None,
             pointer_kind: PointerKind::Mouse,
             screen: [1194.0, 834.0],
@@ -1704,6 +1754,22 @@ impl AppState {
         if self.gizmo == GizmoMode::Rotate {
             return vec![];
         }
+        if self.gizmo == GizmoMode::Scale {
+            // WZX Engine's scale tool: a cube at the end of each local axis, one
+            // in the middle for all three
+            let m = self.scene.world_matrix(id);
+            let (_, r, o) = m.to_scale_rotation_translation();
+            let view = self.view();
+            let len = view.pixel_size_at((o - view.eye).length()) * 110.0;
+            let mut out = vec![HandleInfo { handle: Handle::ScaleAll, world: o, origin: o, axis: Vec3::Y }];
+            if n.shape().is_some() {
+                for (h, a) in [(Handle::ScaleX, Vec3::X), (Handle::ScaleY, Vec3::Y), (Handle::ScaleZ, Vec3::Z)] {
+                    let ax = r * a;
+                    out.push(HandleInfo { handle: h, world: o + ax * len, origin: o, axis: ax });
+                }
+            }
+            return out;
+        }
         let m = self.scene.world_matrix(id);
         let (s, r, o) = m.to_scale_rotation_translation();
         let s = s.x;
@@ -1831,6 +1897,7 @@ impl AppState {
             anchor: None,
             rot: Some(RotDrag { pivot, n, v0, angle: 0.0, last: 0.0, tangent, mouse0: pos, prev: pos, free: Quat::IDENTITY, start_rot, radius_px }),
             others: self.others_of(id),
+            others_start: vec![],
         });
     }
 
@@ -1928,7 +1995,7 @@ impl AppState {
         let Some(start) = self.scene.node(id).cloned() else { return };
         let (ro, rd) = self.ray(pos);
         let t0 = line_param(info.origin, info.axis, ro, rd);
-        let start_hit = ray_plane(ro, rd, info.origin, info.axis).unwrap_or(info.origin);
+        let start_hit = if info.handle == Handle::ScaleAll { Vec3::new(pos[0], pos[1], 0.0) } else { ray_plane(ro, rd, info.origin, info.axis).unwrap_or(info.origin) };
         let s = self.scene.world_matrix(id).to_scale_rotation_translation().0.x;
         self.history.record(info.handle.label(), &self.scene);
         let reach = (info.world - info.origin).dot(info.axis);
@@ -1945,6 +2012,7 @@ impl AppState {
             anchor: None,
             rot: None,
             others: if info.handle.is_move() { self.others_of(id) } else { vec![] },
+            others_start: if info.handle.is_scale() { self.others_of(id).into_iter().filter_map(|(o, ..)| self.scene.node(o).cloned().map(|n| (o, n))).collect() } else { vec![] },
         });
     }
 
@@ -2002,6 +2070,31 @@ impl AppState {
                 }
                 if !d.others.is_empty() {
                     self.carry_others(&d.others, np - o, None);
+                }
+            }
+            h if h.is_scale() => {
+                // factor along the dragged axis (or from the horizontal drag for all)
+                let k = if h == Handle::ScaleAll {
+                    (1.0 + (pos[0] - d.start_hit.x) / 120.0).max(0.05)
+                } else {
+                    (t / d.t0.max(1e-4)).max(0.05)
+                };
+                let k = if snap { ((k * 10.0).round() / 10.0).max(0.1) } else { k };
+                let f = match h {
+                    Handle::ScaleX => Vec3::new(k, 1.0, 1.0),
+                    Handle::ScaleY => Vec3::new(1.0, k, 1.0),
+                    Handle::ScaleZ => Vec3::new(1.0, 1.0, k),
+                    _ => Vec3::splat(k),
+                };
+                self.scale_factor = Some(k);
+                let mut targets = vec![(d.node, d.start.clone())];
+                targets.extend(d.others_start.iter().cloned());
+                for (id, n0) in targets {
+                    let Some(n) = self.scene.node_mut(id) else { continue };
+                    match (n0.shape(), n.shape_mut()) {
+                        (Some(sh0), Some(sh)) => *sh = scaled_shape(sh0, f),
+                        _ => n.transform.scale = (n0.transform.scale * k).max(0.01),
+                    }
                 }
             }
             h if h.is_size() => {
@@ -2063,6 +2156,7 @@ impl AppState {
     }
 
     pub fn end_handle(&mut self) {
+        self.scale_factor = None;
         self.handle_drag = None;
     }
 

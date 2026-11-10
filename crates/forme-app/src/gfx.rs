@@ -138,6 +138,8 @@ pub struct FrameRenderer {
     pub full_px: f32,
     pub interactive_px: f32,
     pub band_px: f32,
+    /// The budgets follow Réglages (the app); the capture harness sets its own.
+    pub follow_settings: bool,
     /// Adaptive factor on the quick image (from the measured frame time).
     adapt: f32,
     frame_ms: f32,
@@ -240,6 +242,7 @@ impl FrameRenderer {
             full_px: 0.0,
             interactive_px: 0.0,
             band_px: 1.5e6,
+            follow_settings: false,
             adapt: 1.0,
             frame_ms: 16.0,
             last_frame: None,
@@ -367,6 +370,12 @@ impl FrameRenderer {
         }
         self.last_frame = Some(now);
         self.last_moving = moving;
+        // PC: the pixel budget chosen in the light panel (iPad: fixed in main.rs)
+        if !cfg!(target_os = "ios") && self.follow_settings {
+            let (still, moving_px) = st.settings.display.quality.budgets();
+            self.full_px = still;
+            self.interactive_px = moving_px;
+        }
         let px = size_px[0] as f32 * size_px[1] as f32;
         let budget = |px_budget: f32, cap: f32| if px_budget > 0.0 { (px_budget / px).sqrt().min(cap) } else { cap };
         let full_scale = budget(self.full_px, self.full_scale);
@@ -571,7 +580,7 @@ impl FrameRenderer {
         show_bake: bool,
     ) {
         let key = RenderKey { state, size, full: true };
-        let target = if show_bake { 1 } else { st.settings.display.aa.clamp(1, 64) };
+        let target = if show_bake { 1 } else { st.settings.display.aa.clamp(1, 64).min(st.settings.display.quality.max_aa()) };
         self.accum_target = target;
         let fresh = self.key_low != Some(key);
         if fresh {

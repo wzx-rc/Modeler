@@ -40,6 +40,8 @@ pub enum Icon {
     Rotate,
     /// Move gizmo (W).
     Move,
+    /// Scale gizmo (R).
+    Scale,
 }
 
 struct Pen<'a> {
@@ -248,6 +250,13 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(8.0, 15.5), (10.0, 17.5), (12.0, 15.5)]);
             pen.line(&[(4.5, 8.0), (2.5, 10.0), (4.5, 12.0)]);
             pen.line(&[(15.5, 8.0), (17.5, 10.0), (15.5, 12.0)]);
+        }
+        Icon::Scale => {
+            // a small square growing into a big one
+            pen.closed(&[(3.0, 9.0), (11.0, 9.0), (11.0, 17.0), (3.0, 17.0)]);
+            pen.line(&[(7.0, 3.0), (17.0, 3.0), (17.0, 13.0)]);
+            pen.line(&[(11.0, 9.0), (16.5, 3.5)]);
+            pen.line(&[(13.0, 3.5), (16.5, 3.5), (16.5, 7.0)]);
         }
         Icon::Bake => {
             pen.closed(&[(3.0, 3.0), (17.0, 3.0), (17.0, 17.0), (3.0, 17.0)]);
