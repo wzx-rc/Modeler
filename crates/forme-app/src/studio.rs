@@ -723,6 +723,56 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         sub_head(ui, "Arêtes");
         edges(ui, st);
     }
+    sub_head(ui, "Répétition");
+    let cur = match node.repeat {
+        Repeat::None => 0,
+        Repeat::Linear { .. } => 1,
+        Repeat::Radial { .. } => 2,
+    };
+    ui.horizontal(|ui| {
+        for (k, l) in [(0, "Aucune"), (1, "Linéaire"), (2, "Circulaire")] {
+            if ui.radio(cur == k, l).clicked() && cur != k {
+                let w = st.scene.shape_world_aabb(id).map(|(lo, hi)| (hi - lo).x).unwrap_or(10.0).max(1.0);
+                let r = match k {
+                    1 => Repeat::Linear { count: 4, step: Vec3::X * (w * 1.5).round() },
+                    2 => Repeat::Radial { count: 6, axis: Axis::Y },
+                    _ => Repeat::None,
+                };
+                st.edit("Répétition", id, |n| n.repeat = r);
+            }
+        }
+    });
+    match node.repeat {
+        Repeat::None => {}
+        Repeat::Linear { count, step } => {
+            let mut c = count as f32;
+            let (ch, s0) = spin(ui, "Copies", &mut c, 0.1, 2.0..=64.0, "", 0);
+            if ch {
+                st.edit_live("Répétition", id, s0, |n| n.repeat = Repeat::Linear { count: c.round() as u32, step });
+            }
+            let mut v = step;
+            for (i, l) in ["Pas X", "Pas Y", "Pas Z"].iter().enumerate() {
+                let (ch, s0) = spin(ui, l, &mut v[i], 0.1, -400.0..=400.0, " mm", 1);
+                if ch {
+                    st.edit_live("Répétition", id, s0, |n| n.repeat = Repeat::Linear { count, step: v });
+                }
+            }
+        }
+        Repeat::Radial { count, axis } => {
+            let mut c = count as f32;
+            let (ch, s0) = spin(ui, "Copies", &mut c, 0.1, 2.0..=64.0, "", 0);
+            if ch {
+                st.edit_live("Répétition", id, s0, |n| n.repeat = Repeat::Radial { count: c.round() as u32, axis });
+            }
+            ui.horizontal(|ui| {
+                for (a, l) in [(Axis::X, "Axe X"), (Axis::Y, "Axe Y"), (Axis::Z, "Axe Z")] {
+                    if ui.radio(axis == a, l).clicked() {
+                        st.edit("Répétition", id, |n| n.repeat = Repeat::Radial { count, axis: a });
+                    }
+                }
+            });
+        }
+    }
     sub_head(ui, "Position");
     position(ui, st, id, &node);
     sub_head(ui, "Symétrie");
@@ -869,6 +919,14 @@ fn shape_params(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
         if !sh.edges.is_empty() {
             ui.label(RichText::new("Arêtes réglées une par une : Arrondi / Chanfrein les remettent pareilles.").font(regular(11.5)).color(EDGE_SEL));
         }
+    }
+    // coque: hollow inwards, Shape.shell is the wall thickness
+    let mut wall = s.shell;
+    let (c, s0) = spin(ui, "Coque", &mut wall, 0.05, 0.0..=40.0, " mm", 2);
+    if c {
+        s.shell = wall;
+        any = true;
+        start |= s0;
     }
     if any {
         st.edit_live("Forme", id, start, |n| {

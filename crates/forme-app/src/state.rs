@@ -221,6 +221,9 @@ pub struct HandleDrag {
     pub anchor: Option<Vec3>,
     /// Rotation rings: the drag state.
     pub rot: Option<RotDrag>,
+    /// The other selected shapes, moved / turned with the gizmo: id, world
+    /// position and rotation at the start, own scale.
+    pub others: Vec<(NodeId, Vec3, Quat, f32)>,
 }
 
 /// A rotation drag (WZX Engine's manipulator): the angle is measured in the
@@ -1827,6 +1830,7 @@ impl AppState {
             reach: 0.0,
             anchor: None,
             rot: Some(RotDrag { pivot, n, v0, angle: 0.0, last: 0.0, tangent, mouse0: pos, prev: pos, free: Quat::IDENTITY, start_rot, radius_px }),
+            others: self.others_of(id),
         });
     }
 
@@ -1863,6 +1867,10 @@ impl AppState {
             Quat::from_axis_angle(r.n, ang)
         };
         r.prev = pos;
+        if !d.others.is_empty() {
+            let others = d.others.clone();
+            self.carry_others(&others, Vec3::ZERO, Some((r.pivot, dq)));
+        }
         let rot = (dq * r.start_rot).normalize();
         self.set_world(d.node, r.pivot, rot);
         if let Some(n) = self.scene.node_mut(d.node) {
@@ -1882,6 +1890,34 @@ impl AppState {
         }
         let a = if self.snap { (r.angle / ROT_STEP).round() * ROT_STEP } else { r.angle };
         Some(a.to_degrees())
+    }
+
+    /// The other selected shapes (several moved at once), as they are now.
+    fn others_of(&self, primary: NodeId) -> Vec<(NodeId, Vec3, Quat, f32)> {
+        self.selected_ids()
+            .into_iter()
+            .filter(|id| *id != primary && !self.scene.ancestors(primary).contains(id) && !self.scene.ancestors(*id).contains(&primary))
+            .filter_map(|id| {
+                let n = self.scene.node(id)?;
+                let (_, r, p) = self.scene.world_matrix(id).to_scale_rotation_translation();
+                Some((id, p, r, n.transform.scale))
+            })
+            .collect()
+    }
+
+    /// Moves the other selected shapes by the primary's displacement, or
+    /// turns them about its pivot.
+    fn carry_others(&mut self, others: &[(NodeId, Vec3, Quat, f32)], delta: Vec3, turn: Option<(Vec3, Quat)>) {
+        for (id, p0, r0, sc) in others {
+            let (p, r) = match turn {
+                Some((pivot, dq)) => (pivot + dq * (*p0 - pivot), (dq * *r0).normalize()),
+                None => (*p0 + delta, *r0),
+            };
+            self.set_world(*id, p, r);
+            if let Some(n) = self.scene.node_mut(*id) {
+                n.transform.scale = *sc;
+            }
+        }
     }
 
     pub fn begin_handle(&mut self, info: &HandleInfo, pos: [f32; 2]) {
@@ -1908,6 +1944,7 @@ impl AppState {
             reach,
             anchor: None,
             rot: None,
+            others: if info.handle.is_move() { self.others_of(id) } else { vec![] },
         });
     }
 
@@ -1936,6 +1973,9 @@ impl AppState {
                 if let Some(n) = self.scene.node_mut(d.node) {
                     n.transform.scale = d.start.transform.scale;
                 }
+                if !d.others.is_empty() {
+                    self.carry_others(&d.others, np - o, None);
+                }
             }
             Handle::Fillet => {
                 // every selected edge takes the handle's value
@@ -1959,6 +1999,9 @@ impl AppState {
                 self.set_world(d.node, np, rot);
                 if let Some(n) = self.scene.node_mut(d.node) {
                     n.transform.scale = d.start.transform.scale;
+                }
+                if !d.others.is_empty() {
+                    self.carry_others(&d.others, np - o, None);
                 }
             }
             h if h.is_size() => {

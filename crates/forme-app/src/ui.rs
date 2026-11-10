@@ -1382,6 +1382,7 @@ pub(crate) fn properties(ui: &mut Ui, st: &mut AppState) {
     }
 
     symmetry_row(ui, st, id, &node);
+    repeat_rows(ui, st, id, &node);
     position_rows(ui, st, id, &node);
 
     section(ui, "Matière");
@@ -1410,6 +1411,66 @@ fn symmetry_row(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
             }
         }
     });
+}
+
+/// Répétition: none, a row of copies along an axis, or copies around an axis.
+fn repeat_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
+    section(ui, "Répétition");
+    #[derive(Clone, Copy, PartialEq)]
+    enum K {
+        Off,
+        Lin,
+        Rad,
+    }
+    let cur = match node.repeat {
+        Repeat::None => K::Off,
+        Repeat::Linear { .. } => K::Lin,
+        Repeat::Radial { .. } => K::Rad,
+    };
+    let items = [(K::Off, "Aucune", accent()), (K::Lin, "Linéaire", accent()), (K::Rad, "Circulaire", accent())];
+    if let Some(k) = segmented(ui, &items, cur, 32.0) {
+        // a sensible start: 4 copies, spaced by the shape's width along X
+        let w = st.scene.shape_world_aabb(id).map(|(lo, hi)| (hi - lo).x).unwrap_or(10.0).max(1.0);
+        let r = match k {
+            K::Off => Repeat::None,
+            K::Lin => Repeat::Linear { count: 4, step: Vec3::X * (w * 1.5).round() },
+            K::Rad => Repeat::Radial { count: 6, axis: Axis::Y },
+        };
+        st.edit("Répétition", id, |n| n.repeat = r);
+    }
+    match node.repeat {
+        Repeat::None => {}
+        Repeat::Linear { count, step } => {
+            if let Some(c) = stepper(ui, "Copies", count, 2, 64) {
+                st.edit("Répétition", id, |n| n.repeat = Repeat::Linear { count: c, step });
+            }
+            // the axis of the row, and the spacing along it
+            let axis = if step.x.abs() >= step.y.abs() && step.x.abs() >= step.z.abs() { 0 } else if step.y.abs() >= step.z.abs() { 1 } else { 2 };
+            let mut dist = step[axis];
+            let axes = [(0usize, "X", AXIS_X), (1, "Y", AXIS_Y), (2, "Z", AXIS_Z)];
+            if let Some(a) = segmented(ui, &axes, axis, 28.0) {
+                let mut s = Vec3::ZERO;
+                s[a] = if dist.abs() > 0.01 { dist } else { 10.0 };
+                st.edit("Répétition", id, |n| n.repeat = Repeat::Linear { count, step: s });
+            }
+            let (ch, start) = slider_row(ui, "Pas", &mut dist, -400.0..=400.0, 0.5, "mm");
+            if ch {
+                let mut s = Vec3::ZERO;
+                s[axis] = dist;
+                st.edit_live("Répétition", id, start, |n| n.repeat = Repeat::Linear { count, step: s });
+            }
+        }
+        Repeat::Radial { count, axis } => {
+            if let Some(c) = stepper(ui, "Copies", count, 2, 64) {
+                st.edit("Répétition", id, |n| n.repeat = Repeat::Radial { count: c, axis });
+            }
+            let axes = [(Axis::X, "Axe X", AXIS_X), (Axis::Y, "Axe Y", AXIS_Y), (Axis::Z, "Axe Z", AXIS_Z)];
+            if let Some(a) = segmented(ui, &axes, axis, 28.0) {
+                st.edit("Répétition", id, |n| n.repeat = Repeat::Radial { count, axis: a });
+            }
+            ui.label(egui::RichText::new(format!("{count} copies tous les {}° autour de l'axe passant par l'origine", fmt_mm(360.0 / count as f32))).font(regular(11.5)).color(TEXT2));
+        }
+    }
 }
 
 fn position_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
@@ -1594,6 +1655,9 @@ fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
     if s.round != r0 || s.chamfer != c0 {
         s.edges.clear();
     }
+    // coque: hollow inwards, Shape.shell is the wall thickness
+    let wall_max = (s.size.min_element() * 2.0).max(0.4).min(40.0);
+    row(ui, "Coque", &mut s.shell, 0.0..=wall_max, 0.1, 1.0, "mm");
     if sh.kind == PrimKind::Prism {
         if let Some(n) = stepper(ui, "Côtés", sh.sides, 3, 24) {
             s.sides = n;

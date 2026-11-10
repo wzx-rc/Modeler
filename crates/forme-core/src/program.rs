@@ -59,7 +59,41 @@ pub struct Program {
 fn node_ops(scene: &Scene, n: &Node) -> Vec<PointOp> {
     let mut ops = vec![];
     match n.repeat {
-        Repeat::Radial { count, axis } if count > 1 => ops.push(PointOp::Radial { count, axis: axis.index(), second: false }),
+        Repeat::Radial { count, axis } if count > 1 => {
+            // the fold keeps the sector centred on the first in-plane axis: turn
+            // the space so that this sector is the one where the node is, fold,
+            // turn back. The copies then start where the shape was put, at any
+            // angle (« répétition propre »). Pure rotations: same bytecode for
+            // the shader and both interpreters.
+            let a = axis.index();
+            let p = n.transform.pos;
+            let (u, v) = match a {
+                0 => (p.y, p.z),
+                1 => (p.z, p.x),
+                _ => (p.x, p.y),
+            };
+            let phase = if u * u + v * v > 1e-8 { v.atan2(u) } else { 0.0 };
+            let ax = [Vec3::X, Vec3::Y, Vec3::Z][a as usize];
+            let turn = |phi: f32| {
+                let m = Mat3::from_axis_angle(ax, phi);
+                PointOp::Affine {
+                    rows: [
+                        Vec4::new(m.x_axis.x, m.y_axis.x, m.z_axis.x, 0.0),
+                        Vec4::new(m.x_axis.y, m.y_axis.y, m.z_axis.y, 0.0),
+                        Vec4::new(m.x_axis.z, m.y_axis.z, m.z_axis.z, 0.0),
+                    ],
+                    scale: 1.0,
+                }
+            };
+            let phased = phase.abs() > 1e-6;
+            if phased {
+                ops.push(turn(-phase));
+            }
+            ops.push(PointOp::Radial { count, axis: a, second: false });
+            if phased {
+                ops.push(turn(phase));
+            }
+        }
         Repeat::Linear { count, step } if count > 1 => ops.push(PointOp::Linear { count, step, origin: scene.content_center_parent(n.id), second: false }),
         _ => {}
     }

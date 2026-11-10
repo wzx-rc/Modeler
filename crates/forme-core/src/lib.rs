@@ -134,6 +134,25 @@ mod tests {
     }
 
     #[test]
+    fn radial_repeat_starts_where_the_shape_is() {
+        // a shape at any angle around the axis: the copies start on it
+        let mut s = Scene::new();
+        let r = s.root;
+        let mut sh = Shape::new(PrimKind::Sphere);
+        sh.size = Vec3::splat(2.0);
+        let a0 = 0.7f32;
+        s.add(r, NodeSpec::shape("dot", sh).at(Vec3::new(18.0 * a0.sin(), 0.0, 18.0 * a0.cos())).repeat(Repeat::Radial { count: 6, axis: Axis::Y }));
+        let p = compile(&s);
+        for k in 0..6 {
+            let a = a0 + k as f32 * std::f32::consts::TAU / 6.0;
+            let q = Vec3::new(18.0 * a.sin(), 0.0, 18.0 * a.cos());
+            assert!(p.dist(q) < -1.9, "copy {k} at {q}");
+        }
+        let mid = a0 + std::f32::consts::TAU / 12.0;
+        assert!(p.dist(Vec3::new(18.0 * mid.sin(), 0.0, 18.0 * mid.cos())) > 0.0);
+    }
+
+    #[test]
     fn linear_repeat_of_a_group_made_from_the_tree() {
         // group at the origin, content at y = 46: copies at 46 and 70
         let mut s = Scene::new();

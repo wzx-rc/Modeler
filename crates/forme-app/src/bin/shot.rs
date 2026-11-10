@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -771,7 +771,57 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.st.commit_placement();
         h.steps(2);
         eprintln!("tore très zoomé : pas de plantage");
-    }    if want("pc-rot") {
+    }    if want("pc-multi") {
+        // several shapes moved at once, a clean repetition, a shell
+        h.pc(AppState::new(support_axe(), "Support d'axe"), UiMode::Atelier);
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.steps(2);
+        h.st.frame_all();
+        h.steps(30);
+        let (a, b) = (h.find("Palier"), h.find("Alésage"));
+        h.st.select(Some(a));
+        h.st.toggle_in_selection(b);
+        h.steps(3);
+        let pa = h.st.scene.node(a).unwrap().transform.pos;
+        let pb = h.st.scene.node(b).unwrap().transform.pos;
+        let mx = h.st.handles().into_iter().find(|i| i.handle == forme_app::state::Handle::MoveY).unwrap();
+        let s0 = h.screen_of(mx.world);
+        h.drag(s0, s0 + egui::vec2(0.0, -60.0), 10, true);
+        h.steps(2);
+        let qa = h.st.scene.node(a).unwrap().transform.pos;
+        let qb = h.st.scene.node(b).unwrap().transform.pos;
+        eprintln!("plusieurs formes : Palier {:.1?} → {:.1?}, Alésage {:.1?} → {:.1?}", pa, qa, pb, qb);
+        h.shot("pc-multi-1-deplace");
+        h.st.undo();
+        // the mounting holes in a circle of 6, the bearing hollowed (2 mm wall)
+        let t = h.find("Trous de fixation");
+        h.st.edit("Répétition", t, |n| {
+            n.mirror = forme_core::scene::Mirror::default();
+            n.transform.pos = Vec3::new(18.0, 5.0, 0.0);
+            n.repeat = forme_core::scene::Repeat::Radial { count: 6, axis: forme_core::scene::Axis::Y };
+        });
+        let s = h.find("Socle");
+        h.st.edit("Coque", s, |n| {
+            if let Some(sh) = n.shape_mut() {
+                sh.shell = 2.0;
+            }
+        });
+        h.st.select(Some(t));
+        h.steps(4);
+        h.shot("pc-multi-2-repetition-coque");
+        // a cut through the front of the base shows the 2 mm wall of the shell
+        {
+            let mut b = forme_core::scene::Shape::new(PrimKind::Box);
+            b.size = Vec3::new(30.0, 8.0, 6.0);
+            let root = h.st.scene.root;
+            h.st.scene.add(root, forme_core::scene::NodeSpec::shape("Coupe", b).at(Vec3::new(0.0, 5.0, 14.0)).mode(CombineMode::Carve));
+            h.st.select(None);
+            h.st.changed();
+        }
+        h.steps(4);
+        h.shot("pc-multi-3-coque-coupee");
+    }
+    if want("pc-rot") {
         // rotation gizmo (E): rings X / Y / Z, view ring, trackball, 15° snap
         h.pc(AppState::new(support_axe(), "Support d'axe"), UiMode::Atelier);
         h.st.pointer_kind = PointerKind::Mouse;
