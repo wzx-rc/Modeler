@@ -118,6 +118,18 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         return;
     }
 
+    // Tripo3D navigation: right or middle drag pans (left drag in empty
+    // space orbits, below); the right button does not open the menu
+    let tripo = st.settings.navigation == crate::settings::Navigation::Tripo;
+    if tripo && (m || r) && !l && !st.marking.is_open() {
+        if d != egui::Vec2::ZERO && (resp.hovered() || resp.dragged()) {
+            st.camera.pan(d.x, d.y, rect.height());
+            st.view_changed();
+            st.interacting = true;
+        }
+        return;
+    }
+
     // marking menu: right press, or left press held still (not on a handle)
     let on_handle = st.hover.map(|h| handle_at(st, pos2(h[0], h[1])).is_some()).unwrap_or(false);
     if crate::marking::input(ctx, st, rect, on_handle) {
@@ -171,7 +183,8 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         let awaiting = st.placement.as_ref().map(|p| p.phase == PlacePhase::AwaitHeight).unwrap_or(false);
         // the Select tool with a mouse draws a selection rectangle (orbit is
         // Alt + left, Maya style); Shift or Ctrl adds to the selection
-        let marquee = st.tool == Tool::Select && st.pointer_kind == PointerKind::Mouse;
+        // (Tripo3D navigation: a plain left drag orbits, Shift / Ctrl + drag selects)
+        let marquee = st.tool == Tool::Select && st.pointer_kind == PointerKind::Mouse && (!tripo || shift || st.multi());
         // 3ds Max style, finger or Pencil: drag the base, release, drag the height
         st.gesture = if shift && !marquee {
             Gesture::Pan

@@ -342,7 +342,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -770,6 +770,32 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.st.commit_placement();
         h.steps(2);
         eprintln!("tore très zoomé : pas de plantage");
+    }    if want("pc-nav") {
+        // Tripo3D navigation: left drag in empty space orbits, right drag pans
+        // (no marking menu), Shift + left drag draws the selection rectangle
+        h.pc(part(), UiMode::Atelier);
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.st.settings.navigation = forme_app::settings::Navigation::Tripo;
+        h.steps(2);
+        h.st.frame_all();
+        h.steps(2);
+        let empty = pos2(400.0, 250.0);
+        let (yaw0, t0) = (h.st.camera.yaw, h.st.camera.target);
+        h.drag(empty, empty + egui::vec2(80.0, 0.0), 8, true);
+        eprintln!("tripo gauche : lacet {:.2} → {:.2}, rectangle {}", yaw0, h.st.camera.yaw, h.st.marquee.is_some());
+        let right = |h: &mut Harness, p: Pos2, down: bool| {
+            h.pending.push(Event::PointerMoved(p));
+            h.pending.push(Event::PointerButton { pos: p, button: PointerButton::Secondary, pressed: down, modifiers: Modifiers::NONE });
+            h.step();
+        };
+        right(h, empty, true);
+        for s in 1..=8 {
+            h.move_to(empty + egui::vec2(0.0, 10.0 * s as f32));
+        }
+        right(h, empty + egui::vec2(0.0, 80.0), false);
+        h.steps(2);
+        eprintln!("tripo droit : cible {:.1?} → {:.1?}, menu ouvert {}", t0, h.st.camera.target, h.st.marking.is_open());
+        h.st.settings.navigation = forme_app::settings::Navigation::Maya;
     }    if want("pc-snap") {
         // base on the top face of the socle, far corner snapped to its edge
         h.pc(part(), UiMode::Atelier);

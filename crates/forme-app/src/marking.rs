@@ -302,7 +302,8 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect, on_handle: bool
 
     if st.marking.menu.is_none() {
         // right press: the menu at once (drawn after the delay, flicks allowed)
-        if sec_pressed && in_view {
+        // (Maya navigation only: in Tripo3D navigation the right drag pans)
+        if sec_pressed && in_view && st.settings.navigation == crate::settings::Navigation::Maya {
             st.marking.press = None;
             let c = context_at(st, p);
             st.marking.menu = Some(Menu::new(p, c, true, now));

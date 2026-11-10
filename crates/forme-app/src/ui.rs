@@ -1858,6 +1858,16 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                 }
             }
             ui.label(egui::RichText::new("Le choix est gardé pour les prochaines sessions.").font(regular(11.5)).color(TEXT2));
+            section(ui, "Navigation");
+            {
+                use crate::settings::Navigation;
+                let items: Vec<(Navigation, &str, Color32)> = Navigation::ALL.iter().map(|n| (*n, n.label(), ACCENT)).collect();
+                if let Some(n) = segmented(ui, &items, st.settings.navigation, 32.0) {
+                    st.settings.navigation = n;
+                    st.save_settings();
+                }
+                ui.add(egui::Label::new(egui::RichText::new(st.settings.navigation.blurb()).font(regular(11.5)).color(TEXT2)).wrap());
+            }
             section(ui, "Création");
             if toggle_row(ui, "Accrocher aux faces des objets (AutoGrid)", st.settings.snap_faces) {
                 st.settings.snap_faces = !st.settings.snap_faces;

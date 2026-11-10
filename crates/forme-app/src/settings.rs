@@ -45,6 +45,37 @@ pub struct Settings {
     pub creation: Creation,
     /// Viewport and display options (light panel).
     pub display: Display,
+    /// Camera navigation with the mouse.
+    pub navigation: Navigation,
+}
+
+/// Camera navigation with the mouse (Réglages).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Navigation {
+    /// Maya: Alt + left orbit, Alt + middle pan, Alt + right zoom; the right
+    /// button opens the marking menu, a left drag in empty space selects.
+    #[default]
+    Maya,
+    /// Tripo3D / web viewers: left drag in empty space orbits, right or
+    /// middle drag pans, wheel zooms; Shift + left drag selects, a left
+    /// press held still opens the marking menu.
+    Tripo,
+}
+
+impl Navigation {
+    pub const ALL: [Navigation; 2] = [Navigation::Maya, Navigation::Tripo];
+    pub fn label(self) -> &'static str {
+        match self {
+            Navigation::Maya => "Maya (Alt)",
+            Navigation::Tripo => "Tripo3D",
+        }
+    }
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Navigation::Maya => "Alt + clic gauche : orbite · Alt + molette (clic) : pan · Alt + clic droit : zoom. Clic droit : marking menu, clic gauche glissé dans le vide : rectangle de sélection.",
+            Navigation::Tripo => "Clic gauche glissé dans le vide : orbite · clic droit ou molette glissés : pan · molette : zoom. Maj + clic gauche glissé : rectangle de sélection, clic gauche maintenu : marking menu.",
+        }
+    }
 }
 
 /// Creation of a primitive.
@@ -88,7 +119,7 @@ impl Display {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { ui_mode: UiMode::Atelier, snap_faces: true, creation: Creation::Interactive, display: Display::default() }
+        Settings { ui_mode: UiMode::Atelier, snap_faces: true, creation: Creation::Interactive, display: Display::default(), navigation: Navigation::Maya }
     }
 }
 
