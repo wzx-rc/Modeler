@@ -54,6 +54,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
 fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, rect: Rect) {
     st.hover = ctx.input(|i| i.pointer.hover_pos()).map(p2);
     st.interacting = false;
+    st.handle_hover = None;
 
     // Maya navigation: Alt + left = orbit, Alt + middle = pan, Alt + right =
     // zoom, whatever the tool (nothing is created or selected meanwhile)
@@ -131,7 +132,13 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     }
 
     // marking menu: right press, or left press held still (not on a handle)
-    let on_handle = st.hover.map(|h| handle_at(st, pos2(h[0], h[1])).is_some()).unwrap_or(false);
+    // pre-selection: the handle under the pointer is drawn hot before the click
+    st.handle_hover = if st.gesture == Gesture::None && st.placement.is_none() && !st.marking.is_open() {
+        st.hover.and_then(|h| handle_at(st, pos2(h[0], h[1]))).map(|h| h.handle)
+    } else {
+        None
+    };
+    let on_handle = st.handle_hover.is_some();
     if crate::marking::input(ctx, st, rect, on_handle) {
         return;
     }
@@ -423,6 +430,8 @@ fn draw_marquee(p: &Painter, st: &AppState) {
 }
 
 const MARQUEE: Color32 = Color32::from_rgb(0xD8, 0xE4, 0xF2);
+/// Hovered / dragged handle (WZX Engine's hot yellow).
+const HOT: Color32 = Color32::from_rgb(255, 226, 102);
 
 fn draw_overlay(p: &Painter, st: &AppState) {
     let view = st.view();
@@ -430,25 +439,67 @@ fn draw_overlay(p: &Painter, st: &AppState) {
     // selection handles
     if st.placement.is_none() && st.tool == Tool::Select && !st.bake_mode() {
         let active = st.handle_drag.as_ref().map(|d| d.handle);
+        let hover = st.handle_hover;
         let node = st.selection.and_then(|id| st.scene.node(id));
-        for (h, sp) in handle_points(st) {
-            let Some(o) = view.project(h.origin).map(|q| pos2(q[0], q[1])) else { continue };
-            let hot = active == Some(h.handle);
+        let points = handle_points(st);
+        let proj = |w: glam::Vec3| view.project(w).map(|q| pos2(q[0], q[1]));
+        // anticipation (WZX Engine): the hovered / dragged handle shows where
+        // it will go, the guide line of its axis (or of its plane's two axes)
+        // and, for a size handle, the face that stays fixed
+        if let Some((h, sp)) = points.iter().find(|(h, _)| Some(h.handle) == active.or(hover)) {
+            let reach = view.pixel_size_at((h.origin - view.eye).length()) * 110.0 * 8.0;
+            let guide = |a: glam::Vec3, c: Color32| {
+                if let (Some(a0), Some(a1)) = (proj(h.origin - a * reach), proj(h.origin + a * reach)) {
+                    p.extend(Shape::dashed_line(&[a0, a1], Stroke::new(1.0, tint(c, 0.75)), 6.0, 5.0));
+                }
+            };
+            match h.handle {
+                Handle::MoveX | Handle::MoveY | Handle::MoveZ | Handle::Radius | Handle::Height | Handle::Depth => guide(h.axis, HOT),
+                Handle::PlaneXY | Handle::PlaneYZ | Handle::PlaneXZ => {
+                    let (a1, a2) = h.handle.plane_axes();
+                    guide(a1, HOT);
+                    guide(a2, HOT);
+                }
+                _ => {}
+            }
+            if h.handle.is_size() {
+                let fixed = match &st.handle_drag {
+                    Some(d) => d.anchor,
+                    None if !st.multi() => Some(h.origin * 2.0 - h.world),
+                    None => None,
+                };
+                if let Some(a) = fixed.and_then(|a| proj(a)) {
+                    // anchor: a small square on the fixed face
+                    let r = 5.0;
+                    p.rect(Rect::from_center_size(a, vec2(r, r) * 2.0), 1.0, tint(HOT, 0.25), Stroke::new(1.5, HOT), egui::StrokeKind::Middle);
+                    p.line_segment([a - vec2(r + 4.0, 0.0), a + vec2(r + 4.0, 0.0)], Stroke::new(1.0, HOT));
+                }
+            }
+            if active.is_none() {
+                chip(p, *sp + vec2(16.0, -18.0), Align2::LEFT_BOTTOM, h.handle.hint(), tint(HOT, 0.5), HOT);
+            }
+        }
+        for (h, sp) in points {
+            let Some(o) = proj(h.origin) else { continue };
+            let hot = active == Some(h.handle) || (active.is_none() && hover == Some(h.handle));
+            // the other handles fade while one is dragged
+            let fade = |c: Color32, k: f32| if active.is_some() && !hot { tint(c, k) } else { c };
             match h.handle {
                 Handle::PlaneXY | Handle::PlaneYZ | Handle::PlaneXZ => {
-                    // équerre: a small square between two axes, its outer L drawn solid
+                    // équerre: a square between two axes, far from the centre
+                    // (WZX Engine: 0.60 to 0.74 of the axis length)
                     let (a1, a2) = h.handle.plane_axes();
                     let len = view.pixel_size_at((h.origin - view.eye).length()) * 110.0;
-                    let q = |u: f32, v: f32| view.project(h.origin + a1 * len * u + a2 * len * v).map(|s| pos2(s[0], s[1]));
+                    let q = |u: f32, v: f32| proj(h.origin + a1 * len * u + a2 * len * v);
                     let c = match h.handle {
                         Handle::PlaneXY => AXIS_Z,
                         Handle::PlaneYZ => AXIS_X,
                         _ => AXIS_Y,
                     };
-                    let c = if active.is_some() && !hot { tint(c, 0.3) } else { c };
-                    if let (Some(p0), Some(p1), Some(p2), Some(p3)) = (q(0.2, 0.2), q(0.4, 0.2), q(0.4, 0.4), q(0.2, 0.4)) {
-                        p.add(Shape::convex_polygon(vec![p0, p1, p2, p3], tint(c, if hot { 0.45 } else { 0.22 }), Stroke::NONE));
-                        p.add(Shape::line(vec![p1, p2, p3], Stroke::new(if hot { 2.5 } else { 1.75 }, c)));
+                    let c = if hot { HOT } else { fade(c, 0.3) };
+                    if let (Some(p0), Some(p1), Some(p2), Some(p3)) = (q(PLANE0, PLANE0), q(PLANE1, PLANE0), q(PLANE1, PLANE1), q(PLANE0, PLANE1)) {
+                        p.add(Shape::convex_polygon(vec![p0, p1, p2, p3], tint(c, if hot { 0.43 } else { 0.22 }), Stroke::NONE));
+                        p.add(Shape::closed_line(vec![p0, p1, p2, p3], Stroke::new(if hot { 2.0 } else { 1.25 }, c)));
                     }
                 }
                 Handle::MoveX | Handle::MoveY | Handle::MoveZ => {
@@ -457,14 +508,14 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                         Handle::MoveY => AXIS_Y,
                         _ => AXIS_Z,
                     };
-                    let c = if active.is_some() && !hot { tint(c, 0.35) } else { c };
+                    let c = if hot { HOT } else { fade(c, 0.35) };
                     arrow(p, o, sp, c, if hot { 3.0 } else { 2.0 });
                 }
                 Handle::Round => {
-                    let s = 7.0;
+                    let s = if hot { 8.5 } else { 7.0 };
                     p.add(Shape::convex_polygon(
                         vec![sp + vec2(0.0, -s), sp + vec2(s, 0.0), sp + vec2(0.0, s), sp + vec2(-s, 0.0)],
-                        ACCENT_LIGHT,
+                        if hot { HOT } else { fade(ACCENT_LIGHT, 0.4) },
                         Stroke::new(1.5, ON_ACCENT),
                     ));
                 }
@@ -485,8 +536,9 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                     continue;
                 }
                 _ => {
-                    p.line_segment([o, sp], Stroke::new(if hot { 2.5 } else { 1.75 }, ACCENT));
-                    p.circle(sp, if hot { 8.5 } else { 7.0 }, ACCENT, Stroke::new(2.0, ON_ACCENT));
+                    let c = if hot { HOT } else { fade(ACCENT, 0.4) };
+                    p.line_segment([o, sp], Stroke::new(if hot { 2.5 } else { 1.75 }, c));
+                    p.circle(sp, if hot { 8.5 } else { 7.0 }, c, Stroke::new(2.0, ON_ACCENT));
                 }
             }
             // value chips on the size handles (bevel only while dragging it)

@@ -4,7 +4,7 @@
 use egui::{pos2, Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use forme_app::gfx::FrameRenderer;
 use forme_app::settings::UiMode;
-use forme_app::state::{AppState, PickMode, PointerKind, Tool};
+use forme_app::state::{AppState, Handle, PickMode, PointerKind, Tool};
 use forme_app::{theme, AppState as _S};
 use forme_core::{demo, CombineMode, NodeId, PrimKind};
 use forme_render::headless::Gpu;
@@ -342,7 +342,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -770,6 +770,66 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.st.commit_placement();
         h.steps(2);
         eprintln!("tore très zoomé : pas de plantage");
+    }    if want("pc-gizmo") {
+        // transform tools: équerres far from the centre, pre-selection
+        // highlight, size handles anchored on the opposite face (Ctrl: centre)
+        h.pc(AppState::new(forme_core::Scene::new(), "Gizmo"), UiMode::Atelier);
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.st.snap = false;
+        h.steps(2);
+        h.st.tool = Tool::Place(PrimKind::Box);
+        h.steps(2);
+        let a = h.screen_of(Vec3::new(-10.0, 0.0, -8.0));
+        let b = h.screen_of(Vec3::new(10.0, 0.0, 8.0));
+        h.drag(a, b, 10, true);
+        if h.st.placement.is_some() {
+            for s in 1..=10 {
+                h.move_to(b + egui::vec2(0.0, -6.0 * s as f32));
+            }
+            h.st.commit_placement();
+        }
+        h.steps(2);
+        h.st.frame_selection();
+        h.st.camera.pitch = 0.42;
+        h.st.camera.dist *= 1.6;
+        h.st.view_changed();
+        h.steps(4);
+        let id = h.st.selection.unwrap();
+        let faces = |h: &Harness| {
+            let sh = h.st.scene.node(id).unwrap().shape().unwrap().clone();
+            let c = h.st.scene.world_matrix(id).transform_point3(Vec3::ZERO);
+            (c.x - sh.size.x, c.x + sh.size.x)
+        };
+        let at = |h: &Harness, k: Handle| h.st.handles().into_iter().find(|i| i.handle == k).map(|i| h.screen_of(i.world)).unwrap();
+        let pl = at(h, Handle::PlaneXZ);
+        h.move_to(pl);
+        h.steps(2);
+        eprintln!("survol équerre : {:?}", h.st.handle_hover);
+        h.shot("pc-gizmo-1-equerre");
+        let mx = at(h, Handle::MoveX);
+        h.move_to(mx);
+        h.steps(2);
+        eprintln!("survol flèche : {:?}", h.st.handle_hover);
+        h.shot("pc-gizmo-2-fleche");
+        let r = at(h, Handle::Radius);
+        h.move_to(r);
+        h.steps(2);
+        eprintln!("survol taille : {:?}", h.st.handle_hover);
+        h.shot("pc-gizmo-3-taille");
+        let f0 = faces(h);
+        h.drag(r, r + egui::vec2(90.0, 0.0), 10, false);
+        let f1 = faces(h);
+        h.shot("pc-gizmo-4-ancre");
+        h.press(r + egui::vec2(90.0, 0.0), false);
+        h.steps(2);
+        eprintln!("ancre : faces x {:.2?} → {:.2?} (la face −X doit rester)", f0, f1);
+        h.st.ctrl_held = true;
+        let r = at(h, Handle::Radius);
+        let f0 = faces(h);
+        h.drag(r, r + egui::vec2(60.0, 0.0), 10, true);
+        h.st.ctrl_held = false;
+        h.steps(2);
+        eprintln!("Ctrl symétrique : faces x {:.2?} → {:.2?} (centre fixe)", f0, faces(h));
     }    if want("pc-nav") {
         // Tripo3D navigation: left drag in empty space orbits, right drag pans
         // (no marking menu), Shift + left drag draws the selection rectangle

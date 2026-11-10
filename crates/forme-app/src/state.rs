@@ -141,7 +141,31 @@ impl Handle {
             Handle::Fillet => "Fillet",
         }
     }
+    /// Size handles: scaled with the opposite face fixed (box anchor).
+    pub fn is_size(self) -> bool {
+        matches!(self, Handle::Radius | Handle::Height | Handle::Depth)
+    }
+    /// What a drag will do, shown while the handle is pre-selected.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Handle::MoveX => "Déplacer en X",
+            Handle::MoveY => "Déplacer en Y",
+            Handle::MoveZ => "Déplacer en Z",
+            Handle::PlaneXY => "Déplacer dans le plan XY",
+            Handle::PlaneYZ => "Déplacer dans le plan YZ",
+            Handle::PlaneXZ => "Déplacer dans le plan XZ",
+            Handle::Radius | Handle::Height | Handle::Depth => "Face opposée fixe · Ctrl : symétrique",
+            Handle::Round => "Bevel de toutes les arêtes",
+            Handle::Fillet => "Fillet des arêtes sélectionnées",
+        }
+    }
 }
+
+/// Plane squares (« équerres ») of the move gizmo, in units of the axis
+/// length: far from the centre, at two thirds of the axes (WZX Engine).
+pub const PLANE0: f32 = 0.60;
+pub const PLANE1: f32 = 0.74;
+pub const PLANE_MID: f32 = (PLANE0 + PLANE1) * 0.5;
 
 #[derive(Clone, Debug)]
 pub struct HandleInfo {
@@ -162,6 +186,10 @@ pub struct HandleDrag {
     pub scale: f32,
     /// Plane handles: where the drag started on the plane.
     pub start_hit: Vec3,
+    /// Size handles: world distance from `origin` to the handle at the start.
+    pub reach: f32,
+    /// Size handles: the fixed face (world), None when scaling about the centre.
+    pub anchor: Option<Vec3>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,6 +335,8 @@ pub struct AppState {
     pub show_tree: bool,
     pub placement: Option<Placement>,
     pub handle_drag: Option<HandleDrag>,
+    /// Handle under the pointer (pre-selection, drawn hot before the click).
+    pub handle_hover: Option<Handle>,
     pub pointer_kind: PointerKind,
     pub screen: [f32; 2],
     /// Free 3D view area in points (min x, min y, max x, max y), set by the
@@ -461,6 +491,7 @@ impl AppState {
             show_tree: true,
             placement: None,
             handle_drag: None,
+            handle_hover: None,
             pointer_kind: PointerKind::Mouse,
             screen: [1194.0, 834.0],
             view_rect: [84.0, 16.0, 1194.0 - 308.0, 834.0],
@@ -1559,14 +1590,19 @@ impl AppState {
         let z = r * Vec3::Z;
         let view = self.view();
         let len = view.pixel_size_at((o - view.eye).length()) * 110.0;
+        // a plane seen edge-on is hidden (and cannot be grabbed), like WZX Engine;
+        // 0.1 (6°) rather than 0.2 so the ground square stays at the default view
+        let look = (o - view.eye).normalize_or(Vec3::Z);
+        let facing = |n: Vec3| n.dot(look).abs() >= 0.1;
         let mut out = vec![
             HandleInfo { handle: Handle::MoveX, world: o + Vec3::X * len, origin: o, axis: Vec3::X },
             HandleInfo { handle: Handle::MoveY, world: o + Vec3::Y * len, origin: o, axis: Vec3::Y },
             HandleInfo { handle: Handle::MoveZ, world: o + Vec3::Z * len, origin: o, axis: Vec3::Z },
-            HandleInfo { handle: Handle::PlaneXY, world: o + (Vec3::X + Vec3::Y) * len * 0.3, origin: o, axis: Vec3::Z },
-            HandleInfo { handle: Handle::PlaneYZ, world: o + (Vec3::Y + Vec3::Z) * len * 0.3, origin: o, axis: Vec3::X },
-            HandleInfo { handle: Handle::PlaneXZ, world: o + (Vec3::X + Vec3::Z) * len * 0.3, origin: o, axis: Vec3::Y },
+            HandleInfo { handle: Handle::PlaneXY, world: o + (Vec3::X + Vec3::Y) * len * PLANE_MID, origin: o, axis: Vec3::Z },
+            HandleInfo { handle: Handle::PlaneYZ, world: o + (Vec3::Y + Vec3::Z) * len * PLANE_MID, origin: o, axis: Vec3::X },
+            HandleInfo { handle: Handle::PlaneXZ, world: o + (Vec3::X + Vec3::Z) * len * PLANE_MID, origin: o, axis: Vec3::Y },
         ];
+        out.retain(|h| !h.handle.is_plane() || facing(h.axis));
         if let Some(sh) = n.shape() {
             let sz = sh.size;
             match sh.kind {
@@ -1613,8 +1649,19 @@ impl AppState {
         let start_hit = ray_plane(ro, rd, info.origin, info.axis).unwrap_or(info.origin);
         let s = self.scene.world_matrix(id).to_scale_rotation_translation().0.x;
         self.history.record(info.handle.label(), &self.scene);
-        self.handle_drag =
-            Some(HandleDrag { node: id, handle: info.handle, origin: info.origin, axis: info.axis, t0, start, scale: s, start_hit });
+        let reach = (info.world - info.origin).dot(info.axis);
+        self.handle_drag = Some(HandleDrag {
+            node: id,
+            handle: info.handle,
+            origin: info.origin,
+            axis: info.axis,
+            t0,
+            start,
+            scale: s,
+            start_hit,
+            reach,
+            anchor: None,
+        });
     }
 
     pub fn drag_handle(&mut self, pos: [f32; 2]) {
@@ -1664,22 +1711,51 @@ impl AppState {
                     n.transform.scale = d.start.transform.scale;
                 }
             }
+            h if h.is_size() => {
+                // box anchor (WZX Engine): the opposite face stays where it is
+                // and the shape's centre follows; Ctrl scales about the centre
+                let anchored = !self.multi();
+                let Some(sh0) = d.start.shape().cloned() else { return };
+                let extent = |sh: &Shape| match (d.handle, sh.kind) {
+                    (Handle::Radius, _) => sh.size.x,
+                    (Handle::Height, PrimKind::Torus) => sh.size.z,
+                    (Handle::Height, _) => sh.half_height(),
+                    _ => sh.size.z,
+                };
+                let target = if anchored { (t + d.reach) * 0.5 } else { t };
+                {
+                    let Some(n) = self.scene.node_mut(d.node) else { return };
+                    let Some(sh) = n.shape_mut() else { return };
+                    let r = snap_to((target / d.scale).max(0.2), 0.5, snap).max(0.2);
+                    match (d.handle, sh0.kind) {
+                        (Handle::Radius, PrimKind::Sphere) => {
+                            sh.size.x = r;
+                            sh.size.z = r * sh0.size.z / sh0.size.x.max(1e-3);
+                        }
+                        (Handle::Radius, _) => sh.size.x = r,
+                        (Handle::Height, PrimKind::Torus) => sh.size.z = r.min(sh.size.x * 0.95),
+                        (Handle::Height, PrimKind::Capsule) => sh.size.y = (r - sh.size.x).max(0.0),
+                        (Handle::Height, _) => sh.size.y = r,
+                        _ => sh.size.z = r,
+                    }
+                }
+                let now = self.scene.node(d.node).and_then(|n| n.shape()).map(|sh| extent(sh)).unwrap_or(0.0);
+                let start_world = self.scene.parent_matrix(d.node) * d.start.transform.matrix();
+                let (_, rot, o) = start_world.to_scale_rotation_translation();
+                let shift = if anchored { d.axis * (now * d.scale - d.reach) } else { Vec3::ZERO };
+                self.set_world(d.node, o + shift, rot);
+                if let Some(n) = self.scene.node_mut(d.node) {
+                    n.transform.scale = d.start.transform.scale;
+                }
+                if let Some(hd) = &mut self.handle_drag {
+                    hd.anchor = anchored.then(|| d.origin - d.axis * d.reach);
+                }
+            }
             _ => {
                 let Some(sh0) = d.start.shape().cloned() else { return };
                 let Some(n) = self.scene.node_mut(d.node) else { return };
                 let Some(sh) = n.shape_mut() else { return };
-                let v = |x: f32| snap_to((x / d.scale).max(0.2), 0.5, snap).max(0.2);
                 match (d.handle, sh0.kind) {
-                    (Handle::Radius, PrimKind::Sphere) => {
-                        let r = v(t);
-                        sh.size.x = r;
-                        sh.size.z = r * sh0.size.z / sh0.size.x.max(1e-3);
-                    }
-                    (Handle::Radius, _) => sh.size.x = v(t),
-                    (Handle::Height, PrimKind::Torus) => sh.size.z = v(t).min(sh.size.x * 0.95),
-                    (Handle::Height, PrimKind::Capsule) => sh.size.y = (v(t) - sh.size.x).max(0.0),
-                    (Handle::Height, _) => sh.size.y = v(t),
-                    (Handle::Depth, _) => sh.size.z = v(t),
                     (Handle::Round, _) => {
                         let delta = (d.t0 - t) / d.scale;
                         let maxr = sh0.size.x.min(sh0.half_height());
