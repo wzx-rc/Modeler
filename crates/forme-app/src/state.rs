@@ -2370,6 +2370,9 @@ impl AppState {
                 return format!("Maillage baké · {} faces · {} quads · aperçu sans lien avec le modèle", fmt_int(b.faces.len()), fmt_int(b.stats.quads));
             }
         }
+        if self.bake_mode() {
+            return "Mode BAKE : navigation seule, lance le Bake à gauche · Échap ou BUILD pour modifier".to_string();
+        }
         if let Some(p) = &self.placement {
             return match p.phase {
                 PlacePhase::Base => format!("{} — trace la base (sur une face ou au sol), relâche, puis monte (+ Add) ou descends (− Carve) · Ctrl inverse", p.kind.label()),
