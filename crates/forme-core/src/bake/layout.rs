@@ -1969,6 +1969,41 @@ fn build_pass(scene: &Scene, st: &LayoutSettings, progress: &Progress, hints: &[
                             if let Some(h) = hints.iter().find(|h| h.chart == ci && h.w == w && h.m.distance(mm) < lay.node_tol * 10.0 && h.c > hook * 0.05 && h.c < hook * 1.6) {
                                 best = Some(h.c);
                             }
+                            // or another feature less than two hooks away
+                            // beyond that side (a second hole, a shape): the
+                            // two squares would overlap and their diagonals
+                            // cross. The side is on the middle of the gap,
+                            // which the other feature's square then shares
+                            if best.is_none() {
+                                if let Some(cn) = centre {
+                                    let r = cn.distance(p0);
+                                    let b = [a2, a1][w];
+                                    let eps = lay.node_tol * 10.0;
+                                    let mut gap: Option<f64> = None;
+                                    for t in [-2.0 * r, -1.5 * r, -r, -0.5 * r, 0.0, hook * 0.5, hook] {
+                                        let o = x + b * t + ax * eps;
+                                        if lay.fmin(&lay.charts[ci], o).0 <= 0.0 {
+                                            continue;
+                                        }
+                                        let Some((e, x3)) = boundary_hit(&lay, ci, o, ax) else { continue };
+                                        // (not the face's own edge: that is the
+                                        // rule above, the square on the edge)
+                                        if lay.edges[e].charts.iter().all(|&c| lay.charts[c].id.prim == lay.charts[ci].id.prim) {
+                                            continue;
+                                        }
+                                        let d = (map.to2(x3) - o).dot(ax) + eps;
+                                        if gap.is_none_or(|g| d < g) {
+                                            gap = Some(d);
+                                        }
+                                    }
+                                    if let Some(d) = gap.filter(|&d| d < hook * 2.0 && d > hook * 0.3) {
+                                        if std::env::var("DEBUG_LAYOUT").is_ok() {
+                                            eprintln!("côté du carré au milieu de l'écart {:?} ({:.2} au lieu de {hook:.2})", lay.nodes[m], d * 0.5);
+                                        }
+                                        best = Some(d * 0.5);
+                                    }
+                                }
+                            }
                             if let Some(c) = best {
                                 hk[w] = c;
                             }
