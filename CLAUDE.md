@@ -18,13 +18,13 @@ Forme is a hard-surface modelling app for iPad Pro, in the spirit of Substance 3
 ## Commands
 
 ```bash
-cargo test --release -p forme-core                      # core tests (21 tests)
+cargo test --release -p forme-core                      # core tests (22 tests)
 cargo run --release -p forme-app --bin forme            # the app on PC
 cargo run --release -p forme-app --bin forme-shot -- shots          # every capture scenario
 cargo run --release -p forme-app --bin forme-shot -- /tmp/x max     # one scenario (prefix): max, user, live, 22, 19, ui-ipad…
 cargo run --release -p forme-app --bin forme-shot -- /tmp/x pc-atelier pc-studio   # the two PC interfaces at 1600×900
 IPAD_ZOOM=0.84 cargo run --release -p forme-app --bin forme-shot -- /tmp/x ui-ipad   # layout as on the iPad
-OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes  # the Bake on its test scenes, CPU renders (CASE=romain-aretes|ra-coin3|romain|coin|trou|… for one, DEBUG_LAYOUT=1 for the rays)
+OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes  # the Bake on its test scenes, CPU renders (CASE=romain-aretes|rc-sans-raccord|ra-coin3|romain|coin|trou|… for one, DEBUG_LAYOUT=1 for the rays)
 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- lignes     # construction lines (bake/lines.rs) over the baked part
 DEG=5 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- decime  # optional pass: dissolve the closed edge loops whose cross path bends less than DEG (same code as the toggle)
 ```
