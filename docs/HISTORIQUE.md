@@ -25,3 +25,5 @@
     - création façon 3ds Max au doigt ;
     - bake de sa scène (boîte, profil, 4 vis) passé à l'ancien bake : bake par opération étendu à tout l'historique en chaîne.
 15. **Paquet de transfert** vers un Projet Claude et un développement sur PC (ce dossier `docs/`, `CLAUDE.md`).
+16. **Bake par lignes de construction** (10 nov.) : le maillage se déduit des arêtes, rails et jonctions ; fillets d'abord en bandes, puis patchs à 4 coins ; accroche en diagonale des fillets concaves (« maillage parfait »).
+17. **Un seul algorithme** (10 nov.) : à la demande de Romain, les anciens bakes (par opération, par surfaces, orienté champ) sont supprimés. Un cas pas encore géré affiche sa raison en rouge, sans maillage de repli.

@@ -28,11 +28,11 @@ ios/              Info.plist, icônes, build_ipa.sh
 | Fichier | Rôle |
 | --- | --- |
 | `field.rs` | Réinterprète le bytecode en **f64**. `Field::eval` renvoie `Sample { d, mat, owner, margin, blend }`, avec `dist`, `grad` et `project` (Newton). `prims: Vec<PrimDef>` et `instances(prim)` donnent les copies avec leurs `to_local` / `to_world`. **`steps()`** donne l'historique à plat (`Step { prim, mode, k, chamfer, end }`) et **`prefix(steps, n)`** le modèle après n étapes. On y trouve aussi `prim_raw`, `prim_project`, `box_edges`, `cyl_edges` et `box_edge_signs`. |
-| `gen.rs` | Maillages **natifs** des primitives en quads : `rounded_box` (dont `rounded_box_edges` pour les fillets par arête), `quad_sphere`, `extrusion`, `revolve` (disques tout en quads `quad_disc` ; `GenSettings.segs` force le nombre de colonnes). `PolyMesh { pos, faces }`. |
-| `build.rs` | **Bake par opération** (méthode actuelle). Entrées : `build_auto(scene, settings, progress) -> Result<Baked, String>` et `plan(scene, settings)`. |
-| `mod.rs` | `bake()` essaie d'abord `build_auto`, sinon se replie sur `bake_surfaces()` (ancien bake, `patch.rs`) et explique le repli dans `stats.note`. Contient aussi `Baked`, `BFace`, `BakeStats`, `Quality`/`BakeSettings::preset` (densité : `divisions` = 5 / 8 / 12 quads sur la forme de base), `finish` (normales, stats), `to_obj`, `to_mesh`, `triangulate_face`. |
-| `patch.rs` | Ancien bake : patchs paramétriques découpés et cousus (repli). |
-| `quad.rs` | Essai abandonné de remaillage « Instant Meshes » (orienté champ). Gardé pour référence, non branché. |
+| `gen.rs` | Maillages **natifs** des primitives (graines des lignes de construction, `prim_bounds`, `ear_clip`) : `rounded_box` (dont `rounded_box_edges` pour les fillets par arête), `quad_sphere`, `extrusion`, `revolve` (disques tout en quads `quad_disc` ; `GenSettings.segs` force le nombre de colonnes). `PolyMesh { pos, faces }`. |
+| `layout.rs` | **Le Bake** (seul algorithme) : par lignes de construction. `build(scene, settings, progress) -> Result<Baked, String>`, `handles(scene)`. Cartes par face, bords exacts, boucles, patchs à 4 coins, TFI (voir `docs/BAKE.md`). |
+| `lines.rs` | Lignes de construction lues dans l'historique (arêtes, rails, jonctions), pour les calques de diagnostic du panneau Bake. |
+| `decimate.rs` | Passe optionnelle (désactivée par défaut) : retire les edge loops plates. |
+| `mod.rs` | `bake()` = `plan` (taille des quads, ou `Err(raison)`) puis `layout::build`, sans repli. Contient aussi `Baked`, `BFace` (rôle `P_FILLET` / `P_FILL`), `BakeStats`, `Quality`/`BakeSettings::preset` (densité : `divisions` = 5 / 8 / 12 quads sur la forme de base), `finish` (normales, stats), `to_obj`, `to_mesh`, `triangulate_face`. |
 
 ## forme-render
 

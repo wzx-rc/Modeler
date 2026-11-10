@@ -8,7 +8,7 @@ use crate::camera::ViewPreset;
 use crate::icons::{self, Icon};
 use crate::settings::UiMode;
 use crate::state::*;
-use crate::theme::{medium, regular, semibold, AXIS_X, AXIS_Y, AXIS_Z, CARVE, EDGE_SEL, OK};
+use crate::theme::{medium, regular, semibold, AXIS_X, AXIS_Y, AXIS_Z, CARVE, EDGE_SEL, ERROR, OK};
 use crate::ui;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, Id, LayerId, Order, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui};
 use forme_core::*;
@@ -643,8 +643,10 @@ fn bake_box(ui: &mut Ui, st: &mut AppState) {
     let w = ui.available_width();
     ui.add_space(6.0);
     let stale = st.bake.stale(st.scene_version);
+    let error = st.bake.error.clone();
     let (state, color) = match (&st.bake.job, &st.bake.result) {
         (Some(_), _) => ("En cours…", AC),
+        _ if error.is_some() => ("Impossible", ERROR),
         (None, Some(_)) if st.bake.pass.is_some() => ("Passe en cours…", AC),
         (None, Some(_)) if stale => ("Périmé", CARVE),
         (None, Some(_)) => ("À jour", OK),
@@ -660,11 +662,12 @@ fn bake_box(ui: &mut Ui, st: &mut AppState) {
     });
     ui.add_space(4.0);
     let rows: Vec<(String, String)> = match &st.bake.result {
+        _ if error.is_some() => vec![],
         Some(b) => {
             let s = &b.stats;
             let faces = b.faces.len().max(1);
             let mut rows: Vec<(String, String)> = vec![
-                ("Méthode".into(), if s.lines { "Par lignes".into() } else if s.constructive { "Par opération".into() } else { "Par surfaces (repli)".into() }),
+                ("Patchs".into(), fmt_int(s.patches)),
                 ("Faces".into(), fmt_int(b.faces.len())),
                 ("Quads".into(), format!("{:.0} %", 100.0 * s.quads as f64 / faces as f64)),
                 ("Bords ouverts".into(), fmt_int(s.open_edges)),
@@ -677,8 +680,20 @@ fn bake_box(ui: &mut Ui, st: &mut AppState) {
             }
             rows
         }
-        None => vec![("Méthode".into(), "—".into()), ("Faces".into(), "—".into()), ("Quads".into(), "—".into())],
+        None => vec![("Faces".into(), "—".into()), ("Quads".into(), "—".into())],
     };
+    // no fallback mesh: what the bake does not handle yet, or will not
+    let why = match (&error, st.bake.job.is_some()) {
+        (Some((_, why)), false) => Some((format!("Bake impossible : {why}"), ERROR)),
+        _ => st.bake_plan().err().map(|why| (format!("Bake : {why}"), ERROR)),
+    };
+    if let Some((text, color)) = why {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.add(egui::Label::new(RichText::new(text).font(regular(11.5)).color(color)).wrap());
+        });
+        ui.add_space(2.0);
+    }
     for (k, v) in rows {
         let (r, _) = ui.allocate_exact_size(vec2(w, 17.0), Sense::hover());
         let p = ui.painter();

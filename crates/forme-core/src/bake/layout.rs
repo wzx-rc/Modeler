@@ -16,15 +16,14 @@
 //!    then every patch is filled with a grid of quads (transfinite
 //!    interpolation in its chart), every vertex exactly on its face.
 //!
-//! Handled for now: boxes with sharp or rounded edges and sharp cylinders,
-//! combined by sharp Add / Carve, as long as every cylinder wall is hidden
-//! somewhere (its seam goes there). Anything else returns Err and the
-//! caller falls back.
+//! Handled for now: boxes with sharp or rounded edges (a ball where three
+//! equal fillets meet) and sharp cylinders, combined by sharp Add / Carve,
+//! as long as every cylinder wall is hidden somewhere (its seam goes
+//! there). Anything else returns Err(reason), shown in the Bake panel.
 
-use super::build::{P_FILLET, P_LOFT};
 use super::field::{box_edge_signs, prim_raw, Field, Instance, PrimDef, Step};
 use super::lines::edge_r;
-use super::{finish, BFace, BakeSettings, Baked, Progress};
+use super::{finish, BFace, BakeSettings, Baked, Progress, P_FILL, P_FILLET};
 use crate::program::compile;
 use crate::scene::Scene;
 use glam::{DVec2, DVec3};
@@ -40,6 +39,32 @@ const CYL_TOP: u32 = 1;
 const CYL_BOTTOM: u32 = 2;
 /// Second half of a cylinder wall seen all around (a round hole).
 const CYL_SIDE_B: u32 = 3;
+/// Faces of a box: 18 + k a rounded corner (ball) where three edges rounded
+/// alike meet; k from the signs, bit 0 x < 0, bit 1 y < 0, bit 2 z < 0.
+const CORNER0: u32 = 18;
+
+fn corner_signs(k: u32) -> DVec3 {
+    let s = |bit: u32| if k & bit == 0 { 1.0 } else { -1.0 };
+    DVec3::new(s(1), s(2), s(4))
+}
+
+fn corner_of(sg: DVec3) -> u32 {
+    (sg.x < 0.0) as u32 | ((sg.y < 0.0) as u32) << 1 | ((sg.z < 0.0) as u32) << 2
+}
+
+/// The three edges meeting at the corner of signs `sg`, by axis.
+fn corner_edges(sg: DVec3) -> [usize; 3] {
+    [edge_index(0, sg.y, sg.z), edge_index(1, sg.z, sg.x), edge_index(2, sg.x, sg.y)]
+}
+
+/// Radius of a box corner rounded as a ball (its three edges rounded alike).
+fn corner_r(pr: &PrimDef, k: u32) -> Option<f64> {
+    if pr.kind != 0 {
+        return None;
+    }
+    let r = corner_edges(corner_signs(k)).map(|e| edge_r(pr, e));
+    (r[0] > 0.0 && (r[1] - r[0]).abs() < 1e-6 && (r[2] - r[0]).abs() < 1e-6).then_some(r[0])
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 struct FaceId {
@@ -76,13 +101,21 @@ impl Shape<'_> {
             }
             return best.1;
         }
+        let s = self.pr.size;
+        for k in 0..8u32 {
+            if let Some(r) = corner_r(self.pr, k) {
+                let sg = corner_signs(k);
+                if (0..3).all(|i| l[i] * sg[i] >= s[i] - r) {
+                    return CORNER0 + k;
+                }
+            }
+        }
         for f in 0..6u32 {
             let v = self.face_fn_local(f, l).abs();
             if v < best.0 {
                 best = (v, f);
             }
         }
-        let s = self.pr.size;
         for e in 0..12usize {
             let r = edge_r(self.pr, e);
             if r <= 0.0 {
@@ -108,6 +141,11 @@ impl Shape<'_> {
                 CYL_TOP => l.y - s.y,
                 _ => -l.y - s.y,
             };
+        }
+        if f >= CORNER0 {
+            let sg = corner_signs(f - CORNER0);
+            let r = corner_r(self.pr, f - CORNER0).unwrap_or(0.0);
+            return (l - (s - DVec3::splat(r)) * sg).length() - r;
         }
         if f < FILLET0 {
             let ax = (f / 2) as usize;
@@ -157,6 +195,9 @@ fn turn(a: DVec2, b: DVec2) -> f64 {
 enum Map {
     Plane { o: DVec3, u: DVec3, v: DVec3 },
     Cyl { o: DVec3, a: DVec3, b: DVec3, c: DVec3, r: f64 },
+    /// Ball corner: gnomonic chart around direction `d` (great circles are
+    /// straight lines, the corner's three arcs a triangle).
+    Sph { c: DVec3, d: DVec3, e1: DVec3, e2: DVec3, r: f64 },
 }
 
 impl Map {
@@ -167,6 +208,7 @@ impl Map {
                 let th = q.y / r;
                 o + a * q.x + (b * th.cos() + c * th.sin()) * r
             }
+            Map::Sph { c, d, e1, e2, r } => c + (d + e1 * (q.x / r) + e2 * (q.y / r)).normalize() * r,
         }
     }
     fn to2(&self, p: DVec3) -> DVec2 {
@@ -178,6 +220,11 @@ impl Map {
             Map::Cyl { o, a, b, c, r } => {
                 let d = p - o;
                 DVec2::new(d.dot(a), d.dot(c).atan2(d.dot(b)) * r)
+            }
+            Map::Sph { c, d, e1, e2, r } => {
+                let n = p - c;
+                let w = n.dot(d).max(r * 1e-6);
+                DVec2::new(n.dot(e1), n.dot(e2)) * (r / w)
             }
         }
     }
@@ -191,6 +238,8 @@ enum Cons {
     Arc(usize),
     /// Round cap of a cylinder (disc around the chart origin).
     Disc,
+    /// Ball corner: stays on the corner's side of the plane square to axis i.
+    Oct(usize),
     /// Must lie outside (Add) or inside (Carve) the model before the step.
     Prev,
     /// Must lie outside a later shape.
@@ -212,6 +261,9 @@ struct Chart {
     ring: Option<f64>,
     /// Cylinder cap: radius and the wall around it.
     disc: Option<(f64, FaceId)>,
+    /// Ball corner: its three axes (world, pointing out) and the rounded
+    /// edge across each of its arcs.
+    ball: Option<([DVec3; 3], [FaceId; 3])>,
     cons: Vec<Cons>,
 }
 
@@ -273,6 +325,10 @@ impl Layout<'_> {
                 r - w.length()
             }
             Cons::Disc => ch.disc.map(|(r, _)| r - q.length()).unwrap_or(1e9),
+            Cons::Oct(i) => match (ch.ball, ch.map) {
+                (Some((ax, _)), Map::Sph { c, .. }) => (ch.map.to3(q) - c).dot(ax[i]),
+                _ => 1e9,
+            },
             Cons::Prev => {
                 let sh = &self.shapes[ch.shape];
                 let d = self.prev[ch.shape].as_ref().map(|f| f.dist(ch.map.to3(q))).unwrap_or(1e9);
@@ -312,7 +368,7 @@ impl Layout<'_> {
     fn label(&self, ch: &Chart, k: Cons, q: DVec2) -> FaceId {
         let f = self.label_raw(ch, k, q);
         match k {
-            Cons::Rect(_) | Cons::Arc(_) => f,
+            Cons::Rect(_) | Cons::Arc(_) | Cons::Oct(_) => f,
             _ => self.half(f, ch.map.to3(q)),
         }
     }
@@ -322,6 +378,7 @@ impl Layout<'_> {
             Cons::Rect(s) => ch.side[s],
             Cons::Arc(i) => ch.arcs[i].3,
             Cons::Disc => ch.disc.map(|d| d.1).unwrap_or(ch.id),
+            Cons::Oct(i) => ch.ball.map(|b| b.1[i]).unwrap_or(ch.id),
             Cons::Prev => {
                 let p = ch.map.to3(q);
                 let me = &self.shapes[ch.shape];
@@ -338,7 +395,7 @@ impl Layout<'_> {
     /// The function whose zero set carries a piece of boundary.
     fn psi(&self, ch: &Chart, k: Cons, l: FaceId, q: DVec2) -> f64 {
         match k {
-            Cons::Rect(_) | Cons::Arc(_) | Cons::Disc => self.cval(ch, k, q),
+            Cons::Rect(_) | Cons::Arc(_) | Cons::Disc | Cons::Oct(_) => self.cval(ch, k, q),
             _ => self.shape_of(l.prim).map(|s| s.face_fn(l.face, ch.map.to3(q))).unwrap_or(0.0),
         }
     }
@@ -619,19 +676,22 @@ fn check(field: &Field, steps: &[Step]) -> Result<(), String> {
     for (i, s) in steps.iter().enumerate() {
         let pr = &field.prims[s.prim as usize];
         if pr.kind > 1 || pr.taper.abs() > 1e-6 || pr.shell > 0.0 {
-            return Err("par lignes : seulement des boîtes et des cylindres pour l'instant".into());
+            return Err("seulement des boîtes et des cylindres pour l'instant".into());
         }
         if pr.kind == 1 && (pr.round > 0.0 || pr.chamfer > 0.0 || pr.edges.iter().any(|r| *r != 0.0)) {
-            return Err("par lignes : cylindre arrondi pas encore géré".into());
+            return Err("cylindre arrondi pas encore géré".into());
         }
         if field.instances(s.prim).len() != 1 {
-            return Err("par lignes : copies pas encore gérées".into());
+            return Err("copies pas encore gérées".into());
         }
         if i > 0 && (s.mode > 1 || s.chamfer || s.k > 1e-9) {
-            return Err("par lignes : seulement Add / Carve sans fillet de jonction pour l'instant".into());
+            return Err("seulement Add / Carve sans fillet de jonction pour l'instant".into());
         }
         if (0..12).any(|e| edge_r(pr, e) < 0.0) {
-            return Err("par lignes : chanfreins pas encore gérés".into());
+            return Err("chanfreins pas encore gérés".into());
+        }
+        if pr.kind == 0 && (0..8u32).any(|k| corner_edges(corner_signs(k)).iter().all(|&e| edge_r(pr, e) > 0.0) && corner_r(pr, k).is_none()) {
+            return Err("coin où trois fillets de rayons différents se rejoignent, pas encore géré".into());
         }
     }
     Ok(())
@@ -694,6 +754,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 strip: None,
                 ring: Some((rad * step).min(st.size)),
                 disc: None,
+                ball: None,
                 cons: cons_base.clone(),
             });
             for (sg, id) in [(1.0, top), (-1.0, bottom)] {
@@ -711,6 +772,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                     strip: None,
                     ring: None,
                     disc: Some((rad, wall)),
+                    ball: None,
                     cons,
                 });
             }
@@ -755,7 +817,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 for i in 0..arcs.len() {
                     cons.push(Cons::Arc(i));
                 }
-                charts.push(Chart { id: FaceId { prim: sh.prim, face }, shape: si, map: Map::Plane { o, u, v }, lo, hi, side, arcs, strip: None, ring: None, disc: None, cons });
+                charts.push(Chart { id: FaceId { prim: sh.prim, face }, shape: si, map: Map::Plane { o, u, v }, lo, hi, side, arcs, strip: None, ring: None, disc: None, ball: None, cons });
             }
         }
         for e in 0..12usize {
@@ -780,18 +842,65 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 FaceId { prim: sh.prim, face: (ax * 2 + 1) as u32 },
             ];
             let segs = fillet_segs(rad, FRAC_PI_2, tol_f).max(((rad * FRAC_PI_2 / st.size).round() as usize + 1) / 2 * 2);
+            // an end on a ball corner stops where the ball starts
+            let mut side = side;
+            let (mut t0, mut t1) = (-s[ax], s[ax]);
+            for (end, sa) in [(1usize, 1.0f64), (3, -1.0)] {
+                let mut sg = DVec3::ZERO;
+                sg[ax] = sa;
+                sg[b] = sb;
+                sg[c] = scn;
+                if let Some(rc) = corner_r(pr, corner_of(sg)) {
+                    side[end] = FaceId { prim: sh.prim, face: CORNER0 + corner_of(sg) };
+                    if sa > 0.0 {
+                        t1 = s[ax] - rc;
+                    } else {
+                        t0 = -s[ax] + rc;
+                    }
+                }
+            }
             charts.push(Chart {
                 id: FaceId { prim: sh.prim, face: FILLET0 + e as u32 },
                 shape: si,
                 map: Map::Cyl { o, a: am, b: bm, c: cm, r: rad },
-                lo: DVec2::new(-s[ax] * sc, 0.0),
-                hi: DVec2::new(s[ax] * sc, rad * FRAC_PI_2),
+                lo: DVec2::new(t0 * sc, 0.0),
+                hi: DVec2::new(t1 * sc, rad * FRAC_PI_2),
                 side,
                 arcs: vec![],
                 strip: Some((rad, segs)),
                 ring: None,
                 disc: None,
+                ball: None,
                 cons: cons_base.clone(),
+            });
+        }
+        // ball corners: an octant of sphere, three arcs on the strips
+        for k in 0..8u32 {
+            let Some(r) = corner_r(pr, k) else { continue };
+            let sg = corner_signs(k);
+            let c = tw.transform_point3((s - DVec3::splat(r)) * sg);
+            let ax = [0usize, 1, 2].map(|i| tw.transform_vector3(unit(i) * sg[i]).normalize());
+            let d = (ax[0] + ax[1] + ax[2]).normalize();
+            let e1 = (ax[0] - ax[1]).normalize();
+            let e2 = d.cross(e1);
+            let rad = r * sc;
+            let id = FaceId { prim: sh.prim, face: CORNER0 + k };
+            let faces = corner_edges(sg).map(|e| FaceId { prim: sh.prim, face: FILLET0 + e as u32 });
+            let mut cons = cons_base.clone();
+            cons.extend([Cons::Oct(0), Cons::Oct(1), Cons::Oct(2)]);
+            charts.push(Chart {
+                id,
+                shape: si,
+                map: Map::Sph { c, d, e1, e2, r: rad },
+                lo: DVec2::splat(-1.6 * rad),
+                hi: DVec2::splat(1.6 * rad),
+                side: [id; 4],
+                arcs: vec![],
+                strip: None,
+                ring: None,
+                disc: None,
+                ball: Some((ax, faces)),
+                cons,
             });
         }
     }
@@ -935,7 +1044,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 marks.push((i, node.unwrap()));
             }
             if marks.is_empty() {
-                return Err("par lignes : contour fermé sans coin (trou rond) pas encore géré".into());
+                return Err("contour fermé sans coin (trou rond) pas encore géré".into());
             }
             let mut raw = vec![];
             for (k, &(i, q)) in marks.iter().enumerate() {
@@ -967,7 +1076,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             let a = lay.node(pts[0]);
             let b = lay.node(*pts.last().unwrap());
             if a == b {
-                return Err("par lignes : bord refermé sur un seul coin".into());
+                return Err("bord refermé sur un seul coin".into());
             }
             pieces.push(Piece { chart: ci, a, b, label, pts });
             ids.push(pieces.len() - 1);
@@ -985,7 +1094,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         let p = &pieces[i];
         let me = lay.charts[p.chart].id;
         let Some(&other) = chart_of.get(&p.label) else {
-            return Err(format!("par lignes : face voisine absente ({:?})", p.label));
+            return Err(format!("face voisine absente ({:?})", p.label));
         };
         let mid = p.pts[p.pts.len() / 2];
         let twin = (0..pieces.len())
@@ -1004,7 +1113,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                     }
                 }
             }
-            return Err("par lignes : ligne sans partenaire de l'autre côté".into());
+            return Err("ligne sans partenaire de l'autre côté".into());
         };
         let e = lay.edges.len();
         let mut pts = p.pts.clone();
@@ -1055,10 +1164,40 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         }
     }
 
+    progress.set(2, 1);
     // 3. loop origins: concave fillet ends (middle of the arc) and sharp
     // re-entrant corners
     let mut queue: VecDeque<(usize, usize, DVec2)> = VecDeque::new();
     let mut forced: Vec<(usize, usize)> = vec![];
+    // rounded corners of each face, (centre, radius, unit directions from
+    // the centre to the arc's two ends, rows across the strip): its own
+    // rounded edges, and where another shape's rounded edge crosses it (a
+    // notch through a box's rounded edge) found below from the boundary
+    let strip_rows = |id: FaceId| lay.charts.iter().find(|c| c.id == id).and_then(|c| c.strip).map(|s| s.1).unwrap_or(0);
+    let mut rounded: Vec<Vec<(DVec2, f64, [DVec2; 2], usize)>> =
+        lay.charts.iter().map(|ch| ch.arcs.iter().map(|&(c, r, sg, id)| (c, r, [DVec2::new(sg.x, 0.0), DVec2::new(0.0, sg.y)], strip_rows(id))).collect()).collect();
+    // ball corners: three quads around the centre, a loop from the middle
+    // of each arc on into its strip (the strip's middle row)
+    for ci in 0..nc {
+        let (Some(_), Map::Sph { c, r, .. }) = (lay.charts[ci].ball, lay.charts[ci].map) else { continue };
+        let loops = lay.bnd[ci].clone();
+        if loops.len() != 1 || loops[0].len() != 3 {
+            return Err("coin arrondi coupé par une autre forme, pas encore géré".into());
+        }
+        let g = lay.node(lay.charts[ci].map.to3(DVec2::ZERO));
+        lay.origins.push(g);
+        lay.inner[ci].push(g);
+        for &(e, _) in &loops[0] {
+            let (pa, pb) = (lay.nodes[lay.edges[e].a], lay.nodes[lay.edges[e].b]);
+            let mid = c + ((pa - c).normalize() + (pb - c).normalize()).normalize() * r;
+            let other = lay.edges[e].charts.iter().copied().find(|&x| x != ci).unwrap_or(ci);
+            let m = lay.split(e, mid);
+            let re = lay.edges.len();
+            lay.edges.push(GEdge { a: g, b: m, pts: vec![lay.nodes[g], lay.nodes[m]], charts: [ci, ci], ray: true, alive: true });
+            lay.rays[ci].push(re);
+            queue.push_back((other, m, DVec2::ZERO));
+        }
+    }
     for ci in 0..nc {
         if lay.charts[ci].strip.is_some() {
             continue;
@@ -1103,7 +1242,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                         // corner where the two walls would meet
                         let den = a1.perp_dot(t_out);
                         if den.abs() < 1e-6 {
-                            return Err("par lignes : fillet entre deux murs parallèles".into());
+                            return Err("fillet entre deux murs parallèles".into());
                         }
                         let s = (q0 - p0).perp_dot(t_out) / den;
                         let x = p0 + a1 * s;
@@ -1128,6 +1267,27 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                         // convex fillet: loops from its rails, its middle is a
                         // corner of the rounded patch
                         forced.push((ci, m));
+                        // another shape's rounded edge across this face,
+                        // a whole quarter: a rounded corner of its own
+                        let foreign = lay.charts[other].id.prim != lay.charts[ci].id.prim;
+                        if foreign && lay.charts[other].strip.is_some() && lay.charts[ci].disc.is_none() && (total.abs() - FRAC_PI_2).abs() < 0.15 && t_in.dot(t_out).abs() < 0.05 {
+                            let map = lay.charts[ci].map;
+                            let (ps, pe) = if fwd { (na, nb) } else { (nb, na) };
+                            let (p0, q0) = (map.to2(lay.nodes[ps]), map.to2(lay.nodes[pe]));
+                            // centre: on both ends' normals
+                            let (n0, n1) = (perp(t_in), perp(t_out));
+                            let den = n0.perp_dot(n1);
+                            if den.abs() > 1e-9 {
+                                let s0 = (q0 - p0).perp_dot(n1) / den;
+                                let c = p0 + n0 * s0;
+                                let (r0, r1) = (p0.distance(c), q0.distance(c));
+                                if (r0 - r1).abs() < r0.max(r1) * 0.02 {
+                                    let r = (r0 + r1) * 0.5;
+                                    let rows = lay.charts[other].strip.map(|s| s.1).unwrap_or(0);
+                                    rounded[ci].push((c, r, [(p0 - c) / r0, (q0 - c) / r1], rows));
+                                }
+                            }
+                        }
                         queue.push_back((ci, na, DVec2::ZERO));
                         queue.push_back((ci, nb, DVec2::ZERO));
                     }
@@ -1159,11 +1319,11 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
     while let Some((ci, n0, d0)) = queue.pop_front() {
         guard += 1;
         if guard > 4000 {
-            return Err("par lignes : boucles sans fin".into());
+            return Err("boucles sans fin".into());
         }
         let o = lay.charts[ci].map.to2(lay.nodes[n0]);
         // direction: given, or square to the boundary into the face
-        let d = if d0 == DVec2::ZERO {
+        let mut d = if d0 == DVec2::ZERO {
             match inward(&lay, ci, n0) {
                 Some(d) => d,
                 None => continue,
@@ -1171,6 +1331,79 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         } else {
             d0.normalize()
         };
+        // a loop entering a rounded corner of the face from its arc (a row
+        // of the strip) crosses the corner patch to the opposite side:
+        // from the half next to a rail it runs along that rail
+        let mut on_arc: Option<(DVec2, [DVec2; 2], usize)> = None;
+        if d0 == DVec2::ZERO {
+            for &(c, r, u, _) in &rounded[ci] {
+                let w = DVec2::new((o - c).dot(u[0]), (o - c).dot(u[1]));
+                // (not its ends: the rails, whose loops cross the whole face)
+                if w.min_element() > r * 0.05 && ((o - c).length() - r).abs() < snap.max(r * 0.02) {
+                    let k = if w.y > w.x { 1 } else { 0 };
+                    d = -u[k];
+                    on_arc = Some((c, u, k));
+                }
+            }
+        }
+        // first crossing with the chart's boundary
+        let first_hit = |d: DVec2| -> Option<(f64, usize, usize, f64)> {
+            let mut best: Option<(f64, usize, usize, f64)> = None;
+            for lp in &lay.bnd[ci] {
+                for &(e, _) in lp {
+                    let p2 = lay.pts2(e, ci);
+                    for i in 0..p2.len() - 1 {
+                        let (p, q) = (p2[i], p2[i + 1]);
+                        let r = q - p;
+                        let den = d.perp_dot(r);
+                        if den.abs() < 1e-14 {
+                            continue;
+                        }
+                        let s = (p - o).perp_dot(r) / den;
+                        let w = (p - o).perp_dot(d) / den;
+                        if s > extent * 1e-6 && (-1e-9..=1.0 + 1e-9).contains(&w) && best.is_none_or(|b| s < b.0) {
+                            best = Some((s, e, i, w));
+                        }
+                    }
+                }
+            }
+            best
+        };
+        // two rounded corners facing each other along one side of the face
+        // (a box's top and bottom rounded edges seen on a side face): one
+        // column of quads between them, so their rails are one line, from
+        // arc end to arc end (slightly slanted when the radii differ),
+        // instead of two lines a T apart
+        if d0 == DVec2::ZERO && on_arc.is_none() {
+            let mut aim: Option<DVec2> = None;
+            for &(c, r, u, rows) in &rounded[ci] {
+                for k in 0..2 {
+                    if (c + u[k] * r).distance(o) > snap {
+                        continue;
+                    }
+                    // (as many rows on both: the column keeps its count)
+                    for &(c2, r2, u2, rows2) in &rounded[ci] {
+                        for k2 in 0..2 {
+                            if rows2 != rows || u2[1 - k2].dot(u[1 - k]) < 0.999 || u2[k2].dot(u[k]) > -0.999 {
+                                continue;
+                            }
+                            let p = c2 + u2[k2] * r2;
+                            let w = p - o;
+                            if w.dot(-u[k]) > snap && w.dot(u[1 - k]).abs() < r.max(r2) && aim.is_none_or(|a| w.length() < (a - o).length()) {
+                                aim = Some(p);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(p) = aim {
+                // only when nothing stands between them
+                let da = (p - o).normalize();
+                if first_hit(da).is_some_and(|b| (o + da * b.0).distance(p) < snap) {
+                    d = da;
+                }
+            }
+        }
         // already a loop leaving this node this way
         let exists = lay.rays[ci].iter().any(|&r| {
             let ed = &lay.edges[r];
@@ -1181,26 +1414,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         if exists {
             continue;
         }
-        // first crossing with the chart's boundary
-        let mut best: Option<(f64, usize, usize, f64)> = None;
-        for lp in &lay.bnd[ci] {
-            for &(e, _) in lp {
-                let p2 = lay.pts2(e, ci);
-                for i in 0..p2.len() - 1 {
-                    let (p, q) = (p2[i], p2[i + 1]);
-                    let r = q - p;
-                    let den = d.perp_dot(r);
-                    if den.abs() < 1e-14 {
-                        continue;
-                    }
-                    let s = (p - o).perp_dot(r) / den;
-                    let w = (p - o).perp_dot(d) / den;
-                    if s > extent * 1e-6 && (-1e-9..=1.0 + 1e-9).contains(&w) && best.is_none_or(|b| s < b.0) {
-                        best = Some((s, e, i, w));
-                    }
-                }
-            }
-        }
+        let best = first_hit(d);
         // a loop node inside the face on the way (where loops cross)
         let mut stop: Option<(f64, usize)> = None;
         for &g in &lay.inner[ci] {
@@ -1213,6 +1427,75 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 stop = Some((s, g));
             }
         }
+        // a rounded corner of the face (between its arc and the lines from
+        // the arc's ends) is a patch of its own: a loop coming from the
+        // face stops on its side (a T), rather than cutting a triangle off
+        // it against the arc
+        let mut tee: Option<(f64, DVec2)> = None;
+        if let Some((c, u, k)) = on_arc {
+            let t = (o - c).dot(u[k]);
+            if t > extent * 1e-6 {
+                tee = Some((t, o + d * t));
+            }
+        }
+        for &(c, r, u, _) in &rounded[ci] {
+            let lo = |q: DVec2| (q - c).dot(u[0]).min((q - c).dot(u[1]));
+            if lo(o) > -snap {
+                continue;
+            }
+            // first point of the ray inside the corner square [0, r]²
+            let mut enter: Option<f64> = None;
+            for k in 0..2 {
+                let dk = d.dot(u[k]);
+                if dk.abs() < 1e-12 {
+                    continue;
+                }
+                let t = -(o - c).dot(u[k]) / dk;
+                let q = o + d * t;
+                let w1 = (q - c).dot(u[1 - k]);
+                if t > extent * 1e-6 && w1 >= -1e-9 && w1 <= r && enter.is_none_or(|x| t < x) {
+                    enter = Some(t);
+                }
+            }
+            if let Some(t) = enter {
+                if best.is_none_or(|b| t < b.0 - snap) && tee.is_none_or(|x| t < x.0) {
+                    tee = Some((t, o + d * t));
+                }
+            }
+        }
+        let mut new_tee = false;
+        if let Some((t, q)) = tee {
+            if stop.is_none_or(|x| t < x.0 + snap) {
+                // the T of a loop already there, or a new one
+                let m = lay.charts[ci].map;
+                let near = lay.inner[ci].iter().copied().find(|&g| m.to2(lay.nodes[g]).distance(q) < snap);
+                let g = match near {
+                    Some(g) => g,
+                    None => {
+                        let g = lay.node(m.to3(q));
+                        lay.inner[ci].push(g);
+                        new_tee = true;
+                        // a loop already traced through the T takes it
+                        let rs: Vec<usize> = lay.rays[ci].iter().copied().filter(|&r| lay.edges[r].alive).collect();
+                        for r in rs {
+                            let ed = &lay.edges[r];
+                            if ed.a == g || ed.b == g {
+                                continue;
+                            }
+                            let (a, b) = (m.to2(lay.nodes[ed.a]), m.to2(lay.nodes[ed.b]));
+                            let ab = b - a;
+                            let t = (q - a).dot(ab) / ab.length_squared().max(1e-30);
+                            if t > 1e-6 && t < 1.0 - 1e-6 && (a + ab * t).distance(q) < snap {
+                                let x = lay.nodes[g];
+                                lay.split(r, x);
+                            }
+                        }
+                        g
+                    }
+                };
+                stop = Some((t, g));
+            }
+        }
         if let Some((_, g)) = stop {
             let re = lay.edges.len();
             if std::env::var("DEBUG_LAYOUT").is_ok() {
@@ -1220,10 +1503,14 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             }
             lay.edges.push(GEdge { a: n0, b: g, pts: vec![lay.nodes[n0], lay.nodes[g]], charts: [ci, ci], ray: true, alive: true });
             lay.rays[ci].push(re);
+            // a loop meeting a T node goes on through it (the T's own loop)
+            if !new_tee && !lay.origins.contains(&g) {
+                queue.push_back((ci, g, d));
+            }
             continue;
         }
         let Some((_, e, i, w)) = best else {
-            return Err("par lignes : boucle qui ne ressort pas de la face".into());
+            return Err("boucle qui ne ressort pas de la face".into());
         };
         let ed = lay.edges[e].clone();
         let x = ed.pts[i].lerp(ed.pts[i + 1], w.clamp(0.0, 1.0));
@@ -1257,8 +1544,9 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             if corner_angle(&lay, nc2, n1).is_some_and(|t| t.abs() > 0.5) {
                 continue;
             }
-            // a loop already leaves this node across: this one closes on it
-            if lay.rays[nc2].iter().any(|&r| lay.edges[r].a == n1 || lay.edges[r].b == n1) {
+            // a loop already leaves this node across: this one closes on it;
+            // the middle of a rounded corner is a patch corner, an end too
+            if lay.rays[nc2].iter().any(|&r| lay.edges[r].a == n1 || lay.edges[r].b == n1) || forced.contains(&(nc2, n1)) {
                 continue;
             }
             queue.push_back((nc2, n1, DVec2::ZERO));
@@ -1271,7 +1559,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         'again: loop {
             tries += 1;
             if tries > 2000 {
-                return Err("par lignes : croisements de boucles".into());
+                return Err("croisements de boucles".into());
             }
             let rs = lay.rays[ci].clone();
             let m = lay.charts[ci].map;
@@ -1371,7 +1659,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 }
             }
             if area <= 0.0 {
-                return Err("par lignes : face avec un trou non relié".into());
+                return Err("face avec un trou non relié".into());
             }
             if corners.len() != 4 && std::env::var("DEBUG_LAYOUT").is_ok() {
                 eprintln!("chart {:?}: {} corners", lay.charts[ci].id, corners.len());
@@ -1384,7 +1672,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 eprintln!("  origins {:?}", lay.origins);
             }
             if corners.len() != 4 {
-                return Err(format!("par lignes : patch à {} coins sur {:?}", corners.len(), lay.charts[ci].id));
+                return Err(format!("patch à {} coins sur {:?}", corners.len(), lay.charts[ci].id));
             }
             let mut sides: [Vec<(usize, bool)>; 4] = Default::default();
             for (si, side) in sides.iter_mut().enumerate() {
@@ -1436,10 +1724,13 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
     }
     let sum = |side: &Vec<(usize, bool)>, count: &Vec<usize>| -> usize { side.iter().map(|x| count[x.0]).sum() };
     let mut it = 0;
+    let mut settled = true;
     loop {
         it += 1;
-        if it > 200_000 {
-            return Err("par lignes : nombres de segments impossibles à accorder".into());
+        if it > 20_000 {
+            // T junctions tying faces together: the search below
+            settled = false;
+            break;
         }
         let mut bad = None;
         for (_, s) in &patches {
@@ -1463,8 +1754,20 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         let down = big.iter().filter(|x| !fixed[x.0] && count[x.0] > 1).min_by(|x, y| (target[x.0] / count[x.0] as f64).total_cmp(&(target[y.0] / count[y.0] as f64)));
         match down {
             Some(&(e, _)) => count[e] -= 1,
-            None => return Err("par lignes : rangées de fillet impossibles à raccorder".into()),
+            None => {
+                settled = false;
+                break;
+            }
         }
+    }
+
+    if !settled {
+        min_conflicts(&patches, &mut count, &fixed, &target).map_err(|why| {
+            if std::env::var("DEBUG_LAYOUT").is_ok() {
+                eprintln!("{why}");
+            }
+            "nombres de segments impossibles à accorder".to_string()
+        })?;
     }
 
     // 8. where the vertices sit on every line: the free lines take the
@@ -1614,7 +1917,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         s3.reverse();
         let (n, m) = (s0.len() - 1, s1.len() - 1);
         if s2.len() != n + 1 || s3.len() != m + 1 {
-            return Err("par lignes : patch mal accordé".into());
+            return Err("patch mal accordé".into());
         }
         let q2: HashMap<u32, DVec2> = s0.iter().chain(&s1).chain(&s2).chain(&s3).map(|&v| (v, ch.map.to2(pos[v as usize]))).collect();
         let q = |v: u32| q2[&v];
@@ -1650,7 +1953,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 grid[i][j] = pos.len() as u32 - 1;
             }
         }
-        let role = if ch.strip.is_some() { P_FILLET } else { P_LOFT };
+        let role = if ch.strip.is_some() { P_FILLET } else { P_FILL };
         for i in 0..n {
             for j in 0..m {
                 faces.push(vec![grid[i][j], grid[i + 1][j], grid[i + 1][j + 1], grid[i][j + 1]]);
@@ -1659,7 +1962,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         }
     }
     if faces.is_empty() {
-        return Err("par lignes : aucune face".into());
+        return Err("aucune face".into());
     }
 
     // 9. compact, orient outward, check
@@ -1679,19 +1982,16 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
     for (f, r) in faces.into_iter().zip(roles) {
         b.faces.push(BFace { verts: f, normals: vec![], mat: 0, patch: r });
     }
-    let bs = BakeSettings { tol: st.tol, max_edge: st.size, trim_len: st.size, threads: st.threads, divisions: 0.0 };
-    progress.set(4, b.faces.len() as u32);
+    let bs = BakeSettings { tol: st.tol, threads: st.threads, divisions: 0.0 };
+    progress.set(3, b.faces.len() as u32);
     finish(&field, &mut b, &bs, progress);
     if b.stats.open_edges > 0 || b.stats.nonmanifold_edges > 0 {
-        return Err(format!("par lignes : maillage mal fermé ({} bords ouverts)", b.stats.open_edges + b.stats.nonmanifold_edges));
+        return Err(format!("maillage mal fermé ({} bords ouverts)", b.stats.open_edges + b.stats.nonmanifold_edges));
     }
     if b.stats.max_dev > (st.size * 0.25).max(0.2) {
-        return Err(format!("par lignes : écart de {:.2} mm à la surface", b.stats.max_dev).replace('.', ","));
+        return Err(format!("écart de {:.2} mm à la surface", b.stats.max_dev).replace('.', ","));
     }
-    b.stats.terms = lay.shapes.len();
     b.stats.patches = patches.len();
-    b.stats.constructive = true;
-    b.stats.lines = true;
     b.stats.quad_size = st.size;
     b.stats.seconds = t0.elapsed().as_secs_f64();
     let _ = lay.field;
@@ -1786,4 +2086,72 @@ fn orient(pos: &[DVec3], faces: &mut [Vec<u32>], field: &Field) {
             }
         }
     }
+}
+
+/// Segments per line so that opposite sides of every patch agree, from the
+/// current counts: a min-conflicts search (moves of one segment on a free
+/// line of an unbalanced patch, the one that leaves the fewest unbalanced
+/// sides, then the closest to the line's target), with a short tabu so it
+/// does not undo its last moves.
+fn min_conflicts(patches: &[(usize, [Vec<(usize, bool)>; 4])], count: &mut [usize], fixed: &[bool], target: &[f64]) -> Result<(), String> {
+    let ne = count.len();
+    let mut cons: Vec<(Vec<usize>, Vec<usize>)> = vec![];
+    for (_, sd) in patches {
+        for (a, b) in [(0, 2), (1, 3)] {
+            cons.push((sd[a].iter().map(|x| x.0).collect(), sd[b].iter().map(|x| x.0).collect()));
+        }
+    }
+    let mut of_edge: Vec<Vec<(usize, i64)>> = vec![vec![]; ne];
+    for (i, (a, b)) in cons.iter().enumerate() {
+        for &e in a {
+            of_edge[e].push((i, 1));
+        }
+        for &e in b {
+            of_edge[e].push((i, -1));
+        }
+    }
+    let side = |s: &Vec<usize>, count: &[usize]| -> i64 { s.iter().map(|&e| count[e] as i64).sum() };
+    let mut v: Vec<i64> = cons.iter().map(|c| side(&c.0, count) - side(&c.1, count)).collect();
+    let cost = |e: usize, n: usize| ((n as f64) - target[e]).powi(2) / target[e].max(1.0);
+    let mut tabu: Vec<(usize, i64)> = vec![(0, 0); ne];
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    for it in 1..400_000usize {
+        let bad: Vec<usize> = (0..cons.len()).filter(|&i| v[i] != 0).collect();
+        if bad.is_empty() {
+            return Ok(());
+        }
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let c = bad[(seed >> 33) as usize % bad.len()];
+        let sgn = v[c].signum();
+        let mut best: Option<(i64, f64, usize, i64)> = None;
+        for (list, s) in [(&cons[c].0, 1i64), (&cons[c].1, -1i64)] {
+            for &e in list {
+                if fixed[e] {
+                    continue;
+                }
+                let delta = -sgn * s;
+                if (count[e] as i64 + delta) < 1 || (tabu[e].0 > it && tabu[e].1 == -delta) {
+                    continue;
+                }
+                let dv: i64 = of_edge[e].iter().map(|&(ci, s2)| (v[ci] + s2 * delta).abs() - v[ci].abs()).sum();
+                let dc = cost(e, (count[e] as i64 + delta) as usize) - cost(e, count[e]);
+                if best.is_none_or(|b| (dv, dc) < (b.0, b.1)) {
+                    best = Some((dv, dc, e, delta));
+                }
+            }
+        }
+        let Some((_, _, e, delta)) = best else {
+            if cons[c].0.iter().chain(&cons[c].1).all(|&e| fixed[e]) {
+                return Err(format!("côtés fixés différents ({} vs {})", side(&cons[c].0, count), side(&cons[c].1, count)));
+            }
+            continue;
+        };
+        count[e] = (count[e] as i64 + delta) as usize;
+        for &(ci, s2) in &of_edge[e] {
+            v[ci] += s2 * delta;
+        }
+        tabu[e] = (it + 7, delta);
+    }
+    let left = v.iter().filter(|x| **x != 0).count();
+    Err(format!("{left} côtés encore différents"))
 }

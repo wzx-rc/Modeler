@@ -1710,7 +1710,7 @@ fn note(ui: &mut Ui, text: impl Into<String>, color: Color32) {
 /// Bake panel content, shared by both interfaces: run, diagnostic layers,
 /// result, optional pass, export.
 pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
-    use forme_core::bake::{BakeSettings, Quality, STAGES};
+    use forme_core::bake::{Quality, STAGES};
     note(ui, "Lignes de construction lues dans l'historique : jaune = arêtes et jonctions, orange = rails de fillet. Le maillage doit partir de ces lignes.", TEXT2);
     section(ui, "Densité");
     let running = st.bake.job.is_some();
@@ -1728,15 +1728,10 @@ pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
             }
         }
     }
-    let s = BakeSettings::preset(st.bake.quality);
-    let plan = st.bake_plan();
-    let by_lines = st.bake_by_lines();
-    let line = match plan {
-        Some(size) if by_lines => format!("Par lignes de construction · quads de ~{} mm · fillets en rangées", fmt_mm(size as f32)),
-        Some(size) => format!("Par opération · quads de ~{} mm · fillets en rangées", fmt_mm(size as f32)),
-        None => format!("Historique pas encore géré par opération : repli par surfaces · écart {} mm", fmt_mm_fine(s.tol)),
-    };
-    note(ui, line, if plan.is_some() { OK } else { EDGE_SEL });
+    match st.bake_plan() {
+        Ok(size) => note(ui, format!("Par lignes de construction · quads de ~{} mm · fillets en rangées", fmt_mm(size as f32)), OK),
+        Err(why) => note(ui, format!("Bake : {why}"), ERROR),
+    }
     ui.add_space(6.0);
     if let Some(j) = &st.bake.job {
         let f = j.progress.fraction();
@@ -1790,14 +1785,19 @@ pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
         st.bake.wire = !st.bake.wire;
     }
 
+    if let Some((v, why)) = st.bake.error.clone() {
+        section(ui, "Résultat");
+        note(ui, format!("Bake impossible : {why}"), ERROR);
+        if v != st.scene_version {
+            note(ui, "Le modèle a changé depuis : relance le Bake.", TEXT2);
+        }
+        return;
+    }
     let Some(b) = st.bake.result.clone() else { return };
     let s = &b.stats;
     section(ui, "Résultat");
     if st.bake.stale(st.scene_version) {
         note(ui, "Le modèle a changé depuis ce Bake : relance-le.", CARVE);
-    }
-    if st.bake.diag.roles && !s.constructive {
-        note(ui, "Repli par surfaces : ce maillage n'a pas de rôles (fillets, paths) à colorer.", EDGE_SEL);
     }
     let total = b.faces.len().max(1);
     stat_row(ui, "Faces", format!("{}  ({} % quads)", fmt_int(b.faces.len()), s.quads * 100 / total), TEXT);
@@ -1805,22 +1805,7 @@ pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
     stat_row(ui, "Écart", format!("moy. {} · max {} mm", fmt_mm_fine(s.mean_dev), fmt_mm_fine(s.max_dev)), LABEL);
     let defects = s.open_edges + s.nonmanifold_edges;
     stat_row(ui, "Fermeture", if defects == 0 { "étanche".to_string() } else { format!("{} arêtes à reprendre", fmt_int(defects)) }, if defects == 0 { OK } else { CARVE });
-    stat_row(
-        ui,
-        "Méthode",
-        if s.lines {
-            format!("par lignes · {:.2} s", s.seconds)
-        } else if s.constructive {
-            format!("par opération · {:.2} s", s.seconds)
-        } else {
-            format!("repli par surfaces · {:.1} s", s.seconds)
-        },
-        if s.lines { OK } else { EDGE_SEL },
-    );
-    if !s.note.is_empty() {
-        let why = if s.constructive { "Pas encore par lignes" } else { "Pourquoi le repli" };
-        note(ui, format!("{why} : {}", s.note), EDGE_SEL);
-    }
+    stat_row(ui, "Durée", format!("{} patchs · {:.2} s", fmt_int(s.patches), s.seconds).replace('.', ","), LABEL);
 
     section(ui, "Passe secondaire (option)");
     let deg = forme_core::bake::decimate::FLAT_LOOPS_DEG;

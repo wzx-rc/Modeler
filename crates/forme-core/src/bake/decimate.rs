@@ -29,18 +29,8 @@ pub fn dissolve_flat_loops(scene: &Scene, b: &Baked, max_deg: f64, threads: usiz
     let field = Field::new(&compile(scene));
     let (mut out, loops) = dissolve(&field, b, max_deg);
     let s = &b.stats;
-    out.stats = BakeStats {
-        terms: s.terms,
-        patches: s.patches,
-        seconds: s.seconds,
-        stage_seconds: s.stage_seconds,
-        constructive: s.constructive,
-        quad_size: s.quad_size,
-        note: s.note.clone(),
-        holes_filled: s.holes_filled,
-        ..Default::default()
-    };
-    let bs = BakeSettings { tol: 0.01, max_edge: 1.0, trim_len: 1.0, threads, divisions: 0.0 };
+    out.stats = BakeStats { patches: s.patches, seconds: s.seconds, quad_size: s.quad_size, ..Default::default() };
+    let bs = BakeSettings { tol: 0.01, threads, divisions: 0.0 };
     finish(&field, &mut out, &bs, &Progress::default());
     out.stats.flat_loops = loops.len();
     out.stats.faces_before_flat = b.faces.len();

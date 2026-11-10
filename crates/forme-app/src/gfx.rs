@@ -300,8 +300,8 @@ impl FrameRenderer {
             self.uploaded = up;
         }
 
-        // diagnostic colours: the faces' role in the constructive bake
-        let roles = st.bake.diag.roles && st.bake.open && st.bake.result.as_ref().is_some_and(|b| b.stats.constructive);
+        // diagnostic colours: the faces' role in the bake
+        let roles = st.bake.diag.roles && st.bake.open && st.bake.result.is_some();
         let key = st.bake.version * 2 + roles as u64;
         if self.mesh_version != key {
             if let Some(b) = &st.bake.result {

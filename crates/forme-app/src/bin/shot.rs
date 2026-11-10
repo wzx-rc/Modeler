@@ -439,10 +439,7 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(50));
             h.step();
         }
-        if let Some(b) = h.st.bake.result.clone() {
-            let st = &b.stats;
-            eprintln!("bake : {} faces ({} q {} t {} n) constructif {} ouvertes {} nm {} · {}", b.faces.len(), st.quads, st.tris, st.ngons, st.constructive, st.open_edges, st.nonmanifold_edges, st.note);
-        }
+        report_bake(&h, "bake");
         h.st.toast = None;
         h.steps(6);
         h.shot("user-2-bake");
@@ -1404,7 +1401,17 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         // construction lines, then the bake coloured by role, both interfaces
         let romain = forme_core::Scene::from_json(include_str!("../../../forme-core/examples/scenes/romain-coin.forme")).expect("scène");
         let only = std::env::var("BAKE_DIAG").ok();
-        for (name, scene, mode) in [("romain", romain.clone(), UiMode::Atelier), ("coin", coin_cylindre(), UiMode::Atelier), ("trou", plaque_trou(), UiMode::Atelier), ("support", support_axe(), UiMode::Atelier), ("romain-studio", romain, UiMode::Studio)] {
+        let aretes = forme_core::Scene::from_json(include_str!("../../../forme-core/examples/scenes/romain-aretes.forme")).expect("scène");
+        for (name, scene, mode) in [
+            ("romain", romain.clone(), UiMode::Atelier),
+            ("romain-aretes", aretes.clone(), UiMode::Atelier),
+            ("coin", coin_cylindre(), UiMode::Atelier),
+            ("trou", plaque_trou(), UiMode::Atelier),
+            ("support", support_axe(), UiMode::Atelier),
+            ("romain-studio", romain, UiMode::Studio),
+            ("romain-aretes-studio", aretes, UiMode::Studio),
+            ("support-studio", support_axe(), UiMode::Studio),
+        ] {
             if only.as_deref().is_some_and(|o| o != name) {
                 continue;
             }
@@ -1467,10 +1474,7 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
             std::thread::sleep(std::time::Duration::from_millis(50));
             h.step();
         }
-        if let Some(b) = &h.st.bake.result {
-            let st = &b.stats;
-            eprintln!("support : {} faces ({} q {} t {} n) constructif {} · {:.3} s", b.faces.len(), st.quads, st.tris, st.ngons, st.constructive, st.seconds);
-        }
+        report_bake(h, "support");
         h.st.toast = None;
         h.steps(10);
         h.shot("pc-studio-bake");
@@ -1573,13 +1577,33 @@ fn edges_cube(h: &mut Harness) {
         std::thread::sleep(std::time::Duration::from_millis(50));
         h.step();
     }
-    if let Some(b) = h.st.bake.result.clone() {
-        let st = &b.stats;
-        eprintln!("bake : {} faces ({} q {} t {} n) constructif {} ouvertes {} nm {}", b.faces.len(), st.quads, st.tris, st.ngons, st.constructive, st.open_edges, st.nonmanifold_edges);
-    }
+    report_bake(h, "bake");
     h.st.toast = None;
     h.steps(8);
     h.shot("29-fillets-par-arete-bake");
+}
+
+/// The bake's outcome in the log: the mesh's counts, or why there is none.
+fn report_bake(h: &Harness, tag: &str) {
+    match (&h.st.bake.result, &h.st.bake.error) {
+        (_, Some((_, why))) => eprintln!("{tag} : bake impossible · {why}"),
+        (Some(b), None) => {
+            let st = &b.stats;
+            eprintln!(
+                "{tag} : {} faces ({} q {} t {} n) · {} patchs · ouvertes {} nm {} · écart max {:.4} · {:.3} s",
+                b.faces.len(),
+                st.quads,
+                st.tris,
+                st.ngons,
+                st.patches,
+                st.open_edges,
+                st.nonmanifold_edges,
+                st.max_dev,
+                st.seconds
+            );
+        }
+        (None, None) => eprintln!("{tag} : pas de bake"),
+    }
 }
 
 /// The test cube (bevel 1 mm, through hole Ø8, fillet 0.8) baked in the app.
@@ -1606,11 +1630,13 @@ fn bake_cube(h: &mut Harness) {
         std::thread::sleep(std::time::Duration::from_millis(50));
         h.step();
     }
-    let b = h.st.bake.result.clone().expect("bake result");
-    let st = &b.stats;
-    eprintln!("cube : {} faces ({} q {} t {} n) constructif {} · {:.3} s", b.faces.len(), st.quads, st.tris, st.ngons, st.constructive, st.seconds);
+    report_bake(h, "cube");
     h.steps(30);
     h.shot("19-cube-bake-resultat");
+    if h.st.bake.result.is_none() {
+        // not handled yet: the dialog says why, nothing more to show
+        return;
+    }
     h.st.bake.open = false;
     h.st.toast = None;
     h.cam(Vec3::new(3.0, 0.0, 0.0), 78.0, 0.72, 0.52);
@@ -1659,24 +1685,13 @@ fn bake_grenade(h: &mut Harness) {
             h.shot("11-bake-calcul");
         }
     }
-    let b = h.st.bake.result.clone().expect("bake result");
-    let s = &b.stats;
-    eprintln!(
-        "bake : {:.1?} · {} faces ({} quads, {} tris, {} n-gons) · {} sommets · écart moy {:.4} max {:.4} · ouvertes {} non-manifold {} · trous comblés {}",
-        t0.elapsed(),
-        b.faces.len(),
-        s.quads,
-        s.tris,
-        s.ngons,
-        s.verts,
-        s.mean_dev,
-        s.max_dev,
-        s.open_edges,
-        s.nonmanifold_edges,
-        s.holes_filled
-    );
+    eprintln!("bake : {:.1?}", t0.elapsed());
+    report_bake(h, "grenade");
     h.steps(40);
     h.shot("12-bake-resultat");
+    if h.st.bake.result.is_none() {
+        return;
+    }
     h.st.bake.open = false;
     h.steps(20);
     h.shot("13-bake-filaire");

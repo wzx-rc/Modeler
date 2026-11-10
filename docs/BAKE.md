@@ -18,21 +18,23 @@ Toujours dans cet ordre, à garder pour toutes les jonctions :
 2. **Les matérialiser en orange** dans les rendus de mise au point, pour voir les bandes seules avant le reste.
 3. **Ensuite les paths de remplissage** : les faces plates et les parois se remplissent entre les bords des bandes, en reprenant exactement leurs sommets (soudés, jamais recousus après coup). Si une bande rejoint une face déjà posée, ses colonnes partent des sommets de cette face.
 
-Validé sur la pièce test « Support d'axe » : jonction palier / socle, anneau avant du palier, face avant en rayons droits (topologie A, sans pôle) soudée au fillet du socle, coins en éventail (`bake_probe lignes`, `anneau`, `raccord`, `liaison`). Puis la pièce entière (`bake_probe piece`) : 5168 quads, 100 % quads, 0 bord ouvert, 0 non-manifold, sommets sur la surface exacte. Cette version est écrite pour cette pièce (positions des trous, palier le long de z) : reste à la généraliser dans `build.rs`. Captures : `/mnt/project-files/forme-pc/jonctions/`.
+Le Bake par lignes (`layout.rs`) applique cette règle : bandes de fillet d'abord (rôle orange, `P_FILLET`), puis les patchs de remplissage (rôle crème, `P_FILL`) qui reprennent leurs sommets.
 
 ### Passe secondaire : retirer les loops plates (9 nov. 2026, option, désactivée par défaut)
 
 Validée par Romain, mais **jamais appliquée par le Bake par défaut**. C'est une option de la fenêtre Bake (« Passe secondaire · Retirer les loops plates (< 5°) ») qui tourne en arrière-plan sur le résultat du Bake ; la désactiver rend le Bake sans la passe, et l'export prend le maillage affiché. Code : `bake/decimate.rs` (`dissolve_flat_loops`, seuil `FLAT_LOOPS_DEG` = 5°), par tours : toutes les loops candidates, la plus plate d'abord, celles qui partagent une face avec une loop déjà retirée attendent le tour suivant.
 
-Sur les bakes de l'app : cube 20 mm 384 → 6 faces, cube arrondi 864 → 150, cube test (trou + fillet) 1376 → 624, cylindre arrondi 1392 → 1056, grenade (repli par surfaces) 132 345 → 125 737 en 3,3 s. Toujours fermé, aucun défaut ajouté.
+Sur les bakes de l'app : cube 20 mm 384 → 6 faces, cube arrondi 864 → 150, cube test (trou + fillet) 1376 → 624, cylindre arrondi 1392 → 1056, grenade (ancien bake par surfaces) 132 345 → 125 737 en 3,3 s (chiffres du 9 nov., avec les anciens bakes). Toujours fermé, aucun défaut ajouté.
 
-`bake_probe decime` (seuil `DEG`, 5° par défaut) appelle la même fonction et retire les edge loops fermées qui ne font pas de volume : en chaque sommet de la loop, le chemin qui la traverse (voisin d'un côté, sommet, voisin de l'autre) ne sort pas de la surface de plus de `DEG`. Les deux quads de part et d'autre fusionnent. Sur la pièce test : 59 loops, 5168 → 2256 quads, toujours 100 % quads et fermé. Même résultat de 1° à 5° (les loops retirées sont exactement plates, la suivante est à 7,5° sur le palier). À 10° le palier perd une colonne sur deux, à 20° tout devient facetté.
+`bake_probe decime` (seuil `DEG`, 5° par défaut) appelle la même fonction sur le bake de la scène de Romain et retire les edge loops fermées qui ne font pas de volume : en chaque sommet de la loop, le chemin qui la traverse (voisin d'un côté, sommet, voisin de l'autre) ne sort pas de la surface de plus de `DEG`. Les deux quads de part et d'autre fusionnent. Scène de Romain : 15 loops, 390 → 44 quads, fermé.
 
 Limite : une loop n'est retirée qu'entière. Celles qui passent par un trou, un éventail de fillet ou un pôle (coin du carré d'un trou) restent, même sur leurs morceaux plats (dessous du socle).
 
-## Bake par lignes (`layout.rs`, 10 nov. 2026)
+## Le Bake : par lignes (`layout.rs`), seul algorithme depuis le 10 nov. 2026
 
-Demande de Romain : le maillage se déduit des **lignes de construction** (arêtes des formes, rails de leurs arrondis, ligne de jonction entre deux formes), en commençant par la ligne de contour entre deux formes. C'est le premier essai du Bake, avant `build.rs`.
+Demande de Romain : le maillage se déduit des **lignes de construction** (arêtes des formes, rails de leurs arrondis, ligne de jonction entre deux formes), en commençant par la ligne de contour entre deux formes.
+
+**Un seul algorithme, pas de repli** (Romain, 10 nov.) : `bake()` appelle seulement `layout::build`. Un historique qu'il ne gère pas encore renvoie `Err(raison)` : pas de maillage, la raison s'affiche en rouge dans le panneau Bake (et avant de lancer, « Pas encore géré : … » d'après `bake::plan`). Les anciens bakes (par opération `build.rs`, par surfaces `patch.rs`, orienté champ `quad.rs`) sont supprimés.
 
 1. **Cartes** : chaque face de chaque boîte (face plate = rectangle dans son plan, arête arrondie = bande « le long de l'arête × le long de l'arc ») est découpée par les autres formes. Les bords de la région sont tracés en 2D puis posés exactement sur la face voisine ; les coins sont résolus à l'intersection exacte des deux faces. Chaque bord est partagé par les deux faces qu'il sépare (mêmes sommets des deux côtés).
 2. **Fillets d'abord** : le nombre de rangées à travers chaque bande est fixé (tolérance de corde, pair), rôle orange.
@@ -43,69 +45,31 @@ Demande de Romain : le maillage se déduit des **lignes de construction** (arêt
 
 Résultats : scène de Romain (boîte + coin creusé, fillet 2,2 mm) 390 quads en diagonale (432 en rangées droites), fermé, écart max 0,04 mm ; même scène sans fillet 318 quads ; boîte à une arête arrondie 450 quads ; cube avec un cylindre creusé dans un coin 482 quads, écart max 0,04 mm ; plaque percée d'un trou de Ø 12 : 480 quads, écart max 0,05 mm (`bake_probe parlignes`, `CASE=coin` pour un seul cas). Pour l'instant : boîtes et cylindres vifs (trous compris), Add / Carve sans fillet de jonction. Le reste renvoie `Err` et passe à `build.rs`, puis au repli par surfaces ; la raison s'affiche dans le panneau (« Pas encore par lignes : … »).
 
-## Historique des approches
+### Règles ajoutées le 10 nov. (scène de Romain à fillets par arête)
 
-1. **Bake par surfaces** (`patch.rs`, encore utilisé en repli). Patchs paramétriques par primitive, découpés exactement le long des courbes de jonction puis cousus. C'est précis (écart moyen 0,002 mm), mais la topologie est mauvaise : raffinements adaptatifs, triangles. **Refusé par Romain.**
-2. **Remaillage orienté champ** (`quad.rs`, style Instant Meshes). Grille uniforme correcte sur les faces, mais les fillets sont irréguliers, il y a des non-manifold, et aucune garantie du motif « cercle dans un carré ». **Abandonné.**
-3. **Bake par opération** (`build.rs`, actuel). C'est l'idée de Romain : chaque opération construit sa topologie à partir de ses paramètres.
+- **Coin en boule** : où trois arêtes arrondies du même rayon se rejoignent, le coin est un huitième de sphère (carte gnomonique `Map::Sph`), coupé en trois quads autour de son centre ; les bandes s'arrêtent à la boule. Trois rayons différents : pas encore géré (raison affichée).
+- **Coin arrondi d'une face = un patch** : une boucle qui arrive de la face sur le carré du coin s'arrête sur son côté (un T), au lieu de couper un triangle contre l'arc. Les rangées de la bande qui entrent par l'arc traversent le coin parallèlement au rail et s'arrêtent en T de l'autre côté. Une boucle déjà tracée qui passe par un T est coupée en ce point.
+- **Tangentes exactes** aux bouts des lignes de jonction (gradient de la surface d'en face), pas la direction de la polyligne : sinon les boucles dérivent d'un degré et ratent les nœuds.
+- **Accroche proche** : une boucle qui arrive à moins d'environ 1° d'un nœud existant le prend, au lieu de laisser une rangée très fine.
 
-## Bake par opération (`build.rs`)
+### Encore à faire (renvoie `Err` aujourd'hui)
 
-**Entrée**
-- `Field::steps()` lit l'historique à plat : une forme de base, puis une forme combinée à la fois (Add ou Carve, blend k).
-- Les groupes transparents (« Fusionner les enfants » désactivé) donnent une chaîne à plat.
-- Chaque copie d'une forme (répétitions, symétries) est une sous-étape.
+- Fillets de jonction (blend entre deux formes), chanfreins, Intersect, Groove, Tongue.
+- Cylindres arrondis, sphères, profils, tores, coques, taper.
+- Copies (répétitions, symétries), groupes fusionnés (historique en arbre).
+- Coin où trois fillets de rayons différents se rejoignent ; coin arrondi coupé par une autre forme.
+- Cube test et grenade : en attente de ces cas.
 
-**Étape 0 : maillage natif de la forme de base** (`gen.rs`). Pour une boîte arrondie : grille par face, rangées de bevel, coins en patchs. Fillets par arête : bandes par face aussi larges que le plus grand fillet autour de la face, puis chaque sommet est projeté depuis le point intérieur de sa bande (étanche par construction).
+## Historique des approches (supprimées le 10 nov. 2026)
 
-**Étape i** (`apply_step`), avec `pre = field.prefix(i)` (le modèle avant), `post = prefix(i+1)`, et l'outil (primitive + copie) :
+1. **Bake par surfaces** (`patch.rs`). Patchs paramétriques découpés et cousus. Précis, mais topologie refusée par Romain (« voxel converti »).
+2. **Remaillage orienté champ** (`quad.rs`, style Instant Meshes). Fillets irréguliers, non-manifold. Abandonné.
+3. **Bake par opération** (`build.rs`). Chaque opération refaisait une région autour de ses rails (anneaux de raccord, lofts). Cube test 1408 quads ; remplacé par le Bake par lignes, plus proche de ce que Romain veut (boucles qui suivent les lignes de construction).
 
-1. **Rails exacts.** Le fillet de blend k entre la surface A (avant) et l'outil B a deux rails :
-   - sur A : `{sa = 0, sb = k}` ;
-   - sur B : `{sb = 0, sa = ∓k}` (Carve : −k, Add : +k) ;
-   - plus le coin `{sa = 0, sb = 0}`.
-
-   On trace un contour de `sb − k` sur le maillage courant, puis chaque point est affiné par **Newton à deux contraintes** (pas de norme minimale, `solve2`) et densifié.
-2. **Région à refaire sur A.**
-   - Les faces dans le rail sont forcées.
-   - S'y ajoutent les faces à moins de `dégagement` du rail : une fraction (0,6) de la taille de la pièce, au plus une maille.
-   - Ces faces doivent rester proches du plan tangent du rail (pas de raccord par-dessus un bevel).
-   - Les faces faites par des étapes précédentes ne sont reprises que si le rail les traverse.
-   - La région est complétée jusqu'à ne plus avoir d'encoche (contour propre) et doit être un disque à un seul contour.
-3. **Échantillonnage du rail** : autant de points que de sommets sur le contour de la région, aux mêmes fractions d'abscisse curviligne, avec la phase et le sens qui collent au contour.
-4. **Fillet en rangées** : pour chaque colonne, un rail A → coin → rail B (Bézier quadratique), projeté sur le champ final. Le nombre de rangées dépend de la longueur du profil et de la largeur des colonnes (au moins 2).
-5. **Anneaux de raccord sur A** : du rail au contour de la région, avec une hauteur graduée de la taille des colonnes près du rail jusqu'à la maille native. Chaque point est projeté sur A.
-6. **Outil B** :
-   - maillage natif avec autant de colonnes que le rail quand c'est une révolution (`GenSettings.segs`) ;
-   - on garde les faces bien à l'intérieur de A (Carve) ou à l'extérieur (Add), et on raccorde au rail B par des anneaux ;
-   - si les nombres de sommets diffèrent : anneaux à **compte variable** et quads « 3 + 1 » (`loft_varying`, `bridge_quads`). Il ne reste qu'un triangle si la différence est impaire.
-7. **Orientation** propagée par les arêtes partagées, puis signe global voté sur le gradient du champ.
-
-**Fin** : `finish()` calcule les normales exactes du champ et les statistiques (quads, triangles, bords ouverts, non-manifold, écart à la surface).
-
-**Repli** : toute situation non gérée renvoie `Err(raison)`. `bake()` utilise alors l'ancien bake et la fenêtre Bake affiche la raison en jaune, avec la forme concernée.
-
-## Résultats et limites (9 nov. 2026)
-
-| Cas | Résultat |
-| --- | --- |
-| Cube test | 1408 faces, 100 % quads, 0 bord ouvert, 0 non-manifold, écart max 0,044 mm, ~15 ms |
-| Variantes (trou décalé, sur le côté, borgne, bossage, arête vive, près du bord, fillets par arête) | Toutes 100 % quads et fermées |
-| Boîte + 4 vis du kit | ~2100 faces, 93 % quads, fermé |
-| Vis qui se chevauchent | Quelques non-manifold |
-
-**Encore à faire**
-- Plusieurs trous dans une même région (région à plusieurs contours).
-- Jonction d'un profil extrudé avec la boîte.
-- Intersect, chanfrein de jonction, coques.
-- Groupes fusionnés (historique en arbre).
-- Copies de la forme de base.
-- Grenade.
+Le code est dans l'historique git (commit avant le nettoyage du 10 nov.) si une idée doit être reprise.
 
 ## Outils de mise au point
 
-- `cargo run --release -p forme-core --example bake_probe -- build | variants | screws | target` : rendus CPU filaires dans `/tmp`.
-- `OUT=/tmp/x … bake_probe -- lignes | anneau | raccord | liaison | piece | support` : pièce test, jonction par jonction (bandes de fillet en orange, faces de remplissage en crème).
-- `BY_STEP=1` : couleur par rôle (natif, anneaux, fillet, raccord paroi, paroi native).
-- `ROUND=…` : bevel du cube test. `SIZE=…` : taille des quads.
-- `forme-shot -- /tmp/x 19` (cube dans l'app), `22` (sélection d'arêtes, fillets par arête, bake), `user` (scène de test de Romain).
+- `OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes` : le Bake sur ses scènes de test, rendus CPU (`CASE=romain-aretes` pour une seule, `DEBUG_LAYOUT=1` pour les rayons tracés et les patchs refusés). Bandes de fillet en orange, remplissage en bleu.
+- `… bake_probe -- lignes` : lignes de construction (`lines.rs`) sur la pièce bakée. `… bake_probe -- decime` : la passe optionnelle.
+- `forme-shot -- /tmp/x 19` (cube test dans l'app : montre le message « pas encore géré »), `22` (fillets par arête, bake), `user` (scène de test de Romain).

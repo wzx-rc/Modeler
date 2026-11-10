@@ -226,7 +226,7 @@ pub struct ExportResult {
 /// A bake running in the background.
 pub struct BakeJob {
     pub progress: std::sync::Arc<forme_core::bake::Progress>,
-    pub rx: mpsc::Receiver<Option<forme_core::bake::Baked>>,
+    pub rx: mpsc::Receiver<Result<forme_core::bake::Baked, String>>,
     pub started: f64,
     /// The scene being baked (the optional second pass needs its field).
     pub scene: Scene,
@@ -246,10 +246,11 @@ pub struct BakeState {
     pub show: bool,
     pub wire: bool,
     pub last_export: Option<String>,
-    /// Cached constructive plan: (scene version, quality, quad size).
-    pub plan: Option<(u64, forme_core::bake::Quality, Option<f64>)>,
-    /// Cached: (scene version, history the line bake handles).
-    pub lines_ok: Option<(u64, bool)>,
+    /// Cached plan: (scene version, quality, quad size or why the history
+    /// is not handled yet).
+    pub plan: Option<(u64, forme_core::bake::Quality, Result<f64, String>)>,
+    /// Why the last bake gave no mesh: (scene version, reason).
+    pub error: Option<(u64, String)>,
     /// Optional second pass: dissolve the flat edge loops. Off by default;
     /// when on, `result` is `base` after the pass.
     pub flat: bool,
@@ -524,7 +525,7 @@ impl AppState {
                 wire: true,
                 last_export: None,
                 plan: None,
-                lines_ok: None,
+                error: None,
                 flat: false,
                 base: None,
                 base_scene: None,
@@ -2057,30 +2058,18 @@ impl AppState {
         self.export_job = Some((rx, self.now));
     }
 
-    /// Quad size of the bake par opération for the current scene, or None
-    /// when the history needs the classic bake (cached per scene version).
-    pub fn bake_plan(&mut self) -> Option<f64> {
+    /// Quad size of the bake for the current scene, or why its history is
+    /// not handled yet (cached per scene version and density).
+    pub fn bake_plan(&mut self) -> Result<f64, String> {
         let q = self.bake.quality;
-        if let Some((v, pq, p)) = self.bake.plan {
-            if v == self.scene_version && pq == q {
-                return p;
+        if let Some((v, pq, p)) = &self.bake.plan {
+            if *v == self.scene_version && *pq == q {
+                return p.clone();
             }
         }
-        let p = forme_core::bake::build::plan(&self.scene, &forme_core::bake::BakeSettings::preset(q));
-        self.bake.plan = Some((self.scene_version, q, p));
+        let p = forme_core::bake::plan(&self.scene, &forme_core::bake::BakeSettings::preset(q));
+        self.bake.plan = Some((self.scene_version, q, p.clone()));
         p
-    }
-
-    /// Whether the history is one the bake by construction lines handles.
-    pub fn bake_by_lines(&mut self) -> bool {
-        if let Some((v, ok)) = self.bake.lines_ok {
-            if v == self.scene_version {
-                return ok;
-            }
-        }
-        let ok = forme_core::bake::layout::handles(&self.scene).is_ok();
-        self.bake.lines_ok = Some((self.scene_version, ok));
-        ok
     }
 
     pub fn start_bake(&mut self) {
@@ -2102,6 +2091,7 @@ impl AppState {
         });
         self.bake.job = Some(BakeJob { progress, rx, started: self.now, scene });
         self.bake.scene_version = self.scene_version;
+        self.bake.error = None;
         self.bake.last_export = None;
         self.bake.pass = None;
     }
@@ -2255,7 +2245,7 @@ impl AppState {
         if let Some((r, _)) = finished {
             let job = self.bake.job.take().unwrap();
             match r {
-                Some(b) => {
+                Ok(b) => {
                     let secs = if b.stats.seconds < 1.0 { format!("{:.0} ms", b.stats.seconds * 1000.0) } else { format!("{:.1} s", b.stats.seconds) };
                     let quads = if b.stats.quads == b.faces.len() { " · 100 % quads" } else { "" };
                     let msg = format!("Bake terminé · {} faces{quads} · {secs}", fmt_int(b.faces.len()));
@@ -2270,7 +2260,12 @@ impl AppState {
                         self.start_flat_pass();
                     }
                 }
-                None => self.toast("Bake annulé".to_string()),
+                Err(why) if why == "annulé" => self.toast("Bake annulé".to_string()),
+                Err(why) => {
+                    // no fallback mesh: say what is not handled yet
+                    self.warn(format!("Bake impossible : {why}"));
+                    self.bake.error = Some((self.bake.scene_version, why));
+                }
             }
         }
         if let Some(rx) = &self.bake.pass {

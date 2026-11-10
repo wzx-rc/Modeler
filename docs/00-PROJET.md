@@ -15,7 +15,7 @@
 | Sujet | Décision |
 | --- | --- |
 | Topologie du Bake | Le premier bake (surfaces découpées) a été refusé : « on dirait qu'on convertit du voxel vers poly ». Romain veut une grille de quads régulière et des boucles qui suivent les formes. Sa référence : un cylindre Blender avec un panneau en retrait. Les fillets et bevels doivent ressembler à un **bevel modifier** ou à une conversion **NURBS**, en rangées de quads. |
-| Méthode | C'est son idée : chaque outil mémorise ses valeurs et son tracé exact, et on génère des chemins propres à partir de là. C'est le **bake par opération** (`docs/BAKE.md`). |
+| Méthode | C'est son idée : chaque outil mémorise ses valeurs et son tracé exact, et on génère des chemins propres à partir de là. Aujourd'hui c'est le **Bake par lignes de construction**, seul algorithme depuis le 10 nov. (`docs/BAKE.md`). |
 | Avancer petit à petit | D'abord le **cube test** (20 mm, bevel 1 mm, trou traversant Ø8, fillet 0,8). Romain a validé un dessin cible de la topologie avant le code (`docs/images/16-cible-cube-trou.jpg`). Ensuite seulement les scènes complexes (la grenade). |
 | Bevel du cube | « Plus sharp » : 1 mm au lieu de 2. |
 | Sélection d'arêtes | En mode Select, le survol met en évidence une jonction ou une arête ; un tap la sélectionne. **Une seule arête à la fois.** Un gros bouton **CTRL** en HUD à gauche, maintenu, ajoute ou retire des arêtes de la sélection. Le fillet se règle avec une poignée ou un curseur. |
@@ -62,8 +62,8 @@
 - Maillage voxel par dual contouring (ancien export) ou maillage baké.
 
 **Bake**
-- Le bake par opération (nouveau) traite tout l'historique « à plat » (groupes transparents).
-- Repli expliqué sur l'ancien bake par surfaces quand l'historique n'est pas encore géré.
+- Un seul algorithme : le Bake par lignes de construction (boîtes à arêtes vives ou arrondies, cylindres vifs, Add / Carve vifs).
+- Pas de repli : un historique pas encore géré donne un message en rouge dans le panneau Bake, sans maillage.
 
 **Captures automatiques** : `forme-shot`, avec des scénarios pour chaque fonctionnalité.
 
@@ -76,21 +76,15 @@
 
 | Cas | Résultat |
 | --- | --- |
-| Cube test, bake par opération | 1408 faces, 100 % quads, fermé, 0 non-manifold, 13 à 17 ms |
-| Cube à fillets par arête | 1571 faces, 100 % quads, fermé |
-| Boîte + profil + 4 vis du kit (comme le test de Romain) | ~2100 faces, 93 % quads, 0 bord ouvert ; quelques non-manifold quand deux vis se chevauchent |
-| Grenade, ancien bake par surfaces (repli) | 290 000 faces, 50 % quads, écart moyen 0,002 mm, ~24 s |
+| Scène de Romain (boîte + coin creusé, fillet 2,2 mm), Bake par lignes | 390 quads, 100 % quads, fermé, écart max 0,04 mm, ~50 ms |
+| Plaque percée d'un trou Ø12 | 480 quads, fermé |
+| Cube test, grenade | pas encore gérés par le Bake par lignes (fillet de jonction, sphères…) |
 
 ## 5. Prochaines étapes (ordre proposé)
 
 1. PC : retour de Romain sur les deux interfaces (Atelier / Studio), puis les 4 vues de Studio (Dessus, Face, Gauche, Perspective : rendu multi-caméras dans `gfx.rs`). L'iPad attend.
-2. Bake par opération :
-   - fonctionnalités voisines qui se chevauchent : région commune à plusieurs trous ;
-   - jonction profil / boîte plus propre ;
-   - Intersect, chanfrein de jonction, coques ;
-   - groupes fusionnés (arbre) ;
-   - copies de la forme de base.
-3. Grenade entièrement en bake par opération.
+2. Bake par lignes, cas par cas : fillets de jonction, cylindres arrondis, chanfreins, Intersect, copies, groupes fusionnés (liste dans `docs/BAKE.md`).
+3. Cube test puis grenade avec le Bake par lignes.
 4. Fillets par arête pour prisme et cône. Raccord de coin lisse quand des rayons différents se rencontrent (aujourd'hui une petite cassure).
 5. Performances au-delà de ~150 formes (cache de briques du champ).
 6. Pencil Pro : squeeze pour un menu radial, survol plus fin.

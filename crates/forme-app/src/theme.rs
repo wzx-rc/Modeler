@@ -30,6 +30,8 @@ pub const AXIS_Z: Color32 = Color32::from_rgb(0x6F, 0xA8, 0xF5);
 pub const EDGE_SEL: Color32 = Color32::from_rgb(0xFF, 0xCF, 0x5A);
 pub const EDGE_SEL_DIM: Color32 = Color32::from_rgb(0x6B, 0x55, 0x22);
 pub const OK: Color32 = Color32::from_rgb(0x8F, 0xC2, 0x7A);
+/// A bake that could not be made, a hard error.
+pub const ERROR: Color32 = Color32::from_rgb(0xF2, 0x5F, 0x5C);
 
 pub fn tint(c: Color32, a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 255.0) as u8)
@@ -111,16 +113,13 @@ pub fn install(ctx: &egui::Context) {
     });
 }
 
-/// Bake diagnostic colours (linear-ish sRGB 0..1), by face role in the
-/// constructive bake (`bake::build` patches): fillet strips orange, fill
-/// paths and transitions cream, native grids grey, the tool's grid blue-grey.
+/// Bake diagnostic colours (linear-ish sRGB 0..1), by face role: fillet
+/// strips orange, fill paths cream.
 pub fn bake_role_color(patch: u32) -> [f32; 3] {
-    use forme_core::bake::build::{P_FILLET, P_LOFT, P_NATIVE, P_TOOL, P_TOOL_LOFT};
+    use forme_core::bake::{P_FILL, P_FILLET};
     match patch {
         P_FILLET => [0.95, 0.52, 0.16],
-        P_LOFT | P_TOOL_LOFT => [0.93, 0.86, 0.68],
-        P_NATIVE => [0.62, 0.63, 0.64],
-        P_TOOL => [0.52, 0.60, 0.70],
+        P_FILL => [0.93, 0.86, 0.68],
         _ => [0.80, 0.30, 0.55],
     }
 }

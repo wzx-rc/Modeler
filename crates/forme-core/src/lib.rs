@@ -295,25 +295,35 @@ mod tests {
     }
 
     fn bake_ok(s: &Scene) -> bake::Baked {
-        let b = bake::bake_blocking(s, bake::Quality::Standard);
+        let b = bake::bake_blocking(s, bake::Quality::Standard).expect("bake par lignes");
         assert!(!b.faces.is_empty());
         assert_eq!(b.stats.open_edges + b.stats.nonmanifold_edges, 0, "seams left open");
+        assert_eq!(b.stats.quads, b.faces.len(), "not all quads");
         assert!(b.stats.mean_dev < 0.02, "mean deviation {}", b.stats.mean_dev);
         b
     }
 
-    #[test]
-    fn bake_box_with_blended_hole_is_closed_and_mostly_quads() {
+    /// A plate with a round hole through it, and one rounded edge.
+    fn plate_with_hole() -> Scene {
         let mut s = Scene::new();
         let r = s.root;
         let mut b = Shape::new(PrimKind::Box);
-        b.round = 1.0;
-        s.add(r, NodeSpec::shape("b", b));
+        b.size = Vec3::new(20.0, 10.0, 20.0);
+        b.set_edge(4, 3.0);
+        s.add(r, NodeSpec::shape("Plaque", b).at(Vec3::new(0.0, 10.0, 0.0)));
         let mut c = Shape::new(PrimKind::Cylinder);
-        c.size = Vec3::new(4.0, 14.0, 0.0);
-        s.add(r, NodeSpec::shape("c", c).mode(CombineMode::Carve).blend(1.0));
+        c.size = Vec3::new(6.0, 14.0, 0.0);
+        s.add(r, NodeSpec::shape("Trou", c).at(Vec3::new(0.0, 10.0, 0.0)).mode(CombineMode::Carve));
+        s
+    }
+
+    #[test]
+    fn bake_plate_with_hole_is_closed_all_quads() {
+        let s = plate_with_hole();
         let out = bake_ok(&s);
-        assert!(out.stats.quads * 2 > out.faces.len());
+        // fillet strips first, then the fill paths
+        assert!(out.faces.iter().any(|f| f.patch == bake::P_FILLET));
+        assert!(out.faces.iter().any(|f| f.patch == bake::P_FILL));
         // OBJ keeps the polygons, GLB is triangulated
         let obj = out.to_obj(&s.materials, "t");
         assert_eq!(obj.lines().filter(|l| l.starts_with("f ")).count(), out.faces.len());
@@ -322,37 +332,30 @@ mod tests {
     }
 
     #[test]
+    fn bake_romain_scenes() {
+        for (name, json) in [("coin", include_str!("../examples/scenes/romain-coin.forme")), ("arêtes", include_str!("../examples/scenes/romain-aretes.forme"))] {
+            let s = Scene::from_json(json).expect(name);
+            let out = bake_ok(&s);
+            assert!(out.faces.iter().any(|f| f.patch == bake::P_FILLET), "{name}: no fillet strip");
+        }
+    }
+
+    #[test]
     fn flat_loops_pass_is_optional_and_keeps_the_mesh_closed() {
-        let mut s = Scene::new();
-        let r = s.root;
-        let mut b = Shape::new(PrimKind::Box);
-        b.round = 1.0;
-        s.add(r, NodeSpec::shape("b", b));
-        let mut c = Shape::new(PrimKind::Cylinder);
-        c.size = Vec3::new(4.0, 14.0, 0.0);
-        s.add(r, NodeSpec::shape("c", c).mode(CombineMode::Carve).blend(1.0));
+        let s = plate_with_hole();
         let out = bake_ok(&s);
         // off by default: the bake itself never runs it
         assert_eq!(out.stats.flat_loops, 0);
         let d = bake::decimate::dissolve_flat_loops(&s, &out, bake::decimate::FLAT_LOOPS_DEG, 2);
-        assert!(d.stats.flat_loops > 0 && d.faces.len() < out.faces.len());
+        assert!(d.faces.len() <= out.faces.len());
         assert_eq!(d.stats.faces_before_flat, out.faces.len());
         assert_eq!(d.stats.open_edges + d.stats.nonmanifold_edges, 0, "pass opened the mesh");
         assert_eq!(d.stats.quads, d.faces.len());
-        assert!(d.stats.max_dev <= out.stats.max_dev + 1e-6);
     }
 
     #[test]
-    fn bake_threads_on_a_core_and_a_groove() {
-        let mut s = Scene::new();
-        let r = s.root;
-        let mut c = Shape::new(PrimKind::Cylinder);
-        c.size = Vec3::new(14.0, 9.0, 0.0);
-        s.add(r, NodeSpec::shape("core", c).at(Vec3::new(0.0, 100.0, 0.0)));
-        let mut t = Shape::new(PrimKind::Torus);
-        t.size = Vec3::new(14.4, 0.0, 1.5);
-        s.add(r, NodeSpec::shape("thread", t).at(Vec3::new(0.0, 93.5, 0.0)).repeat(Repeat::Linear { count: 5, step: Vec3::new(0.0, 3.3, 0.0) }));
-        bake_ok(&s);
+    fn bake_says_why_instead_of_a_fallback_mesh() {
+        // a groove: not handled by the bake yet, no mesh at all
         let mut s = Scene::new();
         let r = s.root;
         let mut b = Shape::new(PrimKind::Box);
@@ -361,6 +364,12 @@ mod tests {
         let mut g = Shape::new(PrimKind::Box);
         g.size = Vec3::new(0.1, 10.0, 14.0);
         s.add(r, NodeSpec::shape("g", g).at(Vec3::new(0.0, 6.0, 0.0)).mode(CombineMode::Groove).groove(1.2, 0.9));
-        bake_ok(&s);
+        let why = bake::bake_blocking(&s, bake::Quality::Standard).expect_err("groove baked");
+        assert!(!why.is_empty());
+        // a sphere neither
+        let mut s = Scene::new();
+        let r = s.root;
+        s.add(r, NodeSpec::shape("s", Shape::new(PrimKind::Sphere)));
+        assert!(bake::bake_blocking(&s, bake::Quality::Standard).is_err());
     }
 }

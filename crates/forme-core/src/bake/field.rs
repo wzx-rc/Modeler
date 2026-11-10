@@ -626,49 +626,6 @@ impl Field {
         }
         f
     }
-
-    pub fn term_levels(&self) -> Vec<(u32, f64)> {
-        let mut stack: Vec<Vec<(u32, f64)>> = vec![];
-        for ins in &self.instrs {
-            match *ins {
-                Instr::Empty => stack.push(vec![]),
-                Instr::Prim(k) => {
-                    let pr = &self.prims[k as usize];
-                    if pr.shell > 0.0 {
-                        stack.push(vec![(k, pr.shell * pr.sc), (k, -pr.shell * pr.sc)]);
-                    } else {
-                        stack.push(vec![(k, 0.0)]);
-                    }
-                }
-                Instr::Combine { mode, depth, width, .. } => {
-                    if stack.len() < 2 {
-                        continue;
-                    }
-                    let b = stack.pop().unwrap();
-                    let mut a = stack.pop().unwrap();
-                    match mode {
-                        3 | 4 => {
-                            let shift = if mode == 3 { -depth } else { depth };
-                            let a2: Vec<_> = a.iter().map(|&(k, l)| (k, l + shift)).collect();
-                            a.extend(a2);
-                            for &(k, l) in &b {
-                                a.push((k, l + width));
-                                a.push((k, l - width));
-                            }
-                        }
-                        _ => a.extend(b),
-                    }
-                    stack.push(a);
-                }
-                Instr::End => break,
-                _ => {}
-            }
-        }
-        let mut out: Vec<(u32, f64)> = stack.into_iter().next().unwrap_or_default();
-        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap()));
-        out.dedup_by(|a, b| a.0 == b.0 && (a.1 - b.1).abs() < 1e-6);
-        out
-    }
 }
 
 fn combine(a: Slot, b: Slot, mode: u32, k: f64, chamfer: bool, depth: f64, width: f64) -> Slot {

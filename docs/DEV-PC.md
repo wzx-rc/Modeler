@@ -21,11 +21,11 @@ cargo run --release -p forme-app --bin forme          # l'app (première compila
 cargo test --release -p forme-core                    # tests du noyau
 cargo run --release -p forme-app --bin forme-shot -- shots         # toutes les captures
 cargo run --release -p forme-app --bin forme-shot -- C:\tmp\x user # un scénario
-cargo run --release -p forme-core --example bake_probe -- build    # bake du cube test (images dans le dossier temporaire /tmp → adapter sur Windows)
+OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes   # le Bake sur ses scènes de test (images dans OUT)
 ```
 
 - Les projets et exports vont dans `Documents\Forme` (`USERPROFILE`). On peut changer ce dossier avec `FORME_DOCS`.
-- `bake_probe` écrit dans `/tmp/...` : sur Windows, crée `C:\tmp` ou change les chemins dans `crates/forme-core/examples/bake_probe.rs`.
+- `bake_probe` écrit dans `OUT` (par défaut `/tmp`) : sur Windows, mets `OUT` vers un dossier existant.
 - `IPAD_ZOOM=0.84` (variable d'environnement) : `forme-shot` reproduit la mise en page de l'iPad.
 - Sans vrai GPU (VM, CI), `forme-shot` accepte un GPU logiciel (Vulkan lavapipe ou WARP).
 
@@ -44,4 +44,4 @@ cargo run --release -p forme-core --example bake_probe -- build    # bake du cub
 - Code (commentaires, noms) en anglais ; interface et messages de commit en français.
 - Avant de montrer un changement visuel : `forme-shot` sur le scénario concerné, puis regarder l'image.
 - Toute modification d'une primitive se fait dans les trois évaluateurs : `sdf.wgsl`, `program.rs`, `bake/field.rs`.
-- `cargo test --release -p forme-core` doit rester vert. Le cube du `bake_probe build` doit rester à 1408 faces, 100 % quads, 0 bord ouvert, 0 non-manifold.
+- `cargo test --release -p forme-core` doit rester vert. `bake_probe parlignes` : tous les cas 100 % quads, 0 bord ouvert (scène de Romain : 390 quads).

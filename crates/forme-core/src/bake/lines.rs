@@ -10,13 +10,13 @@
 //! its fillet strips on the rails first, then fills the faces between the
 //! lines (see docs/BAKE.md); the Bake panel draws them for diagnosis.
 
-use super::build::contour;
 use super::field::{box_edge_signs, Field, PrimDef};
 use super::gen::{self, GenSettings};
 use crate::edges::{junction_owner, solve2};
 use crate::program::{compile, compile_single};
 use crate::scene::*;
 use glam::DVec3;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineKind {
@@ -277,4 +277,67 @@ pub fn construction_lines(scene: &Scene) -> Lines {
     }
     out.seconds = t0.elapsed().as_secs_f64();
     out
+}
+
+
+/// Zero-level contour of `f` over a set of faces, as closed polylines.
+fn contour(pos: &[DVec3], faces: &[Vec<u32>], set: &[usize], f: &dyn Fn(DVec3) -> f64) -> Vec<Vec<DVec3>> {
+    let val: HashMap<u32, f64> = set.iter().flat_map(|&i| faces[i].iter()).map(|&v| (v, f(pos[v as usize]))).collect();
+    let mut pts: HashMap<(u32, u32), DVec3> = HashMap::new();
+    let mut adj: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
+    for &i in set {
+        let fc = &faces[i];
+        let mut cross = vec![];
+        for k in 0..fc.len() {
+            let (a, b) = (fc[k], fc[(k + 1) % fc.len()]);
+            let (fa, fb) = (val[&a], val[&b]);
+            if (fa < 0.0) != (fb < 0.0) {
+                let key = (a.min(b), a.max(b));
+                let t = fa / (fa - fb);
+                pts.insert(key, pos[a as usize].lerp(pos[b as usize], t));
+                cross.push(key);
+            }
+        }
+        if cross.len() == 2 {
+            adj.entry(cross[0]).or_default().push(cross[1]);
+            adj.entry(cross[1]).or_default().push(cross[0]);
+        } else if cross.len() == 4 {
+            // saddle: pair consecutive crossings
+            adj.entry(cross[0]).or_default().push(cross[1]);
+            adj.entry(cross[1]).or_default().push(cross[0]);
+            adj.entry(cross[2]).or_default().push(cross[3]);
+            adj.entry(cross[3]).or_default().push(cross[2]);
+        }
+    }
+    let mut loops = vec![];
+    let mut seen: HashSet<(u32, u32)> = HashSet::new();
+    let mut keys: Vec<(u32, u32)> = adj.keys().copied().collect();
+    keys.sort();
+    for s in keys {
+        if seen.contains(&s) {
+            continue;
+        }
+        let mut lp = vec![pts[&s]];
+        seen.insert(s);
+        let (mut prev, mut cur) = (s, adj[&s][0]);
+        let mut closed = false;
+        loop {
+            if cur == s {
+                closed = true;
+                break;
+            }
+            if !seen.insert(cur) {
+                break;
+            }
+            lp.push(pts[&cur]);
+            let n = &adj[&cur];
+            let nx = if n[0] != prev { n[0] } else if n.len() > 1 { n[1] } else { break };
+            prev = cur;
+            cur = nx;
+        }
+        if closed && lp.len() >= 3 {
+            loops.push(lp);
+        }
+    }
+    loops
 }

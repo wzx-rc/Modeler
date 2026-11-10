@@ -37,7 +37,7 @@
 - **Panneau droit** (276 pt) : propriétés de la sélection (forme, combinaison, blend lisse ou chanfrein, organisation radiale ou linéaire, symétrie, position et rotation), carte d'arête, arbre de formes.
 - **Barre de modes en bas** : Add, Carve, Intersect, Groove, Tongue.
 - **Boutons ronds en bas à gauche** : Carve (maintenir) et CTRL (maintenir).
-- **Bake** : densité Légère / Standard / Dense, méthode affichée (par opération ou repli avec sa raison), aperçu du maillage (filaire), export OBJ (quads) et GLB.
+- **Bake** : densité Légère / Standard / Dense, un seul algorithme (par lignes de construction) ; un cas pas encore géré s'affiche en rouge avec sa raison, sans maillage de repli. Aperçu du maillage (filaire), rôles (fillets orange / paths crème), export OBJ (quads) et GLB.
 - Sur iPad, l'interface est mise à l'échelle 0,84 (`UI_ZOOM`) : la maquette a été dessinée pour 1194 × 834 pt et paraissait trop grosse sur l'appareil.
 
 ## Viewport
