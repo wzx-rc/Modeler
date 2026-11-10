@@ -197,11 +197,13 @@ pub struct Menu {
     /// Material arc: when it opened, and the swatch under the pointer.
     pub arc: Option<f64>,
     pub swatch: Option<usize>,
+    /// Opened by a right click (Tripo3D): stays open, the next click picks.
+    pub sticky: bool,
 }
 
 impl Menu {
     pub fn new(center: [f32; 2], ctx: Ctx, right: bool, now: f64) -> Menu {
-        Menu { center, pointer: center, hover: None, ctx, right, t0: now, shown: !right, arc: None, swatch: None }
+        Menu { center, pointer: center, hover: None, ctx, right, t0: now, shown: !right, arc: None, swatch: None, sticky: false }
     }
 }
 
@@ -219,6 +221,11 @@ pub struct Marking {
     pub flash: Option<Flash>,
     /// Left press waiting to become a menu: where and when.
     press: Option<([f32; 2], f64)>,
+    /// Tripo3D: right press waiting to become a menu (click or held still)
+    /// or a pan (moved).
+    rpress: Option<([f32; 2], f64)>,
+    /// A sticky menu closed by a press: that press is not passed on.
+    swallow: bool,
     /// Captures: the open menu stays frozen on screen.
     pub demo: bool,
 }
@@ -226,6 +233,10 @@ pub struct Marking {
 impl Marking {
     pub fn is_open(&self) -> bool {
         self.menu.is_some()
+    }
+    /// Tripo3D: a right press that has not moved yet (no pan meanwhile).
+    pub fn right_pending(&self) -> bool {
+        self.rpress.is_some()
     }
 }
 
@@ -300,15 +311,55 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect, on_handle: bool
     // only over the 3D view itself (not over a panel)
     let in_view = rect.contains(pos) && ctx.layer_id_at(pos).map(|l| l.order == Order::Background).unwrap_or(false);
 
+    // the press that closed a sticky menu goes nowhere else
+    if st.marking.swallow {
+        if pri_down || sec_down {
+            return true;
+        }
+        st.marking.swallow = false;
+    }
+
     if st.marking.menu.is_none() {
-        // right press: the menu at once (drawn after the delay, flicks allowed)
-        // (Maya navigation only: in Tripo3D navigation the right drag pans)
-        if sec_pressed && in_view && st.settings.navigation == crate::settings::Navigation::Maya {
+        let maya = st.settings.navigation == crate::settings::Navigation::Maya;
+        // Maya: right press, the menu at once (drawn after the delay, flicks allowed)
+        if sec_pressed && in_view && maya {
             st.marking.press = None;
             let c = context_at(st, p);
             st.marking.menu = Some(Menu::new(p, c, true, now));
             ctx.request_repaint();
             return true;
+        }
+        // Tripo3D: the right drag pans, so the menu waits: a right click
+        // (released without moving) opens it until the next click, a right
+        // press held still opens it like in Maya (release on an item)
+        if !maya {
+            if sec_pressed && in_view {
+                st.marking.rpress = Some((p, now));
+            }
+            if let Some((p0, t)) = st.marking.rpress {
+                if (p[0] - p0[0]).hypot(p[1] - p0[1]) > HOLD_SLOP {
+                    st.marking.rpress = None;
+                } else if !sec_down {
+                    st.marking.rpress = None;
+                    let c = context_at(st, p0);
+                    let mut m = Menu::new(p0, c, true, now);
+                    m.sticky = true;
+                    m.shown = true;
+                    st.marking.menu = Some(m);
+                    ctx.request_repaint();
+                    return true;
+                } else if now - t >= HOLD {
+                    st.marking.rpress = None;
+                    let c = context_at(st, p0);
+                    let mut m = Menu::new(p0, c, true, now);
+                    m.shown = true;
+                    st.marking.menu = Some(m);
+                    ctx.request_repaint();
+                    return true;
+                } else {
+                    ctx.request_repaint();
+                }
+            }
         }
         // left press held still: the menu (Select tool, not on a handle)
         if pri_pressed && in_view && st.tool == Tool::Select && !on_handle && !ctx.input(|i| i.modifiers.shift) {
@@ -365,8 +416,16 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect, on_handle: bool
             menu.swatch = best.1;
         }
     }
-    let released = if menu.right { !sec_down } else { !pri_down };
+    let sticky = menu.sticky;
+    let released = if sticky { pri_pressed || sec_pressed } else if menu.right { !sec_down } else { !pri_down };
+    if sticky && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        st.marking.menu = None;
+        return true;
+    }
     if released {
+        if sticky {
+            st.marking.swallow = true;
+        }
         let menu = st.marking.menu.take().unwrap();
         if let (Some(k), Ctx::Shape(id)) = (menu.swatch, menu.ctx) {
             let name = st.scene.materials.get(k).map(|m| m.name.clone()).unwrap_or_default();

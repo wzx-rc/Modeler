@@ -855,6 +855,30 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         right(h, empty + egui::vec2(0.0, 80.0), false);
         h.steps(2);
         eprintln!("tripo droit : cible {:.1?} → {:.1?}, menu ouvert {}", t0, h.st.camera.target, h.st.marking.is_open());
+        // a right click without moving opens the menu, which stays open
+        let t1 = h.st.camera.target;
+        right(h, empty, true);
+        right(h, empty, false);
+        h.steps(3);
+        eprintln!("tripo clic droit : menu ouvert {} (caméra immobile {})", h.st.marking.is_open(), (h.st.camera.target - t1).length() < 1e-3);
+        h.shot("pc-nav-menu");
+        h.press(empty + egui::vec2(0.0, -200.0), true);
+        h.press(empty + egui::vec2(0.0, -200.0), false);
+        h.steps(2);
+        eprintln!("tripo clic suivant : menu ouvert {}, geste {:?}", h.st.marking.is_open(), h.st.gesture);
+        // F: the camera glides to the framing instead of jumping
+        h.st.select(h.st.scene.nodes.keys().next().copied());
+        h.st.camera.dist *= 4.0;
+        h.st.view_changed();
+        h.step();
+        let d0 = h.st.camera.dist;
+        h.st.frame_selection();
+        let mut ds = vec![];
+        for _ in 0..32 {
+            h.step();
+            ds.push(h.st.camera.dist);
+        }
+        eprintln!("F : distance {:.0} → {:.0?} (animation {})", d0, ds.iter().step_by(4).collect::<Vec<_>>(), h.st.cam_anim.is_none());
         h.st.settings.navigation = forme_app::settings::Navigation::Maya;
     }    if want("pc-snap") {
         // base on the top face of the socle, far corner snapped to its edge

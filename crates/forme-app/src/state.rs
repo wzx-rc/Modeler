@@ -192,6 +192,19 @@ pub struct HandleDrag {
     pub anchor: Option<Vec3>,
 }
 
+/// Smooth framing: the camera glides from where it is to the framed box.
+#[derive(Clone, Copy, Debug)]
+pub struct CamAnim {
+    from: (Vec3, f32),
+    to: (Vec3, f32),
+    t0: f64,
+    /// Last values written: any other change means the user took the camera.
+    last: (Vec3, f32),
+}
+
+/// Length of the framing glide, in seconds.
+const CAM_ANIM: f64 = 0.45;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportRes {
     Draft,
@@ -337,6 +350,8 @@ pub struct AppState {
     pub handle_drag: Option<HandleDrag>,
     /// Handle under the pointer (pre-selection, drawn hot before the click).
     pub handle_hover: Option<Handle>,
+    /// Smooth framing (F) in progress.
+    pub cam_anim: Option<CamAnim>,
     pub pointer_kind: PointerKind,
     pub screen: [f32; 2],
     /// Free 3D view area in points (min x, min y, max x, max y), set by the
@@ -492,6 +507,7 @@ impl AppState {
             placement: None,
             handle_drag: None,
             handle_hover: None,
+            cam_anim: None,
             pointer_kind: PointerKind::Mouse,
             screen: [1194.0, 834.0],
             view_rect: [84.0, 16.0, 1194.0 - 308.0, 834.0],
@@ -1910,8 +1926,38 @@ impl AppState {
         self.view_changed();
     }
 
+    /// Glides the camera to frame a box (F): ease in / out, the distance
+    /// interpolated on a log scale so zooming far in or out feels even.
+    pub fn frame_smooth(&mut self, lo: Vec3, hi: Vec3) {
+        let from = (self.camera.target, self.camera.dist);
+        let mut end = self.camera.clone();
+        end.frame(lo, hi);
+        // a little air around the shape
+        end.dist = (end.dist * 1.08).clamp(30.0, 4000.0);
+        self.cam_anim = Some(CamAnim { from, to: (end.target, end.dist), t0: self.now, last: from });
+    }
+
+    fn step_cam_anim(&mut self) {
+        let Some(a) = self.cam_anim else { return };
+        let cur = (self.camera.target, self.camera.dist);
+        if (cur.0 - a.last.0).length() > 1e-3 || (cur.1 - a.last.1).abs() > 1e-3 {
+            // orbit / pan / zoom meanwhile: the user has the camera
+            self.cam_anim = None;
+            return;
+        }
+        let u = ((self.now - a.t0) / CAM_ANIM).clamp(0.0, 1.0) as f32;
+        let e = if u < 0.5 { 4.0 * u * u * u } else { 1.0 - (-2.0 * u + 2.0).powi(3) * 0.5 };
+        self.camera.target = a.from.0.lerp(a.to.0, e);
+        self.camera.dist = a.from.1 * (a.to.1 / a.from.1.max(1e-3)).powf(e);
+        self.view_changed();
+        self.cam_anim = if u >= 1.0 { None } else { Some(CamAnim { last: (self.camera.target, self.camera.dist), ..a }) };
+    }
+
     pub fn frame_selection(&mut self) {
-        let Some(id) = self.selection else { return self.frame_all() };
+        let Some(id) = self.selection else {
+            let (lo, hi) = self.scene.bounds();
+            return self.frame_smooth(lo, hi);
+        };
         let bb = match self.scene.node(id).map(|n| n.is_group()) {
             Some(false) => self.scene.shape_world_aabb(id),
             _ => {
@@ -1920,8 +1966,7 @@ impl AppState {
             }
         };
         if let Some((lo, hi)) = bb {
-            self.camera.frame(lo, hi);
-            self.view_changed();
+            self.frame_smooth(lo, hi);
         }
     }
 
@@ -2176,6 +2221,7 @@ impl AppState {
     /// Called every frame.
     pub fn tick(&mut self, now: f64) {
         self.now = now;
+        self.step_cam_anim();
         self.update_lines();
         let mut finished = None;
         if let Some(j) = &self.bake.job {

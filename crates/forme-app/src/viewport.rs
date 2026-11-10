@@ -49,6 +49,9 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_marquee(ui.painter(), st);
     });
     crate::marking::draw(ctx, st);
+    if st.cam_anim.is_some() {
+        ctx.request_repaint();
+    }
 }
 
 fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, rect: Rect) {
@@ -119,19 +122,6 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         return;
     }
 
-    // Tripo3D navigation: right or middle drag pans (left drag in empty
-    // space orbits, below); the right button does not open the menu
-    let tripo = st.settings.navigation == crate::settings::Navigation::Tripo;
-    if tripo && (m || r) && !l && !st.marking.is_open() {
-        if d != egui::Vec2::ZERO && (resp.hovered() || resp.dragged()) {
-            st.camera.pan(d.x, d.y, rect.height());
-            st.view_changed();
-            st.interacting = true;
-        }
-        return;
-    }
-
-    // marking menu: right press, or left press held still (not on a handle)
     // pre-selection: the handle under the pointer is drawn hot before the click
     st.handle_hover = if st.gesture == Gesture::None && st.placement.is_none() && !st.marking.is_open() {
         st.hover.and_then(|h| handle_at(st, pos2(h[0], h[1]))).map(|h| h.handle)
@@ -139,7 +129,21 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         None
     };
     let on_handle = st.handle_hover.is_some();
+    // marking menu: right press (Maya), right click or right press held still
+    // (Tripo3D), or left press held still (not on a handle)
     if crate::marking::input(ctx, st, rect, on_handle) {
+        return;
+    }
+
+    // Tripo3D navigation: right or middle drag pans (left drag in empty
+    // space orbits, below); a right click without moving opens the menu
+    let tripo = st.settings.navigation == crate::settings::Navigation::Tripo;
+    if tripo && (m || r) && !l {
+        if d != egui::Vec2::ZERO && (resp.hovered() || resp.dragged()) && !st.marking.right_pending() {
+            st.camera.pan(d.x, d.y, rect.height());
+            st.view_changed();
+            st.interacting = true;
+        }
         return;
     }
 

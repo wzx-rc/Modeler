@@ -57,8 +57,8 @@ pub enum Navigation {
     #[default]
     Maya,
     /// Tripo3D / web viewers: left drag in empty space orbits, right or
-    /// middle drag pans, wheel zooms; Shift + left drag selects, a left
-    /// press held still opens the marking menu.
+    /// middle drag pans, wheel zooms; Shift + left drag selects; a right
+    /// click (or a press held still) opens the marking menu.
     Tripo,
 }
 
@@ -73,7 +73,7 @@ impl Navigation {
     pub fn blurb(self) -> &'static str {
         match self {
             Navigation::Maya => "Alt + clic gauche : orbite · Alt + molette (clic) : pan · Alt + clic droit : zoom. Clic droit : marking menu, clic gauche glissé dans le vide : rectangle de sélection.",
-            Navigation::Tripo => "Clic gauche glissé dans le vide : orbite · clic droit ou molette glissés : pan · molette : zoom. Maj + clic gauche glissé : rectangle de sélection, clic gauche maintenu : marking menu.",
+            Navigation::Tripo => "Clic gauche glissé dans le vide : orbite · clic droit ou molette glissés : pan · molette : zoom. Clic droit (sans bouger) ou clic maintenu : marking menu. Maj + clic gauche glissé : rectangle de sélection.",
         }
     }
 }
