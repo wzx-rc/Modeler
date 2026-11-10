@@ -42,6 +42,44 @@ const CYL_SIDE_B: u32 = 3;
 /// Faces of a box: 18 + k a rounded corner (ball) where three edges rounded
 /// alike meet; k from the signs, bit 0 x < 0, bit 1 y < 0, bit 2 z < 0.
 const CORNER0: u32 = 18;
+/// Junction fillets (blend of a step): BLEND0 + index in `Layout::blends`,
+/// with the prim of the shape added by that step.
+const BLEND0: u32 = 1000;
+
+/// Profile of a smooth union (quadratic smooth min) between two square
+/// planes, heights u over the first and v off the second: √u + √v = √k,
+/// u = k t², v = k (1 - t)², t from 0 (rail on the first) to 1. Arc length
+/// from t = 0, over k.
+fn blend_s(t: f64) -> f64 {
+    let f = |x: f64| {
+        let r = (x * x + 0.25).sqrt();
+        0.5 * x * r + 0.125 * (x + r).ln()
+    };
+    2.0 * std::f64::consts::SQRT_2 * (f(t - 0.5) - f(-0.5))
+}
+
+/// Inverse of `blend_s`.
+fn blend_t(s: f64) -> f64 {
+    let total = blend_s(1.0);
+    let s = s.clamp(0.0, total);
+    let mut t = s / total;
+    for _ in 0..30 {
+        let ds = 2.0 * (t * t + (1.0 - t) * (1.0 - t)).sqrt();
+        let nt = (t - (blend_s(t) - s) / ds).clamp(0.0, 1.0);
+        if (nt - t).abs() < 1e-15 {
+            break;
+        }
+        t = nt;
+    }
+    t
+}
+
+/// Height of a smooth union around a sharp edge square to a plane, at a
+/// distance r from the edge (revolution of the profile): (√k - √r)².
+fn blend_u(k: f64, r: f64) -> f64 {
+    let d = k.sqrt() - r.clamp(0.0, k).sqrt();
+    d * d
+}
 
 fn corner_signs(k: u32) -> DVec3 {
     let s = |bit: u32| if k & bit == 0 { 1.0 } else { -1.0 };
@@ -79,6 +117,27 @@ struct Shape<'a> {
     prim: u32,
     step: usize,
     carve: bool,
+    /// Junction fillet with the model before it (smooth Add), world units.
+    k: f64,
+}
+
+/// One piece of a junction fillet: a strip along one wall of the shape
+/// added, or the corner around one of its edges.
+#[derive(Clone, Copy)]
+struct BlendPart {
+    /// The shape added with the fillet (its step).
+    shape: usize,
+    /// The face it stands on (earlier shape).
+    a: FaceId,
+    kind: BlendKind,
+}
+
+#[derive(Clone, Copy)]
+enum BlendKind {
+    /// Along the wall `face` of the shape added.
+    Strip { face: u32 },
+    /// Around the edge between walls `faces`, foot `c` on the plane, along `axis`.
+    Corner { faces: [u32; 2], c: DVec3, axis: DVec3 },
 }
 
 impl Shape<'_> {
@@ -221,6 +280,20 @@ fn enter_poly(poly: &[DVec2; 4], lines: &[bool; 4], o: DVec2, d: DVec2, margin: 
     (k.is_some_and(|k| lines[k]) && t > 0.0).then_some(t)
 }
 
+/// Whether a ray from `o` along `d` starts on a side of the convex quad
+/// `poly` that is a line and goes into it (a loop from a node on the side of
+/// a reserved area: it ends there).
+fn starts_into(poly: &[DVec2; 4], lines: &[bool; 4], o: DVec2, d: DVec2, margin: f64) -> bool {
+    let area: f64 = (0..4).map(|i| poly[i].perp_dot(poly[(i + 1) % 4])).sum();
+    let n: Vec<DVec2> = (0..4).map(|i| perp(poly[(i + 1) % 4] - poly[i]).normalize_or_zero() * area.signum()).collect();
+    (0..4).any(|i| {
+        lines[i]
+            && (o - poly[i]).dot(n[i]).abs() < margin
+            && d.dot(n[i]) > 0.1
+            && (0..4).filter(|&j| j != i).all(|j| (o - poly[j]).dot(n[j]) > margin)
+    })
+}
+
 /// Signed turn from direction `a` to `b` (left positive).
 fn turn(a: DVec2, b: DVec2) -> f64 {
     a.perp_dot(b).atan2(a.dot(b))
@@ -235,6 +308,14 @@ enum Map {
     /// Ball corner: gnomonic chart around direction `d` (great circles are
     /// straight lines, the corner's three arcs a triangle).
     Sph { c: DVec3, d: DVec3, e1: DVec3, e2: DVec3, r: f64 },
+    /// Junction fillet along a straight line where two square planes meet:
+    /// along `e` × arc length across, from the rail on plane `na` (y = 0)
+    /// to the rail on plane `nb`; `o` on the line where the planes meet.
+    Blend { o: DVec3, e: DVec3, na: DVec3, nb: DVec3, k: f64 },
+    /// Junction fillet around a sharp edge square to a plane: the plane's
+    /// coordinates from the edge's foot `c`, height (along `a`) from the
+    /// distance to the edge; the edge meets the fillet at the centre.
+    Rev { c: DVec3, a: DVec3, e1: DVec3, e2: DVec3, k: f64 },
 }
 
 impl Map {
@@ -246,6 +327,11 @@ impl Map {
                 o + a * q.x + (b * th.cos() + c * th.sin()) * r
             }
             Map::Sph { c, d, e1, e2, r } => c + (d + e1 * (q.x / r) + e2 * (q.y / r)).normalize() * r,
+            Map::Blend { o, e, na, nb, k } => {
+                let t = blend_t(q.y / k);
+                o + e * q.x + na * (k * t * t) + nb * (k * (1.0 - t) * (1.0 - t))
+            }
+            Map::Rev { c, a, e1, e2, k } => c + e1 * q.x + e2 * q.y + a * blend_u(k, q.length()),
         }
     }
     fn to2(&self, p: DVec3) -> DVec2 {
@@ -262,6 +348,16 @@ impl Map {
                 let n = p - c;
                 let w = n.dot(d).max(r * 1e-6);
                 DVec2::new(n.dot(e1), n.dot(e2)) * (r / w)
+            }
+            Map::Blend { o, e, na, nb, k } => {
+                let d = p - o;
+                let (su, sv) = (d.dot(na).max(0.0).sqrt(), d.dot(nb).max(0.0).sqrt());
+                let t = if su + sv > 1e-300 { su / (su + sv) } else { 0.5 };
+                DVec2::new(d.dot(e), k * blend_s(t))
+            }
+            Map::Rev { c, e1, e2, .. } => {
+                let d = p - c;
+                DVec2::new(d.dot(e1), d.dot(e2))
             }
         }
     }
@@ -343,6 +439,8 @@ struct Layout<'a> {
     /// Cylinder walls cut in two halves: prim and the chart map of half A
     /// (half A is where |θ| ≤ π/2 in that map).
     walls: Vec<(u32, Map)>,
+    /// Pieces of junction fillets, chart id face BLEND0 + index.
+    blends: Vec<BlendPart>,
 }
 
 impl Layout<'_> {
@@ -372,10 +470,11 @@ impl Layout<'_> {
                 if sh.carve {
                     -d
                 } else {
-                    d
+                    // (a junction fillet starts k away from the model)
+                    d - sh.k
                 }
             }
-            Cons::Later(j) => self.shapes[j].d(ch.map.to3(q)),
+            Cons::Later(j) => self.shapes[j].d(ch.map.to3(q)) - self.shapes[j].k,
         }
     }
 
@@ -420,10 +519,22 @@ impl Layout<'_> {
                 let p = ch.map.to3(q);
                 let me = &self.shapes[ch.shape];
                 let s = self.shapes.iter().filter(|s| s.step < me.step).min_by(|a, b| a.d(p).abs().total_cmp(&b.d(p).abs())).unwrap();
-                FaceId { prim: s.prim, face: s.face_at(p) }
+                let f = FaceId { prim: s.prim, face: s.face_at(p) };
+                // across the rail of a junction fillet: its strip
+                if me.k > 0.0 {
+                    if let Some(i) = self.blends.iter().position(|b| b.shape == ch.shape && b.a == f && matches!(b.kind, BlendKind::Strip { face } if face == ch.id.face)) {
+                        return FaceId { prim: me.prim, face: BLEND0 + i as u32 };
+                    }
+                }
+                f
             }
             Cons::Later(j) => {
                 let p = ch.map.to3(q);
+                if self.shapes[j].k > 0.0 {
+                    if let Some(b) = self.blend_at(j, ch.id, p) {
+                        return b;
+                    }
+                }
                 FaceId { prim: self.shapes[j].prim, face: self.shapes[j].face_at(p) }
             }
         }
@@ -433,8 +544,50 @@ impl Layout<'_> {
     fn psi(&self, ch: &Chart, k: Cons, l: FaceId, q: DVec2) -> f64 {
         match k {
             Cons::Rect(_) | Cons::Arc(_) | Cons::Disc | Cons::Oct(_) => self.cval(ch, k, q),
-            _ => self.shape_of(l.prim).map(|s| s.face_fn(l.face, ch.map.to3(q))).unwrap_or(0.0),
+            _ => self.across(ch.id, l, ch.map.to3(q)),
         }
+    }
+
+    /// Function zero on the line between face `me` and face `other`, at
+    /// `p` on `me`: the surface of `other`, or the rail of a junction fillet.
+    fn across(&self, me: FaceId, other: FaceId, p: DVec3) -> f64 {
+        if other.face >= BLEND0 {
+            let Some(b) = self.blends.get((other.face - BLEND0) as usize) else { return 0.0 };
+            let sh = &self.shapes[b.shape];
+            if me == b.a {
+                return match b.kind {
+                    BlendKind::Strip { face } => sh.face_fn(face, p) - sh.k,
+                    BlendKind::Corner { c, axis, .. } => {
+                        let d = p - c;
+                        (d - axis * d.dot(axis)).length() - sh.k
+                    }
+                };
+            }
+            if me.prim == sh.prim && me.face < BLEND0 {
+                return self.shape_of(b.a.prim).map(|a| a.face_fn(b.a.face, p)).unwrap_or(0.0) - sh.k;
+            }
+            return 0.0;
+        }
+        self.shape_of(other.prim).map(|s| s.face_fn(other.face, p)).unwrap_or(0.0)
+    }
+
+    /// The piece of the junction fillet of shape `j` (added on face `a`)
+    /// next to `p`: the strip of the wall it faces, or the corner of the
+    /// edge it faces.
+    fn blend_at(&self, j: usize, a: FaceId, p: DVec3) -> Option<FaceId> {
+        let sh = &self.shapes[j];
+        let l = sh.local(p);
+        let s = sh.pr.size;
+        let out: Vec<u32> = (0..3).filter(|&i| l[i].abs() > s[i]).map(|i| (i * 2) as u32 + (l[i] < 0.0) as u32).collect();
+        let i = self.blends.iter().position(|b| {
+            b.shape == j
+                && b.a == a
+                && match b.kind {
+                    BlendKind::Strip { face } => out == [face],
+                    BlendKind::Corner { faces, .. } => out.len() == 2 && faces.contains(&out[0]) && faces.contains(&out[1]),
+                }
+        })?;
+        Some(FaceId { prim: sh.prim, face: BLEND0 + i as u32 })
     }
 
     fn node(&mut self, p: DVec3) -> usize {
@@ -481,11 +634,11 @@ impl Layout<'_> {
         let rough = if at_end { self.end_dir(e, fwd, c) } else { self.start_dir(e, fwd, c) };
         let Some(o) = ed.charts.iter().copied().find(|&x| x != c) else { return rough };
         let id = self.charts[o].id;
-        let Some(sh) = self.shape_of(id.prim) else { return rough };
+        let me = self.charts[c].id;
         let map = self.charts[c].map;
         let node = if fwd != at_end { ed.a } else { ed.b };
         let q = map.to2(self.nodes[node]);
-        let f = |x: DVec2| sh.face_fn(id.face, map.to3(x));
+        let f = |x: DVec2| self.across(me, id, map.to3(x));
         let t = perp(grad2(&f, q, self.node_tol * 5.0)).normalize_or_zero();
         if t == DVec2::ZERO {
             rough
@@ -721,8 +874,16 @@ fn check(field: &Field, steps: &[Step]) -> Result<(), String> {
         if field.instances(s.prim).len() != 1 {
             return Err("copies pas encore gérées".into());
         }
-        if i > 0 && (s.mode > 1 || s.chamfer || s.k > 1e-9) {
-            return Err("seulement Add / Carve sans fillet de jonction pour l'instant".into());
+        if i > 0 && (s.mode > 1 || s.chamfer) {
+            return Err("seulement Add / Carve pour l'instant".into());
+        }
+        if i > 0 && s.k > 1e-9 {
+            if s.mode != 0 {
+                return Err("fillet de jonction d'une forme creusée pas encore géré".into());
+            }
+            if pr.kind != 0 || pr.round > 0.0 || pr.chamfer > 0.0 || pr.edges.iter().any(|r| *r != 0.0) {
+                return Err("fillet de jonction : seulement une boîte à arêtes vives posée sur une face, pour l'instant".into());
+            }
         }
         if (0..12).any(|e| edge_r(pr, e) < 0.0) {
             return Err("chanfreins pas encore gérés".into());
@@ -749,7 +910,8 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
     let mut shapes = vec![];
     for (i, s) in steps.iter().enumerate() {
         let inst = field.instances(s.prim);
-        shapes.push(Shape { pr: &field.prims[s.prim as usize], inst: inst[0], prim: s.prim, step: i, carve: i > 0 && s.mode == 1 });
+        let k = if i > 0 && s.mode == 0 && !s.chamfer { s.k } else { 0.0 };
+        shapes.push(Shape { pr: &field.prims[s.prim as usize], inst: inst[0], prim: s.prim, step: i, carve: i > 0 && s.mode == 1, k });
     }
     let prev: Vec<Option<Field>> = (0..shapes.len()).map(|i| (i > 0).then(|| field.prefix(&steps, i))).collect();
     let tol_f = (st.tol * 2.0).max(0.02);
@@ -941,9 +1103,136 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             });
         }
     }
+    // junction fillets: a sharp box added with a blend, standing on a flat
+    // face of the model, its walls square to it: a strip along each wall
+    // (straight, its section the blend's profile) and a corner around each
+    // edge standing on the face (the profile turned around the edge)
+    let mut blends: Vec<BlendPart> = vec![];
+    for si in 0..shapes.len() {
+        let sh = &shapes[si];
+        let k = sh.k;
+        if k <= 0.0 {
+            continue;
+        }
+        let (s, sc, tw) = (sh.pr.size, sh.pr.sc, sh.inst.to_world);
+        let cb = tw.transform_point3(DVec3::ZERO);
+        let wax = |i: usize| tw.transform_vector3(unit(i)).normalize();
+        // the face it stands on: (chart, box axis along its normal, normal, height of the centre)
+        let mut on: Vec<(usize, usize, DVec3, f64)> = vec![];
+        for (ci, ch) in charts.iter().enumerate() {
+            let Map::Plane { o, .. } = ch.map else { continue };
+            let other = &shapes[ch.shape];
+            if other.step >= sh.step || other.pr.kind != 0 || ch.id.face >= FILLET0 {
+                continue;
+            }
+            let fa = ch.id.face as usize;
+            let na = other.inst.to_world.transform_vector3(unit(fa / 2) * if fa % 2 == 0 { 1.0 } else { -1.0 }).normalize();
+            let Some(ab) = (0..3).find(|&i| wax(i).dot(na).abs() > 1.0 - 1e-9) else { continue };
+            let h = (cb - o).dot(na);
+            let half = s[ab] * sc;
+            let q = ch.map.to2(cb);
+            if h - half < -extent * 1e-6 && h + half > k * 1.5 && q.x > ch.lo.x && q.x < ch.hi.x && q.y > ch.lo.y && q.y < ch.hi.y {
+                on.push((ci, ab, na, h));
+            }
+        }
+        if on.len() != 1 {
+            return Err("fillet de jonction : la boîte doit être posée d'aplomb sur une face plane, pour l'instant".into());
+        }
+        let (ca, ab, na, h) = on[0];
+        let fa = charts[ca].id;
+        let foot = cb - na * h;
+        let (i, j) = ((ab + 1) % 3, (ab + 2) % 3);
+        let walls = [(i, 1.0f64), (i, -1.0), (j, 1.0), (j, -1.0)];
+        let face_of = |ax: usize, sg: f64| (ax * 2) as u32 + (sg < 0.0) as u32;
+        let base = blends.len() as u32;
+        let strip_id = |ax: usize, sg: f64| FaceId { prim: sh.prim, face: BLEND0 + base + walls.iter().position(|w| w.0 == ax && w.1 == sg).unwrap() as u32 };
+        let corners = [(1.0f64, 1.0f64), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)];
+        let corner_id = |si_: f64, sj: f64| FaceId { prim: sh.prim, face: BLEND0 + base + 4 + corners.iter().position(|c| c.0 == si_ && c.1 == sj).unwrap() as u32 };
+        let len_l = k * blend_s(1.0);
+        let rows = fillet_segs(k * 0.71, FRAC_PI_2, tol_f).max(((len_l / st.size).round() as usize + 1) / 2 * 2);
+        if std::env::var("DEBUG_LAYOUT").is_ok() {
+            eprintln!("raccord : k {k} profil {len_l:.3} rangées {rows} taille {:.3} tol {tol_f}", st.size);
+        }
+        let mut cons = vec![Cons::Rect(0), Cons::Rect(1), Cons::Rect(2), Cons::Rect(3)];
+        for jj in (si + 1)..shapes.len() {
+            cons.push(Cons::Later(jj));
+        }
+        let mut new_charts: Vec<Chart> = vec![];
+        for &(ax, sg) in &walls {
+            let ox = if ax == i { j } else { i };
+            let nb = wax(ax) * sg;
+            let e = wax(ox);
+            let o = foot + nb * (s[ax] * sc) - e * (s[ox] * sc);
+            let len = 2.0 * s[ox] * sc;
+            // the edge at x = len is on the + side of axis ox
+            let end = |so: f64| if ax == i { corner_id(sg, so) } else { corner_id(so, sg) };
+            blends.push(BlendPart { shape: si, a: fa, kind: BlendKind::Strip { face: face_of(ax, sg) } });
+            new_charts.push(Chart {
+                id: strip_id(ax, sg),
+                shape: si,
+                map: Map::Blend { o, e, na, nb, k },
+                lo: DVec2::ZERO,
+                hi: DVec2::new(len, len_l),
+                side: [fa, end(1.0), FaceId { prim: sh.prim, face: face_of(ax, sg) }, end(-1.0)],
+                arcs: vec![],
+                strip: Some((len_l / FRAC_PI_2, rows)),
+                ring: None,
+                disc: None,
+                ball: None,
+                cons: cons.clone(),
+            });
+        }
+        for &(sgi, sgj) in &corners {
+            let (e1, e2) = (wax(i) * sgi, wax(j) * sgj);
+            let c = foot + e1 * (s[i] * sc) + e2 * (s[j] * sc);
+            blends.push(BlendPart { shape: si, a: fa, kind: BlendKind::Corner { faces: [face_of(i, sgi), face_of(j, sgj)], c, axis: na } });
+            let mut cc = cons.clone();
+            cc.push(Cons::Disc);
+            new_charts.push(Chart {
+                id: corner_id(sgi, sgj),
+                shape: si,
+                map: Map::Rev { c, a: na, e1, e2, k },
+                lo: DVec2::ZERO,
+                hi: DVec2::splat(k * 1.02),
+                // y = 0: the end of the strip of wall i; x = 0: of wall j
+                side: [strip_id(i, sgi), fa, fa, strip_id(j, sgj)],
+                arcs: vec![],
+                strip: None,
+                ring: None,
+                disc: Some((k, fa)),
+                ball: None,
+                cons: cc,
+            });
+        }
+        // the blend is the profile only where the model before it is that
+        // face alone (no other edge or shape within its reach)
+        let pf = prev[si].as_ref().ok_or("historique")?;
+        let tol = extent * 1e-7 + 1e-9;
+        for ch in &new_charts {
+            for a in 0..=8 {
+                for b in 0..=8 {
+                    let (q, u, v) = match ch.map {
+                        Map::Rev { .. } => {
+                            let (r, th) = (k * a as f64 / 8.0, FRAC_PI_2 * b as f64 / 8.0);
+                            (DVec2::new(th.cos(), th.sin()) * r, blend_u(k, r), r)
+                        }
+                        _ => {
+                            let t = b as f64 / 8.0;
+                            (DVec2::new(ch.hi.x * a as f64 / 8.0, k * blend_s(t)), k * t * t, k * (1.0 - t) * (1.0 - t))
+                        }
+                    };
+                    let p = ch.map.to3(q);
+                    if (pf.dist(p) - u).abs() > tol || (sh.d(p) - v).abs() > tol {
+                        return Err("fillet de jonction trop près d'une arête ou d'une autre forme, pas encore géré".into());
+                    }
+                }
+            }
+        }
+        charts.extend(new_charts);
+    }
     progress.set(1, charts.len() as u32);
 
-    let mut lay = Layout { field: &field, shapes, prev, charts, nodes: vec![], edges: vec![], bnd: vec![], rays: vec![], inner: vec![], origins: vec![], node_tol: extent * 2e-6, walls: vec![] };
+    let mut lay = Layout { field: &field, shapes, prev, charts, nodes: vec![], edges: vec![], bnd: vec![], rays: vec![], inner: vec![], origins: vec![], node_tol: extent * 2e-6, walls: vec![], blends };
     let fd = extent * 1e-7;
 
     // a cylinder wall is cut open where it does not show: its seam
@@ -1225,6 +1514,9 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
     let mut ogrid = vec![false; nc];
     for ci in 0..nc {
         let Some((rad, _)) = lay.charts[ci].disc else { continue };
+        if matches!(lay.charts[ci].map, Map::Rev { .. }) {
+            continue;
+        }
         let loops = lay.bnd[ci].clone();
         if loops.len() != 1 || loops[0].len() != 4 {
             continue;
@@ -1290,7 +1582,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         }
     }
     for ci in 0..nc {
-        if lay.charts[ci].strip.is_some() || ogrid[ci] {
+        if lay.charts[ci].strip.is_some() || ogrid[ci] || matches!(lay.charts[ci].map, Map::Rev { .. }) {
             continue;
         }
         let loops = lay.bnd[ci].clone();
@@ -1302,7 +1594,8 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 let pp = lay.hpts(e, fwd, ci);
                 let total: f64 = pp.windows(3).map(|w| turn(w[1] - w[0], w[2] - w[1])).sum();
                 let planar = matches!(lay.charts[ci].map, Map::Plane { .. });
-                if planar && matches!(lay.charts[other].map, Map::Cyl { .. }) && total.abs() > 0.6 {
+                let rev = matches!(lay.charts[other].map, Map::Rev { .. });
+                if planar && (matches!(lay.charts[other].map, Map::Cyl { .. }) || rev) && total.abs() > 0.6 {
                     // an arc against a fillet strip or a cylinder wall: its
                     // middle, in the curved chart (a whole row on a strip)
                     let sm = lay.charts[other].map;
@@ -1314,7 +1607,10 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                         mid.y = (mid.y / row).round() * row;
                     }
                     let me = lay.charts[ci].id;
-                    if let Some(sh) = lay.shape_of(me.prim) {
+                    if let Map::Rev { k, .. } = sm {
+                        // the rail of a junction fillet's corner: a circle
+                        mid = (qa.normalize() + qb.normalize()).normalize() * k;
+                    } else if let Some(sh) = lay.shape_of(me.prim) {
                         mid = proj1(&|x| sh.face_fn(me.face, sm.to3(x)), mid, fd);
                     }
                     // exact directions of the arc at both ends
@@ -1337,7 +1633,48 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                         }
                         let s = (q0 - p0).perp_dot(t_out) / den;
                         let x = p0 + a1 * s;
-                        let g2 = x + (a1 + a2) * st.size;
+                        // one quad away, nearer when the face ends before
+                        // (a hole or a junction close to the face's edge)
+                        let mut hook = st.size;
+                        let mut g2 = x + (a1 + a2) * hook;
+                        for _ in 0..8 {
+                            if lay.fmin(&lay.charts[ci], g2).0 > hook * 0.1 {
+                                break;
+                            }
+                            hook *= 0.7;
+                            g2 = x + (a1 + a2) * hook;
+                        }
+                        // on a loop already planned nearby, parallel to one
+                        // of the walls (a hole's ring, another hook): there,
+                        // rather than a thin row beside it
+                        let mut hk = [hook, hook];
+                        for (w, ax) in [a1, a2].into_iter().enumerate() {
+                            let mut best: Option<f64> = None;
+                            for &(qc, qn, qd) in queue.iter() {
+                                if qc != ci || qd == DVec2::ZERO || qd.normalize().dot([a2, a1][w]).abs() < 0.999 {
+                                    continue;
+                                }
+                                let c = (map.to2(lay.nodes[qn]) - x).dot(ax);
+                                if c > hook * 0.35 && c < hook * 1.6 && best.is_none_or(|b| (c - hook).abs() < (b - hook).abs()) {
+                                    best = Some(c);
+                                }
+                            }
+                            if let Some(c) = best {
+                                hk[w] = c;
+                            }
+                        }
+                        let g2 = x + a1 * hk[0] + a2 * hk[1];
+                        // the hook node of another feature right there: shared
+                        let near_g = lay.inner[ci].iter().copied().find(|&n| map.to2(lay.nodes[n]).distance(g2) < hook * 0.5);
+                        let g = match near_g {
+                            Some(n) => n,
+                            None => {
+                                let n = lay.node(map.to3(g2));
+                                lay.origins.push(n);
+                                lay.inner[ci].push(n);
+                                n
+                            }
+                        };
                         // the square between the arc's centre and the hook
                         // node: its two sides through the node are loops
                         let (n0, n1) = (perp(t_in), perp(t_out));
@@ -1345,28 +1682,36 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                         let dd = a1.perp_dot(a2);
                         if dn.abs() > 1e-9 && dd.abs() > 1e-9 {
                             let c = p0 + n0 * ((q0 - p0).perp_dot(n1) / dn);
+                            let g2 = map.to2(lay.nodes[g]);
                             let w = g2 - c;
                             let (al, be) = (w.perp_dot(a2) / dd, a1.perp_dot(w) / dd);
                             if al > 0.0 && be > 0.0 {
                                 keep[ci].push(([c, c + a1 * al, g2, c + a2 * be], [false, true, true, false]));
                             }
                         }
-                        let g = lay.node(map.to3(g2));
-                        lay.origins.push(g);
-                        lay.inner[ci].push(g);
                         let re = lay.edges.len();
                         lay.edges.push(GEdge { a: m, b: g, pts: vec![lay.nodes[m], lay.nodes[g]], charts: [ci, ci], ray: true, alive: true });
                         lay.rays[ci].push(re);
                         for d in [a1, -a1, a2, -a2] {
                             queue.push_back((ci, g, d));
                         }
-                        queue.push_back((other, m, DVec2::ZERO));
+                        if rev {
+                            // a junction fillet's corner is one patch: its
+                            // arc's middle is a corner of it
+                            forced.push((other, m));
+                        } else {
+                            queue.push_back((other, m, DVec2::ZERO));
+                        }
                     } else if total < 0.0 {
                         // concave fillet: a re-entrant corner in its middle
                         lay.origins.push(m);
                         queue.push_back((ci, m, t_in));
                         queue.push_back((ci, m, -t_out));
-                        queue.push_back((other, m, DVec2::ZERO));
+                        if rev {
+                            forced.push((other, m));
+                        } else {
+                            queue.push_back((other, m, DVec2::ZERO));
+                        }
                     } else {
                         // convex fillet: loops from its rails, its middle is a
                         // corner of the rounded patch
@@ -1414,6 +1759,47 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                     queue.push_back((ci, v, -to));
                 }
             }
+        }
+    }
+
+    // corners of junction fillets: three quads around a node, like a ball
+    // corner. The rows of the strips turn the corner, the innermost `a`
+    // through the quad at the edge's foot, the others through the two quads
+    // on the arc; the arc gets 2a segments
+    for ci in 0..nc {
+        let Map::Rev { k, .. } = lay.charts[ci].map else { continue };
+        let map = lay.charts[ci].map;
+        let Some(&sc) = chart_of.get(&lay.charts[ci].side[0]) else { continue };
+        let Some((_, n)) = lay.charts[sc].strip else { continue };
+        let len_l = k * blend_s(1.0);
+        let a = ((FRAC_PI_2 * k / st.size * 0.5).round() as usize).clamp(1, n.saturating_sub(1).max(1));
+        let v1 = {
+            let t = blend_t(len_l * (n - a) as f64 / n as f64 / k);
+            k * (1.0 - t) * (1.0 - t)
+        };
+        // the middle of the arc, split when the face around was hooked
+        let Some(m) = forced.iter().find(|f| f.0 == ci).map(|f| f.1) else {
+            return Err("coin de fillet de jonction sans milieu".into());
+        };
+        let mut mids = [0usize; 2];
+        for (w, q) in [DVec2::new(v1, 0.0), DVec2::new(0.0, v1)].into_iter().enumerate() {
+            let x = map.to3(q);
+            let lp = lay.bnd[ci].clone();
+            let Some(&(e, _)) = lp.iter().flatten().find(|&&(e, _)| {
+                let (pa, pb) = (map.to2(lay.nodes[lay.edges[e].a]), map.to2(lay.nodes[lay.edges[e].b]));
+                (pa - q).perp_dot(pb - q).abs() < k * k * 1e-6 && (pa - q).dot(pb - q) < 0.0
+            }) else {
+                return Err("coin de fillet de jonction : côté introuvable".into());
+            };
+            mids[w] = lay.split(e, x);
+        }
+        let g = lay.node(map.to3(DVec2::splat(v1)));
+        lay.inner[ci].push(g);
+        lay.origins.push(g);
+        for b in [mids[0], mids[1], m] {
+            let re = lay.edges.len();
+            lay.edges.push(GEdge { a: g, b, pts: vec![lay.nodes[g], lay.nodes[b]], charts: [ci, ci], ray: true, alive: true });
+            lay.rays[ci].push(re);
         }
     }
 
@@ -1515,7 +1901,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             let m = lay.charts[ci].map;
             (m.to2(lay.nodes[to]) - m.to2(lay.nodes[from])).normalize_or_zero().dot(d) > 0.999
         });
-        if exists {
+        if exists || keep[ci].iter().any(|(poly, lines)| starts_into(poly, lines, o, d, snap)) {
             continue;
         }
         let best = first_hit(d);
@@ -1608,6 +1994,9 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             }
         }
         if let Some((_, g)) = stop {
+            if lay.rays[ci].iter().any(|&r| lay.edges[r].alive && ((lay.edges[r].a == n0 && lay.edges[r].b == g) || (lay.edges[r].a == g && lay.edges[r].b == n0))) {
+                continue;
+            }
             let re = lay.edges.len();
             if std::env::var("DEBUG_LAYOUT").is_ok() {
                 eprintln!("ray {:?} e{re} n{n0} {:?} dir {:?} -> stop n{g} {:?}", lay.charts[ci].id, lay.nodes[n0], d, lay.nodes[g]);
@@ -1621,6 +2010,9 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
             continue;
         }
         let Some((_, e, i, w)) = best else {
+            if std::env::var("DEBUG_LAYOUT").is_ok() {
+                eprintln!("sans sortie : {:?} n{n0} {:?} dir {:?}", lay.charts[ci].id, lay.nodes[n0], d);
+            }
             return Err("boucle qui ne ressort pas de la face".into());
         };
         let ed = lay.edges[e].clone();
@@ -1630,9 +2022,18 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         // (only a small bend of a long loop: about one degree)
         let near = (st.size * 0.3).min(x.distance(lay.nodes[n0]) * 0.02).max(snap);
         let (da, db) = (x.distance(lay.nodes[ed.a]), x.distance(lay.nodes[ed.b]));
-        let n1 = if da < near && da <= db {
+        // (not onto the end of a loop running alongside, from right next to
+        // this one's start: the two would close a triangle)
+        let alongside = |n: usize, gap: f64| {
+            lay.rays[ci].iter().any(|&r| {
+                let ed = &lay.edges[r];
+                let o = if ed.a == n { ed.b } else if ed.b == n { ed.a } else { return false };
+                lay.nodes[o].distance(lay.nodes[n0]) < gap * 3.0 + snap
+            })
+        };
+        let n1 = if da < near && da <= db && !alongside(ed.a, da) {
             ed.a
-        } else if db < near {
+        } else if db < near && !alongside(ed.b, db) {
             ed.b
         } else {
             lay.split(e, x)
@@ -1652,7 +2053,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         // on into the face across
         let next = ed.charts.iter().copied().find(|&c| c != ci);
         if let Some(nc2) = next {
-            if corner_angle(&lay, nc2, n1).is_some_and(|t| t.abs() > 0.5) {
+            if corner_angle(&lay, nc2, n1).is_some_and(|t| t.abs() > 0.5) || matches!(lay.charts[nc2].map, Map::Rev { .. }) {
                 continue;
             }
             // a loop already leaves this node across: this one closes on it;
@@ -1783,6 +2184,32 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 eprintln!("  origins {:?}", lay.origins);
             }
             if corners.len() != 4 {
+                if let Ok(path) = std::env::var("DEBUG_CHART") {
+                    // the chart's lines (2D), for a drawing: boundary, loops, the patch
+                    let m = lay.charts[ci].map;
+                    let mut out = String::new();
+                    for lp in &lay.bnd[ci] {
+                        for &(e, _) in lp {
+                            let p = lay.pts2(e, ci);
+                            out += &format!("b {}\n", p.iter().map(|q| format!("{} {}", q.x, q.y)).collect::<Vec<_>>().join(" "));
+                        }
+                    }
+                    for &r in &lay.rays[ci] {
+                        if lay.edges[r].alive {
+                            let (a, b) = (m.to2(lay.nodes[lay.edges[r].a]), m.to2(lay.nodes[lay.edges[r].b]));
+                            out += &format!("r {} {} {} {}\n", a.x, a.y, b.x, b.y);
+                        }
+                    }
+                    for &h in &cyc {
+                        let p = lay.hpts(hes[h].0, hes[h].1, ci);
+                        out += &format!("p {}\n", p.iter().map(|q| format!("{} {}", q.x, q.y)).collect::<Vec<_>>().join(" "));
+                    }
+                    for &g in &lay.inner[ci] {
+                        let q = m.to2(lay.nodes[g]);
+                        out += &format!("g {} {}\n", q.x, q.y);
+                    }
+                    let _ = std::fs::write(path, out);
+                }
                 return Err(format!("patch à {} coins sur {:?}", corners.len(), lay.charts[ci].id));
             }
             let mut sides: [Vec<(usize, bool)>; 4] = Default::default();
@@ -1876,6 +2303,17 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
         min_conflicts(&patches, &mut count, &fixed, &target).map_err(|why| {
             if std::env::var("DEBUG_LAYOUT").is_ok() {
                 eprintln!("{why}");
+                for (ci, sd) in &patches {
+                    let sm: Vec<usize> = sd.iter().map(|x| x.iter().map(|y| count[y.0]).sum()).collect();
+                    if sm[0] != sm[2] || sm[1] != sm[3] {
+                        eprintln!("  {:?} sommes {:?}", lay.charts[*ci].id, sm);
+                        for (k, side) in sd.iter().enumerate() {
+                            let d: Vec<String> = side.iter().map(|y| format!("e{}:{}{} {:.1}", y.0, count[y.0], if fixed[y.0] { "F" } else { "" }, target[y.0])).collect();
+                            let n0 = if side[0].1 { lay.edges[side[0].0].a } else { lay.edges[side[0].0].b };
+                            eprintln!("    côté {k} depuis {:?} : {}", lay.nodes[n0], d.join(" "));
+                        }
+                    }
+                }
             }
             "nombres de segments impossibles à accorder".to_string()
         })?;
@@ -2064,7 +2502,7 @@ pub fn build(scene: &Scene, st: &LayoutSettings, progress: &Progress) -> Result<
                 grid[i][j] = pos.len() as u32 - 1;
             }
         }
-        let role = if ch.strip.is_some() { P_FILLET } else { P_FILL };
+        let role = if ch.strip.is_some() || ch.id.face >= BLEND0 { P_FILLET } else { P_FILL };
         for i in 0..n {
             for j in 0..m {
                 faces.push(vec![grid[i][j], grid[i + 1][j], grid[i + 1][j + 1], grid[i][j + 1]]);

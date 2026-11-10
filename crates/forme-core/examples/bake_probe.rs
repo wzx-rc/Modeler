@@ -180,6 +180,19 @@ pub fn coin(blend: f32) -> Scene {
     s
 }
 
+/// A box standing on a box, added with a junction fillet (blend).
+pub fn raccord(k: f32) -> Scene {
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::new(10.0, 5.0, 10.0);
+    s.add(root, NodeSpec::shape("Socle", b).at(Vec3::new(0.0, 5.0, 0.0)));
+    let mut c = Shape::new(PrimKind::Box);
+    c.size = Vec3::new(2.0, 5.0, 4.0);
+    s.add(root, NodeSpec::shape("Ailette", c).at(Vec3::new(0.0, 12.0, 0.0)).blend(k));
+    s
+}
+
 /// A plate with a round hole through its middle (no fillet).
 pub fn trou() -> Scene {
     let mut s = Scene::new();
@@ -255,6 +268,7 @@ fn par_lignes() {
         sc
     };
     let cases = [
+        ("raccord", raccord(2.0), DVec3::new(0.0, 10.0, 0.0), 30.0, true, front),
         ("rc", cyl.clone(), t, 80.0, true, front),
         ("rc-sans-raccord", cyl_var(false, true), t, 80.0, true, front),
         ("rc-sans-cube3", cyl_var(false, false), t, 80.0, true, front),

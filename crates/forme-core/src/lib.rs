@@ -343,9 +343,10 @@ mod tests {
     #[test]
     fn bake_blind_round_hole() {
         // Romain's scene of 10 nov: a blind round hole (o-grid floor) next to
-        // a notch with a concave fillet; its junction blend is not handled yet
+        // a notch with a concave fillet, and a fin with a 3.1 mm junction blend
         let mut s = Scene::from_json(include_str!("../examples/scenes/romain-cylindre.forme")).expect("scène");
-        assert!(bake::plan(&s, &bake::BakeSettings::preset(bake::Quality::Standard)).is_err());
+        let b = bake_ok(&s);
+        assert!(b.faces.iter().filter(|f| f.patch == bake::P_FILLET).count() > 0, "no fillet strip");
         let ids: Vec<_> = s.nodes.keys().copied().collect();
         for id in ids {
             if let Some(n) = s.node_mut(id) {
@@ -353,6 +354,24 @@ mod tests {
             }
         }
         bake_ok(&s);
+    }
+
+    #[test]
+    fn bake_junction_blend_box_on_face() {
+        // a fin standing on a block, joined by a smooth union (blend): strips
+        // along the four walls, corners split in three quads
+        let mut s = Scene::new();
+        let r = s.root;
+        let mut b = Shape::new(PrimKind::Box);
+        b.size = Vec3::new(10.0, 5.0, 10.0);
+        s.add(r, NodeSpec::shape("Socle", b).at(Vec3::new(0.0, 5.0, 0.0)));
+        let mut c = Shape::new(PrimKind::Box);
+        c.size = Vec3::new(2.0, 5.0, 4.0);
+        let id = s.add(r, NodeSpec::shape("Ailette", c).at(Vec3::new(0.0, 12.0, 0.0)).blend(2.0));
+        bake_ok(&s);
+        // carving with a blend is not handled yet: a reason, no mesh
+        s.node_mut(id).unwrap().combine.mode = CombineMode::Carve;
+        assert!(bake::bake_blocking(&s, bake::Quality::Standard).is_err());
     }
 
     #[test]
