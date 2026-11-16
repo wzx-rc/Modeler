@@ -215,14 +215,30 @@ impl<'a> Builder<'a> {
     }
 
     fn combine(&mut self, c: &Combine) {
+        self.combine_zoned(c, &[]);
+    }
+
+    /// Combine with local junction fillets: the zones go in the aux buffer
+    /// (per zone a header [radius, points] then the points), w2 = [first aux
+    /// row, zone count].
+    fn combine_zoned(&mut self, c: &Combine, zones: &[BlendZone]) {
         let kind = match c.kind {
             BlendKind::Smooth => 0.0,
             BlendKind::Chamfer => 1.0,
         };
+        let zones: Vec<&BlendZone> = zones.iter().filter(|z| z.radius > 0.0 && !z.pts.is_empty()).collect();
+        let start = self.prog.aux.len() as f32;
+        for z in &zones {
+            let n = z.pts.len().min(BlendZone::MAX_PTS);
+            self.prog.aux.push([z.radius, n as f32, 0.0, 0.0]);
+            for p in &z.pts[..n] {
+                self.prog.aux.push([p.x, p.y, p.z, 0.0]);
+            }
+        }
         self.instr([
             [OP_COMBINE as f32, c.mode.code() as f32, c.blend.max(0.0), kind],
             [c.depth, c.width, 0.0, 0.0],
-            [0.0; 4],
+            [start, zones.len() as f32, 0.0, 0.0],
             [0.0; 4],
         ]);
     }
@@ -241,8 +257,12 @@ impl<'a> Builder<'a> {
                 if shape.kind == PrimKind::Profile && shape.profile.as_ref().map(|p| p.points.len() < 3).unwrap_or(true) {
                     return;
                 }
-                self.prim(id, &chain2, shape, n.material, &combine);
-                self.combine(&combine);
+                // local fillets widen the bound of the shape (their blend reaches further)
+                let zones: &[BlendZone] = if combine_override.is_none() { &n.blend_zones } else { &[] };
+                let zmax = zones.iter().map(|z| z.radius).fold(0.0f32, f32::max);
+                let bound = Combine { blend: combine.blend.max(zmax), ..combine };
+                self.prim(id, &chain2, shape, n.material, &bound);
+                self.combine_zoned(&combine, zones);
             }
             NodeKind::Group { children, combined } => {
                 if *combined || combine_override.is_some() {
@@ -550,6 +570,33 @@ pub fn eval_prim(w: &[[f32; 4]], aux: &[[f32; 4]], p_in: Vec3) -> f32 {
     d * lip
 }
 
+/// Blend size of a combine at world point `pw`: its own blend, or more near
+/// one of its local junction fillets (`BlendZone::k_at`, same in sdf.wgsl).
+pub fn zone_k(w: &[[f32; 4]], aux: &[[f32; 4]], pw: Vec3) -> f32 {
+    let mut k = w[0][2];
+    let (mut row, n) = (w[2][0] as usize, w[2][1] as usize);
+    for _ in 0..n {
+        let Some(h) = aux.get(row) else { break };
+        let np = h[1] as usize;
+        // (BlendZone::k_at without allocating)
+        let pt = |i: usize| aux.get(row + 1 + i).map(|v| Vec3::new(v[0], v[1], v[2])).unwrap_or(Vec3::ZERO);
+        let mut d = if np == 1 { (pw - pt(0)).length() } else { f32::MAX };
+        for i in 0..np.saturating_sub(1) {
+            let (a, b) = (pt(i), pt(i + 1));
+            let ab = b - a;
+            let t = ((pw - a).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
+            d = d.min((pw - (a + ab * t)).length());
+        }
+        let r = h[0];
+        let reach = r * 1.5 + 0.5;
+        let fade = (r * 2.0).max(3.0);
+        let t = ((d - reach) / fade).clamp(0.0, 1.0);
+        k = k.max(r * (1.0 - t * t * (3.0 - 2.0 * t)));
+        row += 1 + np;
+    }
+    k
+}
+
 /// Combines accumulated `a` with new `b`. Returns (distance, material).
 pub fn combine(a: (f32, f32), b: (f32, f32), w: &[[f32; 4]]) -> (f32, f32) {
     let mode = w[0][1] as u32;
@@ -715,7 +762,9 @@ impl Program {
                         let b = stack[sp - 1];
                         let a = stack[sp - 2];
                         sp -= 1;
-                        stack[sp - 1] = combine(a, b, w);
+                        let mut w2 = [w[0], w[1], w[2], w[3]];
+                        w2[0][2] = zone_k(w, &self.aux, pw);
+                        stack[sp - 1] = combine(a, b, &w2);
                     }
                 }
                 _ => {}

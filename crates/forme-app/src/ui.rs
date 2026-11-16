@@ -1581,6 +1581,13 @@ fn edge_card(ui: &mut Ui, st: &mut AppState) {
     };
     ui.label(egui::RichText::new(what).font(regular(12.0)).color(TEXT2));
     ui.add_space(4.0);
+    // a junction: this piece only (local fillet) or the whole junction
+    if st.edge_sel.iter().any(|x| matches!(x.kind, forme_core::edges::EdgeKind::Junction { .. })) {
+        let scope = [(false, "Ce morceau", EDGE_SEL), (true, "Toute la jonction", EDGE_SEL)];
+        if let Some(w) = segmented(ui, &scope, st.junction_whole, 32.0) {
+            st.junction_whole = w;
+        }
+    }
     let kinds = [(false, "Arrondi", EDGE_SEL), (true, "Chanfrein", EDGE_SEL)];
     if let Some(c) = segmented(ui, &kinds, e.chamfer, 36.0) {
         st.set_fillet(e.radius, c, true);

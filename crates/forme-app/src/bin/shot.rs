@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -771,7 +771,39 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.st.commit_placement();
         h.steps(2);
         eprintln!("tore très zoomé : pas de plantage");
-    }    if want("pc-scale") {
+    }    if want("pc-local") {
+        // a fillet on one piece of a junction only (the bearing on the base:
+        // the +X side filleted, the -X side left sharp)
+        h.pc(AppState::new(support_axe(), "Support d'axe"), UiMode::Atelier);
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.steps(2);
+        let palier = h.find("Palier");
+        h.st.edit("Raccord", palier, |n| n.combine.blend = 0.0);
+        h.st.frame_all();
+        h.steps(30);
+        h.st.set_pick_mode(PickMode::Edge);
+        h.steps(2);
+        let x = (11.0f32 * 11.0 - 9.0 * 9.0).sqrt();
+        let at = h.screen_of(Vec3::new(x, 10.0, 6.0));
+        let pick = h.st.pick_edge([at.x, at.y], 14.0);
+        eprintln!("arête : {:?}", pick.as_ref().map(|e| (e.label.clone(), e.kind, e.curves.len())));
+        if let Some(e) = pick {
+            h.st.select_edge(e, false);
+            h.st.set_fillet(4.0, false, true);
+            h.steps(4);
+            let zones = h.st.scene.node(palier).map(|n| n.blend_zones.len()).unwrap_or(0);
+            eprintln!("fillet local : {zones} zone(s), rayon de l'arête {:?}", h.st.edge_sel.last().map(|e| e.radius));
+            let p = h.st.program().clone();
+            let corner = |sx: f32| p.dist(Vec3::new(sx * (x + 0.5), 10.5, 0.0));
+            eprintln!("coin +X {:.2} (rempli si < 0), coin -X {:.2}", corner(1.0), corner(-1.0));
+        }
+        h.shot("pc-local-1-morceau");
+        h.st.camera.yaw += 0.9;
+        h.st.view_changed();
+        h.steps(4);
+        h.shot("pc-local-2-autre-cote");
+    }
+    if want("pc-scale") {
         // scale tool (R), translucent rings, pills marking menu, panel grip
         h.pc(AppState::new(support_axe(), "Support d'axe"), UiMode::Atelier);
         h.st.pointer_kind = PointerKind::Mouse;

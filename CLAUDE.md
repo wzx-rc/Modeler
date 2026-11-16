@@ -45,6 +45,7 @@ The iPad `.ipa` is built by GitHub Actions on every push to `main` (repository `
 ## Rules that are easy to break
 
 - **The shader (`sdf.wgsl`), the f32 CPU interpreter (`program.rs::eval_prim`) and the f64 bake interpreter (`bake/field.rs::prim_raw`) must stay identical.** Any change to a primitive (for example per-edge fillets) goes in all three.
+- Local junction fillets (`Node.blend_zones`, `BlendZone::k_at`): the blend of a combine is `max(own blend, zone radius fading with the distance to the zone's corner polyline)`, evaluated at the world point in `sdf.wgsl::zone_k`, `program.rs::zone_k` and `bake/field.rs::zone_k` (same formula, same aux layout). The Bake refuses them for now. A zone is the straight run of the junction's raw corner curve around the pick (`edges::corner_piece`).
 - Box edge indices (12): `axis*4 + k`, with k over the signs of the other two axes `(+,+) (-,+) (-,-) (+,-)`, other axes = `(axis+1)%3, (axis+2)%3`. Cylinder: 0 = top rim, 1 = bottom rim.
 - `Shape.edges` empty = uniform fillet (`round` / `chamfer`). Negative value = chamfer. `set_edge` collapses back to uniform when every edge is equal.
 - Bake build order (validated by Romain): **fillets first**, as quad strips shown in orange in debug renders, **then the fill paths** (flat faces, walls) between them, reusing the strips' edge vertices exactly. See `docs/BAKE.md`.

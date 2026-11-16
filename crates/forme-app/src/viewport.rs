@@ -437,8 +437,15 @@ fn draw_edges(p: &Painter, st: &AppState) {
     }
     let view = st.view();
     let draw = |e: &forme_core::edges::EdgePick, vis: &[Vec<bool>], color: Color32, strong: bool| {
+        // a junction filleted piece by piece: only the picked piece is lit
+        let piece = (matches!(e.kind, forme_core::edges::EdgeKind::Junction { .. }) && !st.junction_whole && e.raw.len() > 2)
+            .then(|| forme_core::BlendZone { radius: 0.0, pts: forme_core::edges::corner_piece(&e.raw, e.raw_at) });
+        let tol = e.radius * 0.8 + 1.5;
         for (ci, c) in e.curves.iter().enumerate() {
-            let pts: Vec<Option<Pos2>> = c.iter().map(|q| view.project(*q).map(|s| pos2(s[0], s[1]))).collect();
+            let pts: Vec<Option<Pos2>> = c
+                .iter()
+                .map(|q| if piece.as_ref().map(|z| z.dist(*q) < tol).unwrap_or(true) { view.project(*q).map(|s| pos2(s[0], s[1])) } else { None })
+                .collect();
             let v = |i: usize| vis.get(ci).and_then(|x| x.get(i)).copied().unwrap_or(true);
             let mut run: Vec<Pos2> = vec![];
             let mut run_vis = true;

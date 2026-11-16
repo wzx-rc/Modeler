@@ -134,6 +134,31 @@ mod tests {
     }
 
     #[test]
+    fn local_junction_fillet_only_near_its_curve() {
+        // a post on a plate: a fillet zone on the +X side of the junction
+        // only. Near it the inner corner is filled, on the -X side it stays sharp.
+        let mut s = Scene::new();
+        let r = s.root;
+        let mut plate = Shape::new(PrimKind::Box);
+        plate.size = Vec3::new(30.0, 2.0, 30.0);
+        s.add(r, NodeSpec::shape("plate", plate));
+        let mut post = Shape::new(PrimKind::Box);
+        post.size = Vec3::new(5.0, 10.0, 5.0);
+        let id = s.add(r, NodeSpec::shape("post", post).at(Vec3::new(0.0, 12.0, 0.0)));
+        let zone = scene::BlendZone::from_curve(3.0, &[Vec3::new(5.0, 2.0, -5.0), Vec3::new(5.0, 2.0, 5.0)]);
+        s.nodes.get_mut(&id).unwrap().blend_zones.push(zone);
+        let p = compile(&s);
+        // the inner corner, 0.4 mm out from the wall and the plate
+        let near = p.dist(Vec3::new(5.4, 2.4, 0.0));
+        let far = p.dist(Vec3::new(-5.4, 2.4, 0.0));
+        assert!(near < 0.0, "fillet near the zone: {near}");
+        assert!(far > 0.0, "sharp away from it: {far}");
+        // the f64 bake interpreter agrees
+        let f = bake::field::Field::new(&p);
+        assert!((f.eval(glam::DVec3::new(5.4, 2.4, 0.0)).d - near as f64).abs() < 1e-3);
+    }
+
+    #[test]
     fn radial_repeat_starts_where_the_shape_is() {
         // a shape at any angle around the axis: the copies start on it
         let mut s = Scene::new();

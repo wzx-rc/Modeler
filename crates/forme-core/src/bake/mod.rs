@@ -181,6 +181,9 @@ pub fn plan(scene: &Scene, st: &BakeSettings) -> Result<f64, String> {
 /// history is not handled yet.
 pub fn bake(scene: &Scene, st: &BakeSettings, progress: &Progress) -> Result<Baked, String> {
     progress.set(0, 1);
+    if scene.nodes.values().any(|n| !n.blend_zones.is_empty()) {
+        return Err("fillets de jonction locaux : pas encore gérés par le Bake".into());
+    }
     let size = plan(scene, st)?;
     let ls = layout::LayoutSettings { size, tol: (st.tol * 2.0).max(0.01), threads: st.threads, diagonal: true };
     let r = layout::build(scene, &ls, progress);

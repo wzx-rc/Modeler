@@ -950,6 +950,16 @@ fn edges(ui: &mut Ui, st: &mut AppState) {
         let title = if n > 1 { format!("{n} arêtes sélectionnées") } else { e.label.clone() };
         ui.label(RichText::new(title).font(medium(12.5)).color(T1));
     });
+    if st.edge_sel.iter().any(|x| matches!(x.kind, forme_core::edges::EdgeKind::Junction { .. })) {
+        ui.horizontal(|ui| {
+            if ui.radio(!st.junction_whole, "Ce morceau").clicked() {
+                st.junction_whole = false;
+            }
+            if ui.radio(st.junction_whole, "Toute la jonction").clicked() {
+                st.junction_whole = true;
+            }
+        });
+    }
     ui.horizontal(|ui| {
         if ui.radio(!e.chamfer, "Arrondi").clicked() {
             st.set_fillet(e.radius, false, true);

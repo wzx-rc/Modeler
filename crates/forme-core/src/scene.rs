@@ -456,6 +456,65 @@ pub struct Node {
     pub material: u32,
     pub visible: bool,
     pub expanded: bool,
+    /// Local junction fillets: the blend with what is under this node is
+    /// `radius` along each stored piece of the junction curve and fades to
+    /// the node's own blend away from it (Romain, 16 nov.).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blend_zones: Vec<BlendZone>,
+}
+
+/// One piece of a junction curve (world points, a polyline) with its fillet.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BlendZone {
+    pub radius: f32,
+    pub pts: Vec<Vec3>,
+}
+
+impl BlendZone {
+    /// Most points kept per zone (the shader walks them for every sample).
+    pub const MAX_PTS: usize = 12;
+
+    /// Fillet size of this zone at world point p: full near the curve,
+    /// fading smoothly to 0 beyond it (and past its ends). Same formula in
+    /// sdf.wgsl and bake/field.rs.
+    pub fn k_at(&self, p: Vec3) -> f32 {
+        let mut d = f32::MAX;
+        for w in self.pts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let ab = b - a;
+            let t = ((p - a).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
+            d = d.min((p - (a + ab * t)).length());
+        }
+        if self.pts.len() == 1 {
+            d = (p - self.pts[0]).length();
+        }
+        let reach = self.radius * 1.5 + 0.5;
+        let fade = (self.radius * 2.0).max(3.0);
+        let t = ((d - reach) / fade).clamp(0.0, 1.0);
+        self.radius * (1.0 - t * t * (3.0 - 2.0 * t))
+    }
+
+    /// Distance from p to the zone's curve.
+    pub fn dist(&self, p: Vec3) -> f32 {
+        let mut d = if self.pts.len() == 1 { (p - self.pts[0]).length() } else { f32::MAX };
+        for w in self.pts.windows(2) {
+            let ab = w[1] - w[0];
+            let t = ((p - w[0]).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
+            d = d.min((p - (w[0] + ab * t)).length());
+        }
+        d
+    }
+
+    /// A zone from a picked curve: evenly thinned to MAX_PTS points.
+    pub fn from_curve(radius: f32, curve: &[Vec3]) -> BlendZone {
+        let n = curve.len();
+        let pts = if n <= Self::MAX_PTS {
+            curve.to_vec()
+        } else {
+            (0..Self::MAX_PTS).map(|i| curve[i * (n - 1) / (Self::MAX_PTS - 1)]).collect()
+        };
+        BlendZone { radius, pts }
+    }
 }
 
 impl Node {
@@ -597,6 +656,7 @@ impl Scene {
             material: 0,
             visible: true,
             expanded: true,
+            blend_zones: vec![],
         };
         let mut nodes = BTreeMap::new();
         nodes.insert(0, root);
@@ -626,6 +686,7 @@ impl Scene {
             material: spec.material,
             visible: true,
             expanded: false,
+            blend_zones: vec![],
         };
         self.nodes.insert(id, node);
         if let Some(NodeKind::Group { children, .. }) = self.nodes.get_mut(&parent).map(|n| &mut n.kind) {

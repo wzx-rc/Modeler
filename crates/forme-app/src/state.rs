@@ -426,6 +426,9 @@ pub struct AppState {
     pub handle_hover: Option<Handle>,
     /// Move / size (W), rotate (E) or scale (R).
     pub gizmo: GizmoMode,
+    /// Junction fillets: the whole junction between two shapes (true) or only
+    /// the picked piece (false, default).
+    pub junction_whole: bool,
     /// Scale being dragged: the factor (shown by the gizmo).
     pub scale_factor: Option<f32>,
     /// Smooth framing (F) in progress.
@@ -531,7 +534,7 @@ fn snap_vec(v: Vec3, step: f32, on: bool) -> Vec3 {
     Vec3::new(snap_to(v.x, step, on), snap_to(v.y, step, on), snap_to(v.z, step, on))
 }
 
-/// A shape scaled by  along its own axes: boxes and spheres per axis; round
+/// A shape scaled by `f` along its own axes: boxes and spheres per axis; round
 /// shapes keep a round section (the larger of the X / Z factors).
 pub fn scaled_shape(sh0: &Shape, f: Vec3) -> Shape {
     let mut s = sh0.clone();
@@ -617,6 +620,7 @@ impl AppState {
             handle_drag: None,
             handle_hover: None,
             gizmo: GizmoMode::Move,
+            junction_whole: false,
             scale_factor: None,
             cam_anim: None,
             pointer_kind: PointerKind::Mouse,
@@ -1099,8 +1103,11 @@ impl AppState {
 
     /// Selects an edge; with `add`, toggles it in the current edge selection.
     pub fn select_edge(&mut self, e: EdgePick, add: bool) {
+        // two pieces of the same junction are two edges when they are filleted apart
+        let local = self.local_junction(&e);
+        let same = |x: &EdgePick| x.kind.same(&e.kind) && (!local || BlendZone::from_curve(1.0, &forme_core::edges::corner_piece(&x.raw, x.raw_at)).dist(e.raw_at) < 0.6);
         if add {
-            if let Some(i) = self.edge_sel.iter().position(|x| x.kind.same(&e.kind)) {
+            if let Some(i) = self.edge_sel.iter().position(|x| same(x)) {
                 self.edge_sel.remove(i);
             } else {
                 self.edge_sel.push(e);
@@ -1124,7 +1131,8 @@ impl AppState {
 
     /// Is this edge in the selection?
     pub fn edge_selected(&self, e: &EdgePick) -> bool {
-        self.edge_sel.iter().any(|x| x.kind.same(&e.kind))
+        let local = self.local_junction(e);
+        self.edge_sel.iter().any(|x| x.kind.same(&e.kind) && (!local || BlendZone::from_curve(1.0, &forme_core::edges::corner_piece(&x.raw, x.raw_at)).dist(e.raw_at) < 0.6))
     }
 
     /// Largest fillet that makes sense for the selected edge.
@@ -1159,11 +1167,53 @@ impl AppState {
             self.history.record(if chamfer { "Chanfrein" } else { "Fillet" }, &self.scene);
         }
         for e in self.edge_sel.clone() {
-            if let Some(n) = self.scene.node_mut(e.owner) {
-                apply_fillet(n, e.kind, r, chamfer);
-            }
+            self.put_fillet(&e, r, chamfer);
         }
         self.changed();
+    }
+
+    /// A junction edge filleted on its own piece only (Romain, 16 nov.), not
+    /// on the whole junction between the two shapes.
+    fn local_junction(&self, e: &EdgePick) -> bool {
+        matches!(e.kind, EdgeKind::Junction { .. }) && !self.junction_whole
+    }
+
+    /// The fillet an edge has now: on a junction piece, its local fillet.
+    pub fn get_fillet(&self, e: &EdgePick) -> (f32, bool) {
+        let Some(n) = self.scene.node(e.owner) else { return (0.0, false) };
+        let (r, ch) = fillet_of(n, e.kind);
+        if self.local_junction(e) {
+            if let Some(z) = n.blend_zones.iter().find(|z| z.dist(e.raw_at) < 0.6) {
+                return (z.radius, ch);
+            }
+        }
+        (r, ch)
+    }
+
+    /// Writes the fillet of one edge: a junction piece keeps its own zone
+    /// (created on the first non-zero value, removed at 0).
+    pub fn put_fillet(&mut self, e: &EdgePick, r: f32, chamfer: bool) {
+        let local = self.local_junction(e);
+        let Some(n) = self.scene.node_mut(e.owner) else { return };
+        if !local {
+            apply_fillet(n, e.kind, r, chamfer);
+            return;
+        }
+        n.combine.kind = if chamfer { BlendKind::Chamfer } else { BlendKind::Smooth };
+        let at = e.raw_at;
+        match n.blend_zones.iter().position(|z| z.dist(at) < 0.6) {
+            Some(i) if r <= 0.0 => {
+                n.blend_zones.remove(i);
+            }
+            Some(i) => n.blend_zones[i].radius = r,
+            None if r > 0.0 => {
+                // the straight run of the junction around the pick, up to its corners
+                let piece = forme_core::edges::corner_piece(&e.raw, at);
+                let piece = if piece.len() >= 2 { piece } else { vec![at] };
+                n.blend_zones.push(BlendZone::from_curve(r, &piece));
+            }
+            None => {}
+        }
     }
 
     /// Keeps the selected edge in step with the scene (after edits, undo…).
@@ -2048,12 +2098,19 @@ impl AppState {
             Handle::Fillet => {
                 // every selected edge takes the handle's value
                 let Some(e) = self.edge_sel.last().cloned() else { return };
-                let (r0, chamfer) = fillet_of(&d.start, e.kind);
+                let (r0, chamfer) = {
+                    // the value at the start of the drag (local zone included)
+                    let now = self.scene.clone();
+                    if let Some(n) = self.scene.node_mut(d.node) {
+                        *n = d.start.clone();
+                    }
+                    let v = self.get_fillet(&e);
+                    self.scene = now;
+                    v
+                };
                 let r = snap_to((r0 + (t - d.t0) * 0.6).max(0.0), 0.1, snap).clamp(0.0, self.fillet_max());
                 for e in self.edge_sel.clone() {
-                    if let Some(n) = self.scene.node_mut(e.owner) {
-                        apply_fillet(n, e.kind, r, chamfer);
-                    }
+                    self.put_fillet(&e, r, chamfer);
                 }
             }
             Handle::MoveX | Handle::MoveY | Handle::MoveZ => {

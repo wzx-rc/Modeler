@@ -106,7 +106,8 @@ enum Instr {
     Reset,
     Op(ChainOp),
     Prim(u32),
-    Combine { mode: u32, k: f64, chamfer: bool, depth: f64, width: f64 },
+    /// zone: index in Field::zones of the local junction fillets, or u32::MAX.
+    Combine { mode: u32, k: f64, chamfer: bool, depth: f64, width: f64, zone: u32 },
     End,
 }
 
@@ -138,6 +139,8 @@ pub struct Field {
     pub prims: Vec<PrimDef>,
     /// Largest amount a blend can move the surface away from its terms.
     pub blend_bound: f64,
+    /// Local junction fillets of the combines: (radius, world polyline).
+    zones: Vec<Vec<(f64, Vec<DVec3>)>>,
 }
 
 fn rot_in_plane(axis: u32, phi: f64) -> DMat3 {
@@ -185,6 +188,7 @@ impl Field {
         let mut prims = vec![];
         let mut chain: Vec<ChainOp> = vec![];
         let mut blend_bound = 0.0f64;
+        let mut zones: Vec<Vec<(f64, Vec<DVec3>)>> = vec![];
         let mut pc = 0;
         while pc + INSTR_WORDS <= code.len() {
             let w = &code[pc..pc + INSTR_WORDS];
@@ -274,8 +278,25 @@ impl Field {
                 OP_COMBINE => {
                     let k = f(0, 2).max(0.0);
                     let chamfer = w[0][3] > 0.5;
-                    blend_bound = blend_bound.max(if chamfer { k * 0.3 } else { k * 0.25 });
-                    Instr::Combine { mode: w[0][1] as u32, k, chamfer, depth: f(1, 0), width: f(1, 1) }
+                    // local junction fillets (same layout as program.rs::zone_k)
+                    let (mut row, nz) = (w[2][0] as usize, w[2][1] as usize);
+                    let mut set = vec![];
+                    for _ in 0..nz {
+                        let Some(h) = prog.aux.get(row) else { break };
+                        let np = h[1] as usize;
+                        let pts = (0..np).filter_map(|i| prog.aux.get(row + 1 + i).map(|v| DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64))).collect();
+                        set.push((h[0] as f64, pts));
+                        row += 1 + np;
+                    }
+                    let kmax = set.iter().map(|z| z.0).fold(k, f64::max);
+                    blend_bound = blend_bound.max(if chamfer { kmax * 0.3 } else { kmax * 0.25 });
+                    let zone = if set.is_empty() {
+                        u32::MAX
+                    } else {
+                        zones.push(set);
+                        zones.len() as u32 - 1
+                    };
+                    Instr::Combine { mode: w[0][1] as u32, k, chamfer, depth: f(1, 0), width: f(1, 1), zone }
                 }
                 _ => {
                     pc += INSTR_WORDS;
@@ -285,7 +306,7 @@ impl Field {
             instrs.push(ins);
             pc += INSTR_WORDS;
         }
-        Field { instrs, prims, blend_bound }
+        Field { instrs, prims, blend_bound, zones }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -437,11 +458,12 @@ impl Field {
                         sp += 1;
                     }
                 }
-                Instr::Combine { mode, k, chamfer, depth, width } => {
+                Instr::Combine { mode, k, chamfer, depth, width, zone } => {
                     if sp >= 2 {
                         let b = stack[sp - 1];
                         let a = stack[sp - 2];
                         sp -= 1;
+                        let k = if zone == u32::MAX { k } else { zone_k(k, &self.zones[zone as usize], pw) };
                         stack[sp - 1] = combine(a, b, mode, k, chamfer, depth, width);
                     }
                 }
@@ -629,6 +651,24 @@ impl Field {
         }
         f
     }
+}
+
+/// Blend near local junction fillets (f64 twin of program.rs::zone_k).
+fn zone_k(base: f64, zones: &[(f64, Vec<DVec3>)], pw: DVec3) -> f64 {
+    let mut k = base;
+    for (r, pts) in zones {
+        let mut d = if pts.len() == 1 { (pw - pts[0]).length() } else { f64::MAX };
+        for w in pts.windows(2) {
+            let ab = w[1] - w[0];
+            let t = ((pw - w[0]).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
+            d = d.min((pw - (w[0] + ab * t)).length());
+        }
+        let reach = r * 1.5 + 0.5;
+        let fade = (r * 2.0).max(3.0);
+        let s = ((d - reach) / fade).clamp(0.0, 1.0);
+        k = k.max(r * (1.0 - s * s * (3.0 - 2.0 * s)));
+    }
+    k
 }
 
 fn combine(a: Slot, b: Slot, mode: u32, k: f64, chamfer: bool, depth: f64, width: f64) -> Slot {

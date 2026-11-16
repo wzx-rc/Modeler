@@ -46,6 +46,53 @@ pub struct EdgePick {
     pub label: String,
     /// Where the pick happened (to rebuild the curves after an edit).
     pub seed: Vec3,
+    /// Junctions: the raw corner curve (where the two shapes meet, before
+    /// any fillet) and its point nearest to the pick. Local fillets are
+    /// stored on pieces of it. Own edges: empty, `raw_at` = `at`.
+    pub raw: Vec<Vec3>,
+    pub raw_at: Vec3,
+}
+
+/// The piece of a corner curve around `at`: up to the sharp turns (more than
+/// 35°) on both sides, so one straight side of a junction loop is one piece.
+pub fn corner_piece(raw: &[Vec3], at: Vec3) -> Vec<Vec3> {
+    if raw.len() < 3 {
+        return raw.to_vec();
+    }
+    let closed = raw.first().unwrap().distance(*raw.last().unwrap()) < 1e-3;
+    let pts: Vec<Vec3> = if closed { raw[..raw.len() - 1].to_vec() } else { raw.to_vec() };
+    let n = pts.len();
+    let i0 = (0..n).min_by(|&a, &b| pts[a].distance(at).total_cmp(&pts[b].distance(at))).unwrap_or(0);
+    let turn = |i: usize| -> bool {
+        if !closed && (i == 0 || i == n - 1) {
+            return true;
+        }
+        let (a, b, c) = (pts[(i + n - 1) % n], pts[i], pts[(i + 1) % n]);
+        let (u, v) = ((b - a).normalize_or_zero(), (c - b).normalize_or_zero());
+        u.dot(v) < 0.82
+    };
+    // walk both ways until a sharp turn (or all the way round)
+    let mut lo = i0;
+    let mut steps = 0;
+    while !turn(lo) && steps < n {
+        lo = (lo + n - 1) % n;
+        steps += 1;
+    }
+    let mut hi = i0;
+    steps = 0;
+    while !turn(hi) && steps < n {
+        hi = (hi + 1) % n;
+        steps += 1;
+    }
+    let mut out = vec![pts[lo]];
+    let mut i = lo;
+    let mut guard = 0;
+    while i != hi && guard <= n {
+        i = (i + 1) % n;
+        out.push(pts[i]);
+        guard += 1;
+    }
+    out
 }
 
 /// Distance functions of every visible shape, built once per scene version.
@@ -255,7 +302,8 @@ impl EdgeIndex {
         // on the final surface: the middle of the fillet, where it is visible
         let gov = junction_owner(scene, *aid, *bid);
         let gn = &scene.nodes[&gov];
-        let k = gn.combine.blend.max(0.0) as f64;
+        // (local fillets too: the surface moves further from the corner there)
+        let k = gn.blend_zones.iter().map(|z| z.radius).fold(gn.combine.blend.max(0.0), f32::max) as f64;
         let mut curves: Vec<Vec<Vec3>> = vec![];
         let mut cur: Vec<Vec3> = vec![];
         let mut at = c0;
@@ -292,10 +340,13 @@ impl EdgeIndex {
             curves,
             at: at.as_vec3(),
             normal: Vec3::Y,
-            radius: gn.combine.blend.max(0.0),
+            // a local fillet on this piece of the junction wins over the whole one
+            radius: gn.blend_zones.iter().find(|z| z.dist(c0.as_vec3()) < 0.6).map(|z| z.radius).unwrap_or(gn.combine.blend.max(0.0)),
             chamfer: gn.combine.kind == BlendKind::Chamfer,
             label: format!("{} × {}", name(aid), name(bid)),
             seed: p.as_vec3(),
+            raw: corner.iter().map(|c| c.as_vec3()).collect(),
+            raw_at: c0.as_vec3(),
         })
     }
 
@@ -436,6 +487,8 @@ impl EdgeIndex {
                 chamfer: r < 0.0,
                 label,
                 seed: p.as_vec3(),
+                raw: vec![],
+                raw_at: at,
             },
         ))
     }

@@ -280,6 +280,35 @@ fn eval_prim(pc: u32, p_in: vec3<f32>) -> f32 {
     return d * lip;
 }
 
+// Blend size near local junction fillets (BlendZone::k_at in scene.rs,
+// zone_k in program.rs, bake/field.rs): full along each stored curve piece,
+// fading to the combine's own blend away from it.
+fn zone_k(base: f32, start: u32, count: u32, pw: vec3<f32>) -> f32 {
+    var k = base;
+    var row = start;
+    for (var z = 0u; z < count; z = z + 1u) {
+        let h = aux[row];
+        let np = u32(h.y);
+        var d = 1e30;
+        if (np == 1u) {
+            d = length(pw - aux[row + 1u].xyz);
+        }
+        for (var i = 0u; i + 1u < np; i = i + 1u) {
+            let a = aux[row + 1u + i].xyz;
+            let b = aux[row + 2u + i].xyz;
+            let ab = b - a;
+            let t = clamp(dot(pw - a, ab) / max(dot(ab, ab), 1e-9), 0.0, 1.0);
+            d = min(d, length(pw - (a + ab * t)));
+        }
+        let r = h.x;
+        let reach = r * 1.5 + 0.5;
+        let fade = max(r * 2.0, 3.0);
+        let s = clamp((d - reach) / fade, 0.0, 1.0);
+        k = max(k, r * (1.0 - s * s * (3.0 - 2.0 * s)));
+        row = row + 1u + np;
+    }
+    return k;
+}
 fn combine(a: vec2<f32>, b: vec2<f32>, w0: vec4<f32>, w1: vec4<f32>) -> vec2<f32> {
     let mode = u32(w0.y);
     let k = w0.z;
@@ -464,7 +493,13 @@ fn run(start: u32, pw: vec3<f32>) -> vec2<f32> {
                     let b = stack[sp - 1u];
                     let a = stack[sp - 2u];
                     sp = sp - 1u;
-                    stack[sp - 1u] = combine(a, b, w0, code[pc + 1u]);
+                    // local junction fillets: a larger blend near their curves
+                    var wc = w0;
+                    let wz = code[pc + 2u];
+                    if (wz.y > 0.5) {
+                        wc.z = zone_k(w0.z, u32(wz.x), u32(wz.y), pw);
+                    }
+                    stack[sp - 1u] = combine(a, b, wc, code[pc + 1u]);
                 }
             }
             default: {}
