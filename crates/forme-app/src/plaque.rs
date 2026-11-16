@@ -25,7 +25,7 @@ const GAP: f32 = 10.0;
 
 /// Small card: tight corners, thin border (Plaque look).
 fn card() -> Frame {
-    Frame::new().fill(PANEL).stroke(Stroke::new(1.0, PANEL_BORDER)).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(4))
+    Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, PANEL_BORDER())).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(4))
 }
 
 pub fn show(ctx: &egui::Context, st: &mut AppState) {
@@ -51,16 +51,16 @@ fn tool_btn(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> Response {
     if on {
         p.rect(rect.shrink(0.5), 6.0, accent_bg(), Stroke::new(1.0, accent()), StrokeKind::Inside);
     } else if resp.hovered() || resp.is_pointer_button_down_on() {
-        p.rect_filled(rect, 6.0, RAISED);
+        p.rect_filled(rect, 6.0, RAISED());
     }
-    let c = if on { accent_light() } else { TEXT_ICON };
+    let c = if on { accent_light() } else { TEXT_ICON() };
     icons::paint(p, Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), icon, c);
     resp.on_hover_text(tip)
 }
 
 /// Shortcut letter in the bottom-right corner of a tool button.
 fn key(ui: &Ui, r: &Response, k: &str) {
-    ui.painter().text(r.rect.right_bottom() - vec2(3.0, 2.0), Align2::RIGHT_BOTTOM, k, medium(8.5), TEXT2);
+    ui.painter().text(r.rect.right_bottom() - vec2(3.0, 2.0), Align2::RIGHT_BOTTOM, k, medium(8.5), TEXT2());
 }
 
 /// Top left: the app, the document (opens the files), undo / redo.
@@ -74,13 +74,13 @@ fn menu_pill(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.painter().rect_filled(logo, 5.0, accent());
                 icons::paint(ui.painter(), logo.shrink(4.0), Icon::Cube, on_accent());
                 let name = st.doc_name.clone();
-                let g = ui.painter().layout_no_wrap(name, medium(12.5), TEXT);
+                let g = ui.painter().layout_no_wrap(name, medium(12.5), TEXT());
                 let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 30.0, BTN), Sense::click());
                 if resp.hovered() || st.files_open {
-                    ui.painter().rect_filled(r, 6.0, RAISED);
+                    ui.painter().rect_filled(r, 6.0, RAISED());
                 }
-                ui.painter().galley(pos2(r.min.x + 6.0, r.center().y - g.size().y * 0.5), g, TEXT);
-                icons::paint(ui.painter(), Rect::from_min_size(pos2(r.max.x - 18.0, r.center().y - 6.0), vec2(12.0, 12.0)), Icon::Chevron, TEXT2);
+                ui.painter().galley(pos2(r.min.x + 6.0, r.center().y - g.size().y * 0.5), g, TEXT());
+                icons::paint(ui.painter(), Rect::from_min_size(pos2(r.max.x - 18.0, r.center().y - 6.0), vec2(12.0, 12.0)), Icon::Chevron, TEXT2());
                 if resp.on_hover_text("Ouvrir, nouveau, enregistrer").clicked() {
                     st.files_open = !st.files_open;
                 }
@@ -98,7 +98,7 @@ fn menu_pill(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 
 fn sep(ui: &mut Ui) {
     let (r, _) = ui.allocate_exact_size(vec2(9.0, BTN), Sense::hover());
-    ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(1.0, 18.0)), 0.0, DIVIDER);
+    ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(1.0, 18.0)), 0.0, DIVIDER());
 }
 
 /// Top centre of the view: view presets, grid, light, settings.
@@ -110,15 +110,15 @@ fn view_pill(ctx: &egui::Context, st: &mut AppState, view: Rect) {
                 let cur = st.camera.preset_of();
                 for (p, l) in [(ViewPreset::Perspective, "3D"), (ViewPreset::Front, "Face"), (ViewPreset::Right, "Droite"), (ViewPreset::Top, "Dessus")] {
                     let on = cur == p;
-                    let g = ui.painter().layout_no_wrap(l.to_string(), medium(12.0), TEXT);
+                    let g = ui.painter().layout_no_wrap(l.to_string(), medium(12.0), TEXT());
                     let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 18.0, BTN), Sense::click());
                     let pt = ui.painter();
                     if on {
-                        pt.rect_filled(r, 6.0, RAISED);
+                        pt.rect_filled(r, 6.0, RAISED());
                     } else if resp.hovered() {
-                        pt.rect_filled(r, 6.0, WELL);
+                        pt.rect_filled(r, 6.0, WELL());
                     }
-                    pt.text(r.center(), Align2::CENTER_CENTER, l, medium(12.0), if on { TEXT_STRONG } else { TEXT2 });
+                    pt.text(r.center(), Align2::CENTER_CENTER, l, medium(12.0), if on { TEXT_STRONG() } else { TEXT2() });
                     if resp.clicked() {
                         st.camera.preset(p);
                         st.view_changed();
@@ -187,9 +187,9 @@ fn tools(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 if on {
                     p.rect(r.shrink(0.5), 6.0, tint(c, 0.16), Stroke::new(1.0, c), StrokeKind::Inside);
                 } else if resp.hovered() {
-                    p.rect_filled(r, 6.0, RAISED);
+                    p.rect_filled(r, 6.0, RAISED());
                 }
-                ui::paint_mode_glyph(p, r.center(), m, if on { c } else { TEXT_ICON }, 12.0);
+                ui::paint_mode_glyph(p, r.center(), m, if on { c } else { TEXT_ICON() }, 12.0);
                 let tip = if m == CombineMode::Add { "Add : ajoute la forme" } else { "Carve : creuse" };
                 if resp.on_hover_text(tip).clicked() {
                     st.set_mode(m);
@@ -215,8 +215,8 @@ fn scene_dock(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     egui::Area::new(Id::new("plaque-scene")).order(Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
         let (r, _) = ui.allocate_exact_size(rect.size(), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(r, 0.0, PANEL);
-        p.rect_filled(Rect::from_min_size(r.min, vec2(1.0, r.height())), 0.0, PANEL_BORDER);
+        p.rect_filled(r, 0.0, PANEL());
+        p.rect_filled(Rect::from_min_size(r.min, vec2(1.0, r.height())), 0.0, PANEL_BORDER());
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(vec2(8.0, 10.0))));
         let ui = &mut child;
         let h = ui.available_height();
@@ -253,7 +253,7 @@ fn status_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         Some(p) => ui::mode_color(p.mode),
         None => match st.tool {
             Tool::Place(_) => ui::mode_color(st.effective_mode()),
-            _ => st.selection.and_then(|id| st.scene.node(id)).map(|n| ui::mode_color(n.combine.mode)).unwrap_or(TEXT2),
+            _ => st.selection.and_then(|id| st.scene.node(id)).map(|n| ui::mode_color(n.combine.mode)).unwrap_or(TEXT2()),
         },
     };
     let nav = match st.settings.navigation {
@@ -263,16 +263,16 @@ fn status_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     egui::Area::new(Id::new("plaque-status")).order(Order::Middle).fixed_pos(rect.min).interactable(false).show(ctx, |ui| {
         let (r, _) = ui.allocate_exact_size(rect.size(), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(r, 0.0, WELL);
-        p.rect_filled(Rect::from_min_size(r.min, vec2(r.width(), 1.0)), 0.0, PANEL_BORDER);
+        p.rect_filled(r, 0.0, WELL());
+        p.rect_filled(Rect::from_min_size(r.min, vec2(r.width(), 1.0)), 0.0, PANEL_BORDER());
         p.circle_filled(pos2(r.min.x + 14.0, r.center().y), 3.5, dot);
         let right = format!("{nav}   |   {}", st.settings.navigation.label());
-        let rg = p.layout_no_wrap(right, regular(11.5), TEXT2);
+        let rg = p.layout_no_wrap(right, regular(11.5), TEXT2());
         let rx = r.max.x - 12.0 - rg.size().x;
-        let mut job = egui::text::LayoutJob::single_section(hint, egui::TextFormat::simple(regular(12.0), LABEL));
+        let mut job = egui::text::LayoutJob::single_section(hint, egui::TextFormat::simple(regular(12.0), LABEL()));
         job.wrap = egui::text::TextWrapping { max_width: (rx - r.min.x - 40.0).max(60.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
         let hg = p.layout_job(job);
-        p.galley(pos2(r.min.x + 26.0, r.center().y - hg.size().y * 0.5), hg, LABEL);
+        p.galley(pos2(r.min.x + 26.0, r.center().y - hg.size().y * 0.5), hg, LABEL());
         p.galley(pos2(rx, r.center().y - rg.size().y * 0.5), rg, Color32::WHITE);
     });
 }

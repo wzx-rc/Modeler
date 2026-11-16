@@ -61,6 +61,8 @@ pub struct Settings {
     pub navigation: Navigation,
     /// Accent colour: each interface's own, or one for all.
     pub ambiance: AmbianceChoice,
+    /// Light theme: white panels and a light viewport (Romain, 17 nov.).
+    pub light: bool,
 }
 
 /// Accent colour of the interface (Réglages).
@@ -198,7 +200,7 @@ impl Display {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { ui_mode: UiMode::Atelier, snap_faces: true, creation: Creation::Interactive, display: Display::default(), navigation: Navigation::Maya, ambiance: AmbianceChoice::Auto }
+        Settings { ui_mode: UiMode::Atelier, snap_faces: true, creation: Creation::Interactive, display: Display::default(), navigation: Navigation::Maya, ambiance: AmbianceChoice::Auto, light: false }
     }
 }
 
@@ -216,6 +218,12 @@ impl Settings {
             Ok("atelier") | Ok("etabli") => s.ui_mode = UiMode::Atelier,
             Ok("focus") => s.ui_mode = UiMode::Focus,
             Ok("plaque") => s.ui_mode = UiMode::Plaque,
+            _ => {}
+        }
+        // FORME_THEME=clair|sombre overrides the theme
+        match std::env::var("FORME_THEME").map(|v| v.to_lowercase()).as_deref() {
+            Ok("clair") | Ok("light") | Ok("blanc") => s.light = true,
+            Ok("sombre") | Ok("dark") => s.light = false,
             _ => {}
         }
         s

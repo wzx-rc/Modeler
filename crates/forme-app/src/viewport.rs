@@ -361,11 +361,23 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
 
 // ---------------------------------------------------------------- overlays
 
+/// Background of the viewport's value chips: graphite, white in the light theme.
+fn chip_bg() -> Color32 {
+    crate::theme::pick(Color32::from_rgb(0x14, 0x16, 0x19), Color32::WHITE)
+}
+
+/// Chip text: pale colours (yellow, cream) turn dark on a white chip.
+fn chip_fg(fg: Color32) -> Color32 {
+    let luma = 0.3 * fg.r() as f32 + 0.59 * fg.g() as f32 + 0.11 * fg.b() as f32;
+    if crate::theme::light() && luma > 150.0 { TEXT_STRONG() } else { fg }
+}
+
 pub fn chip(p: &Painter, at: Pos2, anchor: Align2, text: &str, border: Color32, fg: Color32) -> Rect {
+    let fg = chip_fg(fg);
     let galley = p.layout_no_wrap(text.to_string(), semibold(12.0), fg);
     let size = galley.size() + vec2(16.0, 8.0);
     let rect = anchor.anchor_size(at, size);
-    p.rect(rect, 7.0, tint(Color32::from_rgb(0x14, 0x16, 0x19), 0.92), Stroke::new(1.0, border), egui::StrokeKind::Inside);
+    p.rect(rect, 7.0, tint(chip_bg(), 0.92), Stroke::new(1.0, border), egui::StrokeKind::Inside);
     p.galley(rect.min + vec2(8.0, 4.0), galley, fg);
     rect
 }
@@ -530,8 +542,8 @@ fn draw_overlay(p: &Painter, st: &AppState) {
             let r_px = rr / view.pixel_size_at((pv - view.eye).length()).max(1e-6);
             let ball = hot(Handle::RotFree);
             // the trackball: a dark glass disc with a thin border (Focus's dock)
-            p.circle_filled(pc, r_px, if ball && active.is_some() { tint(HOT, 0.08) } else { tint(PANEL, 0.22) });
-            p.circle_stroke(pc, r_px, Stroke::new(1.0, if ball { tint(HOT, 0.6) } else { tint(PANEL_BORDER, 0.9) }));
+            p.circle_filled(pc, r_px, if ball && active.is_some() { tint(HOT, 0.08) } else { tint(PANEL(), 0.22) });
+            p.circle_stroke(pc, r_px, Stroke::new(1.0, if ball { tint(HOT, 0.6) } else { tint(PANEL_BORDER(), 0.9) }));
             // the swept angle, a yellow wedge
             if let (Some(d), Some(deg)) = (drag, st.rot_angle()) {
                 if let Some(r) = &d.rot {
@@ -808,7 +820,7 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                 }
             }
             if let Some(snap) = pl.snapped {
-                chip(p, b + vec2(26.0, -34.0), Align2::LEFT_BOTTOM, &format!("Snap · {snap}"), Color32::from_gray(0x4A), TEXT);
+                chip(p, b + vec2(26.0, -34.0), Align2::LEFT_BOTTOM, &format!("Snap · {snap}"), Color32::from_gray(0x4A), TEXT());
             }
             let (title, value) = match pl.phase {
                 PlacePhase::Base => match pl.kind {
@@ -825,23 +837,24 @@ fn draw_overlay(p: &Painter, st: &AppState) {
             // compact on desktop (title and value on one line), larger on iPad
             let desk = !cfg!(target_os = "ios");
             let vcol = if pl.mode == CombineMode::Add { accent_text() } else { Color32::from_rgb(0xFF, 0xD2, 0xAE) };
+            let vcol = chip_fg(vcol);
             if desk {
-                let g1 = p.layout_no_wrap(title.to_string(), regular(11.0), TEXT2);
+                let g1 = p.layout_no_wrap(title.to_string(), regular(11.0), TEXT2());
                 let g2 = p.layout_no_wrap(value.clone(), medium(13.0), vcol);
                 let size = vec2(g1.size().x + g2.size().x + 26.0, g2.size().y.max(g1.size().y) + 10.0);
                 let r = anchor.anchor_size(at, size);
-                p.rect(r, 6.0, tint(Color32::from_rgb(0x14, 0x16, 0x19), 0.92), Stroke::new(1.0, tint(color, 0.7)), egui::StrokeKind::Inside);
-                p.galley(pos2(r.min.x + 9.0, r.center().y - g1.size().y * 0.5), g1.clone(), TEXT2);
-                p.galley(pos2(r.min.x + 17.0 + g1.size().x, r.center().y - g2.size().y * 0.5), g2, TEXT);
+                p.rect(r, 6.0, tint(chip_bg(), 0.92), Stroke::new(1.0, tint(color, 0.7)), egui::StrokeKind::Inside);
+                p.galley(pos2(r.min.x + 9.0, r.center().y - g1.size().y * 0.5), g1.clone(), TEXT2());
+                p.galley(pos2(r.min.x + 17.0 + g1.size().x, r.center().y - g2.size().y * 0.5), g2, TEXT());
             } else {
-                let g1 = p.layout_no_wrap(title.to_string(), regular(11.5), TEXT2);
+                let g1 = p.layout_no_wrap(title.to_string(), regular(11.5), TEXT2());
                 let g2 = p.layout_no_wrap(value.clone(), semibold(20.0), vcol);
                 let size = vec2(g1.size().x.max(g2.size().x) + 24.0, g1.size().y + g2.size().y + 18.0);
                 let r = anchor.anchor_size(at, size);
-                p.rect(r, 10.0, tint(Color32::from_rgb(0x14, 0x16, 0x19), 0.94), Stroke::new(1.5, color), egui::StrokeKind::Inside);
+                p.rect(r, 10.0, tint(chip_bg(), 0.94), Stroke::new(1.5, color), egui::StrokeKind::Inside);
                 let gh = g1.size().y;
-                p.galley(r.min + vec2(12.0, 8.0), g1, TEXT2);
-                p.galley(r.min + vec2(12.0, 10.0 + gh), g2, TEXT);
+                p.galley(r.min + vec2(12.0, 8.0), g1, TEXT2());
+                p.galley(r.min + vec2(12.0, 10.0 + gh), g2, TEXT());
             }
         }
     }
@@ -849,7 +862,7 @@ fn draw_overlay(p: &Painter, st: &AppState) {
     // axis gizmo (bottom right of the free area)
     let gc = pos2(st.view_rect[2] - 40.0, st.view_rect[3] - 40.0);
     let (_, right, up) = view.basis();
-    p.circle(gc, 27.0, Color32::from_rgb(0x1E, 0x20, 0x23), Stroke::new(1.0, Color32::from_rgb(0x2E, 0x31, 0x36)));
+    p.circle(gc, 27.0, crate::theme::pick(Color32::from_rgb(0x1E, 0x20, 0x23), Color32::from_rgb(0xFA, 0xFB, 0xFC)), Stroke::new(1.0, crate::theme::pick(Color32::from_rgb(0x2E, 0x31, 0x36), Color32::from_rgb(0xD3, 0xD7, 0xDD))));
     for (axis, c, l) in [(glam::Vec3::X, AXIS_X, "X"), (glam::Vec3::Y, AXIS_Y, "Y"), (glam::Vec3::Z, AXIS_Z, "Z")] {
         let v = vec2(axis.dot(right), -axis.dot(up)) * 20.0;
         p.line_segment([gc, gc + v], Stroke::new(2.0, c));

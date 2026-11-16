@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -771,6 +771,22 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.st.commit_placement();
         h.steps(2);
         eprintln!("tore très zoomé : pas de plantage");
+    }
+    if want("pc-clair") {
+        // light theme (Romain, 17 nov.): the four interfaces
+        for (mode, tag) in [(UiMode::Atelier, "etabli"), (UiMode::Studio, "studio"), (UiMode::Plaque, "plaque"), (UiMode::Focus, "focus")] {
+            h.pc(AppState::new(support_axe(), "Support d'axe"), mode);
+            h.st.settings.light = true;
+            h.st.pointer_kind = PointerKind::Mouse;
+            h.steps(2);
+            let palier = h.find("Palier");
+            h.st.select(Some(palier));
+            h.st.frame_all();
+            h.st.view_changed();
+            h.steps(30);
+            h.shot(&format!("pc-clair-{tag}"));
+        }
+        h.st.settings.light = false;
     }
     if want("pc-align") {
         // alignment tools: four shapes scattered, then on the ground, centred

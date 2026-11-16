@@ -10,22 +10,49 @@ use crate::camera::ViewPreset;
 use crate::icons::{self, Icon};
 use crate::settings::{Navigation, UiMode};
 use crate::state::*;
-use crate::theme::{accent, accent_bg, accent_border, accent_text, carve, medium, regular, semibold, tint, AXIS_X, AXIS_Y, AXIS_Z, EDGE_SEL};
+use crate::theme::{pick, NEUTRAL_MODE, TEXT_ICON, accent, accent_bg, accent_border, accent_text, carve, medium, regular, semibold, tint, AXIS_X, AXIS_Y, AXIS_Z, EDGE_SEL};
 use crate::ui;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, Id, Order, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui};
 use forme_core::*;
 use glam::{EulerRot, Quat, Vec3};
 
 // Graphite of the redesign (same family as Établi, flatter: docked panels).
-const B0: Color32 = Color32::from_rgb(0x0F, 0x11, 0x14);
-const B1: Color32 = Color32::from_rgb(0x17, 0x19, 0x1D);
-const B2: Color32 = Color32::from_rgb(0x1E, 0x21, 0x26);
-const B3: Color32 = Color32::from_rgb(0x25, 0x29, 0x30);
-const B4: Color32 = Color32::from_rgb(0x2C, 0x31, 0x39);
-const LINE: Color32 = Color32::from_rgb(0x2A, 0x2E, 0x35);
-const T1: Color32 = Color32::from_rgb(0xE4, 0xE7, 0xEB);
-const T2: Color32 = Color32::from_rgb(0x9A, 0xA1, 0xAB);
-const T3: Color32 = Color32::from_rgb(0x64, 0x6B, 0x75);
+#[allow(non_snake_case)]
+fn B0() -> Color32 {
+    pick(Color32::from_rgb(0x0F, 0x11, 0x14), Color32::from_rgb(0xEE, 0xF0, 0xF3))
+}
+#[allow(non_snake_case)]
+fn B1() -> Color32 {
+    pick(Color32::from_rgb(0x17, 0x19, 0x1D), Color32::from_rgb(0xFF, 0xFF, 0xFF))
+}
+#[allow(non_snake_case)]
+fn B2() -> Color32 {
+    pick(Color32::from_rgb(0x1E, 0x21, 0x26), Color32::from_rgb(0xF6, 0xF7, 0xF9))
+}
+#[allow(non_snake_case)]
+fn B3() -> Color32 {
+    pick(Color32::from_rgb(0x25, 0x29, 0x30), Color32::from_rgb(0xED, 0xEF, 0xF2))
+}
+#[allow(non_snake_case)]
+fn B4() -> Color32 {
+    pick(Color32::from_rgb(0x2C, 0x31, 0x39), Color32::from_rgb(0xE2, 0xE5, 0xE9))
+}
+#[allow(non_snake_case)]
+fn LINE() -> Color32 {
+    pick(Color32::from_rgb(0x2A, 0x2E, 0x35), Color32::from_rgb(0xDD, 0xE1, 0xE6))
+}
+#[allow(non_snake_case)]
+fn T1() -> Color32 {
+    pick(Color32::from_rgb(0xE4, 0xE7, 0xEB), Color32::from_rgb(0x1E, 0x22, 0x27))
+}
+#[allow(non_snake_case)]
+fn T2() -> Color32 {
+    pick(Color32::from_rgb(0x9A, 0xA1, 0xAB), Color32::from_rgb(0x5C, 0x63, 0x6D))
+}
+#[allow(non_snake_case)]
+fn T3() -> Color32 {
+    pick(Color32::from_rgb(0x64, 0x6B, 0x75), Color32::from_rgb(0x8A, 0x90, 0x99))
+}
 
 const TOP_H: f32 = 38.0;
 const RAIL_W: f32 = 48.0;
@@ -68,32 +95,32 @@ fn studio_style(s: &mut egui::Style) {
     s.spacing.icon_width_inner = 6.0;
     s.spacing.indent = 14.0;
     let v = &mut s.visuals;
-    v.override_text_color = Some(T1);
-    v.extreme_bg_color = B0;
-    v.faint_bg_color = B2;
+    v.override_text_color = Some(T1());
+    v.extreme_bg_color = B0();
+    v.faint_bg_color = B2();
     v.selection.bg_fill = accent_bg();
     v.selection.stroke = Stroke::new(1.0, accent());
-    v.window_fill = B2;
-    v.panel_fill = B1;
+    v.window_fill = B2();
+    v.panel_fill = B1();
     v.window_corner_radius = CornerRadius::same(8);
     v.menu_corner_radius = CornerRadius::same(8);
-    v.window_stroke = Stroke::new(1.0, LINE);
+    v.window_stroke = Stroke::new(1.0, LINE());
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.corner_radius = CornerRadius::same(6);
     }
-    v.widgets.inactive.bg_fill = B0;
-    v.widgets.inactive.weak_bg_fill = B0;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, LINE);
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, T1);
-    v.widgets.hovered.bg_fill = B3;
-    v.widgets.hovered.weak_bg_fill = B3;
+    v.widgets.inactive.bg_fill = B0();
+    v.widgets.inactive.weak_bg_fill = B0();
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, LINE());
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, T1());
+    v.widgets.hovered.bg_fill = B3();
+    v.widgets.hovered.weak_bg_fill = B3();
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, accent_border());
     v.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
     v.widgets.active.bg_fill = accent_bg();
     v.widgets.active.weak_bg_fill = accent_bg();
     v.widgets.active.bg_stroke = Stroke::new(1.0, accent());
-    v.widgets.open.weak_bg_fill = B3;
-    v.widgets.open.bg_fill = B3;
+    v.widgets.open.weak_bg_fill = B3();
+    v.widgets.open.bg_fill = B3();
 }
 
 fn menu_cfg() -> egui::containers::menu::MenuConfig {
@@ -121,8 +148,8 @@ fn dock(ctx: &egui::Context, id: &str, rect: Rect, fill: Color32, add: impl FnOn
 fn section_head(ui: &mut Ui, title: &str, info: &str) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
     let p = ui.painter();
-    p.text(r.left_center() + vec2(12.0, 0.0), Align2::LEFT_CENTER, title, semibold(10.5), T2);
-    p.text(r.right_center() - vec2(12.0, 0.0), Align2::RIGHT_CENTER, info, regular(11.5), T3);
+    p.text(r.left_center() + vec2(12.0, 0.0), Align2::LEFT_CENTER, title, semibold(10.5), T2());
+    p.text(r.right_center() - vec2(12.0, 0.0), Align2::RIGHT_CENTER, info, regular(11.5), T3());
 }
 
 fn tool_btn(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> Response {
@@ -131,9 +158,9 @@ fn tool_btn(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> Response {
     if on {
         p.rect(r, 7.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
     } else if resp.hovered() {
-        p.rect_filled(r, 7.0, B3);
+        p.rect_filled(r, 7.0, B3());
     }
-    icons::paint(p, Rect::from_center_size(r.center(), vec2(17.0, 17.0)), icon, if on { accent_text() } else { Color32::from_rgb(0xC3, 0xC8, 0xCF) });
+    icons::paint(p, Rect::from_center_size(r.center(), vec2(17.0, 17.0)), icon, if on { accent_text() } else { TEXT_ICON() });
     resp.on_hover_text(tip)
 }
 
@@ -143,9 +170,9 @@ fn small_btn(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> Response {
     if on {
         p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
     } else if resp.hovered() {
-        p.rect_filled(r, 6.0, B3);
+        p.rect_filled(r, 6.0, B3());
     }
-    icons::paint(p, Rect::from_center_size(r.center(), vec2(14.0, 14.0)), icon, if on { accent_text() } else { T2 });
+    icons::paint(p, Rect::from_center_size(r.center(), vec2(14.0, 14.0)), icon, if on { accent_text() } else { T2() });
     resp.on_hover_text(tip)
 }
 
@@ -157,8 +184,8 @@ fn text_btn(ui: &mut Ui, icon: Option<Icon>, label: &str, primary: bool) -> Resp
     let (fill, fg) = match (primary, resp.hovered()) {
         (true, false) => (accent(), Color32::WHITE),
         (true, true) => (Color32::from_rgb(0x6A, 0xA0, 0xFF), Color32::WHITE),
-        (false, false) => (B3, T1),
-        (false, true) => (B4, Color32::WHITE),
+        (false, false) => (B3(), T1()),
+        (false, true) => (B4(), Color32::WHITE),
     };
     p.rect_filled(r, 6.0, fill);
     let mut x = r.min.x + 10.0;
@@ -171,14 +198,14 @@ fn text_btn(ui: &mut Ui, icon: Option<Icon>, label: &str, primary: bool) -> Resp
 }
 
 fn small_label(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).font(regular(11.5)).color(T3));
+    ui.label(RichText::new(text).font(regular(11.5)).color(T3()));
 }
 
 fn mode_color(m: CombineMode) -> Color32 {
     match m {
         CombineMode::Add => accent(),
         CombineMode::Carve => carve(),
-        _ => Color32::from_rgb(0xC8, 0xCC, 0xD2),
+        _ => NEUTRAL_MODE(),
     }
 }
 
@@ -207,7 +234,7 @@ fn spin(ui: &mut Ui, label: &str, v: &mut f32, speed: f64, range: std::ops::Rang
     let mut out = (false, false);
     ui.horizontal(|ui| {
         let (lr, _) = ui.allocate_exact_size(vec2(104.0, 22.0), Sense::hover());
-        ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(12.0), T2);
+        ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(12.0), T2());
         let resp = ui.add_sized(
             vec2(ui.available_width().min(150.0), 22.0),
             egui::DragValue::new(v)
@@ -226,7 +253,7 @@ fn spin(ui: &mut Ui, label: &str, v: &mut f32, speed: f64, range: std::ops::Rang
 
 fn sub_head(ui: &mut Ui, title: &str) {
     ui.add_space(4.0);
-    ui.label(RichText::new(title.to_uppercase()).font(semibold(10.0)).color(T3));
+    ui.label(RichText::new(title.to_uppercase()).font(semibold(10.0)).color(T3()));
 }
 
 fn presets() -> [(ViewPreset, &'static str); 4] {
@@ -236,18 +263,18 @@ fn presets() -> [(ViewPreset, &'static str); 4] {
 // ---------------------------------------------------------------- top bar
 
 fn top_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
-    dock(ctx, "studio-top", rect, B1, |ui| {
-        ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, LINE));
+    dock(ctx, "studio-top", rect, B1(), |ui| {
+        ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, LINE()));
         // the document, centred
         let name = st.doc_name.clone();
         let dirty = st.scene_version != st.saved_version;
-        let g = ui.painter().layout_no_wrap(name, semibold(13.0), T1);
-        let sub = ui.painter().layout_no_wrap(if dirty { "· modifié".to_string() } else { "· enregistré".to_string() }, regular(11.5), T3);
+        let g = ui.painter().layout_no_wrap(name, semibold(13.0), T1());
+        let sub = ui.painter().layout_no_wrap(if dirty { "· modifié".to_string() } else { "· enregistré".to_string() }, regular(11.5), T3());
         let total = g.size().x + 6.0 + sub.size().x;
         let x0 = rect.center().x - total * 0.5;
         let gw = g.size().x;
-        ui.painter().galley(pos2(x0, rect.center().y - g.size().y * 0.5), g, T1);
-        ui.painter().galley(pos2(x0 + gw + 6.0, rect.center().y - sub.size().y * 0.5), sub, T3);
+        ui.painter().galley(pos2(x0, rect.center().y - g.size().y * 0.5), g, T1());
+        ui.painter().galley(pos2(x0 + gw + 6.0, rect.center().y - sub.size().y * 0.5), sub, T3());
 
         ui.add_space(5.0);
         ui.horizontal(|ui| {
@@ -270,12 +297,12 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                 // the command palette field
                 let (r, resp) = ui.allocate_exact_size(vec2(300.0, 26.0), Sense::click());
                 let p = ui.painter();
-                p.rect(r, 7.0, if resp.hovered() { B2 } else { B0 }, Stroke::new(1.0, if resp.hovered() { accent_border() } else { LINE }), StrokeKind::Inside);
-                icons::paint(p, Rect::from_min_size(pos2(r.min.x + 9.0, r.center().y - 6.5), vec2(13.0, 13.0)), Icon::Frame, T3);
-                p.text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, "Commande, forme, réglage…", regular(12.0), T3);
+                p.rect(r, 7.0, if resp.hovered() { B2() } else { B0() }, Stroke::new(1.0, if resp.hovered() { accent_border() } else { LINE() }), StrokeKind::Inside);
+                icons::paint(p, Rect::from_min_size(pos2(r.min.x + 9.0, r.center().y - 6.5), vec2(13.0, 13.0)), Icon::Frame, T3());
+                p.text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, "Commande, forme, réglage…", regular(12.0), T3());
                 let kr = Rect::from_min_size(pos2(r.max.x - 56.0, r.min.y + 4.0), vec2(50.0, 18.0));
-                p.rect(kr, 4.0, B2, Stroke::new(1.0, LINE), StrokeKind::Inside);
-                p.text(kr.center(), Align2::CENTER_CENTER, "Espace", medium(10.5), T2);
+                p.rect(kr, 4.0, B2(), Stroke::new(1.0, LINE()), StrokeKind::Inside);
+                p.text(kr.center(), Align2::CENTER_CENTER, "Espace", medium(10.5), T2());
                 if resp.on_hover_text("Palette de commandes (Espace)").clicked() {
                     open_palette(ui.ctx());
                 }
@@ -428,8 +455,8 @@ fn menus(ui: &mut Ui, st: &mut AppState) {
             ("Échap", "désélectionner"),
         ] {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(k).font(medium(12.0)).color(T1));
-                ui.label(RichText::new(what).font(regular(12.0)).color(T2));
+                ui.label(RichText::new(k).font(medium(12.0)).color(T1()));
+                ui.label(RichText::new(what).font(regular(12.0)).color(T2()));
             });
         }
     });
@@ -438,13 +465,13 @@ fn menus(ui: &mut Ui, st: &mut AppState) {
 // ------------------------------------------------------------- tool column
 
 fn rail(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
-    dock(ctx, "studio-rail", rect, B1, |ui| {
-        ui.painter().line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, LINE));
+    dock(ctx, "studio-rail", rect, B1(), |ui| {
+        ui.painter().line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, LINE()));
         ui.spacing_mut().item_spacing.y = 3.0;
         ui.add_space(8.0);
         let group = |ui: &mut Ui, title: &str| {
             let (r, _) = ui.allocate_exact_size(vec2(RAIL_W, 18.0), Sense::hover());
-            ui.painter().text(r.center() + vec2(0.0, 2.0), Align2::CENTER_CENTER, title, semibold(8.5), T3);
+            ui.painter().text(r.center() + vec2(0.0, 2.0), Align2::CENTER_CENTER, title, semibold(8.5), T3());
         };
         let centred = |ui: &mut Ui, f: &mut dyn FnMut(&mut Ui)| {
             ui.horizontal(|ui| {
@@ -491,9 +518,9 @@ fn rail(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                 if on {
                     p.rect(r, 7.0, tint(c, 0.16), Stroke::new(1.0, tint(c, 0.7)), StrokeKind::Inside);
                 } else if resp.hovered() {
-                    p.rect_filled(r, 7.0, B3);
+                    p.rect_filled(r, 7.0, B3());
                 }
-                ui::paint_mode_glyph(p, r.center(), m, if on { c } else { T2 }, 12.0);
+                ui::paint_mode_glyph(p, r.center(), m, if on { c } else { T2() }, 12.0);
                 if resp.on_hover_text(if m == CombineMode::Add { "Add : ajoute la forme" } else { "Carve : creuse (Ctrl inverse pendant la création)" }).clicked() {
                     st.set_mode(m);
                 }
@@ -536,8 +563,8 @@ fn rail(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
 // ------------------------------------------------------------- side panel
 
 fn side_panel(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
-    dock(ctx, "studio-side", rect, B1, |ui| {
-        ui.painter().line_segment([rect.left_top(), rect.left_bottom()], Stroke::new(1.0, LINE));
+    dock(ctx, "studio-side", rect, B1(), |ui| {
+        ui.painter().line_segment([rect.left_top(), rect.left_bottom()], Stroke::new(1.0, LINE()));
         ui.spacing_mut().item_spacing.y = 0.0;
         let w = rect.width() - 1.0;
         let rows = st.scene.rows();
@@ -551,7 +578,7 @@ fn side_panel(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             if rows.is_empty() {
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);
-                    ui.label(RichText::new("Scène vide · R, C, S, A ou T pour créer").font(regular(12.0)).color(T2));
+                    ui.label(RichText::new("Scène vide · R, C, S, A ou T pour créer").font(regular(12.0)).color(T2()));
                 });
             }
             for (id, depth) in rows.iter() {
@@ -560,7 +587,7 @@ fn side_panel(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
         });
         ui.add_space(6.0);
         let (sep, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
-        ui.painter().rect_filled(sep, 0.0, LINE);
+        ui.painter().rect_filled(sep, 0.0, LINE());
         // properties
         let props_h = rect.height() - list_h - 6.0 - 26.0 - 7.0 - HIST_H;
         egui::ScrollArea::vertical().id_salt("studio-props").max_height(props_h).min_scrolled_height(props_h).auto_shrink([false, false]).show(ui, |ui| {
@@ -572,7 +599,7 @@ fn side_panel(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
         });
         // history
         let (sep, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
-        ui.painter().rect_filled(sep, 0.0, LINE);
+        ui.painter().rect_filled(sep, 0.0, LINE());
         ui.add_space(6.0);
         section_head(ui, "HISTORIQUE", &format!("{} opération{}", rows.len(), if rows.len() > 1 { "s" } else { "" }));
         egui::ScrollArea::vertical().id_salt("studio-hist").auto_shrink([false, false]).show(ui, |ui| {
@@ -591,7 +618,7 @@ fn row_frame(ui: &mut Ui, w: f32, selected: bool, hovered: bool, r: Rect) {
     if selected {
         p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
     } else if hovered {
-        p.rect_filled(r, 6.0, B2);
+        p.rect_filled(r, 6.0, B2());
     }
 }
 
@@ -613,18 +640,18 @@ fn scene_row(ui: &mut Ui, st: &mut AppState, id: NodeId, depth: usize, w: f32) {
     let mut toggled = false;
     if n.is_group() {
         let cr = Rect::from_min_size(pos2(x0, r.center().y - 5.0), vec2(10.0, 10.0));
-        icons::paint(ui.painter(), cr, if n.expanded { Icon::Chevron } else { Icon::ChevronRight }, T2);
+        icons::paint(ui.painter(), cr, if n.expanded { Icon::Chevron } else { Icon::ChevronRight }, T2());
         toggled = ui.interact(cr.expand(5.0), Id::new(("s-exp", id)), Sense::click()).clicked();
-        icons::paint(ui.painter(), Rect::from_min_size(pos2(x0 + 14.0, r.center().y - 7.0), vec2(14.0, 14.0)), Icon::Folder, tint(T2, dim));
+        icons::paint(ui.painter(), Rect::from_min_size(pos2(x0 + 14.0, r.center().y - 7.0), vec2(14.0, 14.0)), Icon::Folder, tint(T2(), dim));
     } else {
         mode_badge(ui, pos2(x0 + 8.0, r.center().y), n.combine.mode, dim);
     }
-    let fg = if selected { accent_text() } else { tint(T1, dim) };
+    let fg = if selected { accent_text() } else { tint(T1(), dim) };
     let mut info = n.type_label();
     if n.mirror.any() {
         info += " · sym.";
     }
-    let ig = ui.painter().layout_no_wrap(info, regular(11.5), if selected { accent_text() } else { tint(T3, dim.max(0.7)) });
+    let ig = ui.painter().layout_no_wrap(info, regular(11.5), if selected { accent_text() } else { tint(T3(), dim.max(0.7)) });
     let ix = r.max.x - 36.0 - ig.size().x;
     let name_max = (ix - 8.0 - (x0 + 26.0)).max(20.0);
     let mut job = egui::text::LayoutJob::single_section(n.name.clone(), egui::TextFormat::simple(if selected { medium(12.5) } else { regular(12.5) }, fg));
@@ -632,9 +659,9 @@ fn scene_row(ui: &mut Ui, st: &mut AppState, id: NodeId, depth: usize, w: f32) {
     let g = ui.painter().layout_job(job);
     let p = ui.painter();
     p.galley(pos2(x0 + 26.0, r.center().y - g.size().y * 0.5), g, fg);
-    p.galley(pos2(ix, r.center().y - ig.size().y * 0.5), ig, T3);
+    p.galley(pos2(ix, r.center().y - ig.size().y * 0.5), ig, T3());
     let er = Rect::from_center_size(pos2(r.max.x - 22.0, r.center().y), vec2(13.0, 13.0));
-    icons::paint(p, er, if n.visible { Icon::Eye } else { Icon::EyeOff }, tint(T2, 0.8));
+    icons::paint(p, er, if n.visible { Icon::Eye } else { Icon::EyeOff }, tint(T2(), 0.8));
     let eye = ui.interact(er.expand(4.0), Id::new(("s-eye", id)), Sense::click());
     if eye.clicked() {
         st.toggle_visible(id);
@@ -662,7 +689,7 @@ fn history_row(ui: &mut Ui, st: &mut AppState, id: NodeId, i: usize, w: f32) {
     let selected = st.is_selected(id);
     row_frame(ui, w, selected, resp.hovered(), r);
     let p = ui.painter();
-    p.text(pos2(r.min.x + 18.0, r.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), medium(11.0), T3);
+    p.text(pos2(r.min.x + 18.0, r.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), medium(11.0), T3());
     if n.shape().is_some() {
         mode_badge(ui, pos2(r.min.x + 42.0, r.center().y), n.combine.mode, 1.0);
     }
@@ -671,8 +698,8 @@ fn history_row(ui: &mut Ui, st: &mut AppState, id: NodeId, i: usize, w: f32) {
         Some(sh) => format!("{} · {}", sh.kind.label(), n.combine.mode.label()),
         None => n.type_label(),
     };
-    p.text(pos2(r.min.x + 58.0, r.center().y), Align2::LEFT_CENTER, &n.name, regular(12.0), if selected { accent_text() } else { T1 });
-    p.text(pos2(r.max.x - 16.0, r.center().y), Align2::RIGHT_CENTER, what, regular(11.0), T3);
+    p.text(pos2(r.min.x + 58.0, r.center().y), Align2::LEFT_CENTER, &n.name, regular(12.0), if selected { accent_text() } else { T1() });
+    p.text(pos2(r.max.x - 16.0, r.center().y), Align2::RIGHT_CENTER, what, regular(11.0), T3());
     if resp.on_hover_text("Sélectionner cette opération").clicked() {
         st.commit_placement();
         st.tool = Tool::Select;
@@ -682,8 +709,8 @@ fn history_row(ui: &mut Ui, st: &mut AppState, id: NodeId, i: usize, w: f32) {
 
 fn properties(ui: &mut Ui, st: &mut AppState) {
     let Some(id) = st.selection else {
-        ui.label(RichText::new("Aucune sélection").font(semibold(13.0)).color(T1));
-        ui.label(RichText::new("Clique une forme dans la vue ou dans la scène. Pour créer : une forme à gauche, puis glisse dans la vue ou tape ses cotes.").font(regular(12.0)).color(T2));
+        ui.label(RichText::new("Aucune sélection").font(semibold(13.0)).color(T1()));
+        ui.label(RichText::new("Clique une forme dans la vue ou dans la scène. Pour créer : une forme à gauche, puis glisse dans la vue ou tape ses cotes.").font(regular(12.0)).color(T2()));
         sub_head(ui, "Nouvelles formes");
         ui.horizontal(|ui| {
             for m in MODES {
@@ -730,7 +757,7 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         Some(sh) => format!("{} · {}", sh.kind.label(), node.combine.mode.label()),
         None => node.type_label(),
     };
-    ui.label(RichText::new(what).font(regular(11.5)).color(T3));
+    ui.label(RichText::new(what).font(regular(11.5)).color(T3()));
 
     if let Some(sh) = node.shape().cloned() {
         sub_head(ui, "Forme");
@@ -878,7 +905,7 @@ fn materials(ui: &mut Ui, st: &mut AppState, target: Option<NodeId>, current: u3
             let on = current as usize == i;
             let c = Color32::from_rgb((m.color[0] * 255.0) as u8, (m.color[1] * 255.0) as u8, (m.color[2] * 255.0) as u8);
             let p = ui.painter();
-            p.rect(r, 6.0, if on { accent_bg() } else { B0 }, Stroke::new(1.0, if on { accent() } else { LINE }), StrokeKind::Inside);
+            p.rect(r, 6.0, if on { accent_bg() } else { B0() }, Stroke::new(1.0, if on { accent() } else { LINE() }), StrokeKind::Inside);
             p.rect(r.shrink(6.0), 3.0, c, Stroke::new(1.0, tint(Color32::WHITE, 0.15)), StrokeKind::Inside);
             if resp.on_hover_text(&m.name).clicked() {
                 match target {
@@ -981,7 +1008,7 @@ fn shape_params(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
 
 fn edges(ui: &mut Ui, st: &mut AppState) {
     let Some(e) = st.edge_sel.last().cloned() else {
-        ui.label(RichText::new("Mode Arête (2) : survole une arête puis clique, Ctrl + clic pour en ajouter.").font(regular(12.0)).color(T2));
+        ui.label(RichText::new("Mode Arête (2) : survole une arête puis clique, Ctrl + clic pour en ajouter.").font(regular(12.0)).color(T2()));
         return;
     };
     let n = st.edge_sel.len();
@@ -989,7 +1016,7 @@ fn edges(ui: &mut Ui, st: &mut AppState) {
         let (r, _) = ui.allocate_exact_size(vec2(10.0, 14.0), Sense::hover());
         ui.painter().circle_filled(r.center(), 4.0, EDGE_SEL);
         let title = if n > 1 { format!("{n} arêtes sélectionnées") } else { e.label.clone() };
-        ui.label(RichText::new(title).font(medium(12.5)).color(T1));
+        ui.label(RichText::new(title).font(medium(12.5)).color(T1()));
     });
     if st.edge_sel.iter().any(|x| matches!(x.kind, forme_core::edges::EdgeKind::Junction { .. })) {
         ui.horizontal(|ui| {
@@ -1028,18 +1055,18 @@ fn edges(ui: &mut Ui, st: &mut AppState) {
 // ------------------------------------------------------------- status bar
 
 fn status_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
-    dock(ctx, "studio-status", rect, B1, |ui| {
-        ui.painter().line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, LINE));
+    dock(ctx, "studio-status", rect, B1(), |ui| {
+        ui.painter().line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, LINE()));
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.add_space(10.0);
             let key = |ui: &mut Ui, k: &str, what: &str| {
-                let g = ui.painter().layout_no_wrap(k.to_string(), medium(10.5), T1);
+                let g = ui.painter().layout_no_wrap(k.to_string(), medium(10.5), T1());
                 let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 10.0, 18.0), Sense::hover());
-                ui.painter().rect(r, 4.0, B2, Stroke::new(1.0, LINE), StrokeKind::Inside);
-                ui.painter().galley(r.center() - g.size() * 0.5, g, T1);
-                ui.label(RichText::new(what).font(regular(11.5)).color(T2));
+                ui.painter().rect(r, 4.0, B2(), Stroke::new(1.0, LINE()), StrokeKind::Inside);
+                ui.painter().galley(r.center() - g.size() * 0.5, g, T1());
+                ui.label(RichText::new(what).font(regular(11.5)).color(T2()));
                 ui.add_space(8.0);
             };
             match st.settings.navigation {
@@ -1051,14 +1078,14 @@ fn status_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             key(ui, "F", "cadrer");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(10.0);
-                ui.label(RichText::new(crate::version_title()).font(regular(11.0)).color(T3));
+                ui.label(RichText::new(crate::version_title()).font(regular(11.0)).color(T3()));
                 ui.add_space(12.0);
                 let hint = st.hint();
-                let mut job = egui::text::LayoutJob::single_section(hint, egui::TextFormat::simple(regular(11.5), T2));
+                let mut job = egui::text::LayoutJob::single_section(hint, egui::TextFormat::simple(regular(11.5), T2()));
                 job.wrap = egui::text::TextWrapping { max_width: (ui.available_width() - 20.0).max(60.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
                 let g = ui.painter().layout_job(job);
                 let (r, _) = ui.allocate_exact_size(vec2(g.size().x, 18.0), Sense::hover());
-                ui.painter().galley(pos2(r.min.x, r.center().y - g.size().y * 0.5), g, T2);
+                ui.painter().galley(pos2(r.min.x, r.center().y - g.size().y * 0.5), g, T2());
             });
         });
     });
@@ -1091,7 +1118,7 @@ fn view_chips(ctx: &egui::Context, st: &mut AppState, view: Rect) {
             ui.spacing_mut().item_spacing.x = 6.0;
             let cur = st.camera.preset_of();
             let name = presets().iter().find(|(p, _)| *p == cur).map(|(_, l)| *l).unwrap_or("Perspective");
-            ui.menu_button(RichText::new(name).font(medium(12.0)).color(T1), |ui| {
+            ui.menu_button(RichText::new(name).font(medium(12.0)).color(T1()), |ui| {
                 for (p, l) in presets() {
                     if ui.radio(cur == p, l).clicked() {
                         st.camera.preset(p);
@@ -1146,9 +1173,9 @@ fn sizes_panel(ctx: &egui::Context, st: &mut AppState, view: Rect) {
             ui.set_width(232.0);
             ui.spacing_mut().item_spacing.y = 6.0;
             ui.horizontal(|ui| {
-                icons::paint(ui.painter(), Rect::from_min_size(ui.cursor().min + vec2(0.0, 2.0), vec2(15.0, 15.0)), ui::prim_icon(kind), T1);
+                icons::paint(ui.painter(), Rect::from_min_size(ui.cursor().min + vec2(0.0, 2.0), vec2(15.0, 15.0)), ui::prim_icon(kind), T1());
                 ui.add_space(20.0);
-                ui.label(RichText::new(format!("Nouveau {}", kind.label().to_lowercase())).font(semibold(13.0)).color(T1));
+                ui.label(RichText::new(format!("Nouveau {}", kind.label().to_lowercase())).font(semibold(13.0)).color(T1()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let m = st.effective_mode();
                     let c = mode_color(m);
@@ -1163,12 +1190,12 @@ fn sizes_panel(ctx: &egui::Context, st: &mut AppState, view: Rect) {
             for (i, label) in fields.iter().enumerate() {
                 ui.horizontal(|ui| {
                     let (lr, _) = ui.allocate_exact_size(vec2(76.0, 24.0), Sense::hover());
-                    ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, *label, regular(12.0), T2);
+                    ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, *label, regular(12.0), T2());
                     // a text field: typing replaces the value (all selected on focus)
                     let fid = key.with(("field", i));
                     let mut text: String = ctx.data(|m| m.get_temp(fid)).unwrap_or_else(|| format!("{}", d[i]).replace('.', ","));
                     let resp = ui.add(egui::TextEdit::singleline(&mut text).id(fid).desired_width(ui.available_width() - 30.0).horizontal_align(egui::Align::RIGHT).font(medium(12.5)));
-                    ui.label(RichText::new("mm").font(regular(11.5)).color(T3));
+                    ui.label(RichText::new("mm").font(regular(11.5)).color(T3()));
                     let first = i == 0 && ctx.data(|m| m.get_temp::<bool>(key.with("focused"))).is_none();
                     if first {
                         // first time the panel shows for this tool: the first field takes the keys
@@ -1189,7 +1216,7 @@ fn sizes_panel(ctx: &egui::Context, st: &mut AppState, view: Rect) {
                 });
             }
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Tab · Entrée crée · Échap").font(regular(11.0)).color(T3));
+                ui.label(RichText::new("Tab · Entrée crée · Échap").font(regular(11.0)).color(T3()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if text_btn(ui, None, "Créer", true).clicked() {
                         create = true;
@@ -1404,7 +1431,7 @@ fn palette(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 if hits.is_empty() {
-                    ui.label(RichText::new("Aucune commande ne correspond.").font(regular(12.5)).color(T2));
+                    ui.label(RichText::new("Aucune commande ne correspond.").font(regular(12.5)).color(T2()));
                 }
                 for (i, (label, key, cmd)) in hits.iter().enumerate() {
                     let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
@@ -1413,11 +1440,11 @@ fn palette(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     if on {
                         p.rect(rr, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
                     } else if resp.hovered() {
-                        p.rect_filled(rr, 6.0, B2);
+                        p.rect_filled(rr, 6.0, B2());
                     }
-                    p.text(rr.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, label, regular(12.5), if on { accent_text() } else { T1 });
+                    p.text(rr.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, label, regular(12.5), if on { accent_text() } else { T1() });
                     if !key.is_empty() {
-                        p.text(rr.right_center() - vec2(10.0, 0.0), Align2::RIGHT_CENTER, *key, medium(11.0), T3);
+                        p.text(rr.right_center() - vec2(10.0, 0.0), Align2::RIGHT_CENTER, *key, medium(11.0), T3());
                     }
                     if on && (up || down) {
                         resp.scroll_to_me(None);

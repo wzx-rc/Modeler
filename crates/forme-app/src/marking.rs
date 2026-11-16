@@ -450,7 +450,7 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect, on_handle: bool
 fn pill_rect(p: &Painter, c: Pos2, dir: u8, label: &str) -> (Rect, std::sync::Arc<egui::Galley>) {
     let a = dir as f32 * std::f32::consts::PI / 4.0;
     let at = pos2(c.x + a.sin() * RADIUS, c.y - a.cos() * RADIUS * 0.82);
-    let g = p.layout_no_wrap(label.to_string(), medium(12.0), TEXT);
+    let g = p.layout_no_wrap(label.to_string(), medium(12.0), TEXT());
     let (pw, ph) = (g.size().x + 18.0, g.size().y + 8.0);
     let x0 = if a.sin() > 0.3 {
         at.x - 8.0
@@ -540,7 +540,7 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
             let ring = if hot { HOT } else if cur == Some(k) { Color32::WHITE } else { Color32::from_rgba_unmultiplied(110, 114, 124, 200) };
             p.circle_stroke(q, r, Stroke::new(if hot || cur == Some(k) { 2.0 } else { 1.0 }, ring.gamma_multiply(e)));
             if hot {
-                p.text(q + vec2(0.0, -r - 6.0), Align2::CENTER_BOTTOM, &mat.name, medium(12.0), TEXT);
+                p.text(q + vec2(0.0, -r - 6.0), Align2::CENTER_BOTTOM, &mat.name, medium(12.0), TEXT());
             }
         }
     }

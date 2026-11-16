@@ -107,6 +107,8 @@ pub struct Settings {
     pub exposure: f32,
     /// Sub-pixel offset of the rays (accumulated anti-aliasing).
     pub jitter: [f32; 2],
+    /// Light background and ground (light theme of the app).
+    pub light_bg: bool,
 }
 
 impl Default for Settings {
@@ -123,6 +125,7 @@ impl Default for Settings {
             light_intensity: 1.0,
             exposure: 1.0,
             jitter: [0.0, 0.0],
+            light_bg: false,
         }
     }
 }
@@ -358,7 +361,7 @@ impl Renderer {
                 let l = Vec3::from(settings.light_dir).normalize_or(Vec3::new(-0.55, 0.85, 0.65).normalize());
                 [l.x, l.y, l.z, settings.light_intensity]
             },
-            extra: [settings.jitter[0], settings.jitter[1], settings.exposure, 0.0],
+            extra: [settings.jitter[0], settings.jitter[1], settings.exposure, if settings.light_bg { 1.0 } else { 0.0 }],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
     }

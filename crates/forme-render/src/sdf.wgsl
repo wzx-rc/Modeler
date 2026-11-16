@@ -15,7 +15,7 @@ struct Globals {
     mats: array<vec4<f32>, 16>,  // rgb, metal
     mats2: array<vec4<f32>, 16>, // roughness, -, -, -
     light: vec4<f32>,     // xyz towards the key light (unit), w intensity
-    extra: vec4<f32>,     // xy sub-pixel jitter (anti-aliasing), z exposure
+    extra: vec4<f32>,     // xy sub-pixel jitter (anti-aliasing), z exposure, w light theme
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -580,6 +580,10 @@ fn calc_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
 
 fn background(rd: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
     let v = frag.y / g.viewport.y;
+    if (g.extra.w > 0.5) {
+        // light theme: a pale grey studio, a little darker at the bottom
+        return mix(vec3<f32>(0.47, 0.48, 0.50), vec3<f32>(0.40, 0.41, 0.43), v);
+    }
     let top = vec3<f32>(0.0102, 0.0109, 0.0124);
     let bottom = vec3<f32>(0.0074, 0.0079, 0.0090);
     return mix(top, bottom, v);
@@ -680,7 +684,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // --- ground with grid and contact shadow ---
     if (t_ground < t_hit && t_ground > 0.0) {
         let gp = ro + rd * t_ground;
+        let lightbg = g.extra.w > 0.5;
         var gcol = vec3<f32>(0.0125, 0.0133, 0.0150);
+        if (lightbg) {
+            gcol = vec3<f32>(0.40, 0.41, 0.43);
+        }
         if (g.scene_hi.w > 0.5) {
             let foot = t_ground * px * 1.5;
             let c1 = abs(fract(gp.xz / 10.0 + 0.5) - 0.5) * 10.0;
@@ -688,7 +696,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let c2 = abs(fract(gp.xz / 50.0 + 0.5) - 0.5) * 50.0;
             let l2 = 1.0 - smoothstep(0.0, foot + 0.08, min(c2.x, c2.y));
             let fade = exp(-t_ground * 0.0016);
-            gcol = gcol + vec3<f32>(0.010, 0.011, 0.013) * l1 * fade + vec3<f32>(0.022, 0.024, 0.028) * l2 * fade;
+            if (lightbg) {
+                gcol = gcol - vec3<f32>(0.035, 0.035, 0.034) * l1 * fade - vec3<f32>(0.075, 0.075, 0.072) * l2 * fade;
+            } else {
+                gcol = gcol + vec3<f32>(0.010, 0.011, 0.013) * l1 * fade + vec3<f32>(0.022, 0.024, 0.028) * l2 * fade;
+            }
         }
         if (g.params.y > 0.5) {
             let d = map(gp + vec3<f32>(0.0, 0.5, 0.0)).x;
