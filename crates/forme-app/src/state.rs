@@ -2815,3 +2815,154 @@ fn tree_order(scene: &Scene) -> Vec<NodeId> {
     walk(scene, scene.root, &mut out);
     out
 }
+
+// ------------------------------------------------------------- alignment
+
+/// Alignment of the selected shapes (Romain, 16 nov.). With one shape the
+/// reference is the world origin; with several, the active shape.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AlignOp {
+    /// On an axis (0 x, 1 y, 2 z): 0 = min sides, 1 = centres, 2 = max sides.
+    Align(usize, u8),
+    /// Even gaps between the shapes along an axis (3 shapes or more).
+    Distribute(usize),
+    /// Each shape rests on the ground (its lowest point at y = 0).
+    Ground,
+    /// The selection as a block, centred on the origin in X and Z.
+    Origin,
+}
+
+impl AppState {
+    /// World bounds of a node (a group: of its shapes), from the shapes' own
+    /// extents: no blend padding, repetitions or mirrors.
+    pub fn node_bounds(&self, id: NodeId) -> Option<(Vec3, Vec3)> {
+        let n = self.scene.node(id)?;
+        if let Some(sh) = n.shape() {
+            // the shape's true extents: local_bounds pads by 0.5 (and the
+            // shell, which hollows inward) to stay conservative
+            let (l, h) = sh.local_bounds();
+            let pad = Vec3::splat(sh.shell.max(0.0) + 0.5);
+            let (l, h) = if sh.kind == PrimKind::Profile { (l, h) } else { (l + pad, h - pad) };
+            let m = self.scene.world_matrix(id);
+            let mut lo = Vec3::splat(f32::MAX);
+            let mut hi = Vec3::splat(f32::MIN);
+            for i in 0..8 {
+                let c = Vec3::new(if i & 1 == 0 { l.x } else { h.x }, if i & 2 == 0 { l.y } else { h.y }, if i & 4 == 0 { l.z } else { h.z });
+                let w = m.transform_point3(c);
+                lo = lo.min(w);
+                hi = hi.max(w);
+            }
+            return Some((lo, hi));
+        }
+        let mut out: Option<(Vec3, Vec3)> = None;
+        for c in n.children() {
+            if let Some((l, h)) = self.node_bounds(*c) {
+                out = Some(match out {
+                    Some((a, b)) => (a.min(l), b.max(h)),
+                    None => (l, h),
+                });
+            }
+        }
+        out
+    }
+
+    /// The selected nodes that move as a whole: a node whose ancestor is
+    /// also selected moves with it.
+    fn align_targets(&self) -> Vec<NodeId> {
+        let ids = self.selected_ids();
+        ids.iter().copied().filter(|id| !self.scene.ancestors(*id).iter().any(|a| ids.contains(a))).collect()
+    }
+
+    pub fn can_align(&self, op: AlignOp) -> bool {
+        let n = self.align_targets().len();
+        match op {
+            AlignOp::Distribute(_) => n >= 3,
+            _ => n >= 1,
+        }
+    }
+
+    pub fn align(&mut self, op: AlignOp) {
+        let ids = self.align_targets();
+        let boxes: Vec<(NodeId, Vec3, Vec3)> = ids.iter().filter_map(|id| self.node_bounds(*id).map(|(l, h)| (*id, l, h))).collect();
+        if boxes.is_empty() {
+            return;
+        }
+        let mut moves: Vec<(NodeId, Vec3)> = vec![];
+        match op {
+            AlignOp::Align(axis, side) => {
+                let pick = |l: Vec3, h: Vec3| match side {
+                    0 => l[axis],
+                    1 => (l[axis] + h[axis]) * 0.5,
+                    _ => h[axis],
+                };
+                // the reference: the active shape, or the origin for one shape
+                let target = if boxes.len() == 1 {
+                    0.0
+                } else {
+                    let r = self.selection.and_then(|a| boxes.iter().find(|b| b.0 == a)).unwrap_or(&boxes[0]);
+                    pick(r.1, r.2)
+                };
+                for (id, l, h) in &boxes {
+                    let mut d = Vec3::ZERO;
+                    d[axis] = target - pick(*l, *h);
+                    moves.push((*id, d));
+                }
+            }
+            AlignOp::Distribute(axis) => {
+                if boxes.len() < 3 {
+                    return;
+                }
+                let mut b = boxes.clone();
+                b.sort_by(|x, y| (x.1[axis] + x.2[axis]).total_cmp(&(y.1[axis] + y.2[axis])));
+                let first = b[0].1[axis];
+                let last = b[b.len() - 1].2[axis];
+                let sizes: f32 = b.iter().map(|x| x.2[axis] - x.1[axis]).sum();
+                let gap = (last - first - sizes) / (b.len() - 1) as f32;
+                let mut at = first;
+                for (id, l, h) in &b {
+                    let mut d = Vec3::ZERO;
+                    d[axis] = at - l[axis];
+                    moves.push((*id, d));
+                    at += h[axis] - l[axis] + gap;
+                }
+            }
+            AlignOp::Ground => {
+                for (id, l, _) in &boxes {
+                    moves.push((*id, Vec3::new(0.0, -l.y, 0.0)));
+                }
+            }
+            AlignOp::Origin => {
+                let (mut lo, mut hi) = (boxes[0].1, boxes[0].2);
+                for (_, l, h) in &boxes {
+                    lo = lo.min(*l);
+                    hi = hi.max(*h);
+                }
+                let c = (lo + hi) * 0.5;
+                for (id, _, _) in &boxes {
+                    moves.push((*id, Vec3::new(-c.x, 0.0, -c.z)));
+                }
+            }
+        }
+        let before = self.scene.clone();
+        for (id, d) in moves {
+            if d.length_squared() < 1e-10 {
+                continue;
+            }
+            // world offset into the parent's frame
+            let local = self.scene.parent_matrix(id).inverse().transform_vector3(d);
+            if let Some(n) = self.scene.node_mut(id) {
+                n.transform.pos += local;
+            }
+        }
+        if self.scene != before {
+            let label = match op {
+                AlignOp::Distribute(_) => "Répartir",
+                AlignOp::Ground => "Poser au sol",
+                AlignOp::Origin => "Centrer sur l'origine",
+                AlignOp::Align(..) => "Aligner",
+            };
+            self.history.record(label, &before);
+            self.changed();
+        }
+    }
+}

@@ -348,6 +348,44 @@ fn menus(ui: &mut Ui, st: &mut AppState) {
         if ui.checkbox(&mut st.sym_x, "Symétrie X des nouvelles formes").changed() {
             st.view_changed();
         }
+        ui.separator();
+        small_label(ui, "Création");
+        {
+            use crate::settings::Creation;
+            for (c, l) in [(Creation::Interactive, "Interactive (base puis hauteur)"), (Creation::Direct, "Directe (un clic pose la forme)")] {
+                if ui.radio(st.settings.creation == c, l).clicked() && st.settings.creation != c {
+                    st.settings.creation = c;
+                    st.save_settings();
+                }
+            }
+        }
+    });
+    ui.menu_button("Aligner", |ui| {
+        use crate::state::AlignOp;
+        let mut todo = None;
+        for (axis, l) in ["X", "Y", "Z"].iter().enumerate() {
+            for (side, name) in [(0u8, "min"), (1, "centre"), (2, "max")] {
+                let op = AlignOp::Align(axis, side);
+                if ui.add_enabled(st.can_align(op), egui::Button::new(format!("Aligner {l} {name}"))).clicked() {
+                    todo = Some(op);
+                }
+            }
+            let op = AlignOp::Distribute(axis);
+            if ui.add_enabled(st.can_align(op), egui::Button::new(format!("Répartir en {l}"))).clicked() {
+                todo = Some(op);
+            }
+            ui.separator();
+        }
+        if ui.add_enabled(st.can_align(AlignOp::Ground), egui::Button::new("Poser au sol")).clicked() {
+            todo = Some(AlignOp::Ground);
+        }
+        if ui.add_enabled(st.can_align(AlignOp::Origin), egui::Button::new("Centrer sur l'origine")).clicked() {
+            todo = Some(AlignOp::Origin);
+        }
+        if let Some(op) = todo {
+            st.align(op);
+            ui.close();
+        }
     });
     ui.menu_button("Vue", |ui| {
         let cur = st.camera.preset_of();
@@ -441,6 +479,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                 }
             });
         }
+        centred(ui, &mut |ui| ui::creation_switch(ui, st, 34.0));
         group(ui, "MODE");
         let shown = st.effective_mode();
         for m in MODES {
@@ -790,6 +829,8 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
             }
         }
     });
+    sub_head(ui, "Alignement");
+    ui::align_rows(ui, st, false);
     sub_head(ui, "Matière");
     materials(ui, st, Some(id), node.material);
 }
@@ -1199,6 +1240,8 @@ enum Cmd {
     Settings,
     Display,
     Etabli,
+    Align(crate::state::AlignOp),
+    CreationToggle,
 }
 
 fn commands() -> Vec<(String, &'static str, Cmd)> {
@@ -1214,6 +1257,14 @@ fn commands() -> Vec<(String, &'static str, Cmd)> {
         ("Dupliquer".to_string(), "Ctrl+D", Cmd::Duplicate),
         ("Supprimer".to_string(), "Suppr", Cmd::Delete),
         ("Grouper la sélection".to_string(), "", Cmd::Group),
+        ("Poser au sol".to_string(), "", Cmd::Align(crate::state::AlignOp::Ground)),
+        ("Centrer sur l'origine".to_string(), "", Cmd::Align(crate::state::AlignOp::Origin)),
+        ("Aligner les centres en X".to_string(), "", Cmd::Align(crate::state::AlignOp::Align(0, 1))),
+        ("Aligner les bas (Y min)".to_string(), "", Cmd::Align(crate::state::AlignOp::Align(1, 0))),
+        ("Aligner les centres en Z".to_string(), "", Cmd::Align(crate::state::AlignOp::Align(2, 1))),
+        ("Répartir en X".to_string(), "", Cmd::Align(crate::state::AlignOp::Distribute(0))),
+        ("Répartir en Z".to_string(), "", Cmd::Align(crate::state::AlignOp::Distribute(2))),
+        ("Création interactive / directe".to_string(), "", Cmd::CreationToggle),
         ("Symétrie X de la sélection".to_string(), "", Cmd::MirrorSel),
         ("Cadrer la sélection".to_string(), "F", Cmd::Frame),
         ("Cadrer toute la scène".to_string(), "", Cmd::FrameAll),
@@ -1247,6 +1298,12 @@ fn run(st: &mut AppState, c: Cmd) {
         Cmd::Duplicate => st.duplicate_selected(),
         Cmd::Delete => st.delete_selected(),
         Cmd::Group => st.group_selected(),
+        Cmd::Align(op) => st.align(op),
+        Cmd::CreationToggle => {
+            use crate::settings::Creation;
+            st.settings.creation = if st.settings.creation == Creation::Interactive { Creation::Direct } else { Creation::Interactive };
+            st.save_settings();
+        }
         Cmd::MirrorSel => {
             if let Some(id) = st.selection {
                 st.edit("Symétrie", id, |n| n.mirror.x = !n.mirror.x);

@@ -174,7 +174,7 @@ fn tools(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     st.tool = Tool::Place(k);
                 }
             }
-            ui::creation_btn(ui, st, BTN, false);
+            ui::creation_switch(ui, st, BTN);
         });
         card().show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;

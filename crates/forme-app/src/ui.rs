@@ -927,22 +927,52 @@ pub(crate) fn key_hint(ui: &Ui, r: &Response, key: &str) {
     ui.painter().text(at, Align2::RIGHT_BOTTOM, key, medium(9.0), Color32::from_rgb(0x8A, 0x8F, 0x97));
 }
 
-/// Small notched button under the primitives: opens the creation popover.
-pub(crate) fn creation_btn(ui: &mut Ui, st: &mut AppState, width: f32, below: bool) {
-    let (r, resp) = ui.allocate_exact_size(vec2(width, 14.0), Sense::click());
-    let p = ui.painter();
-    let on = st.creation_open;
-    let c = if on { accent() } else if resp.hovered() { TEXT } else { Color32::from_rgb(0x7C, 0x81, 0x89) };
-    // a notch: three small dots on a short bar
-    let mid = r.center();
-    p.rect_filled(Rect::from_center_size(mid, vec2(22.0, 10.0)), 5.0, if on { accent_bg() } else if resp.hovered() { RAISED } else { Color32::TRANSPARENT });
-    for i in -1..=1 {
-        p.circle_filled(mid + vec2(i as f32 * 5.0, 0.0), 1.4, c);
+/// Interactive / direct creation switch, always visible under the
+/// primitives (Romain, 16 nov.). Wide: two segments; narrow (< 100 pt): one
+/// cell showing the current way, a click switches.
+pub(crate) fn creation_switch(ui: &mut Ui, st: &mut AppState, width: f32) {
+    use crate::settings::Creation;
+    let cur = st.settings.creation;
+    let tip = |c: Creation| match c {
+        Creation::Interactive => "Création interactive : glisse la base, relâche, puis la hauteur (vers le haut +, vers le bas −, Ctrl inverse)",
+        Creation::Direct => "Création directe : un clic pose la forme à sa taille par défaut, ses poignées la dimensionnent",
+    };
+    let mut set = None;
+    if width >= 100.0 {
+        let (well, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
+        ui.painter().rect(well, 7.0, WELL, Stroke::new(1.0, DIVIDER), StrokeKind::Inside);
+        let w = (well.width() - 4.0) / 2.0;
+        for (i, (c, label)) in [(Creation::Interactive, "Interactive"), (Creation::Direct, "Directe")].into_iter().enumerate() {
+            let r = Rect::from_min_size(well.min + vec2(2.0 + i as f32 * w, 2.0), vec2(w, 22.0));
+            let resp = ui.interact(r, Id::new(("creation-switch", i)), Sense::click());
+            let on = cur == c;
+            let p = ui.painter();
+            if on {
+                p.rect(r, 5.0, accent_bg(), Stroke::new(1.0, accent()), StrokeKind::Inside);
+            } else if resp.hovered() {
+                p.rect_filled(r, 5.0, RAISED);
+            }
+            p.text(r.center(), Align2::CENTER_CENTER, label, medium(10.5), if on { accent_text() } else { TEXT2 });
+            if resp.on_hover_text(tip(c)).clicked() {
+                set = Some(c);
+            }
+        }
+    } else {
+        let (r, resp) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click());
+        let p = ui.painter();
+        p.rect(r, 6.0, if resp.hovered() { RAISED } else { WELL }, Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+        let label = if cur == Creation::Interactive { "INT" } else { "DIR" };
+        p.text(r.center(), Align2::CENTER_CENTER, label, mono(9.5), accent_text());
+        let other = if cur == Creation::Interactive { Creation::Direct } else { Creation::Interactive };
+        if resp.on_hover_text(format!("{}\nClic : passer en création {}", tip(cur), if other == Creation::Direct { "directe" } else { "interactive" })).clicked() {
+            set = Some(other);
+        }
     }
-    let resp = resp.on_hover_text("Options de création");
-    if resp.clicked() {
-        st.creation_open = !st.creation_open;
-        st.creation_anchor = if below { [r.left() - 20.0, r.bottom() + 14.0] } else { [r.right() + 10.0, r.top() - 6.0] };
+    if let Some(c) = set {
+        if c != cur {
+            st.settings.creation = c;
+            st.save_settings();
+        }
     }
 }
 
@@ -1032,7 +1062,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
                 }
             }
             if DESK {
-                creation_btn(ui, st, CARDS_W - 12.0, false);
+                creation_switch(ui, st, CARDS_W - 12.0);
             }
             divider(ui);
             let has = st.selection.is_some();
@@ -1436,6 +1466,7 @@ pub(crate) fn properties(ui: &mut Ui, st: &mut AppState) {
     symmetry_row(ui, st, id, &node);
     repeat_rows(ui, st, id, &node);
     position_rows(ui, st, id, &node);
+    align_rows(ui, st, true);
 
     section(ui, "Matière");
     material_palette(ui, st, Some(id), node.material);
@@ -1522,6 +1553,61 @@ fn repeat_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
             }
             ui.label(egui::RichText::new(format!("{count} copies tous les {}° autour de l'axe passant par l'origine", fmt_mm(360.0 / count as f32))).font(regular(11.5)).color(TEXT2));
         }
+    }
+}
+
+/// Small text button of the alignment grid (dimmed when it cannot act).
+pub(crate) fn grid_btn(ui: &mut Ui, label: &str, enabled: bool, w: f32, tip: &str) -> bool {
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 22.0), if enabled { Sense::click() } else { Sense::hover() });
+    let p = ui.painter();
+    let hot = enabled && resp.hovered();
+    p.rect(r, 6.0, if hot { RAISED } else { WELL }, Stroke::new(1.0, if hot { accent_border() } else { DIVIDER }), StrokeKind::Inside);
+    p.text(r.center(), Align2::CENTER_CENTER, label, medium(11.0), if !enabled { tint(TEXT2, 0.45) } else if hot { TEXT_STRONG } else { TEXT2 });
+    let resp = resp.on_hover_text(tip);
+    enabled && resp.clicked()
+}
+
+/// Alignement: the selected shapes on the active one (or the origin for a
+/// single shape), even gaps, ground, origin. Shared by every inspector.
+pub(crate) fn align_rows(ui: &mut Ui, st: &mut AppState, title: bool) {
+    if title {
+        section(ui, "Alignement");
+    }
+    let several = st.selected_ids().len() > 1;
+    let refer = if several { "sur la forme active" } else { "sur l'origine" };
+    let gap = 4.0;
+    let w = ((ui.available_width() - 22.0 - 4.0 * gap) / 4.0).floor();
+    let mut todo = None;
+    for (axis, (l, c)) in [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AXIS_Z)].iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            let (lr, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+            ui.painter().text(lr.center(), Align2::CENTER_CENTER, *l, semibold(11.5), *c);
+            for (side, name, what) in [(0u8, "Min", "le côté min"), (1, "Centre", "le centre"), (2, "Max", "le côté max")] {
+                let op = AlignOp::Align(axis, side);
+                if grid_btn(ui, name, st.can_align(op), w, &format!("Aligner {what} en {l} {refer}")) {
+                    todo = Some(op);
+                }
+            }
+            let op = AlignOp::Distribute(axis);
+            if grid_btn(ui, "Répartir", st.can_align(op), w, &format!("Espaces égaux en {l} entre les formes (3 ou plus)")) {
+                todo = Some(op);
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+        let w2 = (2.0 * w + gap).floor();
+        if grid_btn(ui, "Poser au sol", st.can_align(AlignOp::Ground), w2, "Chaque forme posée sur la grille (Y = 0)") {
+            todo = Some(AlignOp::Ground);
+        }
+        if grid_btn(ui, "Centrer à l'origine", st.can_align(AlignOp::Origin), w2, "La sélection centrée sur l'origine en X et Z") {
+            todo = Some(AlignOp::Origin);
+        }
+    });
+    if let Some(op) = todo {
+        st.align(op);
     }
 }
 

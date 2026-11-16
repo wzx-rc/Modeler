@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -771,7 +771,50 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         h.st.commit_placement();
         h.steps(2);
         eprintln!("tore très zoomé : pas de plantage");
-    }    if want("pc-local") {
+    }
+    if want("pc-align") {
+        // alignment tools: four shapes scattered, then on the ground, centred
+        // in Z on the active one and evenly spread in X
+        fn scattered() -> forme_core::Scene {
+            use forme_core::scene::{NodeSpec, Scene, Shape};
+            let mut s = Scene::new();
+            let root = s.root;
+            let mut b = Shape::new(PrimKind::Box);
+            b.size = Vec3::new(6.0, 6.0, 6.0);
+            b.round = 1.0;
+            s.add(root, NodeSpec::shape("Bloc", b).at(Vec3::new(-24.0, 9.0, 4.0)));
+            let mut c = Shape::new(PrimKind::Cylinder);
+            c.size = Vec3::new(5.0, 10.0, 0.0);
+            s.add(root, NodeSpec::shape("Fût", c).at(Vec3::new(-6.0, 3.0, -9.0)));
+            let mut sp = Shape::new(PrimKind::Sphere);
+            sp.size = Vec3::splat(5.5);
+            s.add(root, NodeSpec::shape("Boule", sp).at(Vec3::new(8.0, 14.0, 7.0)));
+            let mut k = Shape::new(PrimKind::Capsule);
+            k.size = Vec3::new(3.0, 8.0, 0.0);
+            s.add(root, NodeSpec::shape("Gélule", k).at(Vec3::new(30.0, 6.0, -3.0)));
+            s
+        }
+        for (mode, tag) in [(UiMode::Atelier, "etabli"), (UiMode::Studio, "studio")] {
+            h.pc(AppState::new(scattered(), "Alignement"), mode);
+            h.st.pointer_kind = PointerKind::Mouse;
+            h.steps(2);
+            let ids: Vec<_> = ["Fût", "Bloc", "Boule", "Gélule"].iter().map(|n| h.find(n)).collect();
+            h.st.selection = Some(ids[0]);
+            h.st.selection_more = ids[1..].to_vec();
+            h.st.frame_all();
+            h.st.changed();
+            h.steps(30);
+            h.shot(&format!("pc-align-{tag}-1-avant"));
+            h.st.align(forme_app::state::AlignOp::Ground);
+            h.st.align(forme_app::state::AlignOp::Align(2, 1));
+            h.st.align(forme_app::state::AlignOp::Distribute(0));
+            let report: Vec<String> = ids.iter().filter_map(|id| h.st.node_bounds(*id)).map(|(l, hi)| format!("x {:.1}..{:.1} y {:.1} z {:.1}", l.x, hi.x, l.y, (l.z + hi.z) * 0.5)).collect();
+            eprintln!("alignement : {}", report.join(" | "));
+            h.steps(30);
+            h.shot(&format!("pc-align-{tag}-2-apres"));
+        }
+    }
+    if want("pc-local") {
         // a fillet on one piece of a junction only (the bearing on the base:
         // the +X side filleted, the -X side left sharp)
         h.pc(AppState::new(support_axe(), "Support d'axe"), UiMode::Atelier);
