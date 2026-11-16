@@ -258,7 +258,11 @@ impl<'a> Builder<'a> {
                     return;
                 }
                 // local fillets widen the bound of the shape (their blend reaches further)
-                let zones: &[BlendZone] = if combine_override.is_none() { &n.blend_zones } else { &[] };
+                // zones are kept in the shape's own frame (they follow it when it
+                // moves): to the world here, where the blend is evaluated
+                let m = self.scene.world_matrix(id);
+                let world: Vec<BlendZone> = n.blend_zones.iter().map(|z| BlendZone { radius: z.radius, pts: z.pts.iter().map(|p| m.transform_point3(*p)).collect() }).collect();
+                let zones: &[BlendZone] = if combine_override.is_none() { &world } else { &[] };
                 let zmax = zones.iter().map(|z| z.radius).fold(0.0f32, f32::max);
                 let bound = Combine { blend: combine.blend.max(zmax), ..combine };
                 self.prim(id, &chain2, shape, n.material, &bound);

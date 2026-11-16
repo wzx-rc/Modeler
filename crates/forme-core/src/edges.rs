@@ -341,7 +341,11 @@ impl EdgeIndex {
             at: at.as_vec3(),
             normal: Vec3::Y,
             // a local fillet on this piece of the junction wins over the whole one
-            radius: gn.blend_zones.iter().find(|z| z.dist(c0.as_vec3()) < 0.6).map(|z| z.radius).unwrap_or(gn.combine.blend.max(0.0)),
+            // (zones are in the owner's frame)
+            radius: {
+                let local = scene.world_matrix(gov).inverse().transform_point3(c0.as_vec3());
+                gn.blend_zones.iter().find(|z| z.dist(local) < 0.6).map(|z| z.radius).unwrap_or(gn.combine.blend.max(0.0))
+            },
             chamfer: gn.combine.kind == BlendKind::Chamfer,
             label: format!("{} × {}", name(aid), name(bid)),
             seed: p.as_vec3(),

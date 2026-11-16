@@ -1183,7 +1183,8 @@ impl AppState {
         let Some(n) = self.scene.node(e.owner) else { return (0.0, false) };
         let (r, ch) = fillet_of(n, e.kind);
         if self.local_junction(e) {
-            if let Some(z) = n.blend_zones.iter().find(|z| z.dist(e.raw_at) < 0.6) {
+            let local = self.scene.world_matrix(e.owner).inverse().transform_point3(e.raw_at);
+            if let Some(z) = n.blend_zones.iter().find(|z| z.dist(local) < 0.6) {
                 return (z.radius, ch);
             }
         }
@@ -1194,13 +1195,15 @@ impl AppState {
     /// (created on the first non-zero value, removed at 0).
     pub fn put_fillet(&mut self, e: &EdgePick, r: f32, chamfer: bool) {
         let local = self.local_junction(e);
+        // zones live in the owner's frame (they follow the shape)
+        let to_local = self.scene.world_matrix(e.owner).inverse();
         let Some(n) = self.scene.node_mut(e.owner) else { return };
         if !local {
             apply_fillet(n, e.kind, r, chamfer);
             return;
         }
         n.combine.kind = if chamfer { BlendKind::Chamfer } else { BlendKind::Smooth };
-        let at = e.raw_at;
+        let at = to_local.transform_point3(e.raw_at);
         match n.blend_zones.iter().position(|z| z.dist(at) < 0.6) {
             Some(i) if r <= 0.0 => {
                 n.blend_zones.remove(i);
@@ -1208,7 +1211,7 @@ impl AppState {
             Some(i) => n.blend_zones[i].radius = r,
             None if r > 0.0 => {
                 // the straight run of the junction around the pick, up to its corners
-                let piece = forme_core::edges::corner_piece(&e.raw, at);
+                let piece: Vec<Vec3> = forme_core::edges::corner_piece(&e.raw, e.raw_at).iter().map(|p| to_local.transform_point3(*p)).collect();
                 let piece = if piece.len() >= 2 { piece } else { vec![at] };
                 n.blend_zones.push(BlendZone::from_curve(r, &piece));
             }

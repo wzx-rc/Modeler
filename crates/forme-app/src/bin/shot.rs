@@ -839,6 +839,12 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
             let p = h.st.program().clone();
             let corner = |sx: f32| p.dist(Vec3::new(sx * (x + 0.5), 10.5, 0.0));
             eprintln!("coin +X {:.2} (rempli si < 0), coin -X {:.2}", corner(1.0), corner(-1.0));
+            // the local fillet follows the bearing when it moves
+            h.st.edit("Position", palier, |n| n.transform.pos.z += 2.0);
+            h.steps(2);
+            let p = h.st.program().clone();
+            eprintln!("après déplacement : coin +X {:.2}", p.dist(Vec3::new(x + 1.2, 10.4, 2.0)));
+            h.st.undo();
         }
         h.shot("pc-local-1-morceau");
         h.st.camera.yaw += 0.9;

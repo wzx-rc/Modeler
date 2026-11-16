@@ -145,7 +145,8 @@ mod tests {
         let mut post = Shape::new(PrimKind::Box);
         post.size = Vec3::new(5.0, 10.0, 5.0);
         let id = s.add(r, NodeSpec::shape("post", post).at(Vec3::new(0.0, 12.0, 0.0)));
-        let zone = scene::BlendZone::from_curve(3.0, &[Vec3::new(5.0, 2.0, -5.0), Vec3::new(5.0, 2.0, 5.0)]);
+        // (in the post's own frame: it sits at y = 12)
+        let zone = scene::BlendZone::from_curve(3.0, &[Vec3::new(5.0, -10.0, -5.0), Vec3::new(5.0, -10.0, 5.0)]);
         s.nodes.get_mut(&id).unwrap().blend_zones.push(zone);
         let p = compile(&s);
         // the inner corner, 0.4 mm out from the wall and the plate
@@ -156,6 +157,10 @@ mod tests {
         // the f64 bake interpreter agrees
         let f = bake::field::Field::new(&p);
         assert!((f.eval(glam::DVec3::new(5.4, 2.4, 0.0)).d - near as f64).abs() < 1e-3);
+        // the fillet follows the post when it moves
+        s.nodes.get_mut(&id).unwrap().transform.pos.x += 3.0;
+        let p = compile(&s);
+        assert!(p.dist(Vec3::new(8.4, 2.4, 0.0)) < 0.0, "moved with the post");
     }
 
     #[test]

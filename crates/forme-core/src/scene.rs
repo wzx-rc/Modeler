@@ -463,7 +463,8 @@ pub struct Node {
     pub blend_zones: Vec<BlendZone>,
 }
 
-/// One piece of a junction curve (world points, a polyline) with its fillet.
+/// One piece of a junction curve with its fillet: a polyline in the frame of
+/// the node that holds it (so it follows the shape), radius in mm.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlendZone {
     pub radius: f32,
