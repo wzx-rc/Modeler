@@ -1,0 +1,19 @@
+[package]
+name = "forme-occt"
+edition.workspace = true
+version.workspace = true
+description = "Forme's thin C layer over OpenCascade: primitives, booleans, fillets, meshing, with OpenCascade errors caught and returned"
+links = "forme_occt"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1"
+occt-sys = { version = "7.8", optional = true }
+
+[features]
+# Builds OpenCascade 7.8 from source (cmake + a C++ compiler; ~6 to 20 min the
+# first time, then cached in target/OCCT). Without it, set FORME_OCCT_ROOT to
+# an installed OCCT 7.8 (folder with lib/ and include/).
+default = ["builtin"]
+builtin = ["dep:occt-sys"]
