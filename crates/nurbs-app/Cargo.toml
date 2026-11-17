@@ -1,0 +1,33 @@
+[package]
+name = "nurbs-app"
+edition.workspace = true
+version.workspace = true
+description = "Forme NURBS: the app (egui + wgpu). The part comes from the kernel process; the app draws its mesh and picks its faces"
+build = "build.rs"
+
+[lib]
+name = "nurbs_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "forme-nurbs"
+path = "src/main.rs"
+
+[[bin]]
+name = "forme-nurbs-shot"
+path = "src/bin/shot.rs"
+
+[dependencies]
+nurbs-kernel = { path = "../nurbs-kernel" }
+glam.workspace = true
+bytemuck.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+image.workspace = true

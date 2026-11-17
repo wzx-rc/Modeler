@@ -1,5 +1,7 @@
 # Forme — modélisation hard surface sur iPad
 
+> **Branche `claude/nurbs-zero` : Forme NURBS refait de zéro, sans SDF.** Trois crates seulement : `forme-occt` (couche C sur OpenCascade), `nurbs-kernel` (document, construction B-rep dans un processus à part) et `nurbs-app` (l'app `forme-nurbs`). Commandes et carte du code : `CLAUDE.md`. Le reste de ce README et `docs/` décrivent Forme SDF, qui vit sur la branche `claude/nurbs`.
+
 Forme construit un objet en combinant des formes paramétriques au doigt et au Pencil (Add, Carve, Intersect, Groove, Tongue), dans l'esprit du workflow « primitives » de Substance 3D Modeler, sans VR ni sculpt. Tout reste éditable : la scène est un arbre de formes, jamais un maillage. Le **Bake** convertit l'historique en un maillage de quads propre, comme modélisé à la main.
 
 Écrit entièrement en Rust : le même code tourne sur iPad (Metal) et sur ordinateur (DX12, Vulkan) via wgpu.

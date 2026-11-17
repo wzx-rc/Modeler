@@ -1,8 +1,8 @@
 [workspace]
-members = ["crates/forme-core", "crates/forme-render", "crates/forme-app", "crates/nurbs-core", "crates/nurbs-occ", "crates/forme-occt"]
-# nurbs-occ and forme-occt build OpenCascade from source (6 to 20 min the
-# first time): only with `-p`, never by a bare `cargo build`
-default-members = ["crates/forme-core", "crates/forme-render", "crates/forme-app", "crates/nurbs-core"]
+members = ["crates/nurbs-app", "crates/nurbs-kernel", "crates/forme-occt"]
+# forme-occt (and nurbs-kernel's `occ` feature) build or link OpenCascade:
+# only with `-p`, never by a bare `cargo build`
+default-members = ["crates/nurbs-app", "crates/nurbs-kernel"]
 resolver = "2"
 
 [workspace.package]
@@ -30,8 +30,6 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 2
 
-[profile.dev.package.forme-core]
-opt-level = 3
 
 [profile.release]
 opt-level = 3

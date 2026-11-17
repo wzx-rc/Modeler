@@ -1,0 +1,23 @@
+[package]
+name = "nurbs-kernel"
+edition.workspace = true
+version.workspace = true
+description = "Forme NURBS: the document (features), the model the kernel sends back, and the OpenCascade kernel process"
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+forme-occt = { path = "../forme-occt", default-features = false, optional = true }
+
+[features]
+# the kernel itself (OpenCascade, through forme-occt): the forme-nurbs-kernel
+# process. `occ` links an installed OCCT 7.8 (FORME_OCCT_ROOT); `builtin`
+# builds OCCT from source (6 to 20 min the first time, then cached).
+occ = ["dep:forme-occt"]
+builtin = ["occ", "forme-occt/builtin"]
+
+[[bin]]
+name = "forme-nurbs-kernel"
+path = "src/bin/kernel.rs"
+required-features = ["occ"]

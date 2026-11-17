@@ -22,6 +22,10 @@ struct FMesh {
 struct FLines {
     _p: [u8; 0],
 }
+#[repr(C)]
+struct FBuf {
+    _p: [u8; 0],
+}
 
 extern "C" {
     fn focc_last_error() -> *const c_char;
@@ -38,8 +42,16 @@ extern "C" {
     fn focc_section_edge(s: *const FShape, k: c_int) -> c_int;
     fn focc_edge_count(s: *const FShape) -> c_int;
     fn focc_edge_sample(s: *const FShape, index: c_int, n: c_int, xyz: *mut c_double) -> c_int;
-    fn focc_fillet(s: *const FShape, idx: *const c_int, n: c_int, r: c_double) -> *mut FShape;
-    fn focc_chamfer(s: *const FShape, idx: *const c_int, n: c_int, d: c_double) -> *mut FShape;
+    fn focc_fillet(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
+    fn focc_chamfer(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
+    fn focc_face_count(s: *const FShape) -> c_int;
+    fn focc_face_info(s: *const FShape, index: c_int, out: *mut c_double) -> c_int;
+    fn focc_set_tags(s: *mut FShape, tags: *const i64, n: c_int);
+    fn focc_face_tag(s: *const FShape, index: c_int) -> i64;
+    fn focc_topo(s: *const FShape, defl: c_double, angle: c_double) -> *mut FBuf;
+    fn focc_buf_len(b: *const FBuf) -> c_int;
+    fn focc_buf_data(b: *const FBuf) -> *const u8;
+    fn focc_buf_free(b: *mut FBuf);
     fn focc_volume(s: *const FShape) -> c_double;
     fn focc_is_valid(s: *const FShape) -> c_int;
     fn focc_mesh(s: *const FShape, defl: c_double, angle: c_double) -> *mut FMesh;
@@ -106,6 +118,162 @@ pub struct Edge {
     pub index: i32,
     pub kind: EdgeKind,
     pub pts: Vec<[f64; 3]>,
+}
+
+/// Kind of a face's surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfKind {
+    Plane,
+    Cylinder,
+    Cone,
+    Sphere,
+    Torus,
+    Other,
+}
+
+impl SurfKind {
+    fn from_code(k: i32) -> SurfKind {
+        match k {
+            0 => SurfKind::Plane,
+            1 => SurfKind::Cylinder,
+            2 => SurfKind::Cone,
+            3 => SurfKind::Sphere,
+            4 => SurfKind::Torus,
+            _ => SurfKind::Other,
+        }
+    }
+}
+
+/// What a face is: a point in its middle and the outward normal there, its
+/// axis (a plane's: through that point along the normal) and its radius
+/// (round faces).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceInfo {
+    pub kind: SurfKind,
+    pub point: [f64; 3],
+    pub normal: [f64; 3],
+    pub axis_origin: [f64; 3],
+    pub axis_dir: [f64; 3],
+    pub radius: f64,
+}
+
+impl FaceInfo {
+    fn from_raw(kind: i32, d: &[f64]) -> FaceInfo {
+        FaceInfo {
+            kind: SurfKind::from_code(kind),
+            point: [d[0], d[1], d[2]],
+            normal: [d[3], d[4], d[5]],
+            axis_origin: [d[6], d[7], d[8]],
+            axis_dir: [d[9], d[10], d[11]],
+            radius: d[12],
+        }
+    }
+}
+
+/// A face of a `Topo`: its tag (`Shape::set_tags`, -1 = none) and what it is.
+#[derive(Clone, Debug)]
+pub struct TopoFace {
+    pub tag: i64,
+    pub info: FaceInfo,
+}
+
+/// An edge of a `Topo`: its index in the shape (for fillets), the faces on
+/// each side (indices in `Topo::faces`), its kind, whether it is a closed
+/// surface's own seam, and a polyline along it.
+#[derive(Clone, Debug)]
+pub struct TopoEdge {
+    pub index: i32,
+    pub faces: [i32; 2],
+    pub kind: EdgeKind,
+    pub seam: bool,
+    pub pts: Vec<[f64; 3]>,
+}
+
+/// Everything shown and picked: faces, triangles (each with its face) and
+/// edges.
+#[derive(Clone, Debug, Default)]
+pub struct Topo {
+    pub faces: Vec<TopoFace>,
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub triangles: Vec<[u32; 3]>,
+    pub tri_face: Vec<u32>,
+    pub edges: Vec<TopoEdge>,
+}
+
+struct Reader<'a> {
+    b: &'a [u8],
+    at: usize,
+}
+
+impl Reader<'_> {
+    fn take<const N: usize>(&mut self) -> Option<[u8; N]> {
+        let s = self.b.get(self.at..self.at + N)?;
+        self.at += N;
+        s.try_into().ok()
+    }
+    fn u32(&mut self) -> Option<u32> {
+        self.take::<4>().map(u32::from_le_bytes)
+    }
+    fn i32(&mut self) -> Option<i32> {
+        self.take::<4>().map(i32::from_le_bytes)
+    }
+    fn i64(&mut self) -> Option<i64> {
+        self.take::<8>().map(i64::from_le_bytes)
+    }
+    fn f32(&mut self) -> Option<f32> {
+        self.take::<4>().map(f32::from_le_bytes)
+    }
+    fn f64(&mut self) -> Option<f64> {
+        self.take::<8>().map(f64::from_le_bytes)
+    }
+}
+
+fn parse_topo(b: &[u8]) -> Option<Topo> {
+    let mut r = Reader { b, at: 0 };
+    let mut t = Topo::default();
+    let nf = r.u32()? as usize;
+    for _ in 0..nf {
+        let tag = r.i64()?;
+        let kind = r.i32()?;
+        let mut d = [0.0; 13];
+        for v in d.iter_mut() {
+            *v = r.f64()?;
+        }
+        t.faces.push(TopoFace { tag, info: FaceInfo::from_raw(kind, &d) });
+    }
+    let nv = r.u32()? as usize;
+    for _ in 0..nv {
+        t.positions.push([r.f32()?, r.f32()?, r.f32()?]);
+    }
+    for _ in 0..nv {
+        t.normals.push([r.f32()?, r.f32()?, r.f32()?]);
+    }
+    let nt = r.u32()? as usize;
+    for _ in 0..nt {
+        t.triangles.push([r.u32()?, r.u32()?, r.u32()?]);
+    }
+    for _ in 0..nt {
+        t.tri_face.push(r.u32()?);
+    }
+    let ne = r.u32()? as usize;
+    for _ in 0..ne {
+        let index = r.i32()?;
+        let faces = [r.i32()?, r.i32()?];
+        let kind = match r.i32()? {
+            0 => EdgeKind::Line,
+            1 => EdgeKind::Circle,
+            _ => EdgeKind::Curve,
+        };
+        let seam = r.i32()? != 0;
+        let n = r.u32()? as usize;
+        let mut pts = Vec::with_capacity(n);
+        for _ in 0..n {
+            pts.push([r.f64()?, r.f64()?, r.f64()?]);
+        }
+        t.edges.push(TopoEdge { index, faces, kind, seam, pts });
+    }
+    Some(t)
 }
 
 /// Triangles of a shape: per-face vertices (sharp edges stay sharp).
@@ -188,11 +356,49 @@ impl Shape {
     /// Rounds the edges (indices in this shape) with radius r, in one
     /// operation. Err when OpenCascade cannot make it or the result is not
     /// a valid solid.
-    pub fn fillet(&self, edges: &[i32], r: f64) -> Result<Shape, String> {
-        shape(unsafe { focc_fillet(self.0, edges.as_ptr(), edges.len() as c_int, r) })
+    /// The new (fillet) faces get the tag `fresh`; the others keep theirs.
+    pub fn fillet(&self, edges: &[i32], r: f64, fresh: i64) -> Result<Shape, String> {
+        shape(unsafe { focc_fillet(self.0, edges.as_ptr(), edges.len() as c_int, r, fresh) })
     }
-    pub fn chamfer(&self, edges: &[i32], d: f64) -> Result<Shape, String> {
-        shape(unsafe { focc_chamfer(self.0, edges.as_ptr(), edges.len() as c_int, d) })
+    pub fn chamfer(&self, edges: &[i32], d: f64, fresh: i64) -> Result<Shape, String> {
+        shape(unsafe { focc_chamfer(self.0, edges.as_ptr(), edges.len() as c_int, d, fresh) })
+    }
+
+    pub fn face_count(&self) -> usize {
+        unsafe { focc_face_count(self.0) }.max(0) as usize
+    }
+
+    /// Face `index` (0-based, the shape's face order).
+    pub fn face_info(&self, index: usize) -> Option<FaceInfo> {
+        let mut d = [0.0f64; 13];
+        let k = unsafe { focc_face_info(self.0, index as c_int, d.as_mut_ptr()) };
+        (k >= 0).then(|| FaceInfo::from_raw(k, &d))
+    }
+
+    /// Names the faces (one tag per face, in face order). Transforms,
+    /// booleans and fillets pass each face's tag on to what it becomes.
+    pub fn set_tags(&mut self, tags: &[i64]) {
+        unsafe { focc_set_tags(self.0, tags.as_ptr(), tags.len() as c_int) }
+    }
+
+    pub fn face_tag(&self, index: usize) -> i64 {
+        unsafe { focc_face_tag(self.0, index as c_int) }
+    }
+
+    /// Meshes the shape (chord `defl` mm, angle `angle` rad) and returns its
+    /// faces, triangles and edges.
+    pub fn topo(&self, defl: f64, angle: f64) -> Result<Topo, String> {
+        let b = unsafe { focc_topo(self.0, defl, angle) };
+        if b.is_null() {
+            return Err(last_error());
+        }
+        let out = unsafe {
+            let bytes = std::slice::from_raw_parts(focc_buf_data(b), focc_buf_len(b).max(0) as usize);
+            let t = parse_topo(bytes);
+            focc_buf_free(b);
+            t
+        };
+        out.ok_or_else(|| "topology buffer cut short".to_string())
     }
 
     pub fn volume(&self) -> f64 {
@@ -260,13 +466,13 @@ mod tests {
         let cut = cube.cut(&hole).unwrap();
         let sec = cut.section_edges();
         assert_eq!(sec.len(), 2, "two rims");
-        let f = cut.fillet(&sec, 1.5).unwrap();
+        let f = cut.fillet(&sec, 1.5, 99).unwrap();
         assert!(f.is_valid());
         let v = f.volume();
         let raw = 8000.0 - std::f64::consts::PI * 16.0 * 20.0;
         assert!(v < raw && v > raw - 60.0, "volume {v}");
         // a fillet too big fails cleanly
-        assert!(cut.fillet(&sec, 30.0).is_err());
+        assert!(cut.fillet(&sec, 30.0, 99).is_err());
         let m = f.mesh(0.02, 0.25).unwrap();
         assert!(m.triangles.len() > 100);
         // lines: the cube's 12 edges, each rim's two fillet boundaries; the
@@ -302,6 +508,51 @@ mod tests {
         // it fillets like the rest
         let p = Shape::prism(&l, &[false; 6], 2.0).unwrap();
         let all: Vec<i32> = p.edges(2).iter().map(|e| e.index).collect();
-        assert!(p.fillet(&all, 0.5).unwrap().is_valid());
+        assert!(p.fillet(&all, 0.5, 99).unwrap().is_valid());
+    }
+
+    #[test]
+    fn tags_and_topo() {
+        // a cube tagged 10..15, a hole tagged 20..22: the holed cube keeps
+        // the cube's six tags and gets the hole's side; the fillet faces
+        // get their own tag
+        let mut cube = Shape::cuboid(20.0, 20.0, 20.0).unwrap();
+        assert_eq!(cube.face_count(), 6);
+        cube.set_tags(&(10..16).collect::<Vec<i64>>());
+        let mut hole = Shape::cylinder(4.0, 28.0).unwrap();
+        let n = hole.face_count();
+        assert_eq!(n, 3);
+        let kinds: Vec<SurfKind> = (0..n).map(|i| hole.face_info(i).unwrap().kind).collect();
+        assert_eq!(kinds.iter().filter(|k| **k == SurfKind::Cylinder).count(), 1);
+        hole.set_tags(&[20, 21, 22]);
+        let moved = hole.transformed([[1.0, 0.0, 0.0, 2.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]).unwrap();
+        assert_eq!((0..3).map(|i| moved.face_tag(i)).collect::<Vec<_>>(), vec![20, 21, 22]);
+        let cut = cube.cut(&moved).unwrap();
+        let t = cut.topo(0.05, 0.3).unwrap();
+        assert_eq!(t.faces.len(), 7);
+        let mut tags: Vec<i64> = t.faces.iter().map(|f| f.tag).collect();
+        tags.sort();
+        let side = (0..3).map(|i| moved.face_tag(i)).find(|&tg| {
+            let k = (0..3).find(|&j| moved.face_tag(j) == tg).unwrap();
+            moved.face_info(k).unwrap().kind == SurfKind::Cylinder
+        });
+        assert_eq!(tags, {
+            let mut v: Vec<i64> = (10..16).collect();
+            v.push(side.unwrap());
+            v.sort();
+            v
+        });
+        // every triangle has a face, every edge two faces (a seam has its
+        // one face on both sides)
+        assert_eq!(t.tri_face.len(), t.triangles.len());
+        assert!(t.tri_face.iter().all(|f| (*f as usize) < t.faces.len()));
+        assert!(!t.edges.is_empty());
+        assert!(t.edges.iter().all(|e| e.faces[0] >= 0 && (e.seam || e.faces[1] >= 0) && e.pts.len() >= 2));
+        // the hole's seam is flagged
+        assert_eq!(t.edges.iter().filter(|e| e.seam).count(), 1);
+        let f = cut.fillet(&cut.section_edges(), 1.0, 99).unwrap();
+        let tf = f.topo(0.05, 0.3).unwrap();
+        assert_eq!(tf.faces.iter().filter(|f| f.tag == 99).count(), 2, "one fillet face per rim");
+        assert_eq!(tf.faces.iter().filter(|f| f.tag < 0).count(), 0);
     }
 }

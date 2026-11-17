@@ -1,0 +1,324 @@
+//! forme-nurbs-shot: runs the real app headless (egui + wgpu, a software
+//! GPU is fine) with the kernel process, plays scenarios with pointer
+//! events and saves PNGs.
+//!
+//! cargo run --release -p nurbs-app --bin forme-nurbs-shot -- OUT_DIR [scenario prefix…]
+//! (FORME_NURBS_KERNEL=path/to/forme-nurbs-kernel when it is not next to it)
+
+use egui::{pos2, Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
+use glam::{DQuat, DVec3, Vec3};
+use nurbs_app::draw::Drawer;
+use nurbs_app::state::{AppState, Tool};
+use nurbs_app::theme;
+use nurbs_kernel::client::{kernel_exe, Kernel};
+use nurbs_kernel::doc::PrimKind;
+use nurbs_kernel::{Doc, Op, Prim};
+use std::time::{Duration, Instant};
+
+const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+struct Gpu {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+}
+
+impl Gpu {
+    fn new() -> Gpu {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).expect("adapter");
+        let i = adapter.get_info();
+        eprintln!("GPU: {} ({:?})", i.name, i.backend);
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("shot"), required_limits: adapter.limits(), ..Default::default() })).expect("device");
+        Gpu { device, queue }
+    }
+
+    fn target(&self, w: u32, h: u32) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shot"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FMT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    }
+
+    fn read_rgba(&self, tex: &wgpu::Texture) -> Vec<u8> {
+        let (w, h) = (tex.width(), tex.height());
+        let padded = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("readback"), size: (padded * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([enc.finish()]);
+        buf.map_async(wgpu::MapMode::Read, .., |r| r.expect("map"));
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let data = buf.slice(..).get_mapped_range().expect("mapped");
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for row in 0..h {
+            let s = (row * padded) as usize;
+            out.extend_from_slice(&data[s..s + (w * 4) as usize]);
+        }
+        drop(data);
+        buf.unmap();
+        out
+    }
+}
+
+struct Harness {
+    gpu: Gpu,
+    drawer: Drawer,
+    ctx: egui::Context,
+    st: AppState,
+    t: f64,
+    size: [f32; 2],
+    ppp: f32,
+    pending: Vec<Event>,
+    out: String,
+    mods: Modifiers,
+    /// egui textures not drawn yet (applied with the next image).
+    pending_tex: egui::TexturesDelta,
+}
+
+impl Harness {
+    fn new(out: &str) -> Harness {
+        let gpu = Gpu::new();
+        let drawer = Drawer::new(&gpu.device, FMT);
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let st = AppState::new(Doc::default(), "Untitled", Kernel::start(None));
+        Harness { gpu, drawer, ctx, st, t: 0.0, size: [1600.0, 900.0], ppp: 2.0, pending: vec![], out: out.to_string(), mods: Modifiers::NONE, pending_tex: Default::default() }
+    }
+
+    /// A new app state on this document (its own kernel process).
+    fn reset(&mut self, doc: Doc, name: &str) {
+        let exe = kernel_exe();
+        if exe.is_none() {
+            eprintln!("kernel not found: set FORME_NURBS_KERNEL");
+        }
+        self.st = AppState::new(doc, name, Kernel::start(exe));
+        self.ctx = egui::Context::default();
+        theme::install(&self.ctx);
+        self.pending_tex = Default::default();
+        self.drawer = Drawer::new(&self.gpu.device, FMT);
+        self.steps(2);
+        self.settle();
+        self.st.frame_all();
+        self.steps(2);
+    }
+
+    fn raw(&mut self) -> RawInput {
+        let mut raw = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(self.size[0], self.size[1]))),
+            time: Some(self.t),
+            predicted_dt: 1.0 / 60.0,
+            events: std::mem::take(&mut self.pending),
+            focused: true,
+            ..Default::default()
+        };
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(self.ppp);
+        raw
+    }
+
+    fn step(&mut self) {
+        self.t += 1.0 / 60.0;
+        let raw = self.raw();
+        self.st.tick(self.t);
+        let st = &mut self.st;
+        let out = self.ctx.run_pass(raw, |ctx| nurbs_app::run(ctx, st));
+        // textures are applied with the next image
+        self.pending_tex.append(out.textures_delta);
+    }
+
+    fn steps(&mut self, n: usize) {
+        for _ in 0..n {
+            self.step();
+        }
+    }
+
+    /// Frames until the kernel has answered the latest document.
+    fn settle(&mut self) {
+        let end = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < end {
+            self.step();
+            if !self.st.building() {
+                self.steps(2);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        eprintln!("kernel: no answer in 20 s");
+    }
+
+    fn press(&mut self, p: Pos2, down: bool) {
+        self.pending.push(Event::PointerMoved(p));
+        self.pending.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: down, modifiers: self.mods });
+        self.step();
+    }
+
+    fn move_to(&mut self, p: Pos2) {
+        self.pending.push(Event::PointerMoved(p));
+        self.step();
+    }
+
+    fn click(&mut self, p: Pos2) {
+        self.press(p, true);
+        self.press(p, false);
+        self.steps(2);
+    }
+
+    fn drag(&mut self, a: Pos2, b: Pos2, n: usize, release: bool) {
+        self.press(a, true);
+        for i in 1..=n {
+            let t = i as f32 / n as f32;
+            self.move_to(a + (b - a) * t);
+        }
+        if release {
+            self.press(b, false);
+            self.step();
+        }
+    }
+
+    fn screen_of(&self, w: Vec3) -> Pos2 {
+        let p = self.st.view().project(w).expect("in front");
+        pos2(p[0], p[1])
+    }
+
+    fn shot(&mut self, name: &str) {
+        self.t += 1.0 / 60.0;
+        let raw = self.raw();
+        self.st.tick(self.t);
+        let st = &mut self.st;
+        let mut out = self.ctx.run_pass(raw, |ctx| nurbs_app::run(ctx, st));
+        let paint = self.ctx.tessellate(std::mem::take(&mut out.shapes), out.pixels_per_point);
+        let mut tex = std::mem::take(&mut self.pending_tex);
+        tex.append(out.textures_delta);
+        let (w, h) = ((self.size[0] * self.ppp) as u32, (self.size[1] * self.ppp) as u32);
+        let target = self.gpu.target(w, h);
+        let view = target.create_view(&Default::default());
+        self.drawer.render(&self.gpu.device, &self.gpu.queue, &view, [w, h], self.ppp, &self.st, &paint, &mut tex);
+        let px = self.gpu.read_rgba(&target);
+        let path = format!("{}/{}.png", self.out, name);
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
+        image::save_buffer(&path, &px, w, h, image::ExtendedColorType::Rgba8).expect("png");
+        let m = self.st.model.as_ref();
+        eprintln!("{path}  ({} faces, {} edges, errors {:?})", m.map(|m| m.faces.len()).unwrap_or(0), m.map(|m| m.edges.len()).unwrap_or(0), m.map(|m| m.errors.clone()).unwrap_or_default());
+    }
+}
+
+/// The test part: a 40 mm block, a hole through it, a boss on top, a slot.
+fn test_part() -> Doc {
+    let mut d = Doc::default();
+    let block = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+    d.feature_mut(block).unwrap().name = "Block".into();
+    let hole = d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-10.0, -5.0, 0.0), DQuat::IDENTITY);
+    d.feature_mut(hole).unwrap().name = "Hole".into();
+    let boss = d.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0), DQuat::IDENTITY);
+    d.feature_mut(boss).unwrap().name = "Boss".into();
+    let slot = d.add(Op::Carve, Prim::Box { x: 8.0, y: 8.0, z: 40.0 }, DVec3::new(0.0, 14.0, 0.0), DQuat::IDENTITY);
+    d.feature_mut(slot).unwrap().name = "Slot".into();
+    d
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let out = args.first().cloned().unwrap_or_else(|| "shots".into());
+    let only: Vec<String> = args.iter().skip(1).cloned().collect();
+    let want = |name: &str| only.is_empty() || only.iter().any(|o| name.starts_with(o.as_str()));
+    let mut h = Harness::new(&out);
+
+    if want("empty") {
+        h.reset(Doc::default(), "Untitled");
+        h.shot("zero-empty");
+    }
+
+    if want("part") {
+        h.reset(test_part(), "Test part");
+        h.shot("zero-part");
+        // pre-selection, then selection by a click on the block's front face
+        let front = h.screen_of(Vec3::new(14.0, 6.0, 15.0));
+        h.move_to(front);
+        h.steps(2);
+        h.shot("zero-part-hover");
+        h.click(front);
+        h.settle();
+        h.shot("zero-part-select");
+        // the hole's far wall, seen through its opening: selects the hole
+        // (a cutter, shown by its outline)
+        h.st.selection.clear();
+        let wall = h.screen_of(Vec3::new(-13.5, 17.0, -3.5));
+        h.click(wall);
+        h.steps(2);
+        h.shot("zero-part-select-hole");
+    }
+
+    if want("move") {
+        h.reset(test_part(), "Test part");
+        // select the boss, drag its X arrow: the kernel rebuilds live
+        let boss = h.screen_of(Vec3::new(10.0, 30.0, 0.0));
+        h.click(boss);
+        h.steps(2);
+        let pivot = h.st.pivot().unwrap();
+        let v = h.st.view();
+        let k = v.pixel_size_at((pivot.as_vec3() - v.eye).length()) * 78.0;
+        let tip = h.screen_of(pivot.as_vec3() + Vec3::X * k * 0.7);
+        let to = h.screen_of(pivot.as_vec3() + Vec3::new(-14.0, 0.0, 0.0) + Vec3::X * k * 0.7);
+        h.move_to(tip);
+        h.steps(2);
+        h.shot("zero-move-1-hot");
+        h.drag(tip, to, 12, false);
+        h.settle();
+        h.shot("zero-move-2-live");
+        h.press(to, false);
+        h.settle();
+        h.shot("zero-move-3-done");
+        eprintln!("boss now at {:?}", h.st.doc.features[2].origin);
+    }
+
+    if want("create") {
+        h.reset(test_part(), "Test part");
+        // a box on the block's top face, Add: base, then height
+        h.st.tool = Tool::Create(PrimKind::Box);
+        let a = h.screen_of(Vec3::new(-16.0, 20.0, -12.0));
+        let b = h.screen_of(Vec3::new(-6.0, 20.0, -4.0));
+        h.move_to(a);
+        h.steps(2);
+        h.shot("zero-create-1-armed");
+        h.drag(a, b, 10, true);
+        h.settle();
+        h.shot("zero-create-2-base");
+        let up = h.screen_of(Vec3::new(-11.0, 32.0, -8.0));
+        h.move_to(up);
+        h.settle();
+        h.shot("zero-create-3-height");
+        h.click(up);
+        h.settle();
+        h.shot("zero-create-4-done");
+        // a cylinder in Carve, into the block's front face
+        h.st.mode = Op::Carve;
+        h.st.tool = Tool::Create(PrimKind::Cylinder);
+        let c = h.screen_of(Vec3::new(12.0, 8.0, 15.0));
+        let r = h.screen_of(Vec3::new(16.0, 8.0, 15.0));
+        h.drag(c, r, 8, true);
+        let down = h.screen_of(Vec3::new(12.0, 8.0, 5.0));
+        h.move_to(down);
+        h.settle();
+        h.shot("zero-create-5-carve");
+        h.click(down);
+        h.settle();
+        h.st.tool = Tool::Select;
+        h.st.selection.clear();
+        h.steps(2);
+        h.shot("zero-create-6-done");
+        for f in &h.st.doc.features {
+            eprintln!("  {} {:?} {:?} at {:?}", f.name, f.op, f.prim, f.origin);
+        }
+    }
+}

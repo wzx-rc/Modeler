@@ -1,82 +1,63 @@
-# CLAUDE.md — Forme
+# CLAUDE.md — Forme NURBS (branch `claude/nurbs-zero`)
 
 Instructions for Claude (Claude Code on PC, or a claude.ai Project) working on this repository.
-Read `docs/00-PROJET.md` first: vision, decisions already taken with Romain, state, what's next.
+
+**This branch is Forme NURBS restarted from zero** (Romain, 17 nov. 2026: "repartir à 1000 % de zéro… il faut absolument tout enlever du SDF"). It holds no SDF code at all: no raymarcher, no SDF scene, no Bake, no SDF edge picking. Forme SDF and the first Forme NURBS (built on top of the SDF app) live on the branch `claude/nurbs`; `docs/` still describes Forme SDF and its Bake. Never bring SDF code back here, not even as a preview.
 
 ## The project in three lines
 
-Forme is a hard-surface modelling app for iPad Pro, in the spirit of Substance 3D Modeler without VR: an object is built by combining parametric SDF shapes (Add, Carve, Intersect, Groove, Tongue). It is close to CAD, not sculpting. Everything is written in Rust (egui + wgpu), and the same code runs on iPad (Metal) and on PC (DX12 / Vulkan). The **Bake** turns the parametric history into a clean, all-quad export mesh, the way it would be modelled by hand.
+Forme NURBS is a hard-surface modelling app (PC first, iPad later): an object is a list of features (Cube, Cylinder…) combined in order (Add = union, Carve = cut), built as exact B-rep solids by **OpenCascade** and shown as its mesh with its B-rep edges. The UI looks like Forme's « Établi » interface (floating islands, tool cards, one inspector, history strip), in English, dark, with the white accent.
 
 ## Working with Romain
 
 - Always reply in **French**: short, straight to the point, with screenshots when there is something to see. He often reads on his phone.
-- All UI text is in French. Code comments are in English. Commit messages are in French (title + bullet points).
-- Move forward **step by step** on simple cases: the 20 mm test cube before complex scenes like the grenade. Show a drawing or a capture before a large change of direction.
-- Topology requirements for the Bake are strict: quads, loops that follow the shapes, fillets as rows like a bevel modifier, no "voxel converted" look. See `docs/BAKE.md`.
-- Be honest about limits: say what has not been tested on a real device.
+- The UI text is in **English**. Code comments are in English. Commit messages are in French (title + bullet points).
+- Move forward **step by step** on simple cases. Show a drawing or a capture before a large change of direction.
+- Be honest about limits: say what has only been checked in captures, and what has not been tried at the mouse or on a real device.
+
+## Plan (announced to Romain on 17 nov. 2026)
+
+1. **Base** (done): viewport, grid and world origin, Cube and Cylinder in Add / Carve, selection and move; OpenCascade recomputes the booleans live during every drag.
+2. Selection of the real B-rep edges (from the kernel's topology: face tags and edge adjacency), fillets and chamfers.
+3. Quick creation and stacking, workplanes, Sketch (extruded profiles), materials (6 balls).
 
 ## Commands
 
 ```bash
-cargo test --release -p forme-core                      # core tests (25 tests)
-cargo run --release -p forme-app --bin forme            # the app on PC
-cargo run --release -p forme-app --bin forme-shot -- shots          # every capture scenario
-cargo run --release -p forme-app --bin forme-shot -- /tmp/x max     # one scenario (prefix): max, live, 22, 19, ui-ipad…
-cargo run --release -p forme-app --bin forme-shot -- /tmp/x pc-atelier pc-studio   # the two PC interfaces at 1600×900
-IPAD_ZOOM=0.84 cargo run --release -p forme-app --bin forme-shot -- /tmp/x ui-ipad   # layout as on the iPad
-OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- parlignes  # the Bake on its test scenes, CPU renders (CASE=romain-aretes|rc|raccord|boss|bossage|bossage-c3z+1|rc-sans-raccord|ra-coin3|romain|coin|trou|… for one, DEBUG_LAYOUT=1 for the rays, DEBUG_FACE="prim face file" dumps one face's lines, DEBUG_COUNTS=file dumps the segment-count system when it does not settle, QUALITE=legere|dense, BEVEL=0 for the layout without the sharp-edge bevel, OBJ=1 writes each mesh)
-OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- lignes     # construction lines (bake/lines.rs) over the baked part
-DEG=5 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- decime  # optional pass: dissolve the closed edge loops whose cross path bends less than DEG (same code as the toggle)
-OUT=/tmp/x cargo run --release -p forme-core --example bake_robust              # robustness: ~6000 simple cases (plate + one shape moved on a 1 mm grid, fillet patterns, sizes, Romain's scenes), maps + results.tsv + résumé.txt; family names as args (trou, boite, fillets…), CAS="x 3 z 0" OBJ=file for one case, BEVEL=0 grades the layout alone (the reference for layout rules)
+export FORME_OCCT_ROOT=/path/occt-7.8                        # an installed OCCT 7.8 (lib/ include/); on PC use --features builtin instead
+cargo test --release -p forme-occt --no-default-features      # the C layer: cube − hole, fillet, face tags, topology
+cargo test --release -p nurbs-kernel --features occ           # the document → B-rep build, caches, skip, encode / decode
+cargo build --release -p nurbs-kernel --features occ          # the kernel process forme-nurbs-kernel
+cargo build --release -p nurbs-kernel --features builtin      # same, building OpenCascade from source the first time (6 to 20 min, cmake + C++ compiler)
+cargo build --release -p nurbs-app                            # the app forme-nurbs and the capture harness forme-nurbs-shot
+cargo run --release -p nurbs-app --bin forme-nurbs            # the app (finds target/release/forme-nurbs-kernel next to it, or FORME_NURBS_KERNEL=path)
+./target/release/forme-nurbs-shot /tmp/x                      # every capture scenario on the test part; prefix filter: empty, part, move, create
 ```
 
-## Two apps: Forme SDF and Forme NURBS (Romain, 17 nov. 2026)
+`forme-nurbs-shot` runs the real app headless (egui + wgpu, real kernel process, real mouse events). It accepts a software GPU (lavapipe / llvmpipe) and writes full-quality PNGs at 1600×900 points, scale 2. Use it to check every visual change before showing it.
 
-The same `forme-app` code builds two apps that Romain works on separately:
-- `forme` = **Forme SDF** (French UI, the SDF raymarched part);
-- `forme-nurbs` = **Forme NURBS** (English UI, dark with the white accent « Blanc »): same tools and UI, but the part is built as B-rep solids by a CAD kernel and shown as its mesh (the SDF preview stays while the kernel computes). `forme_app::nurbs()` is set from the exe name or `FORME_ENGINE=nurbs`; settings in `settings-nurbs.json`; UI strings go through `crate::i18n::{tr, trd}` (French source text, English dictionary), `FORME_LANG=en|fr` overrides.
-- A tool built for one app is ported to the other by removing its `nurbs()` gate: put features in `state.rs` like any other tool, never in a copy of the UI.
+The window title shows the version, branch, commit and commit date (`crates/nurbs-app/build.rs`, `nurbs_app::version_title()`): check it before saying which version Romain is running.
 
-The NURBS kernel is **OpenCascade**, chosen by Romain over truck (whose booleans fail on sphere / torus faces and whose fillets do not work); what matters to him is that it can go to the iPad. `crates/forme-occt` is our own thin C layer over it (`cpp/forme_occt.cpp` + safe Rust wrapper): primitives, booleans with their junction edges, fillets / chamfers by edge index, meshing; every OpenCascade exception is caught and returned as `Err`; only `opencascade::handle<T>` is used (the `Handle_T` aliases are a derived class under MSVC, which is why the `opencascade` crate does not build on Windows). OpenCascade itself is built from source by `occt-sys` (feature `builtin`, cached in `target/OCCT`) or taken from `FORME_OCCT_ROOT`. On PC it runs in a separate process, `forme-occ` (crate `nurbs-occ`), next to the app executable (or `FORME_OCC=path`): a hard crash inside OpenCascade cannot take the app down, `nurbs_core::worker::build_occ` reruns it with the failing step skipped (`--skip fillet:<id>`…), and what was left out is listed. Without `forme-occ`, the app falls back to the pure Rust kernel (`nurbs_core::build`, truck). On iPad (no child processes) forme-occt will be called in-process.
+## Code map
 
-The NURBS part is shown with its B-rep edges as thin dark lines (face borders, where each fillet starts and ends; seams and poles left out): `Shape::edge_lines` in forme-occt, `NurbsModel.edges`, drawn by `forme_render::mesh` as anti-aliased screen-width quads (1.1 point, `MeshRenderer.line_scale` = image pixels per point) hidden behind the matter (`line_vertices`, `upload_lines`); the mesh pass uses a perspective depth (affine in 1/z) so long triangles and lines get exact depths.
-
-Mapping: Add = union, Carve = cut, the node's Blend (Raccord) = fillet of the boolean's new edges (Chamfer kind = chamfer), local junction fillets = fillet of the new edges along the zone and of the B-rep edge it was picked on (a closed rim is one edge, filleted whole; the kernel returns each boolean's sharp junction edges in `NurbsModel.junctions`, and the Edges tool lights exactly those, `AppState::nurbs_piece_edges`), Round / Chamfer / per-edge fillets of a box or cylinder = fillets of the primitive's own edges, repetitions and mirrors = copies.
-
-NURBS-only tools (gated by `nurbs()`, ported by removing the gate): **quick creation** (`AppState::arm_tool` / `quick_add`: the armed tool again, or Shift + C/S/A/T, places a 20 mm primitive at the world origin, stacks it on the selected shape's top along its axis, or drills through it in Carve), the **world origin** on the grid (`Settings.origin`, red X / blue Z axes and a ring in `sdf.wgsl`), and Modo-like **workplanes** (`state::Workplane`, `workplane_candidates()`: Ground, the vertical plane facing the camera, the top of the selection; drawn in `sdf.wgsl` with depth from `Globals.planes`, yellow, hovered = brighter; `begin_placement` starts on the plane under the pointer unless a face of the part is nearer; P or the Workplane button toggles them). The **Sketch** tool (L, Romain 17 nov.: 2D creation; `Tool::Sketch`, `state::Sketch`): click = corner, drag = curve point, click the first point or Enter to close (Backspace removes the last point, Esc drops it); the outline is drawn on the workplane under the pointer, else the face, else the ground, then pulled like a primitive's base (up = Add, down = Carve) into a `PrimKind::Profile` (Extrude) shape, which forme-occ builds as an exact prism (`Shape::prism`: smooth points are quadratic Bézier curves).
-
-```bash
-cargo build --release -p nurbs-occ                       # the kernel process; builds OpenCascade 7.8 from source the first time (6 to 20 min, needs cmake + a C++ compiler)
-FORME_OCCT_ROOT=/path/occt cargo build --release -p nurbs-occ --no-default-features   # same, against an installed OCCT 7.8 (lib/ include/)
-FORME_OCCT_ROOT=/path/occt cargo test --release -p forme-occt --no-default-features   # the C layer: cube − hole, fillet of the rims, volume
-cargo run --release -p forme-app --bin forme-nurbs       # Forme NURBS (uses target/release/forme-occ when it is there)
-OUT=/tmp/x cargo run --release -p nurbs-core --example occ_test     # the kernel on small parts (cube + hole + fillets…), OBJ per case with the edge lines as `l`
-cargo run --release -p forme-app --bin forme-shot -- /tmp/x nurbs nurbs-stack nurbs-planes nurbs-sketch nurbs-edit nurbs-mats   # NURBS captures (fillet test part, bearing, primitives; quick creation and stacking; workplanes; sketch + extrude; a fillet clicked with Edges and resized; the material balls)
-```
-
-The window title shows the version, branch, commit and commit date (`crates/forme-app/build.rs`, `forme_app::version_title()`), also at the bottom of Réglages: check it before saying which version Romain is running.
-
-`forme-shot` runs the real app headless (egui + wgpu). It accepts a software GPU (lavapipe / llvmpipe) and writes full-quality PNGs. Use it to check every visual change before showing it.
-
-The iPad `.ipa` is built by GitHub Actions on every push to `main` (repository `wzx-rc/Modeler`). It is published as the `ipa-latest` release. Details are in `docs/DEV-PC.md`.
-
-## Code map (details in `docs/ARCHITECTURE.md`)
-
-- `crates/forme-core`: scene (shape tree), SDF bytecode compiler + CPU interpreter, history, `.forme` JSON projects, OBJ/GLB export, dual contouring, `edges.rs` (edge picking for fillets), `bake/` (the Bake by lines `layout.rs`, construction lines `lines.rs`, optional pass `decimate.rs`, f64 interpreter `field.rs`, primitive tessellation `gen.rs`).
-- `crates/forme-render`: WGSL raymarcher (`sdf.wgsl`), preview of the baked mesh (`mesh.rs`), headless capture.
-- `crates/forme-app`: two desktop interfaces chosen in Settings (redesign of 10 nov. 2026): « Établi » (`ui.rs`, enum `UiMode::Atelier`: viewport first, floating islands, tool column, one inspector, context bar over the selection, history strip; also the iPad layout) and « Studio » (`studio.rs`: docked CAD station like Plasticity, menus, command palette on Espace, sizes panel typed while a creation tool is armed via `AppState::place_sized`, fixed side panel scene / properties / history, status bar) (« Radial » was removed on 10 nov.; a saved "Radial" opens as Établi) and « Focus » (`ui.rs::show_focus`: dock at the bottom, radial menu, scene drawer), plus Romain's two moods « Plaque » (`plaque.rs`: thin tool bar left, floating inspector in mm, docked scene tree, status bar; orange) and « Radial » (`radial.rs`: tool pill with ADD / CARVE, tool cards on the right, contextual inspector, JetBrains Mono labels; green); the ambiance (accent colour, `theme::set_ambiance`) is Auto (Établi and Radial green, Studio and Plaque orange, Focus blue) or one for all, in Réglages; colours in `theme.rs`; user preferences (`settings.rs`, `settings.json` next to the projects, `FORME_UI=atelier|studio|focus|plaque|radial` overrides); gestures (`viewport.rs`), state and tools (`state.rs`), frame composition and progressive rendering (`gfx.rs`), entry point (`main.rs`), capture harness (`bin/shot.rs`).
+- `crates/forme-occt`: our thin C layer over OpenCascade (`cpp/forme_occt.cpp` + safe Rust wrapper). Primitives, transforms, booleans, fillets / chamfers by edge index, meshing. Every OpenCascade exception is caught and returned as `Err`; only `opencascade::handle<T>` is used (the `Handle_T` aliases break under MSVC). **Face tags**: each face carries an `i64` tag that booleans, transforms, fillets and chamfers carry to the faces they make (`carry_tags`, history `Modified`); new fillet / chamfer faces get the `fresh` tag. `Shape::topo(defl, angle)` returns in one buffer the faces (tag, surface kind, plane point / normal, axis, radius), the mesh with a face index per triangle, and the edges (index, the two faces, kind, seam, polyline). OpenCascade is built by `occt-sys` (feature `builtin`, cached in `target/OCCT`) or taken from `FORME_OCCT_ROOT`.
+- `crates/nurbs-kernel`: the document and the kernel.
+  - `doc.rs`: `Doc { features }`, `Feature { id, name, op, prim, origin, rot, visible, material }`. A feature's origin is the centre of its base; it rises along its local +Y. Saved as JSON `.fnurbs`.
+  - `model.rs`: what the kernel sends back: mesh, `tri_face`, faces with their `FaceTag { feature, sub }` (box sub: 0 +X, 1 −X, 2 top, 3 bottom, 4 +Z, 5 −Z; cylinder: 0 side, 1 top, 2 bottom), edges, errors; binary encode / decode.
+  - `build.rs` (feature `occ`): features applied in order (a Carve with nothing before it is ignored), tool solids cached by feature hash, stages by prefix hash, `STEP what:id:hash` written on stderr before each risky step.
+  - `client.rs`: the app side. The kernel runs in its own process `forme-nurbs-kernel` (u32-length frames on stdin / stdout, JSON request, binary model): a hard crash inside OpenCascade cannot take the app down; the client restarts it with the failing step skipped and the model lists what was left out. The latest request wins; coarse meshing while a gesture is live, fine after.
+- `crates/nurbs-app`: the app.
+  - `render.rs`: wgpu, MSAA 4×: background (gradient, ground grid 10 / 50 mm, origin axes), the part's mesh with per-face flags (selected / hovered) in a storage buffer, B-rep edges as anti-aliased screen-width lines, overlay outlines (cutters, shapes being moved or created) with a dimmed hidden part.
+  - `pick.rs`: ray against the kernel's triangles, face by face → the face's tag → the feature. No SDF, no approximation.
+  - `state.rs`: `AppState` (document, undo / redo with live edits, selection, tools, 3ds Max-like creation on the ground or a flat face, move gizmo and size handles, kernel round trips). Features go here first.
+  - `viewport.rs`: gestures (Maya navigation: Alt + left orbit, Alt + middle pan, Alt + right zoom, wheel zoom), gizmo, creation and marquee drawing, kernel status line.
+  - `ui.rs` + `widgets.rs` + `theme.rs` + `icons.rs`: the Établi-style islands, inspector, history strip, files dialog; `draw.rs`: what is uploaded to the renderer each frame; `files.rs`, `settings.rs`: `~/Documents/Forme NURBS`.
+  - `bin/shot.rs`: the capture harness (`test_part()`: Block, Hole, Boss, Slot).
 
 ## Rules that are easy to break
 
-- **The shader (`sdf.wgsl`), the f32 CPU interpreter (`program.rs::eval_prim`) and the f64 bake interpreter (`bake/field.rs::prim_raw`) must stay identical.** Any change to a primitive (for example per-edge fillets) goes in all three.
-- Local junction fillets (`Node.blend_zones`, `BlendZone::k_at`): the blend of a combine is `max(own blend, zone radius fading with the distance to the zone's corner polyline)`, evaluated at the world point in `sdf.wgsl::zone_k`, `program.rs::zone_k` and `bake/field.rs::zone_k` (same formula, same aux layout). The Bake refuses them for now. A zone is the straight run of the junction's raw corner curve around the pick (`edges::corner_piece`).
-- Box edge indices (12): `axis*4 + k`, with k over the signs of the other two axes `(+,+) (-,+) (-,-) (+,-)`, other axes = `(axis+1)%3, (axis+2)%3`. Cylinder: 0 = top rim, 1 = bottom rim.
-- `Shape.edges` empty = uniform fillet (`round` / `chamfer`). Negative value = chamfer. `set_edge` collapses back to uniform when every edge is equal.
-- Bake build order (validated by Romain): **fillets first**, as quad strips shown in orange in debug renders, **then the fill paths** (flat faces, walls) between them, reusing the strips' edge vertices exactly. See `docs/BAKE.md`.
-- The pair bevel on sharp edges (`bake/bevel.rs`, Romain's Maya reference) is **part of `bake()`**, always on: width `BakeSettings.bevel` (0.25 mm, 0 = none). A corner it cannot bevel returns `Err`.
-- The flat-loop pass (`bake/decimate.rs`) is an **option, off by default** (validated by Romain): never call it from `bake()`. It runs only when the toggle in the Bake window is on, on a copy of the result.
-- **One Bake algorithm: by construction lines (`bake/layout.rs`)** (Romain, 10 nov. 2026). The old bakes (by operation `build.rs`, by surfaces `patch.rs`, field-aligned `quad.rs`) are deleted: never bring back a fallback mesh. A history it does not handle returns `Err(reason)`; `bake()` returns it as is and the Bake panel shows it in red, with no mesh. Never return a broken mesh in silence.
-- Renderer: an image is "moving" when it changes from frame to frame (not just because a tool is active). The full-quality image is refined in bands, so it never blocks the UI.
-- Both interfaces drive the same `AppState`: a feature goes in `state.rs`, then gets a control in `ui.rs` (Atelier) and in `studio.rs` (Studio). Each interface sets `st.view_rect` every frame (the free 3D area), which centres the camera.
-- The app creates only Cube, Cylinder, Sphere, Capsule and Torus (`state::PRIMS`) with the Add and Carve modes (`state::MODES`). Forme NURBS adds the Sketch tool (extruded profiles), asked by Romain for the NURBS app on 17 nov.; Forme SDF keeps the list as is. The Profile tool, the kit of parts, repetitions, Cone / Prism / Tube, Intersect / Groove / Tongue and the old "advanced" setting were removed from the app (Romain, 10 nov. 2026): do not bring them back as hidden options. forme-core still knows them, so older `.forme` files load and render.
-- Never commit `target/` or `shots/replay/frames/`.
+- **No SDF, ever, on this branch**: the part on screen is always the kernel's mesh. While the kernel computes, the previous mesh stays, with the moved or created shape drawn as an outline.
+- Picking and selection go through the kernel's faces and their tags (`Model::faces[f].tag`), never through a field or a guess from the shape list.
+- A tag is `(feature << 16) | sub`; any new primitive must tag all its faces in `nurbs_kernel::build::sub_of`.
+- Both sides of the kernel protocol (`proto.rs`, `model.rs` encode / decode) change together; the kernel process is rebuilt with the app.
+- Never commit `target/` or `shots/replay/frames/`. Never run `cargo fmt` on the whole tree.

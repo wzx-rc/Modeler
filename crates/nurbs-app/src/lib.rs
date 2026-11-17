@@ -1,0 +1,39 @@
+#![allow(deprecated)]
+//! Forme NURBS, the app (Romain, 17 nov. 2026: "repars de zéro, sans une
+//! ligne de SDF"). The part is OpenCascade's (crate nurbs-kernel, in its
+//! own process): the app shows its mesh, picks its B-rep faces, and edits a
+//! document of features. Same look as the first Forme NURBS.
+
+pub mod camera;
+pub mod draw;
+pub mod files;
+pub mod icons;
+pub mod pick;
+pub mod render;
+pub mod settings;
+pub mod state;
+pub mod theme;
+pub mod ui;
+pub mod view;
+pub mod viewport;
+pub mod widgets;
+
+pub use state::AppState;
+
+/// "Forme NURBS 0.1.0 — nurbs-zero · 3f2a1bc · 17/11/2026 05:30": version,
+/// branch, commit and commit date (see build.rs). Shown in the window title.
+pub fn version_title() -> String {
+    let parts: Vec<&str> = [env!("FORME_GIT_BRANCH"), env!("FORME_GIT_COMMIT"), env!("FORME_GIT_DATE")].into_iter().filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        format!("Forme NURBS {}", env!("CARGO_PKG_VERSION"))
+    } else {
+        format!("Forme NURBS {} — {}", env!("CARGO_PKG_VERSION"), parts.join(" · "))
+    }
+}
+
+/// The whole UI for one frame.
+pub fn run(ctx: &egui::Context, st: &mut AppState) {
+    theme::set_light(ctx, st.settings.light);
+    viewport::show(ctx, st);
+    ui::show(ctx, st);
+}
