@@ -1852,15 +1852,34 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
                 k = (k + 1) % n;
             }
         }
+        // a side may start rows ending in T when it holds a fillet's arc,
+        // or any arc (a hole's) facing its opposite side across a narrow
+        // strip (Romain: a hole close to an edge should not spread its
+        // segments over the next face)
+        let len: [f64; 4] = std::array::from_fn(|k| sides[k].iter().map(|(p, _, _)| cx.piece_len(*p)).sum());
+        let edge_kind = |side: &[(Piece, bool, bool)]| -> Vec<i32> {
+            side.iter().map(|(p, _, _)| cx.lines[p.line].edge).map(|e| if e > 0 { topo.edges[(e - 1) as usize].kind } else { -1 }).collect()
+        };
         let fillet = std::array::from_fn(|k| {
+            // the strip: a flat face, the two short sides cuts across it,
+            // the side opposite the arc straight B-rep edges
+            let strip = topo.faces[fi].kind == forme_occt::SurfKind::Plane
+                && edge_kind(&sides[(k + 1) % 4]).iter().all(|&c| c == -1)
+                && edge_kind(&sides[(k + 3) % 4]).iter().all(|&c| c == -1)
+                && edge_kind(&sides[(k + 2) % 4]).iter().all(|&c| c == 0);
             sides[k].iter().any(|(p, _, _)| {
                 let e = cx.lines[p.line].edge;
                 e > 0 && {
                     let te = &topo.edges[(e - 1) as usize];
-                    te.kind == 1 && te.radius > 0.0 && cx.arcs[(e - 1) as usize].length() / te.radius < 100f64.to_radians()
+                    te.kind == 1
+                        && te.radius > 0.0
+                        && (strip || cx.arcs[(e - 1) as usize].length() / te.radius < 100f64.to_radians())
                 }
             })
         });
+        if std::env::var("FORME_QUADS_DEBUG").is_ok() {
+            eprintln!("  patch face {fi}: len {len:.1?} flags {fillet:?}");
+        }
         patches.push(Patch { face: fi, sides, fillet });
     }
 
@@ -1958,8 +1977,33 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
             let mut changed = false;
             for pt in &patches {
                 let sum4 = |k: usize| pt.sides[k].iter().map(|(p, _, _)| count[p]).sum::<usize>();
-                if transition_ok([sum4(0), sum4(1), sum4(2), sum4(3)], pt.fillet, relaxed.contains(&pt.face)) {
+                let c4 = [sum4(0), sum4(1), sum4(2), sum4(3)];
+                if transition_ok(c4, pt.fillet, relaxed.contains(&pt.face)) {
                     continue;
+                }
+                // a patch shaped for rows ending in T that only misses it
+                // by a little (its two other sides differ, or an odd
+                // difference): mend that rather than raising the coarse
+                // side up to the dense one, which would spread the dense
+                // count over the next faces
+                let near = (0..2).find_map(|k| {
+                    let (a, c2) = (c4[k], c4[k + 2]);
+                    let (hi, lo, lo_k) = if a > c2 { (a, c2, k + 2) } else { (c2, a, k) };
+                    let dense = if a > c2 { pt.fillet[k] } else { pt.fillet[k + 2] };
+                    (dense && lo > 0 && 2 * hi >= 3 * lo).then_some((k, lo_k))
+                });
+                if let Some((k, lo_k)) = near {
+                    let (b, d) = (c4[(k + 1) % 4], c4[(k + 3) % 4]);
+                    let raise = if b != d {
+                        if b < d { (k + 1) % 4 } else { (k + 3) % 4 }
+                    } else {
+                        lo_k
+                    };
+                    if let Some((p, _, _)) = pt.sides[raise].iter().filter(|x| !cx.is_pole(x.0.line)).max_by(|x, y| (cx.piece_len(x.0) / count[&x.0] as f64).total_cmp(&(cx.piece_len(y.0) / count[&y.0] as f64))) {
+                        *count.get_mut(p).unwrap() += if even { 2 } else { 1 };
+                        changed = true;
+                        continue;
+                    }
                 }
                 for (a, b) in [(0, 2), (1, 3)] {
                     let sum = |k: usize| pt.sides[k].iter().map(|(p, _, _)| count[p]).sum::<usize>();
@@ -2548,6 +2592,23 @@ mod tests {
         assert_eq!(q.bad_quads(15.0), 0, "four holes: no squashed quads");
         let diag = Shape::cuboid(40.0, 10.0, 40.0).unwrap().cut(&cyl(5.0, -4.5, -4.5)).unwrap().cut(&cyl(5.0, 4.5, 4.5)).unwrap();
         check("diag", &diag, 2);
+    }
+
+    #[test]
+    fn hole_near_edge() {
+        // a hole 1 mm from the edge of a plate (Romain: the ring should run
+        // along the edge, its segments should not spread over the side)
+        let cyl = |r: f64, x: f64, z: f64| moved(Shape::cylinder(r, 30.0).unwrap(), [x, 0.0, z]);
+        let plate = Shape::cuboid(40.0, 10.0, 30.0).unwrap().cut(&cyl(5.0, 14.0, 0.0)).unwrap();
+        let q = check("hole-edge", &plate, 1);
+        let mut per: HashMap<u32, usize> = HashMap::new();
+        for f in &q.quad_face {
+            *per.entry(*f).or_default() += 1;
+        }
+        let mut per: Vec<_> = per.into_iter().collect();
+        per.sort();
+        eprintln!("hole near an edge: {} quads, {} bad, min angle {:.0}°, per face {per:?}", q.quads.len(), q.bad_quads(15.0), q.min_angle());
+        assert_eq!(q.bad_quads(15.0), 0, "hole near an edge: no squashed quads");
     }
 
     #[test]

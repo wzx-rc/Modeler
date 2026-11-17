@@ -702,6 +702,17 @@ fn main() {
         }
         std::env::set_var("FORME_DOCS", &out);
         h.st.export_obj();
+
+        // a hole 1 mm from the edge of a plate
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(14.0, -5.0, 0.0), DQuat::IDENTITY);
+        h.reset(d, "Hole near an edge");
+        h.st.quads = true;
+        h.st.camera.frame(Vec3::new(-20.0, 0.0, -15.0), Vec3::new(20.0, 10.0, 15.0));
+        h.steps(2);
+        h.settle();
+        h.shot("zero-quads-hole-edge");
     }
 
     if want("snap") {
