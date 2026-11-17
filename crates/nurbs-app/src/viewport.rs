@@ -600,7 +600,11 @@ fn draw_push(p: &Painter, st: &AppState) {
             p.circle(a, 2.5, col, Stroke::NONE);
             p.circle(b, if on { 7.5 } else { 6.0 }, if on { HOT } else { chip_bg() }, Stroke::new(2.0, col));
             if on {
-                chip(p, b + vec2(14.0, -10.0), Align2::LEFT_BOTTOM, &format!("Inset {} mm", fmt_mm(pu.inset as f32)), col, col);
+                // on the far side of the dot from its line, clear of the arrow
+                let away = (b - a).normalized();
+                let at = b + if away.x.is_finite() { away * 16.0 } else { vec2(14.0, 0.0) };
+                let anchor = if away.x >= 0.0 { Align2::LEFT_CENTER } else { Align2::RIGHT_CENTER };
+                chip(p, at, anchor, &format!("Inset {} mm", fmt_mm(pu.inset as f32)), col, col);
             }
         }
     }

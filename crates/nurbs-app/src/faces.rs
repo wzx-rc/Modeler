@@ -346,7 +346,14 @@ impl AppState {
         // the arrow: from the middle of the step's own face, else from its point moved
         let base = own.filter(|x| x.kind == SurfKind::Plane).map(|x| DVec3::from_array(x.point)).unwrap_or(at + n * p.depth);
         let v = self.view();
-        let len = v.pixel_size_at((base.as_vec3() - v.eye).length()) as f64 * 64.0;
+        let mut len = v.pixel_size_at((base.as_vec3() - v.eye).length()) as f64 * 84.0;
+        // seen end on, the arrow shrinks: long enough to show 64 points at least
+        if let (Some(a), Some(b)) = (v.project(base.as_vec3()), v.project((base + n * len).as_vec3())) {
+            let px = ((b[0] - a[0]).hypot(b[1] - a[1]) as f64).max(1.0);
+            if px < 64.0 {
+                len *= (64.0 / px).min(4.0);
+            }
+        }
         Some(PushHandles { inset, base, tip: base + n * len, n })
     }
 
