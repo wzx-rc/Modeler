@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "forme-nurbs"
-path = "src/main.rs"
+path = "src/bin/forme_nurbs.rs"
 
 [[bin]]
 name = "forme-shot"

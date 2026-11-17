@@ -1,4 +1,5 @@
-//! Forme app entry point (iPad via winit's UIKit backend, and desktop for development).
+// Forme app entry point (iPad via winit's UIKit backend, and desktop for development).
+// Also the Forme NURBS app: src/bin/forme_nurbs.rs includes this file.
 
 use forme_app::gfx::FrameRenderer;
 use forme_app::state::{AppState, PointerKind};

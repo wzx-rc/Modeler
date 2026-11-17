@@ -1,0 +1,4 @@
+[env]
+# CMake 4 refuses projects that ask for a CMake older than 3.5 (OpenCascade's
+# build through occt-sys / opencascade-sys): accept them.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
