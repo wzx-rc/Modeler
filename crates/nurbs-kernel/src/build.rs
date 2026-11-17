@@ -219,6 +219,79 @@ fn round(acc: &Shape, f: &Feature, r: &Round) -> (Option<Result<Shape, String>>,
     (Some(res), missing, None)
 }
 
+/// A fillet that blends its corners: rebuilt in one operation with the run
+/// of fillets just before it (from the first one it touches, through shared
+/// edge ends), on the solid from before that run. None when there is
+/// nothing to blend with or OpenCascade cannot make it (then each fillet is
+/// made on its own, as before).
+fn blend(befores: &[(&Feature, Stage)], f: &Feature, r: &Round) -> Option<Shape> {
+    let n = befores.len().checked_sub(1)?;
+    let mut k = n;
+    while k > 0 && befores[k - 1].0.round.as_ref().map(|g| !g.chamfer).unwrap_or(false) {
+        k -= 1;
+    }
+    if k == n {
+        return None;
+    }
+    let base = befores[k].1.shape.clone()?;
+    let limits = &befores[n].1.limits;
+    // each fillet of the run on the base: its id, size and edges
+    let mut groups = vec![];
+    for (g, _) in &befores[k..=n] {
+        let gr = g.round.as_ref()?;
+        let (edges, missing) = resolve(&base, &gr.edges);
+        if missing > 0 || edges.is_empty() {
+            return None;
+        }
+        let size = if g.id == f.id { r.size } else { limits.iter().find(|(i, _)| *i == g.id).map(|(_, l)| *l).unwrap_or(gr.size) };
+        if size <= 1e-6 {
+            return None;
+        }
+        groups.push((g.id, size, edges));
+    }
+    // which fillets touch this one (through shared edge ends, step by step)
+    let ends: Vec<Vec<DVec3>> = groups
+        .iter()
+        .map(|(_, _, es)| es.iter().filter_map(|&i| base.edge(i, 2)).flat_map(|e| [e.pts.first().copied(), e.pts.last().copied()]).flatten().map(DVec3::from_array).collect())
+        .collect();
+    let meet = |a: usize, b: usize| ends[a].iter().any(|p| ends[b].iter().any(|q| p.distance(*q) < 1e-4));
+    let last = groups.len() - 1;
+    let mut touch = vec![false; groups.len()];
+    touch[last] = true;
+    loop {
+        let mut more = false;
+        for a in 0..groups.len() {
+            if !touch[a] && (0..groups.len()).any(|b| touch[b] && meet(a, b)) {
+                touch[a] = true;
+                more = true;
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+    let first = touch.iter().position(|t| *t)?;
+    if first == last {
+        return None;
+    }
+    // the run from the first fillet it touches (the ones in between too, so
+    // none is lost), all in one operation
+    let base = befores[k + first].1.shape.clone()?;
+    let mut entries = vec![];
+    for (g, _) in &befores[k + first..=n] {
+        let gr = g.round.as_ref()?;
+        let (edges, missing) = resolve(&base, &gr.edges);
+        if missing > 0 {
+            return None;
+        }
+        let (_, size, _) = groups.iter().find(|x| x.0 == g.id)?;
+        let tag = FaceTag { feature: g.id, sub: 0 }.pack();
+        entries.extend(edges.into_iter().map(|i| (i, *size, tag)));
+    }
+    mark(&step("round", f));
+    base.fillet_multi(&entries, FaceTag { feature: f.id, sub: 0 }.pack()).ok()
+}
+
 /// The face a reference names: among the faces with its tag, the nearest
 /// to its point.
 fn find_face(shape: &Shape, r: &FaceRef) -> Option<usize> {
@@ -289,7 +362,10 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let mut key = 0u64;
     let mut used_tools = vec![];
     let mut used_stages = vec![];
+    // the stage before each feature (blended fillets start again from there)
+    let mut befores: Vec<(&Feature, Stage)> = vec![];
     for f in doc.features.iter().filter(|f| f.visible) {
+        befores.push((f, stage.clone()));
         let fh = f.hash();
         key = hash2(key, fh);
         let skipped = |what: &str| skip.iter().any(|s| *s == step(what, f));
@@ -305,7 +381,14 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         // a fillet or chamfer: on the solid built so far
         if let Some(r) = &f.round {
             if let Some(acc) = stage.shape.clone() {
-                let (res, missing, limit) = if skipped("round") { (Some(Err("skipped, it crashed the kernel".to_string())), 0, None) } else { round(&acc, f, r) };
+                let blended = if r.blend && !r.chamfer && !skipped("round") { blend(&befores, f, r) } else { None };
+                let (res, missing, limit) = if let Some(b) = blended {
+                    (Some(Ok(b)), 0, None)
+                } else if skipped("round") {
+                    (Some(Err("skipped, it crashed the kernel".to_string())), 0, None)
+                } else {
+                    round(&acc, f, r)
+                };
                 if let Some(l) = limit {
                     stage.limits.push((f.id, l));
                 }
@@ -492,6 +575,36 @@ mod tests {
         assert!(m4.is_empty() && m4.errors.is_empty());
         // round trip through the wire
         assert_eq!(Model::decode(&m.encode()).unwrap(), m);
+    }
+
+    #[test]
+    fn fillets_blend_their_corner() {
+        // three fillets made one after the other on the three edges of the
+        // same corner of a block
+        let mk = |blend: bool| {
+            let mut d = Doc::default();
+            let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            let e = |a: u16, c: u16, at: DVec3| vec![EdgeRef { faces: { let (x, y) = (tag(b, a), tag(b, c)); if x <= y { [x, y] } else { [y, x] } }, at }];
+            let r1 = d.add_round(3.0, false, e(2, 4, DVec3::new(0.0, 20.0, 10.0)));
+            let r2 = d.add_round(3.0, false, e(0, 4, DVec3::new(10.0, 10.0, 10.0)));
+            let r3 = d.add_round(3.0, false, e(2, 0, DVec3::new(10.0, 20.0, 0.0)));
+            for id in [r1, r2, r3] {
+                d.feature_mut(id).unwrap().round.as_mut().unwrap().blend = blend;
+            }
+            (build(&d, true, false, &[], &mut Cache::default()), [r1, r2, r3])
+        };
+        // one after the other, the second fillet runs on along the first's
+        // border (tangent) and takes the third's edge
+        let (open, _) = mk(false);
+        let (blended, [r1, r2, r3]) = mk(true);
+        assert!(blended.errors.is_empty(), "{:?}", blended.errors);
+        let count = |m: &Model, id: u32| m.faces.iter().filter(|f| f.tag.map(|t| t.feature == id).unwrap_or(false)).count();
+        // each fillet keeps its faces (clicking them selects it), the corner
+        // belongs to the last one
+        assert!(count(&blended, r1) >= 1 && count(&blended, r2) >= 1 && count(&blended, r3) >= 2, "{} {} {}", count(&blended, r1), count(&blended, r2), count(&blended, r3));
+        eprintln!("faces: open {} blended {} ({} {} {})", open.faces.len(), blended.faces.len(), count(&blended, r1), count(&blended, r2), count(&blended, r3));
+        // the block's 6 faces, one band per fillet, one corner
+        assert_eq!((blended.faces.len(), count(&blended, r1), count(&blended, r2), count(&blended, r3)), (10, 1, 1, 2));
     }
 
     /// The tag of a face of the built model, packed.

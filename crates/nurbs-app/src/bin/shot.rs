@@ -574,6 +574,34 @@ fn main() {
         assert_eq!(h.st.sel_mode, SelMode::Object);
     }
 
+    if want("blend") {
+        // three fillets (3, 3 and 6 mm) made one after the other on the
+        // three edges of a block's corner: open (each on its own), then
+        // blended
+        let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        let mk = |blend: bool| {
+            let mut d = Doc::default();
+            let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            d.feature_mut(b).unwrap().name = "Block".into();
+            let edges = [(2u16, 4u16, DVec3::new(0.0, 20.0, 15.0), 3.0), (0, 4, DVec3::new(20.0, 10.0, 15.0), 3.0), (2, 0, DVec3::new(20.0, 20.0, 0.0), 6.0)];
+            for (a, c, at, size) in edges {
+                let r = d.add_round(size, false, vec![EdgeRef { faces: [tag(b, a), tag(b, c)], at }]);
+                d.feature_mut(r).unwrap().round.as_mut().unwrap().blend = blend;
+            }
+            d
+        };
+        for (blend, name) in [(false, "zero-blend-1-open"), (true, "zero-blend-2-blended")] {
+            let d = mk(blend);
+            let last = d.features.last().unwrap().id;
+            h.reset(d, "Corner");
+            h.st.camera.frame(Vec3::new(5.0, 5.0, 0.0), Vec3::new(25.0, 22.0, 18.0));
+            h.st.selection = vec![last];
+            h.steps(2);
+            h.settle();
+            h.shot(name);
+        }
+    }
+
     if want("quads") {
         let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
         // a 20 mm cube, its top front edge filleted at 4 mm

@@ -44,6 +44,7 @@ extern "C" {
     fn focc_edge_faces(s: *const FShape, out: *mut c_int, cap: c_int) -> c_int;
     fn focc_edge_sample(s: *const FShape, index: c_int, n: c_int, xyz: *mut c_double) -> c_int;
     fn focc_fillet(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
+    fn focc_fillet_multi(s: *const FShape, idx: *const c_int, r: *const c_double, tags: *const i64, n: c_int, fresh: i64) -> *mut FShape;
     fn focc_chamfer(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
     fn focc_inset_face(s: *const FShape, face: c_int, d: c_double) -> *mut FShape;
     fn focc_extrude(s: *const FShape, dx: c_double, dy: c_double, dz: c_double) -> *mut FShape;
@@ -447,6 +448,15 @@ impl Shape {
     /// The new (fillet) faces get the tag `fresh`; the others keep theirs.
     pub fn fillet(&self, edges: &[i32], r: f64, fresh: i64) -> Result<Shape, String> {
         shape(unsafe { focc_fillet(self.0, edges.as_ptr(), edges.len() as c_int, r, fresh) })
+    }
+    /// Several fillets in one operation (corners blended): each edge
+    /// (1-based) with its radius and the tag of the faces made along it;
+    /// corner faces get `fresh`.
+    pub fn fillet_multi(&self, edges: &[(i32, f64, i64)], fresh: i64) -> Result<Shape, String> {
+        let idx: Vec<c_int> = edges.iter().map(|e| e.0).collect();
+        let r: Vec<c_double> = edges.iter().map(|e| e.1).collect();
+        let t: Vec<i64> = edges.iter().map(|e| e.2).collect();
+        shape(unsafe { focc_fillet_multi(self.0, idx.as_ptr(), r.as_ptr(), t.as_ptr(), idx.len() as c_int, fresh) })
     }
     pub fn chamfer(&self, edges: &[i32], d: f64, fresh: i64) -> Result<Shape, String> {
         shape(unsafe { focc_chamfer(self.0, edges.as_ptr(), edges.len() as c_int, d, fresh) })

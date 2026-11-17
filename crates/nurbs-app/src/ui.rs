@@ -875,6 +875,14 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
             }
         }
     });
+    // fillets made one after the other meet in one rounded corner
+    if let Some(r) = existing.as_ref().filter(|r| !r.chamfer) {
+        ui.add_space(2.0);
+        if toggle_row(ui, "Blend corners", r.blend) {
+            st.set_blend(!r.blend);
+        }
+        ui.label(egui::RichText::new(if r.blend { "Made together with the fillets before it that it touches: one rounded corner" } else { "Made on its own: it ends where it meets another fillet" }).font(regular(12.0)).color(TEXT2()));
+    }
     if existing.is_none() {
         ui.add_space(2.0);
         if secondary_btn(ui, "Deselect the edges", ui.available_width()).clicked() {

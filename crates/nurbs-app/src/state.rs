@@ -829,6 +829,16 @@ impl AppState {
         self.round_chamfer = chamfer;
     }
 
+    /// Blend corners on or off for the selected fillet.
+    pub fn set_blend(&mut self, on: bool) {
+        let Some(id) = self.selected_round().map(|f| f.id) else { return };
+        self.edit(if on { "Blend corners" } else { "Open corners" }, |d| {
+            if let Some(r) = d.feature_mut(id).and_then(|f| f.round.as_mut()) {
+                r.blend = on;
+            }
+        });
+    }
+
     /// The largest size the kernel could give this fillet / chamfer, when
     /// the size asked was too big for it (it is then built at that size).
     pub fn round_limit(&self, id: u32) -> Option<f64> {

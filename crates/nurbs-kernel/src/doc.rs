@@ -219,6 +219,11 @@ pub struct Round {
     #[serde(default)]
     pub chamfer: bool,
     pub edges: Vec<EdgeRef>,
+    /// Blend corners: made in one operation with the fillets just before it
+    /// that it touches, so they meet in a rounded corner instead of each
+    /// ending on its own (fillets only).
+    #[serde(default)]
+    pub blend: bool,
 }
 
 impl Round {
@@ -424,7 +429,7 @@ impl Doc {
     pub fn add_round(&mut self, size: f64, chamfer: bool, edges: Vec<EdgeRef>) -> FeatureId {
         let id = self.next_id;
         self.next_id += 1;
-        let round = Round { size, chamfer, edges };
+        let round = Round { size, chamfer, edges, blend: !chamfer };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
         self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None });

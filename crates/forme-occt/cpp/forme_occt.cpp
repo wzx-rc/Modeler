@@ -493,6 +493,54 @@ FShape* focc_fillet(const FShape* s, const int* idx, int n, double r, long long 
         (FShape*)nullptr);
 }
 
+// Rounds several fillets at once, each edge (1-based index) with its own
+// radius and tag: where they meet, OpenCascade blends the corner instead of
+// ending each fillet on its own. The faces made along an edge's contour take
+// that edge's tag; the corner faces (made from vertices) take `fresh`.
+FShape* focc_fillet_multi(const FShape* s, const int* idx, const double* r, const long long* tags, int n, long long fresh) {
+    return guard(
+        [&] {
+            TopTools_IndexedMapOfShape m;
+            edge_map(s->s, m);
+            BRepFilletAPI_MakeFillet op(s->s);
+            std::vector<std::pair<TopoDS_Edge, long long>> added;
+            for (int i = 0; i < n; i++) {
+                if (idx[i] < 1 || idx[i] > m.Extent()) continue;
+                TopoDS_Edge e = TopoDS::Edge(m(idx[i]));
+                if (op.Contour(e) > 0) continue; // already in a contour (tangent chain)
+                op.Add(r[i], e);
+                added.push_back({e, tags[i]});
+            }
+            op.Build();
+            if (!op.IsDone()) {
+                set_err("fillet failed");
+                return (FShape*)nullptr;
+            }
+            if (!valid(op.Shape())) {
+                set_err("fillet gave an invalid solid");
+                return (FShape*)nullptr;
+            }
+            FShape* res = wrap(op.Shape());
+            if (!res) return res;
+            carry_tags(op, s, res, fresh);
+            TopTools_IndexedMapOfShape fout;
+            face_map(res->s, fout);
+            for (auto& [e0, t] : added) {
+                int ic = op.Contour(e0);
+                if (ic <= 0) continue;
+                for (int ie = 1; ie <= op.NbEdges(ic); ie++) {
+                    const TopTools_ListOfShape& g = op.Generated(op.Edge(ic, ie));
+                    for (TopTools_ListOfShape::Iterator it(g); it.More(); it.Next()) {
+                        int j = fout.FindIndex(it.Value());
+                        if (j > 0) res->tags[j - 1] = t;
+                    }
+                }
+            }
+            return res;
+        },
+        (FShape*)nullptr);
+}
+
 FShape* focc_chamfer(const FShape* s, const int* idx, int n, double d, long long fresh) {
     return guard(
         [&] {
