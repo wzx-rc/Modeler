@@ -39,7 +39,7 @@ The same `forme-app` code builds two apps that Romain works on separately:
 
 The NURBS kernel is **OpenCascade**, chosen by Romain over truck (whose booleans fail on sphere / torus faces and whose fillets do not work); what matters to him is that it can go to the iPad. `crates/forme-occt` is our own thin C layer over it (`cpp/forme_occt.cpp` + safe Rust wrapper): primitives, booleans with their junction edges, fillets / chamfers by edge index, meshing; every OpenCascade exception is caught and returned as `Err`; only `opencascade::handle<T>` is used (the `Handle_T` aliases are a derived class under MSVC, which is why the `opencascade` crate does not build on Windows). OpenCascade itself is built from source by `occt-sys` (feature `builtin`, cached in `target/OCCT`) or taken from `FORME_OCCT_ROOT`. On PC it runs in a separate process, `forme-occ` (crate `nurbs-occ`), next to the app executable (or `FORME_OCC=path`): a hard crash inside OpenCascade cannot take the app down, `nurbs_core::worker::build_occ` reruns it with the failing step skipped (`--skip fillet:<id>`…), and what was left out is listed. Without `forme-occ`, the app falls back to the pure Rust kernel (`nurbs_core::build`, truck). On iPad (no child processes) forme-occt will be called in-process.
 
-The NURBS part is shown with its B-rep edges as thin dark lines (face borders, where each fillet starts and ends; seams and poles left out): `Shape::edge_lines` in forme-occt, `NurbsModel.edges`, drawn by `forme_render::mesh` as screen-width quads hidden behind the matter (`line_vertices`, `upload_lines`).
+The NURBS part is shown with its B-rep edges as thin dark lines (face borders, where each fillet starts and ends; seams and poles left out): `Shape::edge_lines` in forme-occt, `NurbsModel.edges`, drawn by `forme_render::mesh` as anti-aliased screen-width quads (1.1 point, `MeshRenderer.line_scale` = image pixels per point) hidden behind the matter (`line_vertices`, `upload_lines`); the mesh pass uses a perspective depth (affine in 1/z) so long triangles and lines get exact depths.
 
 Mapping: Add = union, Carve = cut, the node's Blend (Raccord) = fillet of the boolean's new edges (Chamfer kind = chamfer), local junction fillets = fillet of the new edges along the zone, Round / Chamfer / per-edge fillets of a box or cylinder = fillets of the primitive's own edges, repetitions and mirrors = copies.
 
@@ -50,7 +50,7 @@ cargo build --release -p nurbs-occ                       # the kernel process; b
 FORME_OCCT_ROOT=/path/occt cargo build --release -p nurbs-occ --no-default-features   # same, against an installed OCCT 7.8 (lib/ include/)
 FORME_OCCT_ROOT=/path/occt cargo test --release -p forme-occt --no-default-features   # the C layer: cube − hole, fillet of the rims, volume
 cargo run --release -p forme-app --bin forme-nurbs       # Forme NURBS (uses target/release/forme-occ when it is there)
-OUT=/tmp/x cargo run --release -p nurbs-core --example occ_test     # the kernel on small parts (cube + hole + fillets…), OBJ per case
+OUT=/tmp/x cargo run --release -p nurbs-core --example occ_test     # the kernel on small parts (cube + hole + fillets…), OBJ per case with the edge lines as `l`
 cargo run --release -p forme-app --bin forme-shot -- /tmp/x nurbs nurbs-stack nurbs-planes nurbs-sketch   # NURBS captures (fillet test part, bearing, primitives; quick creation and stacking; workplanes; sketch + extrude)
 ```
 

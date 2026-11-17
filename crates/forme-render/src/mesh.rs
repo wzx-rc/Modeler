@@ -32,6 +32,8 @@ struct VOut {
     @location(2) bary: vec3<f32>,
     @location(3) @interpolate(flat) mask: f32,
     @location(4) wpos: vec3<f32>,
+    // edge lines: signed distance across the line in pixels, half width
+    @location(5) @interpolate(linear) across: vec2<f32>,
 };
 
 fn project(p: vec3<f32>) -> vec4<f32> {
@@ -44,10 +46,15 @@ fn project(p: vec3<f32>) -> vec4<f32> {
     let pp = u.view.zw;
     let near = u.params.x;
     let far = u.params.y;
+    // perspective depth (z_ndc affine in 1/z), which the rasterizer
+    // interpolates exactly across a triangle; a depth linear in z is not
+    // linear on screen and was off by up to a millimetre along long
+    // triangles and edge lines
+    let zd = far * (z - near) / (far - near);
     return vec4<f32>(
         x * size.y / (t * size.x) + (2.0 * pp.x / size.x - 1.0) * z,
         y / t + (1.0 - 2.0 * pp.y / size.y) * z,
-        clamp((z - near) / (far - near), 0.0, 1.0) * z,
+        min(max(zd, 0.0), max(z, 0.0)),
         z,
     );
 }
@@ -60,6 +67,7 @@ fn project(p: vec3<f32>) -> vec4<f32> {
     o.bary = i.bary.xyz;
     o.mask = i.bary.w * 255.0;
     o.wpos = i.pos;
+    o.across = vec2<f32>(0.0);
     return o;
 }
 
@@ -105,8 +113,9 @@ fn pulled(p: vec3<f32>) -> vec4<f32> {
     return project(p + d / max(dist, 1e-6) * (0.03 + 0.004 * dist));
 }
 
-// a segment is a quad `params.w` points wide: each corner holds its own end
-// (pos), the other end (nrm) and its side (bary.x)
+// a segment is a quad `params.w` pixels wide plus one pixel of fringe on each
+// side for the anti-aliasing: each corner holds its own end (pos), the other
+// end (nrm), its side (bary.x) and whether it is the far end (bary.y)
 @vertex fn vs_line(i: VIn) -> VOut {
     var o: VOut;
     let a = pulled(i.pos);
@@ -116,20 +125,28 @@ fn pulled(p: vec3<f32>) -> vec4<f32> {
     if (dot(dir, dir) < 1e-10) {
         dir = vec2<f32>(1.0, 0.0);
     }
-    dir = normalize(dir);
+    // both ends use the same direction, so a side is the same side of the
+    // line all along it
+    dir = normalize(dir) * select(1.0, -1.0, i.bary.y > 0.5);
     let side = i.bary.x * 2.0 - 1.0;
-    let off = vec2<f32>(-dir.y, dir.x) * side * u.params.w / size;
+    let half = u.params.w * 0.5;
+    let reach = side * (half + 1.0);
+    let off = vec2<f32>(-dir.y, dir.x) * reach * 2.0 / size;
     o.clip = vec4<f32>(a.xy + off * a.w, a.z, a.w);
     o.nrm = i.nrm;
     o.col = i.col.rgb;
     o.bary = vec3<f32>(0.0);
     o.mask = i.col.a;
     o.wpos = i.pos;
+    o.across = vec2<f32>(reach, half);
     return o;
 }
 
+// coverage of the pixel by the line: no stair steps on long, nearly vertical
+// edges (a hard 1-2 px quad came out as broken dashes)
 @fragment fn fs_line(i: VOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(i.col, i.mask);
+    let cover = clamp(i.across.y + 0.5 - abs(i.across.x), 0.0, 1.0);
+    return vec4<f32>(i.col, i.mask * cover);
 }
 "#;
 
@@ -187,8 +204,9 @@ pub fn mesh_vertices_colored(b: &Baked, color: &dyn Fn(&forme_core::bake::BFace)
     out
 }
 
-/// Line width in points (screen units of the view).
-const LINE_W: f32 = 1.25;
+/// Edge line width in points (UI units): `MeshRenderer::line_scale` turns it
+/// into pixels of the image being drawn.
+const LINE_PT: f32 = 1.1;
 
 /// Vertices of polylines drawn as thin lines (`MeshRenderer::upload_lines`):
 /// a quad of two triangles per segment, `col` = colour and opacity.
@@ -197,9 +215,9 @@ pub fn line_vertices(lines: &[Vec<[f32; 3]>], col: [u8; 4]) -> Vec<MeshVertex> {
     for l in lines {
         for w in l.windows(2) {
             let (p, q) = (w[0], w[1]);
-            // the side flips at the far end: the direction is seen from there
-            let v = |at: [f32; 3], other: [f32; 3], side: u8| MeshVertex { pos: at, nrm: other, col, bary: [side, 0, 0, 0] };
-            let (p0, p1, q0, q1) = (v(p, q, 0), v(p, q, 255), v(q, p, 255), v(q, p, 0));
+            // bary.y marks the far end, whose direction is seen from there
+            let v = |at: [f32; 3], other: [f32; 3], side: u8, far: u8| MeshVertex { pos: at, nrm: other, col, bary: [side, far, 0, 0] };
+            let (p0, p1, q0, q1) = (v(p, q, 0, 0), v(p, q, 255, 0), v(q, p, 0, 255), v(q, p, 255, 255));
             out.extend_from_slice(&[p0, p1, q1, p0, q1, q0]);
         }
     }
@@ -217,6 +235,8 @@ pub struct MeshRenderer {
     count: u32,
     depth: Option<(wgpu::TextureView, [u32; 2])>,
     pub wire: bool,
+    /// Pixels of the image per UI point, for the edge line width.
+    pub line_scale: f32,
     lo: glam::Vec3,
     hi: glam::Vec3,
 }
@@ -302,7 +322,7 @@ impl MeshRenderer {
             multiview_mask: None,
             cache: None,
         });
-        MeshRenderer { pipeline, line_pipeline, lbuf: None, lcount: 0, uniforms, bind, vbuf: None, count: 0, depth: None, wire: true, lo: glam::Vec3::ZERO, hi: glam::Vec3::ZERO }
+        MeshRenderer { pipeline, line_pipeline, lbuf: None, lcount: 0, uniforms, bind, vbuf: None, count: 0, depth: None, wire: true, line_scale: 1.0, lo: glam::Vec3::ZERO, hi: glam::Vec3::ZERO }
     }
 
     /// Thin lines drawn over the mesh (`line_vertices`); empty to remove
@@ -394,7 +414,7 @@ impl MeshRenderer {
             right: [right.x, right.y, right.z, 0.0],
             up: [up.x, up.y, up.z, 0.0],
             view: [view.size[0], view.size[1], view.principal[0], view.principal[1]],
-            params: [near, far, if self.wire { 1.0 } else { 0.0 }, LINE_W],
+            params: [near, far, if self.wire { 1.0 } else { 0.0 }, LINE_PT * self.line_scale],
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
         let depth = &self.depth.as_ref().unwrap().0;

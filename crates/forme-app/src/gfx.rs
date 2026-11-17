@@ -533,6 +533,7 @@ impl FrameRenderer {
             drop(pass);
             let complete = r1 >= size[1];
             if complete && show_bake {
+                self.mesh.line_scale = k;
                 self.mesh.draw(device, queue, &mut enc, &off.view, size, &view);
             }
             if full {
@@ -686,6 +687,7 @@ impl FrameRenderer {
                 }
             }
             if i == 0 && show_bake {
+                self.mesh.line_scale = size[0] as f32 / (size_px[0] as f32 / ppp);
                 self.mesh.draw(device, queue, &mut enc, &off.view, size, &view);
             }
             queue.submit([enc.finish()]);

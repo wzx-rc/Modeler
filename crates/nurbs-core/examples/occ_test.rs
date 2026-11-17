@@ -68,7 +68,8 @@ fn cases() -> Vec<(&'static str, Scene)> {
     v
 }
 
-fn write_obj(path: &std::path::Path, m: &nurbs_core::NurbsMesh) {
+/// The mesh, then the B-rep edge lines as `l` elements.
+fn write_obj(path: &std::path::Path, m: &nurbs_core::NurbsMesh, edges: &[Vec<[f32; 3]>]) {
     let mut f = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
     for p in &m.positions {
         writeln!(f, "v {} {} {}", p[0], p[1], p[2]).unwrap();
@@ -78,6 +79,15 @@ fn write_obj(path: &std::path::Path, m: &nurbs_core::NurbsMesh) {
     }
     for t in &m.tris {
         writeln!(f, "f {0}//{0} {1}//{1} {2}//{2}", t[0] + 1, t[1] + 1, t[2] + 1).unwrap();
+    }
+    let mut base = m.positions.len() + 1;
+    for line in edges {
+        for p in line {
+            writeln!(f, "v {} {} {}", p[0], p[1], p[2]).unwrap();
+        }
+        let ids: Vec<String> = (0..line.len()).map(|i| (base + i).to_string()).collect();
+        writeln!(f, "l {}", ids.join(" ")).unwrap();
+        base += line.len();
     }
 }
 
@@ -97,15 +107,16 @@ fn main() {
         match nurbs_core::worker::build_occ(&exe, &scene) {
             Ok(m) => {
                 println!(
-                    "{name}: {} shapes, {} booleans, {} ms kernel, {} ms total, {} triangles, ignored {:?}",
+                    "{name}: {} shapes, {} booleans, {} ms kernel, {} ms total, {} triangles, {} edge lines, ignored {:?}",
                     m.shapes,
                     m.booleans,
                     m.millis,
                     t.elapsed().as_millis(),
                     m.mesh.tris.len(),
+                    m.edges.len(),
                     m.ignored
                 );
-                write_obj(&out.join(format!("{name}.obj")), &m.mesh);
+                write_obj(&out.join(format!("{name}.obj")), &m.mesh, &m.edges);
             }
             Err(e) => println!("{name}: ERROR {e}"),
         }
