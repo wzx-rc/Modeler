@@ -33,6 +33,10 @@ pub struct NurbsModel {
     /// The part's edges as polylines (face borders, fillet boundaries), drawn
     /// as thin lines over the mesh. Empty when the kernel gives none.
     pub edges: Vec<Vec<[f32; 3]>>,
+    /// The sharp junction edges of each boolean, before its fillets, with the
+    /// node whose blend (and blend zones) rounds them: the B-rep edges a
+    /// junction fillet is applied to, for the Edges tool's highlight.
+    pub junctions: Vec<(u32, Vec<[f32; 3]>)>,
     /// Shapes combined, booleans done.
     pub shapes: usize,
     pub booleans: usize,

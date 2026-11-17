@@ -230,6 +230,12 @@ fn junction(ctx: &mut Ctx, shape: Shape, scene: &Scene, id: NodeId, m: Mat4, nam
     let key = format!("fillet:{id}");
     let blend = n.combine.blend as f64;
     let sec = shape.section_edges();
+    // the junction's B-rep edges, filleted or not: the Edges tool lights
+    // exactly the ones a fillet will round
+    let edges: Vec<Vec<DVec3>> = sec.iter().filter_map(|&i| shape.edge(i, SAMPLES).map(|e| pts(&e))).collect();
+    for p in &edges {
+        ctx.model.junctions.push((id, p.iter().map(|q| [q.x as f32, q.y as f32, q.z as f32]).collect()));
+    }
     if (blend <= 0.0 && n.blend_zones.is_empty()) || sec.is_empty() {
         return shape;
     }
@@ -241,9 +247,7 @@ fn junction(ctx: &mut Ctx, shape: Shape, scene: &Scene, id: NodeId, m: Mat4, nam
     let blend = if n.combine.kind == BlendKind::Chamfer { -blend } else { blend };
     let zones: Vec<(f64, Vec<DVec3>)> = n.blend_zones.iter().map(|z| (z.radius as f64, z.pts.iter().map(|p| dv(m.transform_point3(*p))).collect())).collect();
     let mut items: Vec<(f64, Vec<DVec3>)> = vec![];
-    for i in sec {
-        let Some(e) = shape.edge(i, SAMPLES) else { continue };
-        let p = pts(&e);
+    for p in edges {
         let c = p[p.len() / 2];
         // a zone rounds the edges along it, and the edge it was picked on
         // (its middle): a closed rim is one B-rep edge whose own middle can

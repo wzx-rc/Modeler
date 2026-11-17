@@ -1316,6 +1316,27 @@ impl AppState {
         matches!(e.kind, EdgeKind::Junction { .. }) && !self.junction_whole
     }
 
+    /// Forme NURBS: the kernel's junction edges that a fillet on this piece
+    /// will round (same rule as forme-occ: the edges along the zone and the
+    /// one it was picked on), so the highlight shows the whole fillet that
+    /// changes. None outside a junction piece, or before the kernel answered.
+    pub fn nurbs_piece_edges(&self, e: &EdgePick) -> Option<Vec<BlendZone>> {
+        if !crate::nurbs() || !self.local_junction(e) {
+            return None;
+        }
+        let model = self.nurbs.model.as_ref()?;
+        let zone = BlendZone::from_curve(0.0, &forme_core::edges::corner_piece(&e.raw, e.raw_at));
+        let mid = *zone.pts.get(zone.pts.len() / 2)?;
+        let out: Vec<BlendZone> = model
+            .junctions
+            .iter()
+            .filter(|(id, l)| *id == e.owner && !l.is_empty())
+            .map(|(_, l)| BlendZone { radius: 0.0, pts: l.iter().map(|p| Vec3::from(*p)).collect() })
+            .filter(|l| zone.dist(l.pts[l.pts.len() / 2]) < 0.5 || l.dist(mid) < 0.5)
+            .collect();
+        (!out.is_empty()).then_some(out)
+    }
+
     /// The fillet an edge has now: on a junction piece, its local fillet.
     pub fn get_fillet(&self, e: &EdgePick) -> (f32, bool) {
         let Some(n) = self.scene.node(e.owner) else { return (0.0, false) };

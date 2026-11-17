@@ -602,23 +602,30 @@ fn draw_edges(p: &Painter, st: &AppState) {
     }
     let view = st.view();
     let draw = |e: &forme_core::edges::EdgePick, vis: &[Vec<bool>], color: Color32, strong: bool| {
-        // a junction filleted piece by piece: only the picked piece is lit
-        let piece = (matches!(e.kind, forme_core::edges::EdgeKind::Junction { .. }) && !st.junction_whole && e.raw.len() > 2)
+        // a junction filleted piece by piece: only the picked piece is lit;
+        // in Forme NURBS the whole B-rep edges the kernel will round (a hole's
+        // rim is one edge, filleted all round)
+        let kernel = st.nurbs_piece_edges(e);
+        let piece = (kernel.is_none() && matches!(e.kind, forme_core::edges::EdgeKind::Junction { .. }) && !st.junction_whole && e.raw.len() > 2)
             .then(|| forme_core::BlendZone { radius: 0.0, pts: forme_core::edges::corner_piece(&e.raw, e.raw_at) });
         let tol = e.radius * 0.8 + 1.5;
+        let ktol = e.radius * 0.8 + 0.6;
+        let lit = |q: glam::Vec3| match (&kernel, &piece) {
+            (Some(k), _) => k.iter().any(|z| z.dist(q) < ktol),
+            (None, Some(z)) => z.dist(q) < tol,
+            _ => true,
+        };
         for (ci, c) in e.curves.iter().enumerate() {
-            let pts: Vec<Option<Pos2>> = c
-                .iter()
-                .map(|q| if piece.as_ref().map(|z| z.dist(*q) < tol).unwrap_or(true) { view.project(*q).map(|s| pos2(s[0], s[1])) } else { None })
-                .collect();
+            let pts: Vec<Option<Pos2>> = c.iter().map(|q| if lit(*q) { view.project(*q).map(|s| pos2(s[0], s[1])) } else { None }).collect();
             let v = |i: usize| vis.get(ci).and_then(|x| x.get(i)).copied().unwrap_or(true);
             let mut run: Vec<Pos2> = vec![];
             let mut run_vis = true;
             let flush = |run: &mut Vec<Pos2>, visible: bool| {
                 if run.len() >= 2 {
                     if visible {
-                        p.add(Shape::line(run.clone(), Stroke::new(if strong { 9.0 } else { 8.0 }, tint(color, if strong { 0.24 } else { 0.3 }))));
-                        p.add(Shape::line(run.clone(), Stroke::new(if strong { 3.0 } else { 2.5 }, color)));
+                        // thin and at 70 %: the fillet's own shading stays readable (Romain, 17 nov.)
+                        p.add(Shape::line(run.clone(), Stroke::new(if strong { 4.5 } else { 4.0 }, tint(color, if strong { 0.24 } else { 0.3 }).gamma_multiply(0.7))));
+                        p.add(Shape::line(run.clone(), Stroke::new(if strong { 1.5 } else { 1.25 }, color.gamma_multiply(0.7))));
                     } else {
                         p.add(Shape::line(run.clone(), Stroke::new(1.0, tint(color, 0.16))));
                     }
