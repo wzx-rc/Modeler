@@ -82,16 +82,22 @@ pub struct Workplane {
     /// In-plane axes (u × normal = v).
     pub u: Vec3,
     pub v: Vec3,
-    /// Half size of the square shown.
+    /// Half sizes of the rectangle shown, along u and along v.
     pub half: f32,
+    pub half_v: f32,
     pub label: String,
 }
 
 impl Workplane {
-    fn new(origin: Vec3, normal: Vec3, u: Vec3, half: f32, label: String) -> Self {
+    fn new(origin: Vec3, normal: Vec3, u: Vec3, half: f32, half_v: f32, label: String) -> Self {
         let normal = normal.normalize_or(Vec3::Y);
         let u = (u - normal * u.dot(normal)).normalize_or(normal.any_orthonormal_vector());
-        Workplane { origin, normal, u, v: u.cross(normal), half, label }
+        Workplane { origin, normal, u, v: u.cross(normal), half, half_v, label }
+    }
+
+    /// Its four corners.
+    pub fn corners(&self) -> [Vec3; 4] {
+        [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(|(a, b): (f32, f32)| self.origin + self.u * (a * self.half) + self.v * (b * self.half_v))
     }
 
     /// Where a ray meets the square (distance along the ray, point).
@@ -103,7 +109,7 @@ impl Workplane {
         let t = (self.origin - ro).dot(self.normal) / den;
         let p = ro + rd * t;
         let d = p - self.origin;
-        (t > 0.0 && d.dot(self.u).abs() <= self.half && d.dot(self.v).abs() <= self.half).then_some((t, p))
+        (t > 0.0 && d.dot(self.u).abs() <= self.half && d.dot(self.v).abs() <= self.half_v).then_some((t, p))
     }
 
     /// Orientation of a shape drawn on it (its Y along the normal).
@@ -1992,12 +1998,14 @@ impl AppState {
         let fwd = (view.target - view.eye).normalize_or(Vec3::NEG_Z);
         let mut out = vec![];
         if fwd.y.abs() > 0.15 {
-            out.push(Workplane::new(Vec3::ZERO, Vec3::Y, Vec3::X, half, tr("Sol").to_string()));
+            out.push(Workplane::new(Vec3::ZERO, Vec3::Y, Vec3::X, half, half, tr("Sol").to_string()));
         }
-        // the vertical plane that faces the camera most, standing on the ground
+        // the vertical plane that faces the camera most, standing on the
+        // ground, a little taller than the part (on the 10 mm grid)
         let (axis, u, label) = if fwd.x.abs() > fwd.z.abs() { (Vec3::X, Vec3::Z, tr("Côté · YZ")) } else { (Vec3::Z, Vec3::X, tr("Face · XY")) };
         let n = axis * -fwd.dot(axis).signum();
-        out.push(Workplane::new(Vec3::new(0.0, half, 0.0), n, u, half, label.to_string()));
+        let tall = (((hi.y.max(0.0) * 1.15 + 10.0) / 20.0).ceil() * 10.0).max(20.0);
+        out.push(Workplane::new(Vec3::new(0.0, tall, 0.0), n, u, half, tall, label.to_string()));
         if let Some(n) = self.selection.and_then(|id| self.scene.node(id)) {
             if let Some(sh) = n.shape() {
                 let (sc, wr, wt) = self.scene.world_matrix(n.id).to_scale_rotation_translation();
@@ -2015,7 +2023,8 @@ impl AppState {
                 };
                 let axis = (wr * Vec3::Y).normalize_or(Vec3::Y);
                 let label = trd(format!("Dessus de {}", n.name));
-                out.push(Workplane::new(wt + axis * top, axis, wr * Vec3::X, (foot * 2.0).max(15.0), label));
+                let h = (foot * 2.0).max(15.0);
+                out.push(Workplane::new(wt + axis * top, axis, wr * Vec3::X, h, h, label));
             }
         }
         out
@@ -2053,7 +2062,7 @@ impl AppState {
         for (i, (w, state)) in shown.iter().take(3).enumerate() {
             out[i * 4] = [w.origin.x, w.origin.y, w.origin.z, w.half];
             out[i * 4 + 1] = [w.normal.x, w.normal.y, w.normal.z, *state];
-            out[i * 4 + 2] = [w.u.x, w.u.y, w.u.z, 0.0];
+            out[i * 4 + 2] = [w.u.x, w.u.y, w.u.z, w.half_v];
             out[i * 4 + 3] = [w.v.x, w.v.y, w.v.z, 0.0];
         }
         out

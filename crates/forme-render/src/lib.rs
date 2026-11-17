@@ -26,9 +26,9 @@ pub struct Globals {
     pub light: [f32; 4],
     /// xy sub-pixel jitter (anti-aliasing), z exposure, w unused.
     pub extra: [f32; 4],
-    /// Up to 3 workplanes (Forme NURBS), 4 rows each: origin + half size,
-    /// normal + state (0 off, 1 proposed, 2 under the pointer, 3 in use),
-    /// in-plane axis u, in-plane axis v.
+    /// Up to 3 workplanes (Forme NURBS), 4 rows each: origin + half size
+    /// along u, normal + state (0 off, 1 proposed, 2 under the pointer,
+    /// 3 in use), in-plane axis u + half size along v, in-plane axis v.
     pub planes: [[f32; 4]; 12],
 }
 

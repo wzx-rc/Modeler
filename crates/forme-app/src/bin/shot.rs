@@ -1010,16 +1010,16 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         eprintln!("nurbs-planes : {:?}", planes.iter().map(|w| w.label.clone()).collect::<Vec<_>>());
         // a point of the vertical plane, beside the part
         let wall = planes.iter().find(|w| w.normal.y.abs() < 0.5).expect("vertical plane").clone();
-        let a = h.screen_of(wall.origin + wall.u * (wall.half * 0.55) + wall.v * (wall.half * 0.1));
+        let a = h.screen_of(wall.origin + wall.u * (wall.half * 0.55) + wall.v * (wall.half_v * 0.1));
         h.move_to(a);
         h.steps(4);
         eprintln!("nurbs-planes : survolé {:?}", h.st.workplane_hover.and_then(|i| planes.get(i)).map(|w| w.label.clone()));
         h.shot("nurbs-planes-1-hover");
         // the base drawn on it, then the height
-        let b = h.screen_of(wall.origin + wall.u * (wall.half * 0.55 + 9.0) + wall.v * (wall.half * 0.1));
+        let b = h.screen_of(wall.origin + wall.u * (wall.half * 0.55 + 9.0) + wall.v * (wall.half_v * 0.1));
         h.drag(a, b, 8, true);
         // the height: along the plane's normal on screen (towards the camera)
-        let p0 = wall.origin + wall.u * (wall.half * 0.55) + wall.v * (wall.half * 0.1);
+        let p0 = wall.origin + wall.u * (wall.half * 0.55) + wall.v * (wall.half_v * 0.1);
         let dir = (h.screen_of(p0 + wall.normal * 10.0) - h.screen_of(p0)).normalized();
         h.move_to(b + dir * 30.0);
         h.move_to(b + dir * 70.0);

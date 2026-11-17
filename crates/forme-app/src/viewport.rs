@@ -145,14 +145,38 @@ fn draw_workplanes(p: &Painter, st: &AppState) {
     }
     let view = st.view();
     let proj = |q: glam::Vec3| view.project(q).map(|s| pos2(s[0], s[1]));
+    let vr = st.view_rect;
+    // the part on screen: labels stay off it
+    let part = if st.scene.shape_count() == 0 {
+        None
+    } else {
+        let (lo, hi) = st.scene.bounds();
+        let pts: Vec<Pos2> = (0..8).filter_map(|k| proj(glam::Vec3::new(if k & 1 == 0 { lo.x } else { hi.x }, if k & 2 == 0 { lo.y } else { hi.y }, if k & 4 == 0 { lo.z } else { hi.z }))).collect();
+        (!pts.is_empty()).then(|| Rect::from_points(&pts).expand(10.0))
+    };
+    let mut taken: Vec<Rect> = vec![];
     for (i, w) in st.workplane_candidates().iter().enumerate() {
         let hot = Some(i) == st.workplane_hover;
-        let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(|(a, b): (f32, f32)| w.origin + w.u * (a * w.half) + w.v * (b * w.half));
-        let Some(pts) = corners.iter().map(|c| proj(*c)).collect::<Option<Vec<Pos2>>>() else { continue };
-        // under its lowest corner on screen, kept inside the view
-        let at = pts.iter().copied().max_by(|a, b| a.y.total_cmp(&b.y)).unwrap();
-        let vr = st.view_rect;
-        let at = pos2(at.x.clamp(vr[0] + 60.0, vr[2] - 60.0), (at.y + 6.0).clamp(vr[1] + 40.0, vr[3] - 130.0));
+        let Some(pts) = w.corners().iter().map(|c| proj(*c)).collect::<Option<Vec<Pos2>>>() else { continue };
+        // at one of its corners, kept inside the view: off the part and the
+        // other labels, the lowest one on screen when several are free
+        let size = vec2(w.label.chars().count() as f32 * 7.0 + 22.0, 24.0);
+        let spot = |c: Pos2| {
+            let at = pos2(c.x.clamp(vr[0] + size.x * 0.5 + 8.0, vr[2] - size.x * 0.5 - 8.0), (c.y + 6.0).clamp(vr[1] + 40.0, vr[3] - 130.0));
+            (at, Rect::from_center_size(pos2(at.x, at.y + size.y * 0.5), size))
+        };
+        let score = |r: Rect| {
+            let mut s = r.center().y * 0.01;
+            if part.is_some_and(|q| q.intersects(r)) {
+                s -= 100.0;
+            }
+            if taken.iter().any(|t| t.expand(4.0).intersects(r)) {
+                s -= 1000.0;
+            }
+            s
+        };
+        let (at, rect) = pts.iter().map(|c| spot(*c)).max_by(|a, b| score(a.1).total_cmp(&score(b.1))).unwrap();
+        taken.push(rect);
         chip(p, at, Align2::CENTER_TOP, &w.label, tint(HOT, if hot { 0.9 } else { 0.35 }), if hot { HOT } else { TEXT2() });
     }
 }

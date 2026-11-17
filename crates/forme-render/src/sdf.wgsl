@@ -16,7 +16,7 @@ struct Globals {
     mats2: array<vec4<f32>, 16>, // roughness, -, -, -
     light: vec4<f32>,     // xyz towards the key light (unit), w intensity
     extra: vec4<f32>,     // xy sub-pixel jitter (anti-aliasing), z exposure, w light theme
-    planes: array<vec4<f32>, 12>, // 3 workplanes: origin + half, normal + state, u, v
+    planes: array<vec4<f32>, 12>, // 3 workplanes: origin + half u, normal + state, u + half v, v
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -799,11 +799,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let q = ro + rd * t - o.xyz;
         let a = dot(q, g.planes[i * 4 + 2].xyz);
         let b = dot(q, g.planes[i * 4 + 3].xyz);
-        let h = o.w;
-        let m = max(abs(a), abs(b));
-        if (m > h) {
+        let hu = o.w;
+        var hv = g.planes[i * 4 + 2].w;
+        if (hv <= 0.0) {
+            hv = hu;
+        }
+        if (abs(a) > hu || abs(b) > hv) {
             continue;
         }
+        let edge = min(hu - abs(a), hv - abs(b));
         let foot = t * px * 1.2;
         let c = abs(fract(vec2<f32>(a, b) / 10.0 + 0.5) - 0.5) * 10.0;
         let line = 1.0 - smoothstep(0.0, foot + 0.04, min(c.x, c.y));
@@ -822,7 +826,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             fill = 0.03;
             lw = 0.2;
         }
-        let border = 1.0 - smoothstep(0.0, bw, h - m);
+        let border = 1.0 - smoothstep(0.0, bw, edge);
         var yellow = vec3<f32>(0.46, 0.37, 0.09);
         if (g.extra.w > 0.5) {
             yellow = vec3<f32>(0.40, 0.29, 0.0);
