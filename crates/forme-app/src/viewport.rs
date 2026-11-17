@@ -627,7 +627,9 @@ fn draw_edges(p: &Painter, st: &AppState) {
                         p.add(Shape::line(run.clone(), Stroke::new(if strong { 4.5 } else { 4.0 }, tint(color, if strong { 0.24 } else { 0.3 }).gamma_multiply(0.7))));
                         p.add(Shape::line(run.clone(), Stroke::new(if strong { 1.5 } else { 1.25 }, color.gamma_multiply(0.7))));
                     } else {
-                        p.add(Shape::line(run.clone(), Stroke::new(1.0, tint(color, 0.16))));
+                        // the hidden part, dashed: the whole length the fillet
+                        // takes stays readable (a hole's rim behind its lip)
+                        p.extend(Shape::dashed_line(run, Stroke::new(1.25, color.gamma_multiply(0.6)), 5.0, 4.0));
                     }
                 }
                 run.clear();
