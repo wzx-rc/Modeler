@@ -2400,6 +2400,7 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                     AmbianceChoice::Vert => Color32::from_rgb(0x8F, 0xDB, 0x5B),
                     AmbianceChoice::Orange => Color32::from_rgb(0xF2, 0x8C, 0x38),
                     AmbianceChoice::Bleu => Color32::from_rgb(0x4D, 0x8D, 0xFF),
+                    AmbianceChoice::Blanc => TEXT_STRONG(),
                 };
                 let items: Vec<(AmbianceChoice, &str, Color32)> = AmbianceChoice::ALL.iter().map(|a| (*a, a.label(), col(*a))).collect();
                 if let Some(a) = segmented(ui, &items, st.settings.ambiance, 32.0) {

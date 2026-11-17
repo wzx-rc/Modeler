@@ -12,12 +12,17 @@ name = "forme"
 path = "src/main.rs"
 
 [[bin]]
+name = "forme-nurbs"
+path = "src/main.rs"
+
+[[bin]]
 name = "forme-shot"
 path = "src/bin/shot.rs"
 
 [dependencies]
 forme-core = { path = "../forme-core" }
 forme-render = { path = "../forme-render" }
+nurbs-core = { path = "../nurbs-core" }
 glam.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/forme-core", "crates/forme-render", "crates/forme-app"]
+members = ["crates/forme-core", "crates/forme-render", "crates/forme-app", "crates/nurbs-core"]
 resolver = "2"
 
 [workspace.package]

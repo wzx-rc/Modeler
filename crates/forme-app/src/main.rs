@@ -16,7 +16,14 @@ use winit::window::{Window, WindowId};
 const UI_ZOOM: f32 = 0.84;
 
 /// Autosave of the current session (written when the app goes to the background).
-const SESSION: &str = "Session";
+/// Name of the autosaved session (Forme NURBS keeps its own).
+fn session() -> &'static str {
+    if forme_app::nurbs() {
+        "Session NURBS"
+    } else {
+        "Session"
+    }
+}
 
 struct Gfx {
     surface: wgpu::Surface<'static>,
@@ -54,9 +61,9 @@ impl App {
         theme::install(&ctx);
         // the last session if there is one, else an empty scene (the demo
         // grenade is in Documents)
-        let mut st = match files::load(&files::project_path(SESSION)) {
+        let mut st = match files::load(&files::project_path(session())) {
             Ok(scene) => {
-                let mut s = AppState::new(scene, SESSION);
+                let mut s = AppState::new(scene, session());
                 s.frame_all();
                 s
             }
@@ -295,7 +302,7 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                let _ = files::save(&self.st.scene, SESSION);
+                let _ = files::save(&self.st.scene, session());
                 el.exit();
             }
             WindowEvent::Resized(size) => {
@@ -317,7 +324,7 @@ impl ApplicationHandler for App {
 
     /// iPadOS: going to the background may be the last chance to save.
     fn suspended(&mut self, _el: &ActiveEventLoop) {
-        let _ = files::save(&self.st.scene, SESSION);
+        let _ = files::save(&self.st.scene, session());
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
@@ -346,6 +353,9 @@ fn install_crash_log() {
 }
 
 fn main() {
+    // the forme-nurbs binary (or FORME_ENGINE=nurbs) builds the scene in NURBS
+    let exe = std::env::current_exe().ok().and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_lowercase())).unwrap_or_default();
+    forme_app::set_nurbs(exe.contains("nurbs") || std::env::var("FORME_ENGINE").map(|v| v.eq_ignore_ascii_case("nurbs")).unwrap_or(false));
     install_crash_log();
     let event_loop = EventLoop::new().expect("event loop");
     let mut app = App::new();

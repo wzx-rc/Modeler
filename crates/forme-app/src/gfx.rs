@@ -63,6 +63,35 @@ fn at(uv: vec2<f32>) -> vec3<f32> {
 }
 "#;
 
+/// Vertices of the NURBS mesh, the selected shapes' faces tinted with the
+/// accent (a face belongs to a shape when it lies on its surface).
+fn nurbs_vertices(st: &mut AppState) -> Vec<forme_render::mesh::MeshVertex> {
+    let Some(model) = st.nurbs.model.clone() else { return vec![] };
+    let m = &model.mesh;
+    let lin = |c: f32| (c.max(0.0).powf(2.2) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let sel = crate::theme::sel_rgb();
+    let has_sel = st.selection.is_some();
+    let prog = if has_sel { Some(st.selection_program().0.clone()) } else { None };
+    let mut out = Vec::with_capacity(m.tris.len() * 3);
+    for (t, tri) in m.tris.iter().enumerate() {
+        let mat = m.tri_material[t] as usize;
+        let mut c = st.scene.materials.get(mat).map(|x| x.color).unwrap_or([0.7, 0.7, 0.7]);
+        if let Some(p) = &prog {
+            let ctr = (glam::Vec3::from(m.positions[tri[0] as usize]) + glam::Vec3::from(m.positions[tri[1] as usize]) + glam::Vec3::from(m.positions[tri[2] as usize])) / 3.0;
+            if p.dist(ctr).abs() < 0.08 {
+                c = [c[0] * 0.55 + sel[0] * 0.45, c[1] * 0.55 + sel[1] * 0.45, c[2] * 0.55 + sel[2] * 0.45];
+            }
+        }
+        let col = [lin(c[0]), lin(c[1]), lin(c[2]), 255];
+        for (k, &vi) in tri.iter().enumerate() {
+            let mut bary = [0u8, 0, 0, 0];
+            bary[k] = 255;
+            out.push(forme_render::mesh::MeshVertex { pos: m.positions[vi as usize], nrm: m.normals[vi as usize], col, bary });
+        }
+    }
+    out
+}
+
 /// Scene images are kept in half floats: jittered samples accumulate
 /// without banding, and the blit converts to the screen format.
 const SCENE_FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -317,8 +346,20 @@ impl FrameRenderer {
             }
             self.mesh_version = key;
         }
-        let show_bake = st.bake.show && self.mesh.has_mesh();
-        self.mesh.wire = st.bake.wire;
+        // Forme NURBS: the B-rep mesh replaces the SDF image once it matches
+        // the scene (the SDF preview shows while it is rebuilt)
+        let nurbs_on = crate::nurbs() && st.nurbs.ready(st.scene_version);
+        if nurbs_on {
+            let sel = st.selected_ids();
+            let key = (1u64 << 63) | (st.nurbs.version << 20) | (sel.iter().map(|i| *i as u64).sum::<u64>() & 0xFFFFF) ^ ((sel.len() as u64) << 40) ^ ((crate::theme::ambiance() as u64) << 48);
+            if self.mesh_version != key {
+                let verts = nurbs_vertices(st);
+                self.mesh.upload(device, queue, &verts);
+                self.mesh_version = key;
+            }
+        }
+        let show_bake = (st.bake.show || nurbs_on) && self.mesh.has_mesh();
+        self.mesh.wire = st.bake.wire && !nurbs_on;
 
         // 2. scene image (only when something changed)
         let now = std::time::Instant::now();

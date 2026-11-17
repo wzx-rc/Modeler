@@ -74,16 +74,19 @@ pub enum AmbianceChoice {
     Vert,
     Orange,
     Bleu,
+    /// White accent on graphite (Romain, 17 nov.).
+    Blanc,
 }
 
 impl AmbianceChoice {
-    pub const ALL: [AmbianceChoice; 4] = [AmbianceChoice::Auto, AmbianceChoice::Vert, AmbianceChoice::Orange, AmbianceChoice::Bleu];
+    pub const ALL: [AmbianceChoice; 5] = [AmbianceChoice::Auto, AmbianceChoice::Vert, AmbianceChoice::Orange, AmbianceChoice::Bleu, AmbianceChoice::Blanc];
     pub fn label(self) -> &'static str {
         match self {
             AmbianceChoice::Auto => "Auto",
             AmbianceChoice::Vert => "Vert",
             AmbianceChoice::Orange => "Orange",
             AmbianceChoice::Bleu => "Bleu",
+            AmbianceChoice::Blanc => "Blanc",
         }
     }
 }
@@ -206,13 +209,20 @@ impl Default for Settings {
 
 impl Settings {
     pub fn path() -> PathBuf {
-        files::documents_dir().join("settings.json")
+        files::documents_dir().join(if crate::nurbs() { "settings-nurbs.json" } else { "settings.json" })
     }
 
     /// Reads the saved settings (defaults when missing or unreadable).
     /// `FORME_UI=studio` or `FORME_UI=atelier` overrides the interface.
     pub fn load() -> Settings {
-        let mut s: Settings = std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let mut s: Settings = std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| {
+            let mut d = Settings::default();
+            if crate::nurbs() {
+                // Forme NURBS: dark, white accent (Romain, 17 nov.)
+                d.ambiance = AmbianceChoice::Blanc;
+            }
+            d
+        });
         match std::env::var("FORME_UI").map(|v| v.to_lowercase()).as_deref() {
             Ok("studio") => s.ui_mode = UiMode::Studio,
             Ok("atelier") | Ok("etabli") => s.ui_mode = UiMode::Atelier,

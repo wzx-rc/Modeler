@@ -120,10 +120,38 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_edges(ui.painter(), st);
         draw_overlay(ui.painter(), st);
         draw_marquee(ui.painter(), st);
+        if crate::nurbs() {
+            nurbs_status(ui, st);
+        }
     });
     crate::marking::draw(ctx, st);
-    if st.cam_anim.is_some() {
+    if st.cam_anim.is_some() || (crate::nurbs() && st.nurbs.building()) {
         ctx.request_repaint();
+    }
+}
+
+/// Forme NURBS: what the viewport shows (B-rep mesh, or the SDF preview while
+/// it is rebuilt), the build time, and what the NURBS build left out.
+fn nurbs_status(ui: &mut egui::Ui, st: &AppState) {
+    let vr = st.view_rect;
+    let at = pos2(vr[0] + 14.0, vr[3] - 14.0);
+    let n = &st.nurbs;
+    let (text, border, fg) = if let Some(e) = &n.error {
+        (format!("NURBS · {e}"), ERROR, ERROR)
+    } else if n.ready(st.scene_version) {
+        let m = n.model.as_ref().unwrap();
+        let mut t = format!("NURBS · {} forme{} · {} booléen{} · {} ms", m.shapes, if m.shapes > 1 { "s" } else { "" }, m.booleans, if m.booleans > 1 { "s" } else { "" }, m.millis);
+        if !m.ignored.is_empty() {
+            t.push_str(&format!(" · {} réglage{} SDF ignoré{}", m.ignored.len(), if m.ignored.len() > 1 { "s" } else { "" }, if m.ignored.len() > 1 { "s" } else { "" }));
+        }
+        (t, accent_border(), TEXT())
+    } else {
+        ("NURBS · calcul… (aperçu SDF)".to_string(), DIVIDER(), TEXT2())
+    };
+    let r = chip(ui.painter(), at, Align2::LEFT_BOTTOM, &text, border, fg);
+    if let Some(m) = n.model.as_ref().filter(|m| !m.ignored.is_empty() && n.ready(st.scene_version)) {
+        let resp = ui.interact(r, Id::new("nurbs-status"), Sense::hover());
+        resp.on_hover_text(format!("Pas encore en NURBS, ignoré :\n{}", m.ignored.join("\n")));
     }
 }
 

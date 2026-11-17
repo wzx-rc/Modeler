@@ -310,6 +310,30 @@ pub struct ExportResult {
     pub seconds: f32,
 }
 
+/// Forme NURBS: the last B-rep build of the scene (nurbs-core) and the build
+/// running in the background. The viewport shows the NURBS mesh when it
+/// matches the scene, else the SDF preview (instant) while it is rebuilt.
+#[derive(Default)]
+pub struct NurbsState {
+    pub model: Option<std::sync::Arc<nurbs_core::NurbsModel>>,
+    /// Scene version of `model` (or of `error`).
+    pub built: u64,
+    pub error: Option<String>,
+    /// Increments with every new model (mesh upload key).
+    pub version: u64,
+    job: Option<(u64, mpsc::Receiver<Result<nurbs_core::NurbsModel, String>>)>,
+}
+
+impl NurbsState {
+    /// The NURBS mesh is the scene as it is now.
+    pub fn ready(&self, scene_version: u64) -> bool {
+        self.model.is_some() && self.error.is_none() && self.built == scene_version
+    }
+    pub fn building(&self) -> bool {
+        self.job.is_some()
+    }
+}
+
 /// A bake running in the background.
 pub struct BakeJob {
     pub progress: std::sync::Arc<forme_core::bake::Progress>,
@@ -462,6 +486,8 @@ pub struct AppState {
     pub export_glb: bool,
     pub export_job: Option<(mpsc::Receiver<Result<ExportResult, String>>, f64)>,
     pub bake: BakeState,
+    /// Forme NURBS: the scene built as B-rep solids in the background.
+    pub nurbs: NurbsState,
     pub files_open: bool,
     pub material: u32,
     pub now: f64,
@@ -645,6 +671,7 @@ impl AppState {
             export_obj: true,
             export_glb: true,
             export_job: None,
+            nurbs: NurbsState::default(),
             bake: BakeState {
                 open: false,
                 quality: forme_core::bake::Quality::Standard,
@@ -2652,6 +2679,9 @@ impl AppState {
     /// Called every frame.
     pub fn tick(&mut self, now: f64) {
         self.now = now;
+        if crate::nurbs() {
+            self.tick_nurbs();
+        }
         self.step_cam_anim();
         self.update_lines();
         let mut finished = None;
@@ -2966,6 +2996,60 @@ impl AppState {
             };
             self.history.record(label, &before);
             self.changed();
+        }
+    }
+}
+
+// ------------------------------------------------------------- Forme NURBS
+
+impl AppState {
+    /// Collects a finished NURBS build and starts the next one when the
+    /// scene changed (one build at a time, always the latest scene).
+    pub fn tick_nurbs(&mut self) {
+        if let Some((v, rx)) = &self.nurbs.job {
+            match rx.try_recv() {
+                Ok(r) => {
+                    let v = *v;
+                    self.nurbs.job = None;
+                    self.nurbs.built = v;
+                    match r {
+                        Ok(m) => {
+                            self.nurbs.model = Some(std::sync::Arc::new(m));
+                            self.nurbs.error = None;
+                            self.nurbs.version += 1;
+                        }
+                        Err(e) => self.nurbs.error = Some(e),
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // the build panicked inside the kernel
+                    let v = *v;
+                    self.nurbs.job = None;
+                    self.nurbs.built = v;
+                    self.nurbs.error = Some("le noyau NURBS a planté sur cette scène".into());
+                }
+            }
+        }
+        if self.nurbs.job.is_none() && self.nurbs.built != self.scene_version {
+            let scene = self.scene.clone();
+            let v = self.scene_version;
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(nurbs_core::build(&scene));
+            });
+            self.nurbs.job = Some((v, rx));
+        }
+    }
+
+    /// Blocks until the NURBS mesh matches the scene (captures, tests).
+    pub fn wait_nurbs(&mut self) {
+        for _ in 0..6000 {
+            self.tick_nurbs();
+            if self.nurbs.built == self.scene_version && self.nurbs.job.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 }

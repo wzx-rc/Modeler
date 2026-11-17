@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("nurbs") || want("bake-diag") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -787,6 +787,90 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
             h.shot(&format!("pc-clair-{tag}"));
         }
         h.st.settings.light = false;
+    }
+    if want("nurbs") {
+        // « Forme NURBS » (17 nov.): same UI, dark with the white accent, the
+        // scene built as truck B-rep solids (Add = union, Carve = difference)
+        fn piece() -> forme_core::Scene {
+            use forme_core::scene::{Mirror, NodeSpec, Scene, Shape};
+            let mut s = Scene::new();
+            let root = s.root;
+            let lying = glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+            let mut b = Shape::new(PrimKind::Box);
+            b.size = Vec3::new(26.0, 5.0, 16.0);
+            s.add(root, NodeSpec::shape("Socle", b).at(Vec3::new(0.0, 5.0, 0.0)));
+            let mut c = Shape::new(PrimKind::Cylinder);
+            c.size = Vec3::new(11.0, 14.0, 0.0);
+            s.add(root, NodeSpec::shape("Palier", c).at(Vec3::new(0.0, 19.0, 0.0)).rot(lying));
+            let mut c = Shape::new(PrimKind::Cylinder);
+            c.size = Vec3::new(6.0, 20.0, 0.0);
+            s.add(root, NodeSpec::shape("Alésage", c).at(Vec3::new(0.0, 19.0, 0.0)).rot(lying).mode(CombineMode::Carve));
+            let mut c = Shape::new(PrimKind::Cylinder);
+            c.size = Vec3::new(2.6, 8.0, 0.0);
+            s.add(
+                root,
+                NodeSpec::shape("Trous de fixation", c)
+                    .at(Vec3::new(19.0, 5.0, 10.0))
+                    .mode(CombineMode::Carve)
+                    .mirror(Mirror { x: true, y: false, z: true }),
+            );
+            s
+        }
+        fn prims() -> forme_core::Scene {
+            use forme_core::scene::{NodeSpec, Scene, Shape};
+            let mut s = Scene::new();
+            let root = s.root;
+            let mut b = Shape::new(PrimKind::Box);
+            b.size = Vec3::new(8.0, 8.0, 8.0);
+            s.add(root, NodeSpec::shape("Cube", b).at(Vec3::new(-40.0, 8.0, 0.0)));
+            let mut c = Shape::new(PrimKind::Sphere);
+            c.size = Vec3::splat(5.0);
+            s.add(root, NodeSpec::shape("Creux", c).at(Vec3::new(-34.0, 14.0, 6.0)).mode(CombineMode::Carve));
+            let mut c = Shape::new(PrimKind::Cylinder);
+            c.size = Vec3::new(7.0, 8.0, 0.0);
+            s.add(root, NodeSpec::shape("Cylindre", c).at(Vec3::new(-20.0, 8.0, 0.0)));
+            let mut c = Shape::new(PrimKind::Sphere);
+            c.size = Vec3::splat(8.0);
+            s.add(root, NodeSpec::shape("Sphère", c).at(Vec3::new(0.0, 8.0, 0.0)));
+            let mut c = Shape::new(PrimKind::Capsule);
+            c.size = Vec3::new(5.0, 5.0, 0.0);
+            s.add(root, NodeSpec::shape("Capsule", c).at(Vec3::new(17.0, 10.0, 0.0)));
+            let mut c = Shape::new(PrimKind::Torus);
+            c.size = Vec3::new(8.0, 2.5, 2.5);
+            s.add(root, NodeSpec::shape("Tore", c).at(Vec3::new(36.0, 2.5, 0.0)));
+            s
+        }
+        forme_app::set_nurbs(true);
+        let scenes: [(&str, fn() -> forme_core::Scene, &str); 2] = [("piece", piece, "Palier"), ("prims", prims, "Sphère")];
+        for (name, scene, sel) in scenes {
+            for (mode, tag) in [(UiMode::Atelier, "etabli"), (UiMode::Studio, "studio")] {
+                h.pc(AppState::new(scene(), "Forme NURBS"), mode);
+                h.st.settings.light = false;
+                h.st.settings.ambiance = forme_app::settings::AmbianceChoice::Blanc;
+                h.st.pointer_kind = PointerKind::Mouse;
+                h.steps(2);
+                let id = h.find(sel);
+                h.st.select(Some(id));
+                h.st.frame_all();
+                h.st.wait_nurbs();
+                h.st.view_changed();
+                h.steps(30);
+                match (&h.st.nurbs.model, &h.st.nurbs.error) {
+                    (_, Some(e)) => eprintln!("nurbs {name} : erreur {e}"),
+                    (Some(m), _) => eprintln!(
+                        "nurbs {name} : {} formes, {} booléens, {} ms, {} triangles, ignorés {:?}",
+                        m.shapes,
+                        m.booleans,
+                        m.millis,
+                        m.mesh.tris.len(),
+                        m.ignored
+                    ),
+                    _ => eprintln!("nurbs {name} : pas de modèle"),
+                }
+                h.shot(&format!("nurbs-{name}-{tag}"));
+            }
+        }
+        forme_app::set_nurbs(false);
     }
     if want("pc-align") {
         // alignment tools: four shapes scattered, then on the ground, centred

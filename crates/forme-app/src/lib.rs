@@ -6,12 +6,26 @@
 /// "Forme 0.1.0 — forme-pc · 3f2a1bc · 10/11/2026 05:30": version, branch,
 /// commit and commit date (see build.rs). Shown in the window title.
 pub fn version_title() -> String {
+    let app = if nurbs() { "Forme NURBS" } else { "Forme" };
     let parts: Vec<&str> = [env!("FORME_GIT_BRANCH"), env!("FORME_GIT_COMMIT"), env!("FORME_GIT_DATE")].into_iter().filter(|s| !s.is_empty()).collect();
     if parts.is_empty() {
-        format!("Forme {}", env!("CARGO_PKG_VERSION"))
+        format!("{app} {}", env!("CARGO_PKG_VERSION"))
     } else {
-        format!("Forme {} — {}", env!("CARGO_PKG_VERSION"), parts.join(" · "))
+        format!("{app} {} — {}", env!("CARGO_PKG_VERSION"), parts.join(" · "))
     }
+}
+
+static NURBS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Forme NURBS (Romain, 17 nov.): the same app, the scene built as exact
+/// B-rep solids (crate nurbs-core, truck kernel) instead of raymarched SDFs.
+/// Set once at start-up (the `forme-nurbs` binary, or FORME_ENGINE=nurbs).
+pub fn nurbs() -> bool {
+    NURBS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_nurbs(on: bool) {
+    NURBS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub mod camera;
@@ -39,6 +53,7 @@ pub fn run(ctx: &egui::Context, st: &mut AppState) {
         (AmbianceChoice::Vert, _) | (AmbianceChoice::Auto, UiMode::Atelier) => theme::Ambiance::Vert,
         (AmbianceChoice::Orange, _) | (AmbianceChoice::Auto, UiMode::Studio | UiMode::Plaque) => theme::Ambiance::Orange,
         (AmbianceChoice::Bleu, _) | (AmbianceChoice::Auto, UiMode::Focus) => theme::Ambiance::Bleu,
+        (AmbianceChoice::Blanc, _) => theme::Ambiance::Blanc,
     });
     viewport::show(ctx, st);
     match st.settings.ui_mode {
