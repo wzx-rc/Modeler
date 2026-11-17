@@ -645,4 +645,46 @@ fn main() {
         h.shot("zero-quads-4-part");
         h.st.export_obj();
     }
+
+    if want("quads-corner") {
+        // fillets meeting in corners: three edges of a 20 mm cube's corner
+        // in one fillet (a sphere's eighth closes it), then every edge
+        let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        let cases: [(&str, f64, bool); 4] = [("corner-r4", 4.0, false), ("corner-r8", 8.0, false), ("all-r4", 4.0, true), ("all-r8", 8.0, true)];
+        for (name, r, all) in cases {
+            let mut d = Doc::default();
+            let c = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            d.feature_mut(c).unwrap().name = "Cube".into();
+            let mut edges = vec![];
+            for (a, b, at) in [(2u16, 4u16, DVec3::new(0.0, 20.0, 10.0)), (0, 4, DVec3::new(10.0, 10.0, 10.0)), (0, 2, DVec3::new(10.0, 20.0, 0.0))] {
+                edges.push(EdgeRef { faces: [tag(c, a), tag(c, b)], at });
+            }
+            if all {
+                edges.clear();
+                for (x, sx) in [(0u16, 10.0), (1, -10.0)] {
+                    for (z, sz) in [(4u16, 10.0), (5, -10.0)] {
+                        edges.push(EdgeRef { faces: [tag(c, x), tag(c, z)], at: DVec3::new(sx, 10.0, sz) });
+                    }
+                    for (y, sy) in [(2u16, 20.0), (3, 0.0)] {
+                        edges.push(EdgeRef { faces: [tag(c, x), tag(c, y)], at: DVec3::new(sx, sy, 0.0) });
+                    }
+                }
+                for (z, sz) in [(4u16, 10.0), (5, -10.0)] {
+                    for (y, sy) in [(2u16, 20.0), (3, 0.0)] {
+                        edges.push(EdgeRef { faces: [tag(c, z), tag(c, y)], at: DVec3::new(0.0, sy, sz) });
+                    }
+                }
+            }
+            d.add_round(r, false, edges);
+            h.reset(d, name);
+            h.st.quads = true;
+            h.st.camera.frame(Vec3::new(-6.0, 4.0, -6.0), Vec3::new(10.0, 20.0, 10.0));
+            h.steps(2);
+            h.settle();
+            h.shot(&format!("zero-quads-{name}"));
+            if let Some(q) = h.st.quad_mesh() {
+                eprintln!("  {name}: {} quads, left out {:?}", q.quads.len(), q.skipped);
+            }
+        }
+    }
 }

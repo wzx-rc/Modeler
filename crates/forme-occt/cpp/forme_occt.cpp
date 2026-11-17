@@ -40,6 +40,7 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRep_Tool.hxx>
+#include <ShapeAnalysis_Surface.hxx>
 #include <GCPnts_TangentialDeflection.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom_BezierCurve.hxx>
@@ -1153,6 +1154,40 @@ int focc_face_eval(const FShape* s, int face, int n, const double* uv, double* o
                 double* o = out + 6 * k;
                 o[0] = p.X(); o[1] = p.Y(); o[2] = p.Z();
                 o[3] = d.X(); o[4] = d.Y(); o[5] = d.Z();
+            }
+            return n;
+        },
+        -1);
+}
+
+// Points put on a face's surface (the nearest point): for each, out gets
+// u, v, the point and the outward normal (8 doubles).
+int focc_face_project(const FShape* s, int face, int n, const double* xyz, double* out) {
+    return guard(
+        [&] {
+            TopTools_IndexedMapOfShape faces;
+            face_map(s->s, faces);
+            if (face < 0 || face >= faces.Extent()) {
+                set_err("no such face");
+                return -1;
+            }
+            TopoDS_Face f = TopoDS::Face(faces(face + 1));
+            opencascade::handle<ShapeAnalysis_Surface> an = new ShapeAnalysis_Surface(BRep_Tool::Surface(f));
+            BRepAdaptor_Surface sa(f, Standard_True);
+            bool rev = f.Orientation() == TopAbs_REVERSED;
+            for (int k = 0; k < n; k++) {
+                gp_Pnt q(xyz[3 * k], xyz[3 * k + 1], xyz[3 * k + 2]);
+                gp_Pnt2d uv = an->ValueOfUV(q, 1e-7);
+                double u = uv.X(), v = uv.Y();
+                gp_Pnt p = sa.Value(u, v);
+                BRepLProp_SLProps props(sa, u, v, 1, 1e-7);
+                gp_Dir d(0, 0, 1);
+                if (props.IsNormalDefined()) d = props.Normal();
+                if (rev) d.Reverse();
+                double* o = out + 8 * k;
+                o[0] = u; o[1] = v;
+                o[2] = p.X(); o[3] = p.Y(); o[4] = p.Z();
+                o[5] = d.X(); o[6] = d.Y(); o[7] = d.Z();
             }
             return n;
         },

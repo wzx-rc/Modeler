@@ -896,8 +896,9 @@ impl Ctx<'_> {
         if wires.is_empty() {
             return Err("no outline".into());
         }
-        if wires.iter().flatten().any(|(e, _)| self.topo.edges[(*e - 1) as usize].degenerated) {
-            return Err("a pole (degenerated edge)".into());
+        let pole = wires.iter().flatten().any(|(e, _)| self.topo.edges[(*e - 1) as usize].degenerated);
+        if pole && wires.len() > 1 {
+            return Err("a pole (degenerated edge) on a face with holes".into());
         }
         // the loops, joined up in (u, v): OpenCascade's order is kept, but
         // an edge whose curve runs the other way there (a closed edge on a
@@ -971,6 +972,12 @@ impl Ctx<'_> {
                     std::mem::swap(&mut s.f0, &mut s.f1);
                 }
             }
+        }
+
+        // a corner patch closing on a pole (where three fillets meet: a
+        // sphere's eighth): three quads round a point in its middle
+        if pole {
+            return self.triangle(fi, map, &loops[0]);
         }
 
         // 0. several holes: straight cuts across the face between them
@@ -1357,6 +1364,164 @@ impl Ctx<'_> {
         Ok(done)
     }
 
+    /// A degenerated edge (a pole: one point in space, a line in uv).
+    fn is_pole(&self, line: usize) -> bool {
+        let e = self.lines[line].edge;
+        e > 0 && self.topo.edges[(e - 1) as usize].degenerated
+    }
+
+    /// A span's length in space.
+    fn span_len3(&self, s: Span) -> f64 {
+        let l = &self.lines[s.line];
+        let whole = if l.edge > 0 { self.arcs[(l.edge - 1) as usize].length() } else { l.length };
+        whole * (s.f1 - s.f0).abs()
+    }
+
+    /// The point in space at a line fraction, seen from a face.
+    fn point3(&mut self, face: usize, s: Span, f: f64) -> Result<[f64; 3], String> {
+        let l = &self.lines[s.line];
+        if l.edge == 0 {
+            let uv = lerp2(l.uv[0], l.uv[1], f);
+            return Ok(self.shape.face_eval(face, &[uv])?[0].0);
+        }
+        let e = l.edge;
+        let t = self.arcs[(e - 1) as usize].param(f);
+        Ok(self.shape.edge_on_face(face, e, s.pc, &[t])?.0[0])
+    }
+
+    /// The junction of a loop that ends on `node` (on a pole, the one just
+    /// before the degenerated edge).
+    fn junction(&self, lp: &[Span], node: usize) -> Option<usize> {
+        let n = lp.len();
+        let at: Vec<usize> = (0..n).filter(|k| self.node_of(lp[*k].line, lp[*k].f1) == Some(node)).collect();
+        at.iter().copied().find(|k| self.is_pole(lp[(k + 1) % n].line)).or(at.first().copied())
+    }
+
+    /// A face of three corners closing on a pole (where three fillets meet:
+    /// a sphere's eighth): a point in its middle joined to the middles of
+    /// its sides, three quads meeting there (a pole of three, on purpose).
+    fn triangle(&mut self, fi: usize, map: FMap, lp: &[Span]) -> Result<Vec<(Vec<Span>, Vec<usize>)>, String> {
+        let n = lp.len();
+        let kd: Vec<usize> = (0..n).filter(|k| self.is_pole(lp[*k].line)).collect();
+        if kd.len() != 1 {
+            return Err("a face with several poles".into());
+        }
+        let kd = kd[0];
+        let g = self.geo(fi, map, lp)?;
+        // the corners: the pole (the junction before it), and where the
+        // outline turns elsewhere
+        let mut cs = vec![(kd + n - 1) % n];
+        for k in 0..n {
+            let j = (k + 1) % n;
+            if k == kd || j == kd || k == (kd + n - 1) % n {
+                continue;
+            }
+            if turn(tan_end(&g[k]), tan_start(&g[j])).abs() > CORNER {
+                cs.push(k);
+            }
+        }
+        if cs.len() != 3 {
+            return Err(format!("a pole on a face of {} corners", cs.len()));
+        }
+        cs.sort();
+        let corner_nodes: Vec<usize> = cs.iter().map(|k| self.node_of(lp[*k].line, lp[*k].f1).ok_or("a corner without a node")).collect::<Result<_, _>>()?;
+        // the middle of each side, by length in space
+        let mut mids: Vec<(usize, LPos)> = vec![];
+        for r in 0..3 {
+            let (k0, k1) = (cs[r], cs[(r + 1) % 3]);
+            let mut spans = vec![];
+            let mut k = (k0 + 1) % n;
+            loop {
+                spans.push(k);
+                if k == k1 {
+                    break;
+                }
+                k = (k + 1) % n;
+            }
+            let lens: Vec<f64> = spans.iter().map(|k| self.span_len3(lp[*k])).collect();
+            let half = 0.5 * lens.iter().sum::<f64>();
+            let mut acc = 0.0;
+            for (k, l) in spans.iter().zip(&lens) {
+                if acc + l >= half && *l > 0.0 {
+                    let t = ((half - acc) / l).clamp(0.0, 1.0);
+                    let s = lp[*k];
+                    mids.push((r, LPos { i: *k, f: s.f0 + (s.f1 - s.f0) * t }));
+                    break;
+                }
+                acc += l;
+            }
+        }
+        if mids.len() != 3 {
+            return Err("a side of no length".into());
+        }
+        // made nodes, from the last span back (the indices before stay)
+        let mut lp = lp.to_vec();
+        let mut order = mids.clone();
+        order.sort_by(|a, b| b.1.i.cmp(&a.1.i).then(b.1.f.total_cmp(&a.1.f)));
+        let mut mid_nodes = [0usize; 3];
+        let mut mid_pts = [[0.0; 3]; 3];
+        let mut mid_uv = [[0.0; 2]; 3];
+        for (r, p) in order {
+            let s = lp[p.i];
+            mid_pts[r] = self.point3(fi, s, p.f)?;
+            mid_uv[r] = self.uv_at(fi, s.line, p.f, s.pc)?;
+            let (j, _) = self.cut_at(&mut lp, p);
+            mid_nodes[r] = self.node_of(lp[j].line, lp[j].f1).ok_or("a middle without a node")?;
+        }
+        // the middle: the surface's point nearest the middle of the sides'
+        // middles and the corners, in the face's own (u, v) period
+        let mut sum = [0.0; 3];
+        for p in mid_pts.iter() {
+            for c in 0..3 {
+                sum[c] += p[c] / 3.0;
+            }
+        }
+        let guess = k2(a2(a2(mid_uv[0], mid_uv[1]), mid_uv[2]), 1.0 / 3.0);
+        let centre = match self.shape.face_project(fi, &[sum]) {
+            Ok(v) => {
+                let (mut uv, p, _) = v[0];
+                for c in 0..2 {
+                    let period = 2.0 * PI;
+                    while uv[c] - guess[c] > 0.5 * period {
+                        uv[c] -= period;
+                    }
+                    while guess[c] - uv[c] > 0.5 * period {
+                        uv[c] += period;
+                    }
+                }
+                let back = self.shape.face_eval(fi, &[uv])?[0].0;
+                if len(sub(back, p)) < 1e-6 { uv } else { guess }
+            }
+            Err(_) => guess,
+        };
+        // three cuts: middle of side 0 → centre → middle of side 1, then
+        // centre → middle of side 2
+        let ka = self.junction(&lp, mid_nodes[0]).ok_or("a middle lost")?;
+        let kb = self.junction(&lp, mid_nodes[1]).ok_or("a middle lost")?;
+        let (one, two, made) = self.split_path(fi, &lp, ka, &[centre], kb)?;
+        let c = made[0];
+        let ka = self.junction(&two, c).ok_or("the centre lost")?;
+        let kb = self.junction(&two, mid_nodes[2]).ok_or("a middle lost")?;
+        let (two_a, two_b, _) = self.split_path(fi, &two, ka, &[], kb)?;
+        let mut keys: Vec<usize> = corner_nodes;
+        keys.extend(mid_nodes);
+        keys.push(c);
+        let mut out = vec![];
+        for r in [one, two_a, two_b] {
+            let mut cs: Vec<usize> = keys.iter().filter_map(|k| self.junction(&r, *k)).collect();
+            cs.sort();
+            cs.dedup();
+            if cs.len() != 4 {
+                return Err(format!("a corner patch with {} corners", cs.len()));
+            }
+            out.push((r, cs));
+        }
+        if std::env::var("FORME_QUADS_DEBUG").is_ok() {
+            eprintln!("face {fi}: three corners round a pole, three quads round a middle");
+        }
+        Ok(out)
+    }
+
     /// The pieces of a span, in travel order.
     fn pieces(&self, s: Span) -> Vec<(Piece, bool, bool)> {
         let sp = &self.lines[s.line].splits;
@@ -1431,6 +1596,10 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
         count.clear();
         for pt in &patches {
             for (p, _, _) in pt.sides.iter().flatten() {
+                if cx.is_pole(p.line) {
+                    count.insert(*p, 0);
+                    continue;
+                }
                 count.entry(*p).or_insert_with(|| {
                     let l = cx.piece_len(*p);
                     let line = &cx.lines[p.line];
@@ -1465,7 +1634,9 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
                     if na != nb {
                         let short = if na < nb { a } else { b };
                         // the coarsest piece of the short side gets one more
-                        let (p, _, _) = pt.sides[short].iter().max_by(|x, y| (cx.piece_len(x.0) / count[&x.0] as f64).total_cmp(&(cx.piece_len(y.0) / count[&y.0] as f64))).unwrap();
+                        let Some((p, _, _)) = pt.sides[short].iter().filter(|x| !cx.is_pole(x.0.line)).max_by(|x, y| (cx.piece_len(x.0) / count[&x.0] as f64).total_cmp(&(cx.piece_len(y.0) / count[&y.0] as f64))) else {
+                            continue;
+                        };
                         *count.get_mut(p).unwrap() += 1;
                         changed = true;
                     }
@@ -1512,6 +1683,7 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
         })
     };
     let mut failed_faces: HashSet<usize> = HashSet::new();
+    let pole_faces: HashSet<usize> = (0..topo.faces.len()).filter(|f| topo.faces[*f].wires.iter().flatten().any(|(e, _)| topo.edges[(*e - 1) as usize].degenerated)).collect();
     let mut out_quads: Vec<([u32; 4], usize)> = vec![];
     for pt in &patches {
         let fi = pt.face;
@@ -1602,9 +1774,31 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
                 };
             }
         }
-        // on the surface: the inner points, and every point's normal
+        // on the surface: the inner points, and every point's normal (a
+        // face closing on a pole: the grid made in space from the sides'
+        // points, then put on the surface; its (u, v) squeeze at the pole)
         let all: Vec<V2> = (0..=nn).flat_map(|i| (0..=mm).map(move |j| (i, j))).map(|(i, j)| grid[i][j].1).collect();
-        let eval = match shape.face_eval(fi, &all) {
+        let eval = if pole_faces.contains(&fi) {
+            let p3 = |id: u32| mesh.positions[id as usize];
+            let (b3, t3, l3, r3) = (|i: usize| p3(bottom(i).0), |i: usize| p3(top(i).0), |j: usize| p3(left(j).0), |j: usize| p3(right(j).0));
+            let (q00, q10, q11, q01) = (b3(0), b3(nn), t3(nn), t3(0));
+            let pts: Vec<[f64; 3]> = (0..=nn)
+                .flat_map(|i| (0..=mm).map(move |j| (i, j)))
+                .map(|(i, j)| {
+                    if grid[i][j].0 != u32::MAX {
+                        return p3(grid[i][j].0);
+                    }
+                    let (u, v) = (i as f64 / nn as f64, j as f64 / mm as f64);
+                    let (b, t, l, r) = (b3(i), t3(i), l3(j), r3(j));
+                    let c = |k: usize| (1.0 - v) * b[k] + v * t[k] + (1.0 - u) * l[k] + u * r[k] - ((1.0 - u) * (1.0 - v) * q00[k] + u * (1.0 - v) * q10[k] + (1.0 - u) * v * q01[k] + u * v * q11[k]);
+                    [c(0), c(1), c(2)]
+                })
+                .collect();
+            shape.face_project(fi, &pts).map(|v| v.into_iter().map(|(_, p, n)| (p, n)).collect::<Vec<_>>())
+        } else {
+            shape.face_eval(fi, &all)
+        };
+        let eval = match eval {
             Ok(e) => e,
             Err(e) => {
                 mesh.skipped.push((fi, e));
@@ -1825,5 +2019,77 @@ mod tests {
             eprintln!("test part (fillet {fillet}): {} quads on {} faces of {}, left out {:?}, errors {:?}", q.quads.len(), faces.len(), m.faces.len(), q.skipped, m.errors);
             assert!(q.skipped.is_empty(), "fillet {fillet}: {:?}", q.skipped);
         }
+    }
+
+    /// A cube with fillets on the edges given by their two ends.
+    fn rounded(size: f64, r: f64, ends: &[([f64; 3], [f64; 3])]) -> Shape {
+        let h = size * 0.5;
+        let cube = Shape::cuboid(size, size, size).unwrap();
+        let es: Vec<i32> = ends.iter().map(|(a, b)| edge_between(&cube, [a[0] * h, a[1] * h, a[2] * h], [b[0] * h, b[1] * h, b[2] * h])).collect();
+        cube.fillet(&es, r, 99).unwrap()
+    }
+
+    /// How the converter does on a shape: (quads, bad quads, skipped).
+    fn report(name: &str, s: &Shape) -> (usize, usize, usize) {
+        let q = convert(s, 2.5).unwrap();
+        std::fs::write(std::env::temp_dir().join(format!("forme-quads-{name}.obj")), q.obj(|f| format!("face{f}"))).unwrap();
+        let r = (q.quads.len(), q.bad_quads(20.0), q.skipped.len());
+        eprintln!("{name}: {} quads, {} bad, closed {}, skipped {:?}", r.0, r.1, q.is_closed(), q.skipped);
+        r
+    }
+
+    /// Fillets meeting in a corner: the face closing on a pole (a sphere's
+    /// eighth) is three quads round a point, the mesh closed.
+    #[test]
+    fn fillet_corners() {
+        let x = [1.0, 1.0, 1.0];
+        let three = [([1.0, 1.0, -1.0], x), ([1.0, -1.0, 1.0], x), ([-1.0, 1.0, 1.0], x)];
+        let mut all = vec![];
+        for a in [-1.0, 1.0] {
+            for b in [-1.0, 1.0] {
+                all.push(([-1.0, a, b], [1.0, a, b]));
+                all.push(([a, -1.0, b], [a, 1.0, b]));
+                all.push(([a, b, -1.0], [a, b, 1.0]));
+            }
+        }
+        for r in [4.0, 8.0] {
+            let q = check(&format!("corner-r{r}"), &rounded(20.0, r, &three), 0);
+            assert_eq!(q.bad_quads(20.0), 0, "corner r{r}");
+        }
+        for r in [2.0, 4.0, 8.0] {
+            let q = check(&format!("all-r{r}"), &rounded(20.0, r, &all), 0);
+            assert_eq!(q.bad_quads(20.0), 0, "all r{r}");
+            // 8 corners, each a pole of three in the middle of its patch
+            let mut val = vec![0usize; q.positions.len()];
+            for f in &q.quads {
+                for v in f {
+                    val[*v as usize] += 1;
+                }
+            }
+            assert!(val.iter().filter(|v| **v == 3).count() >= 8, "all r{r}: the corners' poles");
+        }
+    }
+
+    #[test]
+    fn corner_survey() {
+        let x = [1.0, 1.0, 1.0];
+        let three = [([1.0, 1.0, -1.0], x), ([1.0, -1.0, 1.0], x), ([-1.0, 1.0, 1.0], x)];
+        for r in [2.0, 4.0, 8.0] {
+            report(&format!("corner3-r{r}"), &rounded(20.0, r, &three));
+        }
+        // all twelve edges
+        let mut all = vec![];
+        for a in [-1.0, 1.0] {
+            for b in [-1.0, 1.0] {
+                all.push(([-1.0, a, b], [1.0, a, b]));
+                all.push(([a, -1.0, b], [a, 1.0, b]));
+                all.push(([a, b, -1.0], [a, b, 1.0]));
+            }
+        }
+        for r in [2.0, 4.0, 8.0] {
+            report(&format!("all-r{r}"), &rounded(20.0, r, &all));
+        }
+        // one large fillet
+        report("one-r8", &rounded(20.0, 8.0, &[([-1.0, 1.0, 1.0], x)]));
     }
 }

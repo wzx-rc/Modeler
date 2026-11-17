@@ -60,6 +60,7 @@ extern "C" {
     fn focc_buf_free(b: *mut FBuf);
     fn focc_quad_topo(s: *const FShape) -> *mut FBuf;
     fn focc_edge_on_face(s: *const FShape, face: c_int, edge: c_int, reversed: c_int, n: c_int, t: *const c_double, xyz: *mut c_double, uv: *mut c_double) -> c_int;
+    fn focc_face_project(s: *const FShape, face: c_int, n: c_int, xyz: *const c_double, out: *mut c_double) -> c_int;
     fn focc_face_eval(s: *const FShape, face: c_int, n: c_int, uv: *const c_double, out: *mut c_double) -> c_int;
     fn focc_volume(s: *const FShape) -> c_double;
     fn focc_is_valid(s: *const FShape) -> c_int;
@@ -534,6 +535,18 @@ impl Shape {
 
     /// Points of face `face` (0-based) at surface coordinates: the point
     /// and the outward normal.
+    /// Points put on a face's surface (its nearest point): (u, v), the
+    /// point, the outward normal.
+    pub fn face_project(&self, face: usize, pts: &[[f64; 3]]) -> Result<Vec<([f64; 2], [f64; 3], [f64; 3])>, String> {
+        let flat: Vec<f64> = pts.iter().flatten().copied().collect();
+        let mut out = vec![0.0; pts.len() * 8];
+        let n = unsafe { focc_face_project(self.0, face as c_int, pts.len() as c_int, flat.as_ptr(), out.as_mut_ptr()) };
+        if n < 0 {
+            return Err(last_error());
+        }
+        Ok(out.chunks(8).map(|c| ([c[0], c[1]], [c[2], c[3], c[4]], [c[5], c[6], c[7]])).collect())
+    }
+
     pub fn face_eval(&self, face: usize, uv: &[[f64; 2]]) -> Result<Vec<([f64; 3], [f64; 3])>, String> {
         let flat: Vec<f64> = uv.iter().flatten().copied().collect();
         let mut out = vec![0.0; uv.len() * 6];
