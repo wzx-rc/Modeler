@@ -540,10 +540,27 @@ impl Ctx<'_> {
         if ka == kb {
             return Err("a cut of no length".into());
         }
+        let (one, two, _) = self.split_path(face, &lp, ka, &[], kb)?;
+        Ok((one, two))
+    }
+
+    /// A loop cut in two along straight pieces from the junction after span
+    /// ka to the one after span kb, through new points `mids` (in uv) inside
+    /// it: the part from a to b, the part from b to a, the new nodes.
+    fn split_path(&mut self, face: usize, lp: &[Span], ka: usize, mids: &[V2], kb: usize) -> Result<(Vec<Span>, Vec<Span>, Vec<usize>), String> {
         let n = lp.len();
-        let a = self.end_of(face, lp[ka])?;
-        let b = self.end_of(face, lp[kb])?;
-        let c = self.new_cut(face, a, b)?;
+        let mut pts = vec![self.end_of(face, lp[ka])?];
+        let mut made = vec![];
+        for m in mids {
+            made.push(self.nodes);
+            pts.push((*m, self.nodes));
+            self.nodes += 1;
+        }
+        pts.push(self.end_of(face, lp[kb])?);
+        let mut cuts = vec![];
+        for w in pts.windows(2) {
+            cuts.push(self.new_cut(face, w[0], w[1])?);
+        }
         let mut one = vec![];
         let mut k = (ka + 1) % n;
         loop {
@@ -553,7 +570,7 @@ impl Ctx<'_> {
             }
             k = (k + 1) % n;
         }
-        one.push(Span { line: c, f0: 1.0, f1: 0.0, pc: false });
+        one.extend(cuts.iter().rev().map(|c| Span { line: *c, f0: 1.0, f1: 0.0, pc: false }));
         let mut two = vec![];
         k = (kb + 1) % n;
         loop {
@@ -563,8 +580,67 @@ impl Ctx<'_> {
             }
             k = (k + 1) % n;
         }
-        two.push(Span { line: c, f0: 0.0, f1: 1.0, pc: false });
-        Ok((one, two))
+        two.extend(cuts.iter().map(|c| Span { line: *c, f0: 0.0, f1: 1.0, pc: false }));
+        Ok((one, two, made))
+    }
+
+    /// A disc (a round loop with no corner): a square in the middle and a
+    /// patch on each of its sides, joined to the outline along the
+    /// diagonals. None when the loop is not round.
+    fn disc(&mut self, fi: usize, map: FMap, lp: &[Span], g: &Geo, tmin: f64) -> Result<Option<Vec<Vec<Span>>>, String> {
+        let turn: f64 = g.iter().map(|p| span_turn(p)).sum();
+        if (turn - 2.0 * PI).abs() > 0.2 || g.iter().any(|p| span_turn(p) < -STRAIGHT) {
+            return Ok(None);
+        }
+        let pts = loop_points(g);
+        let c = k2(pts.iter().fold([0.0; 2], |a, p| a2(a, *p)), 1.0 / pts.len().max(1) as f64);
+        let ds: Vec<f64> = pts.iter().map(|p| l2(s2(*p, c))).collect();
+        let (lo, hi) = ds.iter().fold((f64::MAX, 0.0f64), |(a, b), d| (a.min(*d), b.max(*d)));
+        if lo < 0.7 * hi {
+            return Ok(None);
+        }
+        let r = ds.iter().sum::<f64>() / ds.len() as f64;
+        let diag = |k: usize| {
+            let a = PI / 4.0 + k as f64 * FRAC_PI_2;
+            [a.cos(), a.sin()]
+        };
+        // the four places on the outline along the diagonals, made nodes
+        let mut lp = lp.to_vec();
+        let mut q = vec![];
+        for k in 0..4 {
+            let g = self.geo(fi, map, &lp)?;
+            let (p, _) = self.cast_snap(&lp, &g, c, diag(k), tmin).ok_or("a disc with no outline")?;
+            let (j, _) = self.cut_at(&mut lp, p);
+            q.push(self.node_of(lp[j].line, lp[j].f1).ok_or("a corner without a node")?);
+        }
+        // the square's corners, inside (back in uv)
+        let inner: Vec<V2> = (0..4)
+            .map(|k| {
+                let m = a2(c, k2(diag(k), 0.6 * r));
+                [m[0] / map.su, m[1] / map.sv]
+            })
+            .collect();
+        let find = |cx: &Ctx, lp: &[Span], node: usize| lp.iter().position(|s| cx.node_of(s.line, s.f1) == Some(node)).ok_or("a disc lost a node".to_string());
+        let mut out = vec![];
+        // q0 → p0 → p1 → q1: the first side patch and the rest
+        let (ka, kb) = (find(self, &lp, q[0])?, find(self, &lp, q[1])?);
+        let (side, mut rest, p01) = self.split_path(fi, &lp, ka, &inner[0..2], kb)?;
+        out.push(side);
+        // p1 → p2 → q2, then p2 → p3 → q3
+        let mut p = vec![p01[0], p01[1]];
+        for k in 2..4 {
+            let (ka, kb) = (find(self, &rest, p[k - 1])?, find(self, &rest, q[k])?);
+            let (side, r2, made) = self.split_path(fi, &rest, ka, &inner[k..k + 1], kb)?;
+            out.push(side);
+            rest = r2;
+            p.push(made[0]);
+        }
+        // p3 → p0: the last side patch and the square
+        let (ka, kb) = (find(self, &rest, p[3])?, find(self, &rest, p[0])?);
+        let (side, square, _) = self.split_path(fi, &rest, ka, &[], kb)?;
+        out.push(side);
+        out.push(square);
+        Ok(Some(out))
     }
 
     /// A hole joined to a loop by a straight cut (both ways along it).
@@ -1192,6 +1268,17 @@ impl Ctx<'_> {
                 continue;
             }
 
+            // a disc: a square in the middle, a patch on each of its sides
+            if cs.is_empty() {
+                if let Some(rs) = self.disc(fi, map, &lp, &g, tmin)? {
+                    if std::env::var("FORME_QUADS_DEBUG").is_ok() {
+                        eprintln!("face {fi}: a disc, a square in the middle");
+                    }
+                    work.extend(rs);
+                    continue;
+                }
+            }
+
             // too few: corners in the middle of the longest runs
             if cs.len() < 4 {
                 let lens: Vec<f64> = g.iter().map(|p| span_len(p)).collect();
@@ -1685,6 +1772,14 @@ mod tests {
         let two = Shape::cuboid(50.0, 10.0, 30.0).unwrap().cut(&moved(Shape::cylinder(4.0, 30.0).unwrap(), [-12.0, 0.0, 3.0])).unwrap().cut(&moved(Shape::cylinder(5.0, 30.0).unwrap(), [12.0, 0.0, -2.0])).unwrap();
         let q = check("two-holes", &two, 2);
         assert_eq!(q.bad_quads(15.0), 0, "two holes: no squashed quads");
+    }
+
+    #[test]
+    fn discs() {
+        // a cylinder: its two discs as a square and four patches round it
+        let cyl = Shape::cylinder(6.0, 10.0).unwrap();
+        let q = check("cylinder", &cyl, 0);
+        assert_eq!(q.bad_quads(20.0), 0, "cylinder: no squashed quads");
     }
 
     #[test]
