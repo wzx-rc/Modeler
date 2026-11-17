@@ -18,6 +18,9 @@ pub struct Request {
     /// Steps not to try (they crashed the process).
     #[serde(default)]
     pub skip: Vec<String>,
+    /// The part as quads too (`quads.rs`).
+    #[serde(default)]
+    pub quads: bool,
     pub doc: Doc,
 }
 

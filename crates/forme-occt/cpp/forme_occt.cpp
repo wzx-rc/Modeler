@@ -7,6 +7,9 @@
 // Handle_T aliases (a derived class, not a typedef, under MSVC).
 
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Curve2d.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepLProp_SLProps.hxx>
 #include <BRepTools.hxx>
@@ -49,6 +52,7 @@
 #include <TopoDS_Wire.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 
 #include <cstdint>
@@ -743,6 +747,158 @@ FBuf* focc_topo(const FShape* s, double defl, double angle) {
             return r;
         },
         (FBuf*)nullptr);
+}
+
+// ------------------------------------------------------------ quad mesh
+
+// What the quad mesher (nurbs-kernel `quads.rs`) walks, in one buffer:
+//   u32 faces, each: i32 kind (as face_info), u32 wires (the outer one
+//       first), each: u32 n, each: i32 edge (1-based edge map), i32 reversed
+//   u32 edges (edge map order), each: f64 t0, t1, i32 v0, v1 (vertex map,
+//       1-based: the vertices at t0 and at t1), i32 kind (0 line, 1 circle,
+//       2 other), f64 radius, i32 degenerated, 33 points f64 xyz from t0 to t1
+FBuf* focc_quad_topo(const FShape* s) {
+    return guard(
+        [&]() -> FBuf* {
+            TopTools_IndexedMapOfShape faces, edges, verts;
+            face_map(s->s, faces);
+            edge_map(s->s, edges);
+            TopExp::MapShapes(s->s, TopAbs_VERTEX, verts);
+            Buf out;
+            out.put<uint32_t>((uint32_t)faces.Extent());
+            double info[13];
+            for (int i = 1; i <= faces.Extent(); i++) {
+                TopoDS_Face f = TopoDS::Face(faces(i));
+                out.put<int32_t>(face_info(f, info));
+                TopoDS_Wire outer = BRepTools::OuterWire(f);
+                std::vector<TopoDS_Wire> wires;
+                if (!outer.IsNull()) wires.push_back(outer);
+                for (TopoDS_Iterator it(f); it.More(); it.Next()) {
+                    if (it.Value().ShapeType() == TopAbs_WIRE && !it.Value().IsSame(outer)) wires.push_back(TopoDS::Wire(it.Value()));
+                }
+                out.put<uint32_t>((uint32_t)wires.size());
+                for (const TopoDS_Wire& w : wires) {
+                    std::vector<std::pair<int, int>> list;
+                    for (BRepTools_WireExplorer ex(w, f); ex.More(); ex.Next()) {
+                        list.push_back({edges.FindIndex(ex.Current()), ex.Orientation() == TopAbs_REVERSED ? 1 : 0});
+                    }
+                    out.put<uint32_t>((uint32_t)list.size());
+                    for (auto& e : list) {
+                        out.put<int32_t>(e.first);
+                        out.put<int32_t>(e.second);
+                    }
+                }
+            }
+            out.put<uint32_t>((uint32_t)edges.Extent());
+            for (int i = 1; i <= edges.Extent(); i++) {
+                TopoDS_Edge e = TopoDS::Edge(edges(i).Oriented(TopAbs_FORWARD));
+                bool degen = BRep_Tool::Degenerated(e);
+                double t0 = 0, t1 = 0;
+                BRep_Tool::Range(e, t0, t1);
+                TopoDS_Vertex a, b;
+                TopExp::Vertices(e, a, b);
+                out.put<double>(t0);
+                out.put<double>(t1);
+                out.put<int32_t>(a.IsNull() ? 0 : verts.FindIndex(a));
+                out.put<int32_t>(b.IsNull() ? 0 : verts.FindIndex(b));
+                int kind = 2;
+                double r = 0;
+                gp_Pnt pts[33];
+                if (!degen) {
+                    BRepAdaptor_Curve c(e);
+                    if (c.GetType() == GeomAbs_Line) kind = 0;
+                    if (c.GetType() == GeomAbs_Circle) {
+                        kind = 1;
+                        r = c.Circle().Radius();
+                    }
+                    for (int k = 0; k <= 32; k++) pts[k] = c.Value(t0 + (t1 - t0) * k / 32.0);
+                } else if (!a.IsNull()) {
+                    for (int k = 0; k <= 32; k++) pts[k] = BRep_Tool::Pnt(a);
+                }
+                out.put<int32_t>(kind);
+                out.put<double>(r);
+                out.put<int32_t>(degen ? 1 : 0);
+                for (int k = 0; k <= 32; k++) {
+                    out.put<double>(pts[k].X());
+                    out.put<double>(pts[k].Y());
+                    out.put<double>(pts[k].Z());
+                }
+            }
+            FBuf* r = new FBuf();
+            r->b.swap(out.b);
+            return r;
+        },
+        (FBuf*)nullptr);
+}
+
+// Points of edge `edge` (1-based) at n parameters: 3D (xyz) and, on face
+// `face` (0-based, the edge as it is oriented in that face: a seam has two
+// curves there), its surface coordinates (uv). Returns n, or -1.
+int focc_edge_on_face(const FShape* s, int face, int edge, int reversed, int n, const double* t, double* xyz, double* uv) {
+    return guard(
+        [&] {
+            TopTools_IndexedMapOfShape faces, edges;
+            face_map(s->s, faces);
+            edge_map(s->s, edges);
+            if (face < 0 || face >= faces.Extent() || edge < 1 || edge > edges.Extent()) {
+                set_err("no such face or edge");
+                return -1;
+            }
+            TopoDS_Face f = TopoDS::Face(faces(face + 1));
+            TopoDS_Edge want = TopoDS::Edge(edges(edge));
+            TopAbs_Orientation o = reversed ? TopAbs_REVERSED : TopAbs_FORWARD;
+            TopoDS_Edge found;
+            for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                if (ex.Current().IsSame(want) && (found.IsNull() || ex.Current().Orientation() == o)) found = TopoDS::Edge(ex.Current());
+            }
+            if (found.IsNull()) {
+                set_err("the edge is not on that face");
+                return -1;
+            }
+            BRepAdaptor_Curve c(found);
+            BRepAdaptor_Curve2d c2(found, f);
+            for (int k = 0; k < n; k++) {
+                gp_Pnt p = c.Value(t[k]);
+                gp_Pnt2d q = c2.Value(t[k]);
+                xyz[3 * k] = p.X();
+                xyz[3 * k + 1] = p.Y();
+                xyz[3 * k + 2] = p.Z();
+                uv[2 * k] = q.X();
+                uv[2 * k + 1] = q.Y();
+            }
+            return n;
+        },
+        -1);
+}
+
+// Points of face `face` (0-based) at n surface coordinates: xyz and the
+// outward normal (6 doubles each). Returns n, or -1.
+int focc_face_eval(const FShape* s, int face, int n, const double* uv, double* out) {
+    return guard(
+        [&] {
+            TopTools_IndexedMapOfShape faces;
+            face_map(s->s, faces);
+            if (face < 0 || face >= faces.Extent()) {
+                set_err("no such face");
+                return -1;
+            }
+            TopoDS_Face f = TopoDS::Face(faces(face + 1));
+            BRepAdaptor_Surface sa(f, Standard_True);
+            bool rev = f.Orientation() == TopAbs_REVERSED;
+            for (int k = 0; k < n; k++) {
+                double u = uv[2 * k], v = uv[2 * k + 1];
+                gp_Pnt p = sa.Value(u, v);
+                BRepLProp_SLProps props(sa, u, v, 1, 1e-7);
+                gp_Dir d(0, 0, 1);
+                if (props.IsNormalDefined()) d = props.Normal();
+                if (rev) d.Reverse();
+                double* o = out + 6 * k;
+                o[0] = p.X(); o[1] = p.Y(); o[2] = p.Z();
+                o[3] = d.X(); o[4] = d.Y(); o[5] = d.Z();
+            }
+            return n;
+        },
+        -1);
 }
 
 int focc_buf_len(const FBuf* b) { return (int)b->b.size(); }

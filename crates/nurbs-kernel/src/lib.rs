@@ -18,6 +18,8 @@ pub mod proto;
 
 #[cfg(feature = "occ")]
 pub mod build;
+#[cfg(feature = "occ")]
+pub mod quads;
 
 pub use doc::{Doc, EdgeRef, Feature, FeatureId, Op, Prim, Profile, Round};
-pub use model::{Edge, Face, FaceTag, Model};
+pub use model::{Edge, Face, FaceTag, Model, Quads};

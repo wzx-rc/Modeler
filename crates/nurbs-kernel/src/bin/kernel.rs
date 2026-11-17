@@ -15,7 +15,7 @@ fn main() {
     while let Some(frame) = read_frame(&mut input) {
         let model = match serde_json::from_slice::<Request>(&frame) {
             Ok(req) => {
-                let mut m = build(&req.doc, req.fine, &req.skip, &mut cache);
+                let mut m = build(&req.doc, req.fine, req.quads, &req.skip, &mut cache);
                 m.serial = req.serial;
                 m
             }

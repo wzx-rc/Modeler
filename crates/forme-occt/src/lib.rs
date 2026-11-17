@@ -53,6 +53,9 @@ extern "C" {
     fn focc_buf_len(b: *const FBuf) -> c_int;
     fn focc_buf_data(b: *const FBuf) -> *const u8;
     fn focc_buf_free(b: *mut FBuf);
+    fn focc_quad_topo(s: *const FShape) -> *mut FBuf;
+    fn focc_edge_on_face(s: *const FShape, face: c_int, edge: c_int, reversed: c_int, n: c_int, t: *const c_double, xyz: *mut c_double, uv: *mut c_double) -> c_int;
+    fn focc_face_eval(s: *const FShape, face: c_int, n: c_int, uv: *const c_double, out: *mut c_double) -> c_int;
     fn focc_volume(s: *const FShape) -> c_double;
     fn focc_is_valid(s: *const FShape) -> c_int;
     fn focc_mesh(s: *const FShape, defl: c_double, angle: c_double) -> *mut FMesh;
@@ -230,6 +233,70 @@ impl Reader<'_> {
     }
 }
 
+/// What a quad mesher walks: each face's wires (the outer one first) as
+/// oriented edges, and each edge's range, ends and a sampling.
+#[derive(Clone, Debug, Default)]
+pub struct QuadTopo {
+    pub faces: Vec<QuadFace>,
+    /// `edges[i]` is edge i + 1 of the edge map.
+    pub edges: Vec<QuadEdge>,
+}
+
+#[derive(Clone, Debug)]
+pub struct QuadFace {
+    pub kind: SurfKind,
+    /// Each wire: (edge, reversed) in order around the face.
+    pub wires: Vec<Vec<(i32, bool)>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct QuadEdge {
+    /// Parameter range.
+    pub t: [f64; 2],
+    /// The vertices at t0 and t1 (1-based vertex map, 0 = none).
+    pub v: [i32; 2],
+    /// 0 line, 1 circle, 2 other.
+    pub kind: i32,
+    pub radius: f64,
+    pub degenerated: bool,
+    /// 33 points from t0 to t1, evenly in the parameter.
+    pub pts: Vec<[f64; 3]>,
+}
+
+fn parse_quad_topo(b: &[u8]) -> Option<QuadTopo> {
+    let mut r = Reader { b, at: 0 };
+    let mut t = QuadTopo::default();
+    let nf = r.u32()? as usize;
+    for _ in 0..nf {
+        let kind = SurfKind::from_code(r.i32()?);
+        let nw = r.u32()? as usize;
+        let mut wires = vec![];
+        for _ in 0..nw {
+            let n = r.u32()? as usize;
+            let mut w = vec![];
+            for _ in 0..n {
+                w.push((r.i32()?, r.i32()? != 0));
+            }
+            wires.push(w);
+        }
+        t.faces.push(QuadFace { kind, wires });
+    }
+    let ne = r.u32()? as usize;
+    for _ in 0..ne {
+        let tt = [r.f64()?, r.f64()?];
+        let v = [r.i32()?, r.i32()?];
+        let kind = r.i32()?;
+        let radius = r.f64()?;
+        let degenerated = r.i32()? != 0;
+        let mut pts = Vec::with_capacity(33);
+        for _ in 0..33 {
+            pts.push([r.f64()?, r.f64()?, r.f64()?]);
+        }
+        t.edges.push(QuadEdge { t: tt, v, kind, radius, degenerated, pts });
+    }
+    Some(t)
+}
+
 fn parse_topo(b: &[u8]) -> Option<Topo> {
     let mut r = Reader { b, at: 0 };
     let mut t = Topo::default();
@@ -404,6 +471,45 @@ impl Shape {
 
     /// Meshes the shape (chord `defl` mm, angle `angle` rad) and returns its
     /// faces, triangles and edges.
+    /// The faces' wires and the edges, for the quad mesher.
+    pub fn quad_topo(&self) -> Result<QuadTopo, String> {
+        let b = unsafe { focc_quad_topo(self.0) };
+        if b.is_null() {
+            return Err(last_error());
+        }
+        let out = unsafe {
+            let bytes = std::slice::from_raw_parts(focc_buf_data(b), focc_buf_len(b).max(0) as usize);
+            let t = parse_quad_topo(bytes);
+            focc_buf_free(b);
+            t
+        };
+        out.ok_or_else(|| "quad topology buffer cut short".to_string())
+    }
+
+    /// Points of an edge (1-based) at parameters `t`: 3D, and the surface
+    /// coordinates on face `face` (0-based) where it is used `reversed` or not.
+    pub fn edge_on_face(&self, face: usize, edge: i32, reversed: bool, t: &[f64]) -> Result<(Vec<[f64; 3]>, Vec<[f64; 2]>), String> {
+        let mut xyz = vec![0.0; t.len() * 3];
+        let mut uv = vec![0.0; t.len() * 2];
+        let n = unsafe { focc_edge_on_face(self.0, face as c_int, edge, reversed as c_int, t.len() as c_int, t.as_ptr(), xyz.as_mut_ptr(), uv.as_mut_ptr()) };
+        if n < 0 {
+            return Err(last_error());
+        }
+        Ok((xyz.chunks(3).map(|c| [c[0], c[1], c[2]]).collect(), uv.chunks(2).map(|c| [c[0], c[1]]).collect()))
+    }
+
+    /// Points of face `face` (0-based) at surface coordinates: the point
+    /// and the outward normal.
+    pub fn face_eval(&self, face: usize, uv: &[[f64; 2]]) -> Result<Vec<([f64; 3], [f64; 3])>, String> {
+        let flat: Vec<f64> = uv.iter().flatten().copied().collect();
+        let mut out = vec![0.0; uv.len() * 6];
+        let n = unsafe { focc_face_eval(self.0, face as c_int, uv.len() as c_int, flat.as_ptr(), out.as_mut_ptr()) };
+        if n < 0 {
+            return Err(last_error());
+        }
+        Ok(out.chunks(6).map(|c| ([c[0], c[1], c[2]], [c[3], c[4], c[5]])).collect())
+    }
+
     pub fn topo(&self, defl: f64, angle: f64) -> Result<Topo, String> {
         let b = unsafe { focc_topo(self.0, defl, angle) };
         if b.is_null() {

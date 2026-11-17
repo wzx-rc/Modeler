@@ -48,6 +48,7 @@ pub enum Status {
 struct Job {
     serial: u64,
     fine: bool,
+    quads: bool,
     doc: Doc,
 }
 
@@ -86,10 +87,11 @@ impl Kernel {
         self.exe.as_ref()
     }
 
-    /// Asks for this document (replaces a request not sent yet).
-    pub fn submit(&self, serial: u64, doc: &Doc, fine: bool) {
+    /// Asks for this document (replaces a request not sent yet), and its
+    /// quads with `quads`.
+    pub fn submit(&self, serial: u64, doc: &Doc, fine: bool, quads: bool) {
         let mut g = self.shared.m.lock().unwrap();
-        g.pending = Some(Job { serial, fine, doc: doc.clone() });
+        g.pending = Some(Job { serial, fine, quads, doc: doc.clone() });
         self.shared.cv.notify_all();
     }
 
@@ -219,7 +221,7 @@ fn worker(shared: Arc<Shared>, exe: PathBuf) {
             }
             let p = proc.as_mut().unwrap();
             *p.last_step.lock().unwrap() = None;
-            let req = Request { serial: job.serial, fine: job.fine, skip: skip.clone(), doc: job.doc.clone() };
+            let req = Request { serial: job.serial, fine: job.fine, skip: skip.clone(), quads: job.quads, doc: job.doc.clone() };
             let bytes = serde_json::to_vec(&req).unwrap_or_default();
             let answer = write_frame(&mut p.input, &bytes).ok().and_then(|_| read_frame(&mut p.output)).and_then(|b| Model::decode(&b));
             match answer {

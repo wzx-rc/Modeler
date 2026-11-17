@@ -13,7 +13,7 @@ use nurbs_app::state::{AppState, SelMode, Tool};
 use nurbs_app::theme;
 use nurbs_kernel::client::{kernel_exe, Kernel};
 use nurbs_kernel::doc::PrimKind;
-use nurbs_kernel::{Doc, Op, Prim};
+use nurbs_kernel::{Doc, EdgeRef, FaceTag, Op, Prim};
 use std::time::{Duration, Instant};
 
 const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -494,5 +494,47 @@ fn main() {
         for f in &h.st.doc.features {
             eprintln!("  {} {:?}", f.name, f.round);
         }
+    }
+
+    if want("quads") {
+        let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        // a 20 mm cube, its top front edge filleted at 4 mm
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(c).unwrap().name = "Cube".into();
+        d.add_round(4.0, false, vec![EdgeRef { faces: [tag(c, 2), tag(c, 4)], at: DVec3::new(0.0, 20.0, 10.0) }]);
+        h.reset(d, "Cube one fillet");
+        h.shot("zero-quads-0-off");
+        h.st.quads = true;
+        h.steps(2);
+        h.settle();
+        h.shot("zero-quads-1-one-fillet");
+        std::env::set_var("FORME_DOCS", &out);
+        h.st.export_obj();
+        h.steps(1);
+        h.shot("zero-quads-2-exported");
+
+        // the four upright edges filleted
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(c).unwrap().name = "Cube".into();
+        let ups = [(0u16, 4u16, 10.0, 10.0), (0, 5, 10.0, -10.0), (1, 4, -10.0, 10.0), (1, 5, -10.0, -10.0)];
+        d.add_round(4.0, false, ups.iter().map(|(a, b, x, z)| EdgeRef { faces: [tag(c, *a), tag(c, *b)], at: DVec3::new(*x, 10.0, *z) }).collect());
+        h.reset(d, "Cube four fillets");
+        h.st.quads = true;
+        h.steps(2);
+        h.settle();
+        h.shot("zero-quads-3-four-fillets");
+        h.st.export_obj();
+
+        // the test part with a fillet: the faces with holes stay triangles
+        let mut d = test_part();
+        let block = d.features.iter().find(|f| f.name == "Block").map(|f| f.id).unwrap();
+        d.add_round(3.0, false, vec![EdgeRef { faces: [tag(block, 0), tag(block, 4)], at: DVec3::new(20.0, 10.0, 15.0) }]);
+        h.reset(d, "Test part");
+        h.st.quads = true;
+        h.steps(2);
+        h.settle();
+        h.shot("zero-quads-4-part");
     }
 }

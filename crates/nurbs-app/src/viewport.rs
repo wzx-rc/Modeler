@@ -491,6 +491,11 @@ fn status(p: &Painter, st: &AppState) {
             if rounds > 0 {
                 parts.push(format!("{rounds} fillet{}", if rounds == 1 { "" } else { "s" }));
             }
+            if let Some(q) = st.quad_mesh() {
+                parts.push(format!("{} quads", q.quads.len()));
+            } else if st.quads && !st.building() {
+                parts.push("no quads".into());
+            }
             if let Some(m) = &st.model {
                 parts.push(format!("{:.0} ms", m.ms));
             }
@@ -505,9 +510,20 @@ fn status(p: &Painter, st: &AppState) {
     // what could not be made
     if let Some(m) = &st.model {
         let mut y = r.min.y - 6.0;
-        for e in m.errors.iter().take(4) {
+        let mut lines: Vec<String> = m.errors.clone();
+        // Quads view: the faces left as triangles, and why
+        if let Some(q) = st.quad_mesh() {
+            for (f, why) in &q.skipped {
+                let who = m.faces.get(*f as usize).and_then(|x| x.tag).and_then(|t| st.doc.feature(t.feature)).map(|x| x.name.clone()).unwrap_or_else(|| "part".into());
+                lines.push(format!("{who}: a face left as triangles · {why}"));
+            }
+        }
+        for e in lines.iter().take(4) {
             let rr = chip(p, pos2(at.x, y), Align2::LEFT_BOTTOM, e, carve(), carve_light());
             y = rr.min.y - 4.0;
+        }
+        if lines.len() > 4 {
+            chip(p, pos2(at.x, y), Align2::LEFT_BOTTOM, &format!("and {} more", lines.len() - 4), carve(), carve_light());
         }
     }
 }

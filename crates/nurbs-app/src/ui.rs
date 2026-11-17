@@ -183,6 +183,12 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 if icon_btn(ui, Icon::Frame, false, "Frame the whole part (F with nothing selected)", 28.0).clicked() {
                     st.frame_all();
                 }
+                if icon_btn(ui, Icon::Quads, st.quads, "Quads view: the part as a quad mesh, fillets in orange (first version: faces with holes stay triangles)", 28.0).clicked() {
+                    st.quads = !st.quads;
+                }
+                if st.quads && icon_btn(ui, Icon::Export, false, "Export the quads as .obj (Documents/Forme NURBS)", 28.0).clicked() {
+                    st.export_obj();
+                }
                 if icon_btn(ui, Icon::Light, st.settings.light, "Light theme", 28.0).clicked() {
                     st.settings.light = !st.settings.light;
                     st.save_settings();

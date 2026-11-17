@@ -196,7 +196,7 @@ fn hash2(a: u64, b: u64) -> u64 {
 
 /// Builds the document. Never fails: what cannot be made is listed in
 /// `Model::errors` and left out.
-pub fn build(doc: &Doc, fine: bool, skip: &[String], cache: &mut Cache) -> Model {
+pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Cache) -> Model {
     let t0 = Instant::now();
     let mut model = Model { fine, ..Default::default() };
     let mut stage = Stage { shape: None, errors: vec![] };
@@ -322,6 +322,22 @@ pub fn build(doc: &Doc, fine: bool, skip: &[String], cache: &mut Cache) -> Model
             }
             Err(e) => model.errors.push(format!("meshing failed ({e})")),
         }
+        // the quads: a segment about a fourteenth of the part's size
+        if quads {
+            mark("quads:0:0");
+            let diag = model.bounds().map(|(lo, hi)| ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt() as f64).unwrap_or(20.0);
+            match crate::quads::convert(s, (diag / 14.0).clamp(0.5, 20.0)) {
+                Ok(q) => {
+                    model.quads = Some(crate::model::Quads {
+                        positions: q.positions.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect(),
+                        quads: q.quads,
+                        quad_face: q.quad_face,
+                        skipped: q.skipped.into_iter().map(|(f, s)| (f as u32, s)).collect(),
+                    })
+                }
+                Err(e) => model.errors.push(format!("quads: {e}")),
+            }
+        }
     }
     model.ms = t0.elapsed().as_secs_f32() * 1000.0;
     model
@@ -339,7 +355,7 @@ mod tests {
         let cube = d.add(Op::Add, PrimKind::Box.default_prim(), DVec3::ZERO, DQuat::IDENTITY);
         let hole = d.add(Op::Carve, Prim::Cylinder { radius: 4.0, height: 30.0 }, DVec3::new(0.0, -5.0, 0.0), DQuat::IDENTITY);
         let mut cache = Cache::default();
-        let m = build(&d, true, &[], &mut cache);
+        let m = build(&d, true, false, &[], &mut cache);
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert_eq!(m.booleans, 1);
         // the cube's 6 faces and the hole's side
@@ -356,17 +372,17 @@ mod tests {
         assert_eq!(m.edges.iter().filter(|e| e.seam).count(), 1);
         // moving the hole: the cube comes from the cache
         d.feature_mut(hole).unwrap().origin.x = 2.0;
-        let m2 = build(&d, false, &[], &mut cache);
+        let m2 = build(&d, false, false, &[], &mut cache);
         assert_eq!((m2.cached, m2.booleans), (1, 1));
         // a step to skip: the hole is left out
         let s = step("boolean", d.feature(hole).unwrap());
-        let m3 = build(&d, false, &[s], &mut cache);
+        let m3 = build(&d, false, false, &[s], &mut cache);
         assert_eq!(m3.faces.len(), 6);
         assert_eq!(m3.errors.len(), 1);
         // a carve first: nothing to cut, no error
         let mut d2 = Doc::default();
         d2.add(Op::Carve, PrimKind::Box.default_prim(), DVec3::ZERO, DQuat::IDENTITY);
-        let m4 = build(&d2, true, &[], &mut Cache::default());
+        let m4 = build(&d2, true, false, &[], &mut Cache::default());
         assert!(m4.is_empty() && m4.errors.is_empty());
         // round trip through the wire
         assert_eq!(Model::decode(&m.encode()).unwrap(), m);
@@ -386,7 +402,7 @@ mod tests {
         let pieces = pr.pieces(20.0, 20.0).len();
         d.feature_mut(l).unwrap().profile = Some(pr);
         let mut cache = Cache::default();
-        let m = build(&d, true, &[], &mut cache);
+        let m = build(&d, true, false, &[], &mut cache);
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let (lo, hi) = m.bounds().unwrap();
         assert!((lo[1] - 0.0).abs() < 1e-3 && (hi[1] - 10.0).abs() < 1e-3, "{lo:?} {hi:?}");
@@ -404,7 +420,7 @@ mod tests {
         let front = m.faces.iter().find(|f| f.tag == Some(FaceTag { feature: l, sub: 4 })).unwrap();
         assert!(front.normal[2] < -0.99, "{:?}", front.normal);
         d.add_round(1.0, false, vec![EdgeRef { faces: [tag(l, 1), tag(l, 4)], at: DVec3::new(0.0, 10.0, -10.0) }]);
-        let m2 = build(&d, true, &[], &mut cache);
+        let m2 = build(&d, true, false, &[], &mut cache);
         assert!(m2.errors.is_empty(), "{:?}", m2.errors);
         // a sketch carved into a block, turned upside down (it grows down
         // from the block's top)
@@ -412,12 +428,12 @@ mod tests {
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 40.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let c = d.add(Op::Carve, Prim::Profile { x: 20.0, y: 5.0, z: 20.0 }, DVec3::new(0.0, 20.0, 0.0), DQuat::from_rotation_x(std::f64::consts::PI));
         d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false, false, true] });
-        let m3 = build(&d, true, &[], &mut cache);
+        let m3 = build(&d, true, false, &[], &mut cache);
         assert!(m3.errors.is_empty(), "{:?}", m3.errors);
         assert!(m3.faces.iter().any(|f| f.tag.map(|t| t.feature) == Some(c)), "the pocket's faces carry the sketch's tags");
         // a bow tie crosses itself: an error, the block stays
         d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5]], smooth: vec![false; 4] });
-        let m4 = build(&d, true, &[], &mut cache);
+        let m4 = build(&d, true, false, &[], &mut cache);
         assert_eq!(m4.errors.len(), 1, "{:?}", m4.errors);
     }
 
@@ -433,24 +449,24 @@ mod tests {
         ];
         let r = d.add_round(2.0, false, edges);
         let mut cache = Cache::default();
-        let m = build(&d, true, &[], &mut cache);
+        let m = build(&d, true, false, &[], &mut cache);
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         // two new fillet faces, tagged with the fillet
         assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 2);
         // the boss moves: its foot is found again, from the cache of the cube
         d.feature_mut(boss).unwrap().origin.x = -8.0;
-        let m2 = build(&d, true, &[], &mut cache);
+        let m2 = build(&d, true, false, &[], &mut cache);
         assert!(m2.errors.is_empty(), "{:?}", m2.errors);
         assert_eq!(m2.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 2);
         // a chamfer instead
         d.feature_mut(r).unwrap().round.as_mut().unwrap().chamfer = true;
-        let m3 = build(&d, true, &[], &mut cache);
+        let m3 = build(&d, true, false, &[], &mut cache);
         assert!(m3.errors.is_empty(), "{:?}", m3.errors);
         let cone = m3.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).any(|f| f.kind == SurfKind::Cone);
         assert!(cone, "the boss's foot chamfered is a cone");
         // the boss gone: one edge not found, the other still rounded
         d.feature_mut(boss).unwrap().visible = false;
-        let m4 = build(&d, true, &[], &mut cache);
+        let m4 = build(&d, true, false, &[], &mut cache);
         assert_eq!(m4.errors.len(), 1, "{:?}", m4.errors);
         assert!(m4.errors[0].contains("1 edge not found"));
         assert_eq!(m4.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 1);
@@ -459,7 +475,7 @@ mod tests {
         let rr = d.feature_mut(r).unwrap().round.as_mut().unwrap();
         rr.chamfer = false;
         rr.size = 30.0;
-        let m5 = build(&d, true, &[], &mut cache);
+        let m5 = build(&d, true, false, &[], &mut cache);
         assert_eq!(m5.errors.len(), 1, "{:?}", m5.errors);
         assert!(m5.faces.iter().all(|f| f.tag.map(|t| t.feature) != Some(r)));
         // of the two edges joining the cube's top and a side split by a slot,
@@ -468,7 +484,7 @@ mod tests {
         let c2 = d2.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         d2.add(Op::Carve, Prim::Box { x: 8.0, y: 10.0, z: 40.0 }, DVec3::new(0.0, 12.0, 0.0), DQuat::IDENTITY);
         let r2 = d2.add_round(1.0, false, vec![EdgeRef { faces: [tag(c2, 2), tag(c2, 4)], at: DVec3::new(15.0, 20.0, 15.0) }]);
-        let m6 = build(&d2, true, &[], &mut Cache::default());
+        let m6 = build(&d2, true, false, &[], &mut Cache::default());
         assert!(m6.errors.is_empty(), "{:?}", m6.errors);
         let ff: Vec<&Face> = m6.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r2)).collect();
         assert_eq!(ff.len(), 1);
@@ -484,7 +500,7 @@ mod tests {
         let c = d.add(Op::Add, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-15.0, 20.0, 0.0), DQuat::from_rotation_z(-std::f64::consts::FRAC_PI_2));
         let f = d.feature(c).unwrap();
         assert!((f.axis() - DVec3::X).length() < 1e-9);
-        let m = build(&d, true, &[], &mut Cache::default());
+        let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let (lo, hi) = m.bounds().unwrap();
         assert!((lo[0] + 15.0).abs() < 0.01 && (hi[0] - 15.0).abs() < 0.01, "{lo:?} {hi:?}");

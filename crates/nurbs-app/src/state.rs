@@ -192,6 +192,8 @@ pub struct AppState {
     pub files_open: bool,
     pub save_name: String,
     pub panel_visible: bool,
+    /// Quads view: the part as the kernel's quad mesh (fillets in orange).
+    pub quads: bool,
 }
 
 impl AppState {
@@ -235,6 +237,7 @@ impl AppState {
             files_open: false,
             save_name: name.to_string(),
             panel_visible: true,
+            quads: false,
         }
     }
 
@@ -1162,16 +1165,56 @@ impl AppState {
             }
         }
         let fine = !self.is_live();
-        let want = self.version * 2 + fine as u64;
+        // quads only for a finished state (not while a gesture is live)
+        let quads = self.quads && fine;
+        let want = self.version * 4 + fine as u64 * 2 + quads as u64;
         if want != self.submitted && self.kernel.status() != Status::Missing {
-            self.kernel.submit(want, &self.doc, fine);
+            self.kernel.submit(want, &self.doc, fine, quads);
             self.submitted = want;
         }
     }
 
     /// The model shown is behind the document (the kernel is working).
     pub fn building(&self) -> bool {
-        self.kernel.busy() || self.model.as_ref().map(|m| m.serial / 2 != self.version).unwrap_or(!self.doc.features.is_empty())
+        self.kernel.busy() || self.model.as_ref().map(|m| m.serial / 4 != self.version).unwrap_or(!self.doc.features.is_empty())
+    }
+
+    /// The quad mesh of the part, when the Quads view has it.
+    pub fn quad_mesh(&self) -> Option<&nurbs_kernel::Quads> {
+        self.model.as_ref().and_then(|m| m.quads.as_ref()).filter(|_| self.quads)
+    }
+
+    /// Writes the quads as Wavefront OBJ next to the documents (one group
+    /// per face, named after its shape; faces the converter left out are
+    /// not in it).
+    pub fn export_obj(&mut self) {
+        let Some(m) = self.model.clone() else { return };
+        let Some(q) = m.quads.as_ref() else {
+            self.toast("No quads yet: turn on the Quads view", true);
+            return;
+        };
+        let mut s = String::from("# Forme NURBS: quads from the B-rep\n");
+        for p in &q.positions {
+            s.push_str(&format!("v {:.5} {:.5} {:.5}\n", p[0], p[1], p[2]));
+        }
+        let mut last = u32::MAX;
+        for (k, f) in q.quads.iter().zip(&q.quad_face) {
+            if *f != last {
+                last = *f;
+                let tag = m.faces.get(*f as usize).and_then(|x| x.tag);
+                let who = tag.and_then(|t| self.doc.feature(t.feature)).map(|x| crate::files::sanitize(&x.name).replace(' ', "_")).unwrap_or_else(|| "part".into());
+                s.push_str(&format!("g {who}_face{f}\n"));
+            }
+            s.push_str(&format!("f {} {} {} {}\n", k[0] + 1, k[1] + 1, k[2] + 1, k[3] + 1));
+        }
+        let path = crate::files::documents_dir().join(format!("{}.obj", crate::files::sanitize(&self.doc_name)));
+        match std::fs::write(&path, s) {
+            Ok(()) => {
+                let text = format!("Saved {} quads to {}", q.quads.len(), path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                self.toast(&text, false);
+            }
+            Err(e) => self.toast(&format!("Export failed: {e}"), true),
+        }
     }
 
     pub fn toast(&mut self, text: &str, warn: bool) {

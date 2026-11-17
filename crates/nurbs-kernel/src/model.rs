@@ -103,6 +103,19 @@ pub struct Model {
     pub cached: u32,
     /// Kernel time (ms).
     pub ms: f32,
+    /// The part as quads (when the request asked for them).
+    pub quads: Option<Quads>,
+}
+
+/// The part as quads (`quads.rs`): positions shared by the faces along
+/// their edges, each quad's face (index in `faces`), the faces left out.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Quads {
+    pub positions: Vec<[f32; 3]>,
+    pub quads: Vec<[u32; 4]>,
+    pub quad_face: Vec<u32>,
+    /// Faces not converted: (face index, why).
+    pub skipped: Vec<(u32, String)>,
 }
 
 impl Model {
@@ -174,6 +187,27 @@ impl Model {
         w.u32(self.booleans);
         w.u32(self.cached);
         w.f32(self.ms);
+        match &self.quads {
+            None => w.u8(0),
+            Some(q) => {
+                w.u8(1);
+                w.u32(q.positions.len() as u32);
+                for p in &q.positions {
+                    p.iter().for_each(|v| w.f32(*v));
+                }
+                w.u32(q.quads.len() as u32);
+                for (c, f) in q.quads.iter().zip(&q.quad_face) {
+                    c.iter().for_each(|v| w.u32(*v));
+                    w.u32(*f);
+                }
+                w.u32(q.skipped.len() as u32);
+                for (f, s) in &q.skipped {
+                    w.u32(*f);
+                    w.u32(s.len() as u32);
+                    w.0.extend_from_slice(s.as_bytes());
+                }
+            }
+        }
         w.0
     }
 
@@ -228,6 +262,25 @@ impl Model {
         m.booleans = r.u32()?;
         m.cached = r.u32()?;
         m.ms = r.f32()?;
+        if r.u8()? == 1 {
+            let mut q = Quads::default();
+            let n = r.u32()? as usize;
+            q.positions = (0..n).map(|_| r.v3()).collect::<Option<_>>()?;
+            let n = r.u32()? as usize;
+            for _ in 0..n {
+                q.quads.push([r.u32()?, r.u32()?, r.u32()?, r.u32()?]);
+                q.quad_face.push(r.u32()?);
+            }
+            let n = r.u32()? as usize;
+            for _ in 0..n {
+                let f = r.u32()?;
+                let len = r.u32()? as usize;
+                let s = r.b.get(r.at..r.at + len)?;
+                r.at += len;
+                q.skipped.push((f, String::from_utf8_lossy(s).into_owned()));
+            }
+            m.quads = Some(q);
+        }
         Some(m)
     }
 }
@@ -314,8 +367,11 @@ mod tests {
             booleans: 2,
             cached: 1,
             ms: 3.5,
+            quads: None,
         };
         assert_eq!(Model::decode(&m.encode()).unwrap(), m);
+        let q = Model { quads: Some(Quads { positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], quads: vec![[0, 1, 2, 3]], quad_face: vec![0], skipped: vec![(2, "a face with a hole".into())] }), ..m.clone() };
+        assert_eq!(Model::decode(&q.encode()).unwrap(), q);
         assert_eq!(FaceTag::unpack(FaceTag { feature: 70000, sub: 5 }.pack()), Some(FaceTag { feature: 70000, sub: 5 }));
         assert_eq!(FaceTag::unpack(-1), None);
     }

@@ -43,6 +43,8 @@ pub enum Icon {
     Scale,
     /// Sketch (Forme NURBS): an outline of corners and a curve, its points.
     Sketch,
+    /// Quads view: a patch of quads bending round a corner.
+    Quads,
 }
 
 struct Pen<'a> {
@@ -181,6 +183,17 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             for (x, y) in [(3.0, 16.0), (3.0, 6.0), (9.0, 6.0)] {
                 pen.closed(&[(x - 1.3, y - 1.3), (x + 1.3, y - 1.3), (x + 1.3, y + 1.3), (x - 1.3, y + 1.3)]);
             }
+        }
+        Icon::Quads => {
+            // a flat run that bends down: three rows of quads
+            pen.line(&[(3.0, 4.0), (11.0, 4.0), (15.0, 6.0), (17.0, 10.0), (17.0, 17.0)]);
+            pen.line(&[(3.0, 10.0), (9.0, 10.0), (11.0, 11.0), (12.0, 13.0), (12.0, 17.0)]);
+            pen.line(&[(3.0, 4.0), (3.0, 10.0)]);
+            pen.line(&[(7.0, 4.0), (7.0, 10.0)]);
+            pen.line(&[(11.0, 4.0), (9.0, 10.0)]);
+            pen.line(&[(15.0, 6.0), (11.0, 11.0)]);
+            pen.line(&[(17.0, 10.0), (12.0, 13.0)]);
+            pen.line(&[(17.0, 17.0), (12.0, 17.0)]);
         }
         Icon::Grid => {
             pen.closed(&[(3.0, 3.0), (17.0, 3.0), (17.0, 17.0), (3.0, 17.0)]);

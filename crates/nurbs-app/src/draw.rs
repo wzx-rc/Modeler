@@ -10,10 +10,14 @@ use nurbs_kernel::Op;
 
 /// The part's colour: grey clay (sRGB).
 pub const CLAY: [f32; 3] = [0.50, 0.50, 0.49];
+/// Quads view: the fillet and chamfer bands (sRGB).
+pub const BAND: [f32; 3] = [0.92, 0.47, 0.15];
 
 pub struct Drawer {
     pub r: Renderer,
     model_gen: u64,
+    /// The part was uploaded as quads.
+    quads_shown: bool,
     flags: Vec<FaceGpu>,
     overlay: Vec<LineVertex>,
 }
@@ -24,22 +28,47 @@ fn rgb(c: egui::Color32) -> [f32; 3] {
 
 impl Drawer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Drawer {
-        Drawer { r: Renderer::new(device, format), model_gen: u64::MAX, flags: vec![], overlay: vec![] }
+        Drawer { r: Renderer::new(device, format), model_gen: u64::MAX, quads_shown: false, flags: vec![], overlay: vec![] }
     }
 
     fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, st: &AppState) {
         // the part
-        if self.model_gen != st.model_gen {
+        let quads = st.quad_mesh();
+        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() {
             self.model_gen = st.model_gen;
+            self.quads_shown = quads.is_some();
             let mut verts = vec![];
             let mut edges = vec![];
             if let Some(m) = &st.model {
+                // the faces the quads leave out are drawn from the triangles
+                let left: std::collections::HashSet<u32> = match quads {
+                    Some(q) => q.skipped.iter().map(|(f, _)| *f).collect(),
+                    None => (0..m.faces.len() as u32).collect(),
+                };
                 verts.reserve(m.triangles.len() * 3);
                 for (t, tri) in m.triangles.iter().enumerate() {
                     let face = m.tri_face[t];
+                    if !left.contains(&face) {
+                        continue;
+                    }
                     for &v in tri {
                         verts.push(MeshVertex { pos: m.positions[v as usize], nrm: m.normals[v as usize], face });
                     }
+                }
+                if let Some(q) = quads {
+                    quad_vertices(q, &mut verts);
+                    // the quads' wire, light over the matter
+                    let mut seen = std::collections::HashSet::new();
+                    let mut wire = vec![];
+                    for k in &q.quads {
+                        for i in 0..4 {
+                            let (a, b) = (k[i], k[(i + 1) % 4]);
+                            if seen.insert((a.min(b), a.max(b))) {
+                                wire.push(vec![q.positions[a as usize], q.positions[b as usize]]);
+                            }
+                        }
+                    }
+                    line_vertices(&wire, [16, 18, 22, 150], 0.8, &mut edges);
                 }
                 // the edges a person draws: dark and thin like a CAD view
                 let lines: Vec<Vec<[f32; 3]>> = m.edges.iter().filter(|e| !e.seam).map(|e| e.pts.clone()).collect();
@@ -60,6 +89,11 @@ impl Drawer {
                         _ => 0,
                     };
                     let mat = materials::get(f.tag.map(|t| st.material_of(t.feature)).unwrap_or(0));
+                    // Quads view: the fillet and chamfer bands in orange
+                    let band = self.quads_shown && f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| x.round.is_some()).unwrap_or(false);
+                    if band {
+                        return FaceGpu { color: linear(BAND), flags, metal: 0.0, rough: 0.6, pad: [0.0; 2] };
+                    }
                     FaceGpu { color: linear(mat.color), flags, metal: mat.metal, rough: mat.rough, pad: [0.0; 2] }
                 })
                 .collect(),
@@ -123,5 +157,26 @@ impl Drawer {
             textures,
         };
         self.r.render(device, queue, target, size, frame);
+    }
+}
+
+/// The quads as triangles, each corner with the normal of the quads around
+/// it on the same face (smooth inside a face, sharp between faces).
+fn quad_vertices(q: &nurbs_kernel::Quads, out: &mut Vec<MeshVertex>) {
+    let p = |i: u32| glam::Vec3::from(q.positions[i as usize]);
+    let mut sums: std::collections::HashMap<(u32, u32), glam::Vec3> = std::collections::HashMap::new();
+    for (k, f) in q.quads.iter().zip(&q.quad_face) {
+        let n = (p(k[2]) - p(k[0])).cross(p(k[3]) - p(k[1]));
+        for v in k {
+            *sums.entry((*f, *v)).or_default() += n;
+        }
+    }
+    out.reserve(q.quads.len() * 6);
+    for (k, f) in q.quads.iter().zip(&q.quad_face) {
+        for i in [0, 1, 2, 0, 2, 3] {
+            let v = k[i];
+            let n = sums[&(*f, v)].normalize_or_zero();
+            out.push(MeshVertex { pos: q.positions[v as usize], nrm: n.to_array(), face: *f });
+        }
     }
 }
