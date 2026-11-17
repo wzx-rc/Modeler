@@ -15,6 +15,7 @@ pub mod client;
 pub mod doc;
 pub mod model;
 pub mod proto;
+pub mod remesh;
 
 #[cfg(feature = "occ")]
 pub mod build;
