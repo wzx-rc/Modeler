@@ -41,13 +41,15 @@ The NURBS kernel is **OpenCascade**, chosen by Romain over truck (whose booleans
 
 Mapping: Add = union, Carve = cut, the node's Blend (Raccord) = fillet of the boolean's new edges (Chamfer kind = chamfer), local junction fillets = fillet of the new edges along the zone, Round / Chamfer / per-edge fillets of a box or cylinder = fillets of the primitive's own edges, repetitions and mirrors = copies.
 
+NURBS-only tools (gated by `nurbs()`, ported by removing the gate): **quick creation** (`AppState::arm_tool` / `quick_add`: the armed tool again, or Shift + C/S/A/T, places a 20 mm primitive at the world origin, stacks it on the selected shape's top along its axis, or drills through it in Carve), the **world origin** on the grid (`Settings.origin`, red X / blue Z axes and a ring in `sdf.wgsl`), and Modo-like **workplanes** (`state::Workplane`, `workplane_candidates()`: Ground, the vertical plane facing the camera, the top of the selection; drawn in `sdf.wgsl` with depth from `Globals.planes`, yellow, hovered = brighter; `begin_placement` starts on the plane under the pointer unless a face of the part is nearer; P or the Workplane button toggles them).
+
 ```bash
 cargo build --release -p nurbs-occ                       # the kernel process; builds OpenCascade 7.8 from source the first time (6 to 20 min, needs cmake + a C++ compiler)
 FORME_OCCT_ROOT=/path/occt cargo build --release -p nurbs-occ --no-default-features   # same, against an installed OCCT 7.8 (lib/ include/)
 FORME_OCCT_ROOT=/path/occt cargo test --release -p forme-occt --no-default-features   # the C layer: cube − hole, fillet of the rims, volume
 cargo run --release -p forme-app --bin forme-nurbs       # Forme NURBS (uses target/release/forme-occ when it is there)
 OUT=/tmp/x cargo run --release -p nurbs-core --example occ_test     # the kernel on small parts (cube + hole + fillets…), OBJ per case
-cargo run --release -p forme-app --bin forme-shot -- /tmp/x nurbs   # NURBS captures (fillet test part, bearing, primitives)
+cargo run --release -p forme-app --bin forme-shot -- /tmp/x nurbs nurbs-stack nurbs-planes   # NURBS captures (fillet test part, bearing, primitives; quick creation and stacking; workplanes)
 ```
 
 The window title shows the version, branch, commit and commit date (`crates/forme-app/build.rs`, `forme_app::version_title()`), also at the bottom of Réglages: check it before saying which version Romain is running.

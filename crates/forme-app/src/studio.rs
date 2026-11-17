@@ -1134,6 +1134,9 @@ fn view_chips(ctx: &egui::Context, st: &mut AppState, view: Rect) {
                 st.grid = !st.grid;
                 st.view_changed();
             }
+            if crate::nurbs() && ui::chip(ui, Some(Icon::Workplane), tr("Plans"), st.workplanes, tr("Plans de travail proposés en jaune pendant la création (P)")).clicked() {
+                st.toggle_workplanes();
+            }
         });
     });
 }

@@ -16,6 +16,7 @@ struct Globals {
     mats2: array<vec4<f32>, 16>, // roughness, -, -, -
     light: vec4<f32>,     // xyz towards the key light (unit), w intensity
     extra: vec4<f32>,     // xy sub-pixel jitter (anti-aliasing), z exposure, w light theme
+    planes: array<vec4<f32>, 12>, // 3 workplanes: origin + half, normal + state, u, v
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -776,6 +777,57 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             }
             col = mix(col, g.ghost_color.rgb * (0.6 + 0.6 * edge), alpha);
         }
+    }
+
+    // --- workplanes (Forme NURBS): yellow squares with their 10 mm grid,
+    // hidden by the matter in front of them ---
+    for (var i = 0; i < 3; i = i + 1) {
+        let o = g.planes[i * 4];
+        let nn = g.planes[i * 4 + 1];
+        if (nn.w < 0.5 || o.w <= 0.0) {
+            continue;
+        }
+        let den = dot(rd, nn.xyz);
+        if (abs(den) < 1e-4) {
+            continue;
+        }
+        let t = dot(o.xyz - ro, nn.xyz) / den;
+        // a little tolerance: a plane on a face of the part shows on it
+        if (t <= 0.0 || (hit && t > t_hit + 0.05 + t * px)) {
+            continue;
+        }
+        let q = ro + rd * t - o.xyz;
+        let a = dot(q, g.planes[i * 4 + 2].xyz);
+        let b = dot(q, g.planes[i * 4 + 3].xyz);
+        let h = o.w;
+        let m = max(abs(a), abs(b));
+        if (m > h) {
+            continue;
+        }
+        let foot = t * px * 1.2;
+        let c = abs(fract(vec2<f32>(a, b) / 10.0 + 0.5) - 0.5) * 10.0;
+        let line = 1.0 - smoothstep(0.0, foot + 0.04, min(c.x, c.y));
+        let hot = nn.w > 1.5 && nn.w < 2.5;
+        var fill = 0.03;
+        var lw = 0.08;
+        var bw = foot * 1.5 + 0.05;
+        var ba = 0.45;
+        if (hot) {
+            fill = 0.08;
+            lw = 0.22;
+            bw = foot * 3.0 + 0.08;
+            ba = 1.0;
+        }
+        if (nn.w > 2.5) {
+            fill = 0.03;
+            lw = 0.2;
+        }
+        let border = 1.0 - smoothstep(0.0, bw, h - m);
+        var yellow = vec3<f32>(0.46, 0.37, 0.09);
+        if (g.extra.w > 0.5) {
+            yellow = vec3<f32>(0.40, 0.29, 0.0);
+        }
+        col = mix(col, yellow, clamp(fill + line * lw + border * ba, 0.0, 1.0));
     }
 
     return vec4<f32>(aces(col * 1.9 * g.extra.z), 1.0);

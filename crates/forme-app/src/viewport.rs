@@ -114,11 +114,17 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     egui::Area::new(Id::new("viewport")).order(Order::Background).fixed_pos(screen.min).show(ctx, |ui| {
         let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
         handle_input(ctx, st, &resp, rect);
+        if crate::nurbs() {
+            st.update_workplane_hover();
+        }
         st.update_edge_hover();
         st.refresh_edge();
         st.update_edge_vis();
         draw_construction_lines(ui.painter(), st);
         draw_edges(ui.painter(), st);
+        if crate::nurbs() {
+            draw_workplanes(ui.painter(), st);
+        }
         draw_overlay(ui.painter(), st);
         draw_marquee(ui.painter(), st);
         if crate::nurbs() {
@@ -128,6 +134,26 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     crate::marking::draw(ctx, st);
     if st.cam_anim.is_some() || (crate::nurbs() && st.nurbs.building()) {
         ctx.request_repaint();
+    }
+}
+
+/// Forme NURBS: the names of the proposed workplanes (the renderer draws
+/// the planes, with depth), the one under the pointer highlighted.
+fn draw_workplanes(p: &Painter, st: &AppState) {
+    if st.placement.is_some() || !matches!(st.tool, Tool::Place(_)) {
+        return;
+    }
+    let view = st.view();
+    let proj = |q: glam::Vec3| view.project(q).map(|s| pos2(s[0], s[1]));
+    for (i, w) in st.workplane_candidates().iter().enumerate() {
+        let hot = Some(i) == st.workplane_hover;
+        let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(|(a, b): (f32, f32)| w.origin + w.u * (a * w.half) + w.v * (b * w.half));
+        let Some(pts) = corners.iter().map(|c| proj(*c)).collect::<Option<Vec<Pos2>>>() else { continue };
+        // under its lowest corner on screen, kept inside the view
+        let at = pts.iter().copied().max_by(|a, b| a.y.total_cmp(&b.y)).unwrap();
+        let vr = st.view_rect;
+        let at = pos2(at.x.clamp(vr[0] + 60.0, vr[2] - 60.0), (at.y + 6.0).clamp(vr[1] + 40.0, vr[3] - 130.0));
+        chip(p, at, Align2::CENTER_TOP, &w.label, tint(HOT, if hot { 0.9 } else { 0.35 }), if hot { HOT } else { TEXT2() });
     }
 }
 

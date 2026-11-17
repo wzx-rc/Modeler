@@ -592,6 +592,10 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.set_pick_mode(PickMode::Object);
         st.gizmo = GizmoMode::Scale;
     }
+    // Forme NURBS: P shows / hides the proposed workplanes
+    if crate::nurbs() && ctx.input(|i| !i.modifiers.command && !i.modifiers.alt && i.key_pressed(egui::Key::P)) {
+        st.toggle_workplanes();
+    }
     // Forme NURBS: Shift + the key (or the key again) drops the shape at
     // once, at the origin or on the selected shape (state::quick_add)
     let shift = ctx.input(|i| i.modifiers.shift);
@@ -772,6 +776,9 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 if icon_btn(ui, Icon::Grid, st.grid, tr("Grille au sol"), 28.0).clicked() {
                     st.grid = !st.grid;
                     st.view_changed();
+                }
+                if crate::nurbs() && icon_btn(ui, Icon::Workplane, st.workplanes, tr("Plans de travail proposés en jaune pendant la création (P)"), 28.0).clicked() {
+                    st.toggle_workplanes();
                 }
             });
         });

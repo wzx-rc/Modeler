@@ -124,6 +124,8 @@ struct StateKey {
     bake: (bool, u64, bool),
     /// Display settings (light panel): shadows, AO, light, exposure.
     display: [u32; 6],
+    /// Workplanes shown (Forme NURBS), hashed.
+    planes: u64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -364,7 +366,9 @@ impl FrameRenderer {
         // 2. scene image (only when something changed)
         let now = std::time::Instant::now();
         let cam = st.camera;
+        let planes = st.workplane_uniforms().iter().flatten().fold(0xcbf29ce484222325u64, |h, v| (h ^ v.to_bits() as u64).wrapping_mul(0x100000001b3));
         let state = StateKey {
+            planes,
             scene: st.scene_version,
             view: st.view_version,
             sel: st.selection,
@@ -588,6 +592,7 @@ impl FrameRenderer {
         s.sel_color = crate::theme::sel_rgb();
         s.light_bg = st.settings.light;
         s.origin = crate::nurbs();
+        s.planes = st.workplane_uniforms();
         s
     }
 

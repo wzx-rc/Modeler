@@ -71,6 +71,47 @@ pub enum PlacePhase {
     Height,
 }
 
+/// Forme NURBS workplane (Modo-like, Romain 17 nov.): a bounded plane that
+/// new shapes are drawn on. While a creation tool is armed, 2 or 3 of them
+/// are proposed in yellow (ground, the vertical plane facing the camera, the
+/// top of the selected shape); pressing on one draws there.
+#[derive(Clone, Debug)]
+pub struct Workplane {
+    pub origin: Vec3,
+    pub normal: Vec3,
+    /// In-plane axes (u × normal = v).
+    pub u: Vec3,
+    pub v: Vec3,
+    /// Half size of the square shown.
+    pub half: f32,
+    pub label: String,
+}
+
+impl Workplane {
+    fn new(origin: Vec3, normal: Vec3, u: Vec3, half: f32, label: String) -> Self {
+        let normal = normal.normalize_or(Vec3::Y);
+        let u = (u - normal * u.dot(normal)).normalize_or(normal.any_orthonormal_vector());
+        Workplane { origin, normal, u, v: u.cross(normal), half, label }
+    }
+
+    /// Where a ray meets the square (distance along the ray, point).
+    pub fn hit(&self, ro: Vec3, rd: Vec3) -> Option<(f32, Vec3)> {
+        let den = rd.dot(self.normal);
+        if den.abs() < 1e-4 {
+            return None;
+        }
+        let t = (self.origin - ro).dot(self.normal) / den;
+        let p = ro + rd * t;
+        let d = p - self.origin;
+        (t > 0.0 && d.dot(self.u).abs() <= self.half && d.dot(self.v).abs() <= self.half).then_some((t, p))
+    }
+
+    /// Orientation of a shape drawn on it (its Y along the normal).
+    pub fn rot(&self) -> Quat {
+        Quat::from_mat3(&glam::Mat3::from_cols(self.u, self.normal, self.v)).normalize()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Placement {
     pub node: NodeId,
@@ -492,6 +533,12 @@ pub struct AppState {
     pub bake: BakeState,
     /// Forme NURBS: the scene built as B-rep solids in the background.
     pub nurbs: NurbsState,
+    /// Forme NURBS: workplanes proposed while a creation tool is armed.
+    pub workplanes: bool,
+    /// The proposed plane under the pointer (index in `workplane_candidates`).
+    pub workplane_hover: Option<usize>,
+    /// The plane the shape being created is drawn on.
+    pub workplane_active: Option<Workplane>,
     pub files_open: bool,
     pub material: u32,
     pub now: f64,
@@ -676,6 +723,9 @@ impl AppState {
             export_glb: true,
             export_job: None,
             nurbs: NurbsState::default(),
+            workplanes: true,
+            workplane_hover: None,
+            workplane_active: None,
             bake: BakeState {
                 open: false,
                 quality: forme_core::bake::Quality::Standard,
@@ -1375,6 +1425,21 @@ impl AppState {
         self.snap_ctx = None;
         let (ro, rd) = self.ray(pos);
         let mut snapped = None;
+        // Forme NURBS: on the proposed workplane under the pointer
+        self.workplane_active = None;
+        if let Some((i, p)) = self.workplane_at(pos) {
+            let w = self.workplane_candidates().swap_remove(i);
+            let mut base = p;
+            if self.snap {
+                // on the plane's 1 mm grid
+                let d = p - w.origin;
+                base = w.origin + w.u * d.dot(w.u).round() + w.v * d.dot(w.v).round();
+            }
+            let rot = w.rot();
+            self.workplane_active = Some(w.clone());
+            self.start_placement(kind, ro, base, w.normal, rot, false, Some("plan de travail"));
+            return;
+        }
         // like 3ds Max AutoGrid: the base snaps onto the face under the
         // pointer (its plane), else it is drawn on the ground plane
         let surface = if self.settings.snap_faces { self.hit(pos) } else { None };
@@ -1435,6 +1500,12 @@ impl AppState {
             }
         }
         let rot = Quat::from_rotation_arc(Vec3::Y, normal.normalize());
+        self.start_placement(kind, ro, base, normal, rot, on_surface, snapped);
+    }
+
+    /// Creates the node of a new shape and starts its placement (base on
+    /// the plane through `base` with `normal`).
+    fn start_placement(&mut self, kind: PrimKind, ro: Vec3, base: Vec3, normal: Vec3, rot: Quat, on_surface: bool, snapped: Option<&'static str>) {
         let base_mode = self.effective_mode();
         let mode = self.resolve_place_mode(base_mode, 1.0);
         let parent = self.insertion_parent();
@@ -1901,6 +1972,107 @@ impl AppState {
         self.apply_placement();
         self.commit_placement();
         self.view_changed();
+    }
+
+    /// Forme NURBS: the workplanes proposed now (Romain, 17 nov., like Modo):
+    /// the ground (unless seen edge-on), the vertical plane that faces the
+    /// camera most, standing on the ground, and the top face plane of the
+    /// selected shape. Sized and centred on the scene, on the 10 mm grid.
+    pub fn workplane_candidates(&self) -> Vec<Workplane> {
+        if !crate::nurbs() || !self.workplanes {
+            return vec![];
+        }
+        // through the world origin (everything stays aligned on it), big
+        // enough to hold the scene, on the 10 mm grid
+        let empty = self.scene.shape_count() == 0;
+        let (lo, hi) = if empty { (Vec3::ZERO, Vec3::ZERO) } else { self.scene.bounds() };
+        let reach = lo.abs().max(hi.abs());
+        let half = ((reach.x.max(reach.z).max(reach.y * 0.5) * 1.25 + 10.0) / 10.0).ceil().max(4.0) * 10.0;
+        let view = self.view();
+        let fwd = (view.target - view.eye).normalize_or(Vec3::NEG_Z);
+        let mut out = vec![];
+        if fwd.y.abs() > 0.15 {
+            out.push(Workplane::new(Vec3::ZERO, Vec3::Y, Vec3::X, half, tr("Sol").to_string()));
+        }
+        // the vertical plane that faces the camera most, standing on the ground
+        let (axis, u, label) = if fwd.x.abs() > fwd.z.abs() { (Vec3::X, Vec3::Z, tr("Côté · YZ")) } else { (Vec3::Z, Vec3::X, tr("Face · XY")) };
+        let n = axis * -fwd.dot(axis).signum();
+        out.push(Workplane::new(Vec3::new(0.0, half, 0.0), n, u, half, label.to_string()));
+        if let Some(n) = self.selection.and_then(|id| self.scene.node(id)) {
+            if let Some(sh) = n.shape() {
+                let (sc, wr, wt) = self.scene.world_matrix(n.id).to_scale_rotation_translation();
+                let z = sh.size * sc.x.abs();
+                let top = match sh.kind {
+                    PrimKind::Sphere => z.x,
+                    PrimKind::Capsule => z.y + z.x,
+                    PrimKind::Torus => z.z,
+                    _ => z.y,
+                };
+                let foot = match sh.kind {
+                    PrimKind::Box => z.x.max(z.z),
+                    PrimKind::Torus => z.x + z.z,
+                    _ => z.x,
+                };
+                let axis = (wr * Vec3::Y).normalize_or(Vec3::Y);
+                let label = trd(format!("Dessus de {}", n.name));
+                out.push(Workplane::new(wt + axis * top, axis, wr * Vec3::X, (foot * 2.0).max(15.0), label));
+            }
+        }
+        out
+    }
+
+    /// The proposed workplane under a screen point, unless a face of the
+    /// part is in front of it (drawing on a face stays AutoGrid's).
+    pub fn workplane_at(&mut self, pos: [f32; 2]) -> Option<(usize, Vec3)> {
+        let planes = self.workplane_candidates();
+        if planes.is_empty() {
+            return None;
+        }
+        let (ro, rd) = self.ray(pos);
+        let best = planes.iter().enumerate().filter_map(|(i, w)| w.hit(ro, rd).map(|(t, p)| (i, t, p))).min_by(|a, b| a.1.total_cmp(&b.1))?;
+        if let Some((p, _)) = self.hit(pos) {
+            if (p - ro).length() < best.1 - 0.05 {
+                return None;
+            }
+        }
+        Some((best.0, best.2))
+    }
+
+    /// The workplanes as the renderer draws them (`forme_render::Globals::planes`):
+    /// the proposed ones while a creation tool waits, the one in use while
+    /// a shape is drawn on it.
+    pub fn workplane_uniforms(&self) -> [[f32; 4]; 12] {
+        let mut out = [[0.0; 4]; 12];
+        let shown: Vec<(Workplane, f32)> = if self.placement.is_some() {
+            self.workplane_active.iter().map(|w| (w.clone(), 3.0)).collect()
+        } else if matches!(self.tool, Tool::Place(_)) {
+            self.workplane_candidates().into_iter().enumerate().map(|(i, w)| (w, if Some(i) == self.workplane_hover { 2.0 } else { 1.0 })).collect()
+        } else {
+            vec![]
+        };
+        for (i, (w, state)) in shown.iter().take(3).enumerate() {
+            out[i * 4] = [w.origin.x, w.origin.y, w.origin.z, w.half];
+            out[i * 4 + 1] = [w.normal.x, w.normal.y, w.normal.z, *state];
+            out[i * 4 + 2] = [w.u.x, w.u.y, w.u.z, 0.0];
+            out[i * 4 + 3] = [w.v.x, w.v.y, w.v.z, 0.0];
+        }
+        out
+    }
+
+    pub fn toggle_workplanes(&mut self) {
+        self.workplanes = !self.workplanes;
+        self.toast(if self.workplanes { tr("Plans de travail : proposés en jaune pendant la création") } else { tr("Plans de travail masqués : dessin sur les faces et au sol") });
+    }
+
+    /// Hover of the proposed workplanes while a creation tool waits.
+    pub fn update_workplane_hover(&mut self) {
+        self.workplane_hover = match (self.tool, &self.placement, self.hover) {
+            (Tool::Place(_), None, Some(pos)) if crate::nurbs() && self.workplanes => self.workplane_at(pos).map(|(i, _)| i),
+            _ => None,
+        };
+        if self.placement.is_none() {
+            self.workplane_active = None;
+        }
     }
 
     /// Pencil hover / mouse after the base: the height follows the pointer.

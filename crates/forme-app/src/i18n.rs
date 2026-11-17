@@ -56,6 +56,14 @@ pub fn trd(s: String) -> String {
 
 /// Fixed texts.
 const PLAIN: &[(&str, &str)] = &[
+    ("Sol", "Ground"),
+    ("Côté · YZ", "Side · YZ"),
+    ("Face · XY", "Front · XY"),
+    ("plan de travail", "workplane"),
+    ("Plans", "Planes"),
+    ("Plans de travail proposés en jaune pendant la création (P)", "Workplanes shown in yellow while creating (P)"),
+    ("Plans de travail : proposés en jaune pendant la création", "Workplanes: shown in yellow while creating"),
+    ("Plans de travail masqués : dessin sur les faces et au sol", "Workplanes hidden: drawing on faces and on the ground"),
     ("l'outil encore", "the tool again"),
     ("à l'origine", "at the origin"),
     (" (valeurs différentes)", " (different values)"),
@@ -511,6 +519,7 @@ const FRAG: &[(&str, &str)] = &[
     (" ou l'outil encore", " or the tool again"),
     ("perce à travers ", "drill through "),
     ("empile sur ", "stack on "),
+    ("Dessus de ", "Top of "),
     (" — monte (+) ou descends (−), Ctrl inverse, ", " — go up (+) or down (−), Ctrl flips, "),
     (" pour valider", " to confirm"),
     (" — relâche pour valider", " — release to confirm"),

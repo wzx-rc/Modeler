@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("nurbs") || want("bake-diag") || want("nurbs-stack") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("nurbs") || want("bake-diag") || want("nurbs-stack") || want("nurbs-planes") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -988,6 +988,52 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
             _ => eprintln!("nurbs-stack : pas de modèle"),
         }
         h.shot("nurbs-stack-2-stacked");
+        forme_app::set_nurbs(false);
+    }
+    if want("nurbs-planes") {
+        // Modo-like workplanes (Romain, 17 nov.): with a creation tool armed,
+        // the ground, the vertical plane facing the camera and the top of the
+        // selection are proposed in yellow; the one under the pointer lights
+        // up, pressing on it draws there
+        forme_app::set_nurbs(true);
+        h.pc(AppState::new(forme_core::Scene::new(), "NURBS part"), UiMode::Atelier);
+        h.st.settings.light = false;
+        h.st.settings.ambiance = forme_app::settings::AmbianceChoice::Blanc;
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.steps(2);
+        h.st.quick_add(PrimKind::Box);
+        h.st.quick_add(PrimKind::Cylinder);
+        h.st.arm_tool(PrimKind::Cylinder);
+        h.cam(Vec3::new(0.0, 22.0, 0.0), 190.0, 0.75, 0.38);
+        h.steps(4);
+        let planes = h.st.workplane_candidates();
+        eprintln!("nurbs-planes : {:?}", planes.iter().map(|w| w.label.clone()).collect::<Vec<_>>());
+        // a point of the vertical plane, beside the part
+        let wall = planes.iter().find(|w| w.normal.y.abs() < 0.5).expect("vertical plane").clone();
+        let a = h.screen_of(wall.origin + wall.u * (wall.half * 0.55) + wall.v * (wall.half * 0.1));
+        h.move_to(a);
+        h.steps(4);
+        eprintln!("nurbs-planes : survolé {:?}", h.st.workplane_hover.and_then(|i| planes.get(i)).map(|w| w.label.clone()));
+        h.shot("nurbs-planes-1-hover");
+        // the base drawn on it, then the height
+        let b = h.screen_of(wall.origin + wall.u * (wall.half * 0.55 + 9.0) + wall.v * (wall.half * 0.1));
+        h.drag(a, b, 8, true);
+        // the height: along the plane's normal on screen (towards the camera)
+        let p0 = wall.origin + wall.u * (wall.half * 0.55) + wall.v * (wall.half * 0.1);
+        let dir = (h.screen_of(p0 + wall.normal * 10.0) - h.screen_of(p0)).normalized();
+        h.move_to(b + dir * 30.0);
+        h.move_to(b + dir * 70.0);
+        h.steps(3);
+        h.shot("nurbs-planes-2-drawing");
+        h.tap(b + dir * 70.0);
+        h.st.select(None);
+        h.st.wait_nurbs();
+        h.st.view_changed();
+        h.steps(30);
+        if let Some(m) = &h.st.nurbs.model {
+            eprintln!("nurbs-planes : {} formes, {} booléens, ignorés {:?}", m.shapes, m.booleans, m.ignored);
+        }
+        h.shot("nurbs-planes-3-done");
         forme_app::set_nurbs(false);
     }
     if want("pc-align") {

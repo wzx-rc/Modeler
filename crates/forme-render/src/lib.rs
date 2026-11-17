@@ -26,6 +26,10 @@ pub struct Globals {
     pub light: [f32; 4],
     /// xy sub-pixel jitter (anti-aliasing), z exposure, w unused.
     pub extra: [f32; 4],
+    /// Up to 3 workplanes (Forme NURBS), 4 rows each: origin + half size,
+    /// normal + state (0 off, 1 proposed, 2 under the pointer, 3 in use),
+    /// in-plane axis u, in-plane axis v.
+    pub planes: [[f32; 4]; 12],
 }
 
 /// Camera and framing for one frame. Sizes in physical pixels.
@@ -112,6 +116,8 @@ pub struct Settings {
     /// World origin on the grid: X axis red, Z axis blue, a ring at the
     /// origin (Forme NURBS: shapes are created there).
     pub origin: bool,
+    /// Workplanes drawn with depth (see `Globals::planes`).
+    pub planes: [[f32; 4]; 12],
 }
 
 impl Default for Settings {
@@ -130,6 +136,7 @@ impl Default for Settings {
             jitter: [0.0, 0.0],
             light_bg: false,
             origin: false,
+            planes: [[0.0; 4]; 12],
         }
     }
 }
@@ -366,6 +373,7 @@ impl Renderer {
                 [l.x, l.y, l.z, settings.light_intensity]
             },
             extra: [settings.jitter[0], settings.jitter[1], settings.exposure, if settings.light_bg { 1.0 } else { 0.0 }],
+            planes: settings.planes,
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
     }
