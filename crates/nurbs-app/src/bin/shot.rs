@@ -527,7 +527,8 @@ fn main() {
         h.shot("zero-quads-3-four-fillets");
         h.st.export_obj();
 
-        // the test part with a fillet: the faces with holes stay triangles
+        // the test part with a fillet: every face in quads (the faces with
+        // holes too)
         let mut d = test_part();
         let block = d.features.iter().find(|f| f.name == "Block").map(|f| f.id).unwrap();
         d.add_round(3.0, false, vec![EdgeRef { faces: [tag(block, 0), tag(block, 4)], at: DVec3::new(20.0, 10.0, 15.0) }]);
@@ -536,5 +537,6 @@ fn main() {
         h.steps(2);
         h.settle();
         h.shot("zero-quads-4-part");
+        h.st.export_obj();
     }
 }
