@@ -686,6 +686,22 @@ fn main() {
                 eprintln!("  {name}: {} quads, left out {:?}", q.quads.len(), q.skipped);
             }
         }
+        // the test part, its front right corner rounded large (6 mm, three
+        // edges in one fillet)
+        let mut d = test_part();
+        let block = d.features.iter().find(|f| f.name == "Block").map(|f| f.id).unwrap();
+        let edges = [(2u16, 4u16, DVec3::new(12.0, 20.0, 15.0)), (0, 4, DVec3::new(20.0, 10.0, 15.0)), (0, 2, DVec3::new(20.0, 20.0, 0.0))];
+        d.add_round(6.0, false, edges.iter().map(|(a, b, at)| EdgeRef { faces: [tag(block, *a), tag(block, *b)], at: *at }).collect());
+        h.reset(d, "Test part, large fillet");
+        h.st.quads = true;
+        h.steps(2);
+        h.settle();
+        h.shot("zero-quads-part-large-fillet");
+        if let Some(q) = h.st.quad_mesh() {
+            eprintln!("  part-large-fillet: {} quads, left out {:?}", q.quads.len(), q.skipped);
+        }
+        std::env::set_var("FORME_DOCS", &out);
+        h.st.export_obj();
     }
 
     if want("snap") {

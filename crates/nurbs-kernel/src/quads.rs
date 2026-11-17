@@ -1867,6 +1867,62 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
     // 2. segments per piece: by length (an arc by angle), then raised until
     // opposite sides match; a face whose counts cannot settle is left out
     let mut count: HashMap<Piece, usize> = HashMap::new();
+    // the counts all together first (Romain: "calculer tous les nombres de
+    // segments ensemble"): real numbers near their targets that make
+    // opposite sides equal (projected constraint by constraint, a
+    // fillet's arc never under its rows), then rounded; the whole numbers
+    // are then evened out below
+    let mut want: HashMap<Piece, f64> = HashMap::new();
+    let mut least: HashMap<Piece, f64> = HashMap::new();
+    for pt in &patches {
+        for (p, _, _) in pt.sides.iter().flatten() {
+            if cx.is_pole(p.line) || want.contains_key(p) {
+                continue;
+            }
+            let l = cx.piece_len(*p);
+            let line = &cx.lines[p.line];
+            let mut lo = 1.0f64;
+            if line.edge > 0 {
+                let e = &topo.edges[(line.edge - 1) as usize];
+                if e.kind == 1 && e.radius > 0.0 {
+                    lo = lo.max((l / e.radius / ARC_STEP).round());
+                }
+            }
+            want.insert(*p, (l / target).max(lo));
+            least.insert(*p, lo);
+        }
+    }
+    let goal = want.clone();
+    for _ in 0..400 {
+        let mut worst = 0.0f64;
+        for pt in &patches {
+            let sum = |k: usize, w: &HashMap<Piece, f64>| pt.sides[k].iter().filter(|x| w.contains_key(&x.0)).map(|x| w[&x.0]).sum::<f64>();
+            for (a, b) in [(0usize, 2usize), (1, 3)] {
+                let (sa, sb) = (sum(a, &want), sum(b, &want));
+                // a fillet's end much denser than the side across: rows
+                // will end in T there, no need to match
+                let (hi, lo) = if sa > sb { (a, sb) } else { (b, sa) };
+                if pt.fillet[hi] && sa.max(sb) >= 1.5 * lo {
+                    continue;
+                }
+                let r = sa - sb;
+                worst = worst.max(r.abs());
+                let ps: Vec<(Piece, f64)> = pt.sides[a].iter().map(|x| (x.0, 1.0)).chain(pt.sides[b].iter().map(|x| (x.0, -1.0))).filter(|x| want.contains_key(&x.0)).collect();
+                let wsum: f64 = ps.iter().map(|(p, _)| goal[p]).sum();
+                if wsum <= 0.0 {
+                    continue;
+                }
+                for (p, sgn) in ps {
+                    let v = want.get_mut(&p).unwrap();
+                    *v = (*v - sgn * r * goal[&p] / wsum).max(least[&p]);
+                }
+            }
+        }
+        if worst < 0.05 {
+            break;
+        }
+    }
+
     // faces whose counts go round in a circle (a fillet's rows coming back
     // to where they started): their rows may end in T anywhere
     let mut relaxed: HashSet<usize> = HashSet::new();
@@ -1882,21 +1938,9 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
                     continue;
                 }
                 count.entry(*p).or_insert_with(|| {
-                    let l = cx.piece_len(*p);
-                    let line = &cx.lines[p.line];
-                    let by_len = (l / target).round() as usize;
-                    let n = if line.edge > 0 {
-                        let e = &topo.edges[(line.edge - 1) as usize];
-                        if e.kind == 1 && e.radius > 0.0 {
-                            by_len.max((l / e.radius / ARC_STEP).round() as usize)
-                        } else {
-                            by_len
-                        }
-                    } else {
-                        by_len
-                    };
+                    let n = want.get(p).map(|w| w.round() as usize).unwrap_or(1).max(least.get(p).copied().unwrap_or(1.0) as usize);
                     if even {
-                        2 * ((n + 1) / 2).max(1)
+                        2 * ((n as f64 / 2.0).round() as usize).max(1)
                     } else {
                         n.max(1)
                     }
@@ -1937,6 +1981,16 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
             }
         }
         if settled {
+            if std::env::var("FORME_QUADS_DEBUG").is_ok() {
+                let mut v: Vec<(&Piece, &usize)> = count.iter().collect();
+                v.sort_by_key(|x| (x.0.line, x.0.j));
+                for (p, c) in v {
+                    let l = cx.piece_len(*p);
+                    if *c as f64 > 1.6 * (l / target).max(1.0) && !cx.is_pole(p.line) {
+                        eprintln!("  dense: line {} (edge {}) piece {} = {} for {:.1} mm", p.line, cx.lines[p.line].edge, p.j, c, l);
+                    }
+                }
+            }
             break;
         }
         // the faces still off are left out, and the counts made again
@@ -2570,6 +2624,25 @@ mod tests {
             }
             assert!(val.iter().filter(|v| **v == 3).count() >= 8, "all r{r}: the corners' poles");
         }
+    }
+
+    #[test]
+    fn part_large_fillet() {
+        use crate::doc::{Doc, EdgeRef, Op, Prim};
+        use crate::model::FaceTag;
+        use glam::{DQuat, DVec3};
+        let mut d = Doc::default();
+        let block = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-10.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Box { x: 8.0, y: 8.0, z: 40.0 }, DVec3::new(0.0, 14.0, 0.0), DQuat::IDENTITY);
+        let tag = |sub: u16| FaceTag { feature: block, sub }.pack();
+        let edges = [(2u16, 4u16, DVec3::new(12.0, 20.0, 15.0)), (0, 4, DVec3::new(20.0, 10.0, 15.0)), (0, 2, DVec3::new(20.0, 20.0, 0.0))];
+        d.add_round(6.0, false, edges.iter().map(|(a, b, at)| EdgeRef { faces: [tag(*a), tag(*b)], at: *at }).collect());
+        let m = crate::build::build(&d, true, true, &[], &mut Default::default());
+        let q = m.quads.expect("quads");
+        eprintln!("part, large fillet: {} quads, left out {:?}", q.quads.len(), q.skipped);
+        assert!(q.skipped.is_empty());
     }
 
     #[test]
