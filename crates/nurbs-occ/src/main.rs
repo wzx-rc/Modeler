@@ -358,6 +358,14 @@ fn build(scene: &Scene, skip: HashSet<String>) -> NurbsModel {
             }
             Err(e) => ctx.model.ignored.push(format!("mesh: {e}")),
         }
+        // the edges, drawn as thin lines (where each fillet starts and ends)
+        if !ctx.skip.contains("lines:0") {
+            step("lines:0");
+            match a.edge_lines(MESH_TOL, MESH_ANGLE) {
+                Ok(lines) => ctx.model.edges = lines.into_iter().map(|l| l.into_iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect()).collect(),
+                Err(e) => ctx.model.ignored.push(format!("edges: {e}")),
+            }
+        }
     }
     ctx.model.ignored.dedup();
     ctx.model.millis = t0.elapsed().as_millis();

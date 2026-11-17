@@ -26,6 +26,7 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRep_Tool.hxx>
+#include <GCPnts_TangentialDeflection.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <TColgp_Array1OfPnt.hxx>
@@ -33,6 +34,7 @@
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
@@ -60,6 +62,12 @@ struct FShape {
 struct FMesh {
     std::vector<float> pos, nrm;
     std::vector<uint32_t> tri;
+};
+
+// polylines, one after the other: counts[i] points each
+struct FLines {
+    std::vector<double> xyz;
+    std::vector<int> counts;
 };
 
 static thread_local std::string g_err;
@@ -420,5 +428,46 @@ const float* focc_mesh_positions(const FMesh* m) { return m->pos.data(); }
 const float* focc_mesh_normals(const FMesh* m) { return m->nrm.data(); }
 const uint32_t* focc_mesh_indices(const FMesh* m) { return m->tri.data(); }
 void focc_mesh_free(FMesh* m) { delete m; }
+
+// ------------------------------------------------------------- edge lines
+
+// Every edge of the shape a person would draw: the borders between faces,
+// fillet boundaries included; seams (where a closed surface such as a
+// cylinder wraps onto itself) and degenerated edges (a sphere's poles) are
+// left out. Each one within `defl` mm and `angle` rad of the true curve.
+FLines* focc_lines(const FShape* s, double defl, double angle) {
+    return guard(
+        [&]() -> FLines* {
+            TopTools_IndexedDataMapOfShapeListOfShape faces;
+            TopExp::MapShapesAndUniqueAncestors(s->s, TopAbs_EDGE, TopAbs_FACE, faces);
+            FLines* out = new FLines();
+            for (int i = 1; i <= faces.Extent(); i++) {
+                const TopoDS_Edge& e = TopoDS::Edge(faces.FindKey(i));
+                if (BRep_Tool::Degenerated(e)) continue;
+                bool seam = false;
+                for (TopTools_ListIteratorOfListOfShape it(faces.FindFromIndex(i)); it.More(); it.Next()) {
+                    if (BRep_Tool::IsClosed(e, TopoDS::Face(it.Value()))) seam = true;
+                }
+                if (seam) continue;
+                BRepAdaptor_Curve c(e);
+                GCPnts_TangentialDeflection d(c, angle, defl, 2);
+                int n = d.NbPoints();
+                if (n < 2) continue;
+                for (int k = 1; k <= n; k++) {
+                    gp_Pnt p = d.Value(k);
+                    out->xyz.insert(out->xyz.end(), {p.X(), p.Y(), p.Z()});
+                }
+                out->counts.push_back(n);
+            }
+            return out;
+        },
+        (FLines*)nullptr);
+}
+
+int focc_lines_count(const FLines* l) { return (int)l->counts.size(); }
+const int* focc_lines_counts(const FLines* l) { return l->counts.data(); }
+int focc_lines_points(const FLines* l) { return (int)(l->xyz.size() / 3); }
+const double* focc_lines_xyz(const FLines* l) { return l->xyz.data(); }
+void focc_lines_free(FLines* l) { delete l; }
 
 }  // extern "C"

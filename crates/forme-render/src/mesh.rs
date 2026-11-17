@@ -1,5 +1,7 @@
-//! Polygon mesh preview (the baked mesh): lit faces, crease-aware normals and
-//! an optional wireframe of the real polygon edges (not the triangulation).
+//! Polygon mesh preview (the baked mesh, or Forme NURBS's B-rep mesh): lit
+//! faces, crease-aware normals, an optional wireframe of the real polygon
+//! edges (not the triangulation), and optional thin lines (the B-rep's
+//! edges), hidden behind the matter.
 
 use crate::View;
 use bytemuck::{Pod, Zeroable};
@@ -32,9 +34,8 @@ struct VOut {
     @location(4) wpos: vec3<f32>,
 };
 
-@vertex fn vs_main(i: VIn) -> VOut {
-    var o: VOut;
-    let d = i.pos - u.eye.xyz;
+fn project(p: vec3<f32>) -> vec4<f32> {
+    let d = p - u.eye.xyz;
     let z = dot(d, u.fwd.xyz);
     let x = dot(d, u.right.xyz);
     let y = dot(d, u.up.xyz);
@@ -43,12 +44,17 @@ struct VOut {
     let pp = u.view.zw;
     let near = u.params.x;
     let far = u.params.y;
-    o.clip = vec4<f32>(
+    return vec4<f32>(
         x * size.y / (t * size.x) + (2.0 * pp.x / size.x - 1.0) * z,
         y / t + (1.0 - 2.0 * pp.y / size.y) * z,
         clamp((z - near) / (far - near), 0.0, 1.0) * z,
         z,
     );
+}
+
+@vertex fn vs_main(i: VIn) -> VOut {
+    var o: VOut;
+    o.clip = project(i.pos);
     o.nrm = i.nrm;
     o.col = i.col.rgb;
     o.bary = i.bary.xyz;
@@ -89,6 +95,41 @@ fn aces(x: vec3<f32>) -> vec3<f32> {
     }
     let o = pow(aces(c * 0.9), vec3<f32>(1.0 / 2.2));
     return vec4<f32>(o, 1.0);
+}
+
+// edge lines: pulled a little towards the eye so they win over the faces
+// they lie on, still hidden behind the matter in front
+fn pulled(p: vec3<f32>) -> vec4<f32> {
+    let d = u.eye.xyz - p;
+    let dist = length(d);
+    return project(p + d / max(dist, 1e-6) * (0.03 + 0.004 * dist));
+}
+
+// a segment is a quad `params.w` points wide: each corner holds its own end
+// (pos), the other end (nrm) and its side (bary.x)
+@vertex fn vs_line(i: VIn) -> VOut {
+    var o: VOut;
+    let a = pulled(i.pos);
+    let b = pulled(i.nrm);
+    let size = u.view.xy;
+    var dir = (b.xy / b.w - a.xy / a.w) * size;
+    if (dot(dir, dir) < 1e-10) {
+        dir = vec2<f32>(1.0, 0.0);
+    }
+    dir = normalize(dir);
+    let side = i.bary.x * 2.0 - 1.0;
+    let off = vec2<f32>(-dir.y, dir.x) * side * u.params.w / size;
+    o.clip = vec4<f32>(a.xy + off * a.w, a.z, a.w);
+    o.nrm = i.nrm;
+    o.col = i.col.rgb;
+    o.bary = vec3<f32>(0.0);
+    o.mask = i.col.a;
+    o.wpos = i.pos;
+    return o;
+}
+
+@fragment fn fs_line(i: VOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(i.col, i.mask);
 }
 "#;
 
@@ -146,8 +187,30 @@ pub fn mesh_vertices_colored(b: &Baked, color: &dyn Fn(&forme_core::bake::BFace)
     out
 }
 
+/// Line width in points (screen units of the view).
+const LINE_W: f32 = 1.25;
+
+/// Vertices of polylines drawn as thin lines (`MeshRenderer::upload_lines`):
+/// a quad of two triangles per segment, `col` = colour and opacity.
+pub fn line_vertices(lines: &[Vec<[f32; 3]>], col: [u8; 4]) -> Vec<MeshVertex> {
+    let mut out = vec![];
+    for l in lines {
+        for w in l.windows(2) {
+            let (p, q) = (w[0], w[1]);
+            // the side flips at the far end: the direction is seen from there
+            let v = |at: [f32; 3], other: [f32; 3], side: u8| MeshVertex { pos: at, nrm: other, col, bary: [side, 0, 0, 0] };
+            let (p0, p1, q0, q1) = (v(p, q, 0), v(p, q, 255), v(q, p, 255), v(q, p, 0));
+            out.extend_from_slice(&[p0, p1, q1, p0, q1, q0]);
+        }
+    }
+    out
+}
+
 pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
+    line_pipeline: wgpu::RenderPipeline,
+    lbuf: Option<wgpu::Buffer>,
+    lcount: u32,
     uniforms: wgpu::Buffer,
     bind: wgpu::BindGroup,
     vbuf: Option<wgpu::Buffer>,
@@ -212,11 +275,59 @@ impl MeshRenderer {
             multiview_mask: None,
             cache: None,
         });
-        MeshRenderer { pipeline, uniforms, bind, vbuf: None, count: 0, depth: None, wire: true, lo: glam::Vec3::ZERO, hi: glam::Vec3::ZERO }
+        let line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mesh-lines"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_line"),
+                buffers: &[Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<MeshVertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &attrs })],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_line"),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        MeshRenderer { pipeline, line_pipeline, lbuf: None, lcount: 0, uniforms, bind, vbuf: None, count: 0, depth: None, wire: true, lo: glam::Vec3::ZERO, hi: glam::Vec3::ZERO }
+    }
+
+    /// Thin lines drawn over the mesh (`line_vertices`); empty to remove
+    /// them. `upload` removes them too.
+    pub fn upload_lines(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, verts: &[MeshVertex]) {
+        self.lcount = verts.len() as u32;
+        if verts.is_empty() {
+            self.lbuf = None;
+            return;
+        }
+        let bytes: &[u8] = bytemuck::cast_slice(verts);
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mesh-lines"),
+            size: bytes.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buf, 0, bytes);
+        self.lbuf = Some(buf);
     }
 
     pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, verts: &[MeshVertex]) {
         self.count = verts.len() as u32;
+        self.lbuf = None;
+        self.lcount = 0;
         if verts.is_empty() {
             self.vbuf = None;
             return;
@@ -283,7 +394,7 @@ impl MeshRenderer {
             right: [right.x, right.y, right.z, 0.0],
             up: [up.x, up.y, up.z, 0.0],
             view: [view.size[0], view.size[1], view.principal[0], view.principal[1]],
-            params: [near, far, if self.wire { 1.0 } else { 0.0 }, 0.0],
+            params: [near, far, if self.wire { 1.0 } else { 0.0 }, LINE_W],
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
         let depth = &self.depth.as_ref().unwrap().0;
@@ -306,5 +417,10 @@ impl MeshRenderer {
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_vertex_buffer(0, vbuf.slice(..));
         pass.draw(0..self.count, 0..1);
+        if let Some(lbuf) = &self.lbuf {
+            pass.set_pipeline(&self.line_pipeline);
+            pass.set_vertex_buffer(0, lbuf.slice(..));
+            pass.draw(0..self.lcount, 0..1);
+        }
     }
 }

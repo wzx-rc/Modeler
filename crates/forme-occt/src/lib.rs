@@ -18,6 +18,10 @@ struct FShape {
 struct FMesh {
     _p: [u8; 0],
 }
+#[repr(C)]
+struct FLines {
+    _p: [u8; 0],
+}
 
 extern "C" {
     fn focc_last_error() -> *const c_char;
@@ -45,6 +49,12 @@ extern "C" {
     fn focc_mesh_normals(m: *const FMesh) -> *const f32;
     fn focc_mesh_indices(m: *const FMesh) -> *const u32;
     fn focc_mesh_free(m: *mut FMesh);
+    fn focc_lines(s: *const FShape, defl: c_double, angle: c_double) -> *mut FLines;
+    fn focc_lines_count(l: *const FLines) -> c_int;
+    fn focc_lines_counts(l: *const FLines) -> *const c_int;
+    fn focc_lines_points(l: *const FLines) -> c_int;
+    fn focc_lines_xyz(l: *const FLines) -> *const c_double;
+    fn focc_lines_free(l: *mut FLines);
 }
 
 fn last_error() -> String {
@@ -192,6 +202,30 @@ impl Shape {
         unsafe { focc_is_valid(self.0) == 1 }
     }
 
+    /// The edges a person would draw (face borders, fillet boundaries
+    /// included; no seams, no poles) as polylines within `defl` mm and
+    /// `angle` rad of the true curves.
+    pub fn edge_lines(&self, defl: f64, angle: f64) -> Result<Vec<Vec<[f64; 3]>>, String> {
+        let l = unsafe { focc_lines(self.0, defl, angle) };
+        if l.is_null() {
+            return Err(last_error());
+        }
+        unsafe {
+            let n = focc_lines_count(l).max(0) as usize;
+            let counts = std::slice::from_raw_parts(focc_lines_counts(l), n);
+            let xyz = std::slice::from_raw_parts(focc_lines_xyz(l), focc_lines_points(l).max(0) as usize * 3);
+            let mut out = Vec::with_capacity(n);
+            let mut at = 0;
+            for &c in counts {
+                let c = c.max(0) as usize;
+                out.push(xyz[at * 3..(at + c) * 3].chunks(3).map(|q| [q[0], q[1], q[2]]).collect());
+                at += c;
+            }
+            focc_lines_free(l);
+            Ok(out)
+        }
+    }
+
     /// Triangles: chord deflection `defl` (mm), angular deflection (rad).
     pub fn mesh(&self, defl: f64, angle: f64) -> Result<Mesh, String> {
         let m = unsafe { focc_mesh(self.0, defl, angle) };
@@ -235,6 +269,13 @@ mod tests {
         assert!(cut.fillet(&sec, 30.0).is_err());
         let m = f.mesh(0.02, 0.25).unwrap();
         assert!(m.triangles.len() > 100);
+        // lines: the cube's 12 edges, each rim's two fillet boundaries; the
+        // fillets' and the hole's seams left out
+        let raw = cut.edge_lines(0.02, 0.2).unwrap();
+        assert_eq!(raw.len(), 12 + 2, "cube edges + 2 rims");
+        let lines = f.edge_lines(0.02, 0.2).unwrap();
+        assert_eq!(lines.len(), 12 + 4, "cube edges + 2 boundaries per rim");
+        assert!(lines.iter().all(|l| l.len() >= 2));
     }
 
     #[test]

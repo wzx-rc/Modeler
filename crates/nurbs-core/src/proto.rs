@@ -5,7 +5,8 @@
 //! - 0u8, u32 len, message (UTF-8): an error;
 //! - 1u8, u32 shapes, u32 booleans, u64 millis, u32 n_ignored, n × (u32 len,
 //!   UTF-8), u32 n_pos, n_pos × 3 f32, n_pos × 3 f32 normals, u32 n_tris,
-//!   n_tris × 3 u32, n_tris × u32 material.
+//!   n_tris × 3 u32, n_tris × u32 material, then (optional) u32 n_lines,
+//!   n_lines × (u32 n, n × 3 f32): the edges.
 
 use crate::{NurbsMesh, NurbsModel};
 
@@ -50,6 +51,15 @@ pub fn encode(res: &Result<NurbsModel, String>) -> Vec<u8> {
             }
             for mat in &m.mesh.tri_material {
                 put_u32(&mut out, *mat);
+            }
+            put_u32(&mut out, m.edges.len() as u32);
+            for l in &m.edges {
+                put_u32(&mut out, l.len() as u32);
+                for p in l {
+                    for c in p {
+                        out.extend_from_slice(&c.to_le_bytes());
+                    }
+                }
             }
         }
     }
@@ -109,6 +119,17 @@ pub fn decode(bytes: &[u8]) -> Option<Result<NurbsModel, String>> {
                 mesh.tri_material.push(r.u32()?);
             }
             m.mesh = mesh;
+            // edges: absent from older kernels
+            if let Some(n) = r.u32() {
+                for _ in 0..n {
+                    let k = r.u32()? as usize;
+                    let mut l = Vec::with_capacity(k);
+                    for _ in 0..k {
+                        l.push([r.f32()?, r.f32()?, r.f32()?]);
+                    }
+                    m.edges.push(l);
+                }
+            }
             Some(Ok(m))
         }
     }

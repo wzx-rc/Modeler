@@ -92,6 +92,17 @@ fn nurbs_vertices(st: &mut AppState) -> Vec<forme_render::mesh::MeshVertex> {
     out
 }
 
+/// The NURBS part's edges as line segments (face borders, where each fillet
+/// starts and ends): dark and thin like a CAD view, light on a dark part.
+fn nurbs_lines(st: &AppState) -> Vec<forme_render::mesh::MeshVertex> {
+    let Some(model) = &st.nurbs.model else { return vec![] };
+    let mat = model.mesh.tri_material.first().copied().unwrap_or(0) as usize;
+    let c = st.scene.materials.get(mat).map(|x| x.color).unwrap_or([0.7, 0.7, 0.7]);
+    let lum = 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
+    let col = if lum > 0.35 { [24, 26, 30, 210] } else { [225, 228, 232, 180] };
+    forme_render::mesh::line_vertices(&model.edges, col)
+}
+
 /// Scene images are kept in half floats: jittered samples accumulate
 /// without banding, and the blit converts to the screen format.
 const SCENE_FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -357,6 +368,7 @@ impl FrameRenderer {
             if self.mesh_version != key {
                 let verts = nurbs_vertices(st);
                 self.mesh.upload(device, queue, &verts);
+                self.mesh.upload_lines(device, queue, &nurbs_lines(st));
                 self.mesh_version = key;
             }
         }

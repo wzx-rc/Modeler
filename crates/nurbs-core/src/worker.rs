@@ -67,7 +67,7 @@ pub fn build_occ(exe: &Path, scene: &Scene) -> Result<NurbsModel, String> {
             Ok(r) => return r,
             Err(step) => {
                 let Some(step) = step else { return Err("the NURBS kernel crashed".into()) };
-                let skippable = ["fillet:", "round:", "union:", "cut:"].iter().any(|p| step.starts_with(p));
+                let skippable = ["fillet:", "round:", "union:", "cut:", "lines:"].iter().any(|p| step.starts_with(p));
                 if !skippable || skip.contains(&step) || skip.len() >= MAX_SKIPS {
                     return Err(format!("the NURBS kernel crashed ({step})"));
                 }

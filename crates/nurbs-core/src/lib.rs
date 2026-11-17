@@ -30,6 +30,9 @@ pub struct NurbsMesh {
 #[derive(Clone, Debug, Default)]
 pub struct NurbsModel {
     pub mesh: NurbsMesh,
+    /// The part's edges as polylines (face borders, fillet boundaries), drawn
+    /// as thin lines over the mesh. Empty when the kernel gives none.
+    pub edges: Vec<Vec<[f32; 3]>>,
     /// Shapes combined, booleans done.
     pub shapes: usize,
     pub booleans: usize,
