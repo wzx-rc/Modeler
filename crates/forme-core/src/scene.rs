@@ -1046,13 +1046,15 @@ impl Scene {
 }
 
 pub fn default_materials() -> Vec<Material> {
+    // names in the app's language (Forme NURBS is in English)
+    let n = |fr: &str, en: &str| if english() { en.to_string() } else { fr.to_string() };
     vec![
-        Material { name: "Gris argile".into(), color: [0.50, 0.50, 0.49], metal: 0.0, rough: 0.55 },
-        Material { name: "Vert militaire".into(), color: [0.34, 0.39, 0.24], metal: 0.0, rough: 0.45 },
+        Material { name: n("Gris argile", "Grey clay"), color: [0.50, 0.50, 0.49], metal: 0.0, rough: 0.55 },
+        Material { name: n("Vert militaire", "Green"), color: [0.34, 0.39, 0.24], metal: 0.0, rough: 0.45 },
         Material { name: "Orange".into(), color: [0.86, 0.42, 0.14], metal: 0.0, rough: 0.4 },
-        Material { name: "Métal sombre".into(), color: [0.16, 0.17, 0.19], metal: 0.7, rough: 0.35 },
-        Material { name: "Acier".into(), color: [0.56, 0.57, 0.6], metal: 1.0, rough: 0.3 },
-        Material { name: "Caoutchouc".into(), color: [0.08, 0.08, 0.09], metal: 0.0, rough: 0.8 },
+        Material { name: n("Métal sombre", "Gunmetal"), color: [0.16, 0.17, 0.19], metal: 0.7, rough: 0.35 },
+        Material { name: n("Acier", "Steel"), color: [0.56, 0.57, 0.6], metal: 1.0, rough: 0.3 },
+        Material { name: n("Caoutchouc", "Rubber"), color: [0.08, 0.08, 0.09], metal: 0.0, rough: 0.8 },
     ]
 }
 

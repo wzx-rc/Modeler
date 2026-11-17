@@ -14,6 +14,9 @@ use std::f64::consts::PI;
 use truck_meshalgo::prelude::*;
 use truck_modeling::*;
 
+pub mod proto;
+pub mod worker;
+
 /// Triangles of the built part (world space, f32), one material per triangle.
 #[derive(Clone, Debug, Default)]
 pub struct NurbsMesh {
@@ -146,13 +149,28 @@ fn to_matrix(m: Mat4) -> Matrix4 {
     Matrix4::new(d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15])
 }
 
-/// The world placements of a shape node: its own, plus its mirror copies
-/// (mirrored across the planes of the parent frame).
-fn placements(scene: &Scene, id: NodeId) -> Vec<(Mat4, bool)> {
+/// The world placements of a shape node: its own, its repetitions, and the
+/// mirror copies of all of them (mirrored across the planes of the parent
+/// frame). The flag is true for a mirrored (inside-out) copy.
+pub fn placements(scene: &Scene, id: NodeId) -> Vec<(Mat4, bool)> {
     let n = &scene.nodes[&id];
     let parent = scene.parent_matrix(id);
     let local = n.transform.matrix();
     let m = n.mirror;
+    let mut reps = vec![Mat4::IDENTITY];
+    match n.repeat {
+        forme_core::scene::Repeat::Radial { count, axis } => {
+            for i in 1..count.max(1) {
+                reps.push(Mat4::from_quat(glam::Quat::from_axis_angle(axis.vec(), i as f32 * std::f32::consts::TAU / count as f32)));
+            }
+        }
+        forme_core::scene::Repeat::Linear { count, step } => {
+            for i in 1..count.max(1) {
+                reps.push(Mat4::from_translation(step * i as f32));
+            }
+        }
+        forme_core::scene::Repeat::None => {}
+    }
     let mut out = vec![];
     for sx in [false, true] {
         for sy in [false, true] {
@@ -162,7 +180,9 @@ fn placements(scene: &Scene, id: NodeId) -> Vec<(Mat4, bool)> {
                 }
                 let r = Mat4::from_scale(Vec3::new(if sx { -1.0 } else { 1.0 }, if sy { -1.0 } else { 1.0 }, if sz { -1.0 } else { 1.0 }));
                 let flips = (sx as u8 + sy as u8 + sz as u8) % 2 == 1;
-                out.push((parent * r * local, flips));
+                for rep in &reps {
+                    out.push((parent * r * *rep * local, flips));
+                }
             }
         }
     }
@@ -171,7 +191,7 @@ fn placements(scene: &Scene, id: NodeId) -> Vec<(Mat4, bool)> {
 
 /// Shapes in evaluation order (depth first), visible ones only, with the
 /// visibility of their ancestors.
-fn shape_order(scene: &Scene) -> Vec<NodeId> {
+pub fn shape_order(scene: &Scene) -> Vec<NodeId> {
     fn walk(s: &Scene, id: NodeId, out: &mut Vec<NodeId>) {
         let n = &s.nodes[&id];
         if !n.visible {
@@ -210,9 +230,6 @@ pub fn build(scene: &Scene) -> std::result::Result<NurbsModel, String> {
         }
         if sh.shell > 0.0 {
             ignored.push(format!("{name}: shell"));
-        }
-        if !matches!(n.repeat, forme_core::scene::Repeat::None) {
-            ignored.push(format!("{name}: repeat"));
         }
         let base = primitive(sh)?;
         for (m, flips) in placements(scene, id) {

@@ -144,9 +144,9 @@ fn nurbs_status(ui: &mut egui::Ui, st: &AppState) {
         (format!("NURBS · {e}"), ERROR, ERROR)
     } else if n.ready(st.scene_version) {
         let m = n.model.as_ref().unwrap();
-        let mut t = format!("NURBS · {} · {} · {} ms", plural(m.shapes, "shape"), plural(m.booleans, "boolean"), m.millis);
+        let mut t = format!("NURBS · {} · {} · {} · {} ms", n.kernel, plural(m.shapes, "shape"), plural(m.booleans, "boolean"), m.millis);
         if !m.ignored.is_empty() {
-            t.push_str(&format!(" · {} ignored", plural(m.ignored.len(), "SDF setting")));
+            t.push_str(&format!(" · {} left out", m.ignored.len()));
         }
         (t, accent_border(), TEXT())
     } else {
@@ -155,7 +155,7 @@ fn nurbs_status(ui: &mut egui::Ui, st: &AppState) {
     let r = chip(ui.painter(), at, Align2::LEFT_BOTTOM, &text, border, fg);
     if let Some(m) = n.model.as_ref().filter(|m| !m.ignored.is_empty() && n.ready(st.scene_version)) {
         let resp = ui.interact(r, Id::new("nurbs-status"), Sense::hover());
-        resp.on_hover_text(format!("Not in NURBS yet, ignored:\n{}", m.ignored.join("\n")));
+        resp.on_hover_text(format!("Left out of the NURBS part:\n{}", m.ignored.join("\n")));
     }
 }
 

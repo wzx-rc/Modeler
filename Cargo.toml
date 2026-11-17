@@ -1,5 +1,8 @@
 [workspace]
-members = ["crates/forme-core", "crates/forme-render", "crates/forme-app", "crates/nurbs-core"]
+members = ["crates/forme-core", "crates/forme-render", "crates/forme-app", "crates/nurbs-core", "crates/nurbs-occ"]
+# nurbs-occ builds OpenCascade from source (about 20 min the first time):
+# only with `-p nurbs-occ`, never by a bare `cargo build`
+default-members = ["crates/forme-core", "crates/forme-render", "crates/forme-app", "crates/nurbs-core"]
 resolver = "2"
 
 [workspace.package]

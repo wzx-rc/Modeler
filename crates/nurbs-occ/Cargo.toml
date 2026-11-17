@@ -1,0 +1,23 @@
+[package]
+name = "nurbs-occ"
+version = "0.1.0"
+edition = "2021"
+description = "Forme NURBS kernel process: the scene built with OpenCascade (booleans, fillets), meshed, sent back on stdout"
+
+[[bin]]
+name = "forme-occ"
+path = "src/main.rs"
+
+[dependencies]
+forme-core = { path = "../forme-core" }
+nurbs-core = { path = "../nurbs-core" }
+glam.workspace = true
+serde_json.workspace = true
+opencascade = { version = "0.3", default-features = false }
+dglam = { package = "glam", version = "0.24" }
+
+[features]
+# Builds OpenCascade 7.8 from source on the first build (about 20 min).
+# Without it, set DEP_OCCT_ROOT to an installed OCCT 7.8 (folder with lib/ and include/).
+default = ["builtin"]
+builtin = ["opencascade/builtin"]

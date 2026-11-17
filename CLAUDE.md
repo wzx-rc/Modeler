@@ -30,6 +30,25 @@ DEG=5 OUT=/tmp/x cargo run --release -p forme-core --example bake_probe -- decim
 OUT=/tmp/x cargo run --release -p forme-core --example bake_robust              # robustness: ~6000 simple cases (plate + one shape moved on a 1 mm grid, fillet patterns, sizes, Romain's scenes), maps + results.tsv + résumé.txt; family names as args (trou, boite, fillets…), CAS="x 3 z 0" OBJ=file for one case, BEVEL=0 grades the layout alone (the reference for layout rules)
 ```
 
+## Two apps: Forme SDF and Forme NURBS (Romain, 17 nov. 2026)
+
+The same `forme-app` code builds two apps that Romain works on separately:
+- `forme` = **Forme SDF** (French UI, the SDF raymarched part);
+- `forme-nurbs` = **Forme NURBS** (English UI, dark with the white accent « Blanc »): same tools and UI, but the part is built as B-rep solids by a CAD kernel and shown as its mesh (the SDF preview stays while the kernel computes). `forme_app::nurbs()` is set from the exe name or `FORME_ENGINE=nurbs`; settings in `settings-nurbs.json`; UI strings go through `crate::i18n::{tr, trd}` (French source text, English dictionary), `FORME_LANG=en|fr` overrides.
+- A tool built for one app is ported to the other by removing its `nurbs()` gate: put features in `state.rs` like any other tool, never in a copy of the UI.
+
+The NURBS kernel is **OpenCascade** (C++, via the `opencascade` crate), chosen by Romain over truck (whose booleans fail on sphere / torus faces and whose fillets do not work). It runs in a separate process, `forme-occ` (crate `nurbs-occ`), next to the app executable (or `FORME_OCC=path`): OpenCascade aborts the process on some failures, so `nurbs_core::worker::build_occ` reruns it with the failing step skipped (`--skip fillet:<id>`…) and lists it as "left out". Without `forme-occ`, the app falls back to the pure Rust kernel (`nurbs_core::build`, truck). On iPad (no child processes) the plan is to call OpenCascade in-process through a thin C++ layer that catches its exceptions.
+
+Mapping: Add = union, Carve = cut, the node's Blend (Raccord) = fillet of the boolean's new edges (Chamfer kind = chamfer), local junction fillets = fillet of the new edges along the zone, Round / Chamfer / per-edge fillets of a box or cylinder = fillets of the primitive's own edges, repetitions and mirrors = copies.
+
+```bash
+cargo build --release -p nurbs-occ                       # the kernel process; builds OpenCascade 7.8 from source the first time (~20 min, needs cmake + a C++ compiler)
+DEP_OCCT_ROOT=/path/occt cargo build --release -p nurbs-occ --no-default-features   # same, against an installed OCCT 7.8 (lib/ include/)
+cargo run --release -p forme-app --bin forme-nurbs       # Forme NURBS (uses target/release/forme-occ when it is there)
+OUT=/tmp/x cargo run --release -p nurbs-core --example occ_test     # the kernel on small parts (cube + hole + fillets…), OBJ per case
+cargo run --release -p forme-app --bin forme-shot -- /tmp/x nurbs   # NURBS captures (fillet test part, bearing, primitives)
+```
+
 The window title shows the version, branch, commit and commit date (`crates/forme-app/build.rs`, `forme_app::version_title()`), also at the bottom of Réglages: check it before saying which version Romain is running.
 
 `forme-shot` runs the real app headless (egui + wgpu). It accepts a software GPU (lavapipe / llvmpipe) and writes full-quality PNGs. Use it to check every visual change before showing it.

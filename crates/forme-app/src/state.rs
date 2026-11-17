@@ -322,7 +322,10 @@ pub struct NurbsState {
     pub error: Option<String>,
     /// Increments with every new model (mesh upload key).
     pub version: u64,
-    job: Option<(u64, mpsc::Receiver<Result<nurbs_core::NurbsModel, String>>)>,
+    /// Kernel of the last build: "OpenCascade" (the `forme-occ` process next
+    /// to the app) or "truck" (pure Rust, when the process is not there).
+    pub kernel: &'static str,
+    job: Option<(u64, mpsc::Receiver<(Result<nurbs_core::NurbsModel, String>, &'static str)>)>,
 }
 
 impl NurbsState {
@@ -3009,10 +3012,11 @@ impl AppState {
     pub fn tick_nurbs(&mut self) {
         if let Some((v, rx)) = &self.nurbs.job {
             match rx.try_recv() {
-                Ok(r) => {
+                Ok((r, kernel)) => {
                     let v = *v;
                     self.nurbs.job = None;
                     self.nurbs.built = v;
+                    self.nurbs.kernel = kernel;
                     match r {
                         Ok(m) => {
                             self.nurbs.model = Some(std::sync::Arc::new(m));
@@ -3037,7 +3041,13 @@ impl AppState {
             let v = self.scene_version;
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
-                let _ = tx.send(nurbs_core::build(&scene));
+                // OpenCascade in its own process (robust booleans and
+                // fillets, Romain 17 nov.), else the pure Rust kernel
+                let r = match nurbs_core::worker::occ_exe() {
+                    Some(exe) => (nurbs_core::worker::build_occ(&exe, &scene), "OpenCascade"),
+                    None => (nurbs_core::build(&scene), "truck"),
+                };
+                let _ = tx.send(r);
             });
             self.nurbs.job = Some((v, rx));
         }

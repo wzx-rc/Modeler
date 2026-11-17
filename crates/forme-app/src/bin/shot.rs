@@ -841,8 +841,38 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
             s.add(root, NodeSpec::shape("Torus", c).at(Vec3::new(36.0, 2.5, 0.0)));
             s
         }
+        // Romain's test (17 nov.): a cube with a cylindrical hole, the hole
+        // filleted (the Hole's blend), the cube's edges rounded, plus a boss
+        // and four pin holes with their own junction fillets
+        fn fillet() -> forme_core::Scene {
+            use forme_core::scene::{Mirror, NodeSpec, Scene, Shape};
+            let mut s = Scene::new();
+            let root = s.root;
+            let mut b = Shape::new(PrimKind::Box);
+            b.size = Vec3::splat(10.0);
+            b.round = 1.5;
+            s.add(root, NodeSpec::shape("Cube", b).at(Vec3::new(0.0, 10.0, 0.0)));
+            let mut c = Shape::new(PrimKind::Cylinder);
+            c.size = Vec3::new(4.0, 14.0, 0.0);
+            s.add(root, NodeSpec::shape("Hole", c).at(Vec3::new(0.0, 10.0, 0.0)).mode(CombineMode::Carve).blend(1.5));
+            let mut c = Shape::new(PrimKind::Cylinder);
+            c.size = Vec3::new(3.0, 3.0, 0.0);
+            let side = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+            s.add(root, NodeSpec::shape("Boss", c).at(Vec3::new(11.0, 10.0, 0.0)).rot(side).blend(1.0));
+            let mut c = Shape::new(PrimKind::Cylinder);
+            c.size = Vec3::new(1.5, 4.0, 0.0);
+            s.add(
+                root,
+                NodeSpec::shape("Pins", c)
+                    .at(Vec3::new(6.0, 20.0, 6.0))
+                    .mode(CombineMode::Carve)
+                    .blend(0.5)
+                    .mirror(Mirror { x: true, y: false, z: true }),
+            );
+            s
+        }
         forme_app::set_nurbs(true);
-        let scenes: [(&str, fn() -> forme_core::Scene, &str); 2] = [("piece", piece, "Bearing"), ("prims", prims, "Sphere")];
+        let scenes: [(&str, fn() -> forme_core::Scene, &str); 3] = [("fillet", fillet, "Hole"), ("piece", piece, "Bearing"), ("prims", prims, "Sphere")];
         for (name, scene, sel) in scenes {
             for (mode, tag) in [(UiMode::Atelier, "etabli"), (UiMode::Studio, "studio")] {
                 h.pc(AppState::new(scene(), "NURBS part"), mode);
@@ -869,6 +899,14 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
                     _ => eprintln!("nurbs {name} : pas de modèle"),
                 }
                 h.shot(&format!("nurbs-{name}-{tag}"));
+                if name == "fillet" {
+                    // close-up from above, nothing selected: the hole, its
+                    // fillet, the rounded edges, the boss and the pin holes
+                    h.st.select(None);
+                    h.cam(Vec3::new(2.0, 9.0, 0.0), 78.0, 0.65, 0.62);
+                    h.steps(30);
+                    h.shot(&format!("nurbs-fillet-close-{tag}"));
+                }
                 if name == "piece" {
                     h.st.settings_open = true;
                     h.steps(6);
