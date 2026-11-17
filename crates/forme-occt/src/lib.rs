@@ -26,6 +26,7 @@ extern "C" {
     fn focc_cylinder(r: c_double, h: c_double) -> *mut FShape;
     fn focc_sphere(r: c_double) -> *mut FShape;
     fn focc_torus(big: c_double, small: c_double) -> *mut FShape;
+    fn focc_prism(xy: *const c_double, smooth: *const c_int, n: c_int, h: c_double) -> *mut FShape;
     fn focc_transform(s: *const FShape, m: *const c_double) -> *mut FShape;
     fn focc_fuse(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_cut(a: *const FShape, b: *const FShape) -> *mut FShape;
@@ -120,6 +121,15 @@ impl Shape {
     /// Torus around Y: radius of the ring, radius of the tube.
     pub fn torus(big: f64, small: f64) -> Result<Shape, String> {
         shape(unsafe { focc_torus(big, small) })
+    }
+
+    /// Closed outline in the XY plane extruded along Z between -h and +h.
+    /// A smooth point is rounded into a quadratic curve between the middles
+    /// of its two edges (forme-core's Profile, exact here).
+    pub fn prism(points: &[[f64; 2]], smooth: &[bool], h: f64) -> Result<Shape, String> {
+        let xy: Vec<f64> = points.iter().flatten().copied().collect();
+        let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
+        shape(unsafe { focc_prism(xy.as_ptr(), sm.as_ptr(), points.len() as c_int, h) })
     }
 
     /// Copy moved by an affine map: 3 rows of 4 (rotation × uniform scale,
@@ -225,5 +235,32 @@ mod tests {
         assert!(cut.fillet(&sec, 30.0).is_err());
         let m = f.mesh(0.02, 0.25).unwrap();
         assert!(m.triangles.len() > 100);
+    }
+
+    #[test]
+    fn profile_prism() {
+        // an L, both windings: same positive volume, valid
+        let l = [[0.0, 0.0], [20.0, 0.0], [20.0, 6.0], [6.0, 6.0], [6.0, 20.0], [0.0, 20.0]];
+        let area = 20.0 * 6.0 + 6.0 * 14.0;
+        for pts in [l.to_vec(), l.iter().rev().copied().collect()] {
+            let p = Shape::prism(&pts, &[false; 6], 2.0).unwrap();
+            assert!(p.is_valid());
+            assert!((p.volume() - area * 4.0).abs() < 1e-6, "volume {}", p.volume());
+            assert_eq!(p.edges(2).len(), 18);
+        }
+        // a square with one round corner: a little less matter
+        let sq = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        let r = Shape::prism(&sq, &[false, false, true, false], 1.0).unwrap();
+        let cut = 25.0 / 6.0; // area between the corner and the curve: (5 x 5) / 6
+        assert!((r.volume() - (100.0 - cut) * 2.0).abs() < 1e-6, "volume {}", r.volume());
+        // all smooth: a rounded square, one face around
+        let o = Shape::prism(&sq, &[true; 4], 1.0).unwrap();
+        assert!(o.is_valid() && o.volume() > 0.0);
+        // a bow tie crosses itself
+        assert!(Shape::prism(&[[0.0, 0.0], [10.0, 10.0], [10.0, 0.0], [0.0, 10.0]], &[false; 4], 1.0).is_err());
+        // it fillets like the rest
+        let p = Shape::prism(&l, &[false; 6], 2.0).unwrap();
+        let all: Vec<i32> = p.edges(2).iter().map(|e| e.index).collect();
+        assert!(p.fillet(&all, 0.5).unwrap().is_valid());
     }
 }

@@ -44,6 +44,8 @@ pub enum Icon {
     Scale,
     /// Workplanes (Forme NURBS): a plane in perspective and its normal.
     Workplane,
+    /// Sketch (Forme NURBS): an outline of corners and a curve, its points.
+    Sketch,
 }
 
 struct Pen<'a> {
@@ -182,6 +184,13 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(6.0, 15.0), (14.0, 11.0)]);
             pen.line(&[(10.0, 13.0), (10.0, 2.5)]);
             pen.line(&[(7.5, 5.0), (10.0, 2.5), (12.5, 5.0)]);
+        }
+        Icon::Sketch => {
+            pen.line(&[(3.0, 16.0), (3.0, 6.0), (9.0, 6.0)]);
+            pen.line(&[(9.0, 6.0), (14.5, 6.5), (16.5, 11.0), (14.0, 15.5), (8.0, 16.0), (3.0, 16.0)]);
+            for (x, y) in [(3.0, 16.0), (3.0, 6.0), (9.0, 6.0)] {
+                pen.closed(&[(x - 1.3, y - 1.3), (x + 1.3, y - 1.3), (x + 1.3, y + 1.3), (x - 1.3, y + 1.3)]);
+            }
         }
         Icon::Grid => {
             pen.closed(&[(3.0, 3.0), (17.0, 3.0), (17.0, 17.0), (3.0, 17.0)]);

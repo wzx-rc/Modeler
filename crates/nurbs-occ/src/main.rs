@@ -15,7 +15,7 @@
 //! zone; Round / Chamfer / per-edge fillets of a box or a cylinder = fillets
 //! / chamfers of the primitive's own edges; repetitions and mirrors = copies.
 
-use forme_core::scene::{BlendKind, CombineMode, NodeId, PrimKind, Scene, Shape as FShape};
+use forme_core::scene::{BlendKind, CombineMode, NodeId, PrimKind, ProfileMode, Scene, Shape as FShape};
 use forme_occt::{Edge, EdgeKind, Shape};
 use glam::{DVec3, Mat4, Vec3};
 use nurbs_core::{NurbsMesh, NurbsModel};
@@ -146,6 +146,14 @@ fn primitive(sh: &FShape, own_fillets: bool, ignored: &mut Vec<String>, name: &s
             let small = (s.z as f64).clamp(0.01, big * 0.99);
             Shape::torus(big, small)?
         }
+        // a closed outline extruded on both sides of its plane (the curve
+        // points are true curves here, a polyline in the SDF)
+        PrimKind::Profile if sh.profile.as_ref().is_some_and(|p| p.mode == ProfileMode::Extrude) => {
+            let p = sh.profile.as_ref().unwrap();
+            let pts: Vec<[f64; 2]> = p.points.iter().map(|q| [q.pos.x as f64, q.pos.y as f64]).collect();
+            let smooth: Vec<bool> = p.points.iter().map(|q| q.smooth).collect();
+            Shape::prism(&pts, &smooth, s.z.max(0.01) as f64)?
+        }
         k => {
             ignored.push(format!("{name}: {} not in NURBS yet", k.label()));
             return Ok(None);
@@ -180,6 +188,12 @@ fn primitive(sh: &FShape, own_fillets: bool, ignored: &mut Vec<String>, name: &s
             };
             let r = if sh.edges.is_empty() { uniform } else { sh.edges.get(idx).copied().unwrap_or(0.0) as f64 };
             items.push((r.clamp(-max_r, max_r), p));
+        }
+    } else if sh.kind == PrimKind::Profile && uniform != 0.0 {
+        // like the SDF: every edge, the outline's corners and both caps
+        let r = uniform.clamp(-(s.z as f64) * 0.999, s.z as f64 * 0.999);
+        for e in base.edges(SAMPLES) {
+            items.push((r, pts(&e)));
         }
     } else if sh.round > 0.0 || sh.chamfer > 0.0 {
         ignored.push(format!("{name}: rounding of this shape"));

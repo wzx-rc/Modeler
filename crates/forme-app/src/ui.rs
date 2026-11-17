@@ -535,6 +535,18 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if redo {
         st.redo();
     }
+    // a sketch in progress: Backspace removes its last point, Enter closes
+    // it, Esc drops it (Forme NURBS)
+    if st.sketch.is_some() && (del || enter || esc) {
+        if del {
+            st.sketch_undo_point();
+        } else if enter {
+            st.close_sketch();
+        } else {
+            st.cancel_sketch();
+        }
+        return;
+    }
     if del {
         if let Some(e) = st.edge_sel.last().cloned() {
             // on edges, Delete removes their fillet (the shapes stay)
@@ -592,9 +604,12 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.set_pick_mode(PickMode::Object);
         st.gizmo = GizmoMode::Scale;
     }
-    // Forme NURBS: P shows / hides the proposed workplanes
+    // Forme NURBS: P shows / hides the proposed workplanes, L sketches
     if crate::nurbs() && ctx.input(|i| !i.modifiers.command && !i.modifiers.alt && i.key_pressed(egui::Key::P)) {
         st.toggle_workplanes();
+    }
+    if crate::nurbs() && ctx.input(|i| !i.modifiers.command && !i.modifiers.alt && i.key_pressed(egui::Key::L)) {
+        st.arm_sketch();
     }
     // Forme NURBS: Shift + the key (or the key again) drops the shape at
     // once, at the origin or on the selected shape (state::quick_add)
@@ -733,6 +748,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let tool = match st.tool {
                     Tool::Place(k) => k.label().to_uppercase(),
+                    Tool::Sketch => tr("ESQUISSE").to_string(),
                     _ if st.pick_mode == PickMode::Edge => tr("SÉLECTION · ARÊTE").to_string(),
                     _ => tr("SÉLECTION · OBJET").to_string(),
                 };
@@ -1073,6 +1089,9 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
                     st.arm_tool(k);
                 }
             }
+            if crate::nurbs() && card(ui, Some(Icon::Sketch), tr("ESQUISSE"), &format!("{mode} · L"), st.tool == Tool::Sketch, mode_color(m), tr("Esquisse (L) : un contour sur un plan, puis tiré en volume")).clicked() {
+                st.arm_sketch();
+            }
             if DESK {
                 creation_switch(ui, st, CARDS_W - 12.0);
             }
@@ -1277,7 +1296,7 @@ pub(crate) fn hud(ctx: &egui::Context, st: &mut AppState) {
     let color = match &st.placement {
         Some(p) => mode_color(p.mode),
         None => match st.tool {
-            Tool::Place(_) => mode_color(st.effective_mode()),
+            Tool::Place(_) | Tool::Sketch => mode_color(st.effective_mode()),
             _ => st.selection.and_then(|id| st.scene.node(id)).map(|n| mode_color(n.combine.mode)).unwrap_or(TEXT2()),
         },
     };

@@ -126,6 +126,9 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
             draw_workplanes(ui.painter(), st);
         }
         draw_overlay(ui.painter(), st);
+        if crate::nurbs() {
+            draw_sketch(ui.painter(), st);
+        }
         draw_marquee(ui.painter(), st);
         if crate::nurbs() {
             nurbs_status(ui, st);
@@ -137,10 +140,70 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     }
 }
 
+/// Forme NURBS: the outline being sketched, the segment to the pointer with
+/// its length, the points (square = corner, round = curve), and the first
+/// point to click to close it.
+fn draw_sketch(p: &Painter, st: &AppState) {
+    let Some(k) = &st.sketch else { return };
+    let view = st.view();
+    let to_s = |q: glam::Vec2| view.project(k.to_world(q)).map(|s| pos2(s[0], s[1]));
+    // yellow like the planes, over a dark halo: it reads on a white face
+    // as on the dark background
+    let line = HOT;
+    let halo = Color32::from_black_alpha(150);
+    if k.points.len() >= 2 {
+        let poly: Vec<Pos2> = k.profile().polyline().iter().filter_map(|q| to_s(*q)).collect();
+        if poly.len() >= 2 {
+            if k.points.len() >= 3 {
+                p.add(Shape::dashed_line(&[*poly.last().unwrap(), poly[0]], Stroke::new(1.5, tint(line, 0.6)), 5.0, 5.0));
+            }
+            p.add(Shape::line(poly.clone(), Stroke::new(5.5, halo)));
+            p.add(Shape::line(poly, Stroke::new(2.5, line)));
+        }
+    }
+    // the next segment, under the pointer
+    let next = st.hover.filter(|_| st.pointer_kind != PointerKind::Finger).and_then(|h| st.sketch_point_at(k, h));
+    if let (Some(last), Some(q)) = (k.points.last(), next) {
+        if let (Some(a), Some(b)) = (to_s(last.pos), to_s(q)) {
+            p.line_segment([a, b], Stroke::new(4.5, halo));
+            p.line_segment([a, b], Stroke::new(2.0, HOT));
+            let len = last.pos.distance(q);
+            if len > 0.05 && a.distance(b) > 40.0 {
+                chip(p, a + (b - a) * 0.5 + vec2(0.0, -10.0), Align2::CENTER_BOTTOM, &format!("{} mm", fmt_mm(len)), tint(HOT, 0.5), TEXT());
+            }
+            p.circle_filled(b, 3.5, HOT);
+        }
+    }
+    let bg = crate::theme::pick(Color32::from_rgb(0x14, 0x16, 0x19), Color32::WHITE);
+    for (i, pt) in k.points.iter().enumerate() {
+        let Some(s) = to_s(pt.pos) else { continue };
+        if i == 0 && k.points.len() >= 3 {
+            let near = next == Some(pt.pos);
+            p.circle_stroke(s, if near { 13.0 } else { 11.0 }, Stroke::new(if near { 2.5 } else { 1.5 }, HOT));
+            chip(p, s + vec2(-16.0, -16.0), Align2::RIGHT_BOTTOM, tr("Fermer ici"), tint(HOT, if near { 0.9 } else { 0.4 }), if near { HOT } else { TEXT2() });
+        }
+        if pt.smooth {
+            p.circle(s, 5.0, TEXT(), Stroke::new(2.0, bg));
+        } else {
+            p.rect(Rect::from_center_size(s, vec2(10.0, 10.0)), 0.0, TEXT(), Stroke::new(2.0, bg), egui::StrokeKind::Middle);
+        }
+    }
+}
+
+/// Millimetres with one decimal, French or English separator.
+fn fmt_mm(v: f32) -> String {
+    let s = format!("{v:.1}");
+    if crate::i18n::en() {
+        s
+    } else {
+        s.replace('.', ",")
+    }
+}
+
 /// Forme NURBS: the names of the proposed workplanes (the renderer draws
 /// the planes, with depth), the one under the pointer highlighted.
 fn draw_workplanes(p: &Painter, st: &AppState) {
-    if st.placement.is_some() || !matches!(st.tool, Tool::Place(_)) {
+    if !st.proposing_workplanes() {
         return;
     }
     let view = st.view();
@@ -366,6 +429,8 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                     st.begin_placement(p2(origin));
                     Gesture::Place
                 }
+                // a drag adds a curve point where it ends (a finger orbits)
+                Tool::Sketch if !finger => Gesture::SketchDrag,
                 _ if marquee => {
                     st.marquee = Some((p2(origin), p2(origin)));
                     Gesture::Marquee
@@ -406,6 +471,11 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 st.release_placement();
             }
             Gesture::Handle => st.end_handle(),
+            Gesture::SketchDrag => {
+                if let Some(p) = st.hover.or(resp.interact_pointer_pos().map(p2)) {
+                    st.sketch_point(p, true);
+                }
+            }
             Gesture::Marquee => {
                 if let Some((a, b)) = st.marquee.take() {
                     let add = shift || st.multi();
@@ -437,6 +507,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             Tool::Select => st.tap_select(pos),
             Tool::Place(_) if st.settings.creation == crate::settings::Creation::Direct => st.direct_place(pos),
             Tool::Place(_) => st.tap_place(pos),
+            Tool::Sketch => st.sketch_point(pos, false),
         }
     }
 }
@@ -526,7 +597,7 @@ fn draw_construction_lines(p: &Painter, st: &AppState) {
 /// Hovered and selected edges: a glow on the visible parts, a faint line
 /// where the model hides them.
 fn draw_edges(p: &Painter, st: &AppState) {
-    if st.placement.is_some() || st.bake.show || st.bake_mode() {
+    if st.placement.is_some() || st.sketch.is_some() || st.bake.show || st.bake_mode() {
         return;
     }
     let view = st.view();

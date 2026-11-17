@@ -174,6 +174,13 @@ fn tools(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     st.arm_tool(k);
                 }
             }
+            if crate::nurbs() {
+                let r = tool_btn(ui, Icon::Sketch, st.tool == Tool::Sketch, tr("Esquisse (L) : un contour sur un plan, puis tiré en volume"));
+                key(ui, &r, "L");
+                if r.clicked() {
+                    st.arm_sketch();
+                }
+            }
             ui::creation_switch(ui, st, BTN);
         });
         card().show(ui, |ui| {
@@ -252,7 +259,7 @@ fn status_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     let dot = match &st.placement {
         Some(p) => ui::mode_color(p.mode),
         None => match st.tool {
-            Tool::Place(_) => ui::mode_color(st.effective_mode()),
+            Tool::Place(_) | Tool::Sketch => ui::mode_color(st.effective_mode()),
             _ => st.selection.and_then(|id| st.scene.node(id)).map(|n| ui::mode_color(n.combine.mode)).unwrap_or(TEXT2()),
         },
     };

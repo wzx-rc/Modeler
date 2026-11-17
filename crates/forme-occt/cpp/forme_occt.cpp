@@ -9,6 +9,10 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
@@ -18,10 +22,13 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
+#include <Geom_BezierCurve.hxx>
+#include <TColgp_Array1OfPnt.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
@@ -32,6 +39,8 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <TopoDS_Wire.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
@@ -84,6 +93,11 @@ static FShape* wrap(const TopoDS_Shape& s) {
 
 static void edge_map(const TopoDS_Shape& s, TopTools_IndexedMapOfShape& m) { TopExp::MapShapes(s, TopAbs_EDGE, m); }
 
+static bool valid(const TopoDS_Shape& s) {
+    BRepCheck_Analyzer a(s);
+    return a.IsValid() == Standard_True;
+}
+
 extern "C" {
 
 const char* focc_last_error() { return g_err.c_str(); }
@@ -111,6 +125,75 @@ FShape* focc_torus(double big, double small) {
 
 // Copy of `s` moved by the affine map m (3 rows of 4: rotation and uniform
 // scale, possibly a mirror, then translation).
+// Closed outline in the XY plane (n points, xy[2n]) extruded along Z
+// between -h and +h. A smooth point is rounded into a quadratic curve from
+// the middle of its incoming edge to the middle of its outgoing one, like
+// forme-core's Profile (exact here, a polyline there).
+FShape* focc_prism(const double* xy, const int* smooth, int n, double h) {
+    return guard(
+        [&]() -> FShape* {
+            if (n < 3 || h <= 0) {
+                set_err("a profile needs 3 points and a thickness");
+                return nullptr;
+            }
+            std::vector<gp_Pnt> p(n);
+            for (int i = 0; i < n; i++) p[i] = gp_Pnt(xy[2 * i], xy[2 * i + 1], -h);
+            auto mid = [](const gp_Pnt& a, const gp_Pnt& b) { return gp_Pnt((a.X() + b.X()) / 2, (a.Y() + b.Y()) / 2, (a.Z() + b.Z()) / 2); };
+            // where each point's piece starts and ends (the point itself for a corner)
+            std::vector<TopoDS_Vertex> vin(n), vout(n);
+            for (int i = 0; i < n; i++) {
+                const gp_Pnt& prev = p[(i + n - 1) % n];
+                const gp_Pnt& next = p[(i + 1) % n];
+                bool round = smooth[i] && prev.Distance(p[i]) > 1e-6 && next.Distance(p[i]) > 1e-6;
+                if (round) {
+                    vin[i] = BRepBuilderAPI_MakeVertex(mid(prev, p[i]));
+                    vout[i] = BRepBuilderAPI_MakeVertex(mid(p[i], next));
+                } else {
+                    vin[i] = vout[i] = BRepBuilderAPI_MakeVertex(p[i]);
+                }
+            }
+            // two smooth points in a row meet at the middle of their edge: one vertex
+            for (int i = 0; i < n; i++) {
+                int j = (i + 1) % n;
+                if (BRep_Tool::Pnt(vout[i]).Distance(BRep_Tool::Pnt(vin[j])) < 1e-7) {
+                    bool corner = vin[j].IsSame(vout[j]);
+                    vin[j] = vout[i];
+                    if (corner) vout[j] = vout[i];
+                }
+            }
+            BRepBuilderAPI_MakeWire mw;
+            for (int i = 0; i < n; i++) {
+                if (!vin[i].IsSame(vout[i])) {
+                    TColgp_Array1OfPnt poles(1, 3);
+                    poles(1) = BRep_Tool::Pnt(vin[i]);
+                    poles(2) = p[i];
+                    poles(3) = BRep_Tool::Pnt(vout[i]);
+                    opencascade::handle<Geom_BezierCurve> c = new Geom_BezierCurve(poles);
+                    mw.Add(BRepBuilderAPI_MakeEdge(c, vin[i], vout[i]).Edge());
+                }
+                int j = (i + 1) % n;
+                if (!vout[i].IsSame(vin[j])) mw.Add(BRepBuilderAPI_MakeEdge(vout[i], vin[j]).Edge());
+            }
+            if (!mw.IsDone()) {
+                set_err("the outline is not a closed line");
+                return nullptr;
+            }
+            BRepBuilderAPI_MakeFace mf(mw.Wire(), Standard_True);
+            if (!mf.IsDone()) {
+                set_err("the outline is not flat and closed");
+                return nullptr;
+            }
+            BRepPrimAPI_MakePrism prism(mf.Face(), gp_Vec(0, 0, 2 * h));
+            TopoDS_Shape r = prism.Shape();
+            if (!valid(r)) {
+                set_err("the outline crosses itself");
+                return nullptr;
+            }
+            return wrap(r);
+        },
+        (FShape*)nullptr);
+}
+
 FShape* focc_transform(const FShape* s, const double* m) {
     return guard(
         [&] {
@@ -231,11 +314,6 @@ int focc_edge_sample(const FShape* s, int index, int n, double* xyz) {
 }
 
 // --------------------------------------------------------- fillets, chamfers
-
-static bool valid(const TopoDS_Shape& s) {
-    BRepCheck_Analyzer a(s);
-    return a.IsValid() == Standard_True;
-}
 
 // Rounds the edges (1-based indices) with radius r, all in one operation
 // (corners where they meet are blended).

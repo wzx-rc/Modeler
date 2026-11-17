@@ -7,7 +7,7 @@ use crate::settings::{Settings, UiMode};
 use forme_core::edges::{EdgeIndex, EdgeKind, EdgePick};
 use forme_core::*;
 use forme_render::{SelMode, View};
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -15,6 +15,9 @@ use std::sync::mpsc;
 pub enum Tool {
     Select,
     Place(PrimKind),
+    /// Forme NURBS: a closed outline drawn on a plane (corners and curve
+    /// points), then pulled into a solid like the base of a primitive.
+    Sketch,
 }
 
 /// The primitives the app creates (older files may hold others: they still
@@ -42,6 +45,8 @@ pub enum Gesture {
     Place,
     Height,
     Handle,
+    /// Sketch tool: a drag adds a curve point where it is released.
+    SketchDrag,
 }
 
 /// Objects to snap to while placing a shape (without the shape itself).
@@ -115,6 +120,48 @@ impl Workplane {
     /// Orientation of a shape drawn on it (its Y along the normal).
     pub fn rot(&self) -> Quat {
         Quat::from_mat3(&glam::Mat3::from_cols(self.u, self.normal, self.v)).normalize()
+    }
+}
+
+/// Forme NURBS: the outline being sketched. Points are in the plane's frame
+/// as a profile sees it: x along `plane.u`, y along `normal × u`; the
+/// extrusion goes along the normal (the profile's local Z).
+#[derive(Clone, Debug)]
+pub struct Sketch {
+    pub plane: Workplane,
+    pub points: Vec<ProfilePoint>,
+    /// Drawn on a face of the part (an Add sinks a little into it).
+    pub on_surface: bool,
+}
+
+impl Sketch {
+    /// In-plane Y axis of the profile.
+    pub fn w(&self) -> Vec3 {
+        self.plane.normal.cross(self.plane.u)
+    }
+    pub fn to_world(&self, q: Vec2) -> Vec3 {
+        self.plane.origin + self.plane.u * q.x + self.w() * q.y
+    }
+    /// Where a ray meets the plane (anywhere on it, not only the square).
+    pub fn to_plane(&self, ro: Vec3, rd: Vec3) -> Option<Vec2> {
+        let n = self.plane.normal;
+        let den = rd.dot(n);
+        if den.abs() < 1e-6 {
+            return None;
+        }
+        let t = (self.plane.origin - ro).dot(n) / den;
+        if t <= 0.0 {
+            return None;
+        }
+        let d = ro + rd * t - self.plane.origin;
+        Some(Vec2::new(d.dot(self.plane.u), d.dot(self.w())))
+    }
+    /// Orientation of the profile: X = u, Y = normal × u, Z = normal.
+    pub fn rot(&self) -> Quat {
+        Quat::from_mat3(&glam::Mat3::from_cols(self.plane.u, self.w(), self.plane.normal)).normalize()
+    }
+    pub fn profile(&self) -> Profile {
+        Profile { points: self.points.clone(), mode: ProfileMode::Extrude }
     }
 }
 
@@ -545,6 +592,8 @@ pub struct AppState {
     pub workplane_hover: Option<usize>,
     /// The plane the shape being created is drawn on.
     pub workplane_active: Option<Workplane>,
+    /// Forme NURBS: the outline being drawn with the Sketch tool.
+    pub sketch: Option<Sketch>,
     pub files_open: bool,
     pub material: u32,
     pub now: f64,
@@ -732,6 +781,7 @@ impl AppState {
             workplanes: true,
             workplane_hover: None,
             workplane_active: None,
+            sketch: None,
             bake: BakeState {
                 open: false,
                 quality: forme_core::bake::Quality::Standard,
@@ -1069,6 +1119,7 @@ impl AppState {
     /// Selection tool in object or edge mode (3ds Max: 1 / 2).
     pub fn set_pick_mode(&mut self, m: PickMode) {
         self.commit_placement();
+        self.sketch = None;
         self.tool = Tool::Select;
         if m != self.pick_mode {
             self.pick_mode = m;
@@ -1672,6 +1723,8 @@ impl AppState {
             PrimKind::Torus => Vec3::new(r, 0.0, (p.height.abs() * 0.5).clamp(0.2, (r * 0.9).max(0.2))),
             PrimKind::Cone => Vec3::new(r, hh, r * 0.35),
             PrimKind::Tube => Vec3::new(r, hh, r * 0.7),
+            // a sketched outline: its thickness along its local Z
+            PrimKind::Profile => Vec3::new(0.0, 0.0, hh),
             _ => Vec3::new(r, hh, 0.0),
         };
         // Add grows outwards, cutters go into the matter (top slightly proud)
@@ -1857,6 +1910,7 @@ impl AppState {
     pub fn arm_tool(&mut self, kind: PrimKind) {
         let again = self.tool == Tool::Place(kind) && self.placement.is_none();
         self.commit_placement();
+        self.sketch = None;
         if again && crate::nurbs() {
             self.quick_add(kind);
         } else {
@@ -2052,9 +2106,11 @@ impl AppState {
     /// a shape is drawn on it.
     pub fn workplane_uniforms(&self) -> [[f32; 4]; 12] {
         let mut out = [[0.0; 4]; 12];
-        let shown: Vec<(Workplane, f32)> = if self.placement.is_some() {
+        let shown: Vec<(Workplane, f32)> = if let Some(k) = &self.sketch {
+            vec![(k.plane.clone(), 3.0)]
+        } else if self.placement.is_some() {
             self.workplane_active.iter().map(|w| (w.clone(), 3.0)).collect()
-        } else if matches!(self.tool, Tool::Place(_)) {
+        } else if self.proposing_workplanes() {
             self.workplane_candidates().into_iter().enumerate().map(|(i, w)| (w, if Some(i) == self.workplane_hover { 2.0 } else { 1.0 })).collect()
         } else {
             vec![]
@@ -2068,6 +2124,164 @@ impl AppState {
         out
     }
 
+    /// The proposed workplanes are shown: a creation tool waits for its
+    /// first point (Forme NURBS, planes on).
+    pub fn proposing_workplanes(&self) -> bool {
+        crate::nurbs() && self.workplanes && self.placement.is_none() && self.sketch.is_none() && matches!(self.tool, Tool::Place(_) | Tool::Sketch)
+    }
+
+    // ---------------------------------------------------------------- sketch
+
+    /// Sketch tool (Forme NURBS): draw a closed outline on a plane, then pull it.
+    pub fn arm_sketch(&mut self) {
+        self.commit_placement();
+        self.sketch = None;
+        self.tool = Tool::Sketch;
+        self.view_changed();
+    }
+
+    /// The plane a sketch starts on: the proposed workplane under the
+    /// pointer, else the face under it, else the ground (or the plane
+    /// facing the camera through the target when looking up).
+    fn sketch_plane_at(&mut self, pos: [f32; 2]) -> Option<(Workplane, bool)> {
+        if let Some((i, _)) = self.workplane_at(pos) {
+            return Some((self.workplane_candidates().swap_remove(i), false));
+        }
+        let (ro, rd) = self.ray(pos);
+        // its grid lines up with the world's: the frame starts at the world
+        // origin's foot on the plane, moved by whole centimetres near `p`
+        let frame = |p: Vec3, n: Vec3, label: String| {
+            let n = n.normalize_or(Vec3::Y);
+            let u = [Vec3::X, Vec3::Z, Vec3::Y].into_iter().min_by(|a, b| a.dot(n).abs().total_cmp(&b.dot(n).abs())).unwrap();
+            let w = Workplane::new(n * p.dot(n), n, u, 40.0, 40.0, label);
+            let d = p - w.origin;
+            let (a, b) = ((d.dot(w.u) / 10.0).round() * 10.0, (d.dot(w.v) / 10.0).round() * 10.0);
+            Workplane { origin: w.origin + w.u * a + w.v * b, ..w }
+        };
+        if self.settings.snap_faces {
+            if let Some((p, n)) = self.hit(pos) {
+                return Some((frame(p, n, tr("face").to_string()), true));
+            }
+        }
+        if rd.y < -1e-3 {
+            let t = -ro.y / rd.y;
+            return Some((frame(ro + rd * t, Vec3::Y, tr("Sol").to_string()), false));
+        }
+        let n = -self.view().basis().0;
+        let p = ray_plane(ro, rd, self.camera.target, n)?;
+        Some((frame(p, n, tr("plan de travail").to_string()), false))
+    }
+
+    /// A point on the sketch plane under the pointer: on the 1 mm grid, and
+    /// on the first point when it is near it on screen (to close).
+    pub fn sketch_point_at(&self, k: &Sketch, pos: [f32; 2]) -> Option<Vec2> {
+        let (ro, rd) = self.ray(pos);
+        let q = k.to_plane(ro, rd)?;
+        if let Some(first) = k.points.first().filter(|_| k.points.len() >= 3) {
+            if let Some(sp) = self.view().project(k.to_world(first.pos)) {
+                if (sp[0] - pos[0]).hypot(sp[1] - pos[1]) < 14.0 {
+                    return Some(first.pos);
+                }
+            }
+        }
+        Some(if self.snap { q.round() } else { q })
+    }
+
+    /// Adds a point: a corner on a click, a curve point at the end of a
+    /// drag. On the first point (3 points or more), closes the outline.
+    pub fn sketch_point(&mut self, pos: [f32; 2], smooth: bool) {
+        if self.sketch.is_none() {
+            let Some((plane, on_surface)) = self.sketch_plane_at(pos) else { return };
+            self.workplane_hover = None;
+            self.sketch = Some(Sketch { plane, points: vec![], on_surface });
+        }
+        let k = self.sketch.clone().unwrap();
+        let Some(q) = self.sketch_point_at(&k, pos) else { return };
+        if k.points.len() >= 3 && q == k.points[0].pos {
+            self.close_sketch();
+            return;
+        }
+        if k.points.last().is_some_and(|l| l.pos.distance(q) < 1e-3) {
+            return;
+        }
+        let k = self.sketch.as_mut().unwrap();
+        k.points.push(ProfilePoint { pos: q, smooth });
+        // the plane shown grows with the outline (a little past it)
+        let reach = k.points.iter().map(|p| p.pos.abs().max_element()).fold(0.0f32, f32::max);
+        let half = ((reach + 5.0) / 10.0).ceil() * 10.0;
+        k.plane.half = k.plane.half.max(half);
+        k.plane.half_v = k.plane.half_v.max(half);
+        self.view_changed();
+    }
+
+    pub fn sketch_undo_point(&mut self) {
+        if let Some(k) = self.sketch.as_mut() {
+            k.points.pop();
+            if k.points.is_empty() {
+                self.sketch = None;
+            }
+        }
+        self.view_changed();
+    }
+
+    pub fn cancel_sketch(&mut self) {
+        self.sketch = None;
+        self.view_changed();
+    }
+
+    /// Closes the outline and pulls it like the base of a primitive: the
+    /// height follows the pointer (up = Add, down = Carve), a click confirms.
+    pub fn close_sketch(&mut self) {
+        let Some(k) = self.sketch.take() else { return };
+        if k.points.len() < 3 {
+            self.warn(tr("Il faut au moins 3 points pour fermer le contour"));
+            self.sketch = Some(k);
+            return;
+        }
+        // the shape's centre in the middle of its outline
+        let (lo, hi) = k.points.iter().fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), p| (lo.min(p.pos), hi.max(p.pos)));
+        let c = (lo + hi) * 0.5;
+        let mut shape = Shape::new(PrimKind::Profile);
+        shape.size = Vec3::new(0.0, 0.0, 0.2);
+        shape.profile = Some(Profile { points: k.points.iter().map(|p| ProfilePoint { pos: p.pos - c, smooth: p.smooth }).collect(), mode: ProfileMode::Extrude });
+        let base_mode = self.effective_mode();
+        let mode = self.resolve_place_mode(base_mode, 1.0);
+        let parent = self.insertion_parent();
+        let count = self.scene.nodes.values().filter(|n| n.shape().map(|s| s.kind == PrimKind::Profile).unwrap_or(false)).count() + 1;
+        self.history.record(&trd(format!("Ajouter {}", PrimKind::Profile.label())), &self.scene);
+        let mut spec = NodeSpec::shape(&format!("{} {}", PrimKind::Profile.label(), count), shape).mode(mode).mat(self.material);
+        if self.sym_x {
+            spec.mirror.x = true;
+        }
+        let id = self.scene.add(parent, spec);
+        let base = k.to_world(c);
+        let rot = k.rot();
+        self.set_world(id, base, rot);
+        self.workplane_active = Some(k.plane.clone());
+        self.placement = Some(Placement {
+            node: id,
+            kind: PrimKind::Profile,
+            base,
+            normal: k.plane.normal,
+            rot,
+            radius: 1.0,
+            hx: 1.0,
+            hz: 1.0,
+            height: 0.0,
+            phase: PlacePhase::AwaitHeight,
+            mode,
+            snapped: None,
+            started_on_surface: k.on_surface,
+            anchor: None,
+            offset: Vec3::ZERO,
+            base_mode,
+            snap_end: None,
+        });
+        self.selection = Some(id);
+        self.apply_placement();
+        self.changed();
+    }
+
     pub fn toggle_workplanes(&mut self) {
         self.workplanes = !self.workplanes;
         self.toast(if self.workplanes { tr("Plans de travail : proposés en jaune pendant la création") } else { tr("Plans de travail masqués : dessin sur les faces et au sol") });
@@ -2075,8 +2289,8 @@ impl AppState {
 
     /// Hover of the proposed workplanes while a creation tool waits.
     pub fn update_workplane_hover(&mut self) {
-        self.workplane_hover = match (self.tool, &self.placement, self.hover) {
-            (Tool::Place(_), None, Some(pos)) if crate::nurbs() && self.workplanes => self.workplane_at(pos).map(|(i, _)| i),
+        self.workplane_hover = match self.hover {
+            Some(pos) if self.proposing_workplanes() => self.workplane_at(pos).map(|(i, _)| i),
             _ => None,
         };
         if self.placement.is_none() {
@@ -2127,7 +2341,12 @@ impl AppState {
             self.selection_more.clear();
             self.edge_sel.clear();
         }
-        let again = if self.pointer_kind == PointerKind::Finger { tr("retouche l'outil") } else { tr("C ou l'outil") };
+        let key = if p.kind == PrimKind::Profile { Some("L") } else { crate::ui::prim_key(p.kind) };
+        let again = match key {
+            _ if self.pointer_kind == PointerKind::Finger => tr("retouche l'outil").to_string(),
+            Some(k) => trd(format!("{k} ou l'outil")),
+            None => tr("l'outil").to_string(),
+        };
         self.toast(trd(format!("{name} · {} · {again} pour en créer une autre", p.mode.label())));
         self.changed();
     }
@@ -2749,6 +2968,7 @@ impl AppState {
         self.history = History::new();
         self.selection = None;
         self.placement = None;
+        self.sketch = None;
         self.handle_drag = None;
         self.frame_all();
         self.changed();
@@ -3134,6 +3354,11 @@ impl AppState {
                 }
                 s
             }
+            Tool::Sketch => match &self.sketch {
+                None => tr("Esquisse — clique les angles sur un plan, glisse pour une courbe").to_string(),
+                Some(k) if k.points.len() < 3 => trd(format!("Esquisse · {} points — clic = angle, glisser = courbe, Retour efface le dernier", k.points.len())),
+                Some(k) => trd(format!("Esquisse · {} points — clique le premier point (ou Entrée) pour fermer, puis tire en Add ou Carve", k.points.len())),
+            },
         }
     }
 }

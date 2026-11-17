@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("nurbs") || want("bake-diag") || want("nurbs-stack") || want("nurbs-planes") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("nurbs") || want("bake-diag") || want("nurbs-stack") || want("nurbs-planes") || want("nurbs-sketch") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -1034,6 +1034,90 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
             eprintln!("nurbs-planes : {} formes, {} booléens, ignorés {:?}", m.shapes, m.booleans, m.ignored);
         }
         h.shot("nurbs-planes-3-done");
+        forme_app::set_nurbs(false);
+    }
+    if want("nurbs-sketch") {
+        // 2D in NURBS (Romain, 17 nov.): an outline sketched on the top of
+        // the cube (corners on a click, curve points at the end of a drag),
+        // closed on its first point, then pulled down into a pocket (Carve)
+        forme_app::set_nurbs(true);
+        h.pc(AppState::new(forme_core::Scene::new(), "NURBS part"), UiMode::Atelier);
+        h.st.settings.light = false;
+        h.st.settings.ambiance = forme_app::settings::AmbianceChoice::Blanc;
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.steps(2);
+        h.st.quick_add(PrimKind::Box);
+        h.st.arm_sketch();
+        h.cam(Vec3::new(0.0, 12.0, 0.0), 120.0, 0.7, 0.62);
+        h.steps(4);
+        // a D: two corners, two curve points
+        let top = |x: f32, z: f32| Vec3::new(x, 20.0, z);
+        let (a, b, c, d) = (top(-6.0, 6.0), top(6.0, 6.0), top(6.0, -6.0), top(-6.0, -6.0));
+        let (sa, sb, sc, sd) = (h.screen_of(a), h.screen_of(b), h.screen_of(c), h.screen_of(d));
+        h.tap(sa);
+        h.drag(sb + egui::vec2(-14.0, 6.0), sb, 6, true);
+        h.drag(sc + egui::vec2(-14.0, 6.0), sc, 6, true);
+        h.move_to(sd + egui::vec2(-20.0, 10.0));
+        h.steps(3);
+        if let Some(k) = &h.st.sketch {
+            eprintln!("nurbs-sketch : plan « {} » origine {:?} normale {:?} demi {} / {}, points {:?}", k.plane.label, k.plane.origin, k.plane.normal, k.plane.half, k.plane.half_v, k.points.iter().map(|p| (p.pos, p.smooth)).collect::<Vec<_>>());
+        }
+        h.shot("nurbs-sketch-1-drawing");
+        h.tap(sd);
+        h.move_to(sa + egui::vec2(3.0, 2.0));
+        h.steps(3);
+        h.shot("nurbs-sketch-2-close");
+        eprintln!("nurbs-sketch : {} points avant fermeture", h.st.sketch.as_ref().map(|k| k.points.len()).unwrap_or(0));
+        h.tap(sa + egui::vec2(3.0, 2.0));
+        eprintln!("nurbs-sketch : fermé, esquisse en cours {}", h.st.sketch.is_some());
+        // pulled down: a pocket
+        let dir = (h.screen_of(a - Vec3::Y * 10.0) - sa).normalized();
+        h.move_to(sa + dir * 20.0);
+        h.move_to(sa + dir * 45.0);
+        h.steps(3);
+        h.shot("nurbs-sketch-3-pull");
+        h.tap(sa + dir * 45.0);
+        if let Some(n) = h.st.selection.and_then(|id| h.st.scene.node(id)) {
+            let sh = n.shape().unwrap();
+            eprintln!("nurbs-sketch : {} {:?} {}, profondeur {:.1} mm", n.name, sh.kind, n.combine.mode.label(), sh.size.z * 2.0);
+        }
+        h.st.select(None);
+        h.st.wait_nurbs();
+        h.st.view_changed();
+        h.steps(30);
+        if let Some(m) = &h.st.nurbs.model {
+            eprintln!("nurbs-sketch : {} formes, {} booléens, ignorés {:?}", m.shapes, m.booleans, m.ignored);
+        }
+        h.shot("nurbs-sketch-4-done");
+        // a second outline on the ground beside the cube, pulled up (Add)
+        h.st.arm_sketch();
+        h.steps(2);
+        let pts = [(14.0, 8.0), (32.0, 8.0), (32.0, -2.0), (22.0, -8.0), (14.0, -8.0)].map(|(x, z)| h.screen_of(Vec3::new(x, 0.0, z)));
+        h.tap(pts[0]);
+        h.tap(pts[1]);
+        h.drag(pts[2] + egui::vec2(-12.0, 4.0), pts[2], 6, true);
+        h.tap(pts[3]);
+        h.tap(pts[4]);
+        h.tap(pts[0]);
+        let up = (h.screen_of(Vec3::new(14.0, 10.0, 8.0)) - pts[0]).normalized();
+        h.move_to(pts[0] + up * 25.0);
+        h.move_to(pts[0] + up * 60.0);
+        h.steps(3);
+        h.shot("nurbs-sketch-5-pull-up");
+        h.tap(pts[0] + up * 60.0);
+        if let Some(n) = h.st.selection.and_then(|id| h.st.scene.node(id)) {
+            let sh = n.shape().unwrap();
+            eprintln!("nurbs-sketch : {} {}, hauteur {:.1} mm", n.name, n.combine.mode.label(), sh.size.z * 2.0);
+        }
+        h.st.select(None);
+        h.st.wait_nurbs();
+        h.cam(Vec3::new(10.0, 8.0, 0.0), 130.0, 0.55, 0.6);
+        h.st.view_changed();
+        h.steps(30);
+        if let Some(m) = &h.st.nurbs.model {
+            eprintln!("nurbs-sketch : {} formes, {} booléens, ignorés {:?}", m.shapes, m.booleans, m.ignored);
+        }
+        h.shot("nurbs-sketch-6-done");
         forme_app::set_nurbs(false);
     }
     if want("pc-align") {

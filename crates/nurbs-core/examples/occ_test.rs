@@ -2,8 +2,8 @@
 //! each result as OBJ: `OUT=/tmp/x cargo run --release -p nurbs-core --example occ_test [case…]`.
 //! Build the kernel first: `cargo build --release -p nurbs-occ`.
 
-use forme_core::scene::{CombineMode, Mirror, NodeSpec, PrimKind, Scene, Shape};
-use glam::{Quat, Vec3};
+use forme_core::scene::{CombineMode, Mirror, NodeSpec, PrimKind, Profile, ProfileMode, ProfilePoint, Scene, Shape};
+use glam::{Quat, Vec2, Vec3};
 use std::io::Write;
 
 fn cube_hole(blend: f32, round: f32) -> Scene {
@@ -49,6 +49,22 @@ fn cases() -> Vec<(&'static str, Scene)> {
     c.size = Vec3::new(6.0, 1.5, 1.5);
     s.add(root, NodeSpec::shape("Torus", c).at(Vec3::new(0.0, 20.0, 0.0)).mode(CombineMode::Carve).blend(0.5));
     v.push(("cube-sphere-torus", s));
+    // sketch + extrude: an L outline with one curved corner, carved through
+    // the cube with a fillet of its rims, and a raised rounded plate
+    let mut s = cube_hole(0.0, 0.0);
+    let root = s.root;
+    let pt = |x: f32, y: f32, smooth: bool| ProfilePoint { pos: Vec2::new(x, y), smooth };
+    let mut p = Shape::new(PrimKind::Profile);
+    p.size = Vec3::new(0.0, 0.0, 14.0);
+    p.profile = Some(Profile { points: vec![pt(-7.0, -7.0, false), pt(-1.0, -7.0, false), pt(-1.0, -1.0, true), pt(7.0, -1.0, false), pt(7.0, 5.0, false), pt(-7.0, 5.0, false)], mode: ProfileMode::Extrude });
+    s.add(root, NodeSpec::shape("Slot", p).at(Vec3::new(0.0, 10.0, 0.0)).mode(CombineMode::Carve).blend(0.6));
+    let mut p = Shape::new(PrimKind::Profile);
+    p.size = Vec3::new(0.0, 0.0, 1.5);
+    p.round = 0.5;
+    p.profile = Some(Profile { points: vec![pt(-6.0, -6.0, false), pt(6.0, -6.0, true), pt(6.0, 6.0, false), pt(-6.0, 6.0, true)], mode: ProfileMode::Extrude });
+    let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    s.add(root, NodeSpec::shape("Plate", p).at(Vec3::new(0.0, 21.0, 0.0)).rot(flat).blend(0.5));
+    v.push(("cube-profiles", s));
     v
 }
 

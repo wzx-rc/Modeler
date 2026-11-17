@@ -365,6 +365,9 @@ fn menus(ui: &mut Ui, st: &mut AppState) {
                 st.arm_tool(k);
             }
         }
+        if crate::nurbs() && ui.add(egui::Button::new(tr("Esquisse")).shortcut_text("L").selected(st.tool == Tool::Sketch)).clicked() {
+            st.arm_sketch();
+        }
         ui.separator();
         small_label(ui, tr("Mode des nouvelles formes"));
         for m in MODES {
@@ -502,6 +505,15 @@ fn rail(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                 ui::key_hint(ui, &r, key);
                 if r.clicked() {
                     st.arm_tool(k);
+                }
+            });
+        }
+        if crate::nurbs() {
+            centred(ui, &mut |ui| {
+                let r = tool_btn(ui, Icon::Sketch, st.tool == Tool::Sketch, tr("Esquisse (L) : un contour sur un plan, puis tiré en volume"));
+                ui::key_hint(ui, &r, "L");
+                if r.clicked() {
+                    st.arm_sketch();
                 }
             });
         }
