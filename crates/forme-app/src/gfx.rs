@@ -70,7 +70,9 @@ fn nurbs_vertices(st: &mut AppState) -> Vec<forme_render::mesh::MeshVertex> {
     let m = &model.mesh;
     let lin = |c: f32| (c.max(0.0).powf(2.2) * 255.0).round().clamp(0.0, 255.0) as u8;
     let sel = crate::theme::sel_rgb();
-    let has_sel = st.selection.is_some();
+    // an edge is selected: its highlight says it all (same rule as the SDF
+    // selection), the shape's tint would only blur it
+    let has_sel = st.selection.is_some() && st.edge_sel.is_empty();
     let prog = if has_sel { Some(st.selection_program().0.clone()) } else { None };
     let mut out = Vec::with_capacity(m.tris.len() * 3);
     for (t, tri) in m.tris.iter().enumerate() {
@@ -364,7 +366,7 @@ impl FrameRenderer {
         let nurbs_on = crate::nurbs() && st.nurbs.ready(st.scene_version);
         if nurbs_on {
             let sel = st.selected_ids();
-            let key = (1u64 << 63) | (st.nurbs.version << 20) | (sel.iter().map(|i| *i as u64).sum::<u64>() & 0xFFFFF) ^ ((sel.len() as u64) << 40) ^ ((crate::theme::ambiance() as u64) << 48);
+            let key = (1u64 << 63) | (st.nurbs.version << 20) | (sel.iter().map(|i| *i as u64).sum::<u64>() & 0xFFFFF) ^ ((sel.len() as u64) << 40) ^ ((crate::theme::ambiance() as u64) << 48) ^ ((st.edge_sel.is_empty() as u64) << 56);
             if self.mesh_version != key {
                 let verts = nurbs_vertices(st);
                 self.mesh.upload(device, queue, &verts);

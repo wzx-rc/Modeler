@@ -245,7 +245,11 @@ fn junction(ctx: &mut Ctx, shape: Shape, scene: &Scene, id: NodeId, m: Mat4, nam
         let Some(e) = shape.edge(i, SAMPLES) else { continue };
         let p = pts(&e);
         let c = p[p.len() / 2];
-        let r = zones.iter().filter(|(_, z)| dist_to_polyline(c, z) < 0.5).map(|(r, _)| *r).fold(None, |a: Option<f64>, r| Some(a.map_or(r, |a| a.max(r)))).unwrap_or(blend);
+        // a zone rounds the edges along it, and the edge it was picked on
+        // (its middle): a closed rim is one B-rep edge whose own middle can
+        // be anywhere on it, and OCC fillets a whole edge
+        let on = |z: &Vec<DVec3>| !z.is_empty() && (dist_to_polyline(c, z) < 0.5 || dist_to_polyline(z[z.len() / 2], &p) < 0.5);
+        let r = zones.iter().filter(|(_, z)| on(z)).map(|(r, _)| *r).fold(None, |a: Option<f64>, r| Some(a.map_or(r, |a| a.max(r)))).unwrap_or(blend);
         items.push((r, p));
     }
     let groups = group(items);

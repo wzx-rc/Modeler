@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("nurbs") || want("bake-diag") || want("nurbs-stack") || want("nurbs-planes") || want("nurbs-sketch") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("nurbs") || want("bake-diag") || want("nurbs-stack") || want("nurbs-planes") || want("nurbs-sketch") || want("nurbs-edit") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -841,36 +841,7 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
             s.add(root, NodeSpec::shape("Torus", c).at(Vec3::new(36.0, 2.5, 0.0)));
             s
         }
-        // Romain's test (17 nov.): a cube with a cylindrical hole, the hole
-        // filleted (the Hole's blend), the cube's edges rounded, plus a boss
-        // and four pin holes with their own junction fillets
-        fn fillet() -> forme_core::Scene {
-            use forme_core::scene::{Mirror, NodeSpec, Scene, Shape};
-            let mut s = Scene::new();
-            let root = s.root;
-            let mut b = Shape::new(PrimKind::Box);
-            b.size = Vec3::splat(10.0);
-            b.round = 1.5;
-            s.add(root, NodeSpec::shape("Cube", b).at(Vec3::new(0.0, 10.0, 0.0)));
-            let mut c = Shape::new(PrimKind::Cylinder);
-            c.size = Vec3::new(4.0, 14.0, 0.0);
-            s.add(root, NodeSpec::shape("Hole", c).at(Vec3::new(0.0, 10.0, 0.0)).mode(CombineMode::Carve).blend(1.5));
-            let mut c = Shape::new(PrimKind::Cylinder);
-            c.size = Vec3::new(3.0, 3.0, 0.0);
-            let side = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
-            s.add(root, NodeSpec::shape("Boss", c).at(Vec3::new(11.0, 10.0, 0.0)).rot(side).blend(1.0));
-            let mut c = Shape::new(PrimKind::Cylinder);
-            c.size = Vec3::new(1.5, 4.0, 0.0);
-            s.add(
-                root,
-                NodeSpec::shape("Pins", c)
-                    .at(Vec3::new(6.0, 20.0, 6.0))
-                    .mode(CombineMode::Carve)
-                    .blend(0.5)
-                    .mirror(Mirror { x: true, y: false, z: true }),
-            );
-            s
-        }
+        let fillet = nurbs_fillet_scene;
         forme_app::set_nurbs(true);
         let scenes: [(&str, fn() -> forme_core::Scene, &str); 3] = [("fillet", fillet, "Hole"), ("piece", piece, "Bearing"), ("prims", prims, "Sphere")];
         for (name, scene, sel) in scenes {
@@ -915,6 +886,55 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
                 }
             }
         }
+        forme_app::set_nurbs(false);
+    }
+    if want("nurbs-edit") {
+        // Romain (17 nov.): can a fillet be selected to edit it? With the
+        // Edges tool, a click on the fillet band of the hole picks the
+        // junction it rounds; its radius is then changed and OCC rebuilds
+        forme_app::set_nurbs(true);
+        h.pc(AppState::new(nurbs_fillet_scene(), "NURBS part"), UiMode::Atelier);
+        h.st.settings.light = false;
+        h.st.settings.ambiance = forme_app::settings::AmbianceChoice::Blanc;
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.steps(2);
+        h.cam(Vec3::new(2.0, 9.0, 0.0), 78.0, 0.65, 0.62);
+        h.st.wait_nurbs();
+        h.st.view_changed();
+        h.steps(10);
+        h.st.set_pick_mode(PickMode::Edge);
+        h.steps(2);
+        // the far side of the hole's fillet band faces the camera
+        let eye = h.st.view().eye;
+        let mut best = (f32::MIN, Vec3::ZERO);
+        for i in 0..72 {
+            let a = i as f32 / 72.0 * std::f32::consts::TAU;
+            let q = Vec3::new(4.44 * a.cos(), 19.56, 4.44 * a.sin());
+            let d = Vec3::new(q.x - eye.x, 0.0, q.z - eye.z).length();
+            if d > best.0 {
+                best = (d, q);
+            }
+        }
+        let p = h.screen_of(best.1);
+        h.move_to(p);
+        h.steps(4);
+        eprintln!("nurbs-edit : survol {:?}", h.st.edge_hover.as_ref().map(|e| (e.kind, h.st.get_fillet(e))));
+        h.shot("nurbs-edit-1-hover");
+        h.tap(p);
+        h.steps(4);
+        eprintln!("nurbs-edit : sélection {:?}", h.st.edge_sel.iter().map(|e| (e.kind, h.st.get_fillet(e))).collect::<Vec<_>>());
+        h.shot("nurbs-edit-2-selected");
+        h.st.set_fillet(3.0, false, true);
+        h.st.wait_nurbs();
+        h.st.view_changed();
+        h.steps(10);
+        match (&h.st.nurbs.model, &h.st.nurbs.error) {
+            (_, Some(e)) => eprintln!("nurbs-edit : erreur {e}"),
+            (Some(m), _) => eprintln!("nurbs-edit : rayon 3 mm, {} formes, ignorés {:?}", m.shapes, m.ignored),
+            _ => eprintln!("nurbs-edit : pas de modèle"),
+        }
+        eprintln!("nurbs-edit : après {:?}", h.st.edge_sel.iter().map(|e| (e.kind, h.st.get_fillet(e))).collect::<Vec<_>>());
+        h.shot("nurbs-edit-3-radius");
         forme_app::set_nurbs(false);
     }
     if want("nurbs-stack") {
@@ -1983,4 +2003,35 @@ fn bake_grenade(h: &mut Harness) {
     eprintln!("voxel export (dual contouring) : {} triangles", dc.triangle_count());
     h.st.bake.result = real;
     h.st.bake.version += 1;
+}
+
+// Romain's test (17 nov.): a cube with a cylindrical hole, the hole
+// filleted (the Hole's blend), the cube's edges rounded, plus a boss
+// and four pin holes with their own junction fillets
+fn nurbs_fillet_scene() -> forme_core::Scene {
+    use forme_core::scene::{Mirror, NodeSpec, Scene, Shape};
+    let mut s = Scene::new();
+    let root = s.root;
+    let mut b = Shape::new(PrimKind::Box);
+    b.size = Vec3::splat(10.0);
+    b.round = 1.5;
+    s.add(root, NodeSpec::shape("Cube", b).at(Vec3::new(0.0, 10.0, 0.0)));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(4.0, 14.0, 0.0);
+    s.add(root, NodeSpec::shape("Hole", c).at(Vec3::new(0.0, 10.0, 0.0)).mode(CombineMode::Carve).blend(1.5));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(3.0, 3.0, 0.0);
+    let side = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    s.add(root, NodeSpec::shape("Boss", c).at(Vec3::new(11.0, 10.0, 0.0)).rot(side).blend(1.0));
+    let mut c = Shape::new(PrimKind::Cylinder);
+    c.size = Vec3::new(1.5, 4.0, 0.0);
+    s.add(
+        root,
+        NodeSpec::shape("Pins", c)
+            .at(Vec3::new(6.0, 20.0, 6.0))
+            .mode(CombineMode::Carve)
+            .blend(0.5)
+            .mirror(Mirror { x: true, y: false, z: true }),
+    );
+    s
 }
