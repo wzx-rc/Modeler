@@ -512,18 +512,26 @@ fn main() {
         h.steps(2);
         eprintln!("picked {} faces", h.st.face_sel.len());
         h.shot("zero-faces-2-picked");
-        // I: the inset follows the pointer (3 mm), a click, then the depth
+        // I: a 2 mm inset at once, its dot and its arrow on screen
         h.key(egui::Key::I);
-        let g = h.st.push.clone().expect("inset started");
-        h.move_to(h.screen_of((g.origin + DVec3::X * 3.0).as_vec3()));
         h.settle();
+        let hs = h.st.push_handles().expect("inset handles");
+        let (_, w, knob) = hs.inset.expect("inset dot");
+        h.move_to(h.screen_of(knob.as_vec3()));
+        h.steps(2);
         h.shot("zero-faces-3-inset");
-        h.click(h.screen_of((g.origin + DVec3::X * 3.0).as_vec3()));
-        let g = h.st.push.clone().expect("depth phase");
-        h.move_to(h.screen_of((g.origin + g.n * (g.t0 - 4.0)).as_vec3()));
+        // the dot dragged 1 mm further in: 3 mm
+        h.drag(h.screen_of(knob.as_vec3()), h.screen_of((knob + w).as_vec3()), 8, true);
+        h.settle();
+        let hs = h.st.push_handles().expect("inset handles");
+        // the arrow dragged 4 mm in: a pocket
+        let grab = hs.base + (hs.tip - hs.base) * 0.6;
+        let to = grab - hs.n * 4.0;
+        h.drag(h.screen_of(grab.as_vec3()), h.screen_of(to.as_vec3()), 8, false);
         h.settle();
         h.shot("zero-faces-4-pocket");
-        h.click(h.screen_of((g.origin + g.n * (g.t0 - 4.0)).as_vec3()));
+        h.press(h.screen_of(to.as_vec3()), false);
+        h.steps(2);
         h.settle();
         h.move_to(h.screen_of(Vec3::new(0.0, -10.0, 40.0)));
         h.steps(2);

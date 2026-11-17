@@ -344,7 +344,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             }
             divider(ui);
             for (k, icon, tip) in [
-                (PushKind::Inset, Icon::Inset, "Inset (I): a flat face's outline moved in, then raised, sunk, or left as a line. Press on a face and drag, or pick a face (3) and press I"),
+                (PushKind::Inset, Icon::Inset, "Inset (I): a flat face's outline moved in (2 mm), sized with its dot; its arrow raises or sinks it. Click a face, or pick a face (3) and press I"),
                 (PushKind::Extrude, Icon::Extrude, "Extrude (E): a flat face pulled out (adds) or pushed in (carves). Press on a face and drag, or pick a face (3) and press E"),
             ] {
                 let on = st.tool == Tool::Push(k);
@@ -479,6 +479,10 @@ fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 /// The actions of the selection, floating just above it.
 fn context_bar(ctx: &egui::Context, st: &mut AppState) {
     if st.tool != Tool::Select || st.creation.is_some() || st.drag.is_some() || st.selection.is_empty() {
+        return;
+    }
+    // an inset or extrusion: its handles are there instead (Del deletes it)
+    if st.selected_push().is_some() {
         return;
     }
     let b = st.doc.features.iter().filter(|f| st.selection.contains(&f.id)).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
@@ -893,7 +897,7 @@ fn face_card(ui: &mut Ui, st: &mut AppState) {
     });
     let flat = st.picked_faces().first().and_then(|f| st.model.as_ref().map(|m| m.faces[*f].kind == nurbs_kernel::model::SurfKind::Plane)).unwrap_or(false);
     let help = if flat {
-        "Inset (I) moves its outline in, then raises or sinks it. Extrude (E) pulls it out or pushes it in. Move the pointer, click to finish."
+        "Inset (I): its outline moved in, then sized with the handles. Extrude (E): pulled out or pushed in, the pointer moves it, a click ends it."
     } else {
         "A round face: Inset and Extrude take flat faces only for now."
     };

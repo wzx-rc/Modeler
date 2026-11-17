@@ -90,7 +90,7 @@ impl Drawer {
                     let flags = if by_face {
                         if picked.contains(&i) || f.tag.map(|t| st.selection.contains(&t.feature)).unwrap_or(false) {
                             FACE_SELECTED
-                        } else if st.hover_face == Some(i) {
+                        } else if st.hover_face == Some(i) && st.drag.is_none() && st.hot_handle.is_none() {
                             FACE_HOVERED
                         } else {
                             0

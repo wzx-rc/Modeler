@@ -73,18 +73,11 @@ impl SelMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PushPhase {
-    /// The pointer sets how far the outline moves in (Inset).
-    Inset,
-    /// The pointer sets how far the face moves along its normal.
-    Depth,
-}
-
-/// An inset or extrusion under way: a step in the document from the
-/// start, the kernel shows the real result live. Pressed on a face and
-/// dragged (`held`, the release ends the phase), or started on the picked
-/// face with its key (the pointer moves, a click ends the phase).
+/// An extrusion under way: a step in the document from the start, the
+/// kernel shows the real result live. Pressed on a face and dragged
+/// (`held`, the release ends it), or started on the picked face with E (the
+/// pointer moves, a click ends it). (An inset is made at once, then sized
+/// with its handle.)
 #[derive(Clone, Debug)]
 pub struct PushGesture {
     pub kind: PushKind,
@@ -92,7 +85,6 @@ pub struct PushGesture {
     /// Where the face was grabbed (on it), its outward normal.
     pub origin: DVec3,
     pub n: DVec3,
-    pub phase: PushPhase,
     pub held: bool,
     /// Pointer at the phase's start, and its place along the normal then.
     pub from: [f32; 2],
@@ -195,6 +187,10 @@ pub enum Handle {
     Plane(usize),
     /// A size of the selected shape: 0 width (+X), 1 height (top), 2 depth (+Z), 3 radius.
     Size(usize),
+    /// The selected inset's handle: the outline pulled in from the face's border.
+    PushInset,
+    /// The selected inset or extrusion's arrow: along the face's normal.
+    PushDepth,
 }
 
 #[derive(Clone, Debug)]
@@ -203,6 +199,8 @@ pub struct Drag {
     /// Where the pointer grabbed (world), and the features as they were.
     pub grab: DVec3,
     pub start: Vec<Feature>,
+    /// The line a push handle slides on (point, direction).
+    pub line: Option<(DVec3, DVec3)>,
 }
 
 pub struct Toast {
@@ -1172,6 +1170,7 @@ impl AppState {
                 closest_on_line(pivot, axis, ro, rd).map(|t| pivot + axis * t)
             }
             Handle::Plane(a) => BasePlane::new(pivot, DVec3::AXES[a], None).hit(ro, rd),
+            Handle::PushInset | Handle::PushDepth => None,
             Handle::Size(_) => {
                 let f = self.single()?;
                 let axis = size_axis(f, h)?;
@@ -1181,11 +1180,15 @@ impl AppState {
     }
 
     pub fn begin_drag(&mut self, h: Handle, p: [f32; 2]) {
+        if matches!(h, Handle::PushInset | Handle::PushDepth) {
+            self.begin_push_drag(h, p);
+            return;
+        }
         let Some(pivot) = self.handle_pivot(h) else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
         let start: Vec<Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).cloned().collect();
         self.begin_live(if matches!(h, Handle::Size(_)) { "Resize" } else { "Move" });
-        self.drag = Some(Drag { handle: h, grab, start });
+        self.drag = Some(Drag { handle: h, grab, start, line: None });
     }
 
     /// The point a handle sits on.
@@ -1201,6 +1204,10 @@ impl AppState {
 
     pub fn update_drag(&mut self, p: [f32; 2]) {
         let Some(d) = self.drag.clone() else { return };
+        if d.line.is_some() {
+            self.update_push_drag(&d, p);
+            return;
+        }
         let pivot0 = match d.handle {
             Handle::Size(_) => d.start.first().and_then(|f| size_handle_pos(f, d.handle)),
             _ => Some(d.start.iter().map(|f| f.centre()).sum::<DVec3>() / d.start.len().max(1) as f64),
@@ -1220,6 +1227,7 @@ impl AppState {
                     }
                 });
             }
+            Handle::PushInset | Handle::PushDepth => {}
             Handle::Size(k) => {
                 let Some(s) = d.start.first().cloned() else { return };
                 let Some(axis) = size_axis(&s, d.handle) else { return };

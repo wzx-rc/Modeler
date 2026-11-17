@@ -83,6 +83,19 @@ fn dist_seg(p: Pos2, a: Pos2, b: Pos2) -> f32 {
 
 /// The handle under the pointer: a size handle, an arrow, a plane square.
 fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
+    // the selected inset or extrusion: its dot, its arrow
+    if let Some(hs) = st.push_handles() {
+        if let Some((_, _, k)) = hs.inset {
+            if world(st, k).map(|q| (q - p).length() < 10.0).unwrap_or(false) {
+                return Some(Handle::PushInset);
+            }
+        }
+        if let (Some(a), Some(b)) = (world(st, hs.base), world(st, hs.tip)) {
+            if dist_seg(p, a + (b - a) * 0.25, b + (b - a).normalized() * 10.0) < 8.0 {
+                return Some(Handle::PushDepth);
+            }
+        }
+    }
     if st.tool != Tool::Select || st.creation.is_some() || st.sel_mode != SelMode::Object {
         return None;
     }
@@ -226,6 +239,21 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
         }
         Tool::Select if st.sel_mode == SelMode::Face => {
+            // the selected inset's dot and arrow
+            if resp.drag_started_by(PointerButton::Primary) {
+                let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                if let Some(h) = handle_at(st, origin) {
+                    st.begin_drag(h, p2(origin));
+                }
+            }
+            if resp.dragged_by(PointerButton::Primary) && st.drag.is_some() {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.update_drag(p2(p));
+                }
+            }
+            if resp.drag_stopped() {
+                st.end_drag();
+            }
             if resp.clicked_by(PointerButton::Primary) {
                 let at = resp.interact_pointer_pos().or(hover).map(p2);
                 st.click_face(at, shift || ctrl);
@@ -242,16 +270,21 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             if resp.drag_started_by(PointerButton::Primary) {
                 let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
                 st.push_press(kind, p2(origin), true);
+                if kind == PushKind::Inset {
+                    // pressed and dragged: the new inset's dot follows
+                    st.begin_drag(Handle::PushInset, p2(origin));
+                }
                 if let Some(p) = hover {
-                    st.push_move(p2(p));
+                    if st.drag.is_some() {
+                        st.update_drag(p2(p));
+                    } else {
+                        st.push_move(p2(p));
+                    }
                 }
             } else if resp.clicked_by(PointerButton::Primary) {
                 if let Some(p) = resp.interact_pointer_pos() {
-                    // a click: Inset 2 mm at once, Extrude follows the pointer
+                    // a click: a 2 mm inset at once; an extrusion follows the pointer
                     st.push_press(kind, p2(p), false);
-                    if kind == PushKind::Inset {
-                        st.push_next(p2(p));
-                    }
                 }
             }
         }
@@ -542,24 +575,45 @@ fn draw_vertices(p: &Painter, st: &AppState) {
     }
 }
 
-/// The inset or extrusion under way: its value by the pointer, the normal
-/// it moves along.
+/// The extrusion under way: its value by the pointer, the normal it moves
+/// along. The selected inset or extrusion: its dot and its arrow.
 fn draw_push(p: &Painter, st: &AppState) {
-    let Some(g) = &st.push else { return };
-    let col = accent();
-    if g.phase == PushPhase::Depth {
+    let col = FACE_SEL;
+    if let Some(g) = &st.push {
         if let (Some(a), Some(b)) = (world(st, g.origin), world(st, g.origin + g.n * g.depth)) {
             p.line_segment([a, b], Stroke::new(1.2, tint(col, 0.7)));
             p.circle(a, 3.0, chip_bg(), Stroke::new(1.3, col));
         }
+        let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("Extrude {} mm", fmt_mm(g.depth as f32)), col, col);
+        return;
     }
-    let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
-    let txt = match g.phase {
-        PushPhase::Inset => format!("Inset {} mm", fmt_mm(g.inset as f32)),
-        PushPhase::Depth if g.kind == PushKind::Inset => format!("Inset {} · depth {} mm", fmt_mm(g.inset as f32), fmt_mm(g.depth as f32)),
-        PushPhase::Depth => format!("Extrude {} mm", fmt_mm(g.depth as f32)),
-    };
-    chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, col, col);
+    let Some(hs) = st.push_handles() else { return };
+    let Some(pu) = st.selected_push().and_then(|f| f.push.clone()) else { return };
+    let hot = st.hot_handle;
+    let dragging = st.drag.as_ref().map(|d| d.handle);
+    let lit = |h: Handle| hot == Some(h) || dragging == Some(h);
+    if let Some((q, _, k)) = hs.inset {
+        if let (Some(a), Some(b)) = (world(st, q), world(st, k)) {
+            let on = lit(Handle::PushInset);
+            p.line_segment([a, b], Stroke::new(if on { 2.2 } else { 1.6 }, col));
+            p.circle(a, 2.5, col, Stroke::NONE);
+            p.circle(b, if on { 7.5 } else { 6.0 }, if on { HOT } else { chip_bg() }, Stroke::new(2.0, col));
+            if on {
+                chip(p, b + vec2(14.0, -10.0), Align2::LEFT_BOTTOM, &format!("Inset {} mm", fmt_mm(pu.inset as f32)), col, col);
+            }
+        }
+    }
+    if let (Some(a), Some(b)) = (world(st, hs.base), world(st, hs.tip)) {
+        let on = lit(Handle::PushDepth);
+        p.circle(a, 3.0, chip_bg(), Stroke::new(1.3, col));
+        arrow(p, a, b, if on { HOT } else { col }, if on { 3.0 } else { 2.2 });
+        if on {
+            let d = pu.depth;
+            let txt = if d.abs() < 1e-9 { "Depth 0 (the line only)".to_string() } else { format!("Depth {}{} mm", if d > 0.0 { "+" } else { "−" }, fmt_mm(d.abs() as f32)) };
+            chip(p, b + vec2(14.0, -6.0), Align2::LEFT_BOTTOM, &txt, col, col);
+        }
+    }
 }
 
 fn draw_marquee(p: &Painter, st: &AppState) {
@@ -629,13 +683,7 @@ fn status(p: &Painter, st: &AppState) {
 /// What the hint line says.
 pub fn hint(st: &AppState) -> String {
     if let Some(g) = &st.push {
-        return match (g.phase, g.held) {
-            (PushPhase::Inset, true) => "Drag: how far the outline moves in · release, then the depth".into(),
-            (PushPhase::Inset, false) => "Move: how far the outline moves in · click, then the depth · Esc cancels".into(),
-            (PushPhase::Depth, true) => "Drag: out adds, in carves · release to finish · Esc cancels".into(),
-            (PushPhase::Depth, false) if g.kind == PushKind::Inset => "Move for the depth (out raises, in sinks) · click to finish (here: just the line) · Esc cancels".into(),
-            (PushPhase::Depth, false) => "Move: out adds, in carves · click to finish · Esc cancels".into(),
-        };
+        return if g.held { "Drag: out adds, in carves · release to finish · Esc cancels".into() } else { "Move: out adds, in carves · click to finish · Esc cancels".into() };
     }
     match (&st.creation, st.tool) {
         (Some(c), _) if c.phase == Phase::Base => match c.kind {
@@ -650,7 +698,7 @@ pub fn hint(st: &AppState) -> String {
         },
         (None, Tool::Create(k)) => format!("{} · {}: press on the ground or a face and drag · a click places 20 mm · {} again: at once", k.label(), st.mode.label(), crate::ui::prim_key(k)),
         (None, Tool::Push(k)) => match k {
-            PushKind::Inset => "Inset: press on a flat face and drag the inset, release, then move for the depth · a click: 2 mm".into(),
+            PushKind::Inset => "Inset: click a flat face (2 mm), then drag its dot · or press on the face and drag".into(),
             PushKind::Extrude => "Extrude: press on a flat face and drag it out (adds) or in (carves)".into(),
         },
         (None, Tool::Select) if st.sel_mode == SelMode::Vertex => {
@@ -662,7 +710,11 @@ pub fn hint(st: &AppState) -> String {
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Face => {
             if let Some(f) = st.selected_push() {
-                format!("{} · set its sizes on the left · click a face to pick it · Del deletes", f.kind_label())
+                if f.push.as_ref().map(|p| p.inset > 0.0).unwrap_or(false) {
+                    "Inset · drag the dot: the outline · the arrow: out raises, in sinks · Del deletes".into()
+                } else {
+                    "Extrude · drag the arrow: out adds, in carves · Del deletes".into()
+                }
             } else if st.face_sel.is_empty() {
                 "Faces: click a face of the part · Shift + click adds · then I inset, E extrude".into()
             } else {
