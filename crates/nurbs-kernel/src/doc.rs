@@ -3,6 +3,9 @@
 //! `origin` is the centre of its base, it rises along its local +Y (the
 //! rotation `rot` turns local into world). Millimetres, Y up.
 //!
+//! A sketched feature (`Prim::Profile`) is a closed outline of corners and
+//! curve points (`Profile`) drawn on a plane, pulled to a height.
+//!
 //! A feature can also be a fillet or a chamfer (`round`) of edges of what is
 //! built before it. Its edges are named by the tags of the two faces each
 //! one joins (`EdgeRef`), so they are found again when a shape moves.
@@ -43,12 +46,18 @@ pub enum Prim {
     /// Width (local X), height (local Y), depth (local Z).
     Box { x: f64, y: f64, z: f64 },
     Cylinder { radius: f64, height: f64 },
+    /// A sketched outline (`Feature::profile`) pulled to a height: the
+    /// outline's box width (local X), the height (local Y), its box depth
+    /// (local Z). Resizing it stretches the outline.
+    Profile { x: f64, y: f64, z: f64 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PrimKind {
     Box,
     Cylinder,
+    /// The Sketch tool's outlines.
+    Profile,
 }
 
 impl PrimKind {
@@ -56,6 +65,7 @@ impl PrimKind {
         match self {
             PrimKind::Box => "Cube",
             PrimKind::Cylinder => "Cylinder",
+            PrimKind::Profile => "Sketch",
         }
     }
     /// Default primitive: 20 mm.
@@ -63,6 +73,7 @@ impl PrimKind {
         match self {
             PrimKind::Box => Prim::Box { x: 20.0, y: 20.0, z: 20.0 },
             PrimKind::Cylinder => Prim::Cylinder { radius: 10.0, height: 20.0 },
+            PrimKind::Profile => Prim::Profile { x: 20.0, y: 20.0, z: 20.0 },
         }
     }
 }
@@ -72,24 +83,25 @@ impl Prim {
         match self {
             Prim::Box { .. } => PrimKind::Box,
             Prim::Cylinder { .. } => PrimKind::Cylinder,
+            Prim::Profile { .. } => PrimKind::Profile,
         }
     }
     pub fn height(&self) -> f64 {
         match *self {
-            Prim::Box { y, .. } => y,
+            Prim::Box { y, .. } | Prim::Profile { y, .. } => y,
             Prim::Cylinder { height, .. } => height,
         }
     }
     pub fn set_height(&mut self, h: f64) {
         match self {
-            Prim::Box { y, .. } => *y = h,
+            Prim::Box { y, .. } | Prim::Profile { y, .. } => *y = h,
             Prim::Cylinder { height, .. } => *height = h,
         }
     }
     /// Half extents in the local frame, around the base centre: x, height, z.
     pub fn half_xz(&self) -> (f64, f64) {
         match *self {
-            Prim::Box { x, z, .. } => (x * 0.5, z * 0.5),
+            Prim::Box { x, z, .. } | Prim::Profile { x, z, .. } => (x * 0.5, z * 0.5),
             Prim::Cylinder { radius, .. } => (radius, radius),
         }
     }
@@ -97,6 +109,89 @@ impl Prim {
 
 fn yes() -> bool {
     true
+}
+
+/// A sketched outline: its points in the unit square [-0.5, 0.5]² of the
+/// feature's local X and Z (scaled by the profile's box), each a corner or
+/// a curve point. A curve point rounds the outline into a quadratic curve
+/// from the middle of its incoming side to the middle of its outgoing one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Profile {
+    pub points: Vec<[f64; 2]>,
+    pub smooth: Vec<bool>,
+}
+
+/// One piece of an outline: a curve around a curve point, or a straight
+/// side between two pieces.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Piece {
+    /// 2 i for the curve around point i, 2 i + 1 for the side after it.
+    pub id: usize,
+    pub pts: Vec<[f64; 2]>,
+}
+
+impl Profile {
+    /// The points scaled to a box of `w` × `d`.
+    pub fn scaled(&self, w: f64, d: f64) -> Vec<[f64; 2]> {
+        self.points.iter().map(|p| [p[0] * w, p[1] * d]).collect()
+    }
+    /// Its pieces, in a box of `w` × `d`, curves sampled (as the kernel
+    /// builds them: a curve between the middles of the two sides).
+    pub fn pieces(&self, w: f64, d: f64) -> Vec<Piece> {
+        pieces(&self.scaled(w, d), &self.smooth)
+    }
+    /// The closed outline as one polyline (last point = first).
+    pub fn polyline(&self, w: f64, d: f64) -> Vec<[f64; 2]> {
+        let mut out: Vec<[f64; 2]> = vec![];
+        for piece in self.pieces(w, d) {
+            for p in piece.pts {
+                if out.last().map(|q| (q[0] - p[0]).abs() + (q[1] - p[1]).abs() > 1e-9).unwrap_or(true) {
+                    out.push(p);
+                }
+            }
+        }
+        if let Some(f) = out.first().copied() {
+            out.push(f);
+        }
+        out
+    }
+    /// Mirrored across local X (the feature turned over to grow downwards).
+    pub fn flipped(&self) -> Profile {
+        Profile { points: self.points.iter().map(|p| [p[0], -p[1]]).collect(), smooth: self.smooth.clone() }
+    }
+}
+
+/// The pieces of a closed outline of points (corners or curve points).
+pub fn pieces(p: &[[f64; 2]], smooth: &[bool]) -> Vec<Piece> {
+    let n = p.len();
+    let mut out = vec![];
+    if n < 2 {
+        return out;
+    }
+    let mid = |a: [f64; 2], b: [f64; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+    let far = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() > 1e-9;
+    let round = |i: usize| smooth.get(i).copied().unwrap_or(false) && far(p[(i + n - 1) % n], p[i]) && far(p[i], p[(i + 1) % n]);
+    // where each point's piece starts and ends (the point itself at a corner)
+    let ends = |i: usize| if round(i) { (mid(p[(i + n - 1) % n], p[i]), mid(p[i], p[(i + 1) % n])) } else { (p[i], p[i]) };
+    for i in 0..n {
+        let (a, b) = ends(i);
+        if round(i) {
+            let k = 16;
+            let pts = (0..=k)
+                .map(|j| {
+                    let t = j as f64 / k as f64;
+                    let (u, v, w) = ((1.0 - t) * (1.0 - t), 2.0 * t * (1.0 - t), t * t);
+                    [u * a[0] + v * p[i][0] + w * b[0], u * a[1] + v * p[i][1] + w * b[1]]
+                })
+                .collect();
+            out.push(Piece { id: 2 * i, pts });
+        }
+        let (next, _) = ends((i + 1) % n);
+        if far(b, next) {
+            out.push(Piece { id: 2 * i + 1, pts: vec![b, next] });
+        }
+    }
+    out
 }
 
 /// An edge of the part, found again at every build: the packed tags
@@ -150,6 +245,9 @@ pub struct Feature {
     /// of size 0), `origin` is the middle of its edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<Round>,
+    /// A sketched feature's outline (`Prim::Profile`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Profile>,
 }
 
 impl Feature {
@@ -201,6 +299,20 @@ impl Feature {
         let m = self.matrix();
         let h = self.prim.height();
         match self.prim {
+            Prim::Profile { x, z, .. } => {
+                let Some(pr) = &self.profile else { return vec![] };
+                let line = pr.polyline(x, z);
+                let ring = |y: f64| -> Vec<DVec3> { line.iter().map(|q| m.transform_point3(DVec3::new(q[0], y, q[1]))).collect() };
+                let mut out = vec![ring(0.0), ring(h)];
+                // the corners' uprights
+                for (i, q) in pr.scaled(x, z).iter().enumerate() {
+                    if !pr.smooth.get(i).copied().unwrap_or(false) {
+                        let b = m.transform_point3(DVec3::new(q[0], 0.0, q[1]));
+                        out.push(vec![b, b + self.axis() * h]);
+                    }
+                }
+                out
+            }
             Prim::Box { .. } => {
                 let c = self.corners();
                 let pairs = [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)];
@@ -272,7 +384,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -282,7 +394,7 @@ impl Doc {
         let round = Round { size, chamfer, edges };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round) });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None });
         id
     }
     /// "Cube", then "Cube 2", "Cube 3"…

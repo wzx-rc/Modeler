@@ -10,7 +10,7 @@ use crate::view::View;
 use glam::{DQuat, DVec3, Vec3};
 use nurbs_kernel::client::{Kernel, Status};
 use nurbs_kernel::doc::PrimKind;
-use nurbs_kernel::{Doc, EdgeRef, Feature, FeatureId, Model, Op, Prim};
+use nurbs_kernel::{Doc, EdgeRef, Feature, FeatureId, Model, Op, Prim, Profile};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +95,20 @@ pub struct Creation {
     pub phase: Phase,
     /// Pointer position (screen) when the height phase began.
     pub height_from: [f32; 2],
+    /// A sketch's outline (unit square, as it grows upwards).
+    pub profile: Option<Profile>,
+}
+
+/// The Sketch tool's outline being drawn, on the flat face under its first
+/// point (else the ground): plane coordinates, each point a corner or a
+/// curve point.
+#[derive(Clone, Debug)]
+pub struct Sketch {
+    pub plane: BasePlane,
+    pub pts: Vec<[f64; 2]>,
+    pub smooth: Vec<bool>,
+    /// The point the press under way placed, and where it began (screen).
+    pub held: Option<(usize, [f32; 2])>,
 }
 
 /// What a gizmo handle moves.
@@ -145,7 +159,11 @@ pub struct AppState {
     pub tool: Tool,
     /// Add or Carve for new shapes.
     pub mode: Op,
+    /// Material of new shapes (index in `materials::MATERIALS`).
+    pub material: u32,
     pub creation: Option<Creation>,
+    /// The Sketch tool's outline being drawn.
+    pub sketch: Option<Sketch>,
     pub drag: Option<Drag>,
     pub hot_handle: Option<Handle>,
     /// Selection rectangle (screen).
@@ -194,7 +212,9 @@ impl AppState {
             hover_hit: None,
             tool: Tool::Select,
             mode: Op::Add,
+            material: 0,
             creation: None,
+            sketch: None,
             drag: None,
             hot_handle: None,
             marquee: None,
@@ -431,9 +451,96 @@ impl AppState {
 
     // -------------------------------------------------------------- tools
 
+    /// Arms a creation tool; the armed tool again places a shape at once
+    /// (`quick_add`).
     pub fn arm(&mut self, kind: PrimKind) {
+        if kind == PrimKind::Profile && self.tool == Tool::Create(kind) {
+            return;
+        }
         self.abort_gestures();
-        self.tool = if self.tool == Tool::Create(kind) { Tool::Select } else { Tool::Create(kind) };
+        if self.tool == Tool::Create(kind) {
+            self.quick_add(kind);
+        } else {
+            self.tool = Tool::Create(kind);
+        }
+    }
+
+    /// Quick creation (the armed tool again, or Shift + its key): a shape
+    /// placed at once and selected. Add: 20 mm, stacked on the selected
+    /// shape's top along its axis (at the world origin with nothing
+    /// selected). Carve: drilled through the selected shape, from its top.
+    pub fn quick_add(&mut self, kind: PrimKind) {
+        if kind == PrimKind::Profile {
+            self.arm(kind);
+            return;
+        }
+        self.abort_gestures();
+        let base = self.selection.iter().rev().filter_map(|id| self.doc.feature(*id)).find(|f| f.is_solid()).cloned();
+        let op = self.mode;
+        let (prim, origin, rot, how) = match (&base, op) {
+            (Some(b), Op::Add) => (kind.default_prim(), b.origin + b.axis() * b.prim.height(), b.rot, "on top of"),
+            (Some(b), Op::Carve) => {
+                let h = b.prim.height();
+                let (hx, hz) = b.prim.half_xz();
+                // a quarter of the base's smaller side, at most 5 mm
+                let r = (hx.min(hz) * 0.5).clamp(0.2, 5.0);
+                let prim = match kind {
+                    PrimKind::Box | PrimKind::Profile => Prim::Box { x: 2.0 * r, y: h + 2.0, z: 2.0 * r },
+                    PrimKind::Cylinder => Prim::Cylinder { radius: r, height: h + 2.0 },
+                };
+                // from 1 mm above the top, down through the base
+                (prim, b.origin + b.axis() * (h + 1.0), b.rot * DQuat::from_rotation_x(std::f64::consts::PI), "through")
+            }
+            (None, _) => (kind.default_prim(), DVec3::ZERO, DQuat::IDENTITY, "at the origin"),
+        };
+        let mat = self.material;
+        let mut id = 0;
+        self.edit(&format!("New {}", kind.label()), |d| {
+            id = d.add(op, prim, origin, rot);
+            if let Some(f) = d.feature_mut(id) {
+                f.material = mat;
+            }
+        });
+        self.tool = Tool::Select;
+        self.sel_mode = SelMode::Object;
+        self.edge_sel.clear();
+        self.selection = vec![id];
+        let target = base.map(|b| format!(" {how} {}", b.name)).unwrap_or_else(|| format!(" {how}"));
+        self.toast(&format!("{} {}{target}", kind.label(), op.label()), false);
+    }
+
+    /// The material a feature's faces show: its own, or for a fillet the
+    /// one of the shape its first edge belongs to.
+    pub fn material_of(&self, id: FeatureId) -> u32 {
+        let Some(f) = self.doc.feature(id) else { return 0 };
+        match &f.round {
+            None => f.material,
+            Some(r) => r
+                .edges
+                .first()
+                .and_then(|e| nurbs_kernel::FaceTag::unpack(e.faces[0]))
+                .and_then(|t| self.doc.feature(t.feature))
+                .filter(|g| g.is_solid())
+                .map(|g| g.material)
+                .unwrap_or(0),
+        }
+    }
+
+    /// Gives the selected shapes a material (with nothing selected: the
+    /// material of new shapes).
+    pub fn set_material(&mut self, m: u32) {
+        let ids: Vec<FeatureId> = self.selection.iter().copied().filter(|id| self.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false)).collect();
+        if ids.is_empty() {
+            self.material = m;
+            return;
+        }
+        self.edit("Material", |d| {
+            for id in &ids {
+                if let Some(f) = d.feature_mut(*id) {
+                    f.material = m;
+                }
+            }
+        });
     }
 
     pub fn select_tool(&mut self) {
@@ -613,11 +720,12 @@ impl AppState {
         crate::widgets::nice_ceil((ext * 0.5).clamp(1.0, 100.0) as f32) as f64
     }
 
-    /// Cancels what is under way (creation, drag).
+    /// Cancels what is under way (creation, sketch, drag).
     pub fn abort_gestures(&mut self) {
         if self.creation.take().is_some() || self.drag.take().is_some() {
             self.cancel_live();
         }
+        self.sketch = None;
         self.marquee = None;
     }
 
@@ -658,6 +766,9 @@ impl AppState {
 
     /// Starts a creation at `p` (screen).
     pub fn begin_creation(&mut self, kind: PrimKind, p: [f32; 2]) {
+        if kind == PrimKind::Profile {
+            return;
+        }
         let Some((plane, q)) = self.base_plane_at(p) else { return };
         let mut a = plane.to_plane(q);
         a = [self.snap(a[0]), self.snap(a[1])];
@@ -667,16 +778,18 @@ impl AppState {
         let rot = basis_rotation(plane.u, plane.n);
         // a tiny shape at first: it grows with the drag
         let prim = match kind {
-            PrimKind::Box => Prim::Box { x: 0.01, y: 0.01, z: 0.01 },
+            PrimKind::Box | PrimKind::Profile => Prim::Box { x: 0.01, y: 0.01, z: 0.01 },
             PrimKind::Cylinder => Prim::Cylinder { radius: 0.01, height: 0.01 },
         };
         let mut id = 0;
+        let mat = self.material;
         self.live(|d| id = d.add(op, prim, origin, rot));
         // hidden until it has a size
         if let Some(f) = self.doc.feature_mut(id) {
             f.visible = false;
+            f.material = mat;
         }
-        self.creation = Some(Creation { kind, id, plane, a, b: a, height: 0.0, phase: Phase::Base, height_from: p });
+        self.creation = Some(Creation { kind, id, plane, a, b: a, height: 0.0, phase: Phase::Base, height_from: p, profile: None });
         self.selection = vec![id];
     }
 
@@ -709,7 +822,7 @@ impl AppState {
 
     fn creation_base_centre(&self, c: &Creation) -> DVec3 {
         match c.kind {
-            PrimKind::Box => c.plane.at([(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5]),
+            PrimKind::Box | PrimKind::Profile => c.plane.at([(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5]),
             PrimKind::Cylinder => c.plane.at(c.a),
         }
     }
@@ -720,7 +833,7 @@ impl AppState {
         let (w, dpt) = ((c.b[0] - c.a[0]).abs(), (c.b[1] - c.a[1]).abs());
         let r = ((c.b[0] - c.a[0]).powi(2) + (c.b[1] - c.a[1]).powi(2)).sqrt();
         let base_ok = match c.kind {
-            PrimKind::Box => w > 1e-6 && dpt > 1e-6,
+            PrimKind::Box | PrimKind::Profile => w > 1e-6 && dpt > 1e-6,
             PrimKind::Cylinder => r > 1e-6,
         };
         let h = match c.phase {
@@ -740,7 +853,12 @@ impl AppState {
                 f.prim = match c.kind {
                     PrimKind::Box => Prim::Box { x: w.max(0.01), y: shown_h, z: dpt.max(0.01) },
                     PrimKind::Cylinder => Prim::Cylinder { radius: r.max(0.01), height: shown_h },
+                    PrimKind::Profile => Prim::Profile { x: w.max(0.01), y: shown_h, z: dpt.max(0.01) },
                 };
+                // turned over to grow down: the outline mirrored stays in place
+                if let Some(pr) = &c.profile {
+                    f.profile = Some(if down { pr.flipped() } else { pr.clone() });
+                }
                 f.visible = base_ok;
             }
         });
@@ -751,14 +869,14 @@ impl AppState {
     pub fn base_released(&mut self, p: [f32; 2]) {
         let Some(mut c) = self.creation.clone() else { return };
         let tiny = match c.kind {
-            PrimKind::Box => (c.b[0] - c.a[0]).abs() < 0.5 || (c.b[1] - c.a[1]).abs() < 0.5,
+            PrimKind::Box | PrimKind::Profile => (c.b[0] - c.a[0]).abs() < 0.5 || (c.b[1] - c.a[1]).abs() < 0.5,
             PrimKind::Cylinder => ((c.b[0] - c.a[0]).powi(2) + (c.b[1] - c.a[1]).powi(2)).sqrt() < 0.5,
         };
         if tiny {
             // direct: a default shape, centred on the click
             let s = 10.0;
             match c.kind {
-                PrimKind::Box => {
+                PrimKind::Box | PrimKind::Profile => {
                     c.b = [c.a[0] + s, c.a[1] + s];
                     c.a = [c.a[0] - s, c.a[1] - s];
                 }
@@ -802,6 +920,119 @@ impl AppState {
             self.cancel_live();
             self.clean_selection();
         }
+    }
+
+    // -------------------------------------------------------------- sketch
+
+    /// Where the pointer is on the sketch's plane (snapped).
+    pub fn sketch_point(&self, p: [f32; 2]) -> Option<[f64; 2]> {
+        let k = self.sketch.as_ref()?;
+        let (ro, rd) = self.ray(p);
+        let q = k.plane.to_plane(k.plane.hit(ro, rd)?);
+        Some([self.snap(q[0]), self.snap(q[1])])
+    }
+
+    /// Whether the pointer is on the sketch's first point (it closes it).
+    pub fn sketch_on_first(&self, p: [f32; 2]) -> bool {
+        let Some(k) = &self.sketch else { return false };
+        if k.pts.len() < 3 {
+            return false;
+        }
+        let Some(s) = self.view().project(k.plane.at(k.pts[0]).as_vec3()) else { return false };
+        (s[0] - p[0]).hypot(s[1] - p[1]) < 10.0
+    }
+
+    /// A press with the Sketch tool: the first point (it picks the face
+    /// under it, else the ground), the next ones, or the first point again
+    /// to close the outline.
+    pub fn sketch_press(&mut self, p: [f32; 2]) {
+        if self.sketch.is_none() {
+            let Some((plane, q)) = self.base_plane_at(p) else { return };
+            let a = plane.to_plane(q);
+            self.sketch = Some(Sketch { plane, pts: vec![[self.snap(a[0]), self.snap(a[1])]], smooth: vec![false], held: Some((0, p)) });
+            self.selection.clear();
+            return;
+        }
+        if self.sketch_on_first(p) {
+            self.sketch_close(p);
+            return;
+        }
+        let Some(q) = self.sketch_point(p) else { return };
+        let k = self.sketch.as_mut().unwrap();
+        // the same point twice: nothing
+        if k.pts.last().map(|l| (l[0] - q[0]).abs() + (l[1] - q[1]).abs() < 1e-9).unwrap_or(false) {
+            k.held = None;
+            return;
+        }
+        k.pts.push(q);
+        k.smooth.push(false);
+        k.held = Some((k.pts.len() - 1, p));
+    }
+
+    /// Dragging the press: the point follows and becomes a curve point.
+    pub fn sketch_drag(&mut self, p: [f32; 2]) {
+        let q = self.sketch_point(p);
+        let Some(k) = self.sketch.as_mut() else { return };
+        let (Some((i, from)), Some(q)) = (k.held, q) else { return };
+        if (p[0] - from[0]).hypot(p[1] - from[1]) > 4.0 {
+            k.pts[i] = q;
+            k.smooth[i] = true;
+        }
+    }
+
+    pub fn sketch_release(&mut self) {
+        if let Some(k) = self.sketch.as_mut() {
+            k.held = None;
+        }
+    }
+
+    /// Backspace: the last point goes (the sketch with it if none is left).
+    pub fn sketch_back(&mut self) {
+        if let Some(k) = self.sketch.as_mut() {
+            k.pts.pop();
+            k.smooth.pop();
+            k.held = None;
+            if k.pts.is_empty() {
+                self.sketch = None;
+            }
+        }
+    }
+
+    /// Closes the outline (Enter, or a click on its first point): it becomes
+    /// a shape whose height follows the pointer, like the other tools.
+    pub fn sketch_close(&mut self, p: [f32; 2]) {
+        let Some(k) = self.sketch.clone() else { return };
+        if k.pts.len() < 3 {
+            self.toast("A sketch needs 3 points at least", true);
+            return;
+        }
+        let lo = k.pts.iter().fold([f64::MAX; 2], |a, q| [a[0].min(q[0]), a[1].min(q[1])]);
+        let hi = k.pts.iter().fold([f64::MIN; 2], |a, q| [a[0].max(q[0]), a[1].max(q[1])]);
+        let (w, dp) = (hi[0] - lo[0], hi[1] - lo[1]);
+        if w < 0.5 || dp < 0.5 {
+            self.toast("The outline is flat: draw it wider", true);
+            return;
+        }
+        let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
+        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone() };
+        self.sketch = None;
+        self.begin_live("New Sketch");
+        let op = self.mode;
+        let mat = self.material;
+        let (origin, rot) = (k.plane.at(c), basis_rotation(k.plane.u, k.plane.n));
+        let mut id = 0;
+        let pr = profile.clone();
+        self.live(|d| {
+            id = d.add(op, Prim::Profile { x: w, y: 0.2, z: dp }, origin, rot);
+            if let Some(f) = d.feature_mut(id) {
+                f.material = mat;
+                f.profile = Some(pr);
+            }
+        });
+        let cr = Creation { kind: PrimKind::Profile, id, plane: k.plane, a: lo, b: hi, height: 0.0, phase: Phase::Height, height_from: p, profile: Some(profile) };
+        self.creation = Some(cr.clone());
+        self.selection = vec![id];
+        self.apply_creation(&cr);
     }
 
     // --------------------------------------------------------------- moves
@@ -881,12 +1112,12 @@ impl AppState {
                 let amount = self.snap(delta.dot(axis));
                 let mut f = s.clone();
                 match (&mut f.prim, k) {
-                    (Prim::Box { x, .. }, 0) => {
+                    (Prim::Box { x, .. } | Prim::Profile { x, .. }, 0) => {
                         let nx = (*x + amount).max(0.1);
                         f.origin = s.origin + axis * (nx - *x) * 0.5;
                         *x = nx;
                     }
-                    (Prim::Box { z, .. }, 2) => {
+                    (Prim::Box { z, .. } | Prim::Profile { z, .. }, 2) => {
                         let nz = (*z + amount).max(0.1);
                         f.origin = s.origin + axis * (nz - *z) * 0.5;
                         *z = nz;
@@ -1036,8 +1267,8 @@ pub fn size_handle_pos(f: &Feature, h: Handle) -> Option<DVec3> {
     let hh = f.prim.height();
     let (hx, hz) = f.prim.half_xz();
     let local = match (h, f.prim) {
-        (Handle::Size(0), Prim::Box { .. }) => DVec3::new(hx, hh * 0.5, 0.0),
-        (Handle::Size(2), Prim::Box { .. }) => DVec3::new(0.0, hh * 0.5, hz),
+        (Handle::Size(0), Prim::Box { .. } | Prim::Profile { .. }) => DVec3::new(hx, hh * 0.5, 0.0),
+        (Handle::Size(2), Prim::Box { .. } | Prim::Profile { .. }) => DVec3::new(0.0, hh * 0.5, hz),
         (Handle::Size(1), _) => DVec3::new(0.0, hh, 0.0),
         (Handle::Size(3), Prim::Cylinder { .. }) => DVec3::new(hx, hh * 0.5, 0.0),
         _ => return None,
@@ -1051,7 +1282,7 @@ pub fn size_handles(f: &Feature) -> Vec<Handle> {
         return vec![];
     }
     match f.prim {
-        Prim::Box { .. } => vec![Handle::Size(0), Handle::Size(1), Handle::Size(2)],
+        Prim::Box { .. } | Prim::Profile { .. } => vec![Handle::Size(0), Handle::Size(1), Handle::Size(2)],
         Prim::Cylinder { .. } => vec![Handle::Size(3), Handle::Size(1)],
     }
 }

@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! forme-nurbs-shot: runs the real app headless (egui + wgpu, a software
 //! GPU is fine) with the kernel process, plays scenarios with pointer
 //! events and saves PNGs.
@@ -333,6 +334,97 @@ fn main() {
         h.shot("zero-create-6-done");
         for f in &h.st.doc.features {
             eprintln!("  {} {:?} {:?} at {:?}", f.name, f.op, f.prim, f.origin);
+        }
+    }
+
+    if want("quick") {
+        // quick creation: the tool's key twice, then stacked, then drilled
+        h.reset(Doc::default(), "Quick");
+        h.key(egui::Key::B);
+        h.key(egui::Key::B);
+        h.key(egui::Key::C);
+        h.key(egui::Key::C);
+        h.settle();
+        h.st.frame_all();
+        h.steps(2);
+        h.shot("zero-quick-1-stacked");
+        // Carve for new shapes (X would also switch the selected cylinder)
+        h.st.mode = Op::Carve;
+        h.hold(Modifiers::SHIFT);
+        h.key(egui::Key::C);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.shot("zero-quick-2-drilled");
+        for f in &h.st.doc.features {
+            eprintln!("  {} {:?} {:?} at {:?}", f.name, f.op, f.prim, f.origin);
+        }
+        // materials: orange cube, steel cylinder, the section open
+        let ids: Vec<u32> = h.st.doc.features.iter().map(|f| f.id).collect();
+        h.st.selection = vec![ids[0]];
+        h.st.set_material(2);
+        h.st.selection = vec![ids[1]];
+        h.st.set_material(4);
+        h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("material-open"), true));
+        h.settle();
+        h.shot("zero-quick-3-materials");
+    }
+
+    if want("sketch") {
+        // the Sketch tool (L): an outline on the ground, Add, then one on the
+        // block's front face, Carve
+        h.reset(test_part(), "Test part");
+        h.st.camera.frame(Vec3::new(-60.0, 0.0, -20.0), Vec3::new(25.0, 25.0, 35.0));
+        h.steps(2);
+        h.key(egui::Key::L);
+        let view = h.st.view();
+        let at = move |w: Vec3| {
+            let p = view.project(w).expect("in front");
+            pos2(p[0], p[1])
+        };
+        let g = |x: f32, z: f32| at(Vec3::new(x, 0.0, z));
+        let (p0, p1, p2, p3, p4) = (g(-55.0, 30.0), g(-30.0, 30.0), g(-30.0, 20.0), g(-42.0, 12.0), g(-55.0, 12.0));
+        h.click(p0);
+        h.click(p1);
+        h.click(p2);
+        // a curve point: pressed, then dragged out
+        h.drag(g(-40.0, 18.0), p3, 8, true);
+        h.click(p4);
+        h.move_to(g(-50.0, 22.0));
+        h.steps(2);
+        h.shot("zero-sketch-1-outline");
+        // closing on the first point: on to the height
+        h.move_to(p0);
+        h.steps(2);
+        h.shot("zero-sketch-2-close");
+        h.click(p0);
+        let up = at(Vec3::new(-42.0, 12.0, 21.0));
+        h.move_to(up);
+        h.settle();
+        h.shot("zero-sketch-3-height");
+        h.click(up);
+        h.settle();
+        // a D-shaped pocket in the block's front face, Carve
+        h.st.mode = Op::Carve;
+        let f = |x: f32, y: f32| at(Vec3::new(x, y, 15.0));
+        let (a0, a1, a2, a3) = (f(-17.0, 3.0), f(-7.0, 3.0), f(-7.0, 13.0), f(-17.0, 13.0));
+        h.click(a0);
+        h.click(a1);
+        h.drag(f(-6.0, 8.0), f(-3.0, 8.0), 6, true);
+        h.click(a2);
+        h.click(a3);
+        h.click(a0);
+        let inside = at(Vec3::new(-12.0, 8.0, 7.0));
+        h.move_to(inside);
+        h.settle();
+        h.shot("zero-sketch-4-pocket");
+        h.click(inside);
+        h.settle();
+        h.st.tool = Tool::Select;
+        h.st.selection.clear();
+        h.steps(2);
+        h.shot("zero-sketch-5-done");
+        for f in &h.st.doc.features {
+            eprintln!("  {} {:?} {:?} at {:?} {:?}", f.name, f.op, f.prim, f.origin, f.profile.as_ref().map(|p| p.points.len()));
         }
     }
 

@@ -23,7 +23,15 @@ struct U {
     misc: vec4<f32>,     // x = world origin shown
 };
 @group(0) @binding(0) var<uniform> u: U;
-@group(0) @binding(1) var<storage, read> face_flags: array<u32>;
+// per face: its material (linear colour, metal, roughness) and its state
+struct FaceGpu {
+    color: vec3<f32>,
+    flags: u32,
+    metal: f32,
+    rough: f32,
+    pad: vec2<f32>,
+};
+@group(0) @binding(1) var<storage, read> faces: array<FaceGpu>;
 
 fn project(p: vec3<f32>) -> vec4<f32> {
     let d = p - u.eye.xyz;
@@ -152,21 +160,30 @@ struct MOut {
     if (dot(n, v) < 0.0) {
         n = -n;
     }
-    var base = u.base.rgb;
-    let flags = face_flags[i.face];
+    let fc = faces[i.face];
+    var base = fc.color;
+    let flags = fc.flags;
     if ((flags & 1u) != 0u) {
         base = mix(base, u.sel.rgb, u.sel.a);
     } else if ((flags & 2u) != 0u) {
         base = mix(base, u.hover.rgb, u.hover.a);
     }
+    let metal = fc.metal;
+    let rough = fc.rough;
     let key = normalize(-u.right.xyz * 0.45 + u.up.xyz * 0.8 - u.fwd.xyz * 0.55);
     let fill = normalize(u.right.xyz * 0.7 - u.up.xyz * 0.2 - u.fwd.xyz * 0.6);
     let h = normalize(key + v);
     let sky = 0.5 + 0.5 * dot(n, u.up.xyz);
     let diff = max(dot(n, key), 0.0) * 0.95 + max(dot(n, fill), 0.0) * 0.18 + 0.05 + 0.07 * sky;
-    let spec = pow(max(dot(n, h), 0.0), 40.0) * 0.18;
+    // sharper, stronger and tinted highlights on metals; a sky / ground
+    // reflection gives them their look
+    let shine = mix(110.0, 8.0, rough);
+    let spec = pow(max(dot(n, h), 0.0), shine) * mix(0.18, 0.9, metal) * (1.0 - 0.6 * rough);
     let rim = pow(1.0 - max(dot(n, v), 0.0), 4.0) * 0.08;
-    let c = base * diff + vec3<f32>(spec + rim);
+    let r = reflect(-v, n);
+    let env = mix(vec3<f32>(0.10, 0.10, 0.11), vec3<f32>(0.85, 0.87, 0.9), clamp(0.5 + 0.5 * dot(r, u.up.xyz), 0.0, 1.0));
+    let spec_col = mix(vec3<f32>(1.0), base, metal);
+    let c = base * diff * (1.0 - 0.75 * metal) + base * env * metal * 0.85 + spec_col * spec + vec3<f32>(rim);
     return vec4<f32>(pow(aces(c * 0.9), vec3<f32>(1.0 / 2.2)), 1.0);
 }
 
@@ -276,6 +293,22 @@ struct Uniforms {
 /// Face flags read by the shader.
 pub const FACE_SELECTED: u32 = 1;
 pub const FACE_HOVERED: u32 = 2;
+
+/// One face as the shader reads it: its material (linear colour) and flags.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct FaceGpu {
+    pub color: [f32; 3],
+    pub flags: u32,
+    pub metal: f32,
+    pub rough: f32,
+    pub pad: [f32; 2],
+}
+
+/// sRGB 0..1 to linear.
+pub fn linear(c: [f32; 3]) -> [f32; 3] {
+    c.map(lin)
+}
 
 /// Edge line width in points (`Frame::points_to_px` makes pixels of it).
 const LINE_PT: f32 = 1.1;
@@ -390,7 +423,7 @@ impl Renderer {
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor { label: Some("view-uniforms"), size: std::mem::size_of::<Uniforms>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let faces_cap = 1024u64;
-        let faces = device.create_buffer(&wgpu::BufferDescriptor { label: Some("face-flags"), size: faces_cap * 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let faces = device.create_buffer(&wgpu::BufferDescriptor { label: Some("faces"), size: faces_cap * std::mem::size_of::<FaceGpu>() as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let bind = Self::bind_group(device, &layout, &uniforms, &faces);
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("view-pl"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
         let ms = wgpu::MultisampleState { count: MSAA, mask: !0, alpha_to_coverage_enabled: false };
@@ -461,12 +494,13 @@ impl Renderer {
         self.mesh_bounds = bounds_of(verts.iter().map(|v| &v.pos));
     }
 
-    /// The state of each face (FACE_SELECTED, FACE_HOVERED).
-    pub fn upload_faces(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, flags: &[u32]) {
+    /// Each face's material and state (FACE_SELECTED, FACE_HOVERED).
+    pub fn upload_faces(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, flags: &[FaceGpu]) {
+        let size = std::mem::size_of::<FaceGpu>() as u64;
         let n = flags.len().max(1) as u64;
         if n > self.faces_cap {
             self.faces_cap = n.next_power_of_two();
-            self.faces = device.create_buffer(&wgpu::BufferDescriptor { label: Some("face-flags"), size: self.faces_cap * 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            self.faces = device.create_buffer(&wgpu::BufferDescriptor { label: Some("faces"), size: self.faces_cap * size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             self.bind = Self::bind_group(device, &self.layout, &self.uniforms, &self.faces);
         }
         if !flags.is_empty() {

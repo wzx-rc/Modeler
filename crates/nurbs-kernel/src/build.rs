@@ -46,9 +46,11 @@ fn rows(m: DMat4) -> [[f64; 4]; 3] {
     [[c[0][0], c[1][0], c[2][0], c[3][0]], [c[0][1], c[1][1], c[2][1], c[3][1]], [c[0][2], c[1][2], c[2][2], c[3][2]]]
 }
 
-/// Which face of the primitive (local frame) a face is, from its normal.
-fn sub_of(prim: &Prim, kind: OccSurf, n: DVec3) -> u16 {
-    match prim {
+/// Which face of the primitive (local frame) a face is, from its normal and
+/// its middle point. A sketch: 1 top, 2 bottom, 3 + the outline piece a side
+/// comes from (`doc::Piece::id`).
+fn sub_of(f: &Feature, kind: OccSurf, n: DVec3, at: DVec3) -> u16 {
+    match f.prim {
         Prim::Box { .. } => {
             let a = n.abs();
             if a.x >= a.y && a.x >= a.z {
@@ -70,21 +72,51 @@ fn sub_of(prim: &Prim, kind: OccSurf, n: DVec3) -> u16 {
                 2
             }
         }
+        Prim::Profile { x, z, .. } => {
+            if kind == OccSurf::Plane && n.y > 0.5 {
+                1
+            } else if kind == OccSurf::Plane && n.y < -0.5 {
+                2
+            } else {
+                // the piece nearest the side's middle, seen from above
+                let q = [at.x, at.z];
+                let pieces = f.profile.as_ref().map(|p| p.pieces(x, z)).unwrap_or_default();
+                let near = pieces.iter().map(|pc| (pc.id, pc.pts.windows(2).map(|w| seg_dist(q, w[0], w[1])).fold(f64::MAX, f64::min))).min_by(|a, b| a.1.total_cmp(&b.1));
+                3 + near.map(|(id, _)| id).unwrap_or(0).min(60000) as u16
+            }
+        }
     }
+}
+
+/// Distance from `q` to the segment `a`–`b` (plane coordinates).
+fn seg_dist(q: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let l = dx * dx + dy * dy;
+    let t = if l > 0.0 { (((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / l).clamp(0.0, 1.0) } else { 0.0 };
+    ((q[0] - a[0] - t * dx).powi(2) + (q[1] - a[1] - t * dy).powi(2)).sqrt()
 }
 
 /// The feature's solid in the world, its faces tagged.
 fn tool(f: &Feature) -> Result<Shape, String> {
     let h = f.prim.height().max(0.01);
-    let mut s = match f.prim {
+    let s = match f.prim {
         Prim::Box { x, z, .. } => Shape::cuboid(x.max(0.01), h, z.max(0.01))?,
         Prim::Cylinder { radius, .. } => Shape::cylinder(radius.max(0.01), h)?,
+        Prim::Profile { x, z, .. } => {
+            let pr = f.profile.as_ref().ok_or("a sketch without its outline")?;
+            // OpenCascade extrudes an outline of its XY plane along Z: local
+            // (x, z) is OCC (x, -z), then turned so OCC Z is local Y
+            let pts: Vec<[f64; 2]> = pr.scaled(x.max(0.01), z.max(0.01)).iter().map(|p| [p[0], -p[1]]).collect();
+            let s = Shape::prism(&pts, &pr.smooth, h * 0.5)?;
+            s.transformed(rows(DMat4::from_rotation_x(-std::f64::consts::FRAC_PI_2)))?
+        }
     };
-    // the OCC primitives are centred: tag them in their own frame
+    let mut s = s;
+    // the shape is centred on its local origin: tag it in its own frame
     let tags: Vec<i64> = (0..s.face_count())
         .map(|i| {
             let info = s.face_info(i);
-            let sub = info.map(|fi| sub_of(&f.prim, fi.kind, DVec3::from_array(fi.normal))).unwrap_or(0);
+            let sub = info.map(|fi| sub_of(f, fi.kind, DVec3::from_array(fi.normal), DVec3::from_array(fi.point))).unwrap_or(0);
             FaceTag { feature: f.id, sub }.pack()
         })
         .collect();
@@ -343,6 +375,50 @@ mod tests {
     /// The tag of a face of the built model, packed.
     fn tag(feature: u32, sub: u16) -> i64 {
         FaceTag { feature, sub }.pack()
+    }
+
+    #[test]
+    fn sketches_are_profiles() {
+        // an L of 20 × 20 mm, 10 mm high, its inside corner a curve point
+        let mut d = Doc::default();
+        let l = d.add(Op::Add, Prim::Profile { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let pr = crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false, false, false, true, false, false] };
+        let pieces = pr.pieces(20.0, 20.0).len();
+        d.feature_mut(l).unwrap().profile = Some(pr);
+        let mut cache = Cache::default();
+        let m = build(&d, true, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((lo[1] - 0.0).abs() < 1e-3 && (hi[1] - 10.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        assert!((lo[0] + 10.0).abs() < 1e-3 && (hi[2] - 10.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        // top 1, bottom 2, one side per piece, each its own tag
+        let subs: Vec<u16> = m.faces.iter().filter_map(|f| f.tag).filter(|t| t.feature == l).map(|t| t.sub).collect();
+        assert_eq!(subs.len(), pieces + 2, "{subs:?}");
+        assert!(subs.contains(&1) && subs.contains(&2));
+        let mut sides: Vec<u16> = subs.iter().copied().filter(|s| *s >= 3).collect();
+        sides.sort();
+        sides.dedup();
+        assert_eq!(sides.len(), pieces, "{subs:?}");
+        // the side after point 0 (piece 1: the front, z = -10) is sub 4: its
+        // top edge fillets
+        let front = m.faces.iter().find(|f| f.tag == Some(FaceTag { feature: l, sub: 4 })).unwrap();
+        assert!(front.normal[2] < -0.99, "{:?}", front.normal);
+        d.add_round(1.0, false, vec![EdgeRef { faces: [tag(l, 1), tag(l, 4)], at: DVec3::new(0.0, 10.0, -10.0) }]);
+        let m2 = build(&d, true, &[], &mut cache);
+        assert!(m2.errors.is_empty(), "{:?}", m2.errors);
+        // a sketch carved into a block, turned upside down (it grows down
+        // from the block's top)
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 40.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let c = d.add(Op::Carve, Prim::Profile { x: 20.0, y: 5.0, z: 20.0 }, DVec3::new(0.0, 20.0, 0.0), DQuat::from_rotation_x(std::f64::consts::PI));
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false, false, true] });
+        let m3 = build(&d, true, &[], &mut cache);
+        assert!(m3.errors.is_empty(), "{:?}", m3.errors);
+        assert!(m3.faces.iter().any(|f| f.tag.map(|t| t.feature) == Some(c)), "the pocket's faces carry the sketch's tags");
+        // a bow tie crosses itself: an error, the block stays
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5]], smooth: vec![false; 4] });
+        let m4 = build(&d, true, &[], &mut cache);
+        assert_eq!(m4.errors.len(), 1, "{:?}", m4.errors);
     }
 
     #[test]

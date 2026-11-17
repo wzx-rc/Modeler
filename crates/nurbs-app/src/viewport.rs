@@ -237,6 +237,27 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 st.select(id, shift || ctrl);
             }
         }
+        Tool::Create(PrimKind::Profile) if st.creation.is_none() => {
+            // the outline: a click puts a corner, a drag a curve point
+            if resp.drag_started_by(PointerButton::Primary) {
+                let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                st.sketch_press(p2(origin));
+            }
+            if resp.dragged_by(PointerButton::Primary) {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.sketch_drag(p2(p));
+                }
+            }
+            if resp.drag_stopped() {
+                st.sketch_release();
+            }
+            if resp.clicked_by(PointerButton::Primary) {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    st.sketch_press(p2(p));
+                    st.sketch_release();
+                }
+            }
+        }
         Tool::Create(kind) => {
             let phase = st.creation.as_ref().map(|c| c.phase);
             match phase {
@@ -352,8 +373,8 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
         p.circle(q, if on { 7.0 } else { 5.5 }, if on { HOT } else { Color32::WHITE }, Stroke::new(1.5, Color32::from_rgb(0x20, 0x22, 0x26)));
         if on {
             let (label, v) = match (h, f.prim) {
-                (Handle::Size(0), Prim::Box { x, .. }) => ("W", x),
-                (Handle::Size(2), Prim::Box { z, .. }) => ("D", z),
+                (Handle::Size(0), Prim::Box { x, .. } | Prim::Profile { x, .. }) => ("W", x),
+                (Handle::Size(2), Prim::Box { z, .. } | Prim::Profile { z, .. }) => ("D", z),
                 (Handle::Size(3), Prim::Cylinder { radius, .. }) => ("R", radius),
                 (_, pr) => ("H", pr.height()),
             };
@@ -362,7 +383,59 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
     }
 }
 
+/// The outline being sketched: its pieces as the kernel will build them,
+/// the pointer as the next point, the side back to the first point dimmed.
+fn draw_sketch(p: &Painter, st: &AppState) {
+    let Some(k) = &st.sketch else { return };
+    let col = if st.mode == Op::Carve { carve() } else { accent() };
+    let hover = p.ctx().input(|i| i.pointer.hover_pos());
+    let closing = hover.map(|h| st.sketch_on_first(p2(h))).unwrap_or(false);
+    let mut pts = k.pts.clone();
+    let mut smooth = k.smooth.clone();
+    // the pointer: the next point (unless a point is being dragged or the
+    // outline is about to close)
+    if let (None, false, Some(q)) = (k.held, closing, hover.and_then(|h| st.sketch_point(p2(h)))) {
+        if pts.last().map(|l| (l[0] - q[0]).abs() + (l[1] - q[1]).abs() > 1e-9).unwrap_or(true) {
+            pts.push(q);
+            smooth.push(false);
+        }
+    }
+    let n = pts.len();
+    let screen = |q: [f64; 2]| world(st, k.plane.at(q));
+    for piece in nurbs_kernel::doc::pieces(&pts, &smooth) {
+        // the side from the last point back to the first one closes it
+        let back = piece.id == 2 * (n - 1) + 1;
+        if n < 3 && back {
+            continue;
+        }
+        let line: Vec<Pos2> = piece.pts.iter().filter_map(|q| screen(*q)).collect();
+        let stroke = if back && !closing { Stroke::new(1.2, tint(col, 0.35)) } else { Stroke::new(2.0, col) };
+        p.add(Shape::line(line, stroke));
+    }
+    // the points: corners square, curve points round
+    for (i, q) in k.pts.iter().enumerate() {
+        let Some(s) = screen(*q) else { continue };
+        let first = i == 0 && k.pts.len() >= 3;
+        let r = if first && closing { 6.0 } else { 4.0 };
+        let fill = if first && closing { HOT } else { chip_bg() };
+        if k.smooth[i] {
+            p.circle(s, r, fill, Stroke::new(1.5, col));
+        } else {
+            p.rect(Rect::from_center_size(s, vec2(r * 2.0, r * 2.0)), 1.0, fill, Stroke::new(1.5, col), egui::StrokeKind::Middle);
+        }
+    }
+    if let Some(h) = hover {
+        let on = if k.plane.face.is_some() { "on the face" } else { "on the ground" };
+        let txt = if closing { "close".to_string() } else { format!("{} point{} · {on}", k.pts.len(), if k.pts.len() == 1 { "" } else { "s" }) };
+        chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, tint(col, 0.6), if closing { HOT } else { TEXT2() });
+    }
+}
+
 fn draw_creation(p: &Painter, st: &AppState) {
+    if st.sketch.is_some() {
+        draw_sketch(p, st);
+        return;
+    }
     let Some(c) = &st.creation else {
         // the tool armed: a small cross where the shape would start
         if let (Tool::Create(_), Some(h)) = (st.tool, p.ctx().input(|i| i.pointer.hover_pos())) {
@@ -384,7 +457,7 @@ fn draw_creation(p: &Painter, st: &AppState) {
     let col = if f.op == Op::Carve { carve() } else { accent() };
     let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
     let txt = match (c.phase, f.prim) {
-        (Phase::Base, Prim::Box { x, z, .. }) => format!("{} × {} mm", fmt_mm(x as f32), fmt_mm(z as f32)),
+        (Phase::Base, Prim::Box { x, z, .. } | Prim::Profile { x, z, .. }) => format!("{} × {} mm", fmt_mm(x as f32), fmt_mm(z as f32)),
         (Phase::Base, Prim::Cylinder { radius, .. }) => format!("R {} mm", fmt_mm(radius as f32)),
         (Phase::Height, _) => format!("H {} mm", fmt_mm(c.height as f32)),
     };
@@ -401,6 +474,7 @@ fn draw_marquee(p: &Painter, st: &AppState) {
 /// The kernel's line at the bottom left of the view.
 fn status(p: &Painter, st: &AppState) {
     let n = st.doc.features.len();
+    let n = n - st.doc.features.iter().filter(|f| !f.is_solid()).count();
     let mut parts = vec![format!("NURBS · OpenCascade · {n} shape{}", if n == 1 { "" } else { "s" })];
     let mut color = TEXT();
     match st.kernel.status() {
@@ -413,8 +487,11 @@ fn status(p: &Painter, st: &AppState) {
             color = ERROR;
         }
         Status::Ready => {
+            let rounds = st.doc.features.iter().filter(|f| f.visible && !f.is_solid()).count();
+            if rounds > 0 {
+                parts.push(format!("{rounds} fillet{}", if rounds == 1 { "" } else { "s" }));
+            }
             if let Some(m) = &st.model {
-                parts.push(format!("{} boolean{}", m.booleans + m.cached, if m.booleans + m.cached == 1 { "" } else { "s" }));
                 parts.push(format!("{:.0} ms", m.ms));
             }
             if st.building() {
@@ -439,11 +516,16 @@ fn status(p: &Painter, st: &AppState) {
 pub fn hint(st: &AppState) -> String {
     match (&st.creation, st.tool) {
         (Some(c), _) if c.phase == Phase::Base => match c.kind {
-            PrimKind::Box => "Drag the base · Shift: a square · release, then the height".into(),
+            PrimKind::Box | PrimKind::Profile => "Drag the base · Shift: a square · release, then the height".into(),
             PrimKind::Cylinder => "Drag the radius · release, then the height".into(),
         },
         (Some(_), _) => "Move for the height (up +, down −) · click to finish · Esc cancels".into(),
-        (None, Tool::Create(k)) => format!("{} · {}: press on the ground or a face and drag · a click places 20 mm", k.label(), st.mode.label()),
+        (None, Tool::Create(PrimKind::Profile)) => match &st.sketch {
+            None => format!("Sketch · {}: click on a face or the ground for the first point", st.mode.label()),
+            Some(k) if k.pts.len() < 3 => "Click: a corner · drag: a curve point · Backspace removes the last one · Esc drops it".into(),
+            Some(_) => "Click the first point or press Enter to close · drag: a curve point · Backspace: the last one".into(),
+        },
+        (None, Tool::Create(k)) => format!("{} · {}: press on the ground or a face and drag · a click places 20 mm · {} again: at once", k.label(), st.mode.label(), crate::ui::prim_key(k)),
         (None, Tool::Select) if st.sel_mode == SelMode::Edge => {
             if let Some(f) = st.selected_round() {
                 format!("{} · set its size on the left · Shift + click an edge to add it · Del deletes", f.kind_label())

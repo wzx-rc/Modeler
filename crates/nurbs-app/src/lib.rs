@@ -8,6 +8,7 @@ pub mod camera;
 pub mod draw;
 pub mod files;
 pub mod icons;
+pub mod materials;
 pub mod pick;
 pub mod render;
 pub mod settings;

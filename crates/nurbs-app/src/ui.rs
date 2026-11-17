@@ -6,6 +6,7 @@
 use crate::camera::ViewPreset;
 use crate::files;
 use crate::icons::{self, Icon};
+use crate::materials;
 use crate::state::*;
 use crate::theme::*;
 use crate::widgets::*;
@@ -56,6 +57,7 @@ pub fn prim_icon(k: PrimKind) -> Icon {
     match k {
         PrimKind::Box => Icon::Box,
         PrimKind::Cylinder => Icon::Cylinder,
+        PrimKind::Profile => Icon::Sketch,
     }
 }
 
@@ -63,6 +65,7 @@ pub fn prim_key(k: PrimKind) -> &'static str {
     match k {
         PrimKind::Box => "B",
         PrimKind::Cylinder => "C",
+        PrimKind::Profile => "L",
     }
 }
 
@@ -94,7 +97,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
                 paint_logo(ui, Rect::from_center_size(r.center(), vec2(26.0, 26.0)));
-                let n = st.doc.features.len();
+                let n = st.doc.features.iter().filter(|f| f.is_solid()).count();
                 let g = ui.painter().layout_no_wrap(st.doc_name.clone(), semibold(13.5), TEXT());
                 let sub = ui.painter().layout_no_wrap(format!("· {n} shape{}", if n == 1 { "" } else { "s" }), regular(12.0), TEXT2());
                 let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + sub.size().x + 36.0, 28.0), Sense::click());
@@ -257,9 +260,15 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             for k in PRIMS {
                 let key = prim_key(k);
                 let on = st.tool == Tool::Create(k);
-                if card(ui, Some(prim_icon(k)), &k.label().to_uppercase(), &format!("{m} · {key}"), on, op_color(mode), &format!("{} ({key})", k.label())).clicked() {
+                let tip = format!("{} ({key}) · again, or Shift + {key}: a 20 mm {} at once, on top of the selection (Carve: through it)", k.label(), k.label().to_lowercase());
+                if card(ui, Some(prim_icon(k)), &k.label().to_uppercase(), &format!("{m} · {key}"), on, op_color(mode), &tip).clicked() {
                     st.arm(k);
                 }
+            }
+            let sk = PrimKind::Profile;
+            let tip = "Sketch (L): on a face or the ground, click the corners, drag for curve points, click the first point (or Enter) to close, then pull it up or down";
+            if card(ui, Some(Icon::Sketch), "SKETCH", &format!("{m} · L"), st.tool == Tool::Create(sk), op_color(mode), tip).clicked() {
+                st.arm(sk);
             }
             divider(ui);
             let has = !st.selection.is_empty();
@@ -408,7 +417,8 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
         return;
     }
     let vr = st.view_rect;
-    let at = pos2(((x0 + x1) * 0.5).clamp(vr[0] + 120.0, vr[2] - 120.0), (top - 16.0).clamp(vr[1] + 56.0, vr[3] - 40.0));
+    // below the hint line at the top of the view
+    let at = pos2(((x0 + x1) * 0.5).clamp(vr[0] + 120.0, vr[2] - 120.0), (top - 16.0).clamp(vr[1] + 84.0, vr[3] - 40.0));
     egui::Area::new(Id::new("ctx-bar")).order(Order::Middle).pivot(Align2::CENTER_BOTTOM).fixed_pos(at).show(ctx, |ui| {
         island().inner_margin(Margin::same(3)).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -479,7 +489,7 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 }
 
 fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
-    let n = st.doc.features.len();
+    let n = st.doc.features.iter().filter(|f| f.is_solid()).count();
     ui.horizontal(|ui| {
         ui.set_height(26.0);
         let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 2.0 * 28.0, 26.0), Sense::hover());
@@ -565,7 +575,14 @@ fn defaults(ui: &mut Ui, st: &mut AppState) {
         st.mode = m;
     }
     ui.add_space(4.0);
-    ui.label(egui::RichText::new("Press on the ground or on a flat face and drag the base, release, then move for the height. A click alone places a 20 mm shape.").font(regular(12.0)).color(TEXT2()));
+    let help = if st.tool == Tool::Create(PrimKind::Profile) {
+        "Click on a flat face or the ground: the outline is drawn on it. A click puts a corner, a drag a curve point. Click the first point (or Enter) to close it, then move for the height and click."
+    } else {
+        "Press on the ground or on a flat face and drag the base, release, then move for the height. A click alone places a 20 mm shape; the tool's key again places one at once."
+    };
+    ui.label(egui::RichText::new(help).font(regular(12.0)).color(TEXT2()));
+    let m = st.material;
+    material_section(ui, st, m);
     section(ui, "Display");
     if toggle_row(ui, "Shape list", st.settings.show_tree) {
         st.settings.show_tree = !st.settings.show_tree;
@@ -664,13 +681,13 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
 
     section(ui, "Shape");
     match f.prim {
-        Prim::Box { x, y, z } => {
+        Prim::Box { x, y, z } | Prim::Profile { x, y, z } => {
             for (k, label, v) in [(0, "Width", x), (1, "Height", y), (2, "Depth", z)] {
                 let mut val = v as f32;
                 let (ch, start) = slider_row(ui, label, &mut val, 0.1..=2000.0, 0.1, "mm");
                 if ch {
                     feature_edit(st, id, "Size", start, |g| {
-                        if let Prim::Box { x, y, z } = &mut g.prim {
+                        if let Prim::Box { x, y, z } | Prim::Profile { x, y, z } = &mut g.prim {
                             *[x, y, z][k] = val.max(0.1) as f64;
                         }
                     });
@@ -700,6 +717,7 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
     if let Some(m) = segmented(ui, &items, f.op, 40.0) {
         st.set_op(id, m);
     }
+    material_section(ui, st, f.material);
 
     section(ui, "Position and rotation");
     position_rows(ui, st, &f);
@@ -770,6 +788,62 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
         st.end_live();
     }
+}
+
+/// A material as a small shaded ball: discs shrinking toward the light, a
+/// rim, a highlight sharper on metals.
+fn material_ball(p: &egui::Painter, c: egui::Pos2, r: f32, m: &materials::Material) {
+    let steps = 18;
+    for k in 0..steps {
+        let t = k as f32 / (steps - 1) as f32;
+        let lum = 0.45 + 0.75 * t;
+        let ch = |x: f32| ((x * lum).clamp(0.0, 1.0) * 255.0) as u8;
+        p.circle_filled(c + vec2(-0.3, -0.34) * r * t, r * (1.0 - 0.7 * t), Color32::from_rgb(ch(m.color[0]), ch(m.color[1]), ch(m.color[2])));
+    }
+    let spec = 0.22 + 0.45 * m.metal * (1.0 - m.rough);
+    p.circle_filled(c + vec2(-0.36, -0.4) * r, r * (0.24 - 0.08 * m.metal), Color32::from_white_alpha((spec * 255.0) as u8));
+    p.circle_stroke(c, r, Stroke::new(1.0, tint(Color32::WHITE, 0.22)));
+}
+
+/// "Material": folded by default (a quiet panel), the current ball beside
+/// the title; open, the six balls, a click applies one.
+fn material_section(ui: &mut Ui, st: &mut AppState, current: u32) {
+    let id = Id::new("material-open");
+    let open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    ui.add_space(4.0);
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(r, 6.0, RAISED());
+    }
+    icons::paint(p, Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(11.0, 11.0)), if open { Icon::Chevron } else { Icon::ChevronRight }, TEXT2());
+    p.text(pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, "Material", semibold(12.0), TEXT2());
+    let cur = materials::get(current);
+    p.text(pos2(r.max.x - 26.0, r.center().y), Align2::RIGHT_CENTER, cur.name, regular(11.5), TEXT2());
+    material_ball(p, pos2(r.max.x - 12.0, r.center().y), 8.0, cur);
+    if resp.clicked() {
+        ui.data_mut(|d| d.insert_temp(id, !open));
+    }
+    if !open {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+        for (i, m) in materials::MATERIALS.iter().enumerate() {
+            let (r, resp) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+            let on = current as usize == i;
+            let p = ui.painter();
+            if on {
+                p.circle_stroke(r.center(), 14.5, Stroke::new(1.5, accent()));
+            } else if resp.hovered() {
+                p.circle_stroke(r.center(), 14.5, Stroke::new(1.0, DIVIDER()));
+            }
+            material_ball(p, r.center(), 11.0, m);
+            if resp.on_hover_text(m.name).clicked() {
+                st.set_material(i as u32);
+            }
+        }
+    });
 }
 
 fn axis_field(ui: &mut Ui, label: &str, color: Color32, v: &mut f32, suffix: &str) -> egui::Response {
@@ -899,8 +973,19 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         }
         return;
     }
+    // the sketch under way: Enter closes it, Backspace removes its last point
+    if st.sketch.is_some() {
+        if pressed(Key::Enter) {
+            let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]).unwrap_or(st.principal());
+            st.sketch_close(at);
+        }
+        if pressed(Key::Backspace) || pressed(Key::Delete) {
+            st.sketch_back();
+            return;
+        }
+    }
     if pressed(Key::Escape) {
-        if st.creation.is_some() || st.drag.is_some() {
+        if st.creation.is_some() || st.drag.is_some() || st.sketch.is_some() {
             st.abort_gestures();
         } else if st.tool != Tool::Select {
             st.select_tool();
@@ -916,11 +1001,14 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if pressed(Key::Num2) {
         st.set_sel_mode(SelMode::Edge);
     }
-    if pressed(Key::B) {
-        st.arm(PrimKind::Box);
-    }
-    if pressed(Key::C) {
-        st.arm(PrimKind::Cylinder);
+    for (k, kind) in [(Key::B, PrimKind::Box), (Key::C, PrimKind::Cylinder), (Key::L, PrimKind::Profile)] {
+        if pressed(k) {
+            if shift {
+                st.quick_add(kind);
+            } else {
+                st.arm(kind);
+            }
+        }
     }
     if pressed(Key::X) {
         let op = shown_op(st).other();

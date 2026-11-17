@@ -2,7 +2,8 @@
 //! when a new model arrives), the faces' state (selection, pre-selection),
 //! the outlines over the part.
 
-use crate::render::{line_vertices, Frame, LineVertex, MeshVertex, Renderer, FACE_HOVERED, FACE_SELECTED};
+use crate::materials;
+use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, Renderer, FACE_HOVERED, FACE_SELECTED};
 use crate::state::{AppState, SelMode, Tool};
 use crate::theme;
 use nurbs_kernel::Op;
@@ -13,7 +14,7 @@ pub const CLAY: [f32; 3] = [0.50, 0.50, 0.49];
 pub struct Drawer {
     pub r: Renderer,
     model_gen: u64,
-    flags: Vec<u32>,
+    flags: Vec<FaceGpu>,
     overlay: Vec<LineVertex>,
 }
 
@@ -47,15 +48,19 @@ impl Drawer {
             self.r.upload_part(device, queue, &verts, &edges);
             self.flags.clear();
         }
-        // the faces' state
-        let flags: Vec<u32> = match &st.model {
+        // the faces' material and state
+        let flags: Vec<FaceGpu> = match &st.model {
             Some(m) => m
                 .faces
                 .iter()
-                .map(|f| match f.tag {
-                    Some(t) if st.selection.contains(&t.feature) => FACE_SELECTED,
-                    Some(t) if st.hover_feature == Some(t.feature) => FACE_HOVERED,
-                    _ => 0,
+                .map(|f| {
+                    let flags = match f.tag {
+                        Some(t) if st.selection.contains(&t.feature) => FACE_SELECTED,
+                        Some(t) if st.hover_feature == Some(t.feature) => FACE_HOVERED,
+                        _ => 0,
+                    };
+                    let mat = materials::get(f.tag.map(|t| st.material_of(t.feature)).unwrap_or(0));
+                    FaceGpu { color: linear(mat.color), flags, metal: mat.metal, rough: mat.rough, pad: [0.0; 2] }
                 })
                 .collect(),
             None => vec![],

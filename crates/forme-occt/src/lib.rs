@@ -304,7 +304,7 @@ impl Shape {
 
     /// Closed outline in the XY plane extruded along Z between -h and +h.
     /// A smooth point is rounded into a quadratic curve between the middles
-    /// of its two edges (forme-core's Profile, exact here).
+    /// of its two edges (the Sketch tool's outlines, `nurbs_kernel::doc::Profile`).
     pub fn prism(points: &[[f64; 2]], smooth: &[bool], h: f64) -> Result<Shape, String> {
         let xy: Vec<f64> = points.iter().flatten().copied().collect();
         let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();

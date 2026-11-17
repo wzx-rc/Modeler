@@ -41,8 +41,6 @@ pub enum Icon {
     Move,
     /// Scale gizmo (R).
     Scale,
-    /// Workplanes (Forme NURBS): a plane in perspective and its normal.
-    Workplane,
     /// Sketch (Forme NURBS): an outline of corners and a curve, its points.
     Sketch,
 }
@@ -176,13 +174,6 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.arc(10.0, 9.0, 4.0, 4.0, 0.0, PI);
             pen.line(&[(6.0, 6.0), (9.0, 6.0)]);
             pen.line(&[(11.0, 6.0), (14.0, 6.0)]);
-        }
-        Icon::Workplane => {
-            pen.closed(&[(2.0, 13.0), (10.0, 9.0), (18.0, 13.0), (10.0, 17.0)]);
-            pen.line(&[(6.0, 11.0), (14.0, 15.0)]);
-            pen.line(&[(6.0, 15.0), (14.0, 11.0)]);
-            pen.line(&[(10.0, 13.0), (10.0, 2.5)]);
-            pen.line(&[(7.5, 5.0), (10.0, 2.5), (12.5, 5.0)]);
         }
         Icon::Sketch => {
             pen.line(&[(3.0, 16.0), (3.0, 6.0), (9.0, 6.0)]);

@@ -222,7 +222,7 @@ FShape* focc_torus(double big, double small) {
 // Closed outline in the XY plane (n points, xy[2n]) extruded along Z
 // between -h and +h. A smooth point is rounded into a quadratic curve from
 // the middle of its incoming edge to the middle of its outgoing one, like
-// forme-core's Profile (exact here, a polyline there).
+// the Sketch tool (nurbs-kernel `doc::Profile`).
 FShape* focc_prism(const double* xy, const int* smooth, int n, double h) {
     return guard(
         [&]() -> FShape* {
