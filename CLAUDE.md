@@ -51,7 +51,7 @@ FORME_OCCT_ROOT=/path/occt cargo build --release -p nurbs-occ --no-default-featu
 FORME_OCCT_ROOT=/path/occt cargo test --release -p forme-occt --no-default-features   # the C layer: cube − hole, fillet of the rims, volume
 cargo run --release -p forme-app --bin forme-nurbs       # Forme NURBS (uses target/release/forme-occ when it is there)
 OUT=/tmp/x cargo run --release -p nurbs-core --example occ_test     # the kernel on small parts (cube + hole + fillets…), OBJ per case with the edge lines as `l`
-cargo run --release -p forme-app --bin forme-shot -- /tmp/x nurbs nurbs-stack nurbs-planes nurbs-sketch nurbs-edit   # NURBS captures (fillet test part, bearing, primitives; quick creation and stacking; workplanes; sketch + extrude; a fillet clicked with Edges and resized)
+cargo run --release -p forme-app --bin forme-shot -- /tmp/x nurbs nurbs-stack nurbs-planes nurbs-sketch nurbs-edit nurbs-mats   # NURBS captures (fillet test part, bearing, primitives; quick creation and stacking; workplanes; sketch + extrude; a fillet clicked with Edges and resized; the material balls)
 ```
 
 The window title shows the version, branch, commit and commit date (`crates/forme-app/build.rs`, `forme_app::version_title()`), also at the bottom of Réglages: check it before saying which version Romain is running.

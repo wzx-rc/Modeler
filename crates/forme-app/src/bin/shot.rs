@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("nurbs") || want("bake-diag") || want("nurbs-stack") || want("nurbs-planes") || want("nurbs-sketch") || want("nurbs-edit") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("nurbs") || want("bake-diag") || want("nurbs-stack") || want("nurbs-planes") || want("nurbs-sketch") || want("nurbs-edit") || want("nurbs-mats") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -935,6 +935,41 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
         }
         eprintln!("nurbs-edit : après {:?}", h.st.edge_sel.iter().map(|e| (e.kind, h.st.get_fillet(e))).collect::<Vec<_>>());
         h.shot("nurbs-edit-3-radius");
+        forme_app::set_nurbs(false);
+    }
+    if want("nurbs-mats") {
+        // Romain (17 nov.): the materials as six small balls in a section
+        // that folds (closed by default, the current ball in its header)
+        forme_app::set_nurbs(true);
+        h.pc(AppState::new(nurbs_fillet_scene(), "NURBS part"), UiMode::Atelier);
+        h.st.settings.light = false;
+        h.st.settings.ambiance = forme_app::settings::AmbianceChoice::Blanc;
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.steps(2);
+        h.cam(Vec3::new(2.0, 9.0, 0.0), 78.0, 0.65, 0.62);
+        h.st.wait_nurbs();
+        h.steps(10);
+        h.st.settings.materials_open = false;
+        h.steps(4);
+        h.shot("nurbs-mats-1-ferme");
+        h.st.settings.materials_open = true;
+        h.steps(4);
+        h.shot("nurbs-mats-2-ouvert");
+        let id = h.find("Boss");
+        h.st.select(Some(id));
+        h.st.edit("Matière", id, |n| n.material = 2);
+        h.st.wait_nurbs();
+        h.steps(10);
+        h.shot("nurbs-mats-3-forme");
+        for (mode, tag) in [(UiMode::Studio, "studio")] {
+            h.pc(AppState::new(nurbs_fillet_scene(), "NURBS part"), mode);
+            h.st.settings.ambiance = forme_app::settings::AmbianceChoice::Blanc;
+            h.st.pointer_kind = PointerKind::Mouse;
+            h.steps(2);
+            h.st.wait_nurbs();
+            h.steps(10);
+            h.shot(&format!("nurbs-mats-4-{tag}"));
+        }
         forme_app::set_nurbs(false);
     }
     if want("nurbs-stack") {

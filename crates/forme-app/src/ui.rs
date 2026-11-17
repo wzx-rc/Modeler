@@ -1499,8 +1499,7 @@ pub(crate) fn properties(ui: &mut Ui, st: &mut AppState) {
     position_rows(ui, st, id, &node);
     align_rows(ui, st, true);
 
-    section(ui, tr("Matière"));
-    material_palette(ui, st, Some(id), node.material);
+    material_palette(ui, st, tr("Matière"), Some(id), node.material);
 }
 
 fn symmetry_row(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
@@ -1733,34 +1732,68 @@ pub(crate) fn chip_label(ui: &mut Ui, text: &str, bg: Color32, fg: Color32) {
     ui.painter().galley(pos2(r.min.x + 7.0, r.center().y - g.size().y * 0.5), g, fg);
 }
 
-pub(crate) fn material_palette(ui: &mut Ui, st: &mut AppState, target: Option<NodeId>, current: u32) {
+/// A material as a small shaded ball (Romain, 17 nov.: six coloured spheres
+/// instead of named cards): discs shrinking toward the light, a rim, a
+/// highlight sharper on metals.
+pub(crate) fn material_ball(p: &egui::Painter, c: egui::Pos2, r: f32, m: &forme_core::scene::Material) {
+    let steps = 18;
+    for k in 0..steps {
+        let t = k as f32 / (steps - 1) as f32;
+        let lum = 0.45 + 0.75 * t;
+        let ch = |x: f32| ((x * lum).clamp(0.0, 1.0) * 255.0) as u8;
+        p.circle_filled(c + vec2(-0.3, -0.34) * r * t, r * (1.0 - 0.7 * t), Color32::from_rgb(ch(m.color[0]), ch(m.color[1]), ch(m.color[2])));
+    }
+    let spec = 0.22 + 0.45 * m.metal * (1.0 - m.rough);
+    p.circle_filled(c + vec2(-0.36, -0.4) * r, r * (0.24 - 0.08 * m.metal), Color32::from_white_alpha((spec * 255.0) as u8));
+    p.circle_stroke(c, r, Stroke::new(1.0, tint(Color32::WHITE, 0.14)));
+}
+
+/// The materials as a row of balls; a click applies one (to `target`, or as
+/// the default material of new shapes), its name shows on hover.
+pub(crate) fn material_spheres(ui: &mut Ui, st: &mut AppState, target: Option<NodeId>, current: u32) {
     let mats = st.scene.materials.clone();
-    let cols = 3;
-    egui::Grid::new(("mats", target)).spacing(vec2(6.0, 6.0)).show(ui, |ui| {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
         for (i, m) in mats.iter().enumerate() {
-            let (r, resp) = ui.allocate_exact_size(vec2((RIGHT_W - 28.0 - 12.0) / 3.0, 40.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
             let on = current as usize == i;
             let p = ui.painter();
-            p.rect(r, 9.0, if on { accent_bg() } else { WELL() }, Stroke::new(1.0, if on { accent() } else { Color32::TRANSPARENT }), StrokeKind::Inside);
-            let c = Color32::from_rgb((m.color[0] * 255.0) as u8, (m.color[1] * 255.0) as u8, (m.color[2] * 255.0) as u8);
-            p.rect(Rect::from_min_size(r.min + vec2(8.0, 11.0), vec2(18.0, 18.0)), 5.0, c, Stroke::new(1.0, tint(Color32::WHITE, 0.15)), StrokeKind::Inside);
-            let name = m.name.split(' ').next().unwrap_or("").to_string();
-            let fg = if on { accent_text() } else { LABEL() };
-            let mut job = egui::text::LayoutJob::single_section(name, egui::text::TextFormat::simple(regular(12.0), fg));
-            job.wrap = egui::text::TextWrapping { max_width: r.width() - 38.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-            let g = p.layout_job(job);
-            p.galley(pos2(r.min.x + 32.0, r.center().y - g.size().y * 0.5), g, fg);
-            if resp.clicked() {
+            if on {
+                p.circle_stroke(r.center(), 12.0, Stroke::new(1.5, accent()));
+            } else if resp.hovered() {
+                p.circle_stroke(r.center(), 12.0, Stroke::new(1.0, TEXT2()));
+            }
+            material_ball(p, r.center(), 8.5, m);
+            if resp.on_hover_text(&m.name).clicked() {
                 match target {
                     Some(id) => st.edit(tr("Matière"), id, |n| n.material = i as u32),
                     None => st.material = i as u32,
                 }
             }
-            if (i + 1) % cols == 0 {
-                ui.end_row();
-            }
         }
     });
+}
+
+/// The material section: a header that folds it (closed by default, the
+/// current material's ball stays in view), open = the row of balls.
+pub(crate) fn material_palette(ui: &mut Ui, st: &mut AppState, title: &str, target: Option<NodeId>, current: u32) {
+    ui.add_space(4.0);
+    let open = st.settings.materials_open;
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+    let hot = resp.hovered();
+    let p = ui.painter();
+    p.text(pos2(r.min.x, r.center().y), Align2::LEFT_CENTER, title, semibold(12.0), if hot { LABEL() } else { TEXT2() });
+    icons::paint(p, Rect::from_center_size(pos2(r.max.x - 9.0, r.center().y), vec2(14.0, 14.0)), if open { Icon::Chevron } else { Icon::ChevronRight }, if hot { LABEL() } else { TEXT2() });
+    if let Some(m) = st.scene.materials.get(current as usize) {
+        material_ball(p, pos2(r.max.x - 30.0, r.center().y), 6.5, m);
+    }
+    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        st.settings.materials_open = !open;
+        st.save_settings();
+    }
+    if open {
+        material_spheres(ui, st, target, current);
+    }
 }
 
 fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
@@ -1869,9 +1902,8 @@ fn scene_panel(ui: &mut Ui, st: &mut AppState) {
     if let Some(m) = segmented(ui, &items, st.mode, 40.0) {
         st.mode = m;
     }
-    section(ui, tr("Matière par défaut"));
     let cur = st.material;
-    material_palette(ui, st, None, cur);
+    material_palette(ui, st, tr("Matière par défaut"), None, cur);
     section(ui, "Document");
     let w = RIGHT_W - 28.0;
     if secondary_btn(ui, tr("Cadrer toute la scène"), w).clicked() {

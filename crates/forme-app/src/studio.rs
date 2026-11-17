@@ -908,24 +908,7 @@ fn position(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
 }
 
 fn materials(ui: &mut Ui, st: &mut AppState, target: Option<NodeId>, current: u32) {
-    let mats = st.scene.materials.clone();
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-        for (i, m) in mats.iter().enumerate() {
-            let (r, resp) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
-            let on = current as usize == i;
-            let c = Color32::from_rgb((m.color[0] * 255.0) as u8, (m.color[1] * 255.0) as u8, (m.color[2] * 255.0) as u8);
-            let p = ui.painter();
-            p.rect(r, 6.0, if on { accent_bg() } else { B0() }, Stroke::new(1.0, if on { accent() } else { LINE() }), StrokeKind::Inside);
-            p.rect(r.shrink(6.0), 3.0, c, Stroke::new(1.0, tint(Color32::WHITE, 0.15)), StrokeKind::Inside);
-            if resp.on_hover_text(&m.name).clicked() {
-                match target {
-                    Some(id) => st.edit(tr("Matière"), id, |n| n.material = i as u32),
-                    None => st.material = i as u32,
-                }
-            }
-        }
-    });
+    ui::material_spheres(ui, st, target, current);
 }
 
 /// Dimensions as the user reads them (full width / height, radius).

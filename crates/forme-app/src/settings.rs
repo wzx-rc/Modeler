@@ -64,6 +64,9 @@ pub struct Settings {
     pub ambiance: AmbianceChoice,
     /// Light theme: white panels and a light viewport (Romain, 17 nov.).
     pub light: bool,
+    /// The material section of the side panel is open (folded by default:
+    /// its header shows the current material's ball).
+    pub materials_open: bool,
 }
 
 /// Accent colour of the interface (Réglages).
@@ -204,7 +207,7 @@ impl Display {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { ui_mode: UiMode::Atelier, snap_faces: true, creation: Creation::Interactive, display: Display::default(), navigation: Navigation::Maya, ambiance: AmbianceChoice::Auto, light: false }
+        Settings { ui_mode: UiMode::Atelier, snap_faces: true, creation: Creation::Interactive, display: Display::default(), navigation: Navigation::Maya, ambiance: AmbianceChoice::Auto, light: false, materials_open: false }
     }
 }
 
