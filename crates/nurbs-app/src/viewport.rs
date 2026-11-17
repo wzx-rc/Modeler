@@ -30,6 +30,10 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_vertices(p, st);
         draw_push(p, st);
         draw_creation(p, st);
+        draw_acquired(p, st);
+        if let Some(s) = &st.snap_shown {
+            draw_snap(p, st, s);
+        }
         draw_marquee(p, st);
         status(p, st);
     });
@@ -178,6 +182,16 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     }
 
     let (shift, ctrl) = ctx.input(|i| (i.modifiers.shift, i.modifiers.ctrl || i.modifiers.mac_cmd));
+    // Ctrl held: no snapping to the part's points
+    st.snap_off = ctrl;
+    // the points of interest the pointer passes over: the guides line up
+    // with them
+    let placing = matches!(st.tool, Tool::Create(_)) || st.drag.as_ref().map(|d| matches!(d.handle, Handle::Axis(_) | Handle::Plane(_) | Handle::Size(_))).unwrap_or(false);
+    if let (true, Some(h), true) = (placing, hover, resp.hovered() || resp.dragged()) {
+        let mut skip: Vec<nurbs_kernel::FeatureId> = st.drag.as_ref().map(|d| d.start.iter().map(|f| f.id).collect()).unwrap_or_default();
+        skip.extend(st.creation.as_ref().map(|c| c.id));
+        st.acquire(p2(h), &skip);
+    }
 
     // pre-selection: the feature under the pointer, the handle under it
     let over_ui = !resp.hovered() && !resp.dragged();
@@ -485,7 +499,8 @@ fn draw_sketch(p: &Painter, st: &AppState) {
     let mut smooth = k.smooth.clone();
     // the pointer: the next point (unless a point is being dragged or the
     // outline is about to close)
-    if let (None, false, Some(q)) = (k.held, closing, hover.and_then(|h| st.sketch_point(p2(h)))) {
+    let next = if k.held.is_none() && !closing { hover.and_then(|h| st.sketch_snap(p2(h))) } else { None };
+    if let Some((q, _)) = next {
         if pts.last().map(|l| (l[0] - q[0]).abs() + (l[1] - q[1]).abs() > 1e-9).unwrap_or(true) {
             pts.push(q);
             smooth.push(false);
@@ -515,6 +530,9 @@ fn draw_sketch(p: &Painter, st: &AppState) {
             p.rect(Rect::from_center_size(s, vec2(r * 2.0, r * 2.0)), 1.0, fill, Stroke::new(1.5, col), egui::StrokeKind::Middle);
         }
     }
+    if let Some(s) = next.and_then(|n| n.1) {
+        draw_snap(p, st, &s);
+    }
     if let Some(h) = hover {
         let on = if k.plane.face.is_some() { "on the face" } else { "on the ground" };
         let txt = if closing { "close".to_string() } else { format!("{} point{} · {on}", k.pts.len(), if k.pts.len() == 1 { "" } else { "s" }) };
@@ -530,9 +548,11 @@ fn draw_creation(p: &Painter, st: &AppState) {
     let Some(c) = &st.creation else {
         // the tool armed: a small cross where the shape would start
         if let (Tool::Create(_), Some(h)) = (st.tool, p.ctx().input(|i| i.pointer.hover_pos())) {
-            if let Some((plane, q)) = st.base_plane_at(p2(h)) {
-                let a = plane.to_plane(q);
-                let q = plane.at([st.snap(a[0]), st.snap(a[1])]);
+            if let Some((plane, a, snapped)) = st.start_plane(p2(h)) {
+                let q = plane.at(a);
+                if let Some(s) = &snapped {
+                    draw_snap(p, st, s);
+                }
                 if let Some(s) = world(st, q) {
                     let col = if st.mode == Op::Carve { carve() } else { accent() };
                     p.line_segment([s - vec2(6.0, 0.0), s + vec2(6.0, 0.0)], Stroke::new(1.5, col));
@@ -553,6 +573,70 @@ fn draw_creation(p: &Painter, st: &AppState) {
         (Phase::Height, _) => format!("H {} mm", fmt_mm(c.height as f32)),
     };
     chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, col, col);
+}
+
+/// The points the guides line up with (passed over lately): small rings.
+fn draw_acquired(p: &Painter, st: &AppState) {
+    if !matches!(st.tool, Tool::Create(_)) && st.drag.is_none() {
+        return;
+    }
+    for a in &st.acquired {
+        if let Some(q) = world(st, a.pos) {
+            p.circle(q, 3.5, tint(HOT, 0.25), Stroke::new(1.2, tint(HOT, 0.9)));
+        }
+    }
+}
+
+/// What the pointer snapped to: a mark shaped by its kind (a square for a
+/// corner, a triangle for a middle, a ringed dot for a centre, a diamond for
+/// a face centre), dotted lines to the point it came from and along the
+/// guides, and a small label.
+pub fn draw_snap(p: &Painter, st: &AppState, s: &crate::snap::Snapped) {
+    use crate::snap::SnapKind;
+    let col = HOT;
+    let dark = Color32::from_rgb(0x20, 0x22, 0x26);
+    let dotted = |a: DVec3, b: DVec3| {
+        if let (Some(sa), Some(sb)) = (world(st, a), world(st, b)) {
+            p.extend(Shape::dashed_line(&[sa, sb], Stroke::new(1.3, tint(col, 0.85)), 4.0, 3.0));
+        }
+    };
+    for (a, b) in &s.guides {
+        dotted(*a, *b);
+        if let Some(q) = world(st, *a) {
+            p.circle(q, 3.0, col, Stroke::new(1.0, dark));
+        }
+    }
+    if let Some(src) = s.source {
+        dotted(src, s.pos);
+        if let Some(q) = world(st, src) {
+            p.circle(q, 3.0, col, Stroke::new(1.0, dark));
+        }
+    }
+    let Some(c) = world(st, s.pos) else { return };
+    let st1 = Stroke::new(1.5, dark);
+    match s.kind {
+        SnapKind::End => {
+            p.rect(Rect::from_center_size(c, vec2(10.0, 10.0)), 1.0, col, st1, egui::StrokeKind::Middle);
+        }
+        SnapKind::Mid => {
+            p.add(Shape::convex_polygon(vec![c + vec2(0.0, -6.5), c + vec2(6.0, 4.5), c + vec2(-6.0, 4.5)], col, st1));
+        }
+        SnapKind::Center | SnapKind::Origin => {
+            p.circle_stroke(c, 7.0, Stroke::new(2.0, col));
+            p.circle(c, 2.5, col, Stroke::NONE);
+        }
+        SnapKind::FaceCenter => {
+            p.add(Shape::convex_polygon(vec![c + vec2(0.0, -6.5), c + vec2(6.5, 0.0), c + vec2(0.0, 6.5), c + vec2(-6.5, 0.0)], col, st1));
+        }
+        SnapKind::OnEdge | SnapKind::Aligned => {
+            p.line_segment([c - vec2(5.0, 5.0), c + vec2(5.0, 5.0)], Stroke::new(2.0, col));
+            p.line_segment([c - vec2(5.0, -5.0), c + vec2(5.0, -5.0)], Stroke::new(2.0, col));
+        }
+    }
+    let galley = p.layout_no_wrap(s.kind.label().to_string(), semibold(11.0), dark);
+    let r = Align2::LEFT_BOTTOM.anchor_size(c + vec2(10.0, -10.0), galley.size() + vec2(10.0, 4.0));
+    p.rect(r, 4.0, col, Stroke::NONE, egui::StrokeKind::Inside);
+    p.galley(r.min + vec2(5.0, 2.0), galley, dark);
 }
 
 /// Vertex mode: the part's vertices the eye sees, the picked ones and the

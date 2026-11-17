@@ -13,6 +13,7 @@ pub mod materials;
 pub mod pick;
 pub mod render;
 pub mod settings;
+pub mod snap;
 pub mod state;
 pub mod theme;
 pub mod ui;

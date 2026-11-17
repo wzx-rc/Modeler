@@ -277,6 +277,16 @@ pub struct AppState {
     pub panel_visible: bool,
     /// Quads view: the part as the kernel's quad mesh (fillets in orange).
     pub quads: bool,
+    /// The part's points of interest (`snap.rs`), for the model `snaps_gen`.
+    pub snaps: Vec<crate::snap::SnapPoint>,
+    pub snaps_gen: u64,
+    /// What the pointer snapped to this frame (drawn by the viewport).
+    pub snap_shown: Option<crate::snap::Snapped>,
+    /// Ctrl held: no snapping to points.
+    pub snap_off: bool,
+    /// The points of interest the pointer passed over lately (at most 4):
+    /// the guides line up with them, as in Plasticity / SketchUp.
+    pub acquired: Vec<crate::snap::SnapPoint>,
 }
 
 impl AppState {
@@ -326,6 +336,11 @@ impl AppState {
             save_name: name.to_string(),
             panel_visible: true,
             quads: false,
+            snaps: vec![],
+            snaps_gen: 0,
+            snap_shown: None,
+            snap_off: false,
+            acquired: vec![],
         }
     }
 
@@ -860,6 +875,8 @@ impl AppState {
         }
         self.sketch = None;
         self.marquee = None;
+        self.acquired.clear();
+        self.snap_shown = None;
     }
 
     /// The base plane under the pointer: the flat face hit, else the ground.
@@ -902,9 +919,8 @@ impl AppState {
         if kind == PrimKind::Profile {
             return;
         }
-        let Some((plane, q)) = self.base_plane_at(p) else { return };
-        let mut a = plane.to_plane(q);
-        a = [self.snap(a[0]), self.snap(a[1])];
+        let Some((plane, a, snapped)) = self.start_plane(p) else { return };
+        self.snap_shown = snapped;
         self.begin_live(&format!("New {}", kind.label()));
         let op = self.mode;
         let origin = plane.at(a);
@@ -932,9 +948,9 @@ impl AppState {
         let (ro, rd) = self.ray(p);
         match c.phase {
             Phase::Base => {
-                if let Some(q) = c.plane.hit(ro, rd) {
-                    let b = c.plane.to_plane(q);
-                    c.b = [self.snap(b[0]), self.snap(b[1])];
+                if let Some((b, snapped)) = self.snap_on_plane(&c.plane, p, &[c.id]) {
+                    c.b = b;
+                    self.snap_shown = snapped;
                     if shift && c.kind == PrimKind::Box {
                         // a square
                         let d = (c.b[0] - c.a[0]).abs().max((c.b[1] - c.a[1]).abs());
@@ -945,8 +961,14 @@ impl AppState {
             Phase::Height => {
                 // the height along the normal through the base centre, closest to the ray
                 let centre = self.creation_base_centre(&c);
-                let t = closest_on_line(centre, c.plane.n, ro, rd).unwrap_or(0.0);
-                c.height = self.snap(t);
+                if let Some((t, snapped)) = self.snap_height(centre, c.plane.n, p, &[c.id]).filter(|(t, _)| t.abs() > 1e-3) {
+                    c.height = t;
+                    self.snap_shown = Some(snapped);
+                } else {
+                    let t = closest_on_line(centre, c.plane.n, ro, rd).unwrap_or(0.0);
+                    c.height = self.snap(t);
+                    self.snap_shown = None;
+                }
             }
         }
         self.creation = Some(c.clone());
@@ -963,8 +985,9 @@ impl AppState {
     /// Writes the creation into its feature.
     fn apply_creation(&mut self, c: &Creation) {
         let centre = self.creation_base_centre(c);
-        let (w, dpt) = ((c.b[0] - c.a[0]).abs(), (c.b[1] - c.a[1]).abs());
-        let r = ((c.b[0] - c.a[0]).powi(2) + (c.b[1] - c.a[1]).powi(2)).sqrt();
+        use crate::snap::tidy;
+        let (w, dpt) = (tidy((c.b[0] - c.a[0]).abs()), tidy((c.b[1] - c.a[1]).abs()));
+        let r = tidy(((c.b[0] - c.a[0]).powi(2) + (c.b[1] - c.a[1]).powi(2)).sqrt());
         let base_ok = match c.kind {
             PrimKind::Box | PrimKind::Profile => w > 1e-6 && dpt > 1e-6,
             PrimKind::Cylinder => r > 1e-6,
@@ -1031,6 +1054,7 @@ impl AppState {
 
     /// Click in the height phase: done.
     pub fn finish_creation(&mut self) {
+        self.snap_shown = None;
         let Some(c) = self.creation.take() else { return };
         if c.height.abs() < 1e-6 {
             // no height: nothing to make
@@ -1049,6 +1073,7 @@ impl AppState {
     }
 
     pub fn cancel_creation(&mut self) {
+        self.snap_shown = None;
         if self.creation.take().is_some() {
             self.cancel_live();
             self.clean_selection();
@@ -1059,10 +1084,13 @@ impl AppState {
 
     /// Where the pointer is on the sketch's plane (snapped).
     pub fn sketch_point(&self, p: [f32; 2]) -> Option<[f64; 2]> {
+        self.sketch_snap(p).map(|s| s.0)
+    }
+
+    /// The same, with what it snapped to.
+    pub fn sketch_snap(&self, p: [f32; 2]) -> Option<([f64; 2], Option<crate::snap::Snapped>)> {
         let k = self.sketch.as_ref()?;
-        let (ro, rd) = self.ray(p);
-        let q = k.plane.to_plane(k.plane.hit(ro, rd)?);
-        Some([self.snap(q[0]), self.snap(q[1])])
+        self.snap_on_plane(&k.plane, p, &[])
     }
 
     /// Whether the pointer is on the sketch's first point (it closes it).
@@ -1080,9 +1108,8 @@ impl AppState {
     /// to close the outline.
     pub fn sketch_press(&mut self, p: [f32; 2]) {
         if self.sketch.is_none() {
-            let Some((plane, q)) = self.base_plane_at(p) else { return };
-            let a = plane.to_plane(q);
-            self.sketch = Some(Sketch { plane, pts: vec![[self.snap(a[0]), self.snap(a[1])]], smooth: vec![false], held: Some((0, p)) });
+            let Some((plane, a, _)) = self.start_plane(p) else { return };
+            self.sketch = Some(Sketch { plane, pts: vec![a], smooth: vec![false], held: Some((0, p)) });
             self.selection.clear();
             return;
         }
@@ -1236,9 +1263,27 @@ impl AppState {
         let Some(pivot0) = pivot0 else { return };
         let Some(now) = self.handle_param(d.handle, pivot0, p) else { return };
         let mut delta = now - d.grab;
+        let skip: Vec<FeatureId> = d.start.iter().map(|f| f.id).collect();
+        self.snap_shown = None;
         match d.handle {
-            Handle::Axis(_) | Handle::Plane(_) => {
+            Handle::Axis(a) | Handle::Plane(a) => {
+                let raw = delta;
                 delta = DVec3::new(self.snap(delta.x), self.snap(delta.y), self.snap(delta.z));
+                // a point of interest under the pointer: the shape's centre,
+                // base or top lines up with it (whichever is the closest to
+                // where the pointer took it), along the axis or in the plane
+                if let Some(s) = self.pick_snap(p, &skip).cloned() {
+                    let keys: Vec<DVec3> = match d.start.as_slice() {
+                        [f] => vec![f.centre(), f.origin, f.origin + f.axis() * f.prim.height()],
+                        _ => vec![pivot0],
+                    };
+                    let mask = if matches!(d.handle, Handle::Axis(_)) { DVec3::AXES[a] } else { DVec3::ONE - DVec3::AXES[a] };
+                    if let Some((k, best)) = keys.iter().map(|k| (*k, (s.pos - *k) * mask)).min_by(|x, y| x.1.distance(raw).total_cmp(&y.1.distance(raw))) {
+                        delta = best;
+                        let pos = k + best;
+                        self.snap_shown = Some(crate::snap::Snapped { pos, kind: s.kind, source: (pos.distance(s.pos) > 1e-3).then_some(s.pos), guides: vec![] });
+                    }
+                }
                 let start = d.start.clone();
                 self.live(|doc| {
                     for s in &start {
@@ -1252,7 +1297,13 @@ impl AppState {
             Handle::Size(k) => {
                 let Some(s) = d.start.first().cloned() else { return };
                 let Some(axis) = size_axis(&s, d.handle) else { return };
-                let amount = self.snap(delta.dot(axis));
+                let mut amount = self.snap(delta.dot(axis));
+                // the handle reaches the point of interest under the pointer
+                if let Some(sp) = self.pick_snap(p, &skip).cloned() {
+                    amount = (sp.pos - pivot0).dot(axis);
+                    let pos = pivot0 + axis * amount;
+                    self.snap_shown = Some(crate::snap::Snapped { pos, kind: sp.kind, source: (pos.distance(sp.pos) > 1e-3).then_some(sp.pos), guides: vec![] });
+                }
                 let mut f = s.clone();
                 match (&mut f.prim, k) {
                     (Prim::Box { x, .. } | Prim::Profile { x, .. }, 0) => {
@@ -1282,6 +1333,7 @@ impl AppState {
     }
 
     pub fn end_drag(&mut self) {
+        self.snap_shown = None;
         if self.drag.take().is_some() {
             self.end_live();
         }
@@ -1305,6 +1357,7 @@ impl AppState {
                 self.clamp_rounds();
             }
         }
+        self.refresh_snaps();
         let fine = !self.is_live();
         // quads only for a finished state (not while a gesture is live)
         let quads = self.quads && fine;

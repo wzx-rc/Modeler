@@ -14,13 +14,16 @@ pub struct Settings {
     /// Moves and sizes snap to `step` mm.
     pub snap: bool,
     pub step: f64,
+    /// Creation, sketches and moves snap to the part's points of interest
+    /// (corners, middles, centres) and line up with them.
+    pub points: bool,
     /// Scene list in the inspector.
     pub show_tree: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, show_tree: true }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true }
     }
 }
 

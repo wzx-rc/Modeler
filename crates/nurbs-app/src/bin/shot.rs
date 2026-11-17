@@ -687,4 +687,82 @@ fn main() {
             }
         }
     }
+
+    if want("snap") {
+        // snapping to the part's points of interest, Plasticity style
+        h.reset(test_part(), "Test part");
+        let say = |h: &Harness, what: &str| {
+            let s = h.st.snap_shown.as_ref().map(|s| format!("{:?} at {:.2?}", s.kind, s.pos.to_array()));
+            eprintln!("  {what}: {}", s.unwrap_or_else(|| "nothing".into()));
+        };
+        eprintln!("  {} points of interest", h.st.snaps.len());
+        // the Box tool armed, the pointer near the block's top corner
+        h.st.tool = Tool::Create(PrimKind::Box);
+        let corner = h.screen_of(Vec3::new(20.0, 20.0, 15.0)) + egui::vec2(4.0, -3.0);
+        h.move_to(corner);
+        h.steps(2);
+        h.shot("snap/snap-1-corner");
+        // near the boss's top centre
+        let top = h.screen_of(Vec3::new(10.0, 30.0, 0.0)) + egui::vec2(-5.0, 4.0);
+        h.move_to(top);
+        h.steps(2);
+        h.shot("snap/snap-2-center");
+        // on the ground in front of the block, lined up with its corner
+        let ahead = h.screen_of(Vec3::new(20.3, 0.0, 24.0));
+        h.move_to(ahead);
+        h.steps(2);
+        h.shot("snap/snap-3-aligned");
+        say(&h, "aligned");
+        // a cylinder from the boss's centre, its radius to the boss's edge
+        h.st.tool = Tool::Create(PrimKind::Cylinder);
+        let rim = h.screen_of(Vec3::new(17.0, 30.0, 0.0));
+        h.drag(top, rim, 10, false);
+        h.steps(2);
+        say(&h, "radius");
+        h.shot("snap/snap-4-radius");
+        h.press(rim, false);
+        h.step();
+        let up = h.screen_of(Vec3::new(10.0, 38.0, 0.0));
+        h.move_to(up);
+        h.settle();
+        h.click(up);
+        h.settle();
+        let f = h.st.doc.features.last().unwrap();
+        eprintln!("  new cylinder {:?} at {:.3?}", f.prim, f.origin.to_array());
+        // a box on the ground beside the block, as high as the block
+        h.st.tool = Tool::Create(PrimKind::Box);
+        let (a, b) = (h.screen_of(Vec3::new(26.0, 0.0, -10.0)), h.screen_of(Vec3::new(36.0, 0.0, 6.0)));
+        h.drag(a, b, 10, true);
+        h.steps(2);
+        let to = h.screen_of(Vec3::new(20.0, 20.0, -15.0)) + egui::vec2(3.0, 3.0);
+        h.move_to(to);
+        h.settle();
+        say(&h, "height");
+        h.shot("snap/snap-5-height");
+        h.click(to);
+        h.settle();
+        let f = h.st.doc.features.last().unwrap();
+        eprintln!("  new box {:?} at {:.3?}", f.prim, f.origin.to_array());
+        // the boss moved along X onto the hole's axis
+        h.st.tool = Tool::Select;
+        let boss = h.screen_of(Vec3::new(10.0, 25.0, 6.9));
+        h.click(boss);
+        h.steps(2);
+        let pivot = h.st.pivot().unwrap();
+        let v = h.st.view();
+        let k = v.pixel_size_at((pivot.as_vec3() - v.eye).length()) * 78.0;
+        let tip = h.screen_of(pivot.as_vec3() + Vec3::X * k * 0.7);
+        let hole = h.screen_of(Vec3::new(-10.0, 20.0, 0.0)) + egui::vec2(3.0, 2.0);
+        h.drag(tip, hole, 12, false);
+        h.settle();
+        say(&h, "move");
+        h.shot("snap/snap-6-move");
+        h.press(hole, false);
+        h.settle();
+        let f = h.st.doc.features.iter().find(|f| f.name == "Boss").unwrap();
+        eprintln!("  boss now at {:.3?}", f.origin.to_array());
+        h.st.selection.clear();
+        h.steps(2);
+        h.shot("snap/snap-7-done");
+    }
 }

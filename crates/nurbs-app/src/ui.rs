@@ -694,6 +694,10 @@ fn defaults(ui: &mut Ui, st: &mut AppState) {
         st.settings.step = step.max(0.1) as f64;
         st.save_settings();
     }
+    if toggle_row(ui, "Snap to points (Ctrl: off)", st.settings.points) {
+        st.settings.points = !st.settings.points;
+        st.save_settings();
+    }
 }
 
 /// One edit of a feature from the panel (sliders: one undo step per drag).
