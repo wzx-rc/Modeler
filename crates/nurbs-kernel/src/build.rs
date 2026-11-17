@@ -6,7 +6,7 @@
 //! result after each feature (by the content of everything up to it). While
 //! one feature moves, only the booleans from it onwards are made again.
 
-use crate::doc::{Doc, Feature, Op, Prim};
+use crate::doc::{Doc, EdgeRef, Feature, Op, Prim, Round};
 use crate::model::{Edge, EdgeKind, Face, FaceTag, Model, SurfKind};
 use crate::proto::step;
 use forme_occt::{Shape, SurfKind as OccSurf};
@@ -104,6 +104,60 @@ fn surf(k: OccSurf) -> SurfKind {
     }
 }
 
+/// The edges of `shape` the references name (edge-map indices, 1-based),
+/// and how many were not found. Among the edges joining the same two faces,
+/// the one nearest the reference's point.
+fn resolve(shape: &Shape, refs: &[EdgeRef]) -> (Vec<i32>, usize) {
+    let adj = shape.edge_faces();
+    let tags: Vec<i64> = (0..shape.face_count()).map(|i| shape.face_tag(i)).collect();
+    let tag = |f: i32| if f >= 0 { tags.get(f as usize).copied() } else { None };
+    let mut out = vec![];
+    let mut missing = 0;
+    for r in refs {
+        let want = r.key();
+        let found: Vec<i32> = adj
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                let (a, b) = (tag(f[0])?, tag(f[1])?);
+                let k = if a <= b { [a, b] } else { [b, a] };
+                (k == want).then_some(i as i32 + 1)
+            })
+            .collect();
+        let best = match found.as_slice() {
+            [] => None,
+            [one] => Some(*one),
+            many => many
+                .iter()
+                .map(|&i| {
+                    let d = shape.edge(i, 9).map(|e| e.pts.iter().map(|p| DVec3::from_array(*p).distance(r.at)).fold(f64::MAX, f64::min)).unwrap_or(f64::MAX);
+                    (i, d)
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i),
+        };
+        match best {
+            Some(i) if !out.contains(&i) => out.push(i),
+            Some(_) => {}
+            None => missing += 1,
+        }
+    }
+    (out, missing)
+}
+
+/// A fillet or chamfer step on what is built so far: the new solid (None
+/// when there is nothing to round), and the edges not found.
+fn round(acc: &Shape, f: &Feature, r: &Round) -> (Option<Result<Shape, String>>, usize) {
+    let (edges, missing) = resolve(acc, &r.edges);
+    if edges.is_empty() || r.size <= 1e-6 {
+        return (None, missing);
+    }
+    let fresh = FaceTag { feature: f.id, sub: 0 }.pack();
+    mark(&step("round", f));
+    let res = if r.chamfer { acc.chamfer(&edges, r.size, fresh) } else { acc.fillet(&edges, r.size, fresh) };
+    (Some(res), missing)
+}
+
 fn hash2(a: u64, b: u64) -> u64 {
     crate::doc::fnv(&[a.to_le_bytes(), b.to_le_bytes()].concat())
 }
@@ -121,13 +175,32 @@ pub fn build(doc: &Doc, fine: bool, skip: &[String], cache: &mut Cache) -> Model
         let fh = f.hash();
         key = hash2(key, fh);
         let skipped = |what: &str| skip.iter().any(|s| *s == step(what, f));
-        if skipped("tool") || skipped("boolean") {
+        if skipped("tool") || skipped("boolean") || skipped("round") {
             key = hash2(key, 1);
         }
         used_stages.push(key);
         if let Some(s) = cache.stages.get(&key) {
             stage = s.clone();
             model.cached += 1;
+            continue;
+        }
+        // a fillet or chamfer: on the solid built so far
+        if let Some(r) = &f.round {
+            if let Some(acc) = stage.shape.clone() {
+                let (res, missing) = if skipped("round") { (Some(Err("skipped, it crashed the kernel".to_string())), 0) } else { round(&acc, f, r) };
+                if missing > 0 {
+                    stage.errors.push(format!("{}: {missing} edge{} not found", f.name, if missing > 1 { "s" } else { "" }));
+                }
+                match res {
+                    Some(Ok(s)) => {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                    }
+                    Some(Err(e)) => stage.errors.push(format!("{}: OpenCascade cannot make it at {} mm ({e})", f.name, r.size)),
+                    None => {}
+                }
+            }
+            cache.stages.insert(key, stage.clone());
             continue;
         }
         // the feature's solid
@@ -265,6 +338,66 @@ mod tests {
         assert!(m4.is_empty() && m4.errors.is_empty());
         // round trip through the wire
         assert_eq!(Model::decode(&m.encode()).unwrap(), m);
+    }
+
+    /// The tag of a face of the built model, packed.
+    fn tag(feature: u32, sub: u16) -> i64 {
+        FaceTag { feature, sub }.pack()
+    }
+
+    #[test]
+    fn fillets_find_their_edges() {
+        let mut d = Doc::default();
+        let cube = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let boss = d.add(Op::Add, Prim::Cylinder { radius: 6.0, height: 10.0 }, DVec3::new(8.0, 20.0, 0.0), DQuat::IDENTITY);
+        // the cube's top front edge (top, +Z) and the boss's foot (side, cube top)
+        let edges = vec![
+            EdgeRef { faces: [tag(cube, 2), tag(cube, 4)], at: DVec3::new(0.0, 20.0, 15.0) },
+            EdgeRef { faces: [tag(boss, 0), tag(cube, 2)], at: DVec3::new(14.0, 20.0, 0.0) },
+        ];
+        let r = d.add_round(2.0, false, edges);
+        let mut cache = Cache::default();
+        let m = build(&d, true, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        // two new fillet faces, tagged with the fillet
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 2);
+        // the boss moves: its foot is found again, from the cache of the cube
+        d.feature_mut(boss).unwrap().origin.x = -8.0;
+        let m2 = build(&d, true, &[], &mut cache);
+        assert!(m2.errors.is_empty(), "{:?}", m2.errors);
+        assert_eq!(m2.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 2);
+        // a chamfer instead
+        d.feature_mut(r).unwrap().round.as_mut().unwrap().chamfer = true;
+        let m3 = build(&d, true, &[], &mut cache);
+        assert!(m3.errors.is_empty(), "{:?}", m3.errors);
+        let cone = m3.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).any(|f| f.kind == SurfKind::Cone);
+        assert!(cone, "the boss's foot chamfered is a cone");
+        // the boss gone: one edge not found, the other still rounded
+        d.feature_mut(boss).unwrap().visible = false;
+        let m4 = build(&d, true, &[], &mut cache);
+        assert_eq!(m4.errors.len(), 1, "{:?}", m4.errors);
+        assert!(m4.errors[0].contains("1 edge not found"));
+        assert_eq!(m4.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 1);
+        // too big: the fillet fails, the part stays as it was before it
+        d.feature_mut(boss).unwrap().visible = true;
+        let rr = d.feature_mut(r).unwrap().round.as_mut().unwrap();
+        rr.chamfer = false;
+        rr.size = 30.0;
+        let m5 = build(&d, true, &[], &mut cache);
+        assert_eq!(m5.errors.len(), 1, "{:?}", m5.errors);
+        assert!(m5.faces.iter().all(|f| f.tag.map(|t| t.feature) != Some(r)));
+        // of the two edges joining the cube's top and a side split by a slot,
+        // the one nearest the point is rounded
+        let mut d2 = Doc::default();
+        let c2 = d2.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d2.add(Op::Carve, Prim::Box { x: 8.0, y: 10.0, z: 40.0 }, DVec3::new(0.0, 12.0, 0.0), DQuat::IDENTITY);
+        let r2 = d2.add_round(1.0, false, vec![EdgeRef { faces: [tag(c2, 2), tag(c2, 4)], at: DVec3::new(15.0, 20.0, 15.0) }]);
+        let m6 = build(&d2, true, &[], &mut Cache::default());
+        assert!(m6.errors.is_empty(), "{:?}", m6.errors);
+        let ff: Vec<&Face> = m6.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r2)).collect();
+        assert_eq!(ff.len(), 1);
+        let on_right = m6.triangles.iter().zip(&m6.tri_face).filter(|(_, f)| m6.faces[**f as usize].tag.map(|t| t.feature) == Some(r2)).all(|(t, _)| t.iter().all(|v| m6.positions[*v as usize][0] > 3.9));
+        assert!(on_right, "the right piece of the edge");
     }
 
     #[test]

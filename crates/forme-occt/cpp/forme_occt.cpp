@@ -418,6 +418,40 @@ int focc_edge_sample(const FShape* s, int index, int n, double* xyz) {
         -1);
 }
 
+// For every edge i (1-based, in edge-map order): the 0-based indices of the
+// two faces it joins, in out[2(i-1)] and out[2(i-1)+1] (-1 = none: a seam
+// joins its face to itself, a free edge has one face). Returns the edge
+// count, or -1 (error, or cap too small).
+int focc_edge_faces(const FShape* s, int* out, int cap) {
+    return guard(
+        [&] {
+            TopTools_IndexedMapOfShape edges, faces;
+            edge_map(s->s, edges);
+            face_map(s->s, faces);
+            if (2 * edges.Extent() > cap) {
+                set_err("edge_faces: buffer too small");
+                return -1;
+            }
+            TopTools_IndexedDataMapOfShapeListOfShape adj;
+            TopExp::MapShapesAndUniqueAncestors(s->s, TopAbs_EDGE, TopAbs_FACE, adj);
+            for (int i = 1; i <= edges.Extent(); i++) {
+                int fa = -1, fb = -1;
+                const TopoDS_Shape& e = edges(i);
+                if (adj.Contains(e)) {
+                    for (TopTools_ListIteratorOfListOfShape it(adj.FindFromKey(e)); it.More(); it.Next()) {
+                        int j = faces.FindIndex(it.Value()) - 1;
+                        if (fa < 0) fa = j;
+                        else if (fb < 0 && j != fa) fb = j;
+                    }
+                }
+                out[2 * (i - 1)] = fa;
+                out[2 * (i - 1) + 1] = fb;
+            }
+            return edges.Extent();
+        },
+        -1);
+}
+
 // --------------------------------------------------------- fillets, chamfers
 
 // Rounds the edges (1-based indices) with radius r, all in one operation

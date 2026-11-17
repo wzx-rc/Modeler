@@ -3,7 +3,7 @@
 //! the outlines over the part.
 
 use crate::render::{line_vertices, Frame, LineVertex, MeshVertex, Renderer, FACE_HOVERED, FACE_SELECTED};
-use crate::state::{AppState, Tool};
+use crate::state::{AppState, SelMode, Tool};
 use crate::theme;
 use nurbs_kernel::Op;
 
@@ -70,7 +70,7 @@ impl Drawer {
         let carve = theme::carve();
         let accent = theme::accent();
         let moving = st.drag.is_some();
-        for f in &st.doc.features {
+        for f in st.doc.features.iter().filter(|f| f.is_solid()) {
             let creating = st.creation.as_ref().map(|c| c.id == f.id).unwrap_or(false);
             let selected = st.selection.contains(&f.id);
             let show = creating || (selected && (moving || f.op == Op::Carve || !f.visible)) || (st.tool == Tool::Select && st.hover_feature == Some(f.id) && f.op == Op::Carve);
@@ -81,6 +81,18 @@ impl Drawer {
             let alpha = if selected || creating { 230 } else { 140 };
             let lines: Vec<Vec<[f32; 3]>> = f.outline().iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
             line_vertices(&lines, [c.r(), c.g(), c.b(), alpha], 1.2, &mut over);
+        }
+        // Edge mode: the picked edges, whole, and the one under the pointer
+        if st.sel_mode == SelMode::Edge {
+            if let Some(m) = &st.model {
+                let y = theme::EDGE_SEL;
+                let picked: Vec<usize> = st.edge_sel.iter().filter_map(|r| st.model_edge_of(r)).collect();
+                let lines: Vec<Vec<[f32; 3]>> = picked.iter().map(|i| m.edges[*i].pts.clone()).collect();
+                line_vertices(&lines, [y.r(), y.g(), y.b(), 235], 1.6, &mut over);
+                if let Some(i) = st.hover_edge.filter(|i| !picked.contains(i)) {
+                    line_vertices(&[m.edges[i].pts.clone()], [y.r(), y.g(), y.b(), 150], 1.6, &mut over);
+                }
+            }
         }
         if over.len() != self.overlay.len() || bytemuck::cast_slice::<_, u8>(&over) != bytemuck::cast_slice::<_, u8>(&self.overlay) {
             self.r.upload_overlay(device, queue, &over);

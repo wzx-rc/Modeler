@@ -42,6 +42,16 @@ pub fn paint_op_glyph(p: &egui::Painter, c: egui::Pos2, op: Op, color: Color32, 
     }
 }
 
+/// A feature's icon: its primitive, or the fillet's.
+pub fn feature_icon(f: &Feature) -> Icon {
+    if f.is_solid() { prim_icon(f.prim.kind()) } else { Icon::Fillet }
+}
+
+/// A feature's colour: Add, Carve, or the edges' yellow for a fillet.
+pub fn feature_color(f: &Feature) -> Color32 {
+    if f.is_solid() { op_color(f.op) } else { EDGE_SEL }
+}
+
 pub fn prim_icon(k: PrimKind) -> Icon {
     match k {
         PrimKind::Box => Icon::Box,
@@ -118,6 +128,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let tool = match st.tool {
                     Tool::Create(k) => k.label().to_uppercase(),
+                    Tool::Select if st.sel_mode == SelMode::Edge => "SELECTION · EDGE".to_string(),
                     Tool::Select => "SELECTION · OBJECT".to_string(),
                 };
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
@@ -182,7 +193,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 /// for new shapes.
 fn shown_op(st: &AppState) -> Op {
     if st.tool == Tool::Select {
-        if let Some(f) = st.single() {
+        if let Some(f) = st.single().filter(|f| f.is_solid()) {
             return f.op;
         }
     }
@@ -192,7 +203,7 @@ fn shown_op(st: &AppState) -> Op {
 fn set_op_from_ui(st: &mut AppState, op: Op) {
     st.mode = op;
     if st.tool == Tool::Select {
-        let ids = st.selection.clone();
+        let ids: Vec<FeatureId> = st.selection.iter().copied().filter(|id| st.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false)).collect();
         if !ids.is_empty() {
             st.edit(op.label(), |d| {
                 for id in &ids {
@@ -233,8 +244,12 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_width(CARDS_W - 12.0);
             grip(ui, "rail");
             ui.spacing_mut().item_spacing.y = 5.0;
-            if card(ui, Some(Icon::Select), "SELECTION", "OBJECT · Q", st.tool == Tool::Select, TEXT2(), "Select shapes by their faces (Q)").clicked() {
-                st.select_tool();
+            let select = st.tool == Tool::Select;
+            if card(ui, Some(Icon::Select), "SELECTION", "OBJECT · Q", select && st.sel_mode == SelMode::Object, TEXT2(), "Select shapes by their faces (Q or 1)").clicked() {
+                st.set_sel_mode(SelMode::Object);
+            }
+            if card(ui, Some(Icon::Fillet), "EDGES", "FILLET · 2", select && st.sel_mode == SelMode::Edge, EDGE_SEL, "Pick the part's edges to fillet or chamfer them (2)").clicked() {
+                st.set_sel_mode(SelMode::Edge);
             }
             divider(ui);
             let mode = st.mode;
@@ -310,7 +325,10 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 }
 
 fn history_chip(ui: &mut Ui, st: &AppState, f: &Feature) -> Response {
-    let sub = format!("{} · {}", f.prim.kind().label(), f.op.label());
+    let sub = match &f.round {
+        Some(r) => format!("{} · {} mm", r.label(), fmt_mm(r.size as f32)),
+        None => format!("{} · {}", f.prim.kind().label(), f.op.label()),
+    };
     let tg = ui.painter().layout_no_wrap(f.name.clone(), semibold(12.5), TEXT());
     let sg = ui.painter().layout_no_wrap(sub, regular(11.0), TEXT2());
     let w = 8.0 + 28.0 + 8.0 + tg.size().x.max(sg.size().x) + 12.0;
@@ -325,9 +343,9 @@ fn history_chip(ui: &mut Ui, st: &AppState, f: &Feature) -> Response {
     let dim = if f.visible { 1.0 } else { 0.45 };
     let ir = Rect::from_min_size(pos2(r.min.x + 8.0, r.center().y - 13.0), vec2(26.0, 26.0));
     p.rect_filled(ir, 7.0, RAISED());
-    icons::paint(p, ir.shrink(5.0), prim_icon(f.prim.kind()), tint(TEXT_ICON(), dim));
+    icons::paint(p, ir.shrink(5.0), feature_icon(f), tint(TEXT_ICON(), dim));
     p.circle_filled(ir.right_bottom() - vec2(1.0, 1.0), 5.5, PANEL());
-    p.circle_filled(ir.right_bottom() - vec2(1.0, 1.0), 4.0, op_color(f.op));
+    p.circle_filled(ir.right_bottom() - vec2(1.0, 1.0), 4.0, feature_color(f));
     let tx = ir.max.x + 8.0;
     p.galley(pos2(tx, r.center().y - tg.size().y - 0.5), tg, if selected { accent_text() } else { tint(TEXT(), dim) });
     p.galley(pos2(tx, r.center().y + 1.5), sg, TEXT2());
@@ -341,7 +359,8 @@ fn hud(ctx: &egui::Context, st: &mut AppState) {
     let text = crate::viewport::hint(st);
     let color = match st.tool {
         Tool::Create(_) => op_color(st.mode),
-        Tool::Select => st.single().map(|f| op_color(f.op)).unwrap_or(TEXT2()),
+        Tool::Select if st.sel_mode == SelMode::Edge => EDGE_SEL,
+        Tool::Select => st.single().map(feature_color).unwrap_or(TEXT2()),
     };
     egui::Area::new(Id::new("hud")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(pos2(cx, EDGE + ISLAND_H + 12.0)).interactable(false).show(ctx, |ui| {
         let g = ui.painter().layout_no_wrap(text, regular(12.0), LABEL());
@@ -394,18 +413,21 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
         island().inner_margin(Margin::same(3)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                let op = shown_op(st);
-                let (r, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
-                let c = op_color(op);
-                ui.painter().rect(r, 7.0, tint(c, if resp.hovered() { 0.24 } else { 0.14 }), Stroke::new(1.0, tint(c, 0.6)), StrokeKind::Inside);
-                paint_op_glyph(ui.painter(), r.center(), op, c, 11.0);
-                if resp.on_hover_text(format!("{}: switch to {}", op.label(), op.other().label())).clicked() {
-                    set_op_from_ui(st, op.other());
-                }
-                let (r, _) = ui.allocate_exact_size(vec2(7.0, 28.0), Sense::hover());
-                ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(1.0, 18.0)), 0.0, DIVIDER());
-                if icon_btn(ui, Icon::Duplicate, false, "Duplicate (Ctrl+D)", 28.0).clicked() {
-                    st.duplicate_selected();
+                let solids = st.selection.iter().any(|id| st.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false));
+                if solids {
+                    let op = shown_op(st);
+                    let (r, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+                    let c = op_color(op);
+                    ui.painter().rect(r, 7.0, tint(c, if resp.hovered() { 0.24 } else { 0.14 }), Stroke::new(1.0, tint(c, 0.6)), StrokeKind::Inside);
+                    paint_op_glyph(ui.painter(), r.center(), op, c, 11.0);
+                    if resp.on_hover_text(format!("{}: switch to {}", op.label(), op.other().label())).clicked() {
+                        set_op_from_ui(st, op.other());
+                    }
+                    let (r, _) = ui.allocate_exact_size(vec2(7.0, 28.0), Sense::hover());
+                    ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(1.0, 18.0)), 0.0, DIVIDER());
+                    if icon_btn(ui, Icon::Duplicate, false, "Duplicate (Ctrl+D)", 28.0).clicked() {
+                        st.duplicate_selected();
+                    }
                 }
                 if icon_btn(ui, Icon::Frame, false, "Frame (F)", 28.0).clicked() {
                     st.frame_selection();
@@ -441,7 +463,9 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             // an Area's Ui starts at last frame's size: without a minimum the scroll area never grows
             egui::ScrollArea::vertical().id_salt("props-scroll").max_height(props_max).min_scrolled_height(props_max).auto_shrink([false, true]).show(ui, |ui| {
                 ui.set_width(inner_w);
-                if st.single().is_some() {
+                if st.selection.is_empty() && !st.edge_sel.is_empty() {
+                    round_card(ui, st);
+                } else if st.single().is_some() {
                     properties(ui, st);
                 } else if !st.selection.is_empty() {
                     ui.label(egui::RichText::new(format!("{} shapes selected", st.selection.len())).font(semibold(14.0)).color(TEXT()));
@@ -493,12 +517,20 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             }
             let x0 = r.min.x + 6.0;
             let dim = if f.visible { 1.0 } else { 0.4 };
-            let c = op_color(f.op);
+            let c = feature_color(f);
             let br = Rect::from_min_size(pos2(x0, r.center().y - 8.0), vec2(16.0, 16.0));
             p.rect_filled(br, 4.0, tint(c, 0.16 * dim));
-            paint_op_glyph(p, br.center(), f.op, tint(c, dim), 9.0);
+            if f.is_solid() {
+                paint_op_glyph(p, br.center(), f.op, tint(c, dim), 9.0);
+            } else {
+                icons::paint(p, br.shrink(2.0), Icon::Fillet, tint(c, dim));
+            }
             let name_color = if selected { TEXT_STRONG() } else { tint(TEXT(), dim) };
-            let info_g = p.layout_no_wrap(f.prim.kind().label().to_string(), regular(12.0), tint(TEXT2(), dim));
+            let info = match &f.round {
+                Some(r) => format!("{} mm", fmt_mm(r.size as f32)),
+                None => f.prim.kind().label().to_string(),
+            };
+            let info_g = p.layout_no_wrap(info, regular(12.0), tint(TEXT2(), dim));
             let info_x = r.max.x - 40.0 - info_g.size().x;
             p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
             let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
@@ -512,7 +544,12 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             if eresp.clicked() {
                 st.toggle_visible(f.id);
             } else if resp.clicked() {
-                st.select_tool();
+                if f.is_solid() {
+                    st.set_sel_mode(SelMode::Object);
+                } else {
+                    st.select_tool();
+                    st.edge_sel.clear();
+                }
                 let add = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
                 st.select(Some(f.id), add);
             }
@@ -591,14 +628,16 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
                     st.renaming = true;
                 }
             }
-            chip_label(ui, f.prim.kind().label(), RAISED(), LABEL());
-            let c = op_color(f.op);
-            chip_label(ui, f.op.label(), tint(c, 0.16), c);
+            chip_label(ui, f.kind_label(), RAISED(), LABEL());
+            if f.is_solid() {
+                let c = op_color(f.op);
+                chip_label(ui, f.op.label(), tint(c, 0.16), c);
+            }
         });
     });
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        if icon_btn(ui, Icon::Duplicate, false, "Duplicate", 30.0).clicked() {
+        if f.is_solid() && icon_btn(ui, Icon::Duplicate, false, "Duplicate", 30.0).clicked() {
             st.duplicate_selected();
         }
         if icon_btn(ui, if f.visible { Icon::Eye } else { Icon::EyeOff }, false, "Hide", 30.0).clicked() {
@@ -615,6 +654,10 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         return;
     }
     divider(ui);
+    if !f.is_solid() {
+        round_card(ui, st);
+        return;
+    }
 
     // a slider drag is one undo step: it ends when no pointer button is down
     let any_down = ui.input(|i| i.pointer.any_down());
@@ -660,6 +703,70 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
 
     section(ui, "Position and rotation");
     position_rows(ui, st, &f);
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+        st.end_live();
+    }
+}
+
+/// The fillet or chamfer: of the picked edges (made at the first size), or
+/// of the selected fillet. One undo step per slider drag.
+fn round_card(ui: &mut Ui, st: &mut AppState) {
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let existing = st.selected_round().and_then(|f| f.round.clone());
+    let (size, chamfer, n) = match &existing {
+        Some(r) => (r.size, r.chamfer, r.edges.len()),
+        None => (0.0, st.round_chamfer, st.edge_sel.len()),
+    };
+    if existing.is_none() {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+            ui.painter().circle_filled(r.center(), 5.0, EDGE_SEL);
+            let title = if n > 1 { format!("{n} edges picked") } else { "Edge picked".to_string() };
+            ui.label(egui::RichText::new(title).font(semibold(14.0)).color(TEXT()));
+        });
+        ui.label(egui::RichText::new("Give it a size: OpenCascade rounds the whole edge · Shift + click adds an edge").font(regular(12.0)).color(TEXT2()));
+    } else {
+        section(ui, &format!("{} edge{}", n, if n > 1 { "s" } else { "" }));
+        ui.label(egui::RichText::new("Shift + click an edge (Edges mode) to add it").font(regular(12.0)).color(TEXT2()));
+    }
+    ui.add_space(4.0);
+    let kinds = [(false, "Fillet", EDGE_SEL), (true, "Chamfer", EDGE_SEL)];
+    if let Some(c) = segmented(ui, &kinds, chamfer, 36.0) {
+        if existing.is_some() {
+            st.set_round(size, c, true);
+            st.end_live();
+        } else {
+            st.round_chamfer = c;
+        }
+    }
+    let max = st.round_max().max(size.ceil()) as f32;
+    let mut v = size as f32;
+    let (ch, start) = slider_row(ui, if chamfer { "Distance" } else { "Radius" }, &mut v, 0.0..=max, 0.1, "mm");
+    if ch {
+        st.set_round(v.max(0.0) as f64, chamfer, start || !st.is_live());
+    }
+    // one click sizes
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for q in [0.5, 1.0, 2.0, 3.0, 5.0] {
+            let on = (size - q).abs() < 1e-6;
+            let g = ui.painter().layout_no_wrap(fmt_mm(q as f32), medium(12.0), if on { on_accent() } else { TEXT() });
+            let (r, resp) = ui.allocate_exact_size(vec2(44.0, 24.0), Sense::click());
+            let p = ui.painter();
+            p.rect(r, 6.0, if on { EDGE_SEL } else if resp.hovered() { RAISED() } else { WELL() }, Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+            p.galley(r.center() - g.size() * 0.5, g, TEXT());
+            if resp.on_hover_text(format!("{} {} mm", if chamfer { "Chamfer" } else { "Fillet" }, fmt_mm(q as f32))).clicked() {
+                st.set_round(q, chamfer, true);
+                st.end_live();
+            }
+        }
+    });
+    if existing.is_none() {
+        ui.add_space(2.0);
+        if secondary_btn(ui, "Deselect the edges", ui.available_width()).clicked() {
+            st.edge_sel.clear();
+        }
+    }
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
         st.end_live();
     }
@@ -797,12 +904,17 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.abort_gestures();
         } else if st.tool != Tool::Select {
             st.select_tool();
+        } else if !st.edge_sel.is_empty() {
+            st.edge_sel.clear();
         } else {
             st.selection.clear();
         }
     }
-    if pressed(Key::Q) {
-        st.select_tool();
+    if pressed(Key::Q) || pressed(Key::Num1) {
+        st.set_sel_mode(SelMode::Object);
+    }
+    if pressed(Key::Num2) {
+        st.set_sel_mode(SelMode::Edge);
     }
     if pressed(Key::B) {
         st.arm(PrimKind::Box);

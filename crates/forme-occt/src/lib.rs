@@ -41,6 +41,7 @@ extern "C" {
     fn focc_section_count(s: *const FShape) -> c_int;
     fn focc_section_edge(s: *const FShape, k: c_int) -> c_int;
     fn focc_edge_count(s: *const FShape) -> c_int;
+    fn focc_edge_faces(s: *const FShape, out: *mut c_int, cap: c_int) -> c_int;
     fn focc_edge_sample(s: *const FShape, index: c_int, n: c_int, xyz: *mut c_double) -> c_int;
     fn focc_fillet(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
     fn focc_chamfer(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
@@ -353,6 +354,22 @@ impl Shape {
         Some(Edge { index, kind, pts: buf.chunks(3).map(|c| [c[0], c[1], c[2]]).collect() })
     }
 
+    /// For every edge (index i at position i - 1): the indices of the two
+    /// faces it joins (-1 = none; a seam joins its face to itself, so its
+    /// second face is -1).
+    pub fn edge_faces(&self) -> Vec<[i32; 2]> {
+        let count = unsafe { focc_edge_count(self.0) };
+        if count <= 0 {
+            return vec![];
+        }
+        let mut buf = vec![-1 as c_int; 2 * count as usize];
+        let n = unsafe { focc_edge_faces(self.0, buf.as_mut_ptr(), buf.len() as c_int) };
+        if n < 0 {
+            return vec![];
+        }
+        buf.chunks(2).take(n as usize).map(|c| [c[0], c[1]]).collect()
+    }
+
     /// Rounds the edges (indices in this shape) with radius r, in one
     /// operation. Err when OpenCascade cannot make it or the result is not
     /// a valid solid.
@@ -554,5 +571,10 @@ mod tests {
         let tf = f.topo(0.05, 0.3).unwrap();
         assert_eq!(tf.faces.iter().filter(|f| f.tag == 99).count(), 2, "one fillet face per rim");
         assert_eq!(tf.faces.iter().filter(|f| f.tag < 0).count(), 0);
+        // edge adjacency without meshing agrees with the topology's
+        let adj = cut.edge_faces();
+        for e in &t.edges {
+            assert_eq!(adj[e.index as usize - 1], e.faces, "edge {}", e.index);
+        }
     }
 }

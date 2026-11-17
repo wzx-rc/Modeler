@@ -2,6 +2,10 @@
 //! there, Carve = subtraction. A feature is a primitive standing on its base:
 //! `origin` is the centre of its base, it rises along its local +Y (the
 //! rotation `rot` turns local into world). Millimetres, Y up.
+//!
+//! A feature can also be a fillet or a chamfer (`round`) of edges of what is
+//! built before it. Its edges are named by the tags of the two faces each
+//! one joins (`EdgeRef`), so they are found again when a shape moves.
 
 use glam::{DMat4, DQuat, DVec3};
 use serde::{Deserialize, Serialize};
@@ -95,6 +99,39 @@ fn yes() -> bool {
     true
 }
 
+/// An edge of the part, found again at every build: the packed tags
+/// (`model::FaceTag::pack`) of the two faces it joins, in any order, and a
+/// point on it to choose between edges joining the same two faces.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EdgeRef {
+    pub faces: [i64; 2],
+    pub at: DVec3,
+}
+
+impl EdgeRef {
+    /// The two tags in increasing order.
+    pub fn key(&self) -> [i64; 2] {
+        let [a, b] = self.faces;
+        if a <= b { [a, b] } else { [b, a] }
+    }
+}
+
+/// A fillet (or a chamfer) of edges of what is built before it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Round {
+    /// Fillet radius, or chamfer distance (mm).
+    pub size: f64,
+    #[serde(default)]
+    pub chamfer: bool,
+    pub edges: Vec<EdgeRef>,
+}
+
+impl Round {
+    pub fn label(&self) -> &'static str {
+        if self.chamfer { "Chamfer" } else { "Fillet" }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Feature {
     pub id: FeatureId,
@@ -109,9 +146,24 @@ pub struct Feature {
     pub visible: bool,
     #[serde(default)]
     pub material: u32,
+    /// A fillet or chamfer step: `op`, `prim` and `rot` are not used (a box
+    /// of size 0), `origin` is the middle of its edges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round: Option<Round>,
 }
 
 impl Feature {
+    /// A primitive (Add / Carve), not a fillet or chamfer.
+    pub fn is_solid(&self) -> bool {
+        self.round.is_none()
+    }
+    /// What it is: "Cube", "Cylinder", "Fillet", "Chamfer".
+    pub fn kind_label(&self) -> &'static str {
+        match &self.round {
+            Some(r) => r.label(),
+            None => self.prim.kind().label(),
+        }
+    }
     /// Local (base centre at 0, height along +Y) to world.
     pub fn matrix(&self) -> DMat4 {
         DMat4::from_rotation_translation(self.rot, self.origin)
@@ -220,7 +272,17 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0 });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None });
+        id
+    }
+    /// Adds a fillet (or chamfer) of these edges at the end.
+    pub fn add_round(&mut self, size: f64, chamfer: bool, edges: Vec<EdgeRef>) -> FeatureId {
+        let id = self.next_id;
+        self.next_id += 1;
+        let round = Round { size, chamfer, edges };
+        let name = self.fresh_name(round.label());
+        let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round) });
         id
     }
     /// "Cube", then "Cube 2", "Cube 3"…
@@ -233,10 +295,11 @@ impl Doc {
     pub fn remove(&mut self, ids: &[FeatureId]) {
         self.features.retain(|f| !ids.contains(&f.id));
     }
-    /// Copies of the features (after the last one), with fresh ids; returns
-    /// the new ids.
+    /// Copies of the shapes (after the last feature), with fresh ids; returns
+    /// the new ids. Fillets and chamfers are not copied (their edges belong
+    /// to the original).
     pub fn duplicate(&mut self, ids: &[FeatureId], offset: DVec3) -> Vec<FeatureId> {
-        let src: Vec<Feature> = self.features.iter().filter(|f| ids.contains(&f.id)).cloned().collect();
+        let src: Vec<Feature> = self.features.iter().filter(|f| ids.contains(&f.id) && f.is_solid()).cloned().collect();
         let mut out = vec![];
         for mut f in src {
             f.id = self.next_id;
@@ -273,6 +336,10 @@ mod tests {
         assert_eq!((a, b), (1, 2));
         assert_eq!(d.features[1].name, "Cylinder");
         assert_eq!(d.fresh_name("Cube"), "Cube 2");
+        let r = d.add_round(2.0, false, vec![EdgeRef { faces: [65538, 65536], at: DVec3::new(10.0, 20.0, 0.0) }]);
+        assert_eq!(d.feature(r).unwrap().name, "Fillet");
+        assert_eq!(d.feature(r).unwrap().round.as_ref().unwrap().edges[0].key(), [65536, 65538]);
+        assert!(d.feature(1).unwrap().round.is_none() && !d.to_json().contains("\"round\": null"));
         let back = Doc::from_json(&d.to_json()).unwrap();
         assert_eq!(back, d);
         let (lo, hi) = d.feature(1).unwrap().bounds();

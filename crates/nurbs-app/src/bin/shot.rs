@@ -8,7 +8,7 @@
 use egui::{pos2, Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use glam::{DQuat, DVec3, Vec3};
 use nurbs_app::draw::Drawer;
-use nurbs_app::state::{AppState, Tool};
+use nurbs_app::state::{AppState, SelMode, Tool};
 use nurbs_app::theme;
 use nurbs_kernel::client::{kernel_exe, Kernel};
 use nurbs_kernel::doc::PrimKind;
@@ -166,6 +166,20 @@ impl Harness {
         self.step();
     }
 
+    /// Shift, Ctrl… held from now on.
+    fn hold(&mut self, m: Modifiers) {
+        self.mods = m;
+        self.pending.push(Event::ModifiersChanged(m));
+        self.step();
+    }
+
+    fn key(&mut self, k: egui::Key) {
+        for pressed in [true, false] {
+            self.pending.push(Event::Key { key: k, physical_key: None, pressed, repeat: false, modifiers: self.mods });
+            self.step();
+        }
+    }
+
     fn click(&mut self, p: Pos2) {
         self.press(p, true);
         self.press(p, false);
@@ -319,6 +333,74 @@ fn main() {
         h.shot("zero-create-6-done");
         for f in &h.st.doc.features {
             eprintln!("  {} {:?} {:?} at {:?}", f.name, f.op, f.prim, f.origin);
+        }
+    }
+
+    if want("edges") {
+        // the test part, with a smaller boss clear of the slot
+        let mut d = test_part();
+        if let Some(b) = d.features.iter_mut().find(|f| f.name == "Boss") {
+            b.prim = Prim::Cylinder { radius: 4.0, height: 10.0 };
+            b.origin = DVec3::new(12.0, 20.0, -4.0);
+        }
+        h.reset(d, "Test part");
+        // Edges mode (2): the block's top front edge, right of the slot
+        h.key(egui::Key::Num2);
+        assert_eq!(h.st.sel_mode, SelMode::Edge);
+        let e1 = h.screen_of(Vec3::new(12.0, 20.0, 15.0));
+        h.move_to(e1);
+        h.steps(2);
+        h.shot("zero-edges-1-hover");
+        h.click(e1);
+        // Shift + click: the block's front right vertical edge
+        h.hold(Modifiers::SHIFT);
+        let e2 = h.screen_of(Vec3::new(20.0, 8.0, 15.0));
+        h.click(e2);
+        h.hold(Modifiers::NONE);
+        h.move_to(h.screen_of(Vec3::new(0.0, 0.0, 40.0)));
+        h.steps(2);
+        eprintln!("picked {} edges", h.st.edge_sel.len());
+        h.shot("zero-edges-2-picked");
+        // a 2 mm fillet, as the inspector's "2" does
+        h.st.set_round(2.0, false, true);
+        h.st.end_live();
+        h.settle();
+        h.shot("zero-edges-3-fillet");
+        // a click on the fillet's face selects it; Shift + click on the
+        // boss's foot adds that edge to it
+        let face = h.screen_of(Vec3::new(14.0, 19.4, 14.4));
+        h.click(face);
+        eprintln!("selected {:?}", h.st.selected_round().map(|f| f.name.clone()));
+        h.hold(Modifiers::SHIFT);
+        let foot = h.screen_of(Vec3::new(12.0, 20.0, 0.0));
+        h.click(foot);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.shot("zero-edges-4-boss-foot");
+        // as a chamfer
+        h.st.set_round(1.5, true, true);
+        h.st.end_live();
+        h.settle();
+        h.shot("zero-edges-5-chamfer");
+        // the boss moved (Object mode): its foot is found again
+        h.st.set_round(2.0, false, true);
+        h.st.end_live();
+        h.key(egui::Key::Q);
+        let boss = h.st.doc.features.iter().find(|f| f.name == "Boss").map(|f| f.id).unwrap();
+        h.st.selection = vec![boss];
+        h.st.edit("Move", |d| d.feature_mut(boss).unwrap().origin.z = 3.0);
+        h.st.selection.clear();
+        h.settle();
+        h.shot("zero-edges-6-moved");
+        // too big: OpenCascade refuses, the part stays without it
+        let r = h.st.doc.features.iter().find(|f| !f.is_solid()).map(|f| f.id).unwrap();
+        h.st.selection = vec![r];
+        h.st.set_round(14.0, false, true);
+        h.st.end_live();
+        h.settle();
+        h.shot("zero-edges-7-too-big");
+        for f in &h.st.doc.features {
+            eprintln!("  {} {:?}", f.name, f.round);
         }
     }
 }

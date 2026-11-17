@@ -81,7 +81,7 @@ fn dist_seg(p: Pos2, a: Pos2, b: Pos2) -> f32 {
 
 /// The handle under the pointer: a size handle, an arrow, a plane square.
 fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
-    if st.tool != Tool::Select || st.creation.is_some() {
+    if st.tool != Tool::Select || st.creation.is_some() || st.sel_mode != SelMode::Object {
         return None;
     }
     if let Some(f) = st.single() {
@@ -167,15 +167,36 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     // pre-selection: the feature under the pointer, the handle under it
     let over_ui = !resp.hovered() && !resp.dragged();
     st.hot_handle = if st.drag.is_none() && !over_ui { hover.and_then(|h| handle_at(st, h)) } else { st.drag.as_ref().map(|d| d.handle) };
+    let edges = st.tool == Tool::Select && st.sel_mode == SelMode::Edge;
     if st.drag.is_none() && st.creation.is_none() && st.marquee.is_none() && !over_ui {
         st.hover_hit = hover.and_then(|h| st.pick_at(p2(h)));
+        st.hover_edge = if edges { hover.and_then(|h| st.pick_edge(p2(h))) } else { None };
         st.hover_feature = if st.hot_handle.is_none() && st.tool == Tool::Select { st.hover_hit.and_then(|h| st.feature_of_face(h.face)) } else { None };
+        // edges: only a fillet's faces light up (a click there selects it)
+        if edges && (st.hover_edge.is_some() || st.hover_feature.and_then(|id| st.doc.feature(id)).map(|f| f.is_solid()).unwrap_or(true)) {
+            st.hover_feature = None;
+        }
     } else if over_ui {
         st.hover_hit = None;
+        st.hover_edge = None;
         st.hover_feature = None;
     }
 
     match st.tool {
+        Tool::Select if st.sel_mode == SelMode::Edge => {
+            if resp.clicked_by(PointerButton::Primary) {
+                let at = resp.interact_pointer_pos().or(hover).map(p2);
+                let edge = at.and_then(|p| st.pick_edge(p));
+                let round = at.and_then(|p| st.pick_at(p)).and_then(|h| st.feature_of_face(h.face)).filter(|id| st.doc.feature(*id).map(|f| !f.is_solid()).unwrap_or(false));
+                match (edge, round) {
+                    (None, Some(id)) => {
+                        st.edge_sel.clear();
+                        st.select(Some(id), false);
+                    }
+                    _ => st.click_edge(edge, shift || ctrl),
+                }
+            }
+        }
         Tool::Select => {
             if resp.drag_started_by(PointerButton::Primary) {
                 let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
@@ -199,7 +220,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                     st.end_drag();
                 } else if let Some((a, b)) = st.marquee.take() {
                     let r = Rect::from_two_pos(pos2(a[0], a[1]), pos2(b[0], b[1]));
-                    let inside: Vec<_> = st.doc.features.iter().filter(|f| f.visible && world(st, f.centre()).map(|p| r.contains(p)).unwrap_or(false)).map(|f| f.id).collect();
+                    let inside: Vec<_> = st.doc.features.iter().filter(|f| f.visible && f.is_solid() && world(st, f.centre()).map(|p| r.contains(p)).unwrap_or(false)).map(|f| f.id).collect();
                     if !(shift || ctrl) {
                         st.selection.clear();
                     }
@@ -278,7 +299,7 @@ fn arrow(p: &Painter, a: Pos2, b: Pos2, color: Color32, width: f32) {
 }
 
 fn draw_gizmo(p: &Painter, st: &AppState) {
-    if st.tool != Tool::Select || st.creation.is_some() || st.selection.is_empty() {
+    if st.tool != Tool::Select || st.creation.is_some() || st.selection.is_empty() || st.sel_mode != SelMode::Object {
         return;
     }
     let hot = st.hot_handle;
@@ -423,6 +444,15 @@ pub fn hint(st: &AppState) -> String {
         },
         (Some(_), _) => "Move for the height (up +, down −) · click to finish · Esc cancels".into(),
         (None, Tool::Create(k)) => format!("{} · {}: press on the ground or a face and drag · a click places 20 mm", k.label(), st.mode.label()),
+        (None, Tool::Select) if st.sel_mode == SelMode::Edge => {
+            if let Some(f) = st.selected_round() {
+                format!("{} · set its size on the left · Shift + click an edge to add it · Del deletes", f.kind_label())
+            } else if st.edge_sel.is_empty() {
+                "Edges: click an edge of the part · Shift + click adds · click a fillet to edit it · Q back to objects".into()
+            } else {
+                "Set the fillet or chamfer on the left · Shift + click adds an edge · Esc deselects".into()
+            }
+        }
         (None, Tool::Select) => {
             if st.drag.is_some() {
                 "Moving · the kernel rebuilds the booleans live".into()

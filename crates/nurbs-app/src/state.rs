@@ -10,13 +10,21 @@ use crate::view::View;
 use glam::{DQuat, DVec3, Vec3};
 use nurbs_kernel::client::{Kernel, Status};
 use nurbs_kernel::doc::PrimKind;
-use nurbs_kernel::{Doc, Feature, FeatureId, Model, Op, Prim};
+use nurbs_kernel::{Doc, EdgeRef, Feature, FeatureId, Model, Op, Prim};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Select,
     Create(PrimKind),
+}
+
+/// What a click picks in the Select tool: whole shapes, or the part's B-rep
+/// edges (to fillet or chamfer them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelMode {
+    Object,
+    Edge,
 }
 
 /// The primitives the app creates (step 1: cube and cylinder).
@@ -125,6 +133,13 @@ pub struct AppState {
     live_before: Option<(String, Doc)>,
 
     pub selection: Vec<FeatureId>,
+    pub sel_mode: SelMode,
+    /// The edges picked in Edge mode (not rounded yet).
+    pub edge_sel: Vec<EdgeRef>,
+    /// The edge under the pointer (index in the model's edges).
+    pub hover_edge: Option<usize>,
+    /// Fillet or chamfer for the picked edges.
+    pub round_chamfer: bool,
     pub hover_feature: Option<FeatureId>,
     pub hover_hit: Option<Hit>,
     pub tool: Tool,
@@ -171,6 +186,10 @@ impl AppState {
             redo: vec![],
             live_before: None,
             selection: vec![],
+            sel_mode: SelMode::Object,
+            edge_sel: vec![],
+            hover_edge: None,
+            round_chamfer: false,
             hover_feature: None,
             hover_hit: None,
             tool: Tool::Select,
@@ -321,6 +340,7 @@ impl AppState {
     fn clean_selection(&mut self) {
         let ids: Vec<FeatureId> = self.doc.features.iter().map(|f| f.id).collect();
         self.selection.retain(|id| ids.contains(id));
+        self.edge_sel.clear();
     }
 
     // ----------------------------------------------------------- selection
@@ -355,13 +375,20 @@ impl AppState {
 
     pub fn delete_selected(&mut self) {
         if self.selection.is_empty() {
+            if !self.edge_sel.is_empty() {
+                self.edge_sel.clear();
+            }
             return;
         }
         let ids = self.selection.clone();
         let n = ids.len();
+        let what = match self.single() {
+            Some(f) if !f.is_solid() => f.kind_label().to_string(),
+            _ => format!("{n} shape{}", if n > 1 { "s" } else { "" }),
+        };
         self.edit("Delete", |d| d.remove(&ids));
         self.selection.clear();
-        self.toast(&format!("{n} shape{} deleted", if n > 1 { "s" } else { "" }), false);
+        self.toast(&format!("{what} deleted"), false);
     }
 
     pub fn duplicate_selected(&mut self) {
@@ -412,6 +439,178 @@ impl AppState {
     pub fn select_tool(&mut self) {
         self.abort_gestures();
         self.tool = Tool::Select;
+    }
+
+    /// Object or Edge picking (with the Select tool).
+    pub fn set_sel_mode(&mut self, m: SelMode) {
+        self.abort_gestures();
+        self.tool = Tool::Select;
+        if m != self.sel_mode {
+            self.sel_mode = m;
+            self.edge_sel.clear();
+            self.hover_edge = None;
+            // edges: only a fillet stays selected
+            if m == SelMode::Edge {
+                let keep: Vec<FeatureId> = self.selection.iter().copied().filter(|id| self.doc.feature(*id).map(|f| !f.is_solid()).unwrap_or(false)).collect();
+                self.selection = keep;
+            }
+        }
+    }
+
+    // --------------------------------------------------------------- edges
+
+    /// The reference of a model edge: the tags of its two faces and its
+    /// middle point. None for a seam or an edge without two tagged faces.
+    pub fn edge_ref(&self, i: usize) -> Option<EdgeRef> {
+        let m = self.model.as_ref()?;
+        let e = m.edges.get(i)?;
+        if e.seam || e.faces[0] < 0 || e.faces[1] < 0 {
+            return None;
+        }
+        let a = m.faces.get(e.faces[0] as usize)?.tag?.pack();
+        let b = m.faces.get(e.faces[1] as usize)?.tag?.pack();
+        Some(EdgeRef { faces: [a, b], at: polyline_middle(&e.pts)? })
+    }
+
+    /// The model edge a reference names (the one nearest its point among
+    /// those joining the same two faces).
+    pub fn model_edge_of(&self, r: &EdgeRef) -> Option<usize> {
+        let m = self.model.as_ref()?;
+        let want = r.key();
+        let at = r.at.as_vec3();
+        m.edges
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.edge_ref(*i).map(|x| x.key() == want).unwrap_or(false))
+            .map(|(i, e)| (i, e.pts.iter().map(|p| Vec3::from(*p).distance(at)).fold(f32::MAX, f32::min)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    }
+
+    /// The edge under the pointer: the nearest on screen (within a few
+    /// points) that the part does not hide.
+    pub fn pick_edge(&self, p: [f32; 2]) -> Option<usize> {
+        let m = self.model.as_ref()?;
+        let v = self.view();
+        let mut cands: Vec<(f32, usize, Vec3)> = vec![];
+        for (i, e) in m.edges.iter().enumerate() {
+            if e.seam || e.faces[1] < 0 {
+                continue;
+            }
+            let mut best: Option<(f32, Vec3)> = None;
+            for w in e.pts.windows(2) {
+                let (a, b) = (Vec3::from(w[0]), Vec3::from(w[1]));
+                let (Some(sa), Some(sb)) = (v.project(a), v.project(b)) else { continue };
+                let ab = [sb[0] - sa[0], sb[1] - sa[1]];
+                let len2 = (ab[0] * ab[0] + ab[1] * ab[1]).max(1e-6);
+                let t = (((p[0] - sa[0]) * ab[0] + (p[1] - sa[1]) * ab[1]) / len2).clamp(0.0, 1.0);
+                let d = ((sa[0] + ab[0] * t - p[0]).powi(2) + (sa[1] + ab[1] * t - p[1]).powi(2)).sqrt();
+                if best.map(|b| d < b.0).unwrap_or(true) {
+                    best = Some((d, a.lerp(b, t)));
+                }
+            }
+            if let Some((d, q)) = best {
+                if d < 7.0 {
+                    cands.push((d, i, q));
+                }
+            }
+        }
+        cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, i, q) in cands {
+            // hidden when the part is hit before the edge, seen from the eye
+            let to = q - v.eye;
+            let dist = to.length();
+            let hit = self.picker.pick(m, v.eye, to / dist.max(1e-6));
+            let tol = 0.3 + dist * 0.004;
+            if hit.map(|h| h.t >= dist - tol).unwrap_or(true) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// A click in Edge mode on an edge (or on nothing): picks it, adds it
+    /// (Shift / Ctrl), or adds it to the selected fillet.
+    pub fn click_edge(&mut self, edge: Option<usize>, add: bool) {
+        let Some(r) = edge.and_then(|i| self.edge_ref(i)) else {
+            if !add {
+                self.edge_sel.clear();
+                self.selection.clear();
+            }
+            return;
+        };
+        // a fillet selected and Shift / Ctrl: the edge joins it
+        if add {
+            if let Some(id) = self.single().filter(|f| !f.is_solid()).map(|f| f.id) {
+                let label = self.single().map(|f| f.kind_label()).unwrap_or("Fillet");
+                self.edit(&format!("{label}: one more edge"), |d| {
+                    if let Some(rd) = d.feature_mut(id).and_then(|f| f.round.as_mut()) {
+                        rd.edges.push(r);
+                    }
+                });
+                return;
+            }
+        }
+        self.selection.clear();
+        let key = r.key();
+        let same = |x: &EdgeRef| x.key() == key && x.at.distance(r.at) < 1e-3;
+        if add {
+            if let Some(i) = self.edge_sel.iter().position(same) {
+                self.edge_sel.remove(i);
+            } else {
+                self.edge_sel.push(r);
+            }
+        } else {
+            self.edge_sel = vec![r];
+        }
+    }
+
+    /// The selected fillet or chamfer, if one is.
+    pub fn selected_round(&self) -> Option<&Feature> {
+        self.single().filter(|f| !f.is_solid())
+    }
+
+    /// Sets the size (and kind) of the selected fillet, or makes one of the
+    /// picked edges. `start`: a new gesture (one undo step until `end_live`).
+    pub fn set_round(&mut self, size: f64, chamfer: bool, start: bool) {
+        let label = if chamfer { "Chamfer" } else { "Fillet" };
+        if let Some(id) = self.selected_round().map(|f| f.id) {
+            if start {
+                self.begin_live(label);
+            }
+            self.live(|d| {
+                // "Fillet 2" becomes "Chamfer 2"… when its kind changes (a
+                // name the user gave stays)
+                let rename = d.feature(id).and_then(|f| {
+                    let old = f.round.as_ref()?.label();
+                    let new = if chamfer { "Chamfer" } else { "Fillet" };
+                    (old != new && f.name.starts_with(old)).then(|| d.fresh_name(new))
+                });
+                if let Some(f) = d.feature_mut(id) {
+                    if let Some(name) = rename {
+                        f.name = name;
+                    }
+                    if let Some(r) = f.round.as_mut() {
+                        r.size = size.max(0.0);
+                        r.chamfer = chamfer;
+                    }
+                }
+            });
+        } else if !self.edge_sel.is_empty() && size > 1e-6 {
+            self.begin_live(label);
+            let edges = std::mem::take(&mut self.edge_sel);
+            let mut id = 0;
+            self.live(|d| id = d.add_round(size, chamfer, edges));
+            self.selection = vec![id];
+        }
+        self.round_chamfer = chamfer;
+    }
+
+    /// The largest size the fillet slider offers: half the part's thinnest
+    /// extent (OpenCascade says when it cannot make it).
+    pub fn round_max(&self) -> f64 {
+        let ext = self.model.as_ref().and_then(|m| m.bounds()).map(|(lo, hi)| (0..3).map(|k| (hi[k] - lo[k]) as f64).fold(f64::MAX, f64::min)).unwrap_or(20.0);
+        crate::widgets::nice_ceil((ext * 0.5).clamp(1.0, 100.0) as f32) as f64
     }
 
     /// Cancels what is under way (creation, drag).
@@ -609,7 +808,10 @@ impl AppState {
 
     /// Pivot of the selection (centre of the selected shapes).
     pub fn pivot(&self) -> Option<DVec3> {
-        let fs: Vec<&Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id)).collect();
+        if self.sel_mode != SelMode::Object {
+            return None;
+        }
+        let fs: Vec<&Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).collect();
         if fs.is_empty() {
             return None;
         }
@@ -636,7 +838,7 @@ impl AppState {
     pub fn begin_drag(&mut self, h: Handle, p: [f32; 2]) {
         let Some(pivot) = self.handle_pivot(h) else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
-        let start: Vec<Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id)).cloned().collect();
+        let start: Vec<Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).cloned().collect();
         self.begin_live(if matches!(h, Handle::Size(_)) { "Resize" } else { "Move" });
         self.drag = Some(Drag { handle: h, grab, start });
     }
@@ -784,6 +986,22 @@ pub fn basis_rotation(u: DVec3, n: DVec3) -> DQuat {
     DQuat::from_mat3(&glam::DMat3::from_cols(x, y, z))
 }
 
+/// The point halfway along a polyline (a straight edge has only its two
+/// ends: its middle, not a corner shared with other edges).
+pub fn polyline_middle(pts: &[[f32; 3]]) -> Option<DVec3> {
+    let p: Vec<DVec3> = pts.iter().map(|q| DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64)).collect();
+    let total: f64 = p.windows(2).map(|w| w[0].distance(w[1])).sum();
+    let mut left = total * 0.5;
+    for w in p.windows(2) {
+        let l = w[0].distance(w[1]);
+        if l >= left && l > 0.0 {
+            return Some(w[0].lerp(w[1], left / l));
+        }
+        left -= l;
+    }
+    p.first().copied()
+}
+
 /// Parameter t of the point of the line (o + t d) closest to the ray.
 pub fn closest_on_line(o: DVec3, d: DVec3, ro: DVec3, rd: DVec3) -> Option<f64> {
     let w = o - ro;
@@ -811,6 +1029,9 @@ pub fn size_axis(f: &Feature, h: Handle) -> Option<DVec3> {
 
 /// Where a size handle sits on the shape.
 pub fn size_handle_pos(f: &Feature, h: Handle) -> Option<DVec3> {
+    if !f.is_solid() {
+        return None;
+    }
     let m = f.matrix();
     let hh = f.prim.height();
     let (hx, hz) = f.prim.half_xz();
@@ -826,6 +1047,9 @@ pub fn size_handle_pos(f: &Feature, h: Handle) -> Option<DVec3> {
 
 /// The size handles of a shape.
 pub fn size_handles(f: &Feature) -> Vec<Handle> {
+    if !f.is_solid() {
+        return vec![];
+    }
     match f.prim {
         Prim::Box { .. } => vec![Handle::Size(0), Handle::Size(1), Handle::Size(2)],
         Prim::Cylinder { .. } => vec![Handle::Size(3), Handle::Size(1)],

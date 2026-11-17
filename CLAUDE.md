@@ -18,7 +18,7 @@ Forme NURBS is a hard-surface modelling app (PC first, iPad later): an object is
 ## Plan (announced to Romain on 17 nov. 2026)
 
 1. **Base** (done): viewport, grid and world origin, Cube and Cylinder in Add / Carve, selection and move; OpenCascade recomputes the booleans live during every drag.
-2. Selection of the real B-rep edges (from the kernel's topology: face tags and edge adjacency), fillets and chamfers.
+2. **Edges** (done): Edges mode (2) picks the real B-rep edges; fillets and chamfers are history steps that find their edges again by face tags.
 3. Quick creation and stacking, workplanes, Sketch (extruded profiles), materials (6 balls).
 
 ## Commands
@@ -31,7 +31,7 @@ cargo build --release -p nurbs-kernel --features occ          # the kernel proce
 cargo build --release -p nurbs-kernel --features builtin      # same, building OpenCascade from source the first time (6 to 20 min, cmake + C++ compiler)
 cargo build --release -p nurbs-app                            # the app forme-nurbs and the capture harness forme-nurbs-shot
 cargo run --release -p nurbs-app --bin forme-nurbs            # the app (finds target/release/forme-nurbs-kernel next to it, or FORME_NURBS_KERNEL=path)
-./target/release/forme-nurbs-shot /tmp/x                      # every capture scenario on the test part; prefix filter: empty, part, move, create
+./target/release/forme-nurbs-shot /tmp/x                      # every capture scenario on the test part; prefix filter: empty, part, move, create, edges
 ```
 
 `forme-nurbs-shot` runs the real app headless (egui + wgpu, real kernel process, real mouse events). It accepts a software GPU (lavapipe / llvmpipe) and writes full-quality PNGs at 1600×900 points, scale 2. Use it to check every visual change before showing it.
@@ -42,14 +42,14 @@ The window title shows the version, branch, commit and commit date (`crates/nurb
 
 - `crates/forme-occt`: our thin C layer over OpenCascade (`cpp/forme_occt.cpp` + safe Rust wrapper). Primitives, transforms, booleans, fillets / chamfers by edge index, meshing. Every OpenCascade exception is caught and returned as `Err`; only `opencascade::handle<T>` is used (the `Handle_T` aliases break under MSVC). **Face tags**: each face carries an `i64` tag that booleans, transforms, fillets and chamfers carry to the faces they make (`carry_tags`, history `Modified`); new fillet / chamfer faces get the `fresh` tag. `Shape::topo(defl, angle)` returns in one buffer the faces (tag, surface kind, plane point / normal, axis, radius), the mesh with a face index per triangle, and the edges (index, the two faces, kind, seam, polyline). OpenCascade is built by `occt-sys` (feature `builtin`, cached in `target/OCCT`) or taken from `FORME_OCCT_ROOT`.
 - `crates/nurbs-kernel`: the document and the kernel.
-  - `doc.rs`: `Doc { features }`, `Feature { id, name, op, prim, origin, rot, visible, material }`. A feature's origin is the centre of its base; it rises along its local +Y. Saved as JSON `.fnurbs`.
+  - `doc.rs`: `Doc { features }`, `Feature { id, name, op, prim, origin, rot, visible, material, round }`. A feature's origin is the centre of its base; it rises along its local +Y. Saved as JSON `.fnurbs`. A feature with `round: Some(Round { size, chamfer, edges })` is a fillet / chamfer step on what is built before it (`is_solid()` is false; its `op`, `prim`, `rot` are unused). Each edge is an `EdgeRef { faces: [tag, tag], at }`: the packed tags of the two faces it joins, and its middle point to choose between edges joining the same two faces (`build::resolve`). The fillet's new faces carry the tag `(fillet id, 0)`, so clicking them selects the fillet.
   - `model.rs`: what the kernel sends back: mesh, `tri_face`, faces with their `FaceTag { feature, sub }` (box sub: 0 +X, 1 −X, 2 top, 3 bottom, 4 +Z, 5 −Z; cylinder: 0 side, 1 top, 2 bottom), edges, errors; binary encode / decode.
   - `build.rs` (feature `occ`): features applied in order (a Carve with nothing before it is ignored), tool solids cached by feature hash, stages by prefix hash, `STEP what:id:hash` written on stderr before each risky step.
   - `client.rs`: the app side. The kernel runs in its own process `forme-nurbs-kernel` (u32-length frames on stdin / stdout, JSON request, binary model): a hard crash inside OpenCascade cannot take the app down; the client restarts it with the failing step skipped and the model lists what was left out. The latest request wins; coarse meshing while a gesture is live, fine after.
 - `crates/nurbs-app`: the app.
   - `render.rs`: wgpu, MSAA 4×: background (gradient, ground grid 10 / 50 mm, origin axes), the part's mesh with per-face flags (selected / hovered) in a storage buffer, B-rep edges as anti-aliased screen-width lines, overlay outlines (cutters, shapes being moved or created) with a dimmed hidden part.
   - `pick.rs`: ray against the kernel's triangles, face by face → the face's tag → the feature. No SDF, no approximation.
-  - `state.rs`: `AppState` (document, undo / redo with live edits, selection, tools, 3ds Max-like creation on the ground or a flat face, move gizmo and size handles, kernel round trips). Features go here first.
+  - `state.rs`: `AppState` (document, undo / redo with live edits, selection, tools, 3ds Max-like creation on the ground or a flat face, move gizmo and size handles, kernel round trips). Features go here first. `SelMode::{Object, Edge}` (Q or 1 / 2, the EDGES card): in Edge mode `pick_edge` finds the nearest visible model edge on screen, `edge_sel` holds the picked `EdgeRef`s, `set_round` makes the fillet at the first size (or sets the selected one's), Shift + click on an edge adds it to the selected fillet.
   - `viewport.rs`: gestures (Maya navigation: Alt + left orbit, Alt + middle pan, Alt + right zoom, wheel zoom), gizmo, creation and marquee drawing, kernel status line.
   - `ui.rs` + `widgets.rs` + `theme.rs` + `icons.rs`: the Établi-style islands, inspector, history strip, files dialog; `draw.rs`: what is uploaded to the renderer each frame; `files.rs`, `settings.rs`: `~/Documents/Forme NURBS`.
   - `bin/shot.rs`: the capture harness (`test_part()`: Block, Hole, Boss, Slot).
@@ -58,6 +58,6 @@ The window title shows the version, branch, commit and commit date (`crates/nurb
 
 - **No SDF, ever, on this branch**: the part on screen is always the kernel's mesh. While the kernel computes, the previous mesh stays, with the moved or created shape drawn as an outline.
 - Picking and selection go through the kernel's faces and their tags (`Model::faces[f].tag`), never through a field or a guess from the shape list.
-- A tag is `(feature << 16) | sub`; any new primitive must tag all its faces in `nurbs_kernel::build::sub_of`.
+- A tag is `(feature << 16) | sub`; any new primitive must tag all its faces in `nurbs_kernel::build::sub_of`. Edges are never named by their index in OpenCascade's edge map (it changes with every build): always by the tags of their two faces.
 - Both sides of the kernel protocol (`proto.rs`, `model.rs` encode / decode) change together; the kernel process is rebuilt with the app.
 - Never commit `target/` or `shots/replay/frames/`. Never run `cargo fmt` on the whole tree.
