@@ -6,7 +6,7 @@
 //! result after each feature (by the content of everything up to it). While
 //! one feature moves, only the booleans from it onwards are made again.
 
-use crate::doc::{Doc, EdgeRef, Feature, Op, Prim, Round};
+use crate::doc::{Doc, EdgeRef, FaceRef, Feature, Op, Prim, Push, Round};
 use crate::model::{Edge, EdgeKind, Face, FaceTag, Model, SurfKind};
 use crate::proto::step;
 use forme_occt::{Shape, SurfKind as OccSurf};
@@ -190,6 +190,63 @@ fn round(acc: &Shape, f: &Feature, r: &Round) -> (Option<Result<Shape, String>>,
     (Some(res), missing)
 }
 
+/// The face a reference names: among the faces with its tag, the nearest
+/// to its point.
+fn find_face(shape: &Shape, r: &FaceRef) -> Option<usize> {
+    (0..shape.face_count())
+        .filter(|i| shape.face_tag(*i) == r.tag)
+        .map(|i| (i, shape.face_distance(i, r.at.to_array()).unwrap_or(f64::MAX)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
+}
+
+/// A face pushed or pulled on what is built so far (`doc::Push`): the new
+/// solid, None when it changes nothing. Its new faces are tagged with the
+/// step: 1 the inset (or the end of the extrusion), 2, 3… its sides.
+fn push(acc: &Shape, f: &Feature, p: &Push) -> Result<Option<Shape>, String> {
+    let face = find_face(acc, &p.face).ok_or("its face is gone")?;
+    let info = acc.face_info(face).ok_or("its face is gone")?;
+    if info.kind != OccSurf::Plane {
+        return Err("only a flat face can be pushed or pulled for now".into());
+    }
+    let inset = p.inset.max(0.0);
+    if p.depth.abs() < 1e-6 && inset < 1e-6 {
+        return Ok(None);
+    }
+    let tag = |sub: u16| FaceTag { feature: f.id, sub }.pack();
+    mark(&step("push", f));
+    let mut inner = acc.inset_face(face, inset)?;
+    // depth 0: the inset only drawn on the face
+    if p.depth.abs() < 1e-6 {
+        inner.set_tags(&[tag(1)]);
+        return acc.imprint(&inner).map(Some);
+    }
+    let n = DVec3::from_array(info.normal);
+    let o = DVec3::from_array(info.point);
+    // carving: from a little outside the face, so no face of the tool lies on it
+    let start = if p.depth < 0.0 { 0.1 } else { 0.0 };
+    let base = if start > 0.0 { inner.transformed(rows(DMat4::from_translation(n * start)))? } else { inner };
+    let mut prism = base.extrude((n * (p.depth - start)).to_array())?;
+    let mut side = 2u16;
+    let tags: Vec<i64> = (0..prism.face_count())
+        .map(|i| {
+            let fi = prism.face_info(i);
+            let across = fi.map(|fi| fi.kind == OccSurf::Plane && DVec3::from_array(fi.normal).dot(n).abs() > 0.999).unwrap_or(false);
+            let s = fi.map(|fi| (DVec3::from_array(fi.point) - o).dot(n)).unwrap_or(0.0);
+            if across && (s - p.depth).abs() < 1e-4 {
+                tag(1)
+            } else if across {
+                tag(0)
+            } else {
+                side = side.saturating_add(1);
+                tag(side - 1)
+            }
+        })
+        .collect();
+    prism.set_tags(&tags);
+    if p.depth > 0.0 { acc.fuse(&prism) } else { acc.cut(&prism) }.map(Some)
+}
+
 fn hash2(a: u64, b: u64) -> u64 {
     crate::doc::fnv(&[a.to_le_bytes(), b.to_le_bytes()].concat())
 }
@@ -207,7 +264,7 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         let fh = f.hash();
         key = hash2(key, fh);
         let skipped = |what: &str| skip.iter().any(|s| *s == step(what, f));
-        if skipped("tool") || skipped("boolean") || skipped("round") {
+        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") {
             key = hash2(key, 1);
         }
         used_stages.push(key);
@@ -230,6 +287,22 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
                     }
                     Some(Err(e)) => stage.errors.push(format!("{}: OpenCascade cannot make it at {} mm ({e})", f.name, r.size)),
                     None => {}
+                }
+            }
+            cache.stages.insert(key, stage.clone());
+            continue;
+        }
+        // an inset or extrusion of a face: on the solid built so far
+        if let Some(p) = &f.push {
+            if let Some(acc) = stage.shape.clone() {
+                let res = if skipped("push") { Err("skipped, it crashed the kernel".to_string()) } else { push(&acc, f, p) };
+                match res {
+                    Ok(Some(s)) => {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                    }
+                    Ok(None) => {}
+                    Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
                 }
             }
             cache.stages.insert(key, stage.clone());
@@ -490,6 +563,74 @@ mod tests {
         assert_eq!(ff.len(), 1);
         let on_right = m6.triangles.iter().zip(&m6.tri_face).filter(|(_, f)| m6.faces[**f as usize].tag.map(|t| t.feature) == Some(r2)).all(|(t, _)| t.iter().all(|v| m6.positions[*v as usize][0] > 3.9));
         assert!(on_right, "the right piece of the edge");
+    }
+
+    #[test]
+    fn faces_pushed_and_pulled() {
+        // a block with a hole through it; its top inset by 3 mm
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(0.0, -5.0, 0.0), DQuat::IDENTITY);
+        let top = FaceRef { tag: tag(b, 2), at: DVec3::new(12.0, 20.0, 8.0) };
+        let p = d.add_push(Push { face: top, inset: 3.0, depth: 0.0 });
+        assert_eq!(d.feature(p).unwrap().kind_label(), "Inset");
+        let mut cache = Cache::default();
+        let mine = |m: &Model, sub: u16| m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: p, sub })).count();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        // the top in three: the frame, the ring round the hole, the inside
+        assert_eq!(mine(&m, 1), 1);
+        assert_eq!(m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: b, sub: 2 })).count(), 2);
+        // a pocket 4 mm deep: its floor at 16 mm, facing up, and its walls
+        d.feature_mut(p).unwrap().push.as_mut().unwrap().depth = -4.0;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let floor = m.faces.iter().find(|f| f.tag == Some(FaceTag { feature: p, sub: 1 })).unwrap();
+        assert!((floor.point[1] - 16.0).abs() < 1e-6 && floor.normal[1] > 0.99, "{:?} {:?}", floor.point, floor.normal);
+        assert!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature == p && t.sub >= 2).unwrap_or(false)).count() >= 5);
+        // its floor's edges fillet like any other
+        let e = m.edges.iter().find(|e| e.faces.iter().all(|f| *f >= 0 && m.faces[*f as usize].tag.map(|t| t.feature) == Some(p))).unwrap();
+        let at = DVec3::from_array(e.pts[e.pts.len() / 2].map(|x| x as f64));
+        let faces = e.faces.map(|f| m.faces[f as usize].tag.unwrap().pack());
+        let r = d.add_round(1.0, false, vec![EdgeRef { faces, at }]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 1);
+        d.remove(&[r]);
+        // a raised panel: 2 mm up
+        d.feature_mut(p).unwrap().push.as_mut().unwrap().depth = 2.0;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((m.bounds().unwrap().1[1] - 22.0).abs() < 1e-3);
+        // the whole top (Extrude) down 5 mm, then up 5 mm
+        let pu = d.feature_mut(p).unwrap().push.as_mut().unwrap();
+        pu.inset = 0.0;
+        pu.depth = -5.0;
+        assert_eq!(d.feature(p).unwrap().kind_label(), "Extrude");
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((m.bounds().unwrap().1[1] - 15.0).abs() < 1e-3);
+        assert_eq!(mine(&m, 1), 1);
+        d.feature_mut(p).unwrap().push.as_mut().unwrap().depth = 5.0;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((m.bounds().unwrap().1[1] - 25.0).abs() < 1e-3);
+        // its flat sides lie on the block's: merged, they keep the block's
+        // names (a fillet on them is found again); the hole's wall goes on
+        // as a face of its own
+        let flat = m.faces.iter().filter(|f| f.kind == SurfKind::Plane && f.tag.map(|t| t.feature == p && t.sub >= 2).unwrap_or(false)).count();
+        assert_eq!(flat, 0);
+        assert!(m.faces.iter().any(|f| f.tag == Some(FaceTag { feature: b, sub: 4 })));
+        // wider than the face: an error, the part as before it
+        let pu = d.feature_mut(p).unwrap().push.as_mut().unwrap();
+        pu.inset = 20.0;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert_eq!(m.errors.len(), 1, "{:?}", m.errors);
+        assert!((m.bounds().unwrap().1[1] - 20.0).abs() < 1e-3);
+        // a round face: not yet
+        d.feature_mut(p).unwrap().push = Some(Push { face: FaceRef { tag: tag(2, 0), at: DVec3::new(5.0, 10.0, 0.0) }, inset: 0.0, depth: 1.0 });
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.len() == 1 && m.errors[0].contains("flat"), "{:?}", m.errors);
     }
 
     #[test]

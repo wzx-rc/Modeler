@@ -27,6 +27,8 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         handle_input(ctx, st, &resp, rect);
         let p = ui.painter();
         draw_gizmo(p, st);
+        draw_vertices(p, st);
+        draw_push(p, st);
         draw_creation(p, st);
         draw_marquee(p, st);
         status(p, st);
@@ -167,19 +169,45 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     // pre-selection: the feature under the pointer, the handle under it
     let over_ui = !resp.hovered() && !resp.dragged();
     st.hot_handle = if st.drag.is_none() && !over_ui { hover.and_then(|h| handle_at(st, h)) } else { st.drag.as_ref().map(|d| d.handle) };
-    let edges = st.tool == Tool::Select && st.sel_mode == SelMode::Edge;
-    if st.drag.is_none() && st.creation.is_none() && st.marquee.is_none() && !over_ui {
+    let select = st.tool == Tool::Select;
+    let edges = select && st.sel_mode == SelMode::Edge;
+    let faces = (select && st.sel_mode == SelMode::Face) || matches!(st.tool, Tool::Push(_));
+    let verts = select && st.sel_mode == SelMode::Vertex;
+    if st.drag.is_none() && st.creation.is_none() && st.marquee.is_none() && st.push.is_none() && !over_ui {
         st.hover_hit = hover.and_then(|h| st.pick_at(p2(h)));
         st.hover_edge = if edges { hover.and_then(|h| st.pick_edge(p2(h))) } else { None };
-        st.hover_feature = if st.hot_handle.is_none() && st.tool == Tool::Select { st.hover_hit.and_then(|h| st.feature_of_face(h.face)) } else { None };
+        st.hover_vertex = if verts { hover.and_then(|h| st.pick_vertex(p2(h))) } else { None };
+        st.hover_face = if faces { st.hover_hit.map(|h| h.face) } else { None };
+        let by_feature = select && matches!(st.sel_mode, SelMode::Object | SelMode::Edge);
+        st.hover_feature = if st.hot_handle.is_none() && by_feature { st.hover_hit.and_then(|h| st.feature_of_face(h.face)) } else { None };
         // edges: only a fillet's faces light up (a click there selects it)
-        if edges && (st.hover_edge.is_some() || st.hover_feature.and_then(|id| st.doc.feature(id)).map(|f| f.is_solid()).unwrap_or(true)) {
+        if edges && (st.hover_edge.is_some() || st.hover_feature.and_then(|id| st.doc.feature(id)).map(|f| f.round.is_none()).unwrap_or(true)) {
             st.hover_feature = None;
         }
     } else if over_ui {
         st.hover_hit = None;
         st.hover_edge = None;
         st.hover_feature = None;
+        st.hover_face = None;
+        st.hover_vertex = None;
+    }
+
+    // an inset or extrusion under way, whatever started it
+    if st.push.is_some() {
+        let held = st.push.as_ref().map(|g| g.held).unwrap_or(false);
+        let at = hover.or(resp.interact_pointer_pos()).map(p2);
+        if let Some(p) = at {
+            st.push_move(p);
+        }
+        let p = at.unwrap_or(p2(rect.center()));
+        if held {
+            if resp.drag_stopped() || !l {
+                st.push_next(p);
+            }
+        } else if resp.clicked_by(PointerButton::Primary) || resp.drag_started_by(PointerButton::Primary) {
+            st.push_next(p);
+        }
+        return;
     }
 
     match st.tool {
@@ -187,13 +215,43 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             if resp.clicked_by(PointerButton::Primary) {
                 let at = resp.interact_pointer_pos().or(hover).map(p2);
                 let edge = at.and_then(|p| st.pick_edge(p));
-                let round = at.and_then(|p| st.pick_at(p)).and_then(|h| st.feature_of_face(h.face)).filter(|id| st.doc.feature(*id).map(|f| !f.is_solid()).unwrap_or(false));
+                let round = at.and_then(|p| st.pick_at(p)).and_then(|h| st.feature_of_face(h.face)).filter(|id| st.doc.feature(*id).map(|f| f.round.is_some()).unwrap_or(false));
                 match (edge, round) {
                     (None, Some(id)) => {
                         st.edge_sel.clear();
                         st.select(Some(id), false);
                     }
                     _ => st.click_edge(edge, shift || ctrl),
+                }
+            }
+        }
+        Tool::Select if st.sel_mode == SelMode::Face => {
+            if resp.clicked_by(PointerButton::Primary) {
+                let at = resp.interact_pointer_pos().or(hover).map(p2);
+                st.click_face(at, shift || ctrl);
+            }
+        }
+        Tool::Select if st.sel_mode == SelMode::Vertex => {
+            if resp.clicked_by(PointerButton::Primary) {
+                let at = resp.interact_pointer_pos().or(hover).map(p2);
+                let v = at.and_then(|p| st.pick_vertex(p));
+                st.click_vertex(v, shift || ctrl);
+            }
+        }
+        Tool::Push(kind) => {
+            if resp.drag_started_by(PointerButton::Primary) {
+                let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                st.push_press(kind, p2(origin), true);
+                if let Some(p) = hover {
+                    st.push_move(p2(p));
+                }
+            } else if resp.clicked_by(PointerButton::Primary) {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    // a click: Inset 2 mm at once, Extrude follows the pointer
+                    st.push_press(kind, p2(p), false);
+                    if kind == PushKind::Inset {
+                        st.push_next(p2(p));
+                    }
                 }
             }
         }
@@ -464,6 +522,46 @@ fn draw_creation(p: &Painter, st: &AppState) {
     chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, col, col);
 }
 
+/// Vertex mode: the part's vertices the eye sees, the picked ones and the
+/// one under the pointer bigger.
+fn draw_vertices(p: &Painter, st: &AppState) {
+    if st.tool != Tool::Select || st.sel_mode != SelMode::Vertex {
+        return;
+    }
+    for (q, s) in st.visible_vertices() {
+        let s = pos2(s[0], s[1]);
+        let picked = st.vert_sel.iter().any(|v| v.as_vec3().distance(q) < 1e-3);
+        let hot = st.hover_vertex.map(|v| v.as_vec3().distance(q) < 1e-3).unwrap_or(false);
+        if picked {
+            p.circle(s, 5.0, accent(), Stroke::new(1.5, chip_bg()));
+        } else if hot {
+            p.circle(s, 5.0, chip_bg(), Stroke::new(2.0, accent()));
+        } else {
+            p.circle(s, 3.0, chip_bg(), Stroke::new(1.3, tint(TEXT(), 0.8)));
+        }
+    }
+}
+
+/// The inset or extrusion under way: its value by the pointer, the normal
+/// it moves along.
+fn draw_push(p: &Painter, st: &AppState) {
+    let Some(g) = &st.push else { return };
+    let col = accent();
+    if g.phase == PushPhase::Depth {
+        if let (Some(a), Some(b)) = (world(st, g.origin), world(st, g.origin + g.n * g.depth)) {
+            p.line_segment([a, b], Stroke::new(1.2, tint(col, 0.7)));
+            p.circle(a, 3.0, chip_bg(), Stroke::new(1.3, col));
+        }
+    }
+    let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
+    let txt = match g.phase {
+        PushPhase::Inset => format!("Inset {} mm", fmt_mm(g.inset as f32)),
+        PushPhase::Depth if g.kind == PushKind::Inset => format!("Inset {} · depth {} mm", fmt_mm(g.inset as f32), fmt_mm(g.depth as f32)),
+        PushPhase::Depth => format!("Extrude {} mm", fmt_mm(g.depth as f32)),
+    };
+    chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, col, col);
+}
+
 fn draw_marquee(p: &Painter, st: &AppState) {
     if let Some((a, b)) = st.marquee {
         let r = Rect::from_two_pos(pos2(a[0], a[1]), pos2(b[0], b[1]));
@@ -487,7 +585,7 @@ fn status(p: &Painter, st: &AppState) {
             color = ERROR;
         }
         Status::Ready => {
-            let rounds = st.doc.features.iter().filter(|f| f.visible && !f.is_solid()).count();
+            let rounds = st.doc.features.iter().filter(|f| f.visible && f.round.is_some()).count();
             if rounds > 0 {
                 parts.push(format!("{rounds} fillet{}", if rounds == 1 { "" } else { "s" }));
             }
@@ -530,6 +628,15 @@ fn status(p: &Painter, st: &AppState) {
 
 /// What the hint line says.
 pub fn hint(st: &AppState) -> String {
+    if let Some(g) = &st.push {
+        return match (g.phase, g.held) {
+            (PushPhase::Inset, true) => "Drag: how far the outline moves in · release, then the depth".into(),
+            (PushPhase::Inset, false) => "Move: how far the outline moves in · click, then the depth · Esc cancels".into(),
+            (PushPhase::Depth, true) => "Drag: out adds, in carves · release to finish · Esc cancels".into(),
+            (PushPhase::Depth, false) if g.kind == PushKind::Inset => "Move for the depth (out raises, in sinks) · click to finish (here: just the line) · Esc cancels".into(),
+            (PushPhase::Depth, false) => "Move: out adds, in carves · click to finish · Esc cancels".into(),
+        };
+    }
     match (&st.creation, st.tool) {
         (Some(c), _) if c.phase == Phase::Base => match c.kind {
             PrimKind::Box | PrimKind::Profile => "Drag the base · Shift: a square · release, then the height".into(),
@@ -542,11 +649,31 @@ pub fn hint(st: &AppState) -> String {
             Some(_) => "Click the first point or press Enter to close · drag: a curve point · Backspace: the last one".into(),
         },
         (None, Tool::Create(k)) => format!("{} · {}: press on the ground or a face and drag · a click places 20 mm · {} again: at once", k.label(), st.mode.label(), crate::ui::prim_key(k)),
+        (None, Tool::Push(k)) => match k {
+            PushKind::Inset => "Inset: press on a flat face and drag the inset, release, then move for the depth · a click: 2 mm".into(),
+            PushKind::Extrude => "Extrude: press on a flat face and drag it out (adds) or in (carves)".into(),
+        },
+        (None, Tool::Select) if st.sel_mode == SelMode::Vertex => {
+            if st.vert_sel.is_empty() {
+                "Vertices: click one · Shift + click adds · no tool uses them yet".into()
+            } else {
+                format!("{} vert{} picked · no tool uses them yet · Esc deselects", st.vert_sel.len(), if st.vert_sel.len() == 1 { "ex" } else { "ices" })
+            }
+        }
+        (None, Tool::Select) if st.sel_mode == SelMode::Face => {
+            if let Some(f) = st.selected_push() {
+                format!("{} · set its sizes on the left · click a face to pick it · Del deletes", f.kind_label())
+            } else if st.face_sel.is_empty() {
+                "Faces: click a face of the part · Shift + click adds · then I inset, E extrude".into()
+            } else {
+                "I: inset the face · E: extrude it · Shift + click adds a face · Esc deselects".into()
+            }
+        }
         (None, Tool::Select) if st.sel_mode == SelMode::Edge => {
             if let Some(f) = st.selected_round() {
                 format!("{} · set its size on the left · Shift + click an edge to add it · Del deletes", f.kind_label())
             } else if st.edge_sel.is_empty() {
-                "Edges: click an edge of the part · Shift + click adds · click a fillet to edit it · Q back to objects".into()
+                "Edges: click an edge of the part · Shift + click adds · click a fillet to edit it · 4 or Q: objects".into()
             } else {
                 "Set the fillet or chamfer on the left · Shift + click adds an edge · Esc deselects".into()
             }

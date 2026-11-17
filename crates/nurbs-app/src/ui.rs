@@ -45,12 +45,38 @@ pub fn paint_op_glyph(p: &egui::Painter, c: egui::Pos2, op: Op, color: Color32, 
 
 /// A feature's icon: its primitive, or the fillet's.
 pub fn feature_icon(f: &Feature) -> Icon {
-    if f.is_solid() { prim_icon(f.prim.kind()) } else { Icon::Fillet }
+    match (&f.round, &f.push) {
+        (Some(_), _) => Icon::Fillet,
+        (_, Some(p)) if p.inset > 0.0 => Icon::Inset,
+        (_, Some(_)) => Icon::Extrude,
+        _ => prim_icon(f.prim.kind()),
+    }
+}
+
+/// What a step does, in a few words: "Fillet · 2 mm", "Inset · 2 mm · −3 mm".
+pub fn step_info(f: &Feature) -> String {
+    match (&f.round, &f.push) {
+        (Some(r), _) => format!("{} mm", fmt_mm(r.size as f32)),
+        (_, Some(p)) if p.inset > 0.0 && p.depth != 0.0 => format!("{} · {} mm", fmt_mm(p.inset as f32), fmt_signed(p.depth)),
+        (_, Some(p)) if p.inset > 0.0 => format!("{} mm", fmt_mm(p.inset as f32)),
+        (_, Some(p)) => format!("{} mm", fmt_signed(p.depth)),
+        _ => f.prim.kind().label().to_string(),
+    }
+}
+
+fn fmt_signed(v: f64) -> String {
+    if v > 0.0 { format!("+{}", fmt_mm(v as f32)) } else if v < 0.0 { format!("−{}", fmt_mm(-v as f32)) } else { "0".into() }
 }
 
 /// A feature's colour: Add, Carve, or the edges' yellow for a fillet.
 pub fn feature_color(f: &Feature) -> Color32 {
-    if f.is_solid() { op_color(f.op) } else { EDGE_SEL }
+    if f.is_solid() {
+        op_color(f.op)
+    } else if f.push.is_some() {
+        FACE_SEL
+    } else {
+        EDGE_SEL
+    }
 }
 
 pub fn prim_icon(k: PrimKind) -> Icon {
@@ -129,10 +155,12 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
+                mode_pill(ui, st);
+                island_sep(ui);
                 let tool = match st.tool {
                     Tool::Create(k) => k.label().to_uppercase(),
-                    Tool::Select if st.sel_mode == SelMode::Edge => "SELECTION · EDGE".to_string(),
-                    Tool::Select => "SELECTION · OBJECT".to_string(),
+                    Tool::Push(k) => k.label().to_uppercase(),
+                    Tool::Select => format!("SELECTION · {}", st.sel_mode.label().to_uppercase()),
                 };
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
                 let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 20.0, 28.0), Sense::hover());
@@ -198,6 +226,39 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     });
 }
 
+/// The component modes (like Plasticity): Vertex, Edge, Face, Object, the
+/// current one lit (with the Select tool).
+fn mode_pill(ui: &mut Ui, st: &mut AppState) {
+    let n = SelMode::ALL.len() as f32;
+    let (well, _) = ui.allocate_exact_size(vec2(n * 30.0 + 6.0, 30.0), Sense::hover());
+    ui.painter().rect(well, 9.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+    for (i, m) in SelMode::ALL.into_iter().enumerate() {
+        let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 30.0, 3.0), vec2(30.0, 24.0));
+        let resp = ui.interact(r, Id::new(("isl-selmode", i)), Sense::click());
+        let on = st.sel_mode == m && st.tool == Tool::Select;
+        let lit = st.sel_mode == m;
+        let p = ui.painter();
+        if on {
+            p.rect_filled(r, 7.0, accent());
+        } else if lit {
+            p.rect(r, 7.0, tint(accent(), 0.12), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+        } else if resp.hovered() {
+            p.rect_filled(r, 7.0, RAISED());
+        }
+        let icon = [Icon::ModeVertex, Icon::ModeEdge, Icon::ModeFace, Icon::ModeObject][i];
+        icons::paint(p, Rect::from_center_size(r.center(), vec2(17.0, 17.0)), icon, if on { on_accent() } else if lit { accent() } else { TEXT_ICON() });
+        let tip = match m {
+            SelMode::Vertex => "Vertex (1): pick the part's corners",
+            SelMode::Edge => "Edge (2): pick edges to fillet or chamfer",
+            SelMode::Face => "Face (3): pick faces to inset (I) or extrude (E)",
+            SelMode::Object => "Object (4 or Q): pick and move whole shapes",
+        };
+        if resp.on_hover_text(tip).clicked() {
+            st.set_sel_mode(m);
+        }
+    }
+}
+
 /// The mode shown: the selected shape's with the Select tool, else the one
 /// for new shapes.
 fn shown_op(st: &AppState) -> Op {
@@ -254,11 +315,16 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             grip(ui, "rail");
             ui.spacing_mut().item_spacing.y = 5.0;
             let select = st.tool == Tool::Select;
-            if card(ui, Some(Icon::Select), "SELECTION", "OBJECT · Q", select && st.sel_mode == SelMode::Object, TEXT2(), "Select shapes by their faces (Q or 1)").clicked() {
-                st.set_sel_mode(SelMode::Object);
-            }
-            if card(ui, Some(Icon::Fillet), "EDGES", "FILLET · 2", select && st.sel_mode == SelMode::Edge, EDGE_SEL, "Pick the part's edges to fillet or chamfer them (2)").clicked() {
-                st.set_sel_mode(SelMode::Edge);
+            let m = st.sel_mode;
+            let (icon, color) = match m {
+                SelMode::Vertex => (Icon::ModeVertex, TEXT2()),
+                SelMode::Edge => (Icon::ModeEdge, EDGE_SEL),
+                SelMode::Face => (Icon::ModeFace, FACE_SEL),
+                SelMode::Object => (Icon::Select, TEXT2()),
+            };
+            let sub = format!("{} · {}", m.label().to_uppercase(), m.key());
+            if card(ui, Some(icon), "SELECTION", &sub, select, color, "Select (Esc): what a click picks is set by the modes at the top (1 vertex, 2 edge, 3 face, 4 or Q object)").clicked() {
+                st.select_tool();
             }
             divider(ui);
             let mode = st.mode;
@@ -275,6 +341,16 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             let tip = "Sketch (L): on a face or the ground, click the corners, drag for curve points, click the first point (or Enter) to close, then pull it up or down";
             if card(ui, Some(Icon::Sketch), "SKETCH", &format!("{m} · L"), st.tool == Tool::Create(sk), op_color(mode), tip).clicked() {
                 st.arm(sk);
+            }
+            divider(ui);
+            for (k, icon, tip) in [
+                (PushKind::Inset, Icon::Inset, "Inset (I): a flat face's outline moved in, then raised, sunk, or left as a line. Press on a face and drag, or pick a face (3) and press I"),
+                (PushKind::Extrude, Icon::Extrude, "Extrude (E): a flat face pulled out (adds) or pushed in (carves). Press on a face and drag, or pick a face (3) and press E"),
+            ] {
+                let on = st.tool == Tool::Push(k);
+                if card(ui, Some(icon), &k.label().to_uppercase(), &format!("FACE · {}", k.key()), on, FACE_SEL, tip).clicked() {
+                    st.arm_push(k, None);
+                }
             }
             divider(ui);
             let has = !st.selection.is_empty();
@@ -340,10 +416,7 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 }
 
 fn history_chip(ui: &mut Ui, st: &AppState, f: &Feature) -> Response {
-    let sub = match &f.round {
-        Some(r) => format!("{} · {} mm", r.label(), fmt_mm(r.size as f32)),
-        None => format!("{} · {}", f.prim.kind().label(), f.op.label()),
-    };
+    let sub = if f.is_solid() { format!("{} · {}", f.prim.kind().label(), f.op.label()) } else { format!("{} · {}", f.kind_label(), step_info(f)) };
     let tg = ui.painter().layout_no_wrap(f.name.clone(), semibold(12.5), TEXT());
     let sg = ui.painter().layout_no_wrap(sub, regular(11.0), TEXT2());
     let w = 8.0 + 28.0 + 8.0 + tg.size().x.max(sg.size().x) + 12.0;
@@ -374,7 +447,9 @@ fn hud(ctx: &egui::Context, st: &mut AppState) {
     let text = crate::viewport::hint(st);
     let color = match st.tool {
         Tool::Create(_) => op_color(st.mode),
+        Tool::Push(_) => FACE_SEL,
         Tool::Select if st.sel_mode == SelMode::Edge => EDGE_SEL,
+        Tool::Select if st.sel_mode == SelMode::Face => FACE_SEL,
         Tool::Select => st.single().map(feature_color).unwrap_or(TEXT2()),
     };
     egui::Area::new(Id::new("hud")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(pos2(cx, EDGE + ISLAND_H + 12.0)).interactable(false).show(ctx, |ui| {
@@ -481,6 +556,14 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.set_width(inner_w);
                 if st.selection.is_empty() && !st.edge_sel.is_empty() {
                     round_card(ui, st);
+                } else if st.selection.is_empty() && !st.face_sel.is_empty() {
+                    face_card(ui, st);
+                } else if st.selection.is_empty() && !st.vert_sel.is_empty() {
+                    let n = st.vert_sel.len();
+                    ui.label(egui::RichText::new(if n > 1 { format!("{n} vertices picked") } else { "Vertex picked".to_string() }).font(semibold(14.0)).color(TEXT()));
+                    let v = st.vert_sel[0];
+                    ui.label(egui::RichText::new(format!("X {}  Y {}  Z {} mm", fmt_mm(v.x as f32), fmt_mm(v.y as f32), fmt_mm(v.z as f32))).font(regular(12.0)).color(TEXT2()));
+                    ui.label(egui::RichText::new("No tool uses vertices yet").font(regular(12.0)).color(TEXT2()));
                 } else if st.single().is_some() {
                     properties(ui, st);
                 } else if !st.selection.is_empty() {
@@ -539,13 +622,10 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             if f.is_solid() {
                 paint_op_glyph(p, br.center(), f.op, tint(c, dim), 9.0);
             } else {
-                icons::paint(p, br.shrink(2.0), Icon::Fillet, tint(c, dim));
+                icons::paint(p, br.shrink(2.0), feature_icon(f), tint(c, dim));
             }
             let name_color = if selected { TEXT_STRONG() } else { tint(TEXT(), dim) };
-            let info = match &f.round {
-                Some(r) => format!("{} mm", fmt_mm(r.size as f32)),
-                None => f.prim.kind().label().to_string(),
-            };
+            let info = step_info(f);
             let info_g = p.layout_no_wrap(info, regular(12.0), tint(TEXT2(), dim));
             let info_x = r.max.x - 40.0 - info_g.size().x;
             p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
@@ -562,6 +642,8 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             } else if resp.clicked() {
                 if f.is_solid() {
                     st.set_sel_mode(SelMode::Object);
+                } else if f.push.is_some() {
+                    st.set_sel_mode(SelMode::Face);
                 } else {
                     st.select_tool();
                     st.edge_sel.clear();
@@ -677,6 +759,10 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         return;
     }
     divider(ui);
+    if f.push.is_some() {
+        push_card(ui, st);
+        return;
+    }
     if !f.is_solid() {
         round_card(ui, st);
         return;
@@ -792,6 +878,64 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
         }
     }
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+        st.end_live();
+    }
+}
+
+/// Faces picked in Face mode: what can be done with them.
+fn face_card(ui: &mut Ui, st: &mut AppState) {
+    let n = st.face_sel.len();
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+        ui.painter().circle_filled(r.center(), 5.0, FACE_SEL);
+        let title = if n > 1 { format!("{n} faces picked") } else { "Face picked".to_string() };
+        ui.label(egui::RichText::new(title).font(semibold(14.0)).color(TEXT()));
+    });
+    let flat = st.picked_faces().first().and_then(|f| st.model.as_ref().map(|m| m.faces[*f].kind == nurbs_kernel::model::SurfKind::Plane)).unwrap_or(false);
+    let help = if flat {
+        "Inset (I) moves its outline in, then raises or sinks it. Extrude (E) pulls it out or pushes it in. Move the pointer, click to finish."
+    } else {
+        "A round face: Inset and Extrude take flat faces only for now."
+    };
+    ui.label(egui::RichText::new(help).font(regular(12.0)).color(TEXT2()));
+    if n > 1 {
+        ui.label(egui::RichText::new("Several faces: the tools work on the first one for now").font(regular(12.0)).color(TEXT2()));
+    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let w = (ui.available_width() - 6.0) * 0.5;
+        if secondary_btn(ui, "Inset  I", w).clicked() {
+            st.arm_push(PushKind::Inset, None);
+        }
+        if secondary_btn(ui, "Extrude  E", w).clicked() {
+            st.arm_push(PushKind::Extrude, None);
+        }
+    });
+    ui.add_space(2.0);
+    if secondary_btn(ui, "Deselect the faces", ui.available_width()).clicked() {
+        st.face_sel.clear();
+    }
+}
+
+/// The selected inset or extrusion: its two sizes (one undo step per
+/// slider drag).
+fn push_card(ui: &mut Ui, st: &mut AppState) {
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let Some(p) = st.selected_push().and_then(|f| f.push.clone()) else { return };
+    section(ui, "Face");
+    ui.label(egui::RichText::new("Inset: how far the outline moves in (0: the whole face). Depth: out adds, in carves, 0 leaves the line only.").font(regular(12.0)).color(TEXT2()));
+    let span = st.round_max().max(p.inset.abs().ceil()).max(p.depth.abs().ceil()) as f32 * 2.0;
+    let mut inset = p.inset as f32;
+    let (ch, start) = slider_row(ui, "Inset", &mut inset, 0.0..=span, 0.1, "mm");
+    if ch {
+        st.set_push(inset.max(0.0) as f64, p.depth, start || !st.is_live());
+    }
+    let mut depth = p.depth as f32;
+    let (ch, start) = slider_row(ui, "Depth", &mut depth, -span..=span, 0.1, "mm");
+    if ch {
+        st.set_push(p.inset, depth as f64, start || !st.is_live());
+    }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
         st.end_live();
     }
 }
@@ -991,21 +1135,31 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         }
     }
     if pressed(Key::Escape) {
-        if st.creation.is_some() || st.drag.is_some() || st.sketch.is_some() {
+        if st.push.is_some() {
+            st.abort_gestures();
+            st.select_tool();
+        } else if st.creation.is_some() || st.drag.is_some() || st.sketch.is_some() {
             st.abort_gestures();
         } else if st.tool != Tool::Select {
             st.select_tool();
-        } else if !st.edge_sel.is_empty() {
+        } else if !st.edge_sel.is_empty() || !st.face_sel.is_empty() || !st.vert_sel.is_empty() {
             st.edge_sel.clear();
+            st.face_sel.clear();
+            st.vert_sel.clear();
         } else {
             st.selection.clear();
         }
     }
-    if pressed(Key::Q) || pressed(Key::Num1) {
-        st.set_sel_mode(SelMode::Object);
+    for (k, m) in [(Key::Num1, SelMode::Vertex), (Key::Num2, SelMode::Edge), (Key::Num3, SelMode::Face), (Key::Num4, SelMode::Object), (Key::Q, SelMode::Object)] {
+        if pressed(k) {
+            st.set_sel_mode(m);
+        }
     }
-    if pressed(Key::Num2) {
-        st.set_sel_mode(SelMode::Edge);
+    for (k, kind) in [(Key::I, PushKind::Inset), (Key::E, PushKind::Extrude)] {
+        if pressed(k) && st.push.is_none() {
+            let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]);
+            st.arm_push(kind, at);
+        }
     }
     for (k, kind) in [(Key::B, PrimKind::Box), (Key::C, PrimKind::Cylinder), (Key::L, PrimKind::Profile)] {
         if pressed(k) {

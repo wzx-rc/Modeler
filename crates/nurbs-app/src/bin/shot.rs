@@ -485,7 +485,7 @@ fn main() {
         h.settle();
         h.shot("zero-edges-6-moved");
         // too big: OpenCascade refuses, the part stays without it
-        let r = h.st.doc.features.iter().find(|f| !f.is_solid()).map(|f| f.id).unwrap();
+        let r = h.st.doc.features.iter().find(|f| f.round.is_some()).map(|f| f.id).unwrap();
         h.st.selection = vec![r];
         h.st.set_round(14.0, false, true);
         h.st.end_live();
@@ -494,6 +494,75 @@ fn main() {
         for f in &h.st.doc.features {
             eprintln!("  {} {:?}", f.name, f.round);
         }
+    }
+
+    if want("faces") {
+        // the component modes (Face, 3) and the Inset / Extrude tools on the
+        // test part
+        h.reset(test_part(), "Test part");
+        h.key(egui::Key::Num3);
+        assert_eq!(h.st.sel_mode, SelMode::Face);
+        // the block's front face (it has the slot's notch at the top)
+        let front = h.screen_of(Vec3::new(-12.0, 7.0, 15.0));
+        h.move_to(front);
+        h.steps(2);
+        h.shot("zero-faces-1-hover");
+        h.click(front);
+        h.move_to(front + egui::vec2(0.0, 2.0));
+        h.steps(2);
+        eprintln!("picked {} faces", h.st.face_sel.len());
+        h.shot("zero-faces-2-picked");
+        // I: the inset follows the pointer (3 mm), a click, then the depth
+        h.key(egui::Key::I);
+        let g = h.st.push.clone().expect("inset started");
+        h.move_to(h.screen_of((g.origin + DVec3::X * 3.0).as_vec3()));
+        h.settle();
+        h.shot("zero-faces-3-inset");
+        h.click(h.screen_of((g.origin + DVec3::X * 3.0).as_vec3()));
+        let g = h.st.push.clone().expect("depth phase");
+        h.move_to(h.screen_of((g.origin + g.n * (g.t0 - 4.0)).as_vec3()));
+        h.settle();
+        h.shot("zero-faces-4-pocket");
+        h.click(h.screen_of((g.origin + g.n * (g.t0 - 4.0)).as_vec3()));
+        h.settle();
+        h.move_to(h.screen_of(Vec3::new(0.0, -10.0, 40.0)));
+        h.steps(2);
+        let made = h.st.doc.features.iter().filter_map(|f| f.push.as_ref().map(|p| (f.name.clone(), p.inset, p.depth))).collect::<Vec<_>>();
+        eprintln!("made {made:?}");
+        h.shot("zero-faces-5-done");
+        // E, then a press on the block's left top face (it has the hole) and
+        // a drag up: 6 mm
+        h.key(egui::Key::E);
+        let top = DVec3::new(-16.0, 20.0, 10.0);
+        let a = h.screen_of(top.as_vec3());
+        let b = h.screen_of((top + DVec3::Y * 6.0).as_vec3());
+        h.move_to(a);
+        h.steps(2);
+        h.shot("zero-faces-6-extrude-armed");
+        h.drag(a, b, 8, false);
+        h.settle();
+        h.shot("zero-faces-7-extrude-drag");
+        h.press(b, false);
+        h.steps(2);
+        h.settle();
+        h.move_to(h.screen_of(Vec3::new(0.0, -10.0, 40.0)));
+        h.steps(2);
+        h.shot("zero-faces-8-extruded");
+        // the inset raised instead of sunk, from the panel
+        let inset = h.st.doc.features.iter().find(|f| f.name == "Inset").map(|f| f.id).unwrap();
+        h.st.set_sel_mode(SelMode::Face);
+        h.st.selection = vec![inset];
+        h.st.set_push(3.0, 2.0, true);
+        h.st.end_live();
+        h.settle();
+        h.shot("zero-faces-9-raised");
+        // Vertex mode (1): the corners, one under the pointer
+        h.key(egui::Key::Num1);
+        h.move_to(h.screen_of(Vec3::new(20.0, 20.0, 15.0)));
+        h.steps(2);
+        h.shot("zero-faces-10-vertex");
+        h.key(egui::Key::Num4);
+        assert_eq!(h.st.sel_mode, SelMode::Object);
     }
 
     if want("quads") {

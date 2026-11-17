@@ -227,6 +227,33 @@ impl Round {
     }
 }
 
+/// A face of the part, found again at every build: its packed tag and a
+/// point on it (to choose between faces with the same tag).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FaceRef {
+    pub tag: i64,
+    pub at: DVec3,
+}
+
+/// A flat face pushed or pulled (the Inset and Extrude tools): its
+/// outline moved in by `inset` (0: the whole face), then moved along its
+/// normal by `depth`: out (> 0, material added), in (< 0, carved), or not
+/// at all (0: the inset is only drawn on the face).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Push {
+    pub face: FaceRef,
+    #[serde(default)]
+    pub inset: f64,
+    #[serde(default)]
+    pub depth: f64,
+}
+
+impl Push {
+    pub fn label(&self) -> &'static str {
+        if self.inset > 0.0 { "Inset" } else { "Extrude" }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Feature {
     pub id: FeatureId,
@@ -248,18 +275,24 @@ pub struct Feature {
     /// A sketched feature's outline (`Prim::Profile`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<Profile>,
+    /// A face pushed or pulled: like `round`, a step on what is built
+    /// before it (`origin` is the face point).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<Push>,
 }
 
 impl Feature {
-    /// A primitive (Add / Carve), not a fillet or chamfer.
+    /// A primitive (Add / Carve), not a step on the part (fillet,
+    /// chamfer, inset, extrude).
     pub fn is_solid(&self) -> bool {
-        self.round.is_none()
+        self.round.is_none() && self.push.is_none()
     }
-    /// What it is: "Cube", "Cylinder", "Fillet", "Chamfer".
+    /// What it is: "Cube", "Cylinder", "Fillet", "Chamfer", "Inset", "Extrude".
     pub fn kind_label(&self) -> &'static str {
-        match &self.round {
-            Some(r) => r.label(),
-            None => self.prim.kind().label(),
+        match (&self.round, &self.push) {
+            (Some(r), _) => r.label(),
+            (_, Some(p)) => p.label(),
+            _ => self.prim.kind().label(),
         }
     }
     /// Local (base centre at 0, height along +Y) to world.
@@ -384,7 +417,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -394,7 +427,16 @@ impl Doc {
         let round = Round { size, chamfer, edges };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None });
+        id
+    }
+    /// Adds an inset or extrusion of a face at the end.
+    pub fn add_push(&mut self, push: Push) -> FeatureId {
+        let id = self.next_id;
+        self.next_id += 1;
+        let name = self.fresh_name(push.label());
+        let origin = push.face.at;
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push) });
         id
     }
     /// "Cube", then "Cube 2", "Cube 3"…

@@ -6,6 +6,7 @@
 
 pub mod camera;
 pub mod draw;
+pub mod faces;
 pub mod files;
 pub mod icons;
 pub mod materials;

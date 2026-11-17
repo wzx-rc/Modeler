@@ -45,6 +45,10 @@ extern "C" {
     fn focc_edge_sample(s: *const FShape, index: c_int, n: c_int, xyz: *mut c_double) -> c_int;
     fn focc_fillet(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
     fn focc_chamfer(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
+    fn focc_inset_face(s: *const FShape, face: c_int, d: c_double) -> *mut FShape;
+    fn focc_extrude(s: *const FShape, dx: c_double, dy: c_double, dz: c_double) -> *mut FShape;
+    fn focc_imprint(s: *const FShape, tool: *const FShape) -> *mut FShape;
+    fn focc_face_distance(s: *const FShape, face: c_int, p: *const c_double) -> c_double;
     fn focc_face_count(s: *const FShape) -> c_int;
     fn focc_face_info(s: *const FShape, index: c_int, out: *mut c_double) -> c_int;
     fn focc_set_tags(s: *mut FShape, tags: *const i64, n: c_int);
@@ -448,6 +452,26 @@ impl Shape {
         shape(unsafe { focc_chamfer(self.0, edges.as_ptr(), edges.len() as c_int, d, fresh) })
     }
 
+    /// The inside of a flat face (index in the face map), its outline
+    /// moved in by `d` mm (0: the whole face): a new face on the same plane,
+    /// facing the same way, with its own edges.
+    pub fn inset_face(&self, face: usize, d: f64) -> Result<Shape, String> {
+        shape(unsafe { focc_inset_face(self.0, face as c_int, d) })
+    }
+    /// A face swept along `v` into a solid.
+    pub fn extrude(&self, v: [f64; 3]) -> Result<Shape, String> {
+        shape(unsafe { focc_extrude(self.0, v[0], v[1], v[2]) })
+    }
+    /// The solid with `tool` (a face lying on it) drawn into its faces; the
+    /// part under the tool takes the tool's tag.
+    pub fn imprint(&self, tool: &Shape) -> Result<Shape, String> {
+        shape(unsafe { focc_imprint(self.0, tool.0) })
+    }
+    /// Distance from a point to a face (None when it cannot be measured).
+    pub fn face_distance(&self, face: usize, p: [f64; 3]) -> Option<f64> {
+        let d = unsafe { focc_face_distance(self.0, face as c_int, p.as_ptr()) };
+        (d >= 0.0).then_some(d)
+    }
     pub fn face_count(&self) -> usize {
         unsafe { focc_face_count(self.0) }.max(0) as usize
     }
@@ -605,6 +629,67 @@ mod tests {
         let lines = f.edge_lines(0.02, 0.2).unwrap();
         assert_eq!(lines.len(), 12 + 4, "cube edges + 2 boundaries per rim");
         assert!(lines.iter().all(|l| l.len() >= 2));
+    }
+
+    #[test]
+    fn inset() {
+        // a 20 mm cube, tagged face by face; its top (normal +Y) inset by 3 mm
+        let mut cube = Shape::cuboid(20.0, 20.0, 20.0).unwrap();
+        let tags: Vec<i64> = (0..cube.face_count() as i64).collect();
+        cube.set_tags(&tags);
+        let top = (0..cube.face_count()).find(|f| cube.face_info(*f).unwrap().normal[1] > 0.9).unwrap();
+        assert!(cube.face_distance(top, [0.0, 15.0, 0.0]).map(|d| (d - 5.0).abs() < 1e-6).unwrap_or(false));
+        let mut inner = cube.inset_face(top, 3.0).unwrap();
+        let info = inner.face_info(0).unwrap();
+        assert!(info.normal[1] > 0.99, "facing up: {:?}", info.normal);
+        inner.set_tags(&[100]);
+        // a line only: the top cut in two, its inside tagged 100
+        let lined = cube.imprint(&inner).unwrap();
+        assert!(lined.is_valid());
+        assert_eq!(lined.face_count(), 7);
+        assert!((lined.volume() - 8000.0).abs() < 1e-6);
+        let tags: Vec<i64> = (0..lined.face_count()).map(|f| lined.face_tag(f)).collect();
+        assert!(tags.contains(&100) && tags.contains(&(top as i64)), "{tags:?}");
+        // a pocket 4 mm deep, a raised panel 2 mm high
+        let pocket = cube.cut(&inner.transformed([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.5], [0.0, 0.0, 1.0, 0.0]]).unwrap().extrude([0.0, -4.5, 0.0]).unwrap()).unwrap();
+        assert!((pocket.volume() - (8000.0 - 14.0 * 14.0 * 4.0)).abs() < 1e-3, "{}", pocket.volume());
+        let raised = cube.fuse(&inner.extrude([0.0, 2.0, 0.0]).unwrap()).unwrap();
+        assert!((raised.volume() - (8000.0 + 14.0 * 14.0 * 2.0)).abs() < 1e-3, "{}", raised.volume());
+        assert!(raised.is_valid() && pocket.is_valid());
+        // too wide
+        assert!(cube.inset_face(top, 11.0).is_err());
+        // the whole face (inset 0) pushed 5 mm in
+        let whole = cube.inset_face(top, 0.0).unwrap();
+        let pushed = cube.cut(&whole.transformed([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.1], [0.0, 0.0, 1.0, 0.0]]).unwrap().extrude([0.0, -5.1, 0.0]).unwrap()).unwrap();
+        assert!((pushed.volume() - 20.0 * 20.0 * 15.0).abs() < 1e-3 && pushed.is_valid() && pushed.face_count() == 6, "{} {}", pushed.volume(), pushed.face_count());
+        // a face with a hole: the hole grows
+        let plate = Shape::cuboid(40.0, 10.0, 30.0).unwrap().cut(&Shape::cylinder(5.0, 30.0).unwrap()).unwrap();
+        let top = (0..plate.face_count()).find(|f| plate.face_info(*f).map(|i| i.kind == SurfKind::Plane && i.normal[1] > 0.9).unwrap_or(false)).unwrap();
+        let inner = plate.inset_face(top, 2.0).unwrap();
+        let panel = plate.fuse(&inner.extrude([0.0, 1.0, 0.0]).unwrap()).unwrap();
+        let area = 36.0 * 26.0 - std::f64::consts::PI * 49.0;
+        assert!((panel.volume() - plate.volume() - area).abs() < 0.05, "{}", panel.volume() - plate.volume());
+        let sunk = plate.cut(&inner.transformed([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.5], [0.0, 0.0, 1.0, 0.0]]).unwrap().extrude([0.0, -2.5, 0.0]).unwrap()).unwrap();
+        assert!((plate.volume() - sunk.volume() - 2.0 * area).abs() < 0.1, "{}", plate.volume() - sunk.volume());
+        assert!(panel.is_valid() && sunk.is_valid());
+        // the line only: the top in three (the frame, the ring round the
+        // hole, the inside), only the inside tagged like the inset
+        let mut plate = plate;
+        let tags: Vec<i64> = (0..plate.face_count() as i64).collect();
+        plate.set_tags(&tags);
+        let mut inner = inner;
+        inner.set_tags(&[100]);
+        let lined = plate.imprint(&inner).unwrap();
+        assert!(lined.is_valid());
+        assert_eq!(lined.face_count(), plate.face_count() + 2);
+        let tags: Vec<i64> = (0..lined.face_count()).map(|f| lined.face_tag(f)).collect();
+        assert_eq!(tags.iter().filter(|t| **t == 100).count(), 1, "{tags:?}");
+        assert_eq!(tags.iter().filter(|t| **t == top as i64).count(), 2, "{tags:?}");
+        // the whole holed top pulled up 3 mm
+        let whole = plate.inset_face(top, 0.0).unwrap();
+        let pulled = plate.fuse(&whole.extrude([0.0, 3.0, 0.0]).unwrap()).unwrap();
+        let area = 40.0 * 30.0 - std::f64::consts::PI * 25.0;
+        assert!((pulled.volume() - plate.volume() - 3.0 * area).abs() < 0.05 && pulled.is_valid(), "{}", pulled.volume() - plate.volume());
     }
 
     #[test]

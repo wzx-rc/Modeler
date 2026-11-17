@@ -6,7 +6,7 @@ use std::path::PathBuf;
 /// OpenCascade toolkits used by forme_occt.cpp, dependents first (static
 /// linking order).
 const LIBS: &[&str] = &[
-    "TKFillet", "TKBool", "TKBO", "TKPrim", "TKShHealing", "TKMesh", "TKTopAlgo", "TKGeomAlgo", "TKBRep", "TKGeomBase", "TKG3d", "TKG2d", "TKMath", "TKernel",
+    "TKOffset", "TKFillet", "TKBool", "TKBO", "TKPrim", "TKShHealing", "TKMesh", "TKTopAlgo", "TKGeomAlgo", "TKBRep", "TKGeomBase", "TKG3d", "TKG2d", "TKMath", "TKernel",
 ];
 
 fn occt_root() -> PathBuf {

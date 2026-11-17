@@ -45,6 +45,15 @@ pub enum Icon {
     Sketch,
     /// Quads view: a patch of quads bending round a corner.
     Quads,
+    /// Selection modes: a cube with a corner, an edge, a face, or all of it.
+    ModeVertex,
+    ModeEdge,
+    ModeFace,
+    ModeObject,
+    /// Inset face: a square inside a square, corners joined.
+    Inset,
+    /// Extrude face: a face and an arrow up out of it.
+    Extrude,
 }
 
 struct Pen<'a> {
@@ -78,6 +87,10 @@ impl Pen<'_> {
     }
     fn dot(&self, cx: f32, cy: f32, r: f32) {
         self.p.circle_filled(self.pt(cx, cy), r * self.k(), self.s.color);
+    }
+    fn fill(&self, pts: &[(f32, f32)], alpha: f32) {
+        let v: Vec<Pos2> = pts.iter().map(|(x, y)| self.pt(*x, *y)).collect();
+        self.p.add(Shape::convex_polygon(v, self.s.color.gamma_multiply(alpha), Stroke::NONE));
     }
     /// Half ellipse (lower half when `lower`).
     fn arc(&self, cx: f32, cy: f32, rx: f32, ry: f32, a0: f32, a1: f32) {
@@ -271,6 +284,42 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(8.0, 15.5), (10.0, 17.5), (12.0, 15.5)]);
             pen.line(&[(4.5, 8.0), (2.5, 10.0), (4.5, 12.0)]);
             pen.line(&[(15.5, 8.0), (17.5, 10.0), (15.5, 12.0)]);
+        }
+        Icon::ModeVertex | Icon::ModeEdge | Icon::ModeFace | Icon::ModeObject => {
+            let hex = [(10.0, 2.5), (16.5, 6.0), (16.5, 14.0), (10.0, 17.5), (3.5, 14.0), (3.5, 6.0)];
+            let front = [(10.0, 9.5), (16.5, 6.0), (16.5, 14.0), (10.0, 17.5)];
+            match icon {
+                Icon::ModeFace => pen.fill(&front, 0.9),
+                Icon::ModeObject => pen.fill(&hex, 0.45),
+                _ => {}
+            }
+            let thin = Pen { p, r: rect, s: Stroke::new(pen.s.width * 0.75, pen.s.color.gamma_multiply(if icon == Icon::ModeObject { 1.0 } else { 0.75 })) };
+            thin.closed(&hex);
+            thin.line(&[(3.5, 6.0), (10.0, 9.5), (16.5, 6.0)]);
+            thin.line(&[(10.0, 9.5), (10.0, 17.5)]);
+            match icon {
+                Icon::ModeVertex => pen.dot(10.0, 9.5, 2.6),
+                Icon::ModeEdge => {
+                    let bold = Pen { p, r: rect, s: Stroke::new(pen.s.width * 2.0, pen.s.color) };
+                    bold.line(&[(10.0, 9.5), (10.0, 17.5)]);
+                }
+                _ => {}
+            }
+        }
+        Icon::Inset => {
+            pen.closed(&[(3.0, 3.0), (17.0, 3.0), (17.0, 17.0), (3.0, 17.0)]);
+            pen.fill(&[(7.0, 7.0), (13.0, 7.0), (13.0, 13.0), (7.0, 13.0)], 0.5);
+            pen.closed(&[(7.0, 7.0), (13.0, 7.0), (13.0, 13.0), (7.0, 13.0)]);
+            for (a, b) in [((3.0, 3.0), (7.0, 7.0)), ((17.0, 3.0), (13.0, 7.0)), ((17.0, 17.0), (13.0, 13.0)), ((3.0, 17.0), (7.0, 13.0))] {
+                pen.line(&[a, b]);
+            }
+        }
+        Icon::Extrude => {
+            let face = [(2.5, 13.5), (10.0, 10.0), (17.5, 13.5), (10.0, 17.0)];
+            pen.fill(&face, 0.45);
+            pen.closed(&face);
+            pen.line(&[(10.0, 13.5), (10.0, 2.5)]);
+            pen.line(&[(7.0, 5.5), (10.0, 2.5), (13.0, 5.5)]);
         }
         Icon::Scale => {
             // a small square growing into a big one

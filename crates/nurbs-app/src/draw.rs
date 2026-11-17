@@ -77,16 +77,30 @@ impl Drawer {
             self.r.upload_part(device, queue, &verts, &edges);
             self.flags.clear();
         }
-        // the faces' material and state
+        // the faces' material and state: in Face mode (and with the Inset /
+        // Extrude tools) face by face, else by the feature they come from
+        let by_face = face_mode(st);
+        let picked = if by_face { st.picked_faces() } else { vec![] };
         let flags: Vec<FaceGpu> = match &st.model {
             Some(m) => m
                 .faces
                 .iter()
-                .map(|f| {
-                    let flags = match f.tag {
-                        Some(t) if st.selection.contains(&t.feature) => FACE_SELECTED,
-                        Some(t) if st.hover_feature == Some(t.feature) => FACE_HOVERED,
-                        _ => 0,
+                .enumerate()
+                .map(|(i, f)| {
+                    let flags = if by_face {
+                        if picked.contains(&i) || f.tag.map(|t| st.selection.contains(&t.feature)).unwrap_or(false) {
+                            FACE_SELECTED
+                        } else if st.hover_face == Some(i) {
+                            FACE_HOVERED
+                        } else {
+                            0
+                        }
+                    } else {
+                        match f.tag {
+                            Some(t) if st.selection.contains(&t.feature) => FACE_SELECTED,
+                            Some(t) if st.hover_feature == Some(t.feature) => FACE_HOVERED,
+                            _ => 0,
+                        }
                     };
                     let mat = materials::get(f.tag.map(|t| st.material_of(t.feature)).unwrap_or(0));
                     // Quads view: the fillet and chamfer bands in orange
@@ -143,7 +157,8 @@ impl Drawer {
     #[allow(clippy::too_many_arguments)]
     pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::TextureView, size: [u32; 2], ppp: f32, st: &AppState, paint: &[egui::ClippedPrimitive], textures: &mut egui::TexturesDelta) {
         self.sync(device, queue, st);
-        let sel = rgb(theme::accent());
+        // faces picked or being worked on: green, like their mode
+        let sel = if face_mode(st) || st.push.is_some() || st.selected_push().is_some() { rgb(theme::FACE_SEL) } else { rgb(theme::accent()) };
         let frame = Frame {
             view: st.view().scaled(ppp),
             points_to_px: ppp,
@@ -158,6 +173,13 @@ impl Drawer {
         };
         self.r.render(device, queue, target, size, frame);
     }
+}
+
+/// Faces light up one by one: Face mode, or the Inset / Extrude tool waiting
+/// for a press (not while one is under way: then its new faces light up, as
+/// the selected step's do).
+fn face_mode(st: &AppState) -> bool {
+    st.push.is_none() && ((st.tool == Tool::Select && st.sel_mode == SelMode::Face) || matches!(st.tool, Tool::Push(_)))
 }
 
 /// The quads as triangles, each corner with the normal of the quads around

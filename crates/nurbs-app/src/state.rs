@@ -10,21 +10,96 @@ use crate::view::View;
 use glam::{DQuat, DVec3, Vec3};
 use nurbs_kernel::client::{Kernel, Status};
 use nurbs_kernel::doc::PrimKind;
-use nurbs_kernel::{Doc, EdgeRef, Feature, FeatureId, Model, Op, Prim, Profile};
+use nurbs_kernel::{Doc, EdgeRef, FaceRef, Feature, FeatureId, Model, Op, Prim, Profile};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Select,
     Create(PrimKind),
+    /// Inset or Extrude a flat face.
+    Push(PushKind),
 }
 
-/// What a click picks in the Select tool: whole shapes, or the part's B-rep
-/// edges (to fillet or chamfer them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PushKind {
+    Inset,
+    Extrude,
+}
+
+impl PushKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            PushKind::Inset => "Inset",
+            PushKind::Extrude => "Extrude",
+        }
+    }
+    pub fn key(self) -> &'static str {
+        match self {
+            PushKind::Inset => "I",
+            PushKind::Extrude => "E",
+        }
+    }
+}
+
+/// What a click picks in the Select tool (the component modes, keys 1 to
+/// 4 like Plasticity): the part's B-rep vertices, its edges (to fillet or
+/// chamfer them), its faces (to inset or extrude them), or whole shapes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelMode {
-    Object,
+    Vertex,
     Edge,
+    Face,
+    Object,
+}
+
+impl SelMode {
+    pub const ALL: [SelMode; 4] = [SelMode::Vertex, SelMode::Edge, SelMode::Face, SelMode::Object];
+    pub fn label(self) -> &'static str {
+        match self {
+            SelMode::Vertex => "Vertex",
+            SelMode::Edge => "Edge",
+            SelMode::Face => "Face",
+            SelMode::Object => "Object",
+        }
+    }
+    pub fn key(self) -> &'static str {
+        match self {
+            SelMode::Vertex => "1",
+            SelMode::Edge => "2",
+            SelMode::Face => "3",
+            SelMode::Object => "4",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PushPhase {
+    /// The pointer sets how far the outline moves in (Inset).
+    Inset,
+    /// The pointer sets how far the face moves along its normal.
+    Depth,
+}
+
+/// An inset or extrusion under way: a step in the document from the
+/// start, the kernel shows the real result live. Pressed on a face and
+/// dragged (`held`, the release ends the phase), or started on the picked
+/// face with its key (the pointer moves, a click ends the phase).
+#[derive(Clone, Debug)]
+pub struct PushGesture {
+    pub kind: PushKind,
+    pub id: FeatureId,
+    /// Where the face was grabbed (on it), its outward normal.
+    pub origin: DVec3,
+    pub n: DVec3,
+    pub phase: PushPhase,
+    pub held: bool,
+    /// Pointer at the phase's start, and its place along the normal then.
+    pub from: [f32; 2],
+    pub t0: f64,
+    pub moved: bool,
+    pub inset: f64,
+    pub depth: f64,
 }
 
 /// The primitives the app creates (step 1: cube and cylinder).
@@ -148,6 +223,16 @@ pub struct AppState {
 
     pub selection: Vec<FeatureId>,
     pub sel_mode: SelMode,
+    /// The faces picked in Face mode.
+    pub face_sel: Vec<FaceRef>,
+    /// The face under the pointer (index in the model's faces), in Face
+    /// mode and with the Inset / Extrude tools.
+    pub hover_face: Option<usize>,
+    /// The vertices picked in Vertex mode, and the one under the pointer.
+    pub vert_sel: Vec<DVec3>,
+    pub hover_vertex: Option<DVec3>,
+    /// The inset or extrusion under way.
+    pub push: Option<PushGesture>,
     /// The edges picked in Edge mode (not rounded yet).
     pub edge_sel: Vec<EdgeRef>,
     /// The edge under the pointer (index in the model's edges).
@@ -207,6 +292,11 @@ impl AppState {
             live_before: None,
             selection: vec![],
             sel_mode: SelMode::Object,
+            face_sel: vec![],
+            hover_face: None,
+            vert_sel: vec![],
+            hover_vertex: None,
+            push: None,
             edge_sel: vec![],
             hover_edge: None,
             round_chamfer: false,
@@ -360,10 +450,18 @@ impl AppState {
         !self.redo.is_empty()
     }
 
+    /// Drops from the selection what is no longer in the document.
+    pub(crate) fn clean_selection_ids(&mut self) {
+        let ids: Vec<FeatureId> = self.doc.features.iter().map(|f| f.id).collect();
+        self.selection.retain(|id| ids.contains(id));
+    }
+
     fn clean_selection(&mut self) {
         let ids: Vec<FeatureId> = self.doc.features.iter().map(|f| f.id).collect();
         self.selection.retain(|id| ids.contains(id));
         self.edge_sel.clear();
+        self.face_sel.clear();
+        self.vert_sel.clear();
     }
 
     // ----------------------------------------------------------- selection
@@ -398,9 +496,9 @@ impl AppState {
 
     pub fn delete_selected(&mut self) {
         if self.selection.is_empty() {
-            if !self.edge_sel.is_empty() {
-                self.edge_sel.clear();
-            }
+            self.edge_sel.clear();
+            self.face_sel.clear();
+            self.vert_sel.clear();
             return;
         }
         let ids = self.selection.clone();
@@ -515,18 +613,21 @@ impl AppState {
     /// The material a feature's faces show: its own, or for a fillet the
     /// one of the shape its first edge belongs to.
     pub fn material_of(&self, id: FeatureId) -> u32 {
-        let Some(f) = self.doc.feature(id) else { return 0 };
-        match &f.round {
-            None => f.material,
-            Some(r) => r
-                .edges
-                .first()
-                .and_then(|e| nurbs_kernel::FaceTag::unpack(e.faces[0]))
-                .and_then(|t| self.doc.feature(t.feature))
-                .filter(|g| g.is_solid())
-                .map(|g| g.material)
-                .unwrap_or(0),
+        // a step on the part takes the material of the face it starts from
+        let mut id = id;
+        for _ in 0..16 {
+            let Some(f) = self.doc.feature(id) else { return 0 };
+            let tag = match (&f.round, &f.push) {
+                (Some(r), _) => r.edges.first().map(|e| e.faces[0]),
+                (_, Some(p)) => Some(p.face.tag),
+                _ => return f.material,
+            };
+            match tag.and_then(nurbs_kernel::FaceTag::unpack) {
+                Some(t) if t.feature != id => id = t.feature,
+                _ => return 0,
+            }
         }
+        0
     }
 
     /// Gives the selected shapes a material (with nothing selected: the
@@ -551,19 +652,28 @@ impl AppState {
         self.tool = Tool::Select;
     }
 
-    /// Object or Edge picking (with the Select tool).
+    /// What the Select tool picks: vertices, edges, faces or shapes.
     pub fn set_sel_mode(&mut self, m: SelMode) {
         self.abort_gestures();
         self.tool = Tool::Select;
         if m != self.sel_mode {
             self.sel_mode = m;
             self.edge_sel.clear();
+            self.face_sel.clear();
+            self.vert_sel.clear();
             self.hover_edge = None;
-            // edges: only a fillet stays selected
-            if m == SelMode::Edge {
-                let keep: Vec<FeatureId> = self.selection.iter().copied().filter(|id| self.doc.feature(*id).map(|f| !f.is_solid()).unwrap_or(false)).collect();
-                self.selection = keep;
-            }
+            self.hover_face = None;
+            self.hover_vertex = None;
+            // the steps of the mode stay selected: a fillet in Edge mode,
+            // an inset or extrusion in Face mode
+            let keep = |f: &Feature| match m {
+                SelMode::Object => true,
+                SelMode::Edge => f.round.is_some(),
+                SelMode::Face => f.push.is_some(),
+                SelMode::Vertex => false,
+            };
+            let ids: Vec<FeatureId> = self.selection.iter().copied().filter(|id| self.doc.feature(*id).map(keep).unwrap_or(false)).collect();
+            self.selection = ids;
         }
     }
 
@@ -651,7 +761,7 @@ impl AppState {
         };
         // a fillet selected and Shift / Ctrl: the edge joins it
         if add {
-            if let Some(id) = self.single().filter(|f| !f.is_solid()).map(|f| f.id) {
+            if let Some(id) = self.single().filter(|f| f.round.is_some()).map(|f| f.id) {
                 let label = self.single().map(|f| f.kind_label()).unwrap_or("Fillet");
                 self.edit(&format!("{label}: one more edge"), |d| {
                     if let Some(rd) = d.feature_mut(id).and_then(|f| f.round.as_mut()) {
@@ -677,7 +787,7 @@ impl AppState {
 
     /// The selected fillet or chamfer, if one is.
     pub fn selected_round(&self) -> Option<&Feature> {
-        self.single().filter(|f| !f.is_solid())
+        self.single().filter(|f| f.round.is_some())
     }
 
     /// Sets the size (and kind) of the selected fillet, or makes one of the
@@ -723,10 +833,11 @@ impl AppState {
         crate::widgets::nice_ceil((ext * 0.5).clamp(1.0, 100.0) as f32) as f64
     }
 
-    /// Cancels what is under way (creation, sketch, drag).
+    /// Cancels what is under way (creation, sketch, drag, inset).
     pub fn abort_gestures(&mut self) {
-        if self.creation.take().is_some() || self.drag.take().is_some() {
+        if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() {
             self.cancel_live();
+            self.clean_selection_ids();
         }
         self.sketch = None;
         self.marquee = None;
