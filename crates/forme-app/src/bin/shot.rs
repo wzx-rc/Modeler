@@ -343,7 +343,7 @@ fn main() {
         h.steps(2);
         h.shot("max-4-fini");
     }
-    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("nurbs") || want("bake-diag") {
+    if want("pc-atelier") || want("pc-themes") || want("pc-studio") || want("pc-creation") || want("pc-perf") || want("pc-snap") || want("pc-menu") || want("pc-marquee") || want("pc-prims") || want("pc-nav") || want("pc-gizmo") || want("pc-ui") || want("pc-rot") || want("pc-multi") || want("pc-scale") || want("pc-local") || want("pc-align") || want("pc-clair") || want("nurbs") || want("bake-diag") || want("nurbs-stack") {
         pc_shots(&mut h, &want);
     }
     if want("ui-ipad") {
@@ -915,6 +915,79 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
                 }
             }
         }
+        forme_app::set_nurbs(false);
+    }
+    if want("nurbs-stack") {
+        // quick creation (Romain, 17 nov.): the same tool twice drops the
+        // shape at the world origin, then stacked on the selection, aligned
+        // on its axis; in Carve mode it drills through the selection
+        forme_app::set_nurbs(true);
+        h.pc(AppState::new(forme_core::Scene::new(), "NURBS part"), UiMode::Atelier);
+        h.st.settings.light = false;
+        h.st.settings.ambiance = forme_app::settings::AmbianceChoice::Blanc;
+        h.st.pointer_kind = PointerKind::Mouse;
+        h.steps(2);
+        // the tool armed: the hint says where it will go
+        h.st.arm_tool(PrimKind::Cylinder);
+        h.cam(Vec3::new(0.0, 10.0, 0.0), 160.0, 0.6, 0.45);
+        h.steps(6);
+        h.shot("nurbs-stack-1-origin");
+        // C again: at the origin; again twice: stacked; a cube as wide on top
+        h.st.arm_tool(PrimKind::Cylinder);
+        h.st.arm_tool(PrimKind::Cylinder);
+        h.st.arm_tool(PrimKind::Cylinder);
+        h.st.arm_tool(PrimKind::Box);
+        h.st.arm_tool(PrimKind::Box);
+        // Carve: a hole through the cube, filleted
+        h.st.mode = CombineMode::Carve;
+        h.st.arm_tool(PrimKind::Cylinder);
+        h.st.arm_tool(PrimKind::Cylinder);
+        h.st.mode = CombineMode::Add;
+        if let Some(id) = h.st.selection {
+            h.st.scene.node_mut(id).unwrap().combine.blend = 1.0;
+        }
+        // a raised, tilted cylinder: the next ones line up on its axis
+        h.st.select(None);
+        h.st.quick_add(PrimKind::Cylinder);
+        if let Some(id) = h.st.selection {
+            let n = h.st.scene.node_mut(id).unwrap();
+            n.transform.pos = Vec3::new(45.0, 18.0, -10.0);
+            n.transform.rot = glam::Quat::from_rotation_z(-0.6) * glam::Quat::from_rotation_x(0.25);
+        }
+        h.st.changed();
+        h.st.quick_add(PrimKind::Cylinder);
+        // drawn by hand on its end face (a click there with the Sphere tool,
+        // a little off centre): the shape snaps to the face centre, on the axis
+        let end = h.st.selection.map(|id| {
+            let (_, r, t) = h.st.scene.world_matrix(id).to_scale_rotation_translation();
+            let sh = h.st.scene.node(id).unwrap().shape().unwrap().clone();
+            (t + r * Vec3::new(1.5, sh.size.y, 0.0), r * Vec3::Y)
+        });
+        h.st.select(None);
+        h.st.frame_all();
+        h.steps(2);
+        if let Some((p, _)) = end {
+            let at = h.st.view().project(p).expect("end face on screen");
+            h.st.tool = Tool::Place(PrimKind::Sphere);
+            h.st.tap_place(at);
+            h.st.commit_placement();
+            if let (Some(id), Some((_, axis))) = (h.st.selection, end) {
+                let (_, _, c) = h.st.scene.world_matrix(id).to_scale_rotation_translation();
+                eprintln!("nurbs-stack : sphère tracée sur la face, centre {c:?}, axe du cylindre {axis:?}");
+            }
+        }
+        h.st.select(None);
+        h.st.arm_tool(PrimKind::Cylinder);
+        h.st.frame_all();
+        h.st.wait_nurbs();
+        h.st.view_changed();
+        h.steps(30);
+        match (&h.st.nurbs.model, &h.st.nurbs.error) {
+            (_, Some(e)) => eprintln!("nurbs-stack : erreur {e}"),
+            (Some(m), _) => eprintln!("nurbs-stack : {} formes, {} booléens, {} ms, ignorés {:?}", m.shapes, m.booleans, m.millis, m.ignored),
+            _ => eprintln!("nurbs-stack : pas de modèle"),
+        }
+        h.shot("nurbs-stack-2-stacked");
         forme_app::set_nurbs(false);
     }
     if want("pc-align") {

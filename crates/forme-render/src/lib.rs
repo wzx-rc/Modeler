@@ -109,6 +109,9 @@ pub struct Settings {
     pub jitter: [f32; 2],
     /// Light background and ground (light theme of the app).
     pub light_bg: bool,
+    /// World origin on the grid: X axis red, Z axis blue, a ring at the
+    /// origin (Forme NURBS: shapes are created there).
+    pub origin: bool,
 }
 
 impl Default for Settings {
@@ -126,6 +129,7 @@ impl Default for Settings {
             exposure: 1.0,
             jitter: [0.0, 0.0],
             light_bg: false,
+            origin: false,
         }
     }
 }
@@ -346,7 +350,7 @@ impl Renderer {
             ],
             viewport: [view.size[0], view.size[1], view.principal[0], view.principal[1]],
             scene_lo: [self.bounds.0.x, self.bounds.0.y, self.bounds.0.z, self.ground_y],
-            scene_hi: [self.bounds.1.x, self.bounds.1.y, self.bounds.1.z, if settings.grid { 1.0 } else { 0.0 }],
+            scene_hi: [self.bounds.1.x, self.bounds.1.y, self.bounds.1.z, if !settings.grid { 0.0 } else if settings.origin { 2.0 } else { 1.0 }],
             sel_color: [settings.sel_color[0], settings.sel_color[1], settings.sel_color[2], 1.0],
             ghost_color: [settings.ghost_color[0], settings.ghost_color[1], settings.ghost_color[2], 1.0],
             params: [

@@ -701,6 +701,25 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             } else {
                 gcol = gcol + vec3<f32>(0.010, 0.011, 0.013) * l1 * fade + vec3<f32>(0.022, 0.024, 0.028) * l2 * fade;
             }
+            // world origin: X axis red, Z axis blue, a ring around the origin
+            if (g.scene_hi.w > 1.5) {
+                let w = foot * 1.3 + 0.12;
+                let ax = 1.0 - smoothstep(0.0, w, abs(gp.z));
+                let az = 1.0 - smoothstep(0.0, w, abs(gp.x));
+                let ring = 1.0 - smoothstep(0.0, w, abs(length(gp.xz) - 2.5));
+                var red = vec3<f32>(0.42, 0.075, 0.07);
+                var blue = vec3<f32>(0.07, 0.15, 0.45);
+                var white = vec3<f32>(0.55, 0.56, 0.58);
+                if (lightbg) {
+                    red = vec3<f32>(0.78, 0.2, 0.17);
+                    blue = vec3<f32>(0.17, 0.36, 0.82);
+                    white = vec3<f32>(0.1, 0.1, 0.11);
+                }
+                let f = 0.35 + 0.65 * fade;
+                gcol = mix(gcol, red, ax * f);
+                gcol = mix(gcol, blue, az * f);
+                gcol = mix(gcol, white, ring);
+            }
         }
         if (g.params.y > 0.5) {
             let d = map(gp + vec3<f32>(0.0, 0.5, 0.0)).x;

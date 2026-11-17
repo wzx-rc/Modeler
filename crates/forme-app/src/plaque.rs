@@ -171,8 +171,7 @@ fn tools(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     key(ui, &r, l);
                 }
                 if r.clicked() {
-                    st.commit_placement();
-                    st.tool = Tool::Place(k);
+                    st.arm_tool(k);
                 }
             }
             ui::creation_switch(ui, st, BTN);

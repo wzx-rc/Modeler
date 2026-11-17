@@ -1775,6 +1775,134 @@ impl AppState {
         self.view_changed();
     }
 
+    /// Arms a creation tool (tool buttons, keys, menus). Forme NURBS: arming
+    /// the tool that is already armed drops the shape at once (`quick_add`).
+    pub fn arm_tool(&mut self, kind: PrimKind) {
+        let again = self.tool == Tool::Place(kind) && self.placement.is_none();
+        self.commit_placement();
+        if again && crate::nurbs() {
+            self.quick_add(kind);
+        } else {
+            self.tool = Tool::Place(kind);
+        }
+    }
+
+    /// Where `quick_add` puts the next shape: on the selected shape's top
+    /// face (its name), else at the world origin (None).
+    pub fn quick_add_target(&self) -> Option<String> {
+        let n = self.selection.and_then(|id| self.scene.node(id))?;
+        n.shape().map(|_| n.name.clone())
+    }
+
+    /// Forme NURBS quick creation (Romain, 17 nov.: everything aligned, shapes
+    /// stacked fast). Drops a shape of default size at once:
+    /// - nothing selected: at the world origin, standing on the grid;
+    /// - a shape selected: on its top (the end of its own Y axis), same axis
+    ///   and orientation, same size for the same kind, else the same width;
+    ///   in Carve mode, a hole through it from that face.
+    /// Then the new shape is selected, so the next one stacks on it.
+    pub fn quick_add(&mut self, kind: PrimKind) {
+        self.commit_placement();
+        self.snap_ctx = None;
+        let carve = self.effective_mode() == CombineMode::Carve;
+        // defaults: 20 mm parts on the 10 mm grid
+        let (mut r, mut hx, mut hz, mut h) = match kind {
+            PrimKind::Capsule => (6.0, 6.0, 6.0, 24.0),
+            PrimKind::Torus => (12.0, 12.0, 12.0, 6.0),
+            _ => (10.0, 10.0, 10.0, 20.0),
+        };
+        let (mut base, mut normal, mut rot) = (Vec3::ZERO, Vec3::Y, Quat::IDENTITY);
+        let target = self.selection.and_then(|id| self.scene.node(id)).and_then(|n| n.shape().cloned().map(|s| (n.id, s)));
+        if let Some((id, s)) = target {
+            let (sc, wr, wt) = self.scene.world_matrix(id).to_scale_rotation_translation();
+            let k = sc.x.abs();
+            let z = s.size * k;
+            // half height along its Y axis, and width (radius / half side)
+            let top = match s.kind {
+                PrimKind::Sphere => z.x,
+                PrimKind::Capsule => z.y + z.x,
+                PrimKind::Torus => z.z,
+                _ => z.y,
+            };
+            let foot = match s.kind {
+                PrimKind::Box => z.x.min(z.z),
+                PrimKind::Torus => z.x + z.z,
+                _ => z.x,
+            };
+            normal = (wr * Vec3::Y).normalize_or(Vec3::Y);
+            rot = wr;
+            base = wt + normal * top;
+            if carve {
+                // a hole through the shape from its top face
+                r = foot * 0.4;
+                hx = if s.kind == PrimKind::Box { z.x * 0.5 } else { r };
+                hz = if s.kind == PrimKind::Box { z.z * 0.5 } else { r };
+                h = 2.0 * top + 0.8;
+                if kind == PrimKind::Torus {
+                    r = foot * 0.6;
+                    h = (foot * 0.2).max(0.5);
+                }
+            } else if kind == s.kind {
+                // the same piece again
+                r = z.x;
+                hx = z.x;
+                hz = z.z;
+                h = match kind {
+                    PrimKind::Sphere => 2.0 * z.x,
+                    PrimKind::Capsule => 2.0 * (z.y + z.x),
+                    PrimKind::Torus => 2.0 * z.z,
+                    _ => 2.0 * z.y,
+                };
+            } else {
+                // as wide as the shape below
+                r = foot;
+                hx = foot;
+                hz = foot;
+                h = match kind {
+                    PrimKind::Capsule => foot * 4.0,
+                    PrimKind::Torus => foot * 0.5,
+                    _ => foot * 2.0,
+                };
+            }
+        }
+        // the node, as a placement that is applied and committed at once
+        let mode = if carve { CombineMode::Carve } else { CombineMode::Add };
+        let parent = self.insertion_parent();
+        let count = self.scene.nodes.values().filter(|n| n.shape().map(|s| s.kind == kind).unwrap_or(false)).count() + 1;
+        let mut shape = Shape::new(kind);
+        shape.size = Vec3::splat(0.2);
+        let mut spec = NodeSpec::shape(&format!("{} {}", kind.label(), count), shape).mode(mode).mat(self.material);
+        if self.sym_x {
+            spec.mirror.x = true;
+        }
+        self.history.record(&trd(format!("Ajouter {}", kind.label())), &self.scene);
+        let id = self.scene.add(parent, spec);
+        self.placement = Some(Placement {
+            node: id,
+            kind,
+            base,
+            normal,
+            rot,
+            radius: r,
+            hx,
+            hz,
+            // Add grows along the normal, Carve goes into the matter
+            height: if carve { -h } else { h },
+            phase: PlacePhase::AwaitHeight,
+            mode,
+            snapped: None,
+            // exact contact: the NURBS union fuses touching faces
+            started_on_surface: false,
+            anchor: None,
+            offset: Vec3::ZERO,
+            base_mode: CombineMode::Add,
+            snap_end: None,
+        });
+        self.apply_placement();
+        self.commit_placement();
+        self.view_changed();
+    }
+
     /// Pencil hover / mouse after the base: the height follows the pointer.
     pub fn hover_height(&mut self, pos: [f32; 2]) {
         let Some(mut p) = self.placement.clone() else { return };
@@ -1818,7 +1946,7 @@ impl AppState {
             self.selection_more.clear();
             self.edge_sel.clear();
         }
-        let again = if self.pointer_kind == PointerKind::Finger { tr("retouche l'outil") } else { tr("R / C ou l'outil") };
+        let again = if self.pointer_kind == PointerKind::Finger { tr("retouche l'outil") } else { tr("C ou l'outil") };
         self.toast(trd(format!("{name} · {} · {again} pour en créer une autre", p.mode.label())));
         self.changed();
     }
@@ -2808,7 +2936,23 @@ impl AppState {
                 }
                 None => trd(format!("{} formes · touche une forme pour la sélectionner", self.scene.shape_count())),
             },
-            Tool::Place(k) => trd(format!("{} · {} — glisse pour la base (ou {} : taille par défaut)", k.label(), self.effective_mode().label(), tap_word())),
+            Tool::Place(k) => {
+                let mut s = trd(format!("{} · {} — glisse pour la base (ou {} : taille par défaut)", k.label(), self.effective_mode().label(), tap_word()));
+                if crate::nurbs() {
+                    // quick creation: the same tool again drops the shape
+                    let again = match crate::ui::prim_key(k) {
+                        Some(key) => trd(format!("{key} ou l'outil encore")),
+                        None => tr("l'outil encore").to_string(),
+                    };
+                    let place = match self.quick_add_target() {
+                        Some(name) if self.effective_mode() == CombineMode::Carve => trd(format!("perce à travers {name}")),
+                        Some(name) => trd(format!("empile sur {name}")),
+                        None => tr("à l'origine").to_string(),
+                    };
+                    s += &format!(" · {again}{}{place}", if crate::i18n::en() { ": " } else { " : " });
+                }
+                s
+            }
         }
     }
 }

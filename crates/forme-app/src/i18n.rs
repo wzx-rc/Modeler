@@ -56,6 +56,8 @@ pub fn trd(s: String) -> String {
 
 /// Fixed texts.
 const PLAIN: &[(&str, &str)] = &[
+    ("l'outil encore", "the tool again"),
+    ("à l'origine", "at the origin"),
     (" (valeurs différentes)", " (different values)"),
     (" · sym.", " · mir."),
     ("+ gauche orbite · + molette pan · + droit zoom", "+ left orbit · + wheel pan · + right zoom"),
@@ -282,7 +284,7 @@ const PLAIN: &[(&str, &str)] = &[
     ),
     ("Profondeur", "Depth"),
     ("Qualité", "Quality"),
-    ("R / C ou l'outil", "R / C or the tool"),
+    ("C ou l'outil", "C or the tool"),
     ("Raccord", "Blend"),
     ("Raccourcis", "Shortcuts"),
     ("Rails de fillet (orange)", "Fillet rails (orange)"),
@@ -506,6 +508,9 @@ const FRAG: &[(&str, &str)] = &[
     (" — glisse : vers le haut +, vers le bas −, tap pour valider", " — drag: up +, down −, tap to confirm"),
     (" — glisse pour la base (ou ", " — drag the base (or "),
     (" : taille par défaut)", ": default size)"),
+    (" ou l'outil encore", " or the tool again"),
+    ("perce à travers ", "drill through "),
+    ("empile sur ", "stack on "),
     (" — monte (+) ou descends (−), Ctrl inverse, ", " — go up (+) or down (−), Ctrl flips, "),
     (" pour valider", " to confirm"),
     (" — relâche pour valider", " — release to confirm"),

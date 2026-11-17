@@ -447,8 +447,7 @@ fn focus_dock(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     let r = icon_btn(ui, prim_icon(k), st.tool == Tool::Place(k), &format!("{} ({key})", k.label()), b);
                     key_hint(ui, &r, key);
                     if r.clicked() {
-                        st.commit_placement();
-                        st.tool = Tool::Place(k);
+                        st.arm_tool(k);
                     }
                 }
                 island_sep(ui);
@@ -593,10 +592,16 @@ pub(crate) fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.set_pick_mode(PickMode::Object);
         st.gizmo = GizmoMode::Scale;
     }
+    // Forme NURBS: Shift + the key (or the key again) drops the shape at
+    // once, at the origin or on the selected shape (state::quick_add)
+    let shift = ctx.input(|i| i.modifiers.shift);
     for (pressed, k) in [(kc, PrimKind::Cylinder), (ks, PrimKind::Sphere), (ka, PrimKind::Capsule), (kt, PrimKind::Torus)] {
         if pressed {
-            st.commit_placement();
-            st.tool = Tool::Place(k);
+            if shift && crate::nurbs() {
+                st.quick_add(k);
+            } else {
+                st.arm_tool(k);
+            }
         }
     }
     if k2 {
@@ -1058,8 +1063,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
                 let sub = if key.is_empty() { mode.to_string() } else { format!("{mode} · {key}") };
                 let tip = if key.is_empty() { k.label().to_string() } else { format!("{} ({key})", k.label()) };
                 if card(ui, Some(prim_icon(k)), &name, &sub, on, mode_color(m), &tip).clicked() {
-                    st.commit_placement();
-                    st.tool = Tool::Place(k);
+                    st.arm_tool(k);
                 }
             }
             if DESK {

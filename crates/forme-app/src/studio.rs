@@ -362,8 +362,7 @@ fn menus(ui: &mut Ui, st: &mut AppState) {
         for k in PRIMS {
             let key = ui::prim_key(k).unwrap_or("");
             if ui.add(egui::Button::new(k.label()).shortcut_text(key).selected(st.tool == Tool::Place(k))).clicked() {
-                st.commit_placement();
-                st.tool = Tool::Place(k);
+                st.arm_tool(k);
             }
         }
         ui.separator();
@@ -502,8 +501,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                 let r = tool_btn(ui, ui::prim_icon(k), st.tool == Tool::Place(k), &trd(format!("{} ({key}) : glisser, ou taper les cotes", k.label())));
                 ui::key_hint(ui, &r, key);
                 if r.clicked() {
-                    st.commit_placement();
-                    st.tool = Tool::Place(k);
+                    st.arm_tool(k);
                 }
             });
         }
@@ -1318,8 +1316,7 @@ fn commands() -> Vec<(String, &'static str, Cmd)> {
 fn run(st: &mut AppState, c: Cmd) {
     match c {
         Cmd::Place(k) => {
-            st.commit_placement();
-            st.tool = Tool::Place(k);
+            st.arm_tool(k);
         }
         Cmd::Mode(m) => st.mode = m,
         Cmd::Pick(m) => st.set_pick_mode(m),

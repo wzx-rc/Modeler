@@ -166,8 +166,7 @@ pub fn run(st: &mut AppState, act: Act, ctx: Ctx) {
         Act::EdgeMode => st.set_pick_mode(PickMode::Edge),
         Act::ObjectMode => st.set_pick_mode(PickMode::Object),
         Act::Place(k) => {
-            st.commit_placement();
-            st.tool = Tool::Place(k);
+            st.arm_tool(k);
         }
         Act::Snap => st.snap = !st.snap,
         Act::Grid => st.grid = !st.grid,

@@ -587,6 +587,7 @@ impl FrameRenderer {
         s.jitter = jitter;
         s.sel_color = crate::theme::sel_rgb();
         s.light_bg = st.settings.light;
+        s.origin = crate::nurbs();
         s
     }
 
