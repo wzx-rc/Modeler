@@ -1980,6 +1980,7 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
         })
     };
     let mut failed_faces: HashSet<usize> = HashSet::new();
+    let mut t_faces: HashSet<usize> = HashSet::new();
     let pole_faces: HashSet<usize> = (0..topo.faces.len()).filter(|f| topo.faces[*f].wires.iter().flatten().any(|(e, _)| topo.edges[(*e - 1) as usize].degenerated)).collect();
     let mut out_quads: Vec<([u32; 4], usize)> = vec![];
     for pt in &patches {
@@ -2055,6 +2056,7 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
                     .collect()
             });
             let (mut inner, mut qs) = (vec![], vec![]);
+            t_faces.insert(fi);
             if layout(sd, &mut inner, &mut qs).is_none() {
                 mesh.skipped.push((fi, "opposite sides differ".into()));
                 failed_faces.insert(fi);
@@ -2230,6 +2232,27 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
             mesh.quad_face.push(fi as u32);
         }
     }
+    // 4. smoothed: each point inside a face moved towards the middle of its
+    // neighbours, then put back on the surface (the points on the B-rep
+    // edges stay); a face that comes out worse keeps its points
+    let edge_nodes: HashSet<usize> = cx.lines.iter().filter(|l| l.edge > 0).flat_map(|l| l.splits.iter().map(|x| x.1)).collect();
+    let mut fixed = vec![false; mesh.positions.len()];
+    for (k, id) in &index {
+        let on_edge = match k {
+            Key::Node(n) => edge_nodes.contains(n),
+            Key::Inner(p, _) => cx.lines[p.line].edge > 0,
+        };
+        if on_edge {
+            fixed[*id as usize] = true;
+        }
+    }
+    // (flat faces, faces closing on a pole and faces with rows ending in
+    // T: a curved face's grid in (u, v) is already even)
+    let mut want: HashSet<usize> = pole_faces.clone();
+    want.extend(t_faces.iter().copied());
+    want.extend((0..topo.faces.len()).filter(|f| shape.face_info(*f).map(|i| i.kind == forme_occt::SurfKind::Plane).unwrap_or(false)));
+    smooth(&mut mesh, shape, &fixed, &want);
+
     // faces in face order, so each face's quads are together
     let mut order: Vec<usize> = (0..mesh.quads.len()).collect();
     order.sort_by_key(|k| mesh.quad_face[*k]);
@@ -2238,6 +2261,77 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
     mesh.skipped.sort_by_key(|s| s.0);
     mesh.skipped.dedup_by_key(|s| s.0);
     Ok(mesh)
+}
+
+/// Smooths the points inside each face (not `fixed`): a few steps half way
+/// to the middle of their neighbours, put back on the surface each time.
+/// A face whose quads come out worse (more squashed) keeps its points.
+fn smooth(mesh: &mut QuadMesh, shape: &Shape, fixed: &[bool], want: &HashSet<usize>) {
+    let n = mesh.positions.len();
+    let mut nb: Vec<Vec<u32>> = vec![vec![]; n];
+    let mut face_of: Vec<Option<usize>> = vec![None; n];
+    let mut quads_of: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (k, (q, f)) in mesh.quads.iter().zip(&mesh.quad_face).enumerate() {
+        quads_of.entry(*f as usize).or_default().push(k);
+        for i in 0..4 {
+            let (a, b) = (q[i] as usize, q[(i + 1) % 4]);
+            if !nb[a].contains(&b) {
+                nb[a].push(b);
+            }
+            let (c, d) = (q[(i + 1) % 4] as usize, q[i]);
+            if !nb[c].contains(&d) {
+                nb[c].push(d);
+            }
+            face_of[a] = Some(*f as usize);
+        }
+    }
+    let bad_of = |mesh: &QuadMesh, ks: &[usize]| -> (usize, f64) {
+        let sub = QuadMesh { positions: mesh.positions.clone(), quads: ks.iter().map(|k| mesh.quads[*k]).collect(), quad_face: vec![], skipped: vec![] };
+        (sub.bad_quads(20.0), sub.min_angle())
+    };
+    let mut faces: Vec<usize> = quads_of.keys().copied().filter(|f| want.contains(f)).collect();
+    faces.sort();
+    for f in faces {
+        let ks = &quads_of[&f];
+        let pts: Vec<usize> = (0..n).filter(|v| !fixed[*v] && face_of[*v] == Some(f) && !nb[*v].is_empty()).collect();
+        if pts.is_empty() {
+            continue;
+        }
+        let before = bad_of(mesh, ks);
+        let keep: Vec<[f64; 3]> = pts.iter().map(|v| mesh.positions[*v]).collect();
+        let mut ok = true;
+        for _ in 0..8 {
+            let moved: Vec<[f64; 3]> = pts
+                .iter()
+                .map(|v| {
+                    let p = mesh.positions[*v];
+                    let m = nb[*v].iter().fold([0.0; 3], |a, w| {
+                        let q = mesh.positions[*w as usize];
+                        [a[0] + q[0], a[1] + q[1], a[2] + q[2]]
+                    });
+                    let k = 1.0 / nb[*v].len() as f64;
+                    [p[0] + 0.5 * (m[0] * k - p[0]), p[1] + 0.5 * (m[1] * k - p[1]), p[2] + 0.5 * (m[2] * k - p[2])]
+                })
+                .collect();
+            match shape.face_project(f, &moved) {
+                Ok(on) => {
+                    for (v, (_, p, _)) in pts.iter().zip(on) {
+                        mesh.positions[*v] = p;
+                    }
+                }
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        let after = bad_of(mesh, ks);
+        if !ok || after.0 > before.0 || (after.0 == before.0 && after.1 < before.1 - 1e-9) {
+            for (v, p) in pts.iter().zip(keep) {
+                mesh.positions[*v] = p;
+            }
+        }
+    }
 }
 
 impl QuadMesh {
@@ -2268,6 +2362,20 @@ impl QuadMesh {
             }
         }
         uses.values().all(|n| *n == 2)
+    }
+
+    /// The smallest angle at a corner of a quad (degrees).
+    pub fn min_angle(&self) -> f64 {
+        let p = |i: u32| self.positions[i as usize];
+        let mut m = 180.0f64;
+        for q in &self.quads {
+            for k in 0..4 {
+                let (a, b, c) = (p(q[(k + 3) % 4]), p(q[k]), p(q[(k + 1) % 4]));
+                let (u, v) = (sub(a, b), sub(c, b));
+                m = m.min((dot(u, v) / (len(u) * len(v)).max(1e-30)).clamp(-1.0, 1.0).acos().to_degrees());
+            }
+        }
+        m
     }
 
     /// The quads that are folded or squashed: an angle at a corner under
