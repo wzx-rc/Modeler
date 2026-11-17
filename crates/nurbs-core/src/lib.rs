@@ -30,7 +30,7 @@ pub struct NurbsModel {
     /// Shapes combined, booleans done.
     pub shapes: usize,
     pub booleans: usize,
-    /// What the NURBS build left out (French, for the UI).
+    /// What the NURBS build left out (English, for the UI).
     pub ignored: Vec<String>,
     pub millis: u128,
 }
@@ -135,7 +135,7 @@ pub fn primitive(sh: &Shape) -> std::result::Result<Solid, String> {
         }
         PrimKind::Capsule => make_capsule(s.x.max(0.01) as f64, s.y.max(0.0) as f64),
         PrimKind::Torus => make_torus(s.x.max(0.02) as f64, s.z.clamp(0.01, s.x.max(0.02) * 0.99) as f64),
-        k => return Err(format!("{} : pas encore en NURBS", k.label())),
+        k => return Err(format!("{}: not in NURBS yet", k.label())),
     };
     Ok(solid)
 }
@@ -203,16 +203,16 @@ pub fn build(scene: &Scene) -> std::result::Result<NurbsModel, String> {
         let sh = n.shape().unwrap();
         let name = &n.name;
         if sh.round > 0.0 || sh.chamfer > 0.0 || !sh.edges.is_empty() {
-            ignored.push(format!("{name} : arrondis et chanfreins"));
+            ignored.push(format!("{name}: rounds and chamfers"));
         }
         if n.combine.blend > 0.0 || !n.blend_zones.is_empty() {
-            ignored.push(format!("{name} : raccord (blend)"));
+            ignored.push(format!("{name}: blend"));
         }
         if sh.shell > 0.0 {
-            ignored.push(format!("{name} : coque"));
+            ignored.push(format!("{name}: shell"));
         }
         if !matches!(n.repeat, forme_core::scene::Repeat::None) {
-            ignored.push(format!("{name} : répétition"));
+            ignored.push(format!("{name}: repeat"));
         }
         let base = primitive(sh)?;
         for (m, flips) in placements(scene, id) {
@@ -231,7 +231,7 @@ pub fn build(scene: &Scene) -> std::result::Result<NurbsModel, String> {
                             model.booleans += 1;
                             match truck_shapeops::or(&merged, &p, tol()) {
                                 Some(u) => merged = u,
-                                None => return Err(format!("{name} : l'union NURBS a échoué")),
+                                None => return Err(format!("{name}: the NURBS union failed")),
                             }
                         } else {
                             keep.push((p, mat));
@@ -250,7 +250,7 @@ pub fn build(scene: &Scene) -> std::result::Result<NurbsModel, String> {
                             model.booleans += 1;
                             match truck_shapeops::and(&p, &cut, tol()) {
                                 Some(d) => next.push((d, mat)),
-                                None => return Err(format!("{name} : la soustraction NURBS a échoué")),
+                                None => return Err(format!("{name}: the NURBS subtraction failed")),
                             }
                         } else {
                             next.push((p, mat));
@@ -258,7 +258,7 @@ pub fn build(scene: &Scene) -> std::result::Result<NurbsModel, String> {
                     }
                     parts = next;
                 }
-                other => ignored.push(format!("{name} : mode {} pas encore en NURBS", other.label())),
+                other => ignored.push(format!("{name}: mode {} not in NURBS yet", other.label())),
             }
         }
     }

@@ -14,6 +14,7 @@
 //!
 //! The items are listed in `items()`: change them there.
 
+use crate::i18n::{tr, trd};
 use crate::camera::ViewPreset;
 use crate::state::{AppState, PickMode, Tool};
 use crate::theme::*;
@@ -46,9 +47,9 @@ pub enum Ctx {
 impl Ctx {
     fn title(self) -> &'static str {
         match self {
-            Ctx::Shape(_) => "Forme",
-            Ctx::Edge => "Arête",
-            Ctx::Empty => "Scène",
+            Ctx::Shape(_) => tr("Forme"),
+            Ctx::Edge => tr("Arête"),
+            Ctx::Empty => tr("Scène"),
         }
     }
 }
@@ -96,14 +97,14 @@ pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
             let carve = n.map(|n| n.combine.mode == CombineMode::Carve).unwrap_or(false);
             let mirror = n.map(|n| n.mirror.x).unwrap_or(false);
             vec![
-                it(0, "Matière ›", false, Act::Material),
-                it(1, "Symétrie X", mirror, Act::MirrorX),
-                it(2, if carve { "Passer en Add (+)" } else { "Passer en Carve (−)" }, false, Act::ToggleCarve),
-                it(3, "Cadrer", false, Act::Frame),
-                it(4, "Supprimer", false, Act::Delete),
-                it(5, "Masquer", false, Act::Hide),
-                it(6, "Mode Arête", false, Act::EdgeMode),
-                it(7, "Dupliquer", false, Act::Duplicate),
+                it(0, tr("Matière ›"), false, Act::Material),
+                it(1, tr("Symétrie X"), mirror, Act::MirrorX),
+                it(2, if carve { tr("Passer en Add (+)") } else { tr("Passer en Carve (−)") }, false, Act::ToggleCarve),
+                it(3, tr("Cadrer"), false, Act::Frame),
+                it(4, tr("Supprimer"), false, Act::Delete),
+                it(5, tr("Masquer"), false, Act::Hide),
+                it(6, tr("Mode Arête"), false, Act::EdgeMode),
+                it(7, tr("Dupliquer"), false, Act::Duplicate),
             ]
         }
         Ctx::Edge => {
@@ -111,10 +112,10 @@ pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
             let (r, ch) = e.map(|e| (e.radius, e.chamfer)).unwrap_or((0.0, false));
             vec![
                 it(0, "Fillet", r > 0.0 && !ch, Act::Fillet),
-                it(2, "Chanfrein", r > 0.0 && ch, Act::Chamfer),
-                it(3, "Cadrer", false, Act::Frame),
-                it(4, "Arête vive", r <= 0.0, Act::Sharp),
-                it(6, "Mode Objet", false, Act::ObjectMode),
+                it(2, tr("Chanfrein"), r > 0.0 && ch, Act::Chamfer),
+                it(3, tr("Cadrer"), false, Act::Frame),
+                it(4, tr("Arête vive"), r <= 0.0, Act::Sharp),
+                it(6, tr("Mode Objet"), false, Act::ObjectMode),
             ]
         }
         Ctx::Empty => {
@@ -122,13 +123,13 @@ pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
             let ortho = st.camera.ortho;
             vec![
                 it(0, "Cube", st.tool == Tool::Place(PrimKind::Box), Act::Place(PrimKind::Box)),
-                it(1, "Cylindre", st.tool == Tool::Place(PrimKind::Cylinder), Act::Place(PrimKind::Cylinder)),
+                it(1, tr("Cylindre"), st.tool == Tool::Place(PrimKind::Cylinder), Act::Place(PrimKind::Cylinder)),
                 it(2, "Snap", st.snap, Act::Snap),
-                it(3, "Grille", st.grid, Act::Grid),
-                it(4, "Vue 3D", !ortho, Act::View(ViewPreset::Perspective)),
-                it(5, "Vue de dessus", ortho && preset == ViewPreset::Top, Act::View(ViewPreset::Top)),
-                it(6, "Vue de face", ortho && preset == ViewPreset::Front, Act::View(ViewPreset::Front)),
-                it(7, "Grouper", false, Act::Group),
+                it(3, tr("Grille"), st.grid, Act::Grid),
+                it(4, tr("Vue 3D"), !ortho, Act::View(ViewPreset::Perspective)),
+                it(5, tr("Vue de dessus"), ortho && preset == ViewPreset::Top, Act::View(ViewPreset::Top)),
+                it(6, tr("Vue de face"), ortho && preset == ViewPreset::Front, Act::View(ViewPreset::Front)),
+                it(7, tr("Grouper"), false, Act::Group),
             ]
         }
     }
@@ -141,7 +142,7 @@ pub fn run(st: &mut AppState, act: Act, ctx: Ctx) {
         Act::MirrorX => {
             if let Ctx::Shape(id) = ctx {
                 let v = !st.scene.node(id).map(|n| n.mirror.x).unwrap_or(false);
-                st.edit_selection("Symétrie", id, |n| n.mirror.x = v);
+                st.edit_selection(tr("Symétrie"), id, |n| n.mirror.x = v);
             }
         }
         Act::ToggleCarve => {
@@ -158,7 +159,7 @@ pub fn run(st: &mut AppState, act: Act, ctx: Ctx) {
         Act::Hide => {
             if let Ctx::Shape(id) = ctx {
                 let v = !st.scene.node(id).map(|n| n.visible).unwrap_or(true);
-                st.edit_selection("Visibilité", id, |n| n.visible = v);
+                st.edit_selection(tr("Visibilité"), id, |n| n.visible = v);
             }
         }
         Act::Group => st.group_selected(),
@@ -429,8 +430,8 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect, on_handle: bool
         let menu = st.marking.menu.take().unwrap();
         if let (Some(k), Ctx::Shape(id)) = (menu.swatch, menu.ctx) {
             let name = st.scene.materials.get(k).map(|m| m.name.clone()).unwrap_or_default();
-            st.edit_selection("Matière", id, |n| n.material = k as u32);
-            st.toast(format!("Matière : {name}"));
+            st.edit_selection(tr("Matière"), id, |n| n.material = k as u32);
+            st.toast(trd(format!("Matière : {name}")));
         } else if let Some(d) = menu.hover {
             let list = items(st, menu.ctx);
             if let Some(item) = list.into_iter().find(|i| i.dir == d && i.act != Act::Material) {

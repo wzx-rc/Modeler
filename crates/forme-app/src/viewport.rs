@@ -1,6 +1,7 @@
 //! The 3D viewport: gestures (finger = camera, Pencil/mouse = tools) and the
 //! overlays drawn on top of the raymarched image (handles, measures).
 
+use crate::i18n::{tr, trd};
 use crate::icons::{self, Icon};
 use crate::state::*;
 use crate::theme::*;
@@ -134,24 +135,27 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
 /// it is rebuilt), the build time, and what the NURBS build left out.
 fn nurbs_status(ui: &mut egui::Ui, st: &AppState) {
     let vr = st.view_rect;
-    let at = pos2(vr[0] + 14.0, vr[3] - 14.0);
+    // above the history strip in Établi / Focus (it sits at the bottom centre)
+    let lift = if matches!(st.settings.ui_mode, crate::settings::UiMode::Studio | crate::settings::UiMode::Plaque) { 14.0 } else { 96.0 };
+    let at = pos2(vr[0] + 14.0, vr[3] - lift);
     let n = &st.nurbs;
+    let plural = |k: usize, w: &str| format!("{k} {w}{}", if k == 1 { "" } else { "s" });
     let (text, border, fg) = if let Some(e) = &n.error {
         (format!("NURBS · {e}"), ERROR, ERROR)
     } else if n.ready(st.scene_version) {
         let m = n.model.as_ref().unwrap();
-        let mut t = format!("NURBS · {} forme{} · {} booléen{} · {} ms", m.shapes, if m.shapes > 1 { "s" } else { "" }, m.booleans, if m.booleans > 1 { "s" } else { "" }, m.millis);
+        let mut t = format!("NURBS · {} · {} · {} ms", plural(m.shapes, "shape"), plural(m.booleans, "boolean"), m.millis);
         if !m.ignored.is_empty() {
-            t.push_str(&format!(" · {} réglage{} SDF ignoré{}", m.ignored.len(), if m.ignored.len() > 1 { "s" } else { "" }, if m.ignored.len() > 1 { "s" } else { "" }));
+            t.push_str(&format!(" · {} ignored", plural(m.ignored.len(), "SDF setting")));
         }
         (t, accent_border(), TEXT())
     } else {
-        ("NURBS · calcul… (aperçu SDF)".to_string(), DIVIDER(), TEXT2())
+        ("NURBS · computing… (SDF preview)".to_string(), DIVIDER(), TEXT2())
     };
     let r = chip(ui.painter(), at, Align2::LEFT_BOTTOM, &text, border, fg);
     if let Some(m) = n.model.as_ref().filter(|m| !m.ignored.is_empty() && n.ready(st.scene_version)) {
         let resp = ui.interact(r, Id::new("nurbs-status"), Sense::hover());
-        resp.on_hover_text(format!("Pas encore en NURBS, ignoré :\n{}", m.ignored.join("\n")));
+        resp.on_hover_text(format!("Not in NURBS yet, ignored:\n{}", m.ignored.join("\n")));
     }
 }
 
@@ -530,9 +534,9 @@ fn draw_edges(p: &Painter, st: &AppState) {
             }
             if let Some(h) = st.hover {
                 let r = if e.radius <= 0.0 {
-                    "vive".to_string()
+                    tr("vive").to_string()
                 } else {
-                    format!("{} {} mm", if e.chamfer { "chanfrein" } else { "fillet" }, fmt_mm(e.radius))
+                    format!("{} {} mm", if e.chamfer { tr("chanfrein") } else { "fillet" }, fmt_mm(e.radius))
                 };
                 // CTRL: the tap adds (or removes) this edge
                 let prefix = match (multi, selected) {
@@ -664,7 +668,7 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                     Some(Handle::RotX) => "X",
                     Some(Handle::RotY) => "Y",
                     Some(Handle::RotZ) => "Z",
-                    _ => "vue",
+                    _ => tr("vue"),
                 };
                 let at = st.hover.map(|h| pos2(h[0], h[1])).unwrap_or(pc) + vec2(18.0, -18.0);
                 chip(p, at, Align2::LEFT_BOTTOM, &format!("Rotation {axis} · {}°", fmt_mm(a)), tint(HOT, 0.5), HOT);
@@ -762,10 +766,10 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                     p.line_segment([o, sp], Stroke::new(if hot { 2.5 } else { 1.75 }, EDGE_SEL));
                     p.circle(sp, if hot { 9.5 } else { 8.0 }, EDGE_SEL, Stroke::new(2.0, on_accent()));
                     if let Some(e) = st.edge_sel.last() {
-                        let what = if e.chamfer { "Chanfrein" } else { "Fillet" };
-                        let mut t = if e.radius <= 0.0 { "Arête vive · tire pour arrondir".to_string() } else { format!("{what} {} mm", fmt_mm(e.radius)) };
+                        let what = if e.chamfer { tr("Chanfrein") } else { "Fillet" };
+                        let mut t = if e.radius <= 0.0 { tr("Arête vive · tire pour arrondir").to_string() } else { format!("{what} {} mm", fmt_mm(e.radius)) };
                         if st.edge_sel.len() > 1 {
-                            t = format!("{t} · {} arêtes", st.edge_sel.len());
+                            t = trd(format!("{t} · {} arêtes", st.edge_sel.len()));
                         }
                         // towards the free side of the viewport
                         let right = sp.x < st.principal()[0];
@@ -814,7 +818,7 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                     (Handle::Radius, _) => Some(format!("R {} mm", fmt_mm(sh.size.x))),
                     (Handle::Height, PrimKind::Torus) => Some(format!("É {} mm", fmt_mm(sh.size.z))),
                     (Handle::Height, _) => Some(format!("H {} mm", fmt_mm(sh.half_height() * 2.0))),
-                    (Handle::Depth, PrimKind::Profile) => Some(format!("Ép {} mm", fmt_mm(sh.size.z * 2.0))),
+                    (Handle::Depth, PrimKind::Profile) => Some(trd(format!("Ép {} mm", fmt_mm(sh.size.z * 2.0)))),
                     (Handle::Depth, _) => Some(format!("P {} mm", fmt_mm(sh.size.z * 2.0))),
                     (Handle::Round, _) => Some(format!("Bevel {} mm", fmt_mm(sh.round))),
                     _ => None,
@@ -844,19 +848,19 @@ fn draw_overlay(p: &Painter, st: &AppState) {
                     // snapped far corner: a diamond on the vertex / edge
                     let r = 7.0;
                     p.add(Shape::convex_polygon(vec![q + vec2(0.0, -r), q + vec2(r, 0.0), q + vec2(0.0, r), q + vec2(-r, 0.0)], Color32::TRANSPARENT, Stroke::new(2.0, accent_light())));
-                    chip(p, q + vec2(14.0, -14.0), Align2::LEFT_BOTTOM, &format!("Snap · {what}"), accent_border(), accent_text());
+                    chip(p, q + vec2(14.0, -14.0), Align2::LEFT_BOTTOM, &format!("Snap · {}", tr(what)), accent_border(), accent_text());
                 }
             }
             if let Some(snap) = pl.snapped {
-                chip(p, b + vec2(26.0, -34.0), Align2::LEFT_BOTTOM, &format!("Snap · {snap}"), Color32::from_gray(0x4A), TEXT());
+                chip(p, b + vec2(26.0, -34.0), Align2::LEFT_BOTTOM, &format!("Snap · {}", tr(snap)), Color32::from_gray(0x4A), TEXT());
             }
             let (title, value) = match pl.phase {
                 PlacePhase::Base => match pl.kind {
                     PrimKind::Box => ("Base", format!("{} × {} mm", fmt_mm(pl.hx * 2.0), fmt_mm(pl.hz * 2.0))),
-                    _ => ("Rayon", format!("{} mm", fmt_mm(pl.radius))),
+                    _ => (tr("Rayon"), format!("{} mm", fmt_mm(pl.radius))),
                 },
                 _ => (
-                    if pl.height >= 0.0 { "Hauteur" } else { "Profondeur" },
+                    if pl.height >= 0.0 { tr("Hauteur") } else { tr("Profondeur") },
                     format!("{}{} mm", if pl.mode == CombineMode::Add { "+ " } else if pl.mode == CombineMode::Carve { "− " } else { "" }, fmt_mm(if pl.kind == PrimKind::Torus { pl.height * 0.5 } else { pl.height.abs() })),
                 ),
             };

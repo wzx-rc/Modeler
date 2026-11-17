@@ -4,6 +4,7 @@
 //! the docked scene tree on the right, and a thin status bar at the bottom
 //! that says what the tool expects. One warm orange accent (= Add).
 
+use crate::i18n::{tr};
 use crate::camera::ViewPreset;
 use crate::icons::{self, Icon};
 use crate::settings::Navigation;
@@ -81,14 +82,14 @@ fn menu_pill(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 }
                 ui.painter().galley(pos2(r.min.x + 6.0, r.center().y - g.size().y * 0.5), g, TEXT());
                 icons::paint(ui.painter(), Rect::from_min_size(pos2(r.max.x - 18.0, r.center().y - 6.0), vec2(12.0, 12.0)), Icon::Chevron, TEXT2());
-                if resp.on_hover_text("Ouvrir, nouveau, enregistrer").clicked() {
+                if resp.on_hover_text(tr("Ouvrir, nouveau, enregistrer")).clicked() {
                     st.files_open = !st.files_open;
                 }
                 sep(ui);
-                if tool_btn(ui, Icon::Undo, false, "Annuler (Ctrl+Z)").clicked() {
+                if tool_btn(ui, Icon::Undo, false, tr("Annuler (Ctrl+Z)")).clicked() {
                     st.undo();
                 }
-                if tool_btn(ui, Icon::Redo, false, "Rétablir (Ctrl+Y)").clicked() {
+                if tool_btn(ui, Icon::Redo, false, tr("Rétablir (Ctrl+Y)")).clicked() {
                     st.redo();
                 }
             });
@@ -108,7 +109,7 @@ fn view_pill(ctx: &egui::Context, st: &mut AppState, view: Rect) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let cur = st.camera.preset_of();
-                for (p, l) in [(ViewPreset::Perspective, "3D"), (ViewPreset::Front, "Face"), (ViewPreset::Right, "Droite"), (ViewPreset::Top, "Dessus")] {
+                for (p, l) in [(ViewPreset::Perspective, "3D"), (ViewPreset::Front, tr("Face")), (ViewPreset::Right, tr("Droite")), (ViewPreset::Top, tr("Dessus"))] {
                     let on = cur == p;
                     let g = ui.painter().layout_no_wrap(l.to_string(), medium(12.0), TEXT());
                     let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 18.0, BTN), Sense::click());
@@ -125,13 +126,13 @@ fn view_pill(ctx: &egui::Context, st: &mut AppState, view: Rect) {
                     }
                 }
                 sep(ui);
-                if tool_btn(ui, Icon::Grid, st.grid, "Grille au sol").clicked() {
+                if tool_btn(ui, Icon::Grid, st.grid, tr("Grille au sol")).clicked() {
                     st.grid = !st.grid;
                     st.view_changed();
                 }
-                let r = tool_btn(ui, Icon::Light, st.display_open, "Affichage : lumière, ombres, anticrénelage");
+                let r = tool_btn(ui, Icon::Light, st.display_open, tr("Affichage : lumière, ombres, anticrénelage"));
                 ui::light_toggle(st, &r);
-                if tool_btn(ui, Icon::Settings, st.settings_open, "Réglages").clicked() {
+                if tool_btn(ui, Icon::Settings, st.settings_open, tr("Réglages")).clicked() {
                     st.settings_open = !st.settings_open;
                 }
             });
@@ -146,12 +147,12 @@ fn tools(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         let sel = st.tool == Tool::Select;
         card().show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            let r = tool_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (Q ou 1)");
+            let r = tool_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, tr("Sélection d'objets (Q ou 1)"));
             key(ui, &r, "Q");
             if r.clicked() {
                 st.set_pick_mode(PickMode::Object);
             }
-            let r = tool_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins");
+            let r = tool_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, tr("Sélection d'arêtes (2) : fillets, chanfreins"));
             key(ui, &r, "2");
             if r.clicked() {
                 st.set_pick_mode(PickMode::Edge);
@@ -190,7 +191,7 @@ fn tools(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     p.rect_filled(r, 6.0, RAISED());
                 }
                 ui::paint_mode_glyph(p, r.center(), m, if on { c } else { TEXT_ICON() }, 12.0);
-                let tip = if m == CombineMode::Add { "Add : ajoute la forme" } else { "Carve : creuse" };
+                let tip = if m == CombineMode::Add { tr("Add : ajoute la forme") } else { tr("Carve : creuse") };
                 if resp.on_hover_text(tip).clicked() {
                     st.set_mode(m);
                 }
@@ -198,11 +199,11 @@ fn tools(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         });
         card().show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            if tool_btn(ui, Icon::Mirror, st.sym_x, "Symétrie X des nouvelles formes").clicked() {
+            if tool_btn(ui, Icon::Mirror, st.sym_x, tr("Symétrie X des nouvelles formes")).clicked() {
                 st.sym_x = !st.sym_x;
-                st.toast(if st.sym_x { "Symétrie X : les nouvelles formes sont doublées" } else { "Symétrie X désactivée" });
+                st.toast(if st.sym_x { tr("Symétrie X : les nouvelles formes sont doublées") } else { tr("Symétrie X désactivée") });
             }
-            if tool_btn(ui, Icon::Magnet, st.snap, "Snap aux arêtes et aux sommets").clicked() {
+            if tool_btn(ui, Icon::Magnet, st.snap, tr("Snap aux arêtes et aux sommets")).clicked() {
                 st.snap = !st.snap;
             }
         });
@@ -257,8 +258,8 @@ fn status_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         },
     };
     let nav = match st.settings.navigation {
-        Navigation::Maya => "Alt + clic gauche : orbite · Alt + milieu : pan · Alt + droit : zoom · F : cadrer",
-        Navigation::Tripo => "Glisser dans le vide : orbite · droit : pan · molette : zoom · F : cadrer",
+        Navigation::Maya => tr("Alt + clic gauche : orbite · Alt + milieu : pan · Alt + droit : zoom · F : cadrer"),
+        Navigation::Tripo => tr("Glisser dans le vide : orbite · droit : pan · molette : zoom · F : cadrer"),
     };
     egui::Area::new(Id::new("plaque-status")).order(Order::Middle).fixed_pos(rect.min).interactable(false).show(ctx, |ui| {
         let (r, _) = ui.allocate_exact_size(rect.size(), Sense::hover());

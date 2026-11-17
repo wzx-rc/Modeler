@@ -6,11 +6,12 @@
 //! a creation tool is armed). Same state, tools and renderer as Établi
 //! (`ui.rs`), whose dialogs it reuses.
 
+use crate::i18n::{tr, trd};
 use crate::camera::ViewPreset;
 use crate::icons::{self, Icon};
 use crate::settings::{Navigation, UiMode};
 use crate::state::*;
-use crate::theme::{pick, NEUTRAL_MODE, TEXT_ICON, accent, accent_bg, accent_border, accent_text, carve, medium, regular, semibold, tint, AXIS_X, AXIS_Y, AXIS_Z, EDGE_SEL};
+use crate::theme::{pick, NEUTRAL_MODE, TEXT_ICON, accent, accent_bg, accent_light, on_accent, accent_border, accent_text, carve, medium, regular, semibold, tint, AXIS_X, AXIS_Y, AXIS_Z, EDGE_SEL};
 use crate::ui;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, Id, Order, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui};
 use forme_core::*;
@@ -182,8 +183,8 @@ fn text_btn(ui: &mut Ui, icon: Option<Icon>, label: &str, primary: bool) -> Resp
     let (r, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
     let p = ui.painter();
     let (fill, fg) = match (primary, resp.hovered()) {
-        (true, false) => (accent(), Color32::WHITE),
-        (true, true) => (Color32::from_rgb(0x6A, 0xA0, 0xFF), Color32::WHITE),
+        (true, false) => (accent(), on_accent()),
+        (true, true) => (accent_light(), on_accent()),
         (false, false) => (B3(), T1()),
         (false, true) => (B4(), Color32::WHITE),
     };
@@ -257,7 +258,7 @@ fn sub_head(ui: &mut Ui, title: &str) {
 }
 
 fn presets() -> [(ViewPreset, &'static str); 4] {
-    [(ViewPreset::Perspective, "Perspective"), (ViewPreset::Front, "Face"), (ViewPreset::Right, "Droite"), (ViewPreset::Top, "Dessus")]
+    [(ViewPreset::Perspective, "Perspective"), (ViewPreset::Front, tr("Face")), (ViewPreset::Right, tr("Droite")), (ViewPreset::Top, tr("Dessus"))]
 }
 
 // ---------------------------------------------------------------- top bar
@@ -269,7 +270,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
         let name = st.doc_name.clone();
         let dirty = st.scene_version != st.saved_version;
         let g = ui.painter().layout_no_wrap(name, semibold(13.0), T1());
-        let sub = ui.painter().layout_no_wrap(if dirty { "· modifié".to_string() } else { "· enregistré".to_string() }, regular(11.5), T3());
+        let sub = ui.painter().layout_no_wrap(if dirty { tr("· modifié").to_string() } else { tr("· enregistré").to_string() }, regular(11.5), T3());
         let total = g.size().x + 6.0 + sub.size().x;
         let x0 = rect.center().x - total * 0.5;
         let gw = g.size().x;
@@ -288,10 +289,10 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.add_space(8.0);
-                if small_btn(ui, Icon::Settings, st.settings_open, "Réglages : interface, navigation, création").clicked() {
+                if small_btn(ui, Icon::Settings, st.settings_open, tr("Réglages : interface, navigation, création")).clicked() {
                     st.settings_open = !st.settings_open;
                 }
-                let r = small_btn(ui, Icon::Light, st.display_open, "Affichage : lumière, ombres, anticrénelage");
+                let r = small_btn(ui, Icon::Light, st.display_open, tr("Affichage : lumière, ombres, anticrénelage"));
                 ui::light_toggle(st, &r);
                 ui.add_space(6.0);
                 // the command palette field
@@ -299,11 +300,11 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                 let p = ui.painter();
                 p.rect(r, 7.0, if resp.hovered() { B2() } else { B0() }, Stroke::new(1.0, if resp.hovered() { accent_border() } else { LINE() }), StrokeKind::Inside);
                 icons::paint(p, Rect::from_min_size(pos2(r.min.x + 9.0, r.center().y - 6.5), vec2(13.0, 13.0)), Icon::Frame, T3());
-                p.text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, "Commande, forme, réglage…", regular(12.0), T3());
+                p.text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, tr("Commande, forme, réglage…"), regular(12.0), T3());
                 let kr = Rect::from_min_size(pos2(r.max.x - 56.0, r.min.y + 4.0), vec2(50.0, 18.0));
                 p.rect(kr, 4.0, B2(), Stroke::new(1.0, LINE()), StrokeKind::Inside);
-                p.text(kr.center(), Align2::CENTER_CENTER, "Espace", medium(10.5), T2());
-                if resp.on_hover_text("Palette de commandes (Espace)").clicked() {
+                p.text(kr.center(), Align2::CENTER_CENTER, tr("Espace"), medium(10.5), T2());
+                if resp.on_hover_text(tr("Palette de commandes (Espace)")).clicked() {
                     open_palette(ui.ctx());
                 }
             });
@@ -312,52 +313,52 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
 }
 
 fn menus(ui: &mut Ui, st: &mut AppState) {
-    ui.menu_button("Fichier", |ui| {
-        if ui.add(egui::Button::new("Nouveau · Ouvrir…")).clicked() {
+    ui.menu_button(tr("Fichier"), |ui| {
+        if ui.add(egui::Button::new(tr("Nouveau · Ouvrir…"))).clicked() {
             st.files_open = true;
         }
-        if ui.add(egui::Button::new("Enregistrer").shortcut_text("Ctrl+S")).clicked() {
+        if ui.add(egui::Button::new(tr("Enregistrer")).shortcut_text("Ctrl+S")).clicked() {
             st.save();
         }
         ui.separator();
-        if ui.button("Exporter le mesh…").clicked() {
+        if ui.button(tr("Exporter le mesh…")).clicked() {
             st.export_open = true;
         }
         ui.separator();
-        if ui.button("Réglages…").clicked() {
+        if ui.button(tr("Réglages…")).clicked() {
             st.settings_open = true;
         }
     });
-    ui.menu_button("Édition", |ui| {
-        if ui.add(egui::Button::new("Annuler").shortcut_text("Ctrl+Z")).clicked() {
+    ui.menu_button(tr("Édition"), |ui| {
+        if ui.add(egui::Button::new(tr("Annuler")).shortcut_text("Ctrl+Z")).clicked() {
             st.undo();
         }
-        if ui.add(egui::Button::new("Rétablir").shortcut_text("Ctrl+Y")).clicked() {
+        if ui.add(egui::Button::new(tr("Rétablir")).shortcut_text("Ctrl+Y")).clicked() {
             st.redo();
         }
         ui.separator();
         let has = st.selection.is_some();
-        if ui.add_enabled(has, egui::Button::new("Dupliquer").shortcut_text("Ctrl+D")).clicked() {
+        if ui.add_enabled(has, egui::Button::new(tr("Dupliquer")).shortcut_text("Ctrl+D")).clicked() {
             st.duplicate_selected();
         }
-        if ui.add_enabled(has, egui::Button::new("Supprimer").shortcut_text("Suppr")).clicked() {
+        if ui.add_enabled(has, egui::Button::new(tr("Supprimer")).shortcut_text(tr("Suppr"))).clicked() {
             st.delete_selected();
         }
-        if ui.add_enabled(has, egui::Button::new("Grouper")).clicked() {
+        if ui.add_enabled(has, egui::Button::new(tr("Grouper"))).clicked() {
             st.group_selected();
         }
-        if ui.add_enabled(has, egui::Button::new("Symétrie X de la sélection")).clicked() {
+        if ui.add_enabled(has, egui::Button::new(tr("Symétrie X de la sélection"))).clicked() {
             if let Some(id) = st.selection {
-                st.edit("Symétrie", id, |n| n.mirror.x = !n.mirror.x);
+                st.edit(tr("Symétrie"), id, |n| n.mirror.x = !n.mirror.x);
             }
         }
         ui.separator();
-        if ui.add_enabled(has || !st.edge_sel.is_empty(), egui::Button::new("Désélectionner").shortcut_text("Échap")).clicked() {
+        if ui.add_enabled(has || !st.edge_sel.is_empty(), egui::Button::new(tr("Désélectionner")).shortcut_text(tr("Échap"))).clicked() {
             st.clear_edge();
             st.select(None);
         }
     });
-    ui.menu_button("Créer", |ui| {
+    ui.menu_button(tr("Créer"), |ui| {
         for k in PRIMS {
             let key = ui::prim_key(k).unwrap_or("");
             if ui.add(egui::Button::new(k.label()).shortcut_text(key).selected(st.tool == Tool::Place(k))).clicked() {
@@ -366,20 +367,20 @@ fn menus(ui: &mut Ui, st: &mut AppState) {
             }
         }
         ui.separator();
-        small_label(ui, "Mode des nouvelles formes");
+        small_label(ui, tr("Mode des nouvelles formes"));
         for m in MODES {
             if ui.radio(st.mode == m, m.label()).clicked() {
                 st.mode = m;
             }
         }
-        if ui.checkbox(&mut st.sym_x, "Symétrie X des nouvelles formes").changed() {
+        if ui.checkbox(&mut st.sym_x, tr("Symétrie X des nouvelles formes")).changed() {
             st.view_changed();
         }
         ui.separator();
-        small_label(ui, "Création");
+        small_label(ui, tr("Création"));
         {
             use crate::settings::Creation;
-            for (c, l) in [(Creation::Interactive, "Interactive (base puis hauteur)"), (Creation::Direct, "Directe (un clic pose la forme)")] {
+            for (c, l) in [(Creation::Interactive, tr("Interactive (base puis hauteur)")), (Creation::Direct, tr("Directe (un clic pose la forme)"))] {
                 if ui.radio(st.settings.creation == c, l).clicked() && st.settings.creation != c {
                     st.settings.creation = c;
                     st.save_settings();
@@ -387,26 +388,26 @@ fn menus(ui: &mut Ui, st: &mut AppState) {
             }
         }
     });
-    ui.menu_button("Aligner", |ui| {
+    ui.menu_button(tr("Aligner"), |ui| {
         use crate::state::AlignOp;
         let mut todo = None;
         for (axis, l) in ["X", "Y", "Z"].iter().enumerate() {
-            for (side, name) in [(0u8, "min"), (1, "centre"), (2, "max")] {
+            for (side, name) in [(0u8, "min"), (1, tr("centre")), (2, "max")] {
                 let op = AlignOp::Align(axis, side);
-                if ui.add_enabled(st.can_align(op), egui::Button::new(format!("Aligner {l} {name}"))).clicked() {
+                if ui.add_enabled(st.can_align(op), egui::Button::new(trd(format!("Aligner {l} {name}")))).clicked() {
                     todo = Some(op);
                 }
             }
             let op = AlignOp::Distribute(axis);
-            if ui.add_enabled(st.can_align(op), egui::Button::new(format!("Répartir en {l}"))).clicked() {
+            if ui.add_enabled(st.can_align(op), egui::Button::new(trd(format!("Répartir en {l}")))).clicked() {
                 todo = Some(op);
             }
             ui.separator();
         }
-        if ui.add_enabled(st.can_align(AlignOp::Ground), egui::Button::new("Poser au sol")).clicked() {
+        if ui.add_enabled(st.can_align(AlignOp::Ground), egui::Button::new(tr("Poser au sol"))).clicked() {
             todo = Some(AlignOp::Ground);
         }
-        if ui.add_enabled(st.can_align(AlignOp::Origin), egui::Button::new("Centrer sur l'origine")).clicked() {
+        if ui.add_enabled(st.can_align(AlignOp::Origin), egui::Button::new(tr("Centrer sur l'origine"))).clicked() {
             todo = Some(AlignOp::Origin);
         }
         if let Some(op) = todo {
@@ -414,7 +415,7 @@ fn menus(ui: &mut Ui, st: &mut AppState) {
             ui.close();
         }
     });
-    ui.menu_button("Vue", |ui| {
+    ui.menu_button(tr("Vue"), |ui| {
         let cur = st.camera.preset_of();
         for (p, l) in presets() {
             if ui.radio(cur == p, l).clicked() {
@@ -423,36 +424,36 @@ fn menus(ui: &mut Ui, st: &mut AppState) {
             }
         }
         ui.separator();
-        if ui.add(egui::Button::new("Cadrer la sélection").shortcut_text("F")).clicked() {
+        if ui.add(egui::Button::new(tr("Cadrer la sélection")).shortcut_text("F")).clicked() {
             st.frame_selection();
         }
-        if ui.button("Cadrer toute la scène").clicked() {
+        if ui.button(tr("Cadrer toute la scène")).clicked() {
             let (lo, hi) = st.scene.bounds();
             st.frame_smooth(lo, hi);
         }
         ui.separator();
-        if ui.checkbox(&mut st.grid, "Grille").changed() {
+        if ui.checkbox(&mut st.grid, tr("Grille")).changed() {
             st.view_changed();
         }
         ui.checkbox(&mut st.snap, "Snap");
         ui.separator();
-        if ui.button("Passer à l'interface Établi").clicked() {
+        if ui.button(tr("Passer à l'interface Établi")).clicked() {
             st.set_ui_mode(UiMode::Atelier);
         }
     });
-    ui.menu_button("Aide", |ui| {
-        small_label(ui, "Raccourcis");
+    ui.menu_button(tr("Aide"), |ui| {
+        small_label(ui, tr("Raccourcis"));
         for (k, what) in [
-            ("Espace", "palette de commandes"),
-            ("Q · 1 · 2", "sélection · objet · arête"),
-            ("C · S · A · T", "cylindre · sphère · capsule · tore"),
-            ("W · E · R", "déplacer · tourner · échelle"),
-            ("Tab · Entrée", "cotes au clavier pendant la création"),
-            ("Ctrl pendant la création", "inverse + / −"),
-            ("F", "cadrer la sélection"),
-            ("Ctrl+Z / Ctrl+Y", "annuler / rétablir"),
-            ("Ctrl+D · Suppr", "dupliquer · supprimer"),
-            ("Échap", "désélectionner"),
+            (tr("Espace"), tr("palette de commandes")),
+            ("Q · 1 · 2", tr("sélection · objet · arête")),
+            ("C · S · A · T", tr("cylindre · sphère · capsule · tore")),
+            ("W · E · R", tr("déplacer · tourner · échelle")),
+            (tr("Tab · Entrée"), tr("cotes au clavier pendant la création")),
+            (tr("Ctrl pendant la création"), tr("inverse + / −")),
+            ("F", tr("cadrer la sélection")),
+            ("Ctrl+Z / Ctrl+Y", tr("annuler / rétablir")),
+            (tr("Ctrl+D · Suppr"), tr("dupliquer · supprimer")),
+            (tr("Échap"), tr("désélectionner")),
         ] {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(k).font(medium(12.0)).color(T1()));
@@ -481,24 +482,24 @@ fn rail(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
         };
         let sel = st.tool == Tool::Select;
         centred(ui, &mut |ui| {
-            let r = tool_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (Q ou 1)");
+            let r = tool_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, tr("Sélection d'objets (Q ou 1)"));
             ui::key_hint(ui, &r, "Q");
             if r.clicked() {
                 st.set_pick_mode(PickMode::Object);
             }
         });
         centred(ui, &mut |ui| {
-            let r = tool_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins");
+            let r = tool_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, tr("Sélection d'arêtes (2) : fillets, chanfreins"));
             ui::key_hint(ui, &r, "2");
             if r.clicked() {
                 st.set_pick_mode(PickMode::Edge);
             }
         });
-        group(ui, "FORMES");
+        group(ui, tr("FORMES"));
         for k in PRIMS {
             centred(ui, &mut |ui| {
                 let key = ui::prim_key(k).unwrap_or("");
-                let r = tool_btn(ui, ui::prim_icon(k), st.tool == Tool::Place(k), &format!("{} ({key}) : glisser, ou taper les cotes", k.label()));
+                let r = tool_btn(ui, ui::prim_icon(k), st.tool == Tool::Place(k), &trd(format!("{} ({key}) : glisser, ou taper les cotes", k.label())));
                 ui::key_hint(ui, &r, key);
                 if r.clicked() {
                     st.commit_placement();
@@ -521,13 +522,13 @@ fn rail(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                     p.rect_filled(r, 7.0, B3());
                 }
                 ui::paint_mode_glyph(p, r.center(), m, if on { c } else { T2() }, 12.0);
-                if resp.on_hover_text(if m == CombineMode::Add { "Add : ajoute la forme" } else { "Carve : creuse (Ctrl inverse pendant la création)" }).clicked() {
+                if resp.on_hover_text(if m == CombineMode::Add { tr("Add : ajoute la forme") } else { tr("Carve : creuse (Ctrl inverse pendant la création)") }).clicked() {
                     st.set_mode(m);
                 }
             });
         }
         group(ui, "GIZMO");
-        for (g, icon, tip, key) in [(GizmoMode::Move, Icon::Move, "Déplacer et dimensionner (W)", "W"), (GizmoMode::Rotate, Icon::Rotate, "Tourner : anneaux X / Y / Z, vue, trackball (E)", "E"), (GizmoMode::Scale, Icon::Scale, "Échelle : étirer selon les axes de la forme, ou tout (R)", "R")] {
+        for (g, icon, tip, key) in [(GizmoMode::Move, Icon::Move, tr("Déplacer et dimensionner (W)"), "W"), (GizmoMode::Rotate, Icon::Rotate, tr("Tourner : anneaux X / Y / Z, vue, trackball (E)"), "E"), (GizmoMode::Scale, Icon::Scale, tr("Échelle : étirer selon les axes de la forme, ou tout (R)"), "R")] {
             centred(ui, &mut |ui| {
                 let r = tool_btn(ui, icon, st.gizmo == g, tip);
                 ui::key_hint(ui, &r, key);
@@ -537,23 +538,23 @@ fn rail(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                 }
             });
         }
-        group(ui, "ÉDITION");
+        group(ui, tr("ÉDITION"));
         let has = st.selection.is_some();
         let mirrored = st.selection.and_then(|id| st.scene.node(id)).map(|n| n.mirror.x).unwrap_or(false);
         centred(ui, &mut |ui| {
-            if tool_btn(ui, Icon::Mirror, mirrored, "Symétrie X de la sélection").clicked() && has {
+            if tool_btn(ui, Icon::Mirror, mirrored, tr("Symétrie X de la sélection")).clicked() && has {
                 if let Some(id) = st.selection {
-                    st.edit("Symétrie", id, |n| n.mirror.x = !n.mirror.x);
+                    st.edit(tr("Symétrie"), id, |n| n.mirror.x = !n.mirror.x);
                 }
             }
         });
         centred(ui, &mut |ui| {
-            if tool_btn(ui, Icon::Duplicate, false, "Dupliquer (Ctrl+D)").clicked() && has {
+            if tool_btn(ui, Icon::Duplicate, false, tr("Dupliquer (Ctrl+D)")).clicked() && has {
                 st.duplicate_selected();
             }
         });
         centred(ui, &mut |ui| {
-            if tool_btn(ui, Icon::Folder, false, "Grouper la sélection").clicked() && has {
+            if tool_btn(ui, Icon::Folder, false, tr("Grouper la sélection")).clicked() && has {
                 st.group_selected();
             }
         });
@@ -571,14 +572,14 @@ fn side_panel(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
         let n = st.scene.shape_count();
         // scene
         ui.add_space(6.0);
-        section_head(ui, "SCÈNE", &format!("{n} forme{}", if n > 1 { "s" } else { "" }));
+        section_head(ui, tr("SCÈNE"), &trd(format!("{n} forme{}", if n > 1 { "s" } else { "" })));
         let list_h = (rows.len().max(1) as f32 * 27.0 + 4.0).min(rect.height() * 0.3);
         egui::ScrollArea::vertical().id_salt("studio-scene").max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             if rows.is_empty() {
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);
-                    ui.label(RichText::new("Scène vide · R, C, S, A ou T pour créer").font(regular(12.0)).color(T2()));
+                    ui.label(RichText::new(tr("Scène vide · R, C, S, A ou T pour créer")).font(regular(12.0)).color(T2()));
                 });
             }
             for (id, depth) in rows.iter() {
@@ -601,7 +602,7 @@ fn side_panel(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
         let (sep, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
         ui.painter().rect_filled(sep, 0.0, LINE());
         ui.add_space(6.0);
-        section_head(ui, "HISTORIQUE", &format!("{} opération{}", rows.len(), if rows.len() > 1 { "s" } else { "" }));
+        section_head(ui, tr("HISTORIQUE"), &trd(format!("{} opération{}", rows.len(), if rows.len() > 1 { "s" } else { "" })));
         egui::ScrollArea::vertical().id_salt("studio-hist").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             for (i, (id, _)) in rows.iter().enumerate() {
@@ -649,7 +650,7 @@ fn scene_row(ui: &mut Ui, st: &mut AppState, id: NodeId, depth: usize, w: f32) {
     let fg = if selected { accent_text() } else { tint(T1(), dim) };
     let mut info = n.type_label();
     if n.mirror.any() {
-        info += " · sym.";
+        info += tr(" · sym.");
     }
     let ig = ui.painter().layout_no_wrap(info, regular(11.5), if selected { accent_text() } else { tint(T3(), dim.max(0.7)) });
     let ix = r.max.x - 36.0 - ig.size().x;
@@ -700,7 +701,7 @@ fn history_row(ui: &mut Ui, st: &mut AppState, id: NodeId, i: usize, w: f32) {
     };
     p.text(pos2(r.min.x + 58.0, r.center().y), Align2::LEFT_CENTER, &n.name, regular(12.0), if selected { accent_text() } else { T1() });
     p.text(pos2(r.max.x - 16.0, r.center().y), Align2::RIGHT_CENTER, what, regular(11.0), T3());
-    if resp.on_hover_text("Sélectionner cette opération").clicked() {
+    if resp.on_hover_text(tr("Sélectionner cette opération")).clicked() {
         st.commit_placement();
         st.tool = Tool::Select;
         st.select(Some(id));
@@ -709,9 +710,9 @@ fn history_row(ui: &mut Ui, st: &mut AppState, id: NodeId, i: usize, w: f32) {
 
 fn properties(ui: &mut Ui, st: &mut AppState) {
     let Some(id) = st.selection else {
-        ui.label(RichText::new("Aucune sélection").font(semibold(13.0)).color(T1()));
-        ui.label(RichText::new("Clique une forme dans la vue ou dans la scène. Pour créer : une forme à gauche, puis glisse dans la vue ou tape ses cotes.").font(regular(12.0)).color(T2()));
-        sub_head(ui, "Nouvelles formes");
+        ui.label(RichText::new(tr("Aucune sélection")).font(semibold(13.0)).color(T1()));
+        ui.label(RichText::new(tr("Clique une forme dans la vue ou dans la scène. Pour créer : une forme à gauche, puis glisse dans la vue ou tape ses cotes.")).font(regular(12.0)).color(T2()));
+        sub_head(ui, tr("Nouvelles formes"));
         ui.horizontal(|ui| {
             for m in MODES {
                 if ui.radio(st.mode == m, m.label()).clicked() {
@@ -719,8 +720,8 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
                 }
             }
         });
-        ui.checkbox(&mut st.sym_x, "Symétrie X (doubler les nouvelles formes)");
-        sub_head(ui, "Matière par défaut");
+        ui.checkbox(&mut st.sym_x, tr("Symétrie X (doubler les nouvelles formes)"));
+        sub_head(ui, tr("Matière par défaut"));
         let cur = st.material;
         materials(ui, st, None, cur);
         return;
@@ -732,20 +733,20 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         let mut name = node.name.clone();
         let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(150.0).font(semibold(13.5)));
         if r.changed() {
-            st.edit("Renommer", id, |n| n.name = name.clone());
+            st.edit(tr("Renommer"), id, |n| n.name = name.clone());
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
-            if small_btn(ui, Icon::Trash, false, "Supprimer (Suppr)").clicked() {
+            if small_btn(ui, Icon::Trash, false, tr("Supprimer (Suppr)")).clicked() {
                 st.delete_selected();
             }
-            if small_btn(ui, Icon::Frame, false, "Cadrer (F)").clicked() {
+            if small_btn(ui, Icon::Frame, false, tr("Cadrer (F)")).clicked() {
                 st.frame_selection();
             }
-            if small_btn(ui, if node.visible { Icon::Eye } else { Icon::EyeOff }, false, "Masquer / afficher").clicked() {
+            if small_btn(ui, if node.visible { Icon::Eye } else { Icon::EyeOff }, false, tr("Masquer / afficher")).clicked() {
                 st.toggle_visible(id);
             }
-            if small_btn(ui, Icon::Duplicate, false, "Dupliquer (Ctrl+D)").clicked() {
+            if small_btn(ui, Icon::Duplicate, false, tr("Dupliquer (Ctrl+D)")).clicked() {
                 st.duplicate_selected();
             }
         });
@@ -760,44 +761,44 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
     ui.label(RichText::new(what).font(regular(11.5)).color(T3()));
 
     if let Some(sh) = node.shape().cloned() {
-        sub_head(ui, "Forme");
+        sub_head(ui, tr("Forme"));
         shape_params(ui, st, id, &sh);
     }
     if node.shape().is_some() || matches!(node.kind, NodeKind::Group { combined: true, .. }) {
-        sub_head(ui, "Combinaison");
+        sub_head(ui, tr("Combinaison"));
         let items = MODES.map(|m| (m, m.label(), mode_color(m)));
         if let Some(m) = ui::segmented(ui, &items, node.combine.mode, 28.0) {
             st.mode = m;
             st.edit("Mode", id, |n| n.combine.mode = m);
         }
         let mut b = node.combine.blend;
-        let (ch, start) = spin(ui, "Raccord", &mut b, 0.05, 0.0..=12.0, " mm", 2);
+        let (ch, start) = spin(ui, tr("Raccord"), &mut b, 0.05, 0.0..=12.0, " mm", 2);
         if ch {
-            st.edit_live("Raccord", id, start, |n| n.combine.blend = b);
+            st.edit_live(tr("Raccord"), id, start, |n| n.combine.blend = b);
         }
         if node.combine.blend > 0.0 {
             ui.horizontal(|ui| {
-                if ui.radio(node.combine.kind == BlendKind::Smooth, "Lisse").clicked() {
-                    st.edit("Type de raccord", id, |n| n.combine.kind = BlendKind::Smooth);
+                if ui.radio(node.combine.kind == BlendKind::Smooth, tr("Lisse")).clicked() {
+                    st.edit(tr("Type de raccord"), id, |n| n.combine.kind = BlendKind::Smooth);
                 }
-                if ui.radio(node.combine.kind == BlendKind::Chamfer, "Chanfrein").clicked() {
-                    st.edit("Type de raccord", id, |n| n.combine.kind = BlendKind::Chamfer);
+                if ui.radio(node.combine.kind == BlendKind::Chamfer, tr("Chanfrein")).clicked() {
+                    st.edit(tr("Type de raccord"), id, |n| n.combine.kind = BlendKind::Chamfer);
                 }
             });
         }
     }
     if !st.edge_sel.is_empty() || node.shape().is_some() {
-        sub_head(ui, "Arêtes");
+        sub_head(ui, tr("Arêtes"));
         edges(ui, st);
     }
-    sub_head(ui, "Répétition");
+    sub_head(ui, tr("Répétition"));
     let cur = match node.repeat {
         Repeat::None => 0,
         Repeat::Linear { .. } => 1,
         Repeat::Radial { .. } => 2,
     };
     ui.horizontal(|ui| {
-        for (k, l) in [(0, "Aucune"), (1, "Linéaire"), (2, "Circulaire")] {
+        for (k, l) in [(0, tr("Aucune")), (1, tr("Linéaire")), (2, tr("Circulaire"))] {
             if ui.radio(cur == k, l).clicked() && cur != k {
                 let w = st.scene.shape_world_aabb(id).map(|(lo, hi)| (hi - lo).x).unwrap_or(10.0).max(1.0);
                 let r = match k {
@@ -805,7 +806,7 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
                     2 => Repeat::Radial { count: 6, axis: Axis::Y },
                     _ => Repeat::None,
                 };
-                st.edit("Répétition", id, |n| n.repeat = r);
+                st.edit(tr("Répétition"), id, |n| n.repeat = r);
             }
         }
     });
@@ -813,28 +814,28 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         Repeat::None => {}
         Repeat::Linear { count, step } => {
             let mut c = count as f32;
-            let (ch, s0) = spin(ui, "Copies", &mut c, 0.1, 2.0..=64.0, "", 0);
+            let (ch, s0) = spin(ui, tr("Copies"), &mut c, 0.1, 2.0..=64.0, "", 0);
             if ch {
-                st.edit_live("Répétition", id, s0, |n| n.repeat = Repeat::Linear { count: c.round() as u32, step });
+                st.edit_live(tr("Répétition"), id, s0, |n| n.repeat = Repeat::Linear { count: c.round() as u32, step });
             }
             let mut v = step;
-            for (i, l) in ["Pas X", "Pas Y", "Pas Z"].iter().enumerate() {
+            for (i, l) in [tr("Pas X"), tr("Pas Y"), tr("Pas Z")].iter().enumerate() {
                 let (ch, s0) = spin(ui, l, &mut v[i], 0.1, -400.0..=400.0, " mm", 1);
                 if ch {
-                    st.edit_live("Répétition", id, s0, |n| n.repeat = Repeat::Linear { count, step: v });
+                    st.edit_live(tr("Répétition"), id, s0, |n| n.repeat = Repeat::Linear { count, step: v });
                 }
             }
         }
         Repeat::Radial { count, axis } => {
             let mut c = count as f32;
-            let (ch, s0) = spin(ui, "Copies", &mut c, 0.1, 2.0..=64.0, "", 0);
+            let (ch, s0) = spin(ui, tr("Copies"), &mut c, 0.1, 2.0..=64.0, "", 0);
             if ch {
-                st.edit_live("Répétition", id, s0, |n| n.repeat = Repeat::Radial { count: c.round() as u32, axis });
+                st.edit_live(tr("Répétition"), id, s0, |n| n.repeat = Repeat::Radial { count: c.round() as u32, axis });
             }
             ui.horizontal(|ui| {
-                for (a, l) in [(Axis::X, "Axe X"), (Axis::Y, "Axe Y"), (Axis::Z, "Axe Z")] {
+                for (a, l) in [(Axis::X, tr("Axe X")), (Axis::Y, tr("Axe Y")), (Axis::Z, tr("Axe Z"))] {
                     if ui.radio(axis == a, l).clicked() {
-                        st.edit("Répétition", id, |n| n.repeat = Repeat::Radial { count, axis: a });
+                        st.edit(tr("Répétition"), id, |n| n.repeat = Repeat::Radial { count, axis: a });
                     }
                 }
             });
@@ -842,13 +843,13 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
     }
     sub_head(ui, "Position");
     position(ui, st, id, &node);
-    sub_head(ui, "Symétrie");
+    sub_head(ui, tr("Symétrie"));
     ui.horizontal(|ui| {
         let m = node.mirror;
         for (i, l, on) in [(0, "X", m.x), (1, "Y", m.y), (2, "Z", m.z)] {
             let mut v = on;
             if ui.checkbox(&mut v, l).changed() {
-                st.edit("Symétrie", id, |n| match i {
+                st.edit(tr("Symétrie"), id, |n| match i {
                     0 => n.mirror.x = v,
                     1 => n.mirror.y = v,
                     _ => n.mirror.z = v,
@@ -856,9 +857,9 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
             }
         }
     });
-    sub_head(ui, "Alignement");
+    sub_head(ui, tr("Alignement"));
     ui::align_rows(ui, st, false);
-    sub_head(ui, "Matière");
+    sub_head(ui, tr("Matière"));
     materials(ui, st, Some(id), node.material);
 }
 
@@ -909,7 +910,7 @@ fn materials(ui: &mut Ui, st: &mut AppState, target: Option<NodeId>, current: u3
             p.rect(r.shrink(6.0), 3.0, c, Stroke::new(1.0, tint(Color32::WHITE, 0.15)), StrokeKind::Inside);
             if resp.on_hover_text(&m.name).clicked() {
                 match target {
-                    Some(id) => st.edit("Matière", id, |n| n.material = i as u32),
+                    Some(id) => st.edit(tr("Matière"), id, |n| n.material = i as u32),
                     None => st.material = i as u32,
                 }
             }
@@ -934,39 +935,39 @@ fn shape_params(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
         };
         match sh.kind {
             PrimKind::Box => {
-                row(ui, "Largeur", &mut s.size.x, 2.0, 400.0);
-                row(ui, "Hauteur", &mut s.size.y, 2.0, 400.0);
-                row(ui, "Profondeur", &mut s.size.z, 2.0, 400.0);
+                row(ui, tr("Largeur"), &mut s.size.x, 2.0, 400.0);
+                row(ui, tr("Hauteur"), &mut s.size.y, 2.0, 400.0);
+                row(ui, tr("Profondeur"), &mut s.size.z, 2.0, 400.0);
             }
             PrimKind::Cylinder | PrimKind::Prism => {
-                row(ui, "Rayon", &mut s.size.x, 1.0, 200.0);
-                row(ui, "Hauteur", &mut s.size.y, 2.0, 400.0);
+                row(ui, tr("Rayon"), &mut s.size.x, 1.0, 200.0);
+                row(ui, tr("Hauteur"), &mut s.size.y, 2.0, 400.0);
             }
             PrimKind::Sphere => {
-                row(ui, "Rayon X", &mut s.size.x, 1.0, 200.0);
-                row(ui, "Rayon Y", &mut s.size.y, 1.0, 200.0);
-                row(ui, "Rayon Z", &mut s.size.z, 1.0, 200.0);
+                row(ui, tr("Rayon X"), &mut s.size.x, 1.0, 200.0);
+                row(ui, tr("Rayon Y"), &mut s.size.y, 1.0, 200.0);
+                row(ui, tr("Rayon Z"), &mut s.size.z, 1.0, 200.0);
             }
             PrimKind::Capsule => {
-                row(ui, "Rayon", &mut s.size.x, 1.0, 200.0);
-                row(ui, "Longueur", &mut s.size.y, 2.0, 400.0);
+                row(ui, tr("Rayon"), &mut s.size.x, 1.0, 200.0);
+                row(ui, tr("Longueur"), &mut s.size.y, 2.0, 400.0);
             }
             PrimKind::Torus => {
-                row(ui, "Rayon", &mut s.size.x, 1.0, 200.0);
-                row(ui, "Épaisseur", &mut s.size.z, 1.0, 80.0);
+                row(ui, tr("Rayon"), &mut s.size.x, 1.0, 200.0);
+                row(ui, tr("Épaisseur"), &mut s.size.z, 1.0, 80.0);
             }
             PrimKind::Cone => {
-                row(ui, "Rayon bas", &mut s.size.x, 1.0, 200.0);
-                row(ui, "Rayon haut", &mut s.size.z, 1.0, 200.0);
-                row(ui, "Hauteur", &mut s.size.y, 2.0, 400.0);
+                row(ui, tr("Rayon bas"), &mut s.size.x, 1.0, 200.0);
+                row(ui, tr("Rayon haut"), &mut s.size.z, 1.0, 200.0);
+                row(ui, tr("Hauteur"), &mut s.size.y, 2.0, 400.0);
             }
             PrimKind::Tube => {
-                row(ui, "Rayon ext.", &mut s.size.x, 1.0, 200.0);
-                row(ui, "Rayon int.", &mut s.size.z, 1.0, 200.0);
-                row(ui, "Hauteur", &mut s.size.y, 2.0, 400.0);
+                row(ui, tr("Rayon ext."), &mut s.size.x, 1.0, 200.0);
+                row(ui, tr("Rayon int."), &mut s.size.z, 1.0, 200.0);
+                row(ui, tr("Hauteur"), &mut s.size.y, 2.0, 400.0);
             }
             PrimKind::Profile => {
-                row(ui, "Épaisseur", &mut s.size.z, 2.0, 200.0);
+                row(ui, tr("Épaisseur"), &mut s.size.z, 2.0, 200.0);
             }
         }
     }
@@ -976,29 +977,29 @@ fn shape_params(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
             _ => s.size.x.min(s.size.y.max(0.1)),
         };
         let (r0, c0) = (s.round, s.chamfer);
-        let (c, s0) = spin(ui, "Arrondi", &mut s.round, 0.05, 0.0..=max_round.max(0.1), " mm", 2);
+        let (c, s0) = spin(ui, tr("Arrondi"), &mut s.round, 0.05, 0.0..=max_round.max(0.1), " mm", 2);
         any |= c;
         start |= s0;
-        let (c, s0) = spin(ui, "Chanfrein", &mut s.chamfer, 0.05, 0.0..=max_round.max(0.1), " mm", 2);
+        let (c, s0) = spin(ui, tr("Chanfrein"), &mut s.chamfer, 0.05, 0.0..=max_round.max(0.1), " mm", 2);
         any |= c;
         start |= s0;
         if s.round != r0 || s.chamfer != c0 {
             s.edges.clear();
         }
         if !sh.edges.is_empty() {
-            ui.label(RichText::new("Arêtes réglées une par une : Arrondi / Chanfrein les remettent pareilles.").font(regular(11.5)).color(EDGE_SEL));
+            ui.label(RichText::new(tr("Arêtes réglées une par une : Arrondi / Chanfrein les remettent pareilles.")).font(regular(11.5)).color(EDGE_SEL));
         }
     }
     // coque: hollow inwards, Shape.shell is the wall thickness
     let mut wall = s.shell;
-    let (c, s0) = spin(ui, "Coque", &mut wall, 0.05, 0.0..=40.0, " mm", 2);
+    let (c, s0) = spin(ui, tr("Coque"), &mut wall, 0.05, 0.0..=40.0, " mm", 2);
     if c {
         s.shell = wall;
         any = true;
         start |= s0;
     }
     if any {
-        st.edit_live("Forme", id, start, |n| {
+        st.edit_live(tr("Forme"), id, start, |n| {
             if let NodeKind::Shape(x) = &mut n.kind {
                 *x = s.clone();
             }
@@ -1008,45 +1009,45 @@ fn shape_params(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
 
 fn edges(ui: &mut Ui, st: &mut AppState) {
     let Some(e) = st.edge_sel.last().cloned() else {
-        ui.label(RichText::new("Mode Arête (2) : survole une arête puis clique, Ctrl + clic pour en ajouter.").font(regular(12.0)).color(T2()));
+        ui.label(RichText::new(tr("Mode Arête (2) : survole une arête puis clique, Ctrl + clic pour en ajouter.")).font(regular(12.0)).color(T2()));
         return;
     };
     let n = st.edge_sel.len();
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(10.0, 14.0), Sense::hover());
         ui.painter().circle_filled(r.center(), 4.0, EDGE_SEL);
-        let title = if n > 1 { format!("{n} arêtes sélectionnées") } else { e.label.clone() };
+        let title = if n > 1 { trd(format!("{n} arêtes sélectionnées")) } else { e.label.clone() };
         ui.label(RichText::new(title).font(medium(12.5)).color(T1()));
     });
     if st.edge_sel.iter().any(|x| matches!(x.kind, forme_core::edges::EdgeKind::Junction { .. })) {
         ui.horizontal(|ui| {
-            if ui.radio(!st.junction_whole, "Ce morceau").clicked() {
+            if ui.radio(!st.junction_whole, tr("Ce morceau")).clicked() {
                 st.junction_whole = false;
             }
-            if ui.radio(st.junction_whole, "Toute la jonction").clicked() {
+            if ui.radio(st.junction_whole, tr("Toute la jonction")).clicked() {
                 st.junction_whole = true;
             }
         });
     }
     ui.horizontal(|ui| {
-        if ui.radio(!e.chamfer, "Arrondi").clicked() {
+        if ui.radio(!e.chamfer, tr("Arrondi")).clicked() {
             st.set_fillet(e.radius, false, true);
         }
-        if ui.radio(e.chamfer, "Chanfrein").clicked() {
+        if ui.radio(e.chamfer, tr("Chanfrein")).clicked() {
             st.set_fillet(e.radius, true, true);
         }
     });
     let max = st.fillet_max().max(0.1);
     let mut r = e.radius;
-    let (ch, start) = spin(ui, if e.chamfer { "Chanfrein" } else { "Rayon" }, &mut r, 0.05, 0.0..=max, " mm", 2);
+    let (ch, start) = spin(ui, if e.chamfer { tr("Chanfrein") } else { tr("Rayon") }, &mut r, 0.05, 0.0..=max, " mm", 2);
     if ch {
         st.set_fillet(r, e.chamfer, start);
     }
     ui.horizontal(|ui| {
-        if text_btn(ui, None, "Arête vive", false).clicked() {
+        if text_btn(ui, None, tr("Arête vive"), false).clicked() {
             st.set_fillet(0.0, e.chamfer, true);
         }
-        if text_btn(ui, None, "Désélectionner", false).clicked() {
+        if text_btn(ui, None, tr("Désélectionner"), false).clicked() {
             st.clear_edge();
         }
     });
@@ -1070,12 +1071,12 @@ fn status_bar(ctx: &egui::Context, st: &mut AppState, rect: Rect) {
                 ui.add_space(8.0);
             };
             match st.settings.navigation {
-                Navigation::Maya => key(ui, "Alt", "+ gauche orbite · + molette pan · + droit zoom"),
-                Navigation::Tripo => key(ui, "Glisser", "gauche orbite · droit pan · molette zoom"),
+                Navigation::Maya => key(ui, "Alt", tr("+ gauche orbite · + molette pan · + droit zoom")),
+                Navigation::Tripo => key(ui, tr("Glisser"), tr("gauche orbite · droit pan · molette zoom")),
             }
-            key(ui, "Clic droit", "marking menu");
-            key(ui, "Espace", "commandes");
-            key(ui, "F", "cadrer");
+            key(ui, tr("Clic droit"), "marking menu");
+            key(ui, tr("Espace"), tr("commandes"));
+            key(ui, "F", tr("cadrer"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(10.0);
                 ui.label(RichText::new(crate::version_title()).font(regular(11.0)).color(T3()));
@@ -1100,14 +1101,14 @@ fn view_chips(ctx: &egui::Context, st: &mut AppState, view: Rect) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let cur = if st.tool == Tool::Select { Some(st.pick_mode) } else { None };
-            let items = [(Some(PickMode::Object), "Objet", "1"), (Some(PickMode::Edge), "Arête", "2")];
+            let items = [(Some(PickMode::Object), tr("Objet"), "1"), (Some(PickMode::Edge), tr("Arête"), "2")];
             if let Some(Some(m)) = ui::seg_inline(ui, "studio-pick", &items, cur) {
                 st.set_pick_mode(m);
             }
-            if ui::chip(ui, Some(Icon::Magnet), "Snap", st.snap, "Snap : grille, sommets et arêtes").clicked() {
+            if ui::chip(ui, Some(Icon::Magnet), "Snap", st.snap, tr("Snap : grille, sommets et arêtes")).clicked() {
                 st.snap = !st.snap;
             }
-            if ui::chip(ui, Some(Icon::Mirror), "Sym. X", st.sym_x, "Symétrie X des nouvelles formes").clicked() {
+            if ui::chip(ui, Some(Icon::Mirror), tr("Sym. X"), st.sym_x, tr("Symétrie X des nouvelles formes")).clicked() {
                 st.sym_x = !st.sym_x;
             }
         });
@@ -1126,12 +1127,12 @@ fn view_chips(ctx: &egui::Context, st: &mut AppState, view: Rect) {
                     }
                 }
                 ui.separator();
-                if ui.button("Cadrer tout").clicked() {
+                if ui.button(tr("Cadrer tout")).clicked() {
                     let (lo, hi) = st.scene.bounds();
                     st.frame_smooth(lo, hi);
                 }
             });
-            if ui::chip(ui, Some(Icon::Grid), "Grille", st.grid, "Grille au sol").clicked() {
+            if ui::chip(ui, Some(Icon::Grid), tr("Grille"), st.grid, tr("Grille au sol")).clicked() {
                 st.grid = !st.grid;
                 st.view_changed();
             }
@@ -1159,11 +1160,11 @@ fn sizes_panel(ctx: &egui::Context, st: &mut AppState, view: Rect) {
         _ => [10.0, 10.0, 10.0],
     });
     let fields: &[&str] = match kind {
-        PrimKind::Box => &["Largeur", "Profondeur", "Hauteur"],
-        PrimKind::Cylinder => &["Rayon", "Hauteur"],
-        PrimKind::Sphere => &["Rayon"],
-        PrimKind::Capsule => &["Rayon", "Longueur"],
-        PrimKind::Torus => &["Rayon", "Épaisseur"],
+        PrimKind::Box => &[tr("Largeur"), tr("Profondeur"), tr("Hauteur")],
+        PrimKind::Cylinder => &[tr("Rayon"), tr("Hauteur")],
+        PrimKind::Sphere => &[tr("Rayon")],
+        PrimKind::Capsule => &[tr("Rayon"), tr("Longueur")],
+        PrimKind::Torus => &[tr("Rayon"), tr("Épaisseur")],
         _ => &[],
     };
     let mut create = false;
@@ -1175,7 +1176,7 @@ fn sizes_panel(ctx: &egui::Context, st: &mut AppState, view: Rect) {
             ui.horizontal(|ui| {
                 icons::paint(ui.painter(), Rect::from_min_size(ui.cursor().min + vec2(0.0, 2.0), vec2(15.0, 15.0)), ui::prim_icon(kind), T1());
                 ui.add_space(20.0);
-                ui.label(RichText::new(format!("Nouveau {}", kind.label().to_lowercase())).font(semibold(13.0)).color(T1()));
+                ui.label(RichText::new(trd(format!("Nouveau {}", kind.label().to_lowercase()))).font(semibold(13.0)).color(T1()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let m = st.effective_mode();
                     let c = mode_color(m);
@@ -1216,9 +1217,9 @@ fn sizes_panel(ctx: &egui::Context, st: &mut AppState, view: Rect) {
                 });
             }
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Tab · Entrée crée · Échap").font(regular(11.0)).color(T3()));
+                ui.label(RichText::new(tr("Tab · Entrée crée · Échap")).font(regular(11.0)).color(T3()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if text_btn(ui, None, "Créer", true).clicked() {
+                    if text_btn(ui, None, tr("Créer"), true).clicked() {
                         create = true;
                     }
                 });
@@ -1274,42 +1275,42 @@ enum Cmd {
 fn commands() -> Vec<(String, &'static str, Cmd)> {
     let mut v: Vec<(String, &'static str, Cmd)> = vec![];
     for k in PRIMS {
-        v.push((format!("Créer : {}", k.label()), ui::prim_key(k).unwrap_or(""), Cmd::Place(k)));
+        v.push((trd(format!("Créer : {}", k.label())), ui::prim_key(k).unwrap_or(""), Cmd::Place(k)));
     }
     v.extend([
-        ("Mode Add (nouvelles formes)".to_string(), "", Cmd::Mode(CombineMode::Add)),
-        ("Mode Carve (nouvelles formes)".to_string(), "", Cmd::Mode(CombineMode::Carve)),
-        ("Sélection d'objets".to_string(), "Q", Cmd::Pick(PickMode::Object)),
-        ("Sélection d'arêtes (fillets)".to_string(), "2", Cmd::Pick(PickMode::Edge)),
-        ("Dupliquer".to_string(), "Ctrl+D", Cmd::Duplicate),
-        ("Supprimer".to_string(), "Suppr", Cmd::Delete),
-        ("Grouper la sélection".to_string(), "", Cmd::Group),
-        ("Poser au sol".to_string(), "", Cmd::Align(crate::state::AlignOp::Ground)),
-        ("Centrer sur l'origine".to_string(), "", Cmd::Align(crate::state::AlignOp::Origin)),
-        ("Aligner les centres en X".to_string(), "", Cmd::Align(crate::state::AlignOp::Align(0, 1))),
-        ("Aligner les bas (Y min)".to_string(), "", Cmd::Align(crate::state::AlignOp::Align(1, 0))),
-        ("Aligner les centres en Z".to_string(), "", Cmd::Align(crate::state::AlignOp::Align(2, 1))),
-        ("Répartir en X".to_string(), "", Cmd::Align(crate::state::AlignOp::Distribute(0))),
-        ("Répartir en Z".to_string(), "", Cmd::Align(crate::state::AlignOp::Distribute(2))),
-        ("Création interactive / directe".to_string(), "", Cmd::CreationToggle),
-        ("Symétrie X de la sélection".to_string(), "", Cmd::MirrorSel),
-        ("Cadrer la sélection".to_string(), "F", Cmd::Frame),
-        ("Cadrer toute la scène".to_string(), "", Cmd::FrameAll),
-        ("Vue perspective".to_string(), "", Cmd::View(ViewPreset::Perspective)),
-        ("Vue de face".to_string(), "", Cmd::View(ViewPreset::Front)),
-        ("Vue de droite".to_string(), "", Cmd::View(ViewPreset::Right)),
-        ("Vue de dessus".to_string(), "", Cmd::View(ViewPreset::Top)),
-        ("Snap (activer / couper)".to_string(), "", Cmd::Snap),
-        ("Symétrie X des nouvelles formes".to_string(), "", Cmd::SymX),
-        ("Grille (afficher / cacher)".to_string(), "", Cmd::Grid),
-        ("Annuler".to_string(), "Ctrl+Z", Cmd::Undo),
-        ("Rétablir".to_string(), "Ctrl+Y", Cmd::Redo),
-        ("Enregistrer".to_string(), "Ctrl+S", Cmd::Save),
-        ("Ouvrir · Nouveau…".to_string(), "", Cmd::Open),
-        ("Exporter le mesh…".to_string(), "", Cmd::Export),
-        ("Réglages…".to_string(), "", Cmd::Settings),
-        ("Affichage : lumière, ombres…".to_string(), "", Cmd::Display),
-        ("Passer à l'interface Établi".to_string(), "", Cmd::Etabli),
+        (tr("Mode Add (nouvelles formes)").to_string(), "", Cmd::Mode(CombineMode::Add)),
+        (tr("Mode Carve (nouvelles formes)").to_string(), "", Cmd::Mode(CombineMode::Carve)),
+        (tr("Sélection d'objets").to_string(), "Q", Cmd::Pick(PickMode::Object)),
+        (tr("Sélection d'arêtes (fillets)").to_string(), "2", Cmd::Pick(PickMode::Edge)),
+        (tr("Dupliquer").to_string(), "Ctrl+D", Cmd::Duplicate),
+        (tr("Supprimer").to_string(), tr("Suppr"), Cmd::Delete),
+        (tr("Grouper la sélection").to_string(), "", Cmd::Group),
+        (tr("Poser au sol").to_string(), "", Cmd::Align(crate::state::AlignOp::Ground)),
+        (tr("Centrer sur l'origine").to_string(), "", Cmd::Align(crate::state::AlignOp::Origin)),
+        (tr("Aligner les centres en X").to_string(), "", Cmd::Align(crate::state::AlignOp::Align(0, 1))),
+        (tr("Aligner les bas (Y min)").to_string(), "", Cmd::Align(crate::state::AlignOp::Align(1, 0))),
+        (tr("Aligner les centres en Z").to_string(), "", Cmd::Align(crate::state::AlignOp::Align(2, 1))),
+        (tr("Répartir en X").to_string(), "", Cmd::Align(crate::state::AlignOp::Distribute(0))),
+        (tr("Répartir en Z").to_string(), "", Cmd::Align(crate::state::AlignOp::Distribute(2))),
+        (tr("Création interactive / directe").to_string(), "", Cmd::CreationToggle),
+        (tr("Symétrie X de la sélection").to_string(), "", Cmd::MirrorSel),
+        (tr("Cadrer la sélection").to_string(), "F", Cmd::Frame),
+        (tr("Cadrer toute la scène").to_string(), "", Cmd::FrameAll),
+        (tr("Vue perspective").to_string(), "", Cmd::View(ViewPreset::Perspective)),
+        (tr("Vue de face").to_string(), "", Cmd::View(ViewPreset::Front)),
+        (tr("Vue de droite").to_string(), "", Cmd::View(ViewPreset::Right)),
+        (tr("Vue de dessus").to_string(), "", Cmd::View(ViewPreset::Top)),
+        (tr("Snap (activer / couper)").to_string(), "", Cmd::Snap),
+        (tr("Symétrie X des nouvelles formes").to_string(), "", Cmd::SymX),
+        (tr("Grille (afficher / cacher)").to_string(), "", Cmd::Grid),
+        (tr("Annuler").to_string(), "Ctrl+Z", Cmd::Undo),
+        (tr("Rétablir").to_string(), "Ctrl+Y", Cmd::Redo),
+        (tr("Enregistrer").to_string(), "Ctrl+S", Cmd::Save),
+        (tr("Ouvrir · Nouveau…").to_string(), "", Cmd::Open),
+        (tr("Exporter le mesh…").to_string(), "", Cmd::Export),
+        (tr("Réglages…").to_string(), "", Cmd::Settings),
+        (tr("Affichage : lumière, ombres…").to_string(), "", Cmd::Display),
+        (tr("Passer à l'interface Établi").to_string(), "", Cmd::Etabli),
     ]);
     v
 }
@@ -1333,7 +1334,7 @@ fn run(st: &mut AppState, c: Cmd) {
         }
         Cmd::MirrorSel => {
             if let Some(id) = st.selection {
-                st.edit("Symétrie", id, |n| n.mirror.x = !n.mirror.x);
+                st.edit(tr("Symétrie"), id, |n| n.mirror.x = !n.mirror.x);
             }
         }
         Cmd::Frame => st.frame_selection(),
@@ -1419,7 +1420,7 @@ fn palette(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         studio_style(ui.style_mut());
         ui::island().inner_margin(egui::Margin::same(8)).show(ui, |ui| {
             ui.set_width(520.0);
-            let r = ui.add(egui::TextEdit::singleline(&mut pal.query).hint_text("Tape une commande : cylindre, carve, vue de dessus, exporter…").font(regular(14.0)).desired_width(f32::INFINITY).margin(vec2(10.0, 8.0)));
+            let r = ui.add(egui::TextEdit::singleline(&mut pal.query).hint_text(tr("Tape une commande : cylindre, carve, vue de dessus, exporter…")).font(regular(14.0)).desired_width(f32::INFINITY).margin(vec2(10.0, 8.0)));
             if pal.fresh {
                 r.request_focus();
                 pal.fresh = false;
@@ -1431,7 +1432,7 @@ fn palette(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 if hits.is_empty() {
-                    ui.label(RichText::new("Aucune commande ne correspond.").font(regular(12.5)).color(T2()));
+                    ui.label(RichText::new(tr("Aucune commande ne correspond.")).font(regular(12.5)).color(T2()));
                 }
                 for (i, (label, key, cmd)) in hits.iter().enumerate() {
                     let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());

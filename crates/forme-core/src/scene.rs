@@ -7,6 +7,18 @@ use glam::{Mat4, Quat, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+static ENGLISH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// UI language of the shape labels (the NURBS app is in English, Forme in
+/// French).
+pub fn set_english(on: bool) {
+    ENGLISH.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn english() -> bool {
+    ENGLISH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub type NodeId = u32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -35,6 +47,19 @@ impl PrimKind {
     ];
 
     pub fn label(self) -> &'static str {
+        if english() {
+            return match self {
+                PrimKind::Box => "Cube",
+                PrimKind::Cylinder => "Cylinder",
+                PrimKind::Sphere => "Sphere",
+                PrimKind::Capsule => "Capsule",
+                PrimKind::Torus => "Torus",
+                PrimKind::Cone => "Cone",
+                PrimKind::Prism => "Prism",
+                PrimKind::Tube => "Tube",
+                PrimKind::Profile => "Profile",
+            };
+        }
         match self {
             PrimKind::Box => "Cube",
             PrimKind::Cylinder => "Cylindre",

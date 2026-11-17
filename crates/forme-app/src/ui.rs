@@ -2,6 +2,7 @@
 //! the modes, properties + shape tree on the right, history strip at the
 //! bottom), plus the dialogs and toasts shared with the Studio interface.
 
+use crate::i18n::{tr, trd};
 use crate::camera::ViewPreset;
 use crate::files;
 use crate::icons::{self, Icon};
@@ -385,12 +386,12 @@ pub fn show_focus(ctx: &egui::Context, st: &mut AppState) {
                 paint_logo(ui, Rect::from_center_size(r.center(), vec2(26.0, 26.0)));
                 let name = st.doc_name.clone();
                 let r = ui.add(egui::Label::new(egui::RichText::new(name).font(semibold(13.0)).color(TEXT())).sense(Sense::click()));
-                if r.on_hover_text("Ouvrir · Nouveau · Enregistrer").clicked() {
+                if r.on_hover_text(tr("Ouvrir · Nouveau · Enregistrer")).clicked() {
                     st.files_open = !st.files_open;
                 }
                 let what = match st.selection.and_then(|id| st.scene.node(id)) {
                     Some(n) => n.name.clone(),
-                    None => format!("{} formes", st.scene.shape_count()),
+                    None => trd(format!("{} formes", st.scene.shape_count())),
                 };
                 ui.label(egui::RichText::new(what).font(regular(12.0)).color(TEXT2()));
                 ui.add_space(4.0);
@@ -405,11 +406,11 @@ pub fn show_focus(ctx: &egui::Context, st: &mut AppState) {
         let p = ui.painter();
         p.rect(r, CornerRadius { nw: 10, sw: 10, ne: 0, se: 0 }, if resp.hovered() { RAISED() } else { tint(PANEL(), 0.96) }, Stroke::new(1.0, PANEL_BORDER()), StrokeKind::Inside);
         icons::paint(p, Rect::from_center_size(pos2(r.center().x, r.min.y + 20.0), vec2(15.0, 15.0)), if drawer { Icon::ChevronRight } else { Icon::ChevronLeft }, TEXT2());
-        let g = p.layout_no_wrap(format!("SCÈNE · {}", st.scene.shape_count()), mono(10.0), TEXT2());
+        let g = p.layout_no_wrap(trd(format!("SCÈNE · {}", st.scene.shape_count())), mono(10.0), TEXT2());
         // vertical label: one letter per line would be too tall, so the text turns
         let tg = egui::epaint::TextShape::new(pos2(r.center().x + g.size().y * 0.5, r.min.y + 36.0), g, TEXT2()).with_angle(std::f32::consts::FRAC_PI_2);
         p.add(tg);
-        if resp.on_hover_text("Scène et propriétés").clicked() {
+        if resp.on_hover_text(tr("Scène et propriétés")).clicked() {
             ctx.data_mut(|d| d.insert_temp(drawer_id, !drawer));
         }
     });
@@ -430,12 +431,12 @@ fn focus_dock(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let b = 40.0;
                 let sel = st.tool == Tool::Select;
-                let r = icon_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, "Sélection d'objets (Q ou 1)", b);
+                let r = icon_btn(ui, Icon::Select, sel && st.pick_mode == PickMode::Object, tr("Sélection d'objets (Q ou 1)"), b);
                 key_hint(ui, &r, "Q");
                 if r.clicked() {
                     st.set_pick_mode(PickMode::Object);
                 }
-                let r = icon_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, "Sélection d'arêtes (2) : fillets, chanfreins", b);
+                let r = icon_btn(ui, Icon::Fillet, sel && st.pick_mode == PickMode::Edge, tr("Sélection d'arêtes (2) : fillets, chanfreins"), b);
                 key_hint(ui, &r, "2");
                 if r.clicked() {
                     st.set_pick_mode(PickMode::Edge);
@@ -460,18 +461,18 @@ fn focus_dock(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     }
                 });
                 island_sep(ui);
-                if icon_btn(ui, Icon::Undo, false, "Annuler (Ctrl+Z)", b).clicked() {
+                if icon_btn(ui, Icon::Undo, false, tr("Annuler (Ctrl+Z)"), b).clicked() {
                     st.undo();
                 }
                 if icon_btn(ui, Icon::Magnet, st.snap, "Snap", b).clicked() {
                     st.snap = !st.snap;
                 }
-                let r = icon_btn(ui, Icon::Light, st.display_open, "Affichage", b);
+                let r = icon_btn(ui, Icon::Light, st.display_open, tr("Affichage"), b);
                 light_toggle(st, &r);
-                if icon_btn(ui, Icon::Settings, st.settings_open, "Réglages", b).clicked() {
+                if icon_btn(ui, Icon::Settings, st.settings_open, tr("Réglages"), b).clicked() {
                     st.settings_open = !st.settings_open;
                 }
-                if icon_btn(ui, Icon::Export, st.export_open, "Exporter le mesh", b).clicked() {
+                if icon_btn(ui, Icon::Export, st.export_open, tr("Exporter le mesh"), b).clicked() {
                     st.export_open = !st.export_open;
                 }
             });
@@ -690,7 +691,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 let name = st.doc_name.clone();
                 let n = st.scene.shape_count();
                 let g = ui.painter().layout_no_wrap(name, semibold(13.5), TEXT());
-                let sub = ui.painter().layout_no_wrap(format!("· {n} forme{}", if n > 1 { "s" } else { "" }), regular(12.0), TEXT2());
+                let sub = ui.painter().layout_no_wrap(trd(format!("· {n} forme{}", if n > 1 { "s" } else { "" })), regular(12.0), TEXT2());
                 let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + sub.size().x + 36.0, 28.0), Sense::click());
                 if resp.hovered() {
                     ui.painter().rect_filled(r, 7.0, RAISED());
@@ -699,14 +700,14 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.painter().galley(pos2(r.min.x + 6.0, r.center().y - g.size().y * 0.5), g, TEXT());
                 ui.painter().galley(pos2(r.min.x + 12.0 + gw, r.center().y - sub.size().y * 0.5), sub, TEXT2());
                 icons::paint(ui.painter(), Rect::from_min_size(pos2(r.max.x - 18.0, r.center().y - 6.0), vec2(12.0, 12.0)), Icon::Chevron, TEXT2());
-                if resp.on_hover_text("Ouvrir · Nouveau · Enregistrer").clicked() {
+                if resp.on_hover_text(tr("Ouvrir · Nouveau · Enregistrer")).clicked() {
                     st.files_open = !st.files_open;
                 }
                 island_sep(ui);
-                if icon_btn(ui, Icon::Undo, false, "Annuler (Ctrl+Z)", 28.0).clicked() {
+                if icon_btn(ui, Icon::Undo, false, tr("Annuler (Ctrl+Z)"), 28.0).clicked() {
                     st.undo();
                 }
-                if icon_btn(ui, Icon::Redo, false, "Rétablir (Ctrl+Y)", 28.0).clicked() {
+                if icon_btn(ui, Icon::Redo, false, tr("Rétablir (Ctrl+Y)"), 28.0).clicked() {
                     st.redo();
                 }
             });
@@ -723,8 +724,8 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let tool = match st.tool {
                     Tool::Place(k) => k.label().to_uppercase(),
-                    _ if st.pick_mode == PickMode::Edge => "SÉLECTION · ARÊTE".to_string(),
-                    _ => "SÉLECTION · OBJET".to_string(),
+                    _ if st.pick_mode == PickMode::Edge => tr("SÉLECTION · ARÊTE").to_string(),
+                    _ => tr("SÉLECTION · OBJET").to_string(),
                 };
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
                 let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 20.0, 28.0), Sense::click());
@@ -732,7 +733,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     ui.painter().rect_filled(r, 7.0, RAISED());
                 }
                 ui.painter().galley(pos2(r.min.x + 10.0, r.center().y - g.size().y * 0.5), g, TEXT());
-                if resp.on_hover_text("Objet ⇄ Arête (1 / 2)").clicked() {
+                if resp.on_hover_text(tr("Objet ⇄ Arête (1 / 2)")).clicked() {
                     st.set_pick_mode(if st.pick_mode == PickMode::Edge { PickMode::Object } else { PickMode::Edge });
                 }
                 // ADD | CARVE
@@ -756,14 +757,14 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     }
                 }
                 island_sep(ui);
-                if icon_btn(ui, Icon::Magnet, st.snap, "Snap : grille, sommets et arêtes", 28.0).clicked() {
+                if icon_btn(ui, Icon::Magnet, st.snap, tr("Snap : grille, sommets et arêtes"), 28.0).clicked() {
                     st.snap = !st.snap;
                 }
-                if icon_btn(ui, Icon::Mirror, st.sym_x, "Symétrie X : les nouvelles formes sont doublées", 28.0).clicked() {
+                if icon_btn(ui, Icon::Mirror, st.sym_x, tr("Symétrie X : les nouvelles formes sont doublées"), 28.0).clicked() {
                     st.sym_x = !st.sym_x;
-                    st.toast(if st.sym_x { "Symétrie X : les nouvelles formes sont doublées" } else { "Symétrie X désactivée" });
+                    st.toast(if st.sym_x { tr("Symétrie X : les nouvelles formes sont doublées") } else { tr("Symétrie X désactivée") });
                 }
-                if icon_btn(ui, Icon::Grid, st.grid, "Grille au sol", 28.0).clicked() {
+                if icon_btn(ui, Icon::Grid, st.grid, tr("Grille au sol"), 28.0).clicked() {
                     st.grid = !st.grid;
                     st.view_changed();
                 }
@@ -778,24 +779,24 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let cur = st.camera.preset_of();
-                let presets = [(ViewPreset::Perspective, "3D", ""), (ViewPreset::Front, "Face", ""), (ViewPreset::Right, "Droite", ""), (ViewPreset::Top, "Dessus", "")];
+                let presets = [(ViewPreset::Perspective, "3D", ""), (ViewPreset::Front, tr("Face"), ""), (ViewPreset::Right, tr("Droite"), ""), (ViewPreset::Top, tr("Dessus"), "")];
                 if let Some(p) = seg_inline(ui, "isl-preset", &presets, cur) {
                     st.camera.preset(p);
                     st.view_changed();
                 }
                 island_sep(ui);
-                let r = icon_btn(ui, Icon::Light, st.display_open, "Affichage : lumière, ombres, anticrénelage", 28.0);
+                let r = icon_btn(ui, Icon::Light, st.display_open, tr("Affichage : lumière, ombres, anticrénelage"), 28.0);
                 light_toggle(st, &r);
-                if icon_btn(ui, Icon::Settings, st.settings_open, "Réglages : interface, navigation, création", 28.0).clicked() {
+                if icon_btn(ui, Icon::Settings, st.settings_open, tr("Réglages : interface, navigation, création"), 28.0).clicked() {
                     st.settings_open = !st.settings_open;
                 }
                 // the Bake is set aside (Romain, 10 nov.): pure SDF modelling
-                let g = ui.painter().layout_no_wrap("Exporter".to_string(), semibold(12.5), Color32::WHITE);
+                let g = ui.painter().layout_no_wrap(tr("Exporter").to_string(), semibold(12.5), on_accent());
                 let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 40.0, 28.0), Sense::click());
                 ui.painter().rect_filled(r, 7.0, if resp.hovered() { accent_light() } else { accent() });
-                icons::paint(ui.painter(), Rect::from_min_size(pos2(r.min.x + 10.0, r.center().y - 7.0), vec2(14.0, 14.0)), Icon::Export, Color32::WHITE);
-                ui.painter().galley(pos2(r.min.x + 30.0, r.center().y - g.size().y * 0.5), g, Color32::WHITE);
-                if resp.on_hover_text("Exporter le mesh (OBJ, glTF)").clicked() {
+                icons::paint(ui.painter(), Rect::from_min_size(pos2(r.min.x + 10.0, r.center().y - 7.0), vec2(14.0, 14.0)), Icon::Export, on_accent());
+                ui.painter().galley(pos2(r.min.x + 30.0, r.center().y - g.size().y * 0.5), g, on_accent());
+                if resp.on_hover_text(tr("Exporter le mesh (OBJ, glTF)")).clicked() {
                     st.export_open = !st.export_open;
                 }
             });
@@ -837,7 +838,7 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let is_shape = node.shape().is_some();
-                if is_shape && icon_btn(ui, Icon::Fillet, false, "Arêtes : fillets et chanfreins (2)", 28.0).clicked() {
+                if is_shape && icon_btn(ui, Icon::Fillet, false, tr("Arêtes : fillets et chanfreins (2)"), 28.0).clicked() {
                     st.set_pick_mode(PickMode::Edge);
                 }
                 if is_shape || matches!(node.kind, NodeKind::Group { combined: true, .. }) {
@@ -848,7 +849,7 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                     ui.painter().rect(r, 7.0, tint(c, if resp.hovered() { 0.24 } else { 0.14 }), Stroke::new(1.0, tint(c, 0.6)), StrokeKind::Inside);
                     paint_mode_glyph(ui.painter(), r.center(), m, c, 11.0);
                     let next = if m == CombineMode::Add { CombineMode::Carve } else { CombineMode::Add };
-                    if resp.on_hover_text(format!("{} : passer en {}", m.label(), next.label())).clicked() {
+                    if resp.on_hover_text(trd(format!("{} : passer en {}", m.label(), next.label()))).clicked() {
                         st.mode = next;
                         st.edit("Mode", id, |n| n.combine.mode = next);
                     }
@@ -856,21 +857,21 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                 let (r, _) = ui.allocate_exact_size(vec2(7.0, 28.0), Sense::hover());
                 ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(1.0, 18.0)), 0.0, DIVIDER());
                 // the gizmo of the selection: move (W), rotate (E), scale (R)
-                for (g, icon, tip) in [(GizmoMode::Move, Icon::Move, "Déplacer et dimensionner (W)"), (GizmoMode::Rotate, Icon::Rotate, "Tourner (E)"), (GizmoMode::Scale, Icon::Scale, "Échelle (R)")] {
+                for (g, icon, tip) in [(GizmoMode::Move, Icon::Move, tr("Déplacer et dimensionner (W)")), (GizmoMode::Rotate, Icon::Rotate, tr("Tourner (E)")), (GizmoMode::Scale, Icon::Scale, tr("Échelle (R)"))] {
                     if icon_btn(ui, icon, st.gizmo == g, tip, 28.0).clicked() {
                         st.gizmo = g;
                     }
                 }
-                if icon_btn(ui, Icon::Duplicate, false, "Dupliquer (Ctrl+D)", 28.0).clicked() {
+                if icon_btn(ui, Icon::Duplicate, false, tr("Dupliquer (Ctrl+D)"), 28.0).clicked() {
                     st.duplicate_selected();
                 }
-                if icon_btn(ui, Icon::Mirror, node.mirror.x, "Symétrie X de la forme", 28.0).clicked() {
-                    st.edit("Symétrie", id, |n| n.mirror.x = !n.mirror.x);
+                if icon_btn(ui, Icon::Mirror, node.mirror.x, tr("Symétrie X de la forme"), 28.0).clicked() {
+                    st.edit(tr("Symétrie"), id, |n| n.mirror.x = !n.mirror.x);
                 }
-                if icon_btn(ui, Icon::Frame, false, "Cadrer (F)", 28.0).clicked() {
+                if icon_btn(ui, Icon::Frame, false, tr("Cadrer (F)"), 28.0).clicked() {
                     st.frame_selection();
                 }
-                if icon_btn(ui, Icon::Trash, false, "Supprimer (Suppr)", 28.0).clicked() {
+                if icon_btn(ui, Icon::Trash, false, tr("Supprimer (Suppr)"), 28.0).clicked() {
                     st.delete_selected();
                 }
             });
@@ -900,7 +901,7 @@ pub(crate) fn mode_switch(ui: &mut Ui, st: &mut AppState, height: f32) {
             p.rect_filled(r, 8.0, RAISED());
         }
         p.text(r.center(), Align2::CENTER_CENTER, *label, semibold(12.5), if on { TEXT_STRONG() } else { TEXT2() });
-        let tip = if *bake { "Mode BAKE : modèle figé, diagnostic et Bake (Échap pour revenir)" } else { "Mode BUILD : modélisation" };
+        let tip = if *bake { tr("Mode BAKE : modèle figé, diagnostic et Bake (Échap pour revenir)") } else { tr("Mode BUILD : modélisation") };
         if resp.on_hover_text(tip).clicked() {
             st.set_bake_mode(*bake);
         }
@@ -934,15 +935,15 @@ pub(crate) fn creation_switch(ui: &mut Ui, st: &mut AppState, width: f32) {
     use crate::settings::Creation;
     let cur = st.settings.creation;
     let tip = |c: Creation| match c {
-        Creation::Interactive => "Création interactive : glisse la base, relâche, puis la hauteur (vers le haut +, vers le bas −, Ctrl inverse)",
-        Creation::Direct => "Création directe : un clic pose la forme à sa taille par défaut, ses poignées la dimensionnent",
+        Creation::Interactive => tr("Création interactive : glisse la base, relâche, puis la hauteur (vers le haut +, vers le bas −, Ctrl inverse)"),
+        Creation::Direct => tr("Création directe : un clic pose la forme à sa taille par défaut, ses poignées la dimensionnent"),
     };
     let mut set = None;
     if width >= 100.0 {
         let (well, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
         ui.painter().rect(well, 7.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
         let w = (well.width() - 4.0) / 2.0;
-        for (i, (c, label)) in [(Creation::Interactive, "Interactive"), (Creation::Direct, "Directe")].into_iter().enumerate() {
+        for (i, (c, label)) in [(Creation::Interactive, "Interactive"), (Creation::Direct, tr("Directe"))].into_iter().enumerate() {
             let r = Rect::from_min_size(well.min + vec2(2.0 + i as f32 * w, 2.0), vec2(w, 22.0));
             let resp = ui.interact(r, Id::new(("creation-switch", i)), Sense::click());
             let on = cur == c;
@@ -964,7 +965,7 @@ pub(crate) fn creation_switch(ui: &mut Ui, st: &mut AppState, width: f32) {
         let label = if cur == Creation::Interactive { "INT" } else { "DIR" };
         p.text(r.center(), Align2::CENTER_CENTER, label, mono(9.5), accent_text());
         let other = if cur == Creation::Interactive { Creation::Direct } else { Creation::Interactive };
-        if resp.on_hover_text(format!("{}\nClic : passer en création {}", tip(cur), if other == Creation::Direct { "directe" } else { "interactive" })).clicked() {
+        if resp.on_hover_text(trd(format!("{}\nClic : passer en création {}", tip(cur), if other == Creation::Direct { "directe" } else { "interactive" }))).clicked() {
             set = Some(other);
         }
     }
@@ -985,16 +986,16 @@ pub fn creation_popover(ctx: &egui::Context, st: &mut AppState) {
     let resp = egui::Area::new(Id::new("creation-popover")).order(Order::Foreground).fade_in(false).fixed_pos(at).show(ctx, |ui| {
         panel().inner_margin(Margin::same(12)).show(ui, |ui| {
             ui.set_width(250.0);
-            ui.label(egui::RichText::new("Création").font(semibold(13.0)).color(TEXT()));
+            ui.label(egui::RichText::new(tr("Création")).font(semibold(13.0)).color(TEXT()));
             use crate::settings::Creation;
-            let items = [(Creation::Interactive, "Interactive", accent()), (Creation::Direct, "Directe", accent())];
+            let items = [(Creation::Interactive, "Interactive", accent()), (Creation::Direct, tr("Directe"), accent())];
             if let Some(c) = segmented(ui, &items, st.settings.creation, 30.0) {
                 st.settings.creation = c;
                 st.save_settings();
             }
             let blurb = match st.settings.creation {
-                Creation::Interactive => "Glisse la base, relâche, puis la hauteur : vers le haut +, vers le bas −. Ctrl inverse.",
-                Creation::Direct => "Un clic pose la forme à sa taille par défaut sur la face ou la grille sous le curseur ; ensuite ses poignées la dimensionnent.",
+                Creation::Interactive => tr("Glisse la base, relâche, puis la hauteur : vers le haut +, vers le bas −. Ctrl inverse."),
+                Creation::Direct => tr("Un clic pose la forme à sa taille par défaut sur la face ou la grille sous le curseur ; ensuite ses poignées la dimensionnent."),
             };
             ui.add(egui::Label::new(egui::RichText::new(blurb).font(regular(11.5)).color(TEXT2())).wrap());
         });
@@ -1041,10 +1042,10 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
             grip(ui, "rail");
             ui.spacing_mut().item_spacing.y = 5.0;
             let sel = st.tool == Tool::Select;
-            if card(ui, Some(Icon::Select), "SÉLECTION", "OBJET · Q", sel && st.pick_mode == PickMode::Object, TEXT2(), "Sélection d'objets (Q ou 1)").clicked() {
+            if card(ui, Some(Icon::Select), tr("SÉLECTION"), tr("OBJET · Q"), sel && st.pick_mode == PickMode::Object, TEXT2(), tr("Sélection d'objets (Q ou 1)")).clicked() {
                 st.set_pick_mode(PickMode::Object);
             }
-            if card(ui, Some(Icon::Fillet), "ARÊTES", "FILLET · 2", sel && st.pick_mode == PickMode::Edge, TEXT2(), "Sélection d'arêtes (2) : fillets, chanfreins").clicked() {
+            if card(ui, Some(Icon::Fillet), tr("ARÊTES"), "FILLET · 2", sel && st.pick_mode == PickMode::Edge, TEXT2(), tr("Sélection d'arêtes (2) : fillets, chanfreins")).clicked() {
                 st.set_pick_mode(PickMode::Edge);
             }
             divider(ui);
@@ -1066,10 +1067,10 @@ fn rail(ctx: &egui::Context, st: &mut AppState) {
             }
             divider(ui);
             let has = st.selection.is_some();
-            if card(ui, Some(Icon::Duplicate), "DUPLIQUER", "CTRL+D", false, TEXT2(), "Dupliquer la sélection").clicked() && has {
+            if card(ui, Some(Icon::Duplicate), tr("DUPLIQUER"), "CTRL+D", false, TEXT2(), tr("Dupliquer la sélection")).clicked() && has {
                 st.duplicate_selected();
             }
-            if card(ui, Some(Icon::Folder), "GROUPER", "SÉLECTION", false, TEXT2(), "Grouper la sélection").clicked() && has {
+            if card(ui, Some(Icon::Folder), tr("GROUPER"), tr("SÉLECTION"), false, TEXT2(), tr("Grouper la sélection")).clicked() && has {
                 st.group_selected();
             }
         });
@@ -1106,19 +1107,19 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(egui::RichText::new("Historique").font(semibold(13.0)).color(TEXT()));
+                    ui.label(egui::RichText::new(tr("Historique")).font(semibold(13.0)).color(TEXT()));
                     let n = rows.len();
                     let sub = match n {
-                        0 => "vide".to_string(),
-                        1 => "1 opération".to_string(),
-                        _ => format!("{n} opérations"),
+                        0 => tr("vide").to_string(),
+                        1 => tr("1 opération").to_string(),
+                        _ => trd(format!("{n} opérations")),
                     };
                     ui.label(egui::RichText::new(sub).font(regular(11.5)).color(TEXT2()));
                 });
                 let (sep, _) = ui.allocate_exact_size(vec2(1.0, 36.0), Sense::hover());
                 ui.painter().rect_filled(sep, 0.0, DIVIDER());
                 if rows.is_empty() {
-                    ui.label(egui::RichText::new("Choisis une forme à droite, puis glisse dans la vue").font(regular(13.0)).color(TEXT2()));
+                    ui.label(egui::RichText::new(tr("Choisis une forme à droite, puis glisse dans la vue")).font(regular(13.0)).color(TEXT2()));
                     return;
                 }
                 egui::ScrollArea::horizontal().id_salt("history-scroll").max_width(max_w - 220.0).show(ui, |ui| {
@@ -1140,7 +1141,7 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 let (er, _) = ui.allocate_exact_size(vec2(40.0, 44.0), Sense::hover());
                 let p = ui.painter();
                 p.rect_filled(Rect::from_center_size(pos2(er.min.x + 4.0, er.center().y), vec2(3.0, 30.0)), 2.0, accent());
-                p.text(pos2(er.min.x + 12.0, er.center().y), Align2::LEFT_CENTER, "Fin", regular(12.0), TEXT2());
+                p.text(pos2(er.min.x + 12.0, er.center().y), Align2::LEFT_CENTER, tr("Fin"), regular(12.0), TEXT2());
             });
         });
     });
@@ -1153,7 +1154,7 @@ fn history_chip(ui: &mut Ui, st: &AppState, id: NodeId, depth: usize) -> Respons
     let title = n.name.clone();
     let mut sub = if n.shape().is_some() { format!("{} · {}", n.type_label(), n.combine.mode.label()) } else { n.type_label() };
     if n.mirror.any() {
-        sub += " · sym.";
+        sub += tr(" · sym.");
     }
     if n.repeat.count() > 1 {
         sub += &format!(" ×{}", n.repeat.count());
@@ -1186,7 +1187,7 @@ fn history_chip(ui: &mut Ui, st: &AppState, id: NodeId, depth: usize) -> Respons
     let tx = ir.max.x + 8.0;
     p.galley(pos2(tx, r.center().y - tg.size().y - 0.5), tg, if selected { accent_text() } else { tint(TEXT(), dim) });
     p.galley(pos2(tx, r.center().y + 1.5), sg, TEXT2());
-    resp.on_hover_text("Sélectionner cette opération")
+    resp.on_hover_text(tr("Sélectionner cette opération"))
 }
 
 /// CTRL button area (points), just above the thumb button. Held, taps add to
@@ -1209,7 +1210,7 @@ fn ctrl_button(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         let held = st.multi();
         let p = ui.painter();
         let c = r.center();
-        let sub = if st.tool == Tool::Select { "+ sélection" } else { "combiner" };
+        let sub = if st.tool == Tool::Select { tr("+ sélection") } else { tr("combiner") };
         if held {
             p.circle_filled(c, 50.0, tint(EDGE_SEL, 0.22));
             p.circle(c, 42.0, EDGE_SEL, Stroke::new(2.0, Color32::from_rgb(0xFF, 0xE4, 0xA6)));
@@ -1232,8 +1233,8 @@ pub fn thumb_rect(screen_w: f32, screen_h: f32) -> Rect {
 }
 
 fn thumb_button(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
-    let tr = thumb_rect(screen.width(), screen.height());
-    egui::Area::new(Id::new("thumb")).order(Order::Middle).fixed_pos(tr.min).show(ctx, |ui| {
+    let thumb = thumb_rect(screen.width(), screen.height());
+    egui::Area::new(Id::new("thumb")).order(Order::Middle).fixed_pos(thumb.min).show(ctx, |ui| {
         let (r, resp) = ui.allocate_exact_size(vec2(84.0, 84.0), Sense::click_and_drag());
         if resp.is_pointer_button_down_on() {
             st.carve_held = true;
@@ -1249,12 +1250,12 @@ fn thumb_button(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             let dark = Color32::from_rgb(0x2A, 0x16, 0x08);
             p.text(c + vec2(0.0, -16.0), Align2::CENTER_CENTER, "−", semibold(22.0), dark);
             p.text(c + vec2(0.0, 4.0), Align2::CENTER_CENTER, "Carve", semibold(13.0), dark);
-            p.text(c + vec2(0.0, 20.0), Align2::CENTER_CENTER, "maintenu", semibold(11.0), dark);
+            p.text(c + vec2(0.0, 20.0), Align2::CENTER_CENTER, tr("maintenu"), semibold(11.0), dark);
         } else {
             p.circle(c, 42.0, Color32::from_rgb(0x26, 0x23, 0x1F), Stroke::new(2.0, carve()));
             p.text(c + vec2(0.0, -16.0), Align2::CENTER_CENTER, "−", semibold(22.0), carve_light());
             p.text(c + vec2(0.0, 4.0), Align2::CENTER_CENTER, "Carve", semibold(13.0), carve_light());
-            p.text(c + vec2(0.0, 20.0), Align2::CENTER_CENTER, "maintenir", regular(11.0), Color32::from_rgb(0xB9, 0xAF, 0xA6));
+            p.text(c + vec2(0.0, 20.0), Align2::CENTER_CENTER, tr("maintenir"), regular(11.0), Color32::from_rgb(0xB9, 0xAF, 0xA6));
         }
     });
 }
@@ -1326,7 +1327,7 @@ pub(crate) fn grip(ui: &mut Ui, key: &str) {
             ui.painter().circle_filled(r.center() + vec2(col, row), 1.6, c);
         }
     }
-    let resp = resp.on_hover_text("Glisser pour déplacer le panneau · double-clic : le remettre en place");
+    let resp = resp.on_hover_text(tr("Glisser pour déplacer le panneau · double-clic : le remettre en place"));
     if lit {
         ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
     }
@@ -1373,13 +1374,13 @@ pub(crate) fn properties(ui: &mut Ui, st: &mut AppState) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
-            ui.label(egui::RichText::new("Sélection").font(regular(12.0)).color(TEXT2()));
+            ui.label(egui::RichText::new(tr("Sélection")).font(regular(12.0)).color(TEXT2()));
             ui.horizontal(|ui| {
                 if st.renaming {
                     let mut name = node.name.clone();
                     let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0).font(semibold(15.0)));
                     if r.changed() {
-                        st.edit("Renommer", id, |n| n.name = name.clone());
+                        st.edit(tr("Renommer"), id, |n| n.name = name.clone());
                     }
                     if r.lost_focus() {
                         st.renaming = false;
@@ -1401,16 +1402,16 @@ pub(crate) fn properties(ui: &mut Ui, st: &mut AppState) {
     let ib = if DESK { 30.0 } else { 44.0 };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        if icon_btn(ui, Icon::Duplicate, false, "Dupliquer", ib).clicked() {
+        if icon_btn(ui, Icon::Duplicate, false, tr("Dupliquer"), ib).clicked() {
             st.duplicate_selected();
         }
-        if icon_btn(ui, if node.visible { Icon::Eye } else { Icon::EyeOff }, false, "Masquer", ib).clicked() {
+        if icon_btn(ui, if node.visible { Icon::Eye } else { Icon::EyeOff }, false, tr("Masquer"), ib).clicked() {
             st.toggle_visible(id);
         }
-        if icon_btn(ui, Icon::Frame, false, "Cadrer", ib).clicked() {
+        if icon_btn(ui, Icon::Frame, false, tr("Cadrer"), ib).clicked() {
             st.frame_selection();
         }
-        if icon_btn(ui, Icon::Trash, false, "Supprimer", ib).clicked() {
+        if icon_btn(ui, Icon::Trash, false, tr("Supprimer"), ib).clicked() {
             st.delete_selected();
             return;
         }
@@ -1425,26 +1426,26 @@ pub(crate) fn properties(ui: &mut Ui, st: &mut AppState) {
     }
 
     if let Some(sh) = node.shape().cloned() {
-        section(ui, "Forme");
+        section(ui, tr("Forme"));
         shape_rows(ui, st, id, &sh);
     } else if let NodeKind::Group { combined, .. } = node.kind {
-        section(ui, "Groupe");
-        if toggle_row(ui, "Fusionner les enfants", combined) {
-            st.edit("Groupe", id, |n| {
+        section(ui, tr("Groupe"));
+        if toggle_row(ui, tr("Fusionner les enfants"), combined) {
+            st.edit(tr("Groupe"), id, |n| {
                 if let NodeKind::Group { combined, .. } = &mut n.kind {
                     *combined = !*combined;
                 }
             });
         }
         let mut s = node.transform.scale;
-        let (ch, start) = slider_row(ui, "Échelle", &mut s, 0.2..=4.0, 0.05, "×");
+        let (ch, start) = slider_row(ui, tr("Échelle"), &mut s, 0.2..=4.0, 0.05, "×");
         if ch {
-            st.edit_live("Échelle", id, start, |n| n.transform.scale = s);
+            st.edit_live(tr("Échelle"), id, start, |n| n.transform.scale = s);
         }
     }
 
     if node.shape().is_some() || matches!(node.kind, NodeKind::Group { combined: true, .. }) {
-        section(ui, "Combinaison");
+        section(ui, tr("Combinaison"));
         let items = MODES.map(|m| (m, m.label(), mode_color(m)));
         if let Some(m) = segmented(ui, &items, node.combine.mode, 40.0) {
             st.mode = m;
@@ -1456,9 +1457,9 @@ pub(crate) fn properties(ui: &mut Ui, st: &mut AppState) {
             st.edit_live("Blend", id, start, |n| n.combine.blend = b);
         }
         if node.combine.blend > 0.0 {
-            let kinds = [(BlendKind::Smooth, "Lisse", accent()), (BlendKind::Chamfer, "Chanfrein", accent())];
+            let kinds = [(BlendKind::Smooth, tr("Lisse"), accent()), (BlendKind::Chamfer, tr("Chanfrein"), accent())];
             if let Some(k) = segmented(ui, &kinds, node.combine.kind, 36.0) {
-                st.edit("Type de blend", id, |n| n.combine.kind = k);
+                st.edit(tr("Type de blend"), id, |n| n.combine.kind = k);
             }
         }
     }
@@ -1468,7 +1469,7 @@ pub(crate) fn properties(ui: &mut Ui, st: &mut AppState) {
     position_rows(ui, st, id, &node);
     align_rows(ui, st, true);
 
-    section(ui, "Matière");
+    section(ui, tr("Matière"));
     material_palette(ui, st, Some(id), node.material);
 }
 
@@ -1477,7 +1478,7 @@ fn symmetry_row(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
         let (row, bw, bh) = if DESK { (28.0, 40.0, 24.0) } else { (40.0, 52.0, 36.0) };
         ui.set_height(row);
         let (lr, _) = ui.allocate_exact_size(vec2(if DESK { 74.0 } else { 84.0 }, bh), Sense::hover());
-        ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, "Symétrie", regular(if DESK { 12.5 } else { 13.0 }), LABEL());
+        ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, tr("Symétrie"), regular(if DESK { 12.5 } else { 13.0 }), LABEL());
         let m = node.mirror;
         let items = [(0, "X", m.x), (1, "Y", m.y), (2, "Z", m.z)];
         for (i, l, on) in items {
@@ -1486,7 +1487,7 @@ fn symmetry_row(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
             p.rect(r, 8.0, if on { accent_bg() } else { WELL() }, Stroke::new(1.0, if on { accent() } else { DIVIDER() }), StrokeKind::Inside);
             p.text(r.center(), Align2::CENTER_CENTER, l, semibold(12.5), if on { accent_text() } else { TEXT2() });
             if resp.clicked() {
-                st.edit("Symétrie", id, |n| match i {
+                st.edit(tr("Symétrie"), id, |n| match i {
                     0 => n.mirror.x = !n.mirror.x,
                     1 => n.mirror.y = !n.mirror.y,
                     _ => n.mirror.z = !n.mirror.z,
@@ -1498,7 +1499,7 @@ fn symmetry_row(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
 
 /// Répétition: none, a row of copies along an axis, or copies around an axis.
 fn repeat_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
-    section(ui, "Répétition");
+    section(ui, tr("Répétition"));
     #[derive(Clone, Copy, PartialEq)]
     enum K {
         Off,
@@ -1510,7 +1511,7 @@ fn repeat_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
         Repeat::Linear { .. } => K::Lin,
         Repeat::Radial { .. } => K::Rad,
     };
-    let items = [(K::Off, "Aucune", accent()), (K::Lin, "Linéaire", accent()), (K::Rad, "Circulaire", accent())];
+    let items = [(K::Off, tr("Aucune"), accent()), (K::Lin, tr("Linéaire"), accent()), (K::Rad, tr("Circulaire"), accent())];
     if let Some(k) = segmented(ui, &items, cur, 32.0) {
         // a sensible start: 4 copies, spaced by the shape's width along X
         let w = st.scene.shape_world_aabb(id).map(|(lo, hi)| (hi - lo).x).unwrap_or(10.0).max(1.0);
@@ -1519,13 +1520,13 @@ fn repeat_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
             K::Lin => Repeat::Linear { count: 4, step: Vec3::X * (w * 1.5).round() },
             K::Rad => Repeat::Radial { count: 6, axis: Axis::Y },
         };
-        st.edit("Répétition", id, |n| n.repeat = r);
+        st.edit(tr("Répétition"), id, |n| n.repeat = r);
     }
     match node.repeat {
         Repeat::None => {}
         Repeat::Linear { count, step } => {
-            if let Some(c) = stepper(ui, "Copies", count, 2, 64) {
-                st.edit("Répétition", id, |n| n.repeat = Repeat::Linear { count: c, step });
+            if let Some(c) = stepper(ui, tr("Copies"), count, 2, 64) {
+                st.edit(tr("Répétition"), id, |n| n.repeat = Repeat::Linear { count: c, step });
             }
             // the axis of the row, and the spacing along it
             let axis = if step.x.abs() >= step.y.abs() && step.x.abs() >= step.z.abs() { 0 } else if step.y.abs() >= step.z.abs() { 1 } else { 2 };
@@ -1534,24 +1535,24 @@ fn repeat_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
             if let Some(a) = segmented(ui, &axes, axis, 28.0) {
                 let mut s = Vec3::ZERO;
                 s[a] = if dist.abs() > 0.01 { dist } else { 10.0 };
-                st.edit("Répétition", id, |n| n.repeat = Repeat::Linear { count, step: s });
+                st.edit(tr("Répétition"), id, |n| n.repeat = Repeat::Linear { count, step: s });
             }
-            let (ch, start) = slider_row(ui, "Pas", &mut dist, -400.0..=400.0, 0.5, "mm");
+            let (ch, start) = slider_row(ui, tr("Pas"), &mut dist, -400.0..=400.0, 0.5, "mm");
             if ch {
                 let mut s = Vec3::ZERO;
                 s[axis] = dist;
-                st.edit_live("Répétition", id, start, |n| n.repeat = Repeat::Linear { count, step: s });
+                st.edit_live(tr("Répétition"), id, start, |n| n.repeat = Repeat::Linear { count, step: s });
             }
         }
         Repeat::Radial { count, axis } => {
-            if let Some(c) = stepper(ui, "Copies", count, 2, 64) {
-                st.edit("Répétition", id, |n| n.repeat = Repeat::Radial { count: c, axis });
+            if let Some(c) = stepper(ui, tr("Copies"), count, 2, 64) {
+                st.edit(tr("Répétition"), id, |n| n.repeat = Repeat::Radial { count: c, axis });
             }
-            let axes = [(Axis::X, "Axe X", AXIS_X), (Axis::Y, "Axe Y", AXIS_Y), (Axis::Z, "Axe Z", AXIS_Z)];
+            let axes = [(Axis::X, tr("Axe X"), AXIS_X), (Axis::Y, tr("Axe Y"), AXIS_Y), (Axis::Z, tr("Axe Z"), AXIS_Z)];
             if let Some(a) = segmented(ui, &axes, axis, 28.0) {
-                st.edit("Répétition", id, |n| n.repeat = Repeat::Radial { count, axis: a });
+                st.edit(tr("Répétition"), id, |n| n.repeat = Repeat::Radial { count, axis: a });
             }
-            ui.label(egui::RichText::new(format!("{count} copies tous les {}° autour de l'axe passant par l'origine", fmt_mm(360.0 / count as f32))).font(regular(11.5)).color(TEXT2()));
+            ui.label(egui::RichText::new(trd(format!("{count} copies tous les {}° autour de l'axe passant par l'origine", fmt_mm(360.0 / count as f32)))).font(regular(11.5)).color(TEXT2()));
         }
     }
 }
@@ -1571,10 +1572,10 @@ pub(crate) fn grid_btn(ui: &mut Ui, label: &str, enabled: bool, w: f32, tip: &st
 /// single shape), even gaps, ground, origin. Shared by every inspector.
 pub(crate) fn align_rows(ui: &mut Ui, st: &mut AppState, title: bool) {
     if title {
-        section(ui, "Alignement");
+        section(ui, tr("Alignement"));
     }
     let several = st.selected_ids().len() > 1;
-    let refer = if several { "sur la forme active" } else { "sur l'origine" };
+    let refer = if several { tr("sur la forme active") } else { tr("sur l'origine") };
     let gap = 4.0;
     let w = ((ui.available_width() - 22.0 - 4.0 * gap) / 4.0).floor();
     let mut todo = None;
@@ -1583,14 +1584,14 @@ pub(crate) fn align_rows(ui: &mut Ui, st: &mut AppState, title: bool) {
             ui.spacing_mut().item_spacing.x = gap;
             let (lr, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
             ui.painter().text(lr.center(), Align2::CENTER_CENTER, *l, semibold(11.5), *c);
-            for (side, name, what) in [(0u8, "Min", "le côté min"), (1, "Centre", "le centre"), (2, "Max", "le côté max")] {
+            for (side, name, what) in [(0u8, "Min", tr("le côté min")), (1, tr("Centre"), tr("le centre")), (2, "Max", tr("le côté max"))] {
                 let op = AlignOp::Align(axis, side);
-                if grid_btn(ui, name, st.can_align(op), w, &format!("Aligner {what} en {l} {refer}")) {
+                if grid_btn(ui, name, st.can_align(op), w, &trd(format!("Aligner {what} en {l} {refer}"))) {
                     todo = Some(op);
                 }
             }
             let op = AlignOp::Distribute(axis);
-            if grid_btn(ui, "Répartir", st.can_align(op), w, &format!("Espaces égaux en {l} entre les formes (3 ou plus)")) {
+            if grid_btn(ui, tr("Répartir"), st.can_align(op), w, &trd(format!("Espaces égaux en {l} entre les formes (3 ou plus)"))) {
                 todo = Some(op);
             }
         });
@@ -1599,10 +1600,10 @@ pub(crate) fn align_rows(ui: &mut Ui, st: &mut AppState, title: bool) {
         ui.spacing_mut().item_spacing.x = gap;
         ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
         let w2 = (2.0 * w + gap).floor();
-        if grid_btn(ui, "Poser au sol", st.can_align(AlignOp::Ground), w2, "Chaque forme posée sur la grille (Y = 0)") {
+        if grid_btn(ui, tr("Poser au sol"), st.can_align(AlignOp::Ground), w2, tr("Chaque forme posée sur la grille (Y = 0)")) {
             todo = Some(AlignOp::Ground);
         }
-        if grid_btn(ui, "Centrer à l'origine", st.can_align(AlignOp::Origin), w2, "La sélection centrée sur l'origine en X et Z") {
+        if grid_btn(ui, tr("Centrer à l'origine"), st.can_align(AlignOp::Origin), w2, tr("La sélection centrée sur l'origine en X et Z")) {
             todo = Some(AlignOp::Origin);
         }
     });
@@ -1612,7 +1613,7 @@ pub(crate) fn align_rows(ui: &mut Ui, st: &mut AppState, title: bool) {
 }
 
 fn position_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, node: &Node) {
-    section(ui, "Position et rotation");
+    section(ui, tr("Position et rotation"));
     let mut pos = node.transform.pos;
     let (ex, ey, ez) = node.transform.rot.to_euler(EulerRot::XYZ);
     let mut rot = Vec3::new(ex.to_degrees(), ey.to_degrees(), ez.to_degrees());
@@ -1653,43 +1654,43 @@ fn edge_card(ui: &mut Ui, st: &mut AppState) {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
         ui.painter().circle_filled(r.center(), 5.0, EDGE_SEL);
-        let title = if n > 1 { format!("{n} arêtes sélectionnées") } else { "Arête sélectionnée".to_string() };
+        let title = if n > 1 { trd(format!("{n} arêtes sélectionnées")) } else { tr("Arête sélectionnée").to_string() };
         ui.label(egui::RichText::new(title).font(semibold(14.0)).color(TEXT()));
     });
     let what = if n > 1 {
         let mixed = st.edge_sel.iter().any(|x| (x.radius - e.radius).abs() > 1e-4 || x.chamfer != e.chamfer);
-        format!("Même réglage pour toutes{} · CTRL + tap pour en ajouter ou retirer", if mixed { " (valeurs différentes)" } else { "" })
+        trd(format!("Même réglage pour toutes{} · CTRL + tap pour en ajouter ou retirer", if mixed { tr(" (valeurs différentes)") } else { "" }))
     } else {
         match e.kind {
-            forme_core::edges::EdgeKind::Junction { .. } => format!("{} · jonction entre deux formes", e.label),
-            forme_core::edges::EdgeKind::Own { .. } => format!("{} · maintiens CTRL pour en ajouter", e.label),
+            forme_core::edges::EdgeKind::Junction { .. } => trd(format!("{} · jonction entre deux formes", e.label)),
+            forme_core::edges::EdgeKind::Own { .. } => trd(format!("{} · maintiens CTRL pour en ajouter", e.label)),
         }
     };
     ui.label(egui::RichText::new(what).font(regular(12.0)).color(TEXT2()));
     ui.add_space(4.0);
     // a junction: this piece only (local fillet) or the whole junction
     if st.edge_sel.iter().any(|x| matches!(x.kind, forme_core::edges::EdgeKind::Junction { .. })) {
-        let scope = [(false, "Ce morceau", EDGE_SEL), (true, "Toute la jonction", EDGE_SEL)];
+        let scope = [(false, tr("Ce morceau"), EDGE_SEL), (true, tr("Toute la jonction"), EDGE_SEL)];
         if let Some(w) = segmented(ui, &scope, st.junction_whole, 32.0) {
             st.junction_whole = w;
         }
     }
-    let kinds = [(false, "Arrondi", EDGE_SEL), (true, "Chanfrein", EDGE_SEL)];
+    let kinds = [(false, tr("Arrondi"), EDGE_SEL), (true, tr("Chanfrein"), EDGE_SEL)];
     if let Some(c) = segmented(ui, &kinds, e.chamfer, 36.0) {
         st.set_fillet(e.radius, c, true);
     }
     let max = st.fillet_max().max(0.1);
     let mut r = e.radius;
-    let label = if e.chamfer { "Chanfrein" } else { "Fillet" };
+    let label = if e.chamfer { tr("Chanfrein") } else { "Fillet" };
     let (changed, start) = slider_row(ui, label, &mut r, 0.0..=max, 0.1, "mm");
     if changed {
         st.set_fillet(r, e.chamfer, start);
     }
     ui.horizontal(|ui| {
-        if secondary_btn(ui, "Arête vive", 120.0).clicked() {
+        if secondary_btn(ui, tr("Arête vive"), 120.0).clicked() {
             st.set_fillet(0.0, e.chamfer, true);
         }
-        if secondary_btn(ui, "Désélectionner", ui.available_width()).clicked() {
+        if secondary_btn(ui, tr("Désélectionner"), ui.available_width()).clicked() {
             st.clear_edge();
         }
     });
@@ -1721,7 +1722,7 @@ pub(crate) fn material_palette(ui: &mut Ui, st: &mut AppState, target: Option<No
             p.galley(pos2(r.min.x + 32.0, r.center().y - g.size().y * 0.5), g, fg);
             if resp.clicked() {
                 match target {
-                    Some(id) => st.edit("Matière", id, |n| n.material = i as u32),
+                    Some(id) => st.edit(tr("Matière"), id, |n| n.material = i as u32),
                     None => st.material = i as u32,
                 }
             }
@@ -1747,39 +1748,39 @@ fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
     };
     match sh.kind {
         PrimKind::Box => {
-            row(ui, "Largeur", &mut s.size.x, 0.5..=200.0, 0.5, 2.0, "mm");
-            row(ui, "Hauteur", &mut s.size.y, 0.5..=200.0, 0.5, 2.0, "mm");
-            row(ui, "Profondeur", &mut s.size.z, 0.5..=200.0, 0.5, 2.0, "mm");
+            row(ui, tr("Largeur"), &mut s.size.x, 0.5..=200.0, 0.5, 2.0, "mm");
+            row(ui, tr("Hauteur"), &mut s.size.y, 0.5..=200.0, 0.5, 2.0, "mm");
+            row(ui, tr("Profondeur"), &mut s.size.z, 0.5..=200.0, 0.5, 2.0, "mm");
         }
         PrimKind::Cylinder | PrimKind::Prism => {
-            row(ui, "Rayon", &mut s.size.x, 0.2..=100.0, 0.1, 1.0, "mm");
-            row(ui, "Hauteur", &mut s.size.y, 0.2..=200.0, 0.5, 2.0, "mm");
+            row(ui, tr("Rayon"), &mut s.size.x, 0.2..=100.0, 0.1, 1.0, "mm");
+            row(ui, tr("Hauteur"), &mut s.size.y, 0.2..=200.0, 0.5, 2.0, "mm");
         }
         PrimKind::Sphere => {
-            row(ui, "Rayon X", &mut s.size.x, 0.2..=100.0, 0.1, 1.0, "mm");
-            row(ui, "Rayon Y", &mut s.size.y, 0.2..=100.0, 0.1, 1.0, "mm");
-            row(ui, "Rayon Z", &mut s.size.z, 0.2..=100.0, 0.1, 1.0, "mm");
+            row(ui, tr("Rayon X"), &mut s.size.x, 0.2..=100.0, 0.1, 1.0, "mm");
+            row(ui, tr("Rayon Y"), &mut s.size.y, 0.2..=100.0, 0.1, 1.0, "mm");
+            row(ui, tr("Rayon Z"), &mut s.size.z, 0.2..=100.0, 0.1, 1.0, "mm");
         }
         PrimKind::Capsule => {
-            row(ui, "Rayon", &mut s.size.x, 0.2..=100.0, 0.1, 1.0, "mm");
-            row(ui, "Longueur", &mut s.size.y, 0.0..=200.0, 0.5, 2.0, "mm");
+            row(ui, tr("Rayon"), &mut s.size.x, 0.2..=100.0, 0.1, 1.0, "mm");
+            row(ui, tr("Longueur"), &mut s.size.y, 0.0..=200.0, 0.5, 2.0, "mm");
         }
         PrimKind::Torus => {
-            row(ui, "Rayon", &mut s.size.x, 0.5..=100.0, 0.1, 1.0, "mm");
-            row(ui, "Épaisseur", &mut s.size.z, 0.2..=40.0, 0.1, 1.0, "mm");
+            row(ui, tr("Rayon"), &mut s.size.x, 0.5..=100.0, 0.1, 1.0, "mm");
+            row(ui, tr("Épaisseur"), &mut s.size.z, 0.2..=40.0, 0.1, 1.0, "mm");
         }
         PrimKind::Cone => {
-            row(ui, "Rayon bas", &mut s.size.x, 0.0..=100.0, 0.1, 1.0, "mm");
-            row(ui, "Rayon haut", &mut s.size.z, 0.0..=100.0, 0.1, 1.0, "mm");
-            row(ui, "Hauteur", &mut s.size.y, 0.2..=200.0, 0.5, 2.0, "mm");
+            row(ui, tr("Rayon bas"), &mut s.size.x, 0.0..=100.0, 0.1, 1.0, "mm");
+            row(ui, tr("Rayon haut"), &mut s.size.z, 0.0..=100.0, 0.1, 1.0, "mm");
+            row(ui, tr("Hauteur"), &mut s.size.y, 0.2..=200.0, 0.5, 2.0, "mm");
         }
         PrimKind::Tube => {
-            row(ui, "Rayon ext.", &mut s.size.x, 0.5..=100.0, 0.1, 1.0, "mm");
-            row(ui, "Rayon int.", &mut s.size.z, 0.0..=100.0, 0.1, 1.0, "mm");
-            row(ui, "Hauteur", &mut s.size.y, 0.2..=200.0, 0.5, 2.0, "mm");
+            row(ui, tr("Rayon ext."), &mut s.size.x, 0.5..=100.0, 0.1, 1.0, "mm");
+            row(ui, tr("Rayon int."), &mut s.size.z, 0.0..=100.0, 0.1, 1.0, "mm");
+            row(ui, tr("Hauteur"), &mut s.size.y, 0.2..=200.0, 0.5, 2.0, "mm");
         }
         PrimKind::Profile => {
-            row(ui, "Épaisseur", &mut s.size.z, 0.2..=100.0, 0.5, 2.0, "mm");
+            row(ui, tr("Épaisseur"), &mut s.size.z, 0.2..=100.0, 0.5, 2.0, "mm");
         }
     }
     let max_round = match sh.kind {
@@ -1788,23 +1789,23 @@ fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
         _ => s.size.x.min(s.size.y.max(0.1)),
     };
     if !sh.edges.is_empty() {
-        ui.label(egui::RichText::new("Fillets réglés arête par arête · Rondeur / Chanfrein les remettent tous pareils").font(regular(11.5)).color(EDGE_SEL));
+        ui.label(egui::RichText::new(tr("Fillets réglés arête par arête · Rondeur / Chanfrein les remettent tous pareils")).font(regular(11.5)).color(EDGE_SEL));
     }
     let (r0, c0) = (s.round, s.chamfer);
     if !matches!(sh.kind, PrimKind::Sphere | PrimKind::Capsule | PrimKind::Torus) {
-        row(ui, "Rondeur", &mut s.round, 0.0..=max_round.max(0.1), 0.1, 1.0, "mm");
+        row(ui, tr("Rondeur"), &mut s.round, 0.0..=max_round.max(0.1), 0.1, 1.0, "mm");
     }
     if matches!(sh.kind, PrimKind::Box | PrimKind::Cylinder) {
-        row(ui, "Chanfrein", &mut s.chamfer, 0.0..=max_round.max(0.1), 0.1, 1.0, "mm");
+        row(ui, tr("Chanfrein"), &mut s.chamfer, 0.0..=max_round.max(0.1), 0.1, 1.0, "mm");
     }
     if s.round != r0 || s.chamfer != c0 {
         s.edges.clear();
     }
     // coque: hollow inwards, Shape.shell is the wall thickness
     let wall_max = (s.size.min_element() * 2.0).max(0.4).min(40.0);
-    row(ui, "Coque", &mut s.shell, 0.0..=wall_max, 0.1, 1.0, "mm");
+    row(ui, tr("Coque"), &mut s.shell, 0.0..=wall_max, 0.1, 1.0, "mm");
     if sh.kind == PrimKind::Prism {
-        if let Some(n) = stepper(ui, "Côtés", sh.sides, 3, 24) {
+        if let Some(n) = stepper(ui, tr("Côtés"), sh.sides, 3, 24) {
             s.sides = n;
             any = true;
             start = true;
@@ -1812,7 +1813,7 @@ fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
     }
     if sh.kind == PrimKind::Profile {
         if let Some(prof) = &sh.profile {
-            let modes = [(ProfileMode::Extrude, "Extrusion", accent()), (ProfileMode::Revolve, "Révolution", accent())];
+            let modes = [(ProfileMode::Extrude, tr("Extrusion"), accent()), (ProfileMode::Revolve, tr("Révolution"), accent())];
             if let Some(m) = segmented(ui, &modes, prof.mode, 40.0) {
                 if let Some(p) = s.profile.as_mut() {
                     p.mode = m;
@@ -1823,7 +1824,7 @@ fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
         }
     }
     if any {
-        st.edit_live("Forme", id, start, |n| {
+        st.edit_live(tr("Forme"), id, start, |n| {
             if let NodeKind::Shape(x) = &mut n.kind {
                 *x = s.clone();
             }
@@ -1832,28 +1833,28 @@ fn shape_rows(ui: &mut Ui, st: &mut AppState, id: NodeId, sh: &Shape) {
 }
 
 fn scene_panel(ui: &mut Ui, st: &mut AppState) {
-    ui.label(egui::RichText::new("Clique une forme pour l'éditer, ou choisis-en une nouvelle dans la colonne de droite.").font(regular(12.0)).color(TEXT2()));
-    section(ui, "Nouvelles formes");
+    ui.label(egui::RichText::new(tr("Clique une forme pour l'éditer, ou choisis-en une nouvelle dans la colonne de droite.")).font(regular(12.0)).color(TEXT2()));
+    section(ui, tr("Nouvelles formes"));
     let items = MODES.map(|m| (m, m.label(), mode_color(m)));
     if let Some(m) = segmented(ui, &items, st.mode, 40.0) {
         st.mode = m;
     }
-    section(ui, "Matière par défaut");
+    section(ui, tr("Matière par défaut"));
     let cur = st.material;
     material_palette(ui, st, None, cur);
     section(ui, "Document");
     let w = RIGHT_W - 28.0;
-    if secondary_btn(ui, "Cadrer toute la scène", w).clicked() {
+    if secondary_btn(ui, tr("Cadrer toute la scène"), w).clicked() {
         st.frame_all();
     }
-    if secondary_btn(ui, "Ouvrir · Nouveau…", w).clicked() {
+    if secondary_btn(ui, tr("Ouvrir · Nouveau…"), w).clicked() {
         st.files_open = true;
     }
-    if primary_btn(ui, None, "Enregistrer", Some(w)).clicked() {
+    if primary_btn(ui, None, tr("Enregistrer"), Some(w)).clicked() {
         st.save();
     }
-    section(ui, "Affichage");
-    if toggle_row(ui, "Arbre de formes", st.show_tree) {
+    section(ui, tr("Affichage"));
+    if toggle_row(ui, tr("Arbre de formes"), st.show_tree) {
         st.show_tree = !st.show_tree;
     }
 }
@@ -1864,18 +1865,18 @@ pub(crate) fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     ui.horizontal(|ui| {
         ui.set_height(26.0);
         let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 3.0 * 28.0, 26.0), Sense::hover());
-        ui.painter().text(lr.left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, "SCÈNE", semibold(10.5), TEXT2());
-        ui.painter().text(lr.left_center() + vec2(52.0, 0.0), Align2::LEFT_CENTER, format!("{n_shapes} forme{}", if n_shapes > 1 { "s" } else { "" }), regular(11.5), pick(Color32::from_rgb(0x64, 0x6B, 0x75), Color32::from_rgb(0x8A, 0x90, 0x99)));
+        ui.painter().text(lr.left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, tr("SCÈNE"), semibold(10.5), TEXT2());
+        ui.painter().text(lr.left_center() + vec2(52.0, 0.0), Align2::LEFT_CENTER, trd(format!("{n_shapes} forme{}", if n_shapes > 1 { "s" } else { "" })), regular(11.5), pick(Color32::from_rgb(0x64, 0x6B, 0x75), Color32::from_rgb(0x8A, 0x90, 0x99)));
         ui.spacing_mut().item_spacing.x = 2.0;
-        if icon_btn(ui, Icon::Folder, false, "Grouper la sélection", 26.0).clicked() {
+        if icon_btn(ui, Icon::Folder, false, tr("Grouper la sélection"), 26.0).clicked() {
             st.group_selected();
         }
-        if icon_btn(ui, Icon::Up, false, "Monter (évalué plus tôt)", 26.0).clicked() {
+        if icon_btn(ui, Icon::Up, false, tr("Monter (évalué plus tôt)"), 26.0).clicked() {
             if let Some(id) = st.selection {
                 st.move_in_parent(id, -1);
             }
         }
-        if icon_btn(ui, Icon::Down, false, "Descendre (évalué plus tard)", 26.0).clicked() {
+        if icon_btn(ui, Icon::Down, false, tr("Descendre (évalué plus tard)"), 26.0).clicked() {
             if let Some(id) = st.selection {
                 st.move_in_parent(id, 1);
             }
@@ -1885,7 +1886,7 @@ pub(crate) fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     egui::ScrollArea::vertical().id_salt("tree-scroll").max_height(height - 32.0).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
         if rows.is_empty() {
-            ui.label(egui::RichText::new("Vide · choisis une forme à droite (C, S, A, T…)").font(regular(12.0)).color(TEXT2()));
+            ui.label(egui::RichText::new(tr("Vide · choisis une forme à droite (C, S, A, T…)")).font(regular(12.0)).color(TEXT2()));
         }
         for (id, depth) in rows {
             let Some(n) = st.scene.node(id).cloned() else { continue };
@@ -1923,7 +1924,7 @@ pub(crate) fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
                 info += &format!(" ×{}", n.repeat.count());
             }
             if n.mirror.any() {
-                info += " · sym.";
+                info += tr(" · sym.");
             }
             let info_g = p.layout_no_wrap(info, regular(12.0), if selected { pick(Color32::from_rgb(0xC3, 0xD9, 0xF2), accent_text()) } else { tint(TEXT2(), dim) });
             let info_x = r.max.x - 40.0 - info_g.size().x;
@@ -1976,14 +1977,14 @@ pub(crate) fn export_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect
     egui::Area::new(Id::new("export")).order(Order::Tooltip).pivot(Align2::CENTER_CENTER).fixed_pos(screen.center()).show(ctx, |ui| {
         panel().inner_margin(Margin::same(20)).show(ui, |ui| {
             ui.set_width(380.0);
-            ui.label(egui::RichText::new("Exporter le mesh").font(semibold(18.0)).color(TEXT()));
+            ui.label(egui::RichText::new(tr("Exporter le mesh")).font(semibold(18.0)).color(TEXT()));
             ui.label(
-                egui::RichText::new("Maillage à arêtes vives (dual contouring). Les matières partent en couleurs de vertex pour le masque ID de Substance Painter.")
+                egui::RichText::new(tr("Maillage à arêtes vives (dual contouring). Les matières partent en couleurs de vertex pour le masque ID de Substance Painter."))
                     .font(regular(12.5))
                     .color(TEXT2()),
             );
             ui.add_space(6.0);
-            section(ui, "Résolution");
+            section(ui, tr("Résolution"));
             let res = [
                 (ExportRes::Draft, ExportRes::Draft.label(), accent()),
                 (ExportRes::Normal, ExportRes::Normal.label(), accent()),
@@ -1994,29 +1995,29 @@ pub(crate) fn export_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect
             }
             let (lo, hi) = st.scene.bounds();
             let cell = (hi - lo).max_element() / st.export_res.cells();
-            ui.label(egui::RichText::new(format!("Cellule : {} mm", fmt_mm(cell.max(0.05)))).font(regular(12.0)).color(TEXT2()));
-            section(ui, "Formats");
-            if toggle_row(ui, "glTF binaire (.glb)", st.export_glb) {
+            ui.label(egui::RichText::new(trd(format!("Cellule : {} mm", fmt_mm(cell.max(0.05))))).font(regular(12.0)).color(TEXT2()));
+            section(ui, tr("Formats"));
+            if toggle_row(ui, tr("glTF binaire (.glb)"), st.export_glb) {
                 st.export_glb = !st.export_glb;
             }
-            if toggle_row(ui, "OBJ avec couleurs de vertex", st.export_obj) {
+            if toggle_row(ui, tr("OBJ avec couleurs de vertex"), st.export_obj) {
                 st.export_obj = !st.export_obj;
             }
-            ui.label(egui::RichText::new(format!("Dossier : {}", files::documents_dir().display())).font(regular(11.5)).color(TEXT2()));
+            ui.label(egui::RichText::new(trd(format!("Dossier : {}", files::documents_dir().display()))).font(regular(11.5)).color(TEXT2()));
             ui.add_space(8.0);
             if let Some((_, t0)) = &st.export_job {
                 let el = st.now - t0;
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new().size(18.0).color(accent()));
-                    ui.label(egui::RichText::new(format!("Maillage en cours… {:.0} s", el)).color(LABEL()));
+                    ui.label(egui::RichText::new(trd(format!("Maillage en cours… {:.0} s", el))).color(LABEL()));
                 });
                 ctx.request_repaint();
             } else {
                 ui.horizontal(|ui| {
-                    if secondary_btn(ui, "Annuler", 120.0).clicked() {
+                    if secondary_btn(ui, tr("Annuler"), 120.0).clicked() {
                         st.export_open = false;
                     }
-                    if primary_btn(ui, Some(Icon::Export), "Exporter", Some(250.0)).clicked() {
+                    if primary_btn(ui, Some(Icon::Export), tr("Exporter"), Some(250.0)).clicked() {
                         st.start_export();
                     }
                 });
@@ -2047,7 +2048,7 @@ fn bake_side_panel(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Bake").font(semibold(18.0)).color(TEXT()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_btn(ui, Icon::ChevronLeft, false, "Fermer le panneau Bake", 32.0).clicked() {
+                    if icon_btn(ui, Icon::ChevronLeft, false, tr("Fermer le panneau Bake"), 32.0).clicked() {
                         st.set_bake_mode(false);
                     }
                 });
@@ -2077,8 +2078,8 @@ fn note(ui: &mut Ui, text: impl Into<String>, color: Color32) {
 /// result, optional pass, export.
 pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
     use forme_core::bake::{Quality, STAGES};
-    note(ui, "Lignes de construction lues dans l'historique : jaune = arêtes et jonctions, orange = rails de fillet. Le maillage doit partir de ces lignes.", TEXT2());
-    section(ui, "Densité");
+    note(ui, tr("Lignes de construction lues dans l'historique : jaune = arêtes et jonctions, orange = rails de fillet. Le maillage doit partir de ces lignes."), TEXT2());
+    section(ui, tr("Densité"));
     let running = st.bake.job.is_some();
     if compact {
         egui::ComboBox::from_id_salt("bake-quality-panel").width(160.0).selected_text(st.bake.quality.label()).show_ui(ui, |ui| {
@@ -2087,7 +2088,7 @@ pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
             }
         });
     } else {
-        let q = [(Quality::Draft, "Légère", accent()), (Quality::Standard, "Standard", accent()), (Quality::Max, "Dense", accent())];
+        let q = [(Quality::Draft, tr("Légère"), accent()), (Quality::Standard, "Standard", accent()), (Quality::Max, tr("Dense"), accent())];
         if let Some(v) = segmented(ui, &q, st.bake.quality, 36.0) {
             if !running {
                 st.bake.quality = v;
@@ -2110,19 +2111,19 @@ pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
             ui.add(egui::Spinner::new().size(14.0).color(accent()));
             ui.label(egui::RichText::new(format!("{} · {:.0} % · {:.0} s", STAGES.get(stage).copied().unwrap_or(""), f * 100.0, el)).font(medium(12.5)).color(LABEL()));
         });
-        if secondary_btn(ui, "Annuler le Bake", ui.available_width()).clicked() {
+        if secondary_btn(ui, tr("Annuler le Bake"), ui.available_width()).clicked() {
             st.cancel_bake();
         }
-    } else if primary_btn(ui, Some(Icon::Cube), if st.bake.result.is_some() { "Nouveau Bake" } else { "Lancer le Bake" }, Some(ui.available_width())).clicked() {
+    } else if primary_btn(ui, Some(Icon::Cube), if st.bake.result.is_some() { tr("Nouveau Bake") } else { tr("Lancer le Bake") }, Some(ui.available_width())).clicked() {
         st.start_bake();
     }
 
     // what the algorithm sees and builds
     section(ui, "Diagnostic");
-    if opt_row(ui, compact, "Lignes de construction (jaune)", st.bake.diag.lines) {
+    if opt_row(ui, compact, tr("Lignes de construction (jaune)"), st.bake.diag.lines) {
         st.bake.diag.lines = !st.bake.diag.lines;
     }
-    if opt_row(ui, compact, "Rails de fillet (orange)", st.bake.diag.rails) {
+    if opt_row(ui, compact, tr("Rails de fillet (orange)"), st.bake.diag.rails) {
         st.bake.diag.rails = !st.bake.diag.rails;
     }
     match &st.bake.lines {
@@ -2134,52 +2135,52 @@ pub(crate) fn bake_body(ui: &mut Ui, st: &mut AppState, compact: bool) {
                 LABEL(),
             );
         }
-        _ if st.bake.diag.lines || st.bake.diag.rails => note(ui, "Lecture des lignes…", TEXT2()),
+        _ if st.bake.diag.lines || st.bake.diag.rails => note(ui, tr("Lecture des lignes…"), TEXT2()),
         _ => {}
     }
     let has = st.bake.result.is_some();
-    if opt_row(ui, compact, "Afficher le maillage baké", st.bake.show) && has {
+    if opt_row(ui, compact, tr("Afficher le maillage baké"), st.bake.show) && has {
         st.bake.show = !st.bake.show && !st.bake.stale(st.scene_version);
     }
-    if opt_row(ui, compact, "Rôles (fillets / paths)", st.bake.diag.roles) {
+    if opt_row(ui, compact, tr("Rôles (fillets / paths)"), st.bake.diag.roles) {
         st.bake.diag.roles = !st.bake.diag.roles;
         if st.bake.diag.roles && has {
             st.bake.show = !st.bake.stale(st.scene_version);
         }
     }
-    if opt_row(ui, compact, "Filaire (arêtes des polygones)", st.bake.wire) {
+    if opt_row(ui, compact, tr("Filaire (arêtes des polygones)"), st.bake.wire) {
         st.bake.wire = !st.bake.wire;
     }
 
     if let Some((v, why)) = st.bake.error.clone() {
-        section(ui, "Résultat");
-        note(ui, format!("Bake impossible : {why}"), ERROR);
+        section(ui, tr("Résultat"));
+        note(ui, trd(format!("Bake impossible : {why}")), ERROR);
         if v != st.scene_version {
-            note(ui, "Le modèle a changé depuis : relance le Bake.", TEXT2());
+            note(ui, tr("Le modèle a changé depuis : relance le Bake."), TEXT2());
         }
         return;
     }
     let Some(b) = st.bake.result.clone() else { return };
     let s = &b.stats;
-    section(ui, "Résultat");
+    section(ui, tr("Résultat"));
     if st.bake.stale(st.scene_version) {
-        note(ui, "Le modèle a changé depuis ce Bake : relance-le.", carve());
+        note(ui, tr("Le modèle a changé depuis ce Bake : relance-le."), carve());
     }
     let total = b.faces.len().max(1);
     stat_row(ui, "Faces", format!("{}  ({} % quads)", fmt_int(b.faces.len()), s.quads * 100 / total), TEXT());
-    stat_row(ui, "Quads · tris · n-gones", format!("{} · {} · {}", fmt_int(s.quads), fmt_int(s.tris), fmt_int(s.ngons)), LABEL());
-    stat_row(ui, "Écart", format!("moy. {} · max {} mm", fmt_mm_fine(s.mean_dev), fmt_mm_fine(s.max_dev)), LABEL());
+    stat_row(ui, tr("Quads · tris · n-gones"), format!("{} · {} · {}", fmt_int(s.quads), fmt_int(s.tris), fmt_int(s.ngons)), LABEL());
+    stat_row(ui, tr("Écart"), trd(format!("moy. {} · max {} mm", fmt_mm_fine(s.mean_dev), fmt_mm_fine(s.max_dev))), LABEL());
     let defects = s.open_edges + s.nonmanifold_edges;
-    stat_row(ui, "Fermeture", if defects == 0 { "étanche".to_string() } else { format!("{} arêtes à reprendre", fmt_int(defects)) }, if defects == 0 { OK } else { carve() });
-    stat_row(ui, "Durée", format!("{} patchs · {:.2} s", fmt_int(s.patches), s.seconds).replace('.', ","), LABEL());
+    stat_row(ui, tr("Fermeture"), if defects == 0 { tr("étanche").to_string() } else { trd(format!("{} arêtes à reprendre", fmt_int(defects))) }, if defects == 0 { OK } else { carve() });
+    stat_row(ui, tr("Durée"), format!("{} patchs · {:.2} s", fmt_int(s.patches), s.seconds).replace('.', ","), LABEL());
 
-    section(ui, "Passe secondaire (option)");
+    section(ui, tr("Passe secondaire (option)"));
     let deg = forme_core::bake::decimate::FLAT_LOOPS_DEG;
     if opt_row(ui, compact, &format!("Retirer les loops plates (< {deg:.0}°)"), st.bake.flat) {
         st.set_flat_pass(!st.bake.flat);
     }
     if st.bake.pass.is_some() {
-        note(ui, "Passe en cours…", LABEL());
+        note(ui, tr("Passe en cours…"), LABEL());
     } else if st.bake.flat && s.faces_before_flat > 0 {
         note(ui, format!("{} loops retirées · {} → {} faces", s.flat_loops, fmt_int(s.faces_before_flat), fmt_int(b.faces.len())), OK);
     }
@@ -2215,32 +2216,32 @@ pub(crate) fn files_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect)
     egui::Area::new(Id::new("files")).order(Order::Tooltip).pivot(Align2::CENTER_CENTER).fixed_pos(screen.center()).show(ctx, |ui| {
         panel().inner_margin(Margin::same(20)).show(ui, |ui| {
             ui.set_width(420.0);
-            ui.label(egui::RichText::new("Documents").font(semibold(18.0)).color(TEXT()));
+            ui.label(egui::RichText::new(tr("Documents")).font(semibold(18.0)).color(TEXT()));
             ui.add_space(4.0);
-            section(ui, "Nom du document");
+            section(ui, tr("Nom du document"));
             let mut name = st.doc_name.clone();
             if ui.add(egui::TextEdit::singleline(&mut name).desired_width(380.0).font(medium(14.0))).changed() {
                 st.doc_name = name;
             }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if primary_btn(ui, None, "Enregistrer", Some(130.0)).clicked() {
+                if primary_btn(ui, None, tr("Enregistrer"), Some(130.0)).clicked() {
                     st.save();
                 }
-                if secondary_btn(ui, "Nouveau", 110.0).clicked() {
-                    st.new_document(Scene::new(), "Sans titre");
+                if secondary_btn(ui, tr("Nouveau"), 110.0).clicked() {
+                    st.new_document(Scene::new(), tr("Sans titre"));
                     st.files_open = false;
                 }
-                if secondary_btn(ui, "Démo grenade", 130.0).clicked() {
-                    st.new_document(demo::grenade(), "Grenade sci-fi");
+                if secondary_btn(ui, tr("Démo grenade"), 130.0).clicked() {
+                    st.new_document(demo::grenade(), tr("Grenade sci-fi"));
                     st.camera = crate::camera::OrbitCamera::default();
                     st.files_open = false;
                 }
             });
-            section(ui, "Récents");
+            section(ui, tr("Récents"));
             let list = files::list();
             if list.is_empty() {
-                ui.label(egui::RichText::new("Aucun document enregistré pour l'instant.").color(TEXT2()));
+                ui.label(egui::RichText::new(tr("Aucun document enregistré pour l'instant.")).color(TEXT2()));
             }
             egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                 for (n, path) in list {
@@ -2274,9 +2275,9 @@ pub fn display_panel(ctx: &egui::Context, st: &mut AppState) {
             ui.set_width(320.0);
             ui.set_max_width(320.0);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Affichage").font(semibold(16.0)).color(TEXT()));
+                ui.label(egui::RichText::new(tr("Affichage")).font(semibold(16.0)).color(TEXT()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Label::new(egui::RichText::new("Réinitialiser").font(regular(12.0)).color(accent_text())).sense(Sense::click())).clicked() {
+                    if ui.add(egui::Label::new(egui::RichText::new(tr("Réinitialiser")).font(regular(12.0)).color(accent_text())).sense(Sense::click())).clicked() {
                         st.settings.display = crate::settings::Display::default();
                         st.save_settings();
                     }
@@ -2284,7 +2285,7 @@ pub fn display_panel(ctx: &egui::Context, st: &mut AppState) {
             });
             let d0 = st.settings.display;
             let d = &mut st.settings.display;
-            section(ui, "Rendu");
+            section(ui, tr("Rendu"));
             // pixel budget of the viewport: the main lever on a 4K screen
             {
                 use crate::settings::ViewQuality;
@@ -2293,31 +2294,31 @@ pub fn display_panel(ctx: &egui::Context, st: &mut AppState) {
                     d.quality = q;
                 }
                 let what = match d.quality {
-                    ViewQuality::Performance => "Léger : moins de pixels calculés, l'image est agrandie. Pour les grosses scènes ou un GPU modeste.",
-                    ViewQuality::Equilibre => "Net et fluide : environ 4,5 Mpx à l'arrêt, 8× d'anticrénelage au plus.",
-                    ViewQuality::Qualite => "La pleine résolution de l'écran : le plus net, le plus lourd en 4K.",
+                    ViewQuality::Performance => tr("Léger : moins de pixels calculés, l'image est agrandie. Pour les grosses scènes ou un GPU modeste."),
+                    ViewQuality::Equilibre => tr("Net et fluide : environ 4,5 Mpx à l'arrêt, 8× d'anticrénelage au plus."),
+                    ViewQuality::Qualite => tr("La pleine résolution de l'écran : le plus net, le plus lourd en 4K."),
                 };
                 ui.add(egui::Label::new(egui::RichText::new(what).font(regular(11.5)).color(TEXT2())).wrap());
             }
-            if toggle_row(ui, "Ombres", d.shadows) {
+            if toggle_row(ui, tr("Ombres"), d.shadows) {
                 d.shadows = !d.shadows;
             }
-            if toggle_row(ui, "Occlusion ambiante", d.ao) {
+            if toggle_row(ui, tr("Occlusion ambiante"), d.ao) {
                 d.ao = !d.ao;
             }
-            ui.label(egui::RichText::new("Anticrénelage (image immobile)").font(regular(13.0)).color(LABEL()));
-            let items = [(1u32, "Non", NEUTRAL_MODE()), (4, "4×", accent()), (8, "8×", accent()), (16, "16×", accent())];
+            ui.label(egui::RichText::new(tr("Anticrénelage (image immobile)")).font(regular(13.0)).color(LABEL()));
+            let items = [(1u32, tr("Non"), NEUTRAL_MODE()), (4, "4×", accent()), (8, "8×", accent()), (16, "16×", accent())];
             if let Some(v) = segmented(ui, &items, d.aa, 34.0) {
                 d.aa = v;
             }
-            section(ui, "Lumière");
-            slider_row(ui, "Orientation", &mut d.light_azimuth, -180.0..=180.0, 5.0, "°");
-            slider_row(ui, "Hauteur", &mut d.light_elevation, 5.0..=90.0, 5.0, "°");
-            slider_row(ui, "Intensité", &mut d.light_intensity, 0.0..=2.0, 0.05, "");
-            slider_row(ui, "Exposition", &mut d.exposure, 0.3..=2.5, 0.05, "");
-            section(ui, "Vue");
+            section(ui, tr("Lumière"));
+            slider_row(ui, tr("Orientation"), &mut d.light_azimuth, -180.0..=180.0, 5.0, "°");
+            slider_row(ui, tr("Hauteur"), &mut d.light_elevation, 5.0..=90.0, 5.0, "°");
+            slider_row(ui, tr("Intensité"), &mut d.light_intensity, 0.0..=2.0, 0.05, "");
+            slider_row(ui, tr("Exposition"), &mut d.exposure, 0.3..=2.5, 0.05, "");
+            section(ui, tr("Vue"));
             let grid = st.grid;
-            if toggle_row(ui, "Grille au sol", grid) {
+            if toggle_row(ui, tr("Grille au sol"), grid) {
                 st.grid = !st.grid;
             }
             if st.settings.display != d0 {
@@ -2360,7 +2361,7 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
         panel().inner_margin(Margin::same(20)).show(ui, |ui| {
             ui.set_width(440.0);
             ui.set_max_width(440.0);
-            ui.label(egui::RichText::new("Réglages").font(semibold(18.0)).color(TEXT()));
+            ui.label(egui::RichText::new(tr("Réglages")).font(semibold(18.0)).color(TEXT()));
             section(ui, "Interface");
             for m in UiMode::ALL {
                 let on = st.settings.ui_mode == m;
@@ -2383,16 +2384,16 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                     st.set_ui_mode(m);
                 }
             }
-            section(ui, "Thème");
+            section(ui, tr("Thème"));
             {
-                let items = [(false, "Sombre", accent()), (true, "Clair", accent())];
+                let items = [(false, tr("Sombre"), accent()), (true, tr("Clair"), accent())];
                 if let Some(l) = segmented(ui, &items, st.settings.light, 32.0) {
                     st.settings.light = l;
                     st.save_settings();
                     st.view_changed();
                 }
             }
-            section(ui, "Ambiance");
+            section(ui, tr("Ambiance"));
             {
                 use crate::settings::AmbianceChoice;
                 let col = |a: AmbianceChoice| match a {
@@ -2408,12 +2409,12 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                     st.save_settings();
                 }
                 let what = match st.settings.ambiance {
-                    AmbianceChoice::Auto => "Chaque interface garde la sienne : Établi en vert, Studio et Plaque en orange, Focus en bleu.",
-                    _ => "La même couleur d'accent pour les trois interfaces (Add, sélection, outil actif).",
+                    AmbianceChoice::Auto => tr("Chaque interface garde la sienne : Établi en vert, Studio et Plaque en orange, Focus en bleu."),
+                    _ => tr("La même couleur d'accent pour les trois interfaces (Add, sélection, outil actif)."),
                 };
                 ui.label(egui::RichText::new(what).font(regular(11.5)).color(TEXT2()));
             }
-            ui.label(egui::RichText::new("Les choix sont gardés pour les prochaines sessions.").font(regular(11.5)).color(TEXT2()));            section(ui, "Navigation");
+            ui.label(egui::RichText::new(tr("Les choix sont gardés pour les prochaines sessions.")).font(regular(11.5)).color(TEXT2()));            section(ui, tr("Navigation"));
             {
                 use crate::settings::Navigation;
                 let items: Vec<(Navigation, &str, Color32)> = Navigation::ALL.iter().map(|n| (*n, n.label(), accent())).collect();
@@ -2423,21 +2424,21 @@ pub fn settings_dialog(ctx: &egui::Context, st: &mut AppState) {
                 }
                 ui.add(egui::Label::new(egui::RichText::new(st.settings.navigation.blurb()).font(regular(11.5)).color(TEXT2())).wrap());
             }
-            section(ui, "Création");
-            if toggle_row(ui, "Accrocher aux faces des objets (AutoGrid)", st.settings.snap_faces) {
+            section(ui, tr("Création"));
+            if toggle_row(ui, tr("Accrocher aux faces des objets (AutoGrid)"), st.settings.snap_faces) {
                 st.settings.snap_faces = !st.settings.snap_faces;
                 st.save_settings();
             }
             ui.label(
-                egui::RichText::new("Activé : la base part de la face sous le curseur, sinon du sol ; avec Snap, elle s'accroche aux arêtes et aux sommets. Monte pour ajouter (+), descends pour creuser (−), Ctrl inverse pendant la création.")
+                egui::RichText::new(tr("Activé : la base part de la face sous le curseur, sinon du sol ; avec Snap, elle s'accroche aux arêtes et aux sommets. Monte pour ajouter (+), descends pour creuser (−), Ctrl inverse pendant la création."))
                     .font(regular(11.5))
                     .color(TEXT2()),
             );
             ui.add_space(10.0);
             ui.add(egui::Label::new(egui::RichText::new(crate::version_title()).font(regular(11.0)).color(TEXT2())).wrap());
-            ui.add(egui::Label::new(egui::RichText::new(format!("Fichier : {}", crate::settings::Settings::path().display())).font(regular(11.0)).color(TEXT2())).wrap());
+            ui.add(egui::Label::new(egui::RichText::new(trd(format!("Fichier : {}", crate::settings::Settings::path().display()))).font(regular(11.0)).color(TEXT2())).wrap());
             ui.add_space(6.0);
-            if primary_btn(ui, None, "Fermer", Some(440.0)).clicked() {
+            if primary_btn(ui, None, tr("Fermer"), Some(440.0)).clicked() {
                 st.settings_open = false;
             }
         });

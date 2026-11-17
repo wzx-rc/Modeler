@@ -26,11 +26,19 @@ pub fn nurbs() -> bool {
 
 pub fn set_nurbs(on: bool) {
     NURBS.store(on, std::sync::atomic::Ordering::Relaxed);
+    // the NURBS app is in English, Forme in French (FORME_LANG=en|fr overrides)
+    let english = match std::env::var("FORME_LANG").map(|v| v.to_lowercase()) {
+        Ok(v) if v.starts_with("en") => true,
+        Ok(v) if v.starts_with("fr") => false,
+        _ => on,
+    };
+    i18n::set_english(english);
 }
 
 pub mod camera;
 pub mod files;
 pub mod gfx;
+pub mod i18n;
 pub mod icons;
 pub mod marking;
 pub mod plaque;

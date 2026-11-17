@@ -1,5 +1,6 @@
 //! Application state and every editing action (independent of egui and wgpu).
 
+use crate::i18n::{tr, trd};
 use crate::camera::OrbitCamera;
 use crate::files;
 use crate::settings::{Settings, UiMode};
@@ -160,14 +161,14 @@ impl Handle {
     pub fn label(self) -> &'static str {
         match self {
             Handle::MoveX | Handle::MoveY | Handle::MoveZ => "Position",
-            Handle::PlaneXY | Handle::PlaneYZ | Handle::PlaneXZ => "Position (plan)",
-            Handle::Radius => "Rayon",
-            Handle::Height => "Hauteur",
-            Handle::Depth => "Profondeur",
+            Handle::PlaneXY | Handle::PlaneYZ | Handle::PlaneXZ => tr("Position (plan)"),
+            Handle::Radius => tr("Rayon"),
+            Handle::Height => tr("Hauteur"),
+            Handle::Depth => tr("Profondeur"),
             Handle::Round => "Bevel",
             Handle::Fillet => "Fillet",
             Handle::RotX | Handle::RotY | Handle::RotZ | Handle::RotView | Handle::RotFree => "Rotation",
-            Handle::ScaleX | Handle::ScaleY | Handle::ScaleZ | Handle::ScaleAll => "Échelle",
+            Handle::ScaleX | Handle::ScaleY | Handle::ScaleZ | Handle::ScaleAll => tr("Échelle"),
         }
     }
     /// Size handles: scaled with the opposite face fixed (box anchor).
@@ -177,24 +178,24 @@ impl Handle {
     /// What a drag will do, shown while the handle is pre-selected.
     pub fn hint(self) -> &'static str {
         match self {
-            Handle::MoveX => "Déplacer en X",
-            Handle::MoveY => "Déplacer en Y",
-            Handle::MoveZ => "Déplacer en Z",
-            Handle::PlaneXY => "Déplacer dans le plan XY",
-            Handle::PlaneYZ => "Déplacer dans le plan YZ",
-            Handle::PlaneXZ => "Déplacer dans le plan XZ",
-            Handle::Radius | Handle::Height | Handle::Depth => "Face opposée fixe · Ctrl : symétrique",
-            Handle::Round => "Bevel de toutes les arêtes",
-            Handle::Fillet => "Fillet des arêtes sélectionnées",
-            Handle::RotX => "Tourner autour de X · Snap : 15°",
-            Handle::RotY => "Tourner autour de Y · Snap : 15°",
-            Handle::RotZ => "Tourner autour de Z · Snap : 15°",
-            Handle::RotView => "Tourner face à la vue",
-            Handle::RotFree => "Rotation libre (trackball)",
-            Handle::ScaleX => "Étirer en X (axe de la forme)",
-            Handle::ScaleY => "Étirer en Y (axe de la forme)",
-            Handle::ScaleZ => "Étirer en Z (axe de la forme)",
-            Handle::ScaleAll => "Échelle uniforme : glisser vers la droite agrandit",
+            Handle::MoveX => tr("Déplacer en X"),
+            Handle::MoveY => tr("Déplacer en Y"),
+            Handle::MoveZ => tr("Déplacer en Z"),
+            Handle::PlaneXY => tr("Déplacer dans le plan XY"),
+            Handle::PlaneYZ => tr("Déplacer dans le plan YZ"),
+            Handle::PlaneXZ => tr("Déplacer dans le plan XZ"),
+            Handle::Radius | Handle::Height | Handle::Depth => tr("Face opposée fixe · Ctrl : symétrique"),
+            Handle::Round => tr("Bevel de toutes les arêtes"),
+            Handle::Fillet => tr("Fillet des arêtes sélectionnées"),
+            Handle::RotX => tr("Tourner autour de X · Snap : 15°"),
+            Handle::RotY => tr("Tourner autour de Y · Snap : 15°"),
+            Handle::RotZ => tr("Tourner autour de Z · Snap : 15°"),
+            Handle::RotView => tr("Tourner face à la vue"),
+            Handle::RotFree => tr("Rotation libre (trackball)"),
+            Handle::ScaleX => tr("Étirer en X (axe de la forme)"),
+            Handle::ScaleY => tr("Étirer en Y (axe de la forme)"),
+            Handle::ScaleZ => tr("Étirer en Z (axe de la forme)"),
+            Handle::ScaleAll => tr("Échelle uniforme : glisser vers la droite agrandit"),
         }
     }
 }
@@ -289,9 +290,9 @@ pub enum ExportRes {
 impl ExportRes {
     pub fn label(self) -> &'static str {
         match self {
-            ExportRes::Draft => "Brouillon",
+            ExportRes::Draft => tr("Brouillon"),
             ExportRes::Normal => "Normal",
-            ExportRes::Fine => "Fin",
+            ExportRes::Fine => tr("Fin"),
         }
     }
     /// Cells along the largest dimension.
@@ -620,7 +621,7 @@ fn new_version_base() -> u64 {
 
 impl Default for AppState {
     fn default() -> Self {
-        let mut s = Self::new(demo::grenade(), "Grenade sci-fi");
+        let mut s = Self::new(demo::grenade(), tr("Grenade sci-fi"));
         s.frame_all();
         s
     }
@@ -751,7 +752,7 @@ impl AppState {
             self.bake.show = false;
         }
         self.bake.open = on;
-        self.toast(if on { "Mode BAKE : modèle en lecture seule" } else { "Mode BUILD" });
+        self.toast(if on { tr("Mode BAKE : modèle en lecture seule") } else { tr("Mode BUILD") });
         self.view_changed();
     }
 
@@ -888,7 +889,7 @@ impl AppState {
                 }
             }
             if n > 1 {
-                self.toast(format!("{n} arêtes sélectionnées"));
+                self.toast(trd(format!("{n} arêtes sélectionnées")));
             }
             self.view_changed();
             return;
@@ -931,7 +932,7 @@ impl AppState {
         }
         let n = all.len();
         if n > 1 {
-            self.toast(format!("{n} formes sélectionnées"));
+            self.toast(trd(format!("{n} formes sélectionnées")));
         }
         // the active shape stays active when it is still selected
         let active = self.selection.filter(|id| all.contains(id)).or(all.first().copied());
@@ -976,7 +977,7 @@ impl AppState {
 
     pub fn save_settings(&mut self) {
         if let Err(e) = self.settings.save() {
-            self.warn(format!("Réglages non enregistrés : {e}"));
+            self.warn(trd(format!("Réglages non enregistrés : {e}")));
         }
     }
 
@@ -1191,7 +1192,7 @@ impl AppState {
         }
         let r = r.clamp(0.0, self.fillet_max());
         if start {
-            self.history.record(if chamfer { "Chanfrein" } else { "Fillet" }, &self.scene);
+            self.history.record(if chamfer { tr("Chanfrein") } else { "Fillet" }, &self.scene);
         }
         for e in self.edge_sel.clone() {
             self.put_fillet(&e, r, chamfer);
@@ -1330,7 +1331,7 @@ impl AppState {
         if let Some(label) = self.history.undo(&mut self.scene) {
             self.validate_selection();
             self.changed();
-            self.toast(format!("Annulé : {label}"));
+            self.toast(trd(format!("Annulé : {label}")));
         }
     }
 
@@ -1339,7 +1340,7 @@ impl AppState {
         if let Some(label) = self.history.redo(&mut self.scene) {
             self.validate_selection();
             self.changed();
-            self.toast(format!("Rétabli : {label}"));
+            self.toast(trd(format!("Rétabli : {label}")));
         }
     }
 
@@ -1441,7 +1442,7 @@ impl AppState {
         if self.sym_x {
             spec.mirror.x = true;
         }
-        self.history.record(&format!("Ajouter {}", kind.label()), &self.scene);
+        self.history.record(&trd(format!("Ajouter {}", kind.label())), &self.scene);
         let id = self.scene.add(parent, spec);
         self.set_world(id, base, rot);
         let px = self.view().pixel_size_at((base - ro).length());
@@ -1814,8 +1815,8 @@ impl AppState {
             self.selection_more.clear();
             self.edge_sel.clear();
         }
-        let again = if self.pointer_kind == PointerKind::Finger { "retouche l'outil" } else { "R / C ou l'outil" };
-        self.toast(format!("{name} · {} · {again} pour en créer une autre", p.mode.label()));
+        let again = if self.pointer_kind == PointerKind::Finger { tr("retouche l'outil") } else { tr("R / C ou l'outil") };
+        self.toast(trd(format!("{name} · {} · {again} pour en créer une autre", p.mode.label())));
         self.changed();
     }
 
@@ -2292,7 +2293,7 @@ impl AppState {
         if ids.is_empty() {
             return;
         }
-        self.history.record("Supprimer", &self.scene);
+        self.history.record(tr("Supprimer"), &self.scene);
         for id in ids {
             self.scene.remove(id);
         }
@@ -2307,12 +2308,12 @@ impl AppState {
         if ids.is_empty() {
             return;
         }
-        self.history.record("Dupliquer", &self.scene);
+        self.history.record(tr("Dupliquer"), &self.scene);
         let mut copies = vec![];
         for id in ids {
             if let Some(c) = self.scene.duplicate(id) {
                 if let Some(n) = self.scene.node_mut(c) {
-                    n.name = format!("{} copie", n.name);
+                    n.name = trd(format!("{} copie", n.name));
                     n.transform.pos += Vec3::new(8.0, 0.0, 0.0);
                 }
                 copies.push(c);
@@ -2326,7 +2327,7 @@ impl AppState {
     }
 
     pub fn toggle_visible(&mut self, id: NodeId) {
-        self.edit("Visibilité", id, |n| n.visible = !n.visible);
+        self.edit(tr("Visibilité"), id, |n| n.visible = !n.visible);
     }
 
     pub fn move_in_parent(&mut self, id: NodeId, delta: i32) {
@@ -2335,7 +2336,7 @@ impl AppState {
         let len = self.scene.node(parent).map(|p| p.children().len()).unwrap_or(0) as i32;
         let ni = (idx + delta).clamp(0, len - 1);
         if ni != idx {
-            self.history.record("Réordonner", &self.scene);
+            self.history.record(tr("Réordonner"), &self.scene);
             self.scene.reparent(id, parent, ni as usize);
             self.changed();
         }
@@ -2354,8 +2355,8 @@ impl AppState {
         let first = ids[0];
         let Some(parent) = self.scene.parent_of(first) else { return };
         let idx = self.scene.node(parent).and_then(|p| p.children().iter().position(|c| *c == first)).unwrap_or(0);
-        self.history.record("Grouper", &self.scene);
-        let g = self.scene.insert(parent, NodeSpec::group("Groupe", false), Some(idx));
+        self.history.record(tr("Grouper"), &self.scene);
+        let g = self.scene.insert(parent, NodeSpec::group(tr("Groupe"), false), Some(idx));
         let frame = self.scene.parent_matrix(first);
         for (i, id) in ids.iter().enumerate() {
             // a node from another branch keeps its place in the world
@@ -2446,9 +2447,9 @@ impl AppState {
         match files::save(&self.scene, &self.doc_name) {
             Ok(p) => {
                 self.saved_version = self.scene_version;
-                self.toast(format!("Enregistré : {}", p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()));
+                self.toast(trd(format!("Enregistré : {}", p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default())));
             }
-            Err(e) => self.warn(format!("Échec de l'enregistrement : {e}")),
+            Err(e) => self.warn(trd(format!("Échec de l'enregistrement : {e}"))),
         }
     }
 
@@ -2457,9 +2458,9 @@ impl AppState {
             Ok(s) => {
                 let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
                 self.new_document(s, &name);
-                self.toast(format!("Ouvert : {name}"));
+                self.toast(trd(format!("Ouvert : {name}")));
             }
-            Err(e) => self.warn(format!("Impossible d'ouvrir : {e}")),
+            Err(e) => self.warn(trd(format!("Impossible d'ouvrir : {e}"))),
         }
     }
 
@@ -2469,7 +2470,7 @@ impl AppState {
         }
         let prog = compile(&self.scene);
         if prog.is_empty() {
-            self.warn("Rien à exporter");
+            self.warn(tr("Rien à exporter"));
             return;
         }
         let (lo, hi) = self.scene.bounds();
@@ -2521,7 +2522,7 @@ impl AppState {
             return;
         }
         if compile(&self.scene).is_empty() {
-            self.warn("Rien à baker");
+            self.warn(tr("Rien à baker"));
             return;
         }
         let scene = self.scene.clone();
@@ -2667,9 +2668,9 @@ impl AppState {
             }
         }
         match err {
-            Some(e) => self.warn(format!("Export impossible : {e}")),
+            Some(e) => self.warn(trd(format!("Export impossible : {e}"))),
             None => {
-                let msg = format!("Exporté : {}", done.join(", "));
+                let msg = trd(format!("Exporté : {}", done.join(", ")));
                 self.bake.last_export = Some(msg.clone());
                 self.toast(msg);
             }
@@ -2696,7 +2697,7 @@ impl AppState {
                 Ok(b) => {
                     let secs = if b.stats.seconds < 1.0 { format!("{:.0} ms", b.stats.seconds * 1000.0) } else { format!("{:.1} s", b.stats.seconds) };
                     let quads = if b.stats.quads == b.faces.len() { " · 100 % quads" } else { "" };
-                    let msg = format!("Bake terminé · {} faces{quads} · {secs}", fmt_int(b.faces.len()));
+                    let msg = trd(format!("Bake terminé · {} faces{quads} · {secs}", fmt_int(b.faces.len())));
                     let b = std::sync::Arc::new(b);
                     self.bake.base = Some(b.clone());
                     self.bake.base_scene = Some(job.scene);
@@ -2708,10 +2709,10 @@ impl AppState {
                         self.start_flat_pass();
                     }
                 }
-                Err(why) if why == "annulé" => self.toast("Bake annulé".to_string()),
+                Err(why) if why == "annulé" => self.toast(tr("Bake annulé").to_string()),
                 Err(why) => {
                     // no fallback mesh: say what is not handled yet
-                    self.warn(format!("Bake impossible : {why}"));
+                    self.warn(trd(format!("Bake impossible : {why}")));
                     self.bake.error = Some((self.bake.scene_version, why));
                 }
             }
@@ -2742,15 +2743,15 @@ impl AppState {
                     Ok(r) => {
                         let names: Vec<String> =
                             r.paths.iter().filter_map(|p| p.file_name().map(|f| f.to_string_lossy().to_string())).collect();
-                        self.toast(format!(
+                        self.toast(trd(format!(
                             "Exporté : {} · {} triangles · {:.1} s",
                             names.join(", "),
                             fmt_int(r.triangles),
                             r.seconds
-                        ));
+                        )));
                         self.export_open = false;
                     }
-                    Err(e) => self.warn(format!("Export impossible : {e}")),
+                    Err(e) => self.warn(trd(format!("Export impossible : {e}"))),
                 }
             }
         }
@@ -2765,7 +2766,7 @@ impl AppState {
             && self.placement.is_none()
             && self.handle_drag.is_none()
         {
-            let _ = files::save(&self.scene, "Autosauvegarde");
+            let _ = files::save(&self.scene, tr("Autosauvegarde"));
             self.saved_version = self.scene_version;
         }
     }
@@ -2778,14 +2779,14 @@ impl AppState {
             }
         }
         if self.bake_mode() {
-            return "Mode BAKE : navigation seule, lance le Bake à gauche · Échap ou BUILD pour modifier".to_string();
+            return tr("Mode BAKE : navigation seule, lance le Bake à gauche · Échap ou BUILD pour modifier").to_string();
         }
         if let Some(p) = &self.placement {
             return match p.phase {
-                PlacePhase::Base => format!("{} — trace la base (sur une face ou au sol), relâche, puis monte (+ Add) ou descends (− Carve) · Ctrl inverse", p.kind.label()),
-                PlacePhase::AwaitHeight if self.pointer_kind == PointerKind::Finger => format!("{} · {} — glisse : vers le haut +, vers le bas −, tap pour valider", p.kind.label(), p.mode.label()),
-                PlacePhase::AwaitHeight => format!("{} · {} — monte (+) ou descends (−), Ctrl inverse, {} pour valider", p.kind.label(), p.mode.label(), tap_word()),
-                PlacePhase::Height => format!("{} · {} — relâche pour valider", p.kind.label(), p.mode.label()),
+                PlacePhase::Base => trd(format!("{} — trace la base (sur une face ou au sol), relâche, puis monte (+ Add) ou descends (− Carve) · Ctrl inverse", p.kind.label())),
+                PlacePhase::AwaitHeight if self.pointer_kind == PointerKind::Finger => trd(format!("{} · {} — glisse : vers le haut +, vers le bas −, tap pour valider", p.kind.label(), p.mode.label())),
+                PlacePhase::AwaitHeight => trd(format!("{} · {} — monte (+) ou descends (−), Ctrl inverse, {} pour valider", p.kind.label(), p.mode.label(), tap_word())),
+                PlacePhase::Height => trd(format!("{} · {} — relâche pour valider", p.kind.label(), p.mode.label())),
             };
         }
         match self.tool {
@@ -2796,15 +2797,15 @@ impl AppState {
                         s += &format!(" · {}", n.combine.mode.label());
                     }
                     match n.repeat {
-                        Repeat::Radial { count, .. } => s += &format!(" · Radiale ×{count}"),
-                        Repeat::Linear { count, .. } => s += &format!(" · Linéaire ×{count}"),
+                        Repeat::Radial { count, .. } => s += &trd(format!(" · Radiale ×{count}")),
+                        Repeat::Linear { count, .. } => s += &trd(format!(" · Linéaire ×{count}")),
                         Repeat::None => {}
                     }
                     s
                 }
-                None => format!("{} formes · touche une forme pour la sélectionner", self.scene.shape_count()),
+                None => trd(format!("{} formes · touche une forme pour la sélectionner", self.scene.shape_count())),
             },
-            Tool::Place(k) => format!("{} · {} — glisse pour la base (ou {} : taille par défaut)", k.label(), self.effective_mode().label(), tap_word()),
+            Tool::Place(k) => trd(format!("{} · {} — glisse pour la base (ou {} : taille par défaut)", k.label(), self.effective_mode().label(), tap_word())),
         }
     }
 }
@@ -2830,7 +2831,7 @@ fn tap_word() -> &'static str {
     if cfg!(target_os = "ios") {
         "tap"
     } else {
-        "clic"
+        tr("clic")
     }
 }
 
@@ -2989,10 +2990,10 @@ impl AppState {
         }
         if self.scene != before {
             let label = match op {
-                AlignOp::Distribute(_) => "Répartir",
-                AlignOp::Ground => "Poser au sol",
-                AlignOp::Origin => "Centrer sur l'origine",
-                AlignOp::Align(..) => "Aligner",
+                AlignOp::Distribute(_) => tr("Répartir"),
+                AlignOp::Ground => tr("Poser au sol"),
+                AlignOp::Origin => tr("Centrer sur l'origine"),
+                AlignOp::Align(..) => tr("Aligner"),
             };
             self.history.record(label, &before);
             self.changed();
@@ -3027,7 +3028,7 @@ impl AppState {
                     let v = *v;
                     self.nurbs.job = None;
                     self.nurbs.built = v;
-                    self.nurbs.error = Some("le noyau NURBS a planté sur cette scène".into());
+                    self.nurbs.error = Some("the NURBS kernel crashed on this scene".into());
                 }
             }
         }

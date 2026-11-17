@@ -798,18 +798,18 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
             let lying = glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
             let mut b = Shape::new(PrimKind::Box);
             b.size = Vec3::new(26.0, 5.0, 16.0);
-            s.add(root, NodeSpec::shape("Socle", b).at(Vec3::new(0.0, 5.0, 0.0)));
+            s.add(root, NodeSpec::shape("Base", b).at(Vec3::new(0.0, 5.0, 0.0)));
             let mut c = Shape::new(PrimKind::Cylinder);
             c.size = Vec3::new(11.0, 14.0, 0.0);
-            s.add(root, NodeSpec::shape("Palier", c).at(Vec3::new(0.0, 19.0, 0.0)).rot(lying));
+            s.add(root, NodeSpec::shape("Bearing", c).at(Vec3::new(0.0, 19.0, 0.0)).rot(lying));
             let mut c = Shape::new(PrimKind::Cylinder);
             c.size = Vec3::new(6.0, 20.0, 0.0);
-            s.add(root, NodeSpec::shape("Alésage", c).at(Vec3::new(0.0, 19.0, 0.0)).rot(lying).mode(CombineMode::Carve));
+            s.add(root, NodeSpec::shape("Bore", c).at(Vec3::new(0.0, 19.0, 0.0)).rot(lying).mode(CombineMode::Carve));
             let mut c = Shape::new(PrimKind::Cylinder);
             c.size = Vec3::new(2.6, 8.0, 0.0);
             s.add(
                 root,
-                NodeSpec::shape("Trous de fixation", c)
+                NodeSpec::shape("Mounting holes", c)
                     .at(Vec3::new(19.0, 5.0, 10.0))
                     .mode(CombineMode::Carve)
                     .mirror(Mirror { x: true, y: false, z: true }),
@@ -823,28 +823,29 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
             let mut b = Shape::new(PrimKind::Box);
             b.size = Vec3::new(8.0, 8.0, 8.0);
             s.add(root, NodeSpec::shape("Cube", b).at(Vec3::new(-40.0, 8.0, 0.0)));
-            let mut c = Shape::new(PrimKind::Sphere);
-            c.size = Vec3::splat(5.0);
-            s.add(root, NodeSpec::shape("Creux", c).at(Vec3::new(-34.0, 14.0, 6.0)).mode(CombineMode::Carve));
+            // truck's booleans fail on sphere / torus faces for now: the hole is a cylinder
+            let mut c = Shape::new(PrimKind::Cylinder);
+            c.size = Vec3::new(3.0, 10.0, 0.0);
+            s.add(root, NodeSpec::shape("Hole", c).at(Vec3::new(-40.0, 12.0, 0.0)).mode(CombineMode::Carve));
             let mut c = Shape::new(PrimKind::Cylinder);
             c.size = Vec3::new(7.0, 8.0, 0.0);
-            s.add(root, NodeSpec::shape("Cylindre", c).at(Vec3::new(-20.0, 8.0, 0.0)));
+            s.add(root, NodeSpec::shape("Cylinder", c).at(Vec3::new(-20.0, 8.0, 0.0)));
             let mut c = Shape::new(PrimKind::Sphere);
             c.size = Vec3::splat(8.0);
-            s.add(root, NodeSpec::shape("Sphère", c).at(Vec3::new(0.0, 8.0, 0.0)));
+            s.add(root, NodeSpec::shape("Sphere", c).at(Vec3::new(0.0, 8.0, 0.0)));
             let mut c = Shape::new(PrimKind::Capsule);
             c.size = Vec3::new(5.0, 5.0, 0.0);
             s.add(root, NodeSpec::shape("Capsule", c).at(Vec3::new(17.0, 10.0, 0.0)));
             let mut c = Shape::new(PrimKind::Torus);
             c.size = Vec3::new(8.0, 2.5, 2.5);
-            s.add(root, NodeSpec::shape("Tore", c).at(Vec3::new(36.0, 2.5, 0.0)));
+            s.add(root, NodeSpec::shape("Torus", c).at(Vec3::new(36.0, 2.5, 0.0)));
             s
         }
         forme_app::set_nurbs(true);
-        let scenes: [(&str, fn() -> forme_core::Scene, &str); 2] = [("piece", piece, "Palier"), ("prims", prims, "Sphère")];
+        let scenes: [(&str, fn() -> forme_core::Scene, &str); 2] = [("piece", piece, "Bearing"), ("prims", prims, "Sphere")];
         for (name, scene, sel) in scenes {
             for (mode, tag) in [(UiMode::Atelier, "etabli"), (UiMode::Studio, "studio")] {
-                h.pc(AppState::new(scene(), "Forme NURBS"), mode);
+                h.pc(AppState::new(scene(), "NURBS part"), mode);
                 h.st.settings.light = false;
                 h.st.settings.ambiance = forme_app::settings::AmbianceChoice::Blanc;
                 h.st.pointer_kind = PointerKind::Mouse;
@@ -868,6 +869,12 @@ fn pc_shots(h: &mut Harness, want: &dyn Fn(&str) -> bool) {
                     _ => eprintln!("nurbs {name} : pas de modèle"),
                 }
                 h.shot(&format!("nurbs-{name}-{tag}"));
+                if name == "piece" {
+                    h.st.settings_open = true;
+                    h.steps(6);
+                    h.shot(&format!("nurbs-settings-{tag}"));
+                    h.st.settings_open = false;
+                }
             }
         }
         forme_app::set_nurbs(false);

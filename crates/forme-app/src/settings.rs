@@ -1,6 +1,7 @@
 //! User preferences kept between sessions, in `settings.json` next to the
 //! projects (Documents/Forme on PC).
 
+use crate::i18n::{tr};
 use crate::files;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -29,19 +30,19 @@ impl UiMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            UiMode::Atelier => "Établi",
+            UiMode::Atelier => tr("Établi"),
             UiMode::Studio => "Studio",
             UiMode::Focus => "Focus",
-            UiMode::Plaque => "Plaque",
+            UiMode::Plaque => tr("Plaque"),
         }
     }
 
     pub fn blurb(self) -> &'static str {
         match self {
-            UiMode::Atelier => "La 3D en plein écran, des îlots flottants : colonne de formes, inspecteur, barre d'actions sur la sélection, historique en frise.",
-            UiMode::Studio => "Poste CAD ancré façon Plasticity : menus, palette de commandes (Espace), panneau fixe, cotes au clavier, barre d'état.",
-            UiMode::Focus => "Presque rien à l'écran : un dock en bas, le menu radial au clic droit, la scène dans un tiroir à droite.",
-            UiMode::Plaque => "Sobre, façon Plasticity, en orange : outils fins à gauche, inspecteur en mm, arbre de la scène à droite, barre d'état.",
+            UiMode::Atelier => tr("La 3D en plein écran, des îlots flottants : colonne de formes, inspecteur, barre d'actions sur la sélection, historique en frise."),
+            UiMode::Studio => tr("Poste CAD ancré façon Plasticity : menus, palette de commandes (Espace), panneau fixe, cotes au clavier, barre d'état."),
+            UiMode::Focus => tr("Presque rien à l'écran : un dock en bas, le menu radial au clic droit, la scène dans un tiroir à droite."),
+            UiMode::Plaque => tr("Sobre, façon Plasticity, en orange : outils fins à gauche, inspecteur en mm, arbre de la scène à droite, barre d'état."),
         }
     }
 }
@@ -83,10 +84,10 @@ impl AmbianceChoice {
     pub fn label(self) -> &'static str {
         match self {
             AmbianceChoice::Auto => "Auto",
-            AmbianceChoice::Vert => "Vert",
+            AmbianceChoice::Vert => tr("Vert"),
             AmbianceChoice::Orange => "Orange",
-            AmbianceChoice::Bleu => "Bleu",
-            AmbianceChoice::Blanc => "Blanc",
+            AmbianceChoice::Bleu => tr("Bleu"),
+            AmbianceChoice::Blanc => tr("Blanc"),
         }
     }
 }
@@ -108,14 +109,14 @@ impl Navigation {
     pub const ALL: [Navigation; 2] = [Navigation::Maya, Navigation::Tripo];
     pub fn label(self) -> &'static str {
         match self {
-            Navigation::Maya => "Maya (Alt)",
+            Navigation::Maya => tr("Maya (Alt)"),
             Navigation::Tripo => "Tripo3D",
         }
     }
     pub fn blurb(self) -> &'static str {
         match self {
-            Navigation::Maya => "Alt + clic gauche : orbite · Alt + molette (clic) : pan · Alt + clic droit : zoom. Clic droit : marking menu, clic gauche glissé dans le vide : rectangle de sélection.",
-            Navigation::Tripo => "Clic gauche glissé dans le vide : orbite · clic droit ou molette glissés : pan · molette : zoom. Clic droit (sans bouger) ou clic maintenu : marking menu. Maj + clic gauche glissé : rectangle de sélection.",
+            Navigation::Maya => tr("Alt + clic gauche : orbite · Alt + molette (clic) : pan · Alt + clic droit : zoom. Clic droit : marking menu, clic gauche glissé dans le vide : rectangle de sélection."),
+            Navigation::Tripo => tr("Clic gauche glissé dans le vide : orbite · clic droit ou molette glissés : pan · molette : zoom. Clic droit (sans bouger) ou clic maintenu : marking menu. Maj + clic gauche glissé : rectangle de sélection."),
         }
     }
 }
@@ -165,9 +166,9 @@ impl ViewQuality {
     pub const ALL: [ViewQuality; 3] = [ViewQuality::Performance, ViewQuality::Equilibre, ViewQuality::Qualite];
     pub fn label(self) -> &'static str {
         match self {
-            ViewQuality::Performance => "Fluide",
-            ViewQuality::Equilibre => "Équilibré",
-            ViewQuality::Qualite => "Qualité",
+            ViewQuality::Performance => tr("Fluide"),
+            ViewQuality::Equilibre => tr("Équilibré"),
+            ViewQuality::Qualite => tr("Qualité"),
         }
     }
     /// (still, moving) pixel budgets; 0 = the screen's resolution.
