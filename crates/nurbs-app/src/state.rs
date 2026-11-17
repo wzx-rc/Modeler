@@ -796,6 +796,11 @@ impl AppState {
             if start {
                 self.begin_live(label);
             }
+            // it stops at the largest size OpenCascade could make
+            let size = match self.round_limit(id) {
+                Some(l) => size.min(l),
+                None => size,
+            };
             self.live(|d| {
                 // "Fillet 2" becomes "Chamfer 2"… when its kind changes (a
                 // name the user gave stays)
@@ -822,6 +827,12 @@ impl AppState {
             self.selection = vec![id];
         }
         self.round_chamfer = chamfer;
+    }
+
+    /// The largest size the kernel could give this fillet / chamfer, when
+    /// the size asked was too big for it (it is then built at that size).
+    pub fn round_limit(&self, id: u32) -> Option<f64> {
+        self.model.as_ref()?.limits.iter().find(|(i, _)| *i == id).map(|(_, l)| *l)
     }
 
     /// The largest size the fillet slider offers: half the part's thinnest
@@ -1281,6 +1292,7 @@ impl AppState {
                 self.round_ms = b.round_ms;
                 self.model = Some(Arc::new(b.model));
                 self.model_gen += 1;
+                self.clamp_rounds();
             }
         }
         let fine = !self.is_live();
@@ -1290,6 +1302,32 @@ impl AppState {
         if want != self.submitted && self.kernel.status() != Status::Missing {
             self.kernel.submit(want, &self.doc, fine, quads);
             self.submitted = want;
+        }
+    }
+
+    /// A fillet asked bigger than OpenCascade can make stops at its largest
+    /// size: once the model of the current document says so, and no gesture
+    /// is live, the document takes that size (no undo step of its own).
+    fn clamp_rounds(&mut self) {
+        let Some(m) = self.model.clone() else { return };
+        if self.is_live() || m.serial / 4 != self.version || m.limits.is_empty() {
+            return;
+        }
+        let mut said = None;
+        for (id, l) in &m.limits {
+            if let Some(f) = self.doc.feature_mut(*id) {
+                let name = f.name.clone();
+                if let Some(r) = f.round.as_mut() {
+                    if r.size > l + 1e-6 {
+                        r.size = *l;
+                        said = Some(format!("{name}: {} mm is its largest size", crate::widgets::fmt_mm(*l as f32)));
+                    }
+                }
+            }
+        }
+        if let Some(text) = said {
+            self.touched();
+            self.toast(&text, false);
         }
     }
 

@@ -33,6 +33,8 @@ fn mark(s: &str) {
 struct Stage {
     shape: Option<Rc<Shape>>,
     errors: Vec<String>,
+    /// Fillets and chamfers too big, made at the largest size that works.
+    limits: Vec<(u32, f64)>,
 }
 
 #[derive(Default)]
@@ -178,16 +180,43 @@ fn resolve(shape: &Shape, refs: &[EdgeRef]) -> (Vec<i32>, usize) {
 }
 
 /// A fillet or chamfer step on what is built so far: the new solid (None
-/// when there is nothing to round), and the edges not found.
-fn round(acc: &Shape, f: &Feature, r: &Round) -> (Option<Result<Shape, String>>, usize) {
+/// when there is nothing to round), the edges not found, and the size it
+/// was made at when the one asked for is too big (the largest that works,
+/// to 0.1 mm, 0.01 under 1 mm: the fillet stops there instead of
+/// vanishing).
+fn round(acc: &Shape, f: &Feature, r: &Round) -> (Option<Result<Shape, String>>, usize, Option<f64>) {
     let (edges, missing) = resolve(acc, &r.edges);
     if edges.is_empty() || r.size <= 1e-6 {
-        return (None, missing);
+        return (None, missing, None);
     }
     let fresh = FaceTag { feature: f.id, sub: 0 }.pack();
     mark(&step("round", f));
-    let res = if r.chamfer { acc.chamfer(&edges, r.size, fresh) } else { acc.fillet(&edges, r.size, fresh) };
-    (Some(res), missing)
+    let make = |size: f64| if r.chamfer { acc.chamfer(&edges, size, fresh) } else { acc.fillet(&edges, size, fresh) };
+    let res = make(r.size);
+    if res.is_ok() {
+        return (Some(res), missing, None);
+    }
+    // too big? the largest size that works, by halves
+    let (mut lo, mut hi) = (0.0, r.size);
+    for _ in 0..12 {
+        let mid = (lo + hi) * 0.5;
+        if make(mid).is_ok() {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        if hi - lo < 0.02 {
+            break;
+        }
+    }
+    let q = if lo >= 1.0 { 0.1 } else { 0.01 };
+    let size = (lo / q).floor() * q;
+    if size >= 0.01 {
+        if let Ok(s) = make(size) {
+            return (Some(Ok(s)), missing, Some(size));
+        }
+    }
+    (Some(res), missing, None)
 }
 
 /// The face a reference names: among the faces with its tag, the nearest
@@ -256,7 +285,7 @@ fn hash2(a: u64, b: u64) -> u64 {
 pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Cache) -> Model {
     let t0 = Instant::now();
     let mut model = Model { fine, ..Default::default() };
-    let mut stage = Stage { shape: None, errors: vec![] };
+    let mut stage = Stage { shape: None, errors: vec![], limits: vec![] };
     let mut key = 0u64;
     let mut used_tools = vec![];
     let mut used_stages = vec![];
@@ -276,7 +305,10 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         // a fillet or chamfer: on the solid built so far
         if let Some(r) = &f.round {
             if let Some(acc) = stage.shape.clone() {
-                let (res, missing) = if skipped("round") { (Some(Err("skipped, it crashed the kernel".to_string())), 0) } else { round(&acc, f, r) };
+                let (res, missing, limit) = if skipped("round") { (Some(Err("skipped, it crashed the kernel".to_string())), 0, None) } else { round(&acc, f, r) };
+                if let Some(l) = limit {
+                    stage.limits.push((f.id, l));
+                }
                 if missing > 0 {
                     stage.errors.push(format!("{}: {missing} edge{} not found", f.name, if missing > 1 { "s" } else { "" }));
                 }
@@ -355,6 +387,7 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         cache.tools.retain(|k, _| used_tools.contains(k));
     }
     model.errors = stage.errors.clone();
+    model.limits = stage.limits.clone();
     if let Some(s) = &stage.shape {
         let (defl, angle) = if fine { FINE } else { COARSE };
         mark("mesh:0:0");
@@ -543,14 +576,21 @@ mod tests {
         assert_eq!(m4.errors.len(), 1, "{:?}", m4.errors);
         assert!(m4.errors[0].contains("1 edge not found"));
         assert_eq!(m4.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 1);
-        // too big: the fillet fails, the part stays as it was before it
+        // too big: made at the largest size that works, and said so
         d.feature_mut(boss).unwrap().visible = true;
         let rr = d.feature_mut(r).unwrap().round.as_mut().unwrap();
         rr.chamfer = false;
         rr.size = 30.0;
         let m5 = build(&d, true, false, &[], &mut cache);
-        assert_eq!(m5.errors.len(), 1, "{:?}", m5.errors);
-        assert!(m5.faces.iter().all(|f| f.tag.map(|t| t.feature) != Some(r)));
+        assert!(m5.errors.is_empty(), "{:?}", m5.errors);
+        let limit = m5.limits.iter().find(|(id, _)| *id == r).map(|(_, l)| *l).expect("a limit");
+        assert!(limit > 1.0 && limit < 30.0, "{limit}");
+        assert!(m5.faces.iter().any(|f| f.tag.map(|t| t.feature) == Some(r)));
+        // just under the limit: no limit
+        d.feature_mut(r).unwrap().round.as_mut().unwrap().size = limit;
+        let m6 = build(&d, true, false, &[], &mut cache);
+        assert!(m6.errors.is_empty() && m6.limits.is_empty(), "{:?} {:?}", m6.errors, m6.limits);
+        eprintln!("largest fillet: {limit} mm");
         // of the two edges joining the cube's top and a side split by a slot,
         // the one nearest the point is rounded
         let mut d2 = Doc::default();

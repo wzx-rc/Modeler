@@ -105,6 +105,9 @@ pub struct Model {
     pub ms: f32,
     /// The part as quads (when the request asked for them).
     pub quads: Option<Quads>,
+    /// Fillets and chamfers asked too big: (feature, the size they were
+    /// made at, the largest that works).
+    pub limits: Vec<(u32, f64)>,
 }
 
 /// The part as quads (`quads.rs`): positions shared by the faces along
@@ -208,6 +211,11 @@ impl Model {
                 }
             }
         }
+        w.u32(self.limits.len() as u32);
+        for (id, size) in &self.limits {
+            w.u32(*id);
+            w.f64(*size);
+        }
         w.0
     }
 
@@ -280,6 +288,10 @@ impl Model {
                 q.skipped.push((f, String::from_utf8_lossy(s).into_owned()));
             }
             m.quads = Some(q);
+        }
+        let n = r.u32()? as usize;
+        for _ in 0..n {
+            m.limits.push((r.u32()?, r.f64()?));
         }
         Some(m)
     }
@@ -368,6 +380,7 @@ mod tests {
             cached: 1,
             ms: 3.5,
             quads: None,
+            limits: vec![(4, 2.35)],
         };
         assert_eq!(Model::decode(&m.encode()).unwrap(), m);
         let q = Model { quads: Some(Quads { positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], quads: vec![[0, 1, 2, 3]], quad_face: vec![0], skipped: vec![(2, "a face with a hole".into())] }), ..m.clone() };

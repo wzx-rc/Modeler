@@ -484,11 +484,12 @@ fn main() {
         h.st.selection.clear();
         h.settle();
         h.shot("zero-edges-6-moved");
-        // too big: OpenCascade refuses, the part stays without it
+        // too big: it stops at the largest size OpenCascade can make
         let r = h.st.doc.features.iter().find(|f| f.round.is_some()).map(|f| f.id).unwrap();
         h.st.selection = vec![r];
         h.st.set_round(14.0, false, true);
         h.st.end_live();
+        h.settle();
         h.settle();
         h.shot("zero-edges-7-too-big");
         for f in &h.st.doc.features {
