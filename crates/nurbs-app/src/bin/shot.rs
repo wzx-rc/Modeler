@@ -650,7 +650,7 @@ fn main() {
         // fillets meeting in corners: three edges of a 20 mm cube's corner
         // in one fillet (a sphere's eighth closes it), then every edge
         let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
-        let cases: [(&str, f64, bool); 4] = [("corner-r4", 4.0, false), ("corner-r8", 8.0, false), ("all-r4", 4.0, true), ("all-r8", 8.0, true)];
+        let cases: [(&str, f64, bool); 5] = [("corner-r2", 2.0, false), ("corner-r4", 4.0, false), ("corner-r8", 8.0, false), ("all-r4", 4.0, true), ("all-r8", 8.0, true)];
         for (name, r, all) in cases {
             let mut d = Doc::default();
             let c = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);

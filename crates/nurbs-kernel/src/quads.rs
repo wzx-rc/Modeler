@@ -358,6 +358,9 @@ enum Key {
 struct Patch {
     face: usize,
     sides: [Vec<(Piece, bool, bool)>; 4],
+    /// Sides on a fillet's end (an arc of under 100°): their rows may end
+    /// in T inside the patch.
+    fillet: [bool; 4],
 }
 
 struct Ctx<'a> {
@@ -1540,6 +1543,269 @@ impl Ctx<'_> {
     }
 }
 
+/// A point of a patch's mesh: on one of its sides (side, index in the
+/// side's points), or one of the points made inside it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Vtx {
+    Side(usize, usize),
+    Inner(usize),
+}
+
+/// The rows of a patch whose two opposite sides differ (a fillet's rows
+/// meeting a face cut more coarsely): rows of quads from the dense side,
+/// each row dropping two segments per "3 into 1" step (three quads below,
+/// one above, two points of three in between), so the rows end in T inside
+/// the patch instead of running on across the face.
+/// The fewest rows that take a side of `hi` segments down to `lo`.
+fn rows_to(hi: usize, lo: usize, rows: usize) -> Option<Vec<usize>> {
+    if lo == 0 || hi < lo || (hi - lo) % 2 != 0 {
+        return None;
+    }
+    let mut n = vec![hi];
+    let mut cur = hi;
+    for _ in 0..rows {
+        let t = ((cur - lo) / 2).min(cur / 3);
+        cur -= 2 * t;
+        n.push(cur);
+    }
+    (cur == lo).then_some(n)
+}
+
+/// May a patch with these side counts (bottom, right, top, left) be made
+/// with rows ending in T? Only where one side is much denser than its
+/// opposite (a fillet's rows), the other two equal.
+fn transition_ok(c: [usize; 4], fillet: [bool; 4], relaxed: bool) -> bool {
+    let one = |k: usize| {
+        let (a, b, c2, d) = (c[k], c[(k + 1) % 4], c[(k + 2) % 4], c[(k + 3) % 4]);
+        let (hi, lo) = (a.max(c2), a.min(c2));
+        let dense = if a > c2 { fillet[k] } else { fillet[(k + 2) % 4] };
+        dense && 2 * hi >= 3 * lo && b == d && hi != lo && rows_to(hi, lo, b).is_some()
+    };
+    one(0) || one(1) || (relaxed && (c[0] != c[2] || c[1] != c[3]) && layout_ok(c))
+}
+
+/// A point of a patch's boundary while laying it out: its name, and where
+/// it is in the whole patch (s along the bottom, t up the sides).
+type BPt = (Vtx, (f64, f64));
+
+/// Points along a side by its params at fraction x (0..1 of its count).
+fn side_at(side: &[BPt], x: f64) -> (f64, f64) {
+    let n = side.len() - 1;
+    let f = (x * n as f64).clamp(0.0, n as f64);
+    let i = (f.floor() as usize).min(n.saturating_sub(1));
+    let r = f - i as f64;
+    let (a, b) = (side[i].1, side[(i + 1).min(n)].1);
+    (a.0 + (b.0 - a.0) * r, a.1 + (b.1 - a.1) * r)
+}
+
+/// A point inside a part of a patch, from its four sides (bottom and top
+/// by x, left and right by y; all in loop order: bottom left → right,
+/// right bottom → top, top right → left, left top → bottom).
+fn sub_coons(sd: &[Vec<BPt>; 4], x: f64, y: f64) -> (f64, f64) {
+    let b = side_at(&sd[0], x);
+    let t = side_at(&sd[2], 1.0 - x);
+    let r = side_at(&sd[1], y);
+    let l = side_at(&sd[3], 1.0 - y);
+    let (c00, c10, c11, c01) = (sd[0][0].1, sd[1][0].1, sd[2][0].1, sd[3][0].1);
+    let f = |k: usize| -> f64 {
+        let g = |p: (f64, f64)| if k == 0 { p.0 } else { p.1 };
+        (1.0 - y) * g(b) + y * g(t) + (1.0 - x) * g(l) + x * g(r) - ((1.0 - x) * (1.0 - y) * g(c00) + x * (1.0 - y) * g(c10) + x * y * g(c11) + (1.0 - x) * y * g(c01))
+    };
+    (f(0), f(1))
+}
+
+/// Lays out a part of a patch given its four sides (loop order): a grid
+/// when opposite sides match, rows ending in T when one pair differs (by
+/// an even number), and when both differ, cut in two (rows ending in T
+/// one way on each side of the cut). Points made inside go to `inner`.
+fn layout(sd: [Vec<BPt>; 4], inner: &mut Vec<(f64, f64)>, quads: &mut Vec<[Vtx; 4]>) -> Option<()> {
+    let n: [usize; 4] = std::array::from_fn(|k| sd[k].len() - 1);
+    if n.iter().any(|c| *c == 0) {
+        return None;
+    }
+    let new_pt = |inner: &mut Vec<(f64, f64)>, p: (f64, f64)| {
+        inner.push(p);
+        Vtx::Inner(inner.len() - 1)
+    };
+    // a grid
+    if n[0] == n[2] && n[1] == n[3] {
+        let (a, m) = (n[0], n[1]);
+        let mut grid = vec![vec![sd[0][0].0; m + 1]; a + 1];
+        for i in 0..=a {
+            for j in 0..=m {
+                grid[i][j] = if j == 0 {
+                    sd[0][i].0
+                } else if j == m {
+                    sd[2][a - i].0
+                } else if i == 0 {
+                    sd[3][m - j].0
+                } else if i == a {
+                    sd[1][j].0
+                } else {
+                    // discrete Coons: the lines through the sides' points
+                    let (b, t, l, r) = (sd[0][i].1, sd[2][a - i].1, sd[3][m - j].1, sd[1][j].1);
+                    let (u, v) = (i as f64 / a as f64, j as f64 / m as f64);
+                    let (c00, c10, c11, c01) = (sd[0][0].1, sd[1][0].1, sd[2][0].1, sd[3][0].1);
+                    let f = |k: usize| -> f64 {
+                        let g = |p: (f64, f64)| if k == 0 { p.0 } else { p.1 };
+                        (1.0 - v) * g(b) + v * g(t) + (1.0 - u) * g(l) + u * g(r) - ((1.0 - u) * (1.0 - v) * g(c00) + u * (1.0 - v) * g(c10) + u * v * g(c11) + (1.0 - u) * v * g(c01))
+                    };
+                    new_pt(inner, (f(0), f(1)))
+                };
+            }
+        }
+        for i in 0..a {
+            for j in 0..m {
+                quads.push([grid[i][j], grid[i + 1][j], grid[i + 1][j + 1], grid[i][j + 1]]);
+            }
+        }
+        return Some(());
+    }
+    // one pair differs: turned so that it is bottom and top
+    let one = |k: usize| n[(k + 1) % 4] == n[(k + 3) % 4] && n[k] != n[(k + 2) % 4];
+    if one(0) || one(1) {
+        let r = if one(0) { 0 } else { 1 };
+        let sd: [Vec<BPt>; 4] = std::array::from_fn(|k| sd[(k + r) % 4].clone());
+        let (a, m, c) = (sd[0].len() - 1, sd[1].len() - 1, sd[2].len() - 1);
+        let counts = rows_to(a.max(c), a.min(c), m)?;
+        let counts: Vec<usize> = if a > c { counts } else { counts.into_iter().rev().collect() };
+        // the row lines: points and their places
+        let mut lines: Vec<Vec<BPt>> = vec![];
+        for j in 0..=m {
+            let k = counts[j];
+            let y = j as f64 / m as f64;
+            let row: Vec<BPt> = (0..=k)
+                .map(|i| {
+                    if j == 0 {
+                        sd[0][i]
+                    } else if j == m {
+                        sd[2][c - i]
+                    } else if i == 0 {
+                        sd[3][m - j]
+                    } else if i == k {
+                        sd[1][j]
+                    } else {
+                        let p = sub_coons(&sd, i as f64 / k as f64, y);
+                        (new_pt(inner, p), p)
+                    }
+                })
+                .collect();
+            lines.push(row);
+        }
+        for j in 0..m {
+            let (lo, hi) = (&lines[j], &lines[j + 1]);
+            let (nl, nh) = (lo.len() - 1, hi.len() - 1);
+            if nl == nh {
+                for i in 0..nl {
+                    quads.push([lo[i].0, lo[i + 1].0, hi[i + 1].0, hi[i].0]);
+                }
+                continue;
+            }
+            let flip = nh > nl;
+            let (d, e) = if flip { (hi, lo) } else { (lo, hi) };
+            let (nd, ne) = (d.len() - 1, e.len() - 1);
+            let t = (nd - ne) / 2;
+            let mut starts = vec![];
+            let mut last: i64 = -3;
+            for k in 0..t {
+                let want = (((k as f64 + 0.5) * nd as f64 / t as f64) - 1.5).round() as i64;
+                let st = want.max(last + 3).min(nd as i64 - 3 * (t - k) as i64);
+                starts.push(st as usize);
+                last = st;
+            }
+            let (mut id, mut ie) = (0, 0);
+            while id < nd {
+                let mut q4: Vec<[Vtx; 4]> = vec![];
+                if starts.first() == Some(&id) {
+                    starts.remove(0);
+                    // two points half way across the row, over the dense
+                    // line's inner points
+                    let up = |k: usize| {
+                        let (p, q) = (d[k].1, side_at(e, k as f64 / nd as f64));
+                        (0.5 * (p.0 + q.0), 0.5 * (p.1 + q.1))
+                    };
+                    let (p0, p1) = (up(id + 1), up(id + 2));
+                    let v0 = new_pt(inner, p0);
+                    let v1 = new_pt(inner, p1);
+                    q4.push([d[id].0, d[id + 1].0, v0, e[ie].0]);
+                    q4.push([d[id + 1].0, d[id + 2].0, v1, v0]);
+                    q4.push([d[id + 2].0, d[id + 3].0, e[ie + 1].0, v1]);
+                    q4.push([v0, v1, e[ie + 1].0, e[ie].0]);
+                    id += 3;
+                    ie += 1;
+                } else {
+                    q4.push([d[id].0, d[id + 1].0, e[ie + 1].0, e[ie].0]);
+                    id += 1;
+                    ie += 1;
+                }
+                for mut q in q4 {
+                    if flip {
+                        q.reverse();
+                    }
+                    quads.push(q);
+                }
+            }
+            if ie != ne {
+                return None;
+            }
+        }
+        return Some(());
+    }
+    // both pairs differ: a cut from bottom to top, w columns from the left;
+    // on its left the left side's rows end in T, on its right the bottom's
+    let (a, b, c, d) = (n[0], n[1], n[2], n[3]);
+    if (a + c) % 2 != 0 || (b + d) % 2 != 0 {
+        return None;
+    }
+    let w = (1..a.min(c)).find(|w| rows_to(b.max(d), b.min(d), *w).is_some() && rows_to((a - w).max(c - w), (a - w).min(c - w), b).is_some())?;
+    let (pb, pt) = (sd[0][w], sd[2][c - w]);
+    let mut cut: Vec<BPt> = vec![pb];
+    for j in 1..b {
+        let y = j as f64 / b as f64;
+        let p = (pb.1 .0 + (pt.1 .0 - pb.1 .0) * y, pb.1 .1 + (pt.1 .1 - pb.1 .1) * y);
+        let p = (0.5 * (p.0 + sub_coons(&sd, w as f64 / a as f64, y).0), 0.5 * (p.1 + sub_coons(&sd, w as f64 / a as f64, y).1));
+        cut.push((new_pt(inner, p), p));
+    }
+    cut.push(pt);
+    let back: Vec<BPt> = cut.iter().rev().copied().collect();
+    let left = [sd[0][..=w].to_vec(), cut.clone(), sd[2][c - w..].to_vec(), sd[3].clone()];
+    let right = [sd[0][w..].to_vec(), sd[1].clone(), sd[2][..=c - w].to_vec(), back];
+    layout(left, inner, quads)?;
+    layout(right, inner, quads)
+}
+
+/// May a patch with these side counts (bottom, right, top, left) be laid
+/// out with rows ending in T?
+fn layout_ok(n: [usize; 4]) -> bool {
+    thread_local! {
+        static SEEN: std::cell::RefCell<HashMap<[usize; 4], bool>> = std::cell::RefCell::new(HashMap::new());
+    }
+    if n.iter().any(|c| *c > 400) {
+        return false;
+    }
+    if let Some(v) = SEEN.with(|m| m.borrow().get(&n).copied()) {
+        return v;
+    }
+    let v = layout_ok_now(n);
+    SEEN.with(|m| m.borrow_mut().insert(n, v));
+    v
+}
+
+fn layout_ok_now(n: [usize; 4]) -> bool {
+    let mut inner = vec![];
+    let mut quads = vec![];
+    let sd: [Vec<BPt>; 4] = std::array::from_fn(|k| (0..=n[k]).map(|i| (Vtx::Side(k, i), (0.0, 0.0))).collect());
+    layout(sd, &mut inner, &mut quads).is_some()
+}
+
+/// A point of a patch from its four sides (Coons), each side given as its
+/// points with their params: bottom and top by s, left and right by t.
+fn coons<T: Copy>(s: f64, t: f64, side: &dyn Fn(usize, f64) -> T, mix: &dyn Fn(&[(f64, T)]) -> T) -> T {
+    let (b, tp, l, r) = (side(0, s), side(2, s), side(3, t), side(1, t));
+    let (c00, c10, c11, c01) = (side(0, 0.0), side(0, 1.0), side(2, 1.0), side(2, 0.0));
+    mix(&[(1.0 - t, b), (t, tp), (1.0 - s, l), (s, r), (-(1.0 - s) * (1.0 - t), c00), (-s * (1.0 - t), c10), (-s * t, c11), (-(1.0 - s) * t, c01)])
+}
+
 /// The quads of a solid; `target` is the length of a segment (mm).
 pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
     let topo = shape.quad_topo()?;
@@ -1586,13 +1852,28 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
                 k = (k + 1) % n;
             }
         }
-        patches.push(Patch { face: fi, sides });
+        let fillet = std::array::from_fn(|k| {
+            sides[k].iter().any(|(p, _, _)| {
+                let e = cx.lines[p.line].edge;
+                e > 0 && {
+                    let te = &topo.edges[(e - 1) as usize];
+                    te.kind == 1 && te.radius > 0.0 && cx.arcs[(e - 1) as usize].length() / te.radius < 100f64.to_radians()
+                }
+            })
+        });
+        patches.push(Patch { face: fi, sides, fillet });
     }
 
     // 2. segments per piece: by length (an arc by angle), then raised until
     // opposite sides match; a face whose counts cannot settle is left out
     let mut count: HashMap<Piece, usize> = HashMap::new();
-    for _round in 0..4 {
+    // faces whose counts go round in a circle (a fillet's rows coming back
+    // to where they started): their rows may end in T anywhere
+    let mut relaxed: HashSet<usize> = HashSet::new();
+    // after a first try, every count even: a patch's sides then always add
+    // up to an even number, which rows ending in T need
+    let mut even = false;
+    for _round in 0..6 {
         count.clear();
         for pt in &patches {
             for (p, _, _) in pt.sides.iter().flatten() {
@@ -1614,7 +1895,11 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
                     } else {
                         by_len
                     };
-                    n.max(1)
+                    if even {
+                        2 * ((n + 1) / 2).max(1)
+                    } else {
+                        n.max(1)
+                    }
                 });
             }
         }
@@ -1628,6 +1913,10 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
         for _ in 0..3000 {
             let mut changed = false;
             for pt in &patches {
+                let sum4 = |k: usize| pt.sides[k].iter().map(|(p, _, _)| count[p]).sum::<usize>();
+                if transition_ok([sum4(0), sum4(1), sum4(2), sum4(3)], pt.fillet, relaxed.contains(&pt.face)) {
+                    continue;
+                }
                 for (a, b) in [(0, 2), (1, 3)] {
                     let sum = |k: usize| pt.sides[k].iter().map(|(p, _, _)| count[p]).sum::<usize>();
                     let (na, nb) = (sum(a), sum(b));
@@ -1637,7 +1926,7 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
                         let Some((p, _, _)) = pt.sides[short].iter().filter(|x| !cx.is_pole(x.0.line)).max_by(|x, y| (cx.piece_len(x.0) / count[&x.0] as f64).total_cmp(&(cx.piece_len(y.0) / count[&y.0] as f64))) else {
                             continue;
                         };
-                        *count.get_mut(p).unwrap() += 1;
+                        *count.get_mut(p).unwrap() += if even { 2 } else { 1 };
                         changed = true;
                     }
                 }
@@ -1654,7 +1943,7 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
         let mut off: HashSet<usize> = HashSet::new();
         for pt in &patches {
             let sum = |k: usize| pt.sides[k].iter().map(|(p, _, _)| count[p]).sum::<usize>();
-            if sum(0) != sum(2) || sum(1) != sum(3) {
+            if (sum(0) != sum(2) || sum(1) != sum(3)) && !transition_ok([sum(0), sum(1), sum(2), sum(3)], pt.fillet, relaxed.contains(&pt.face)) {
                 off.insert(pt.face);
             }
         }
@@ -1664,6 +1953,14 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
                 let d: Vec<String> = pt.sides.iter().map(|side| side.iter().map(|(p, r, _)| format!("{}{}.{}{}={}({:.1})", if cx.lines[p.line].edge > 0 { "e" } else { "c" }, if cx.lines[p.line].edge > 0 { cx.lines[p.line].edge as usize } else { p.line }, p.j, if *r { "r" } else { "" }, count[p], cx.piece_len(*p))).collect::<Vec<_>>().join("+")).collect();
                 eprintln!("  face {}: {}", pt.face, d.join(" | "));
             }
+        }
+        if !off.is_subset(&relaxed) || !even {
+            even = true;
+            if std::env::var("FORME_QUADS_DEBUG").is_ok() {
+                eprintln!("rows may end in T on faces {off:?}");
+            }
+            relaxed.extend(off.iter().copied());
+            continue;
         }
         for f in &off {
             mesh.skipped.push((*f, "the segment counts do not settle".into()));
@@ -1737,6 +2034,103 @@ pub fn convert(shape: &Shape, target: f64) -> Result<QuadMesh, String> {
         }
         let nn = side_pts[0].len() - 1;
         let mm = side_pts[1].len() - 1;
+        let cnt = [nn, mm, side_pts[2].len() - 1, side_pts[3].len() - 1];
+        if cnt.iter().all(|c| *c > 0) && (cnt[0] != cnt[2] || cnt[1] != cnt[3]) {
+            // rows ending in T: the sides as curves of (u, v, x, y, z) by
+            // length in space
+            let pos = |id: u32| mesh.positions[id as usize];
+            let par: [Vec<f64>; 4] = std::array::from_fn(|k| {
+                let mut c = vec![0.0];
+                for w in side_pts[k].windows(2) {
+                    c.push(c.last().unwrap() + len(sub(pos(w[1].0), pos(w[0].0))));
+                }
+                let t = c.last().copied().unwrap_or(1.0).max(1e-12);
+                c.iter().map(|x| x / t).collect()
+            });
+            let sd: [Vec<BPt>; 4] = std::array::from_fn(|k| {
+                par[k]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| (Vtx::Side(k, i), match k { 0 => (*x, 0.0), 1 => (1.0, *x), 2 => (1.0 - x, 1.0), _ => (0.0, 1.0 - x) }))
+                    .collect()
+            });
+            let (mut inner, mut qs) = (vec![], vec![]);
+            if layout(sd, &mut inner, &mut qs).is_none() {
+                mesh.skipped.push((fi, "opposite sides differ".into()));
+                failed_faces.insert(fi);
+                continue;
+            }
+            let curves: Vec<Vec<(f64, [f64; 5])>> = (0..4)
+                .map(|k| {
+                    let sd = k;
+                    let mut c: Vec<(f64, [f64; 5])> = side_pts[sd].iter().zip(&par[sd]).map(|((id, uv), x)| {
+                        let p = pos(*id);
+                        (*x, [uv[0], uv[1], p[0], p[1], p[2]])
+                    }).collect();
+                    if k >= 2 {
+                        c.reverse();
+                        for e in c.iter_mut() {
+                            e.0 = 1.0 - e.0;
+                        }
+                    }
+                    c
+                })
+                .collect();
+            let at = |k: usize, x: f64| -> [f64; 5] {
+                let c = &curves[k];
+                let i = c.partition_point(|e| e.0 < x).clamp(1, c.len() - 1);
+                let (a, b) = (c[i - 1], c[i]);
+                let f = if b.0 - a.0 > 1e-12 { ((x - a.0) / (b.0 - a.0)).clamp(0.0, 1.0) } else { 0.0 };
+                std::array::from_fn(|q| a.1[q] + (b.1[q] - a.1[q]) * f)
+            };
+            let mix = |w: &[(f64, [f64; 5])]| -> [f64; 5] { std::array::from_fn(|q| w.iter().map(|(k, v)| k * v[q]).sum()) };
+            let made: Vec<[f64; 5]> = inner.iter().map(|(x, t)| coons(*x, *t, &at, &mix)).collect();
+            // on the surface
+            let got = if pole_faces.contains(&fi) {
+                shape.face_project(fi, &made.iter().map(|m| [m[2], m[3], m[4]]).collect::<Vec<_>>()).map(|v| v.into_iter().map(|(_, p, n)| (p, n)).collect::<Vec<_>>())
+            } else {
+                shape.face_eval(fi, &made.iter().map(|m| [m[0], m[1]]).collect::<Vec<_>>())
+            };
+            let got = match got {
+                Ok(g) => g,
+                Err(e) => {
+                    mesh.skipped.push((fi, e));
+                    failed_faces.insert(fi);
+                    continue;
+                }
+            };
+            let first = mesh.positions.len() as u32;
+            mesh.positions.extend(got.iter().map(|g| g.0));
+            let id = |v: Vtx| match v {
+                Vtx::Side(k, i) => side_pts[k][i].0,
+                Vtx::Inner(i) => first + i as u32,
+            };
+            // turned outwards: the surface's normal at the side points
+            let uvs: Vec<V2> = side_pts.iter().flatten().map(|x| x.1).collect();
+            let normals: HashMap<u32, [f64; 3]> = match shape.face_eval(fi, &uvs) {
+                Ok(e) => side_pts.iter().flatten().zip(e).map(|(x, (_, n))| (x.0, n)).chain(got.iter().enumerate().map(|(i, g)| (first + i as u32, g.1))).collect(),
+                Err(e) => {
+                    mesh.skipped.push((fi, e));
+                    failed_faces.insert(fi);
+                    continue;
+                }
+            };
+            let qs: Vec<[u32; 4]> = qs.iter().map(|q| [id(q[0]), id(q[1]), id(q[2]), id(q[3])]).collect();
+            let mut agree = 0.0;
+            for q in &qs {
+                let p = |k: usize| mesh.positions[q[k] as usize];
+                let n = cross(sub(p(2), p(0)), sub(p(3), p(1)));
+                let s = q.iter().map(|v| normals.get(v).copied().unwrap_or([0.0; 3])).fold([0.0; 3], |x, y| [x[0] + y[0], x[1] + y[1], x[2] + y[2]]);
+                agree += dot(n, s);
+            }
+            for mut q in qs {
+                if agree < 0.0 {
+                    q.reverse();
+                }
+                out_quads.push((q, fi));
+            }
+            continue;
+        }
         if nn == 0 || mm == 0 || side_pts[2].len() - 1 != nn || side_pts[3].len() - 1 != mm {
             mesh.skipped.push((fi, "opposite sides differ".into()));
             failed_faces.insert(fi);
