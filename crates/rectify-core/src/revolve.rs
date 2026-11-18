@@ -42,12 +42,14 @@ pub struct RevolveParams {
     pub max_thick: f64,
     /// Share of the turn the piece must cover (degrees).
     pub min_cover: f64,
+    /// A piece's radius grows by this (twice at most) while its profile holds.
+    pub grow: f64,
     pub max_move: f64,
 }
 
 impl Default for RevolveParams {
     fn default() -> Self {
-        RevolveParams { on: true, refine: true, turn_tol: 0.15, axis_angle: 2.5, axis_dist: 0.25, min_area: 1.5, max_radius: 20.0, margin: 0.8, radius: 0.22, outlier: 0.12, max_thick: 0.05, min_cover: 260.0, max_move: 0.4 }
+        RevolveParams { on: true, refine: true, turn_tol: 0.15, axis_angle: 2.5, axis_dist: 0.25, min_area: 1.5, max_radius: 20.0, margin: 0.8, radius: 0.22, outlier: 0.12, max_thick: 0.05, min_cover: 260.0, grow: 1.35, max_move: 0.4 }
     }
 }
 
@@ -73,6 +75,8 @@ pub struct Piece {
     pub details: usize,
     /// Median distance of the vertices to the profile (mm).
     pub thick: f64,
+    /// How far from round it was (oval or off-centre, mm).
+    pub oval: f64,
     pub hint: bool,
     /// Why it was skipped (None: done).
     pub skipped: Option<String>,
@@ -156,12 +160,120 @@ fn gather(base: &Mesh, tn: &[DVec3], topo: &Topo, seg: &Segmentation, grid: &Gri
 }
 
 struct Fit {
-    /// (radius, height) and angle bin of each vertex.
+    /// (radius, height) and angle bin of each vertex, as on the AI mesh.
     rh: Vec<(DVec2, u8)>,
+    /// The radius taken out of each vertex to make the turn round (an
+    /// oval or off-centre piece), mm.
+    shift: Vec<f64>,
     /// Each vertex's point on the common profile.
     fits: Vec<Option<(DVec2, f64)>>,
     /// Median distance to the profile (mm).
     thick: f64,
+    /// How far from round the piece was (largest radius taken out, mm).
+    oval: f64,
+}
+
+/// Each point's projection on the common profile (its point, the local
+/// fit's spread, the profile's normal there), from the points around it in
+/// the (r, h) plane within `cell`, when many angles agree.
+fn profile_fits(rh: &[(DVec2, u8)], cell: f64) -> Vec<Option<(DVec2, f64, DVec2)>> {
+    let mut hash: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
+    for (i, (q, _)) in rh.iter().enumerate() {
+        hash.entry(((q.x / cell).floor() as i64, (q.y / cell).floor() as i64)).or_default().push(i as u32);
+    }
+    let sig = cell * 0.5;
+    rh.par_iter()
+        .map(|(q, _)| {
+            let (ci, cj) = ((q.x / cell).floor() as i64, (q.y / cell).floor() as i64);
+            let mut pts = vec![];
+            let mut nb = [false; 36];
+            // a dense piece: one point in n is plenty for the local fit,
+            // picked by a hash (the mesh's order follows the angle, a plain
+            // stride would keep a few angles only)
+            let total: usize = (-1..=1).flat_map(|di| (-1..=1).map(move |dj| (di, dj))).filter_map(|(di, dj)| hash.get(&(ci + di, cj + dj)).map(|l| l.len())).sum();
+            let step = total.div_ceil(400).max(1) as u64;
+            for di in -1..=1 {
+                for dj in -1..=1 {
+                    let Some(list) = hash.get(&(ci + di, cj + dj)) else { continue };
+                    for &k in list.iter().filter(|&&k| step == 1 || ((k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) % step == 0) {
+                        let (o, b) = rh[k as usize];
+                        let d2 = (o - *q).length_squared();
+                        if d2 <= cell * cell {
+                            pts.push((o, (-d2 / (sig * sig)).exp()));
+                            nb[b as usize] = true;
+                        }
+                    }
+                }
+            }
+            // a consensus of many angles, or nothing
+            if pts.len() < 12 || nb.iter().filter(|b| **b).count() < 8 {
+                return None;
+            }
+            profile_project(&pts, *q)
+        })
+        .collect()
+}
+
+/// The median distance to the profile, or why there is none.
+fn judge(rh: &[(DVec2, u8)], fits: &[Option<(DVec2, f64, DVec2)>], p: &RevolveParams) -> Result<f64, String> {
+    let mut dists: Vec<f64> = rh.iter().zip(fits).filter_map(|((q, _), f)| f.map(|(g, _, _)| (g - *q).length())).collect();
+    if dists.len() < rh.len() / 3 {
+        return Err("profile not found".into());
+    }
+    dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let thick = dists[dists.len() / 2];
+    if thick > p.max_thick {
+        return Err(format!("not round ({thick:.3} mm thick)"));
+    }
+    Ok(thick)
+}
+
+/// The radius by angle that makes a turn oval or off-centre (harmonics 1
+/// and 2), from each point's distance to a coarse profile along its
+/// normal: Δr(θ) = Σ cₖ cos kθ + sₖ sin kθ. None when it cannot be told.
+fn oval_of(rh: &[(DVec2, u8)], ang: &[f64], coarse: &[Option<(DVec2, f64, DVec2)>]) -> Option<[f64; 4]> {
+    let mut a = [[0.0f64; 4]; 4];
+    let mut b = [0.0f64; 4];
+    let mut n = 0usize;
+    for (i, f) in coarse.iter().enumerate() {
+        let Some((g, _, nrm)) = f else { continue };
+        let q = rh[i].0;
+        let t = ang[i];
+        let row = [nrm.x * t.cos(), nrm.x * t.sin(), nrm.x * (2.0 * t).cos(), nrm.x * (2.0 * t).sin()];
+        let y = (q - *g).dot(*nrm);
+        for j in 0..4 {
+            b[j] += row[j] * y;
+            for k in 0..4 {
+                a[j][k] += row[j] * row[k];
+            }
+        }
+        n += 1;
+    }
+    if n < 60 {
+        return None;
+    }
+    solve4(a, b)
+}
+
+fn solve4(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> Option<[f64; 4]> {
+    for i in 0..4 {
+        let piv = (i..4).max_by(|&x, &y| a[x][i].abs().partial_cmp(&a[y][i].abs()).unwrap())?;
+        if a[piv][i].abs() < 1e-12 {
+            return None;
+        }
+        a.swap(i, piv);
+        b.swap(i, piv);
+        for k in 0..4 {
+            if k != i {
+                let f = a[k][i] / a[i][i];
+                for j in i..4 {
+                    a[k][j] -= f * a[i][j];
+                }
+                b[k] -= f * b[i];
+            }
+        }
+    }
+    Some([b[0] / a[0][0], b[1] / a[1][1], b[2] / a[2][2], b[3] / a[3][3]])
 }
 
 /// The common profile of a piece around (c, a), or why there is none.
@@ -171,14 +283,16 @@ fn fit(base: &Mesh, topo: &Topo, verts: &[usize], c: DVec3, a: DVec3, r_max: f64
     }
     let u = a.any_orthonormal_vector();
     let w = a.cross(u);
+    let mut ang = Vec::with_capacity(verts.len());
     let rh: Vec<(DVec2, u8)> = verts
         .iter()
         .map(|&v| {
             let x = base.pos[v] - c;
             let h = a.dot(x);
             let rad = x - a * h;
-            let ang = rad.dot(w).atan2(rad.dot(u));
-            let bin = (((ang + std::f64::consts::PI) / std::f64::consts::TAU * 36.0) as i64).clamp(0, 35) as u8;
+            let t = rad.dot(w).atan2(rad.dot(u));
+            ang.push(t);
+            let bin = (((t + std::f64::consts::PI) / std::f64::consts::TAU * 36.0) as i64).clamp(0, 35) as u8;
             (DVec2::new(rad.length(), h), bin)
         })
         .collect();
@@ -200,47 +314,50 @@ fn fit(base: &Mesh, topo: &Topo, verts: &[usize], c: DVec3, a: DVec3, r_max: f64
         e.get(e.len() / 2).copied().unwrap_or(p.radius)
     };
     let cell = p.radius.max(edge * 2.5);
-    let mut hash: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
-    for (i, (q, _)) in rh.iter().enumerate() {
-        hash.entry(((q.x / cell).floor() as i64, (q.y / cell).floor() as i64)).or_default().push(i as u32);
+    let plain = profile_fits(&rh, cell);
+    let plain_judge = judge(&rh, &plain, p);
+    let strip = |f: Vec<Option<(DVec2, f64, DVec2)>>| -> Vec<Option<(DVec2, f64)>> { f.into_iter().map(|x| x.map(|(g, e, _)| (g, e))).collect() };
+    if let Ok(t) = plain_judge {
+        if t <= p.max_thick * 0.5 {
+            return Ok(Fit { shift: vec![0.0; rh.len()], rh, fits: strip(plain), thick: t, oval: 0.0 });
+        }
     }
-    let sig = cell * 0.5;
-    let fits: Vec<Option<(DVec2, f64)>> = rh
-        .par_iter()
-        .map(|(q, _)| {
-            let (ci, cj) = ((q.x / cell).floor() as i64, (q.y / cell).floor() as i64);
-            let mut pts = vec![];
-            let mut nb = [false; 36];
-            for di in -1..=1 {
-                for dj in -1..=1 {
-                    let Some(list) = hash.get(&(ci + di, cj + dj)) else { continue };
-                    for &k in list {
-                        let (o, b) = rh[k as usize];
-                        let d2 = (o - *q).length_squared();
-                        if d2 <= cell * cell {
-                            pts.push((o, (-d2 / (sig * sig)).exp()));
-                            nb[b as usize] = true;
-                        }
-                    }
-                }
-            }
-            // a consensus of many angles, or nothing
-            if pts.len() < 12 || nb.iter().filter(|b| **b).count() < 8 {
-                return None;
-            }
-            profile_project(&pts, *q)
-        })
-        .collect();
-    let mut dists: Vec<f64> = rh.iter().zip(&fits).filter_map(|((q, _), f)| f.map(|(g, _)| (g - *q).length())).collect();
-    if dists.len() < verts.len() / 3 {
-        return Err("profile not found".into());
+    // an oval or off-centre turn (common on AI meshes): its radius by
+    // angle taken out, the profile fitted again on the rounded points
+    let mut shift = vec![0.0; rh.len()];
+    // a slight oval only: a strongly flattened turn may be meant so
+    let r_mid = {
+        let mut r: Vec<f64> = rh.iter().map(|(q, _)| q.x).collect();
+        r.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        r[r.len() / 2]
+    };
+    let amp_max = (p.max_move * 0.75).min(r_mid * 0.07);
+    let mut best: Option<(f64, Vec<Option<(DVec2, f64, DVec2)>>, f64)> = None;
+    let mut cur = rh.clone();
+    for pass in 0..3 {
+        let coarse = profile_fits(&cur, cell * if pass == 0 { 2.0 } else { 1.0 });
+        let Some(k) = oval_of(&cur, &ang, &coarse) else { break };
+        for (i, s) in shift.iter_mut().enumerate() {
+            let t = ang[i];
+            *s += k[0] * t.cos() + k[1] * t.sin() + k[2] * (2.0 * t).cos() + k[3] * (2.0 * t).sin();
+        }
+        let amp = shift.iter().fold(0.0f64, |m, s| m.max(s.abs()));
+        if amp > amp_max {
+            break;
+        }
+        cur = rh.iter().zip(&shift).map(|((q, b), s)| (DVec2::new(q.x - s, q.y), *b)).collect();
+        let fits = profile_fits(&cur, cell);
+        let Ok(t) = judge(&cur, &fits, p) else { continue };
+        if best.as_ref().map(|b| t < b.0).unwrap_or(true) {
+            best = Some((t, fits, amp));
+        }
     }
-    dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let thick = dists[dists.len() / 2];
-    if thick > p.max_thick {
-        return Err(format!("not round ({thick:.3} mm thick)"));
+    match (plain_judge, best) {
+        (Ok(t0), Some((t1, fits, amp))) if t1 < t0 * 0.95 => Ok(Fit { rh, shift, fits: strip(fits), thick: t1, oval: amp }),
+        (Ok(t0), _) => Ok(Fit { shift: vec![0.0; rh.len()], rh, fits: strip(plain), thick: t0, oval: 0.0 }),
+        (Err(_), Some((t1, fits, amp))) => Ok(Fit { rh, shift, fits: strip(fits), thick: t1, oval: amp }),
+        (Err(e), None) => Err(e),
     }
-    Ok(Fit { rh, fits, thick })
 }
 
 /// The axis of a surface of revolution from its points and normals: every
@@ -341,7 +458,7 @@ fn axes(m: &Mesh, seg: &Segmentation, p: &RevolveParams) -> Vec<Axis> {
 }
 
 /// A line or a circle through weighted 2D points; the projection of `q`.
-fn profile_project(pts: &[(DVec2, f64)], q: DVec2) -> Option<(DVec2, f64)> {
+fn profile_project(pts: &[(DVec2, f64)], q: DVec2) -> Option<(DVec2, f64, DVec2)> {
     let wsum: f64 = pts.iter().map(|x| x.1).sum();
     if wsum <= 0.0 {
         return None;
@@ -391,12 +508,12 @@ fn profile_project(pts: &[(DVec2, f64)], q: DVec2) -> Option<(DVec2, f64)> {
             if r > 0.05 && r < 50.0 && circ_rms < line_rms * 0.6 {
                 let v = q - c - cc;
                 if v.length() > 1e-9 {
-                    return Some((c + cc + v.normalize() * r, circ_rms));
+                    return Some((c + cc + v.normalize() * r, circ_rms, v.normalize()));
                 }
             }
         }
     }
-    Some((on_line, line_rms))
+    Some((on_line, line_rms, nrm))
 }
 
 fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
@@ -493,7 +610,19 @@ pub fn revolve(m: &mut Mesh, base: &Mesh, topo: &Topo, seg: &Segmentation, hints
         for (c, a, verts) in tries {
             let res = fit(base, topo, &verts, c, a, ax.r_max, p);
             if debug.is_some() {
-                eprintln!("REV try c {c:.2} a {a:.3} r {:.2} verts {}: {:?}", ax.r_max, verts.len(), res.as_ref().map(|f| f.thick));
+                eprintln!("REV try c {c:.2} a {a:.3} r {:.2} h {:.2?} verts {}: {:?}", ax.r_max, ax.h, verts.len(), res.as_ref().map(|f| (f.thick, f.oval)));
+                if let Ok(dir) = std::env::var("RECTIFY_REV_DUMP") {
+                    let u = a.any_orthonormal_vector();
+                    let w = a.cross(u);
+                    let mut out = String::new();
+                    for &v in &verts {
+                        let x = base.pos[v] - c;
+                        let h = a.dot(x);
+                        let rad = x - a * h;
+                        out += &format!("{:.4} {:.4} {:.3}\n", rad.length(), h, rad.dot(w).atan2(rad.dot(u)));
+                    }
+                    let _ = std::fs::write(format!("{dir}/rev-{:.0}-{:.0}-{:.0}-{}.txt", c.x, c.y, c.z, (a.x * 100.0).round() as i64 * 10000 + (a.y * 100.0).round() as i64 * 100 + (a.z * 100.0).round() as i64), out);
+                }
             }
             match res {
                 Ok(f) => {
@@ -508,23 +637,54 @@ pub fn revolve(m: &mut Mesh, base: &Mesh, topo: &Topo, seg: &Segmentation, hints
                 }
             }
         }
-        let Some((c, a, verts, Fit { rh, fits, thick })) = best else {
+        let Some((c, a, mut verts, mut fitted)) = best else {
             let (n, e) = first_err.unwrap_or((0, "too few vertices".into()));
-            rep.pieces.push(Piece { p: c0, a: a0, r_max: ax.r_max, h: ax.h, verts: n, moved: 0, details: 0, thick: 0.0, hint: ax.hint, skipped: Some(e) });
+            rep.pieces.push(Piece { p: c0, a: a0, r_max: ax.r_max, h: ax.h, verts: n, moved: 0, details: 0, thick: 0.0, oval: 0.0, hint: ax.hint, skipped: Some(e) });
             continue;
         };
-        let mut piece = Piece { p: c, a, r_max: ax.r_max, h: ax.h, verts: verts.len(), moved: 0, details: 0, thick, hint: ax.hint, skipped: None };
+        // the cylinders only reach so far: a turned piece often goes on past
+        // them (a muzzle's rounded lip, a button's rim), so it is grown while
+        // its profile still holds
+        let (mut r_max, mut hr) = (ax.r_max, ax.h);
+        if p.grow > 1.0 && !ax.hint {
+            // measured against the piece as first found, so it cannot drift
+            let thick0 = fitted.thick;
+            for _ in 0..2 {
+                let r2 = (r_max * p.grow).min(p.max_radius + p.margin);
+                if r2 <= r_max + 0.05 {
+                    break;
+                }
+                let dh = (r2 - r_max) * 0.5;
+                let big = Axis { p: ax.p, a: ax.a, members: ax.members.clone(), r_max: r2, h: (hr.0 - dh, hr.1 + dh), hint: false };
+                let v2 = gather(base, &tn, topo, seg, &grid, &done, &big, c, a, p);
+                if v2.len() <= verts.len() {
+                    break;
+                }
+                let Ok(f2) = fit(base, topo, &v2, c, a, r2, p) else { break };
+                if debug.is_some() {
+                    eprintln!("REV grow r {r2:.2} verts {}: thick {:.4} oval {:.3}", v2.len(), f2.thick, f2.oval);
+                }
+                if f2.thick > thick0 * 1.25 + 0.003 {
+                    break;
+                }
+                (r_max, hr, verts, fitted) = (r2, big.h, v2, f2);
+            }
+        }
+        let Fit { rh, shift, fits, thick, oval } = fitted;
+        let mut piece = Piece { p: c, a, r_max, h: hr, verts: verts.len(), moved: 0, details: 0, thick, oval, hint: ax.hint, skipped: None };
         for (i, &v) in verts.iter().enumerate() {
             let Some((g, _)) = fits[i] else { continue };
             let q = rh[i].0;
-            let mv = (g - q).length();
-            if mv > p.outlier || mv > p.max_move {
+            // a detail stands off the rounded profile; the move itself
+            // includes the rounding
+            let off = (g - DVec2::new(q.x - shift[i], q.y)).length();
+            if off > p.outlier || (g - q).length() > p.max_move {
                 piece.details += 1;
                 continue;
             }
             // fades out at the piece's rim and ends
-            let fr = ((ax.r_max - q.x) / p.margin).clamp(0.0, 1.0);
-            let fh = ((q.y - ax.h.0).min(ax.h.1 - q.y) / p.margin).clamp(0.0, 1.0);
+            let fr = ((r_max - q.x) / p.margin).clamp(0.0, 1.0);
+            let fh = ((q.y - hr.0).min(hr.1 - q.y) / p.margin).clamp(0.0, 1.0);
             let f = smooth(fr.min(fh));
             if f <= 0.0 || q.x < 1e-6 {
                 continue;

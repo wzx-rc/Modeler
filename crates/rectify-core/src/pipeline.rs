@@ -102,6 +102,7 @@ impl Params {
                 "revolve" => self.revolve.on = v != 0.0,
                 "rev_refine" => self.revolve.refine = v != 0.0,
                 "rev_turn_tol" => self.revolve.turn_tol = v,
+                "rev_grow" => self.revolve.grow = v,
                 "rev_radius" => self.revolve.radius = v,
                 "rev_thick" => self.revolve.max_thick = v,
                 "rev_outlier" => self.revolve.outlier = v,
