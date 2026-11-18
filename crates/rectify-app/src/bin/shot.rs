@@ -7,7 +7,10 @@
 //!
 //! RECTIFY_LOOK="fx,fy,fz,dist,yaw,pitch": the camera of the `look`
 //! scenario (a point of the mesh's box in fractions); RECTIFY_DRAG="x,y;x,y":
-//! a Line drag there (screen points), shot before, during and after.
+//! a Line drag there (screen points), shot before, during and after;
+//! RECTIFY_STRENGTH="0.3,1": the Line placed shown at these strengths;
+//! RECTIFY_CIRCLE="x,y;x,y": a Circle drag there instead (rim to rim), the
+//! rings shown, applied (RECTIFY_LEVELS, RECTIFY_HEIGHT to set them first).
 
 use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use glam::Vec3;
@@ -238,11 +241,82 @@ fn line_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
     }
     h.shot(&format!("{name}-1-drag"));
     h.release();
+    // placed: its strength set live (RECTIFY_STRENGTH="0.5,1"), then applied
+    let strengths = std::env::var("RECTIFY_STRENGTH").map(|s| nums(&s)).unwrap_or_default();
+    for s in &strengths {
+        h.st.line_set_strength(*s as f64);
+        let pc = (s * 100.0).round();
+        h.shot(&format!("{name}-2-placed-{pc}"));
+        h.st.bare = true;
+        h.shot(&format!("{name}-2-s{pc}"));
+        h.st.settings.zebra = true;
+        h.shot(&format!("{name}-2-s{pc}-zebra"));
+        h.st.settings.zebra = false;
+        h.st.bare = false;
+    }
+    h.shot(&format!("{name}-2-placed"));
+    h.st.line_apply();
+    if let Some(t) = &h.st.toast {
+        eprintln!("{}", t.text);
+    }
     h.shot(&format!("{name}-2-done"));
     h.st.bare = true;
     h.shot(&format!("{name}-3-after"));
     h.st.settings.zebra = true;
     h.shot(&format!("{name}-3-zebra"));
+    h.st.settings.zebra = false;
+    h.st.bare = false;
+}
+
+/// A Circle drag from one side of a rim to the other (screen points of the
+/// bare view): before, the rings with the interface, after (bare and zebra).
+fn circle_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
+    h.st.set_tool(Tool::Navigate);
+    h.st.bare = true;
+    h.shot(&format!("{name}-0-before"));
+    let world: Vec<glam::Vec3> = pts.iter().filter_map(|p| h.st.pick_hit(*p).map(|(_, x)| x.as_vec3())).collect();
+    h.st.settings.zebra = true;
+    h.shot(&format!("{name}-0-zebra"));
+    h.st.settings.zebra = false;
+    h.st.bare = false;
+    h.st.set_tool(Tool::Circle);
+    h.steps(2);
+    let view = h.st.view();
+    let scr: Vec<[f32; 2]> = world.iter().filter_map(|x| view.project(*x)).collect();
+    h.drag_screen(&scr, true);
+    h.shot(&format!("{name}-1-drag"));
+    h.release();
+    let levels = std::env::var("RECTIFY_LEVELS").ok().and_then(|s| s.parse().ok());
+    let height = std::env::var("RECTIFY_HEIGHT").ok().and_then(|s| s.parse().ok());
+    if let Some(ce) = &mut h.st.circle {
+        if let Some(l) = levels {
+            ce.levels = l;
+        }
+        if let Some(hh) = height {
+            ce.height = hh;
+        }
+    }
+    h.st.circle_refit();
+    match &h.st.circle {
+        Some(ce) => {
+            let c = &ce.circle;
+            let rings: Vec<String> = ce.rings.iter().map(|(hh, r)| format!("{hh:.2}:{:.3}", r * 2.0)).collect();
+            eprintln!("CIRCLE {name}: c {:.2},{:.2},{:.2} axis {:.3},{:.3},{:.3} Ø {:.3} height {:.2} region {} rings {}", c.c.x, c.c.y, c.c.z, c.a.x, c.a.y, c.a.z, c.r * 2.0, ce.height, c.region.len(), rings.join(" "));
+        }
+        None => eprintln!("CIRCLE {name}: {}", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
+    }
+    h.shot(&format!("{name}-2-rings"));
+    if h.st.circle.is_some() {
+        h.st.circle_apply();
+        if let Some(t) = &h.st.toast {
+            eprintln!("{}", t.text);
+        }
+        h.shot(&format!("{name}-3-done"));
+    }
+    h.st.bare = true;
+    h.shot(&format!("{name}-4-after"));
+    h.st.settings.zebra = true;
+    h.shot(&format!("{name}-4-zebra"));
     h.st.settings.zebra = false;
     h.st.bare = false;
 }
@@ -325,6 +399,12 @@ fn main() {
         let v = std::env::var("RECTIFY_LOOK").map(|s| nums(&s)).unwrap_or_default();
         let v = if v.len() == 6 { v } else { vec![0.3, 0.72, 0.5, 60.0, 0.35, 0.1] };
         look(&mut h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+        let pts_of = |s: String| -> Vec<[f32; 2]> { s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect() };
+        if let Ok(s) = std::env::var("RECTIFY_CIRCLE") {
+            let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "circle".into());
+            circle_drag(&mut h, &tag, &pts_of(s));
+            return;
+        }
         match std::env::var("RECTIFY_DRAG") {
             Ok(s) => {
                 let pts: Vec<[f32; 2]> = s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();

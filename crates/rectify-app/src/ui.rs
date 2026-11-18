@@ -67,7 +67,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the mesh (Esc)", "Esc"), (Tool::Line, Icon::Sketch, "Line: drag along an edge, it becomes straight and sharp (L)", "L"), (Tool::Mirror, Icon::Mirror, "Mirror: the two sides made mirror images (M)", "M")];
+                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the mesh (Esc)", "Esc"), (Tool::Line, Icon::Sketch, "Line: drag along an edge, it becomes straight and sharp (L)", "L"), (Tool::Circle, Icon::Cylinder, "Circle: drag across a hole or a boss, its wall made truly round (C)", "C"), (Tool::Mirror, Icon::Mirror, "Mirror: the two sides made mirror images (M)", "M")];
                 for (t, icon, tip, key) in tools {
                     let r = icon_btn(ui, icon, st.tool == t, tip, 28.0);
                     key_hint(ui, &r, key);
@@ -231,15 +231,77 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
             if secondary_btn(ui, "Line (L): straight, sharp edges", w).clicked() {
                 st.set_tool(Tool::Line);
             }
+            if secondary_btn(ui, "Circle (C): truly round", w).clicked() {
+                st.set_tool(Tool::Circle);
+            }
             if secondary_btn(ui, "Mirror (M): both sides alike", w).clicked() {
                 st.set_tool(Tool::Mirror);
             }
         }
         Tool::Line => {
-            title(ui, "Line", "Press on an edge, drag along it, release: there the edge becomes straight and sharp");
-            slider_f64(ui, "Width", &mut st.line.width, 0.2..=8.0, 0.1, "mm");
-            slider_f64(ui, "Hold", &mut st.line.hold, 0.0..=0.95, 0.05, "");
-            line(ui, "Width: how far from the edge the sides are put on their planes (more on a rounded edge). Hold: the part of it moved fully, the rest fades.");
+            title(ui, "Line", "Press on an edge, drag along it, release: the edge becomes straight and sharp; set its strength, then Enter");
+            let mut s = (st.line_strength * 100.0) as f32;
+            if slider_row(ui, "Strength", &mut s, 0.0..=100.0, 1.0, "%").0 {
+                st.line_set_strength(s as f64 / 100.0);
+            }
+            let mut refit = slider_f64(ui, "Width", &mut st.line.width, 0.2..=8.0, 0.1, "mm");
+            refit |= slider_f64(ui, "Hold", &mut st.line.hold, 0.0..=0.95, 0.05, "");
+            if refit {
+                st.line_refit_edit();
+            }
+            match &st.line_edit {
+                Some(le) => {
+                    line(ui, format!("Edge {:.0}° · {} mm long · {} vertices · {} mm at most", le.fit.angle, fmt((le.fit.b - le.fit.a).length(), 1), le.fit.moves.idx.len(), fmt(le.fit.moves.max_move() * st.line_strength, 2)));
+                    ui.add_space(6.0);
+                    let w = ui.available_width();
+                    let apply = primary_btn(ui, Some(Icon::Sketch), "Apply (Enter)", Some(w)).clicked();
+                    let cancel = secondary_btn(ui, "Cancel (Esc)", w).clicked();
+                    if apply {
+                        st.line_apply();
+                    } else if cancel {
+                        st.line_cancel();
+                    }
+                }
+                None => line(ui, "Strength: how far towards the sharp edge (live once placed). Width: how far from the edge the sides are put on their planes (more on a rounded edge). Hold: the part of it moved fully, the rest fades."),
+            }
+        }
+        Tool::Circle => {
+            title(ui, "Circle", "Press on the rim of a hole or a boss, drag across to the other side: the wall is found, then made round ring by ring");
+            let mut refit = false;
+            let mut apply = false;
+            let mut cancel = false;
+            match &mut st.circle {
+                None => line(ui, "The plane comes from where you press; the circle is then fitted on the wall next to it."),
+                Some(ce) => {
+                    line(ui, format!("Ø {} mm · centre on the plane", fmt(ce.circle.r * 2.0, 3)));
+                    let found = ce.circle.height;
+                    let max = (found * 3.0).max(ce.circle.r * 2.0) as f32;
+                    refit |= slider_f64(ui, "Height", &mut ce.height, 0.1..=max, 0.05, "mm");
+                    let mut lv = ce.levels as f32;
+                    if slider_row(ui, "Levels", &mut lv, 1.0..=24.0, 1.0, "").0 {
+                        ce.levels = lv.round().max(1.0) as usize;
+                        refit = true;
+                    }
+                    slider_f64(ui, "Reach", &mut ce.reach, 0.05..=(ce.circle.r as f32).max(0.5), 0.05, "mm");
+                    let rs: Vec<String> = ce.rings.iter().map(|r| fmt(r.1 * 2.0, 2)).collect();
+                    line(ui, format!("Rings Ø {} mm (found {} mm high)", rs.join(" · "), fmt(found, 1)));
+                    line(ui, format!("Out of round now: {} mm", fmt(ce.off, 3)));
+                    ui.add_space(6.0);
+                    let w = ui.available_width();
+                    apply = primary_btn(ui, Some(Icon::Cylinder), "Apply (Enter)", Some(w)).clicked();
+                    cancel = secondary_btn(ui, "Cancel (Esc)", w).clicked();
+                }
+            }
+            if refit {
+                st.circle_refit();
+            }
+            if apply {
+                st.circle_apply();
+            }
+            if cancel {
+                st.circle = None;
+                st.overlay_gen += 1;
+            }
         }
         Tool::Mirror => {
             use rectify_core::sym::{Axis, SymMode};
@@ -364,6 +426,15 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if enter && st.tool == Tool::Mirror {
         st.apply_mirror();
     }
+    if enter && st.tool == Tool::Circle {
+        st.circle_apply();
+    }
+    if enter && st.tool == Tool::Line {
+        st.line_apply();
+    }
+    if ctx.input(|i| i.key_pressed(Key::C)) && !cmd {
+        st.set_tool(Tool::Circle);
+    }
     if cmd && z {
         if shift {
             st.redo();
@@ -381,9 +452,13 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if f {
         st.frame_all();
     }
-    if esc {
-        if st.line_drag.is_some() {
+    if esc && st.line_edit.is_some() {
+        st.line_cancel();
+    } else if esc {
+        if st.line_drag.is_some() || st.circle_drag.is_some() || st.circle.is_some() {
             st.line_drag = None;
+            st.circle_drag = None;
+            st.circle = None;
             st.overlay_gen += 1;
         } else {
             st.set_tool(Tool::Navigate);

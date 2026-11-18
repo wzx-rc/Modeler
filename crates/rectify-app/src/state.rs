@@ -5,6 +5,7 @@ use crate::camera::OrbitCamera;
 use crate::view::View;
 use glam::{DVec3, Vec3};
 use rayon::prelude::*;
+use rectify_core::circle::Circle;
 use rectify_core::line::{self, LineFit, LineParams};
 use rectify_core::sym::{self, Axis, Found, SymMode};
 use rectify_core::{Mesh, Moves, Surface, Topo};
@@ -33,6 +34,8 @@ pub enum Tool {
     Line,
     /// The mirror plane: both sides made mirror images.
     Mirror,
+    /// Drag across a round part: its wall made truly round, ring by ring.
+    Circle,
 }
 
 impl Tool {
@@ -41,6 +44,7 @@ impl Tool {
             Tool::Navigate => "Navigate",
             Tool::Line => "Line",
             Tool::Mirror => "Mirror",
+            Tool::Circle => "Circle",
         }
     }
 }
@@ -71,6 +75,39 @@ pub struct LineDrag {
     /// The edge it would fix (computed again as the pointer moves).
     pub fit: Option<Result<LineFit, String>>,
     pub fitted_at: Option<DVec3>,
+}
+
+/// A Line placed and not applied yet: shown on the mesh at the strength
+/// set, which can change live (as can the width and the hold: fitted again).
+pub struct LineEdit {
+    pub a: DVec3,
+    pub b: DVec3,
+    pub seeds: Vec<u32>,
+    pub fit: LineFit,
+}
+
+/// The round part found by the Circle tool, and its settings (applied with
+/// Enter).
+pub struct CircleEdit {
+    pub circle: Circle,
+    pub height: f64,
+    pub levels: usize,
+    pub reach: f64,
+    /// (height, radius) of each ring, read on the mesh.
+    pub rings: Vec<(f64, f64)>,
+    /// How far the wall is from those rings now (mm, root mean square).
+    pub off: f64,
+}
+
+/// A Circle drag: from the press on the rim to the pointer, on the plane
+/// under the press.
+#[derive(Clone)]
+pub struct CircleDrag {
+    pub a: DVec3,
+    pub b: DVec3,
+    pub seeds: Vec<u32>,
+    /// The plane's normal at the press.
+    pub n: DVec3,
 }
 
 /// The Mirror tool's settings and the plane found.
@@ -128,7 +165,15 @@ pub struct AppState {
     pub tool: Tool,
     pub line: LineParams,
     pub line_drag: Option<LineDrag>,
+    pub line_edit: Option<LineEdit>,
+    /// How much of the fix is applied (0..1): the "sharp" strength.
+    pub line_strength: f64,
     pub sym: SymState,
+    /// The Circle drag (rim to rim) and the part found.
+    pub circle_drag: Option<CircleDrag>,
+    pub circle: Option<CircleEdit>,
+    /// The Circle tool's levels, kept from one part to the next.
+    pub circle_levels: usize,
     /// The edits made, in order, and the ones undone.
     pub history: Vec<Step>,
     pub undone: Vec<Step>,
@@ -164,7 +209,12 @@ impl AppState {
             tool: Tool::Navigate,
             line: LineParams::default(),
             line_drag: None,
+            line_edit: None,
+            line_strength: 1.0,
             sym: SymState { axis: Axis::Z, mode: SymMode::Average, reach: 1.0, found: None },
+            circle_drag: None,
+            circle: None,
+            circle_levels: 4,
             history: vec![],
             undone: vec![],
         }
@@ -221,6 +271,9 @@ impl AppState {
         self.history.clear();
         self.undone.clear();
         self.line_drag = None;
+        self.line_edit = None;
+        self.circle_drag = None;
+        self.circle = None;
         self.sym.found = None;
         self.dirty.clear();
         self.gen += 1;
@@ -229,6 +282,7 @@ impl AppState {
     }
 
     pub fn export(&mut self) {
+        self.line_apply();
         let Some(d) = &self.doc else { return };
         let m = d.mesh.clone();
         let path = crate::files::documents_dir().join(format!("{} rectified.obj", crate::files::sanitize(&self.name)));
@@ -304,8 +358,14 @@ impl AppState {
             self.toast("Open a mesh first", true);
             return;
         }
+        // a Line placed is kept
+        self.line_apply();
         self.tool = t;
         self.line_drag = None;
+        self.circle_drag = None;
+        if t != Tool::Circle {
+            self.circle = None;
+        }
         self.overlay_gen += 1;
         if t == Tool::Mirror && self.sym.found.is_none() {
             self.find_mirror(None);
@@ -369,6 +429,12 @@ impl AppState {
     }
 
     pub fn undo(&mut self) {
+        // a Line placed and not applied goes first
+        if self.line_edit.is_some() {
+            self.line_cancel();
+            self.toast("Line removed", false);
+            return;
+        }
         let Some(d) = &mut self.doc else { return };
         let Some(s) = self.history.pop() else {
             self.toast("Nothing to undo", false);
@@ -397,6 +463,7 @@ impl AppState {
 
     /// Back to the mesh as it came (undoable step by step).
     pub fn revert_all(&mut self) {
+        self.line_cancel();
         while !self.history.is_empty() {
             self.undo();
         }
@@ -406,12 +473,14 @@ impl AppState {
     // ------------------------------------------------------------ Line
 
     /// The vertices of a triangle.
-    fn tri_verts(&self, t: usize) -> Vec<u32> {
+    pub fn tri_verts(&self, t: usize) -> Vec<u32> {
         self.doc.as_ref().map(|d| d.mesh.tris[t].to_vec()).unwrap_or_default()
     }
 
     pub fn line_press(&mut self, at: [f32; 2]) {
         let Some((t, x)) = self.pick_hit(at) else { return };
+        // a new stroke keeps the one placed before
+        self.line_apply();
         let seeds = self.tri_verts(t);
         self.line_drag = Some(LineDrag { a: x, b: x, seeds_b: seeds.clone(), seeds, fit: None, fitted_at: None });
         self.overlay_gen += 1;
@@ -455,16 +524,155 @@ impl AppState {
         let ld = self.line_drag.take().unwrap();
         self.overlay_gen += 1;
         match ld.fit {
-            Some(Ok(f)) => {
-                let what = format!("Edge {:.0}° · {} mm", f.angle, fmt((f.b - f.a).length(), 1));
-                let n = f.moves.idx.len();
-                let mx = f.moves.max_move();
-                self.commit(Tool::Line, what, f.moves);
-                self.toast(format!("Edge fixed: the sides turn {:.0}° · {n} vertices moved, {} mm at most", f.angle, fmt(mx, 2)), false);
+            Some(Ok(fit)) => {
+                let mut seeds = ld.seeds;
+                seeds.extend_from_slice(&ld.seeds_b);
+                self.line_edit = Some(LineEdit { a: ld.a, b: ld.b, seeds, fit });
+                self.line_show();
             }
             Some(Err(e)) => self.toast(e, true),
             None => {}
         }
+    }
+
+    /// The Line placed, on the mesh at the strength set.
+    fn line_show(&mut self) {
+        let (Some(d), Some(le)) = (&mut self.doc, &self.line_edit) else { return };
+        let s = self.line_strength;
+        let mv = &le.fit.moves;
+        for k in 0..mv.idx.len() {
+            d.mesh.pos[mv.idx[k] as usize] = mv.from[k] + (mv.to[k] - mv.from[k]) * s;
+        }
+        self.dirty.extend_from_slice(&mv.idx);
+        self.overlay_gen += 1;
+    }
+
+    /// The mesh as it was before the Line placed.
+    fn line_hide(&mut self) {
+        let (Some(d), Some(le)) = (&mut self.doc, &self.line_edit) else { return };
+        let mv = &le.fit.moves;
+        for k in 0..mv.idx.len() {
+            d.mesh.pos[mv.idx[k] as usize] = mv.from[k];
+        }
+        self.dirty.extend_from_slice(&mv.idx);
+        self.overlay_gen += 1;
+    }
+
+    /// The strength changed: shown again at once.
+    pub fn line_set_strength(&mut self, s: f64) {
+        self.line_strength = s.clamp(0.0, 1.0);
+        self.line_show();
+    }
+
+    /// The width or the hold changed: the Line placed fitted again.
+    pub fn line_refit_edit(&mut self) {
+        if self.line_edit.is_none() {
+            return;
+        }
+        self.line_hide();
+        let (Some(d), Some(le)) = (&self.doc, &mut self.line_edit) else { return };
+        match line::fix(&d.mesh, &d.topo, &le.seeds, le.a, le.b, d.edge, &self.line) {
+            Ok(f) => le.fit = f,
+            Err(e) => self.toast(e, true),
+        }
+        self.line_show();
+    }
+
+    /// The Line placed goes into the history, at the strength set.
+    pub fn line_apply(&mut self) {
+        if self.line_edit.is_none() {
+            return;
+        }
+        self.line_hide();
+        let Some(le) = self.line_edit.take() else { return };
+        let s = self.line_strength;
+        let Some(d) = &self.doc else { return };
+        let f = le.fit;
+        let targets: Vec<(u32, DVec3)> = f.moves.idx.iter().zip(f.moves.from.iter().zip(&f.moves.to)).map(|(&v, (a, b))| (v, *a + (*b - *a) * s)).collect();
+        let moves = Moves::new(&d.mesh, targets);
+        let what = format!("Edge {:.0}° · {} mm · {:.0} %", f.angle, fmt((f.b - f.a).length(), 1), s * 100.0);
+        let n = moves.idx.len();
+        let mx = moves.max_move();
+        self.commit(Tool::Line, what, moves);
+        self.toast(format!("Edge fixed at {:.0} %: the sides turn {:.0}° · {n} vertices moved, {} mm at most", s * 100.0, f.angle, fmt(mx, 2)), false);
+        self.overlay_gen += 1;
+    }
+
+    /// The Line placed taken away.
+    pub fn line_cancel(&mut self) {
+        self.line_hide();
+        self.line_edit = None;
+        self.overlay_gen += 1;
+    }
+}
+
+impl AppState {
+    // ------------------------------------------------------------ Circle
+
+    pub fn circle_press(&mut self, at: [f32; 2]) {
+        let Some((t, x)) = self.pick_hit(at) else { return };
+        let seeds = self.tri_verts(t);
+        let Some(d) = &self.doc else { return };
+        let n = seeds.iter().flat_map(|&v| d.topo.tris_of(v as usize).iter()).map(|&t| d.mesh.tri_cross(t as usize).normalize_or_zero()).sum::<DVec3>().normalize_or_zero();
+        self.circle_drag = Some(CircleDrag { a: x, b: x, seeds, n });
+        self.circle = None;
+        self.overlay_gen += 1;
+    }
+
+    pub fn circle_move(&mut self, at: [f32; 2]) {
+        if self.circle_drag.is_none() {
+            return;
+        }
+        // on the plane under the press (else the mesh under the pointer)
+        let (o, dir) = self.view().ray(at[0], at[1]);
+        let (o, dir) = (o.as_dvec3(), dir.as_dvec3());
+        let hit = self.pick_hit(at).map(|h| h.1);
+        let Some(cd) = &mut self.circle_drag else { return };
+        let dn = dir.dot(cd.n);
+        let on_plane = (dn.abs() > 0.05).then(|| o + dir * ((cd.a - o).dot(cd.n) / dn)).filter(|x| (*x - o).dot(dir) > 0.0);
+        if let Some(x) = on_plane.or(hit) {
+            cd.b = x;
+        }
+        self.overlay_gen += 1;
+    }
+
+    pub fn circle_release(&mut self) {
+        let Some(CircleDrag { a, b, seeds, .. }) = self.circle_drag.take() else { return };
+        self.overlay_gen += 1;
+        let Some(d) = &self.doc else { return };
+        match Circle::detect(&d.mesh, &d.topo, &seeds, a, b, d.edge) {
+            Ok(c) => {
+                let height = c.height;
+                let reach = (c.r * 0.3).max(d.edge * 4.0);
+                let levels = self.circle_levels;
+                let rings = c.rings(&d.mesh, height, levels);
+                let off = c.out_of_round(&d.mesh, &rings);
+                self.circle = Some(CircleEdit { circle: c, height, levels, reach, rings, off });
+            }
+            Err(e) => self.toast(e, true),
+        }
+    }
+
+    /// The rings again after the height or the levels changed.
+    pub fn circle_refit(&mut self) {
+        let (Some(d), Some(ce)) = (&self.doc, &mut self.circle) else { return };
+        ce.rings = ce.circle.rings(&d.mesh, ce.height, ce.levels);
+        ce.off = ce.circle.out_of_round(&d.mesh, &ce.rings);
+        self.circle_levels = ce.levels;
+        self.overlay_gen += 1;
+    }
+
+    pub fn circle_apply(&mut self) {
+        let Some(ce) = self.circle.take() else { return };
+        let Some(d) = &self.doc else { return };
+        let moves = ce.circle.apply(&d.mesh, &d.topo, &ce.rings, ce.reach);
+        let what = format!("Ø {} mm · {} mm high · {} rings", fmt(ce.circle.r * 2.0, 2), fmt(ce.height, 1), ce.rings.len());
+        let n = moves.idx.len();
+        let mx = moves.max_move();
+        self.commit(Tool::Circle, what, moves);
+        let after = self.doc.as_ref().map(|d| ce.circle.out_of_round(&d.mesh, &ce.rings)).unwrap_or(0.0);
+        self.toast(format!("Made round: {n} vertices moved, {} mm at most · out of round {} → {} mm", fmt(mx, 2), fmt(ce.off, 3), fmt(after, 3)), false);
+        self.overlay_gen += 1;
     }
 }
 

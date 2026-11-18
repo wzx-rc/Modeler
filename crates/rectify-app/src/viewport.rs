@@ -33,7 +33,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             i.pointer.button_down(PointerButton::Secondary),
         )
     });
-    if alt && (resp.hovered() || resp.dragged() || l || m || r) && st.line_drag.is_none() {
+    if alt && (resp.hovered() || resp.dragged() || l || m || r) && st.line_drag.is_none() && st.circle_drag.is_none() {
         if (l || m || r) && d != egui::Vec2::ZERO {
             if l {
                 st.camera.orbit(d.x, d.y);
@@ -76,6 +76,26 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             return;
         }
     }
+    // the Circle tool: press on the rim, drag across, release
+    if st.tool == Tool::Circle && !alt {
+        let (pressed, released, pos) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.latest_pos()));
+        if pressed && resp.hovered() {
+            if let Some(p) = pos {
+                st.circle_press([p.x, p.y]);
+            }
+        } else if st.circle_drag.is_some() {
+            if let Some(p) = pos {
+                st.circle_move([p.x, p.y]);
+            }
+            if released || !l {
+                st.circle_release();
+            }
+        }
+        if st.circle_drag.is_some() {
+            st.interacting = true;
+            return;
+        }
+    }
     // the middle button alone pans; the left drag alone orbits when no
     // tool takes it
     if (m || (l && st.tool == Tool::Navigate)) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
@@ -91,7 +111,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
 /// The tool's name at the pointer.
 fn tool_cursor(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Response) {
     let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else { return };
-    if !resp.hovered() && st.line_drag.is_none() {
+    if !resp.hovered() && st.line_drag.is_none() && st.circle_drag.is_none() {
         return;
     }
     let col = accent();
@@ -126,6 +146,7 @@ pub fn hint(st: &AppState) -> String {
     }
     match st.tool {
         Tool::Line => match &st.line_drag {
+            None if st.line_edit.is_some() => format!("Line placed at {:.0} %: set its strength on the left · Enter applies · Esc removes · a new stroke applies it", st.line_strength * 100.0),
             Some(ld) => match &ld.fit {
                 Some(Ok(f)) => format!("Release to fix: an edge of {:.0}° · Esc cancels", f.angle),
                 Some(Err(e)) => e.clone(),
@@ -138,6 +159,11 @@ pub fn hint(st: &AppState) -> String {
             Some(_) => format!("Mirror {}: the plane in orange · Enter applies · Esc done", st.sym.axis.label()),
             None => "Mirror: finding the plane".into(),
         },
-        Tool::Navigate => "L line · M mirror · Ctrl+Z undo · Space the mesh as it came · drag to turn around".into(),
+        Tool::Circle => match (&st.circle_drag, &st.circle) {
+            (Some(_), _) => "Across to the other side of the rim, then release".into(),
+            (None, Some(c)) => format!("Ø {} mm, {} rings: set the height and the levels on the left · Enter applies · Esc cancels", fmt(c.circle.r * 2.0, 2), c.rings.len()),
+            (None, None) => "Circle: press on the rim of a hole or a boss and drag across it to the other side".into(),
+        },
+        Tool::Navigate => "L line · C circle · M mirror · Ctrl+Z undo · Space the mesh as it came · drag to turn around".into(),
     }
 }

@@ -7,6 +7,7 @@
 //! - `circle`: a round part made truly round, ring by ring;
 //! - `sym`: the mirror plane, both sides averaged or one copied.
 
+pub mod circle;
 pub mod line;
 pub mod mesh;
 pub mod moves;
