@@ -1200,7 +1200,7 @@ impl AppState {
     /// Pivot of the selection (centre of the selected shapes).
     pub fn pivot(&self) -> Option<DVec3> {
         if self.sel_mode != SelMode::Object {
-            return None;
+            return self.comp_pivot();
         }
         let fs: Vec<&Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).collect();
         if fs.is_empty() {
@@ -1232,6 +1232,10 @@ impl AppState {
             self.begin_push_drag(h, p);
             return;
         }
+        if self.sel_mode != SelMode::Object {
+            self.begin_tweak_drag(h, p);
+            return;
+        }
         let Some(pivot) = self.handle_pivot(h) else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
         let start: Vec<Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).cloned().collect();
@@ -1254,6 +1258,10 @@ impl AppState {
         let Some(d) = self.drag.clone() else { return };
         if d.line.is_some() {
             self.update_push_drag(&d, p);
+            return;
+        }
+        if d.start.len() == 1 && d.start[0].tweak.is_some() {
+            self.update_tweak_drag(&d, p);
             return;
         }
         let pivot0 = match d.handle {

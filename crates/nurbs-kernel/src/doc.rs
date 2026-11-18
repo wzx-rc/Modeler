@@ -259,6 +259,43 @@ impl Push {
     }
 }
 
+/// A component of the part (Vertex, Edge and Face modes): found again at
+/// every build, a face by its tag and a point, an edge by the tags of its
+/// two faces and its middle, a vertex by its point.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Comp {
+    Face(FaceRef),
+    Edge(EdgeRef),
+    Vertex(DVec3),
+}
+
+/// A component moved by `delta` (direct modelling, Romain 18 nov.:
+/// "Manipulation de component"): its vertices move, the faces round them
+/// follow.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Tweak {
+    pub comp: Comp,
+    pub delta: DVec3,
+}
+
+impl Tweak {
+    pub fn label(&self) -> &'static str {
+        match self.comp {
+            Comp::Face(_) => "Move face",
+            Comp::Edge(_) => "Move edge",
+            Comp::Vertex(_) => "Move vertex",
+        }
+    }
+    /// Where the component was before the move.
+    pub fn at(&self) -> DVec3 {
+        match &self.comp {
+            Comp::Face(f) => f.at,
+            Comp::Edge(e) => e.at,
+            Comp::Vertex(p) => *p,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Feature {
     pub id: FeatureId,
@@ -284,19 +321,24 @@ pub struct Feature {
     /// before it (`origin` is the face point).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push: Option<Push>,
+    /// A face, edge or vertex moved: like `round`, a step on what is built
+    /// before it (`origin` is where the component was).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tweak: Option<Tweak>,
 }
 
 impl Feature {
     /// A primitive (Add / Carve), not a step on the part (fillet,
     /// chamfer, inset, extrude).
     pub fn is_solid(&self) -> bool {
-        self.round.is_none() && self.push.is_none()
+        self.round.is_none() && self.push.is_none() && self.tweak.is_none()
     }
     /// What it is: "Cube", "Cylinder", "Fillet", "Chamfer", "Inset", "Extrude".
     pub fn kind_label(&self) -> &'static str {
-        match (&self.round, &self.push) {
-            (Some(r), _) => r.label(),
-            (_, Some(p)) => p.label(),
+        match (&self.round, &self.push, &self.tweak) {
+            (Some(r), _, _) => r.label(),
+            (_, Some(p), _) => p.label(),
+            (_, _, Some(t)) => t.label(),
             _ => self.prim.kind().label(),
         }
     }
@@ -422,7 +464,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -432,7 +474,7 @@ impl Doc {
         let round = Round { size, chamfer, edges, blend: !chamfer };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None });
         id
     }
     /// Adds an inset or extrusion of a face at the end.
@@ -441,7 +483,16 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(push.label());
         let origin = push.face.at;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push) });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None });
+        id
+    }
+    /// Adds a move of a face, edge or vertex at the end.
+    pub fn add_tweak(&mut self, tweak: Tweak) -> FeatureId {
+        let id = self.next_id;
+        self.next_id += 1;
+        let name = self.fresh_name(tweak.label());
+        let origin = tweak.at();
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak) });
         id
     }
     /// "Cube", then "Cube 2", "Cube 3"…

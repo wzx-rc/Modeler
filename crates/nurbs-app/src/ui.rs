@@ -45,6 +45,9 @@ pub fn paint_op_glyph(p: &egui::Painter, c: egui::Pos2, op: Op, color: Color32, 
 
 /// A feature's icon: its primitive, or the fillet's.
 pub fn feature_icon(f: &Feature) -> Icon {
+    if f.tweak.is_some() {
+        return Icon::Move;
+    }
     match (&f.round, &f.push) {
         (Some(_), _) => Icon::Fillet,
         (_, Some(p)) if p.inset > 0.0 => Icon::Inset,
@@ -55,6 +58,9 @@ pub fn feature_icon(f: &Feature) -> Icon {
 
 /// What a step does, in a few words: "Fillet · 2 mm", "Inset · 2 mm · −3 mm".
 pub fn step_info(f: &Feature) -> String {
+    if let Some(t) = &f.tweak {
+        return format!("{} mm", fmt_mm(t.delta.length() as f32));
+    }
     match (&f.round, &f.push) {
         (Some(r), _) => format!("{} mm", fmt_mm(r.size as f32)),
         (_, Some(p)) if p.inset > 0.0 && p.depth != 0.0 => format!("{} · {} mm", fmt_mm(p.inset as f32), fmt_signed(p.depth)),
@@ -72,7 +78,7 @@ fn fmt_signed(v: f64) -> String {
 pub fn feature_color(f: &Feature) -> Color32 {
     if f.is_solid() {
         op_color(f.op)
-    } else if f.push.is_some() {
+    } else if f.push.is_some() || f.tweak.is_some() {
         FACE_SEL
     } else {
         EDGE_SEL
@@ -567,7 +573,7 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     ui.label(egui::RichText::new(if n > 1 { format!("{n} vertices picked") } else { "Vertex picked".to_string() }).font(semibold(14.0)).color(TEXT()));
                     let v = st.vert_sel[0];
                     ui.label(egui::RichText::new(format!("X {}  Y {}  Z {} mm", fmt_mm(v.x as f32), fmt_mm(v.y as f32), fmt_mm(v.z as f32))).font(regular(12.0)).color(TEXT2()));
-                    ui.label(egui::RichText::new("No tool uses vertices yet").font(regular(12.0)).color(TEXT2()));
+                    vertex_card(ui, st);
                 } else if st.single().is_some() {
                     properties(ui, st);
                 } else if !st.selection.is_empty() {
@@ -648,6 +654,12 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
                     st.set_sel_mode(SelMode::Object);
                 } else if f.push.is_some() {
                     st.set_sel_mode(SelMode::Face);
+                } else if let Some(t) = &f.tweak {
+                    st.set_sel_mode(match t.comp {
+                        nurbs_kernel::Comp::Face(_) => SelMode::Face,
+                        nurbs_kernel::Comp::Edge(_) => SelMode::Edge,
+                        nurbs_kernel::Comp::Vertex(_) => SelMode::Vertex,
+                    });
                 } else {
                     st.select_tool();
                     st.edge_sel.clear();
@@ -769,6 +781,10 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
     divider(ui);
     if f.push.is_some() {
         push_card(ui, st);
+        return;
+    }
+    if f.tweak.is_some() {
+        tweak_card(ui, st, id);
         return;
     }
     if !f.is_solid() {
@@ -950,6 +966,50 @@ fn push_card(ui: &mut Ui, st: &mut AppState) {
     let (ch, start) = slider_row(ui, "Depth", &mut depth, -span..=span, 0.1, "mm");
     if ch {
         st.set_push(p.inset, depth as f64, start || !st.is_live());
+    }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
+        st.end_live();
+    }
+}
+
+/// Vertices picked: the arrows move them; at a corner of a thin plate, a
+/// radius rounds it in its plane (a fillet on the short edge there).
+fn vertex_card(ui: &mut Ui, st: &mut AppState) {
+    ui.label(egui::RichText::new("Drag the arrows to move it: the faces round it follow").font(regular(12.0)).color(TEXT2()));
+    let corners = st.vert_sel.iter().filter(|v| st.corner_edge(**v).is_some()).count();
+    section(ui, "Round corner");
+    if corners == 0 {
+        ui.label(egui::RichText::new("Pick a corner of a thin plate to round it").font(regular(12.0)).color(TEXT2()));
+        return;
+    }
+    ui.label(egui::RichText::new(if corners > 1 { format!("{corners} thin corners: round them, then set the radius") } else { "A thin corner: round it, then set the radius".to_string() }).font(regular(12.0)).color(TEXT2()));
+    ui.horizontal_wrapped(|ui| {
+        for q in [1.0, 2.0, 5.0] {
+            if chip(ui, Some(Icon::Fillet), &format!("{} mm", fmt_mm(q as f32)), false, "Round the corner (a fillet on its short edge; it stops at the largest that works)").clicked() {
+                st.round_corners(q);
+                st.end_live();
+            }
+        }
+    });
+}
+
+/// A moved face, edge or vertex: how far, along X, Y and Z.
+fn tweak_card(ui: &mut Ui, st: &mut AppState, id: FeatureId) {
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let Some(t) = st.doc.feature(id).and_then(|f| f.tweak.clone()) else { return };
+    section(ui, "Move");
+    ui.label(egui::RichText::new("Drag the arrows, or set the move here. The faces round it follow: flat ones stay flat, a four-sided one may bend.").font(regular(12.0)).color(TEXT2()));
+    let span = (t.delta.abs().max_element().ceil() as f32 * 2.0).max(20.0);
+    for (k, label) in [(0usize, "X"), (1, "Y"), (2, "Z")] {
+        let mut v = t.delta[k] as f32;
+        let (ch, start) = slider_row(ui, label, &mut v, -span..=span, 0.1, "mm");
+        if ch {
+            feature_edit(st, id, "Move", start, |g| {
+                if let Some(tw) = g.tweak.as_mut() {
+                    tw.delta[k] = v as f64;
+                }
+            });
+        }
     }
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
         st.end_live();

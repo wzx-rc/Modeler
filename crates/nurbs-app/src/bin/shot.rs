@@ -715,6 +715,86 @@ fn main() {
         h.shot("zero-quads-hole-edge");
     }
 
+    if want("comp") {
+        // component moves (Romain 18 nov.: "Manipulation de component"): a
+        // face, an edge and a vertex of a block moved with the gizmo; then a
+        // corner of a thin plate rounded (vertex fillet)
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(30.0, 30.0, 20.0));
+        h.steps(2);
+        // drags the gizmo's arrow `axis` by `mm`
+        let pull = |h: &mut Harness, axis: usize, mm: f32| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + Vec3::AXES[axis]) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let by = h.screen_of(c + Vec3::AXES[axis] * mm) - s0;
+            h.drag(grab, grab + by, 10, true);
+            h.settle();
+        };
+        // Face mode: the +X face, out 8 mm
+        h.key(egui::Key::Num3);
+        let side = h.screen_of(Vec3::new(20.0, 10.0, 5.0));
+        h.click(side);
+        h.move_to(side + egui::vec2(0.0, 2.0));
+        h.steps(2);
+        h.shot("zero-comp-1-face-picked");
+        pull(&mut h, 0, 8.0);
+        h.shot("zero-comp-2-face-moved");
+        // Edge mode: the top front edge, up 6 mm (the top and the front tilt)
+        h.key(egui::Key::Num2);
+        let edge = h.screen_of(Vec3::new(0.0, 20.0, 15.0));
+        h.click(edge);
+        h.steps(2);
+        pull(&mut h, 1, 6.0);
+        h.shot("zero-comp-3-edge-moved");
+        // Vertex mode: the front left top corner (raised with the edge), up
+        // 8 mm more: the top and the left side bend
+        h.key(egui::Key::Num1);
+        let corner = h.screen_of(Vec3::new(-20.0, 26.0, 15.0));
+        h.click(corner);
+        h.steps(2);
+        h.shot("zero-comp-4a-vertex-picked");
+        pull(&mut h, 1, 8.0);
+        h.shot("zero-comp-4-vertex-moved");
+        let made = h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| (f.name.clone(), t.delta))).collect::<Vec<_>>();
+        eprintln!("  moves {made:?}, errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.st.quads = true;
+        h.steps(2);
+        h.settle();
+        h.shot("zero-comp-5-quads");
+        h.st.quads = false;
+
+        // a thin plate: its front right corner rounded at 5 mm
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 3.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Plate");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(25.0, 10.0, 20.0));
+        h.steps(2);
+        h.key(egui::Key::Num1);
+        let corner = h.screen_of(Vec3::new(20.0, 3.0, 15.0));
+        h.click(corner);
+        h.steps(2);
+        h.shot("zero-comp-6-corner-picked");
+        h.st.round_corners(5.0);
+        h.st.end_live();
+        h.settle();
+        // two more corners, picked together
+        h.click(h.screen_of(Vec3::new(-20.0, 3.0, 15.0)));
+        h.hold(egui::Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(20.0, 3.0, -15.0)));
+        h.hold(egui::Modifiers::NONE);
+        h.st.round_corners(8.0);
+        h.st.end_live();
+        h.settle();
+        h.move_to(h.screen_of(Vec3::new(0.0, -10.0, 40.0)));
+        h.steps(2);
+        h.shot("zero-comp-7-corners-rounded");
+        eprintln!("  plate: {:?}", h.st.doc.features.iter().map(|f| (f.name.clone(), f.round.as_ref().map(|r| (r.size, r.edges.len())))).collect::<Vec<_>>());
+    }
+
     if want("snap") {
         // snapping to the part's points of interest, Plasticity style
         h.reset(test_part(), "Test part");

@@ -6,7 +6,7 @@
 //! result after each feature (by the content of everything up to it). While
 //! one feature moves, only the booleans from it onwards are made again.
 
-use crate::doc::{Doc, EdgeRef, FaceRef, Feature, Op, Prim, Push, Round};
+use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, Op, Prim, Push, Round, Tweak};
 use crate::model::{Edge, EdgeKind, Face, FaceTag, Model, SurfKind};
 use crate::proto::step;
 use forme_occt::{Shape, SurfKind as OccSurf};
@@ -349,6 +349,46 @@ fn push(acc: &Shape, f: &Feature, p: &Push) -> Result<Option<Shape>, String> {
     if p.depth > 0.0 { acc.fuse(&prism) } else { acc.cut(&prism) }.map(Some)
 }
 
+/// The vertices (1-based) a component names on what is built so far.
+fn comp_vertices(acc: &Shape, c: &Comp) -> Result<Vec<i32>, String> {
+    match c {
+        Comp::Face(r) => {
+            let face = find_face(acc, r).ok_or("its face is gone")?;
+            Ok(acc.face_vertices(face))
+        }
+        Comp::Edge(r) => {
+            let (e, _) = resolve(acc, std::slice::from_ref(r));
+            let e = e.first().ok_or("its edge is gone")?;
+            Ok(acc.edge_vertices(*e))
+        }
+        Comp::Vertex(p) => {
+            let pts = acc.vertex_points();
+            let best = pts.iter().enumerate().map(|(i, q)| (i, DVec3::from_array(*q).distance(*p))).min_by(|a, b| a.1.total_cmp(&b.1));
+            match best {
+                Some((i, d)) if d < 1.0 => Ok(vec![i as i32 + 1]),
+                _ => Err("its vertex is gone".into()),
+            }
+        }
+    }
+}
+
+/// A face, edge or vertex moved (`doc::Tweak`) on what is built so far:
+/// its vertices moved by `delta`, the faces round them following. None
+/// when it does not move.
+fn tweak(acc: &Shape, f: &Feature, t: &Tweak) -> Result<Option<Shape>, String> {
+    if t.delta.length() < 1e-6 {
+        return Ok(None);
+    }
+    let vs = comp_vertices(acc, &t.comp)?;
+    if vs.is_empty() {
+        return Err("nothing to move".into());
+    }
+    let pts = acc.vertex_points();
+    let moves: Vec<(i32, [f64; 3])> = vs.iter().map(|&v| (v, (DVec3::from_array(pts[(v - 1) as usize]) + t.delta).to_array())).collect();
+    mark(&step("tweak", f));
+    acc.move_vertices(&moves).map(Some)
+}
+
 fn hash2(a: u64, b: u64) -> u64 {
     crate::doc::fnv(&[a.to_le_bytes(), b.to_le_bytes()].concat())
 }
@@ -369,7 +409,7 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         let fh = f.hash();
         key = hash2(key, fh);
         let skipped = |what: &str| skip.iter().any(|s| *s == step(what, f));
-        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") {
+        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") {
             key = hash2(key, 1);
         }
         used_stages.push(key);
@@ -411,6 +451,22 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         if let Some(p) = &f.push {
             if let Some(acc) = stage.shape.clone() {
                 let res = if skipped("push") { Err("skipped, it crashed the kernel".to_string()) } else { push(&acc, f, p) };
+                match res {
+                    Ok(Some(s)) => {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                    }
+                    Ok(None) => {}
+                    Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
+                }
+            }
+            cache.stages.insert(key, stage.clone());
+            continue;
+        }
+        // a face, edge or vertex moved: on the solid built so far
+        if let Some(t) = &f.tweak {
+            if let Some(acc) = stage.shape.clone() {
+                let res = if skipped("tweak") { Err("skipped, it crashed the kernel".to_string()) } else { tweak(&acc, f, t) };
                 match res {
                     Ok(Some(s)) => {
                         model.booleans += 1;
@@ -716,6 +772,48 @@ mod tests {
         assert_eq!(ff.len(), 1);
         let on_right = m6.triangles.iter().zip(&m6.tri_face).filter(|(_, f)| m6.faces[**f as usize].tag.map(|t| t.feature) == Some(r2)).all(|(t, _)| t.iter().all(|v| m6.positions[*v as usize][0] > 3.9));
         assert!(on_right, "the right piece of the edge");
+    }
+
+    #[test]
+    fn components_moved() {
+        // a block with a hole through its top: its +X face moved out 5 mm,
+        // then its top front edge raised, then a corner pulled
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
+        let mv = d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 10.0, 0.0) }), delta: DVec3::new(5.0, 0.0, 0.0) });
+        assert_eq!(d.feature(mv).unwrap().kind_label(), "Move face");
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let side = m.faces.iter().find(|f| f.tag == Some(FaceTag { feature: b, sub: 0 })).unwrap();
+        assert!((side.point[0] - 25.0).abs() < 1e-6, "{:?}", side.point);
+        // the front top edge (top, +Z) raised 4 mm: the top tilts
+        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(2.5, 20.0, 15.0) }), delta: DVec3::new(0.0, 4.0, 0.0) });
+        let m = build(&d, true, false, &[], &mut cache);
+        // the top has the hole: it cannot tilt yet
+        assert!(m.errors.iter().any(|e| e.contains("hole")), "{:?}", m.errors);
+        d.features.pop();
+        // the front face's bottom edge pushed forward 4 mm: the front tilts
+        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 3), tag(b, 4)], at: DVec3::new(2.5, 0.0, 15.0) }), delta: DVec3::new(0.0, 0.0, 4.0) });
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let front = m.faces.iter().find(|f| f.tag == Some(FaceTag { feature: b, sub: 4 })).unwrap();
+        assert!(front.normal[1] > 0.1, "the front leans back: {:?}", front.normal);
+        // a fillet after the moves finds its edge (front, +X side)
+        d.add_round(2.0, false, vec![EdgeRef { faces: [tag(b, 0), tag(b, 4)], at: DVec3::new(25.0, 10.0, 17.0) }]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        // a cube's top corner pulled up: three faces bend; a fillet after it
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(10.0, 20.0, 10.0)), delta: DVec3::new(0.0, 4.0, 0.0) });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(m.positions.iter().any(|p| (p[1] - 24.0).abs() < 1e-4), "the corner is up");
+        d.add_round(1.0, false, vec![EdgeRef { faces: [tag(c, 1), tag(c, 5)], at: DVec3::new(-10.0, 10.0, -10.0) }]);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
     }
 
     #[test]

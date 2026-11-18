@@ -21,5 +21,5 @@ pub mod build;
 #[cfg(feature = "occ")]
 pub mod quads;
 
-pub use doc::{Doc, EdgeRef, FaceRef, Feature, FeatureId, Op, Prim, Profile, Push, Round};
+pub use doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Op, Prim, Profile, Push, Round, Tweak};
 pub use model::{Edge, Face, FaceTag, Model, Quads};

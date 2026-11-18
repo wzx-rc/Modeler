@@ -6,8 +6,8 @@
 use crate::state::*;
 use glam::{DVec3, Vec3};
 use nurbs_kernel::doc::Push;
-use nurbs_kernel::model::SurfKind;
-use nurbs_kernel::{FaceRef, FeatureId};
+use nurbs_kernel::model::{EdgeKind, SurfKind};
+use nurbs_kernel::{Comp, EdgeRef, FaceRef, Feature, FeatureId, Tweak};
 
 /// A new inset (mm).
 const DEFAULT_INSET: f64 = 2.0;
@@ -446,4 +446,138 @@ fn point_triangle(p: Vec3, t: [Vec3; 3]) -> f32 {
             (p - (*u + d * s)).length()
         })
         .fold(f32::MAX, f32::min)
+}
+
+// ------------------------------------------------- component moves
+
+impl AppState {
+    /// The edge a vertex fillet rounds (Romain 18 nov.: "Fillet sur les
+    /// vertex quand on a une surface fine"): at a corner of a thin plate,
+    /// the short straight edge across its thickness, much shorter than the
+    /// other edges at that corner. None elsewhere.
+    pub fn corner_edge(&self, v: DVec3) -> Option<EdgeRef> {
+        let m = self.model.as_ref()?;
+        let at = v.as_vec3();
+        let mut here: Vec<(usize, f32, bool)> = m
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.seam && e.pts.len() >= 2)
+            .filter(|(_, e)| e.pts.first().map(|p| Vec3::from_array(*p).distance(at) < 1e-3).unwrap_or(false) || e.pts.last().map(|p| Vec3::from_array(*p).distance(at) < 1e-3).unwrap_or(false))
+            .map(|(i, e)| (i, e.pts.windows(2).map(|w| Vec3::from_array(w[0]).distance(Vec3::from_array(w[1]))).sum::<f32>(), e.kind == EdgeKind::Line))
+            .collect();
+        here.sort_by(|a, b| a.1.total_cmp(&b.1));
+        match here.as_slice() {
+            [(i, short, true), (_, next, _), ..] if *short < 0.6 * *next => self.edge_ref(*i),
+            _ => None,
+        }
+    }
+
+    /// Rounds the corners at the picked vertices (their short edges) at
+    /// `size`: one fillet step, selected after.
+    pub fn round_corners(&mut self, size: f64) {
+        let mut edges: Vec<EdgeRef> = vec![];
+        for v in self.vert_sel.clone() {
+            if let Some(r) = self.corner_edge(v) {
+                if !edges.iter().any(|e| e.key() == r.key() && e.at.distance(r.at) < 1e-3) {
+                    edges.push(r);
+                }
+            }
+        }
+        if edges.is_empty() || size <= 1e-6 {
+            return;
+        }
+        self.edge_sel = edges;
+        self.set_round(size, false, true);
+        self.edge_sel.clear();
+        // the corners are gone: the fillet stays selected
+        self.vert_sel.clear();
+        self.hover_vertex = None;
+    }
+
+    /// The selected move step (Move face / edge / vertex), if one.
+    pub fn selected_tweak(&self) -> Option<&Feature> {
+        self.single().filter(|f| f.tweak.is_some())
+    }
+
+    /// The component the gizmo moves in Vertex, Edge and Face modes: the
+    /// selected move step's, else the first one picked.
+    pub fn picked_comp(&self) -> Option<Comp> {
+        match self.sel_mode {
+            SelMode::Face => self.face_sel.first().cloned().map(Comp::Face),
+            SelMode::Edge => self.edge_sel.first().cloned().map(Comp::Edge),
+            SelMode::Vertex => self.vert_sel.first().copied().map(Comp::Vertex),
+            SelMode::Object => None,
+        }
+    }
+
+    /// Where the gizmo sits in Vertex, Edge and Face modes.
+    pub fn comp_pivot(&self) -> Option<DVec3> {
+        if self.tool != Tool::Select || self.push.is_some() {
+            return None;
+        }
+        if let Some(t) = self.selected_tweak().and_then(|f| f.tweak.as_ref()) {
+            return Some(t.at() + t.delta);
+        }
+        match self.picked_comp()? {
+            Comp::Face(f) => Some(f.at),
+            Comp::Edge(e) => Some(e.at),
+            Comp::Vertex(v) => Some(v),
+        }
+    }
+
+    /// A drag on the gizmo in Vertex, Edge or Face mode: the selected move
+    /// step changes, or a new one starts on the picked component.
+    pub(crate) fn begin_tweak_drag(&mut self, h: Handle, p: [f32; 2]) {
+        if !matches!(h, Handle::Axis(_) | Handle::Plane(_)) {
+            return;
+        }
+        let Some(pivot) = self.comp_pivot() else { return };
+        let Some(grab) = self.handle_param(h, pivot, p) else { return };
+        let id = match self.selected_tweak() {
+            Some(f) => {
+                let id = f.id;
+                self.begin_live("Move");
+                id
+            }
+            None => {
+                let Some(comp) = self.picked_comp() else { return };
+                let t = Tweak { comp, delta: DVec3::ZERO };
+                self.begin_live(t.label());
+                let mut id = 0;
+                self.live(|d| id = d.add_tweak(t));
+                self.select(Some(id), false);
+                id
+            }
+        };
+        let Some(f) = self.doc.feature(id).cloned() else { return };
+        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None });
+    }
+
+    pub(crate) fn update_tweak_drag(&mut self, d: &Drag, p: [f32; 2]) {
+        let Some(t0) = d.start[0].tweak.clone() else { return };
+        let id = d.start[0].id;
+        let pivot0 = t0.at() + t0.delta;
+        let Some(now) = self.handle_param(d.handle, pivot0, p) else { return };
+        let raw = now - d.grab;
+        let mut delta = DVec3::new(self.snap(raw.x), self.snap(raw.y), self.snap(raw.z));
+        self.snap_shown = None;
+        let a = match d.handle {
+            Handle::Axis(a) | Handle::Plane(a) => a,
+            _ => return,
+        };
+        // a point of interest under the pointer: the component lines up
+        // with it, along the axis or in the plane
+        if let Some(s) = self.pick_snap(p, &[]).cloned() {
+            let mask = if matches!(d.handle, Handle::Axis(_)) { DVec3::AXES[a] } else { DVec3::ONE - DVec3::AXES[a] };
+            delta = (s.pos - pivot0) * mask;
+            let pos = pivot0 + delta;
+            self.snap_shown = Some(crate::snap::Snapped { pos, kind: s.kind, source: (pos.distance(s.pos) > 1e-3).then_some(s.pos), guides: vec![] });
+        }
+        self.live(|doc| {
+            if let Some(tw) = doc.feature_mut(id).and_then(|f| f.tweak.as_mut()) {
+                tw.delta = t0.delta + delta;
+            }
+        });
+    }
 }

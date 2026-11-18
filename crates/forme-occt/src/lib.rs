@@ -50,6 +50,9 @@ extern "C" {
     fn focc_extrude(s: *const FShape, dx: c_double, dy: c_double, dz: c_double) -> *mut FShape;
     fn focc_imprint(s: *const FShape, tool: *const FShape) -> *mut FShape;
     fn focc_face_distance(s: *const FShape, face: c_int, p: *const c_double) -> c_double;
+    fn focc_vertex_points(s: *const FShape, xyz: *mut c_double, cap: c_int) -> c_int;
+    fn focc_sub_vertices(s: *const FShape, kind: c_int, index: c_int, out: *mut c_int, cap: c_int) -> c_int;
+    fn focc_move_vertices(s: *const FShape, idx: *const c_int, xyz: *const c_double, n: c_int) -> *mut FShape;
     fn focc_face_count(s: *const FShape) -> c_int;
     fn focc_face_info(s: *const FShape, index: c_int, out: *mut c_double) -> c_int;
     fn focc_set_tags(s: *mut FShape, tags: *const i64, n: c_int);
@@ -483,6 +486,36 @@ impl Shape {
         let d = unsafe { focc_face_distance(self.0, face as c_int, p.as_ptr()) };
         (d >= 0.0).then_some(d)
     }
+    /// The vertices' points, vertex `i` (1-based in OpenCascade's vertex
+    /// map) at `[i - 1]`.
+    pub fn vertex_points(&self) -> Vec<[f64; 3]> {
+        let n = unsafe { focc_vertex_points(self.0, std::ptr::null_mut(), 0) }.max(0) as usize;
+        let mut v = vec![0.0f64; 3 * n];
+        unsafe { focc_vertex_points(self.0, v.as_mut_ptr(), n as c_int) };
+        v.chunks(3).map(|c| [c[0], c[1], c[2]]).collect()
+    }
+    /// The vertices (1-based) of an edge (1-based index in the edge map).
+    pub fn edge_vertices(&self, edge: i32) -> Vec<i32> {
+        self.sub_vertices(1, edge)
+    }
+    /// The vertices (1-based) of a face (0-based).
+    pub fn face_vertices(&self, face: usize) -> Vec<i32> {
+        self.sub_vertices(2, face as i32)
+    }
+    fn sub_vertices(&self, kind: i32, index: i32) -> Vec<i32> {
+        let mut v = vec![0 as c_int; 256];
+        let n = unsafe { focc_sub_vertices(self.0, kind, index, v.as_mut_ptr(), v.len() as c_int) };
+        v.truncate(n.max(0) as usize);
+        v
+    }
+    /// The solid with vertices moved (1-based index, new point), the faces
+    /// round them following (flat faces with straight edges for now; a bent
+    /// four-sided face becomes a bilinear patch). Tags stay.
+    pub fn move_vertices(&self, moves: &[(i32, [f64; 3])]) -> Result<Shape, String> {
+        let idx: Vec<c_int> = moves.iter().map(|m| m.0).collect();
+        let xyz: Vec<f64> = moves.iter().flat_map(|m| m.1).collect();
+        shape(unsafe { focc_move_vertices(self.0, idx.as_ptr(), xyz.as_ptr(), idx.len() as c_int) })
+    }
     pub fn face_count(&self) -> usize {
         unsafe { focc_face_count(self.0) }.max(0) as usize
     }
@@ -740,6 +773,43 @@ mod tests {
         let p = Shape::prism(&l, &[false; 6], 2.0).unwrap();
         let all: Vec<i32> = p.edges(2).iter().map(|e| e.index).collect();
         assert!(p.fillet(&all, 0.5, 99).unwrap().is_valid());
+    }
+
+    #[test]
+    fn vertices_moved() {
+        // a 20 mm cube centred: its top face (y = 10) moved up, then aside
+        let mut cube = Shape::cuboid(20.0, 20.0, 20.0).unwrap();
+        let n = cube.face_count();
+        cube.set_tags(&(0..n as i64).collect::<Vec<_>>());
+        let pts = cube.vertex_points();
+        let top: Vec<i32> = (1..=pts.len() as i32).filter(|i| (pts[(*i - 1) as usize][1] - 10.0).abs() < 1e-6).collect();
+        assert_eq!(top.len(), 4);
+        let up = cube.move_vertices(&top.iter().map(|i| (*i, { let p = pts[(*i - 1) as usize]; [p[0], p[1] + 5.0, p[2]] })).collect::<Vec<_>>()).unwrap();
+        assert!((up.volume() - 20.0 * 20.0 * 25.0).abs() < 1e-6, "{}", up.volume());
+        let mut tags: Vec<i64> = (0..up.face_count()).map(|f| up.face_tag(f)).collect();
+        tags.sort();
+        assert_eq!(tags, (0..n as i64).collect::<Vec<_>>(), "each face keeps its tag");
+        let aside = cube.move_vertices(&top.iter().map(|i| (*i, { let p = pts[(*i - 1) as usize]; [p[0] + 6.0, p[1], p[2]] })).collect::<Vec<_>>()).unwrap();
+        assert!((aside.volume() - 8000.0).abs() < 1e-6, "a shear keeps the volume: {}", aside.volume());
+        // one edge of the top raised: two faces tilt, two stay flat and grow
+        let edge: Vec<i32> = top.iter().copied().filter(|i| pts[(*i - 1) as usize][2] > 0.0).collect();
+        let e = cube.move_vertices(&edge.iter().map(|i| (*i, { let p = pts[(*i - 1) as usize]; [p[0], p[1] + 4.0, p[2]] })).collect::<Vec<_>>()).unwrap();
+        assert!((e.volume() - (8000.0 + 0.5 * 4.0 * 20.0 * 20.0)).abs() < 1e-6, "{}", e.volume());
+        // one corner up: three faces bend into bilinear patches
+        let c = cube.move_vertices(&[(top[0], { let p = pts[(top[0] - 1) as usize]; [p[0], p[1] + 4.0, p[2]] })]).unwrap();
+        assert!(c.volume() > 8000.0 && c.volume() < 8000.0 + 4.0 * 400.0, "{}", c.volume());
+        // a block with a hole: its side face moved out, the top grows round the hole
+        let hole = Shape::cylinder(4.0, 40.0).unwrap();
+        let block = Shape::cuboid(40.0, 20.0, 20.0).unwrap().cut(&hole).unwrap();
+        let pts = block.vertex_points();
+        let side: Vec<(i32, [f64; 3])> = (1..=pts.len() as i32).filter(|i| (pts[(*i - 1) as usize][0] - 20.0).abs() < 1e-6).map(|i| { let p = pts[(i - 1) as usize]; (i, [p[0] + 5.0, p[1], p[2]]) }).collect();
+        assert_eq!(side.len(), 4);
+        let v0 = block.volume();
+        let b = block.move_vertices(&side).unwrap();
+        assert!((b.volume() - (v0 + 5.0 * 20.0 * 20.0)).abs() < 1e-6, "{} vs {}", b.volume(), v0);
+        // the top face (with the hole) cannot tilt
+        let top: Vec<(i32, [f64; 3])> = (1..=pts.len() as i32).filter(|i| { let p = pts[(*i - 1) as usize]; (p[1] - 10.0).abs() < 1e-6 && (p[0] - 20.0).abs() < 1e-6 }).map(|i| { let p = pts[(i - 1) as usize]; (i, [p[0], p[1] + 3.0, p[2]]) }).collect();
+        assert!(block.move_vertices(&top).is_err());
     }
 
     #[test]

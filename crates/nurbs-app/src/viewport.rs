@@ -100,10 +100,10 @@ fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
             }
         }
     }
-    if st.tool != Tool::Select || st.creation.is_some() || st.sel_mode != SelMode::Object {
+    if st.tool != Tool::Select || st.creation.is_some() {
         return None;
     }
-    if let Some(f) = st.single() {
+    if let Some(f) = st.single().filter(|_| st.sel_mode == SelMode::Object) {
         for h in size_handles(f) {
             if let Some(q) = size_handle_pos(f, h).and_then(|w| world(st, w)) {
                 if (q - p).length() < 9.0 {
@@ -237,6 +237,25 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         return;
     }
 
+    // Vertex, Edge and Face modes: the selected inset's dot and arrow, the
+    // gizmo of the picked component (a drag moves it, Plasticity style)
+    if st.tool == Tool::Select && st.sel_mode != SelMode::Object {
+        if resp.drag_started_by(PointerButton::Primary) {
+            let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+            if let Some(h) = handle_at(st, origin) {
+                st.begin_drag(h, p2(origin));
+            }
+        }
+        if resp.dragged_by(PointerButton::Primary) && st.drag.is_some() {
+            if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                st.update_drag(p2(p));
+            }
+        }
+        if resp.drag_stopped() && st.drag.is_some() {
+            st.end_drag();
+        }
+    }
+
     match st.tool {
         Tool::Select if st.sel_mode == SelMode::Edge => {
             if resp.clicked_by(PointerButton::Primary) {
@@ -253,21 +272,6 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
         }
         Tool::Select if st.sel_mode == SelMode::Face => {
-            // the selected inset's dot and arrow
-            if resp.drag_started_by(PointerButton::Primary) {
-                let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
-                if let Some(h) = handle_at(st, origin) {
-                    st.begin_drag(h, p2(origin));
-                }
-            }
-            if resp.dragged_by(PointerButton::Primary) && st.drag.is_some() {
-                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
-                    st.update_drag(p2(p));
-                }
-            }
-            if resp.drag_stopped() {
-                st.end_drag();
-            }
             if resp.clicked_by(PointerButton::Primary) {
                 let at = resp.interact_pointer_pos().or(hover).map(p2);
                 st.click_face(at, shift || ctrl);
@@ -425,7 +429,9 @@ fn arrow(p: &Painter, a: Pos2, b: Pos2, color: Color32, width: f32) {
 }
 
 fn draw_gizmo(p: &Painter, st: &AppState) {
-    if st.tool != Tool::Select || st.creation.is_some() || st.selection.is_empty() || st.sel_mode != SelMode::Object {
+    // shapes selected (Object mode), or a component picked (Vertex, Edge,
+    // Face modes): `pivot` says where, if anywhere
+    if st.tool != Tool::Select || st.creation.is_some() {
         return;
     }
     let hot = st.hot_handle;
