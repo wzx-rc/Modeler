@@ -14,7 +14,12 @@ fn main() {
     let t = Instant::now();
     let mut p = Pipeline::new(m);
     println!("topo {:.1}s", t.elapsed().as_secs_f64());
-    let params = Params::default();
+    let mut params = Params::default();
+    if let Ok(s) = std::env::var("RECTIFY_PARAMS") {
+        for k in params.apply(&s) {
+            eprintln!("unknown setting {k}");
+        }
+    }
     for s in Step::ALL {
         p.run(s, &params, &|_| {});
         let secs = p.times[s.index()].unwrap_or(0.0);
@@ -31,7 +36,7 @@ fn main() {
                 println!("regions {:.1}s: {} planes, {} cylinders, {} spheres, {:.1} % covered", secs, sg.count(Kind::Plane), sg.count(Kind::Cylinder), sg.count(Kind::Sphere), sg.covered(&areas) * 100.0);
                 let mut rs: Vec<_> = sg.regions.iter().collect();
                 rs.sort_by(|a, b| b.area.partial_cmp(&a.area).unwrap());
-                for r in rs.iter().take(25) {
+                for r in rs.iter().take(if std::env::var("RECTIFY_LIST").is_ok() { 25 } else { 0 }) {
                     println!("   {:9} {:8.1} mm²  rms {:.3}  {}", r.prim.kind().label(), r.area, r.rms, r.prim.describe());
                 }
             }
@@ -42,7 +47,7 @@ fn main() {
             }
             Step::Snap => {
                 if let Some(r) = &p.snap {
-                    println!("snap {:.1}s: edges {} radii p10 {:.2} p50 {:.2} p90 {:.2}, face {} edge {} faded {} free {}, mean {:.3} max {:.3}", secs, r.edges, r.radii.get(r.radii.len() / 10).unwrap_or(&0.0), r.radii.get(r.radii.len() / 2).unwrap_or(&0.0), r.radii.get(r.radii.len() * 9 / 10).unwrap_or(&0.0), r.on_face, r.on_edge, r.faded, r.free, r.mean_move, r.max_move);
+                    println!("snap {:.1}s: edges {} (tangent {}, rejected {}, radius groups {}) radii p10 {:.2} p50 {:.2} p90 {:.2}, on edge {} faded {} free {} eased {}, mean {:.3} max {:.3}", secs, r.edges, r.tangent, r.rejected, r.radius_groups, r.radii.get(r.radii.len() / 10).unwrap_or(&0.0), r.radii.get(r.radii.len() / 2).unwrap_or(&0.0), r.radii.get(r.radii.len() * 9 / 10).unwrap_or(&0.0), r.on_edge, r.faded, r.free, r.eased, r.mean_move, r.max_move);
                 }
             }
         }

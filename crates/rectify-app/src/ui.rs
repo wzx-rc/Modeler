@@ -405,7 +405,7 @@ fn step_card(ui: &mut Ui, st: &mut AppState) {
             }
         }
         Step::Snap => {
-            title(ui, "5 · Snap", "Vertices onto their shapes; where two planes meet, a clean edge (fillet of fitted radius, or sharp)");
+            title(ui, "5 · Snap", "Edges rebuilt where two shapes meet (fillet of fitted radius, or sharp); the faces move only near them");
             use rectify_core::snap::Edges;
             let items = [(Edges::Fillet, "Fillet", accent()), (Edges::Sharp, "Sharp", accent()), (Edges::Soft, "Keep", accent())];
             if let Some(e) = segmented(ui, &items, p.snap.edges, 28.0) {
@@ -413,11 +413,16 @@ fn step_card(ui: &mut Ui, st: &mut AppState) {
             }
             slider_f64(ui, "Edge gap", &mut p.snap.gap, 0.2..=6.0, 0.1, "mm");
             slider_f64(ui, "Edge angle", &mut p.snap.edge_angle, 5.0..=80.0, 1.0, "°");
-            slider_f64(ui, "Feather", &mut p.snap.feather, 0.0..=3.0, 0.05, "mm");
+            slider_f64(ui, "Edge fit", &mut p.snap.edge_tol, 0.02..=0.6, 0.01, "mm");
+            slider_f64(ui, "Min radius", &mut p.snap.min_radius, 0.0..=2.0, 0.05, "mm");
+            slider_f64(ui, "Radius step", &mut p.snap.round, 0.0..=0.5, 0.05, "mm");
+            slider_f64(ui, "Fade", &mut p.snap.fade, 0.0..=3.0, 0.05, "mm");
+            slider_f64(ui, "Flatten", &mut p.snap.flatten, 0.0..=1.0, 0.05, "");
             slider_f64(ui, "Max move", &mut p.snap.max_move, 0.05..=5.0, 0.05, "mm");
             if let Some(r) = pipe.and_then(|p| p.snap.as_ref()) {
-                line(ui, format!("{} edges rebuilt{}", r.edges, if r.radii.is_empty() { String::new() } else { format!(" · median radius {} mm", fmt(r.radii[r.radii.len() / 2], 2)) }));
-                line(ui, format!("{} k on a face · {} k on an edge · {} k faded · {} k free", r.on_face / 1000, r.on_edge / 1000, r.faded / 1000, r.free / 1000));
+                line(ui, format!("{} edges rebuilt{}", r.edges, if r.radii.is_empty() { String::new() } else { format!(" · {} radii, median {} mm", r.radius_groups, fmt(r.radii[r.radii.len() / 2], 2)) }));
+                line(ui, format!("{} continue each other · {} left alone", r.tangent, r.rejected));
+                line(ui, format!("{} k on an edge · {} k faded · {} k untouched", r.on_edge / 1000, r.faded / 1000, r.free / 1000));
                 line(ui, format!("Moved {} mm on average, {} at most", fmt(r.mean_move, 3), fmt(r.max_move, 2)));
             }
         }

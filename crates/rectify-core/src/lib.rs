@@ -12,6 +12,7 @@
 //!    (`snap`).
 
 pub mod clean;
+pub mod edit;
 pub mod mesh;
 pub mod pipeline;
 pub mod prim;

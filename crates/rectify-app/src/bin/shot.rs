@@ -203,6 +203,12 @@ fn main() {
         h.st.frame_all();
         h.shot("ui-0-loaded");
     }
+    // RECTIFY_PARAMS="fade=2,flatten=0.3,tol=0.3,…": settings to try
+    if let Ok(s) = std::env::var("RECTIFY_PARAMS") {
+        for k in h.st.params.apply(&s) {
+            eprintln!("unknown setting {k}");
+        }
+    }
     h.st.run_all();
     h.wait();
     eprintln!("steps done in {:.1}s", t.elapsed().as_secs_f64());
@@ -260,6 +266,20 @@ fn main() {
     for (n, f, d, y, p) in close {
         if want(n) {
             look(&mut h, f, d, y, p);
+            // RECTIFY_PICK="x,y;x,y": the world points under these screen points
+            if let Ok(s) = std::env::var("RECTIFY_PICK") {
+                h.st.bare = true;
+                h.steps(2);
+                for xy in s.split(';') {
+                    let v: Vec<f32> = xy.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+                    if v.len() == 2 {
+                        if let Some(t) = h.st.pick([v[0], v[1]]) {
+                            let m = h.st.pipe.as_ref().unwrap().original.tri_centre(t);
+                            eprintln!("PICK {n} {xy}: tri {t} at {:.3} {:.3} {:.3}", m.x, m.y, m.z);
+                        }
+                    }
+                }
+            }
             h.trio(n, true);
         }
     }

@@ -40,6 +40,7 @@ pub struct Region {
     pub locked: bool,
 }
 
+#[derive(Clone)]
 pub struct Segmentation {
     /// Region of each triangle, NONE when free.
     pub label: Vec<u32>,
@@ -48,7 +49,7 @@ pub struct Segmentation {
 
 impl Segmentation {
     pub fn count(&self, k: Kind) -> usize {
-        self.regions.iter().filter(|r| r.prim.kind() == k).count()
+        self.regions.iter().filter(|r| r.prim.kind() == k && !r.faces.is_empty()).count()
     }
     pub fn covered(&self, areas: &[f64]) -> f64 {
         let total: f64 = areas.iter().sum();

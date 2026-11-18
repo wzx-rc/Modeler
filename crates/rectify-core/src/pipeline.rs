@@ -54,6 +54,42 @@ impl Default for Params {
     }
 }
 
+impl Params {
+    /// Settings from text, "fade=2,tol=0.3" (the capture harness and the
+    /// probe try settings this way). Unknown keys are returned.
+    pub fn apply(&mut self, text: &str) -> Vec<String> {
+        let mut unknown = vec![];
+        for kv in text.split(',') {
+            let mut it = kv.split('=');
+            let (Some(k), Some(v)) = (it.next(), it.next().and_then(|v| v.trim().parse::<f64>().ok())) else { continue };
+            match k.trim() {
+                "fade" => self.snap.fade = v,
+                "flatten" => self.snap.flatten = v,
+                "gap" => self.snap.gap = v,
+                "edge_tol" => self.snap.edge_tol = v,
+                "edge_angle" => self.snap.edge_angle = v,
+                "max_move" => self.snap.max_move = v,
+                "round" => self.snap.round = v,
+                "min_radius" => self.snap.min_radius = v,
+                "relax" => self.snap.relax = v as usize,
+                "tol" => self.seg.tol = v,
+                "angle" => self.seg.angle = v,
+                "min_area" => self.seg.min_area = v,
+                "max_radius" => self.seg.max_radius = v,
+                "smooth_radius" => self.smooth.radius = v,
+                "smooth_angle" => self.smooth.angle = v,
+                "smooth_iters" => self.smooth.normal_iters = v as usize,
+                "vertex_iters" => self.smooth.vertex_iters = v as usize,
+                "sym_tol" => self.sym_tol = v,
+                "symmetry" => self.symmetry = v != 0.0,
+                "reg" => self.reg_on = v != 0.0,
+                k => unknown.push(k.to_string()),
+            }
+        }
+        unknown
+    }
+}
+
 pub struct Pipeline {
     pub original: Mesh,
     pub topo: Topo,
