@@ -5,11 +5,11 @@ use crate::camera::OrbitCamera;
 use crate::view::View;
 use glam::{DVec3, Vec3};
 use rayon::prelude::*;
-use rectify_core::circle::{Circle, ProfileKind, Round, RoundParams};
+use rectify_core::circle::ProfileKind;
 use rectify_core::mesh::Surface as Closest;
 use rectify_core::nurbs::{Curve, Surface};
 use rectify_core::path::{self, Built, PathParams, Snap, SnapKind};
-use rectify_core::slot::{Laid, Slot, SlotParams};
+use rectify_core::slot::{Kind, Laid, Slot, SlotParams};
 use rectify_core::{Mesh, Topo};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -42,6 +42,9 @@ pub enum Tool {
     /// Drag along a slot with round ends: a NURBS surface on its wall,
     /// every row an exact slot outline.
     Slot,
+    /// Drag across a block with rounded corners (raised or cut in), corner
+    /// to corner: the same, every row an exact rounded rectangle.
+    Box,
 }
 
 impl Tool {
@@ -51,6 +54,7 @@ impl Tool {
             Tool::Circle => "Circle",
             Tool::Path => "Path",
             Tool::Slot => "Slot",
+            Tool::Box => "Box",
         }
     }
 }
@@ -103,25 +107,15 @@ pub struct PathPress {
     pub moved: bool,
 }
 
-/// A Circle drag: from the press on the rim to the pointer, on the plane
-/// under the press.
+/// A drag on the scan (Circle, Slot, Box): from the press to the pointer.
 #[derive(Clone)]
-pub struct CircleDrag {
+pub struct Drag {
     pub a: DVec3,
     pub b: DVec3,
-    /// The triangle pressed, and its vertices.
+    /// The triangle pressed.
     pub tri: u32,
-    pub seeds: Vec<u32>,
     /// The plane's normal at the press.
     pub n: DVec3,
-}
-
-/// The round part found by the Circle tool, the surface laid on it and its
-/// settings (changed live; kept with Enter).
-pub struct CircleEdit {
-    pub circle: Circle,
-    pub params: RoundParams,
-    pub round: Round,
 }
 
 /// The slot found by the Slot tool, the surface laid on it and its
@@ -176,10 +170,6 @@ pub struct AppState {
     pub objects_gen: u64,
     /// The scan not drawn: the objects alone (H).
     pub hide_scan: bool,
-    pub circle_drag: Option<CircleDrag>,
-    pub circle: Option<CircleEdit>,
-    /// The Circle's profile, kept from one to the next.
-    pub circle_profile: ProfileKind,
     pub path: Option<PathEdit>,
     /// What the pointer would place (the Path tool), and where it was.
     pub path_hover: Option<Snap>,
@@ -189,7 +179,7 @@ pub struct AppState {
     pub path_params: PathParams,
     /// The Slot drag (from one end to the other), the surface placed, its
     /// profile kept from one to the next.
-    pub slot_drag: Option<CircleDrag>,
+    pub slot_drag: Option<Drag>,
     pub slot: Option<SlotEdit>,
     pub slot_profile: ProfileKind,
 }
@@ -224,9 +214,6 @@ impl AppState {
             undone: vec![],
             objects_gen: 1,
             hide_scan: false,
-            circle_drag: None,
-            circle: None,
-            circle_profile: ProfileKind::Cylinder,
             path: None,
             path_hover: None,
             hover_key: None,
@@ -288,8 +275,6 @@ impl AppState {
     fn after_load(&mut self) {
         self.objects.clear();
         self.undone.clear();
-        self.circle = None;
-        self.circle_drag = None;
         self.path = None;
         self.path_hover = None;
         self.path_press = None;
@@ -360,8 +345,6 @@ impl AppState {
             return;
         }
         // what is placed is kept
-        self.circle_apply();
-        self.circle_drag = None;
         self.path_apply();
         self.path_hover = None;
         self.path_press = None;
@@ -386,18 +369,13 @@ impl AppState {
 
     pub fn undo(&mut self) {
         // what is placed and not kept goes first
-        if self.circle.is_some() {
-            self.circle_cancel();
-            self.toast("Circle removed", false);
-            return;
-        }
         if self.path.is_some() {
             self.path_back();
             return;
         }
         if self.slot.is_some() {
             self.slot_cancel();
-            self.toast("Slot removed", false);
+            self.toast("Removed", false);
             return;
         }
         let Some(o) = self.objects.pop() else {
@@ -419,95 +397,26 @@ impl AppState {
         self.objects_gen += 1;
     }
 
-    // ------------------------------------------------------------ Circle
+    // ------------------------------------------------------------ drags
 
-    /// A drag starting on the scan (Circle, Slot): where, and the plane
+    /// A drag starting on the scan (Circle, Slot, Box): where, and the plane
     /// under it.
-    fn drag_start(&self, at: [f32; 2]) -> Option<CircleDrag> {
+    fn drag_start(&self, at: [f32; 2]) -> Option<Drag> {
         let (t, x) = self.pick_hit(at)?;
         let seeds = self.tri_verts(t);
         let d = self.doc.as_ref()?;
         let n = seeds.iter().flat_map(|&v| d.topo.tris_of(v as usize).iter()).map(|&t| d.mesh.tri_cross(t as usize).normalize_or_zero()).sum::<DVec3>().normalize_or_zero();
-        Some(CircleDrag { a: x, b: x, tri: t as u32, seeds, n })
+        Some(Drag { a: x, b: x, tri: t as u32, n })
     }
 
     /// Where a drag goes: on the plane under the press (else the scan
     /// under the pointer).
-    fn drag_to(&self, cd: &CircleDrag, at: [f32; 2]) -> Option<DVec3> {
+    fn drag_to(&self, cd: &Drag, at: [f32; 2]) -> Option<DVec3> {
         let (o, dir) = self.view().ray(at[0], at[1]);
         let (o, dir) = (o.as_dvec3(), dir.as_dvec3());
         let dn = dir.dot(cd.n);
         let on_plane = (dn.abs() > 0.05).then(|| o + dir * ((cd.a - o).dot(cd.n) / dn)).filter(|x| (*x - o).dot(dir) > 0.0);
         on_plane.or_else(|| self.pick_hit(at).map(|h| h.1))
-    }
-
-    pub fn circle_press(&mut self, at: [f32; 2]) {
-        let Some(cd) = self.drag_start(at) else { return };
-        // a new circle keeps the one placed before
-        self.circle_apply();
-        self.circle_drag = Some(cd);
-        self.overlay_gen += 1;
-    }
-
-    pub fn circle_move(&mut self, at: [f32; 2]) {
-        let Some(cd) = &self.circle_drag else { return };
-        if let Some(x) = self.drag_to(cd, at) {
-            self.circle_drag.as_mut().unwrap().b = x;
-        }
-        self.overlay_gen += 1;
-    }
-
-    pub fn circle_release(&mut self) {
-        let Some(CircleDrag { a, b, seeds, .. }) = self.circle_drag.take() else { return };
-        self.overlay_gen += 1;
-        let Some(d) = &self.doc else { return };
-        match Circle::detect(&d.mesh, &d.topo, &seeds, a, b, d.edge) {
-            Ok(c) => {
-                // the fewest rings that follow the wall
-                let levels = c.fewest_levels(&d.mesh, &d.topo, c.height, self.circle_profile);
-                let params = RoundParams { height: c.height, profile: self.circle_profile, levels };
-                let round = c.nurbs(&d.mesh, &d.topo, params);
-                self.circle = Some(CircleEdit { circle: c, params, round });
-                self.objects_gen += 1;
-            }
-            Err(e) => self.toast(e, true),
-        }
-    }
-
-    /// The surface again after the height, the profile or the levels changed.
-    pub fn circle_refit(&mut self) {
-        let (Some(d), Some(ce)) = (&self.doc, &mut self.circle) else { return };
-        ce.params.levels = ce.params.levels.clamp(1, 64);
-        ce.round = ce.circle.nurbs(&d.mesh, &d.topo, ce.params);
-        self.circle_profile = ce.params.profile;
-        self.objects_gen += 1;
-        self.overlay_gen += 1;
-    }
-
-    /// Another profile: the fewest levels for it again.
-    pub fn circle_set_profile(&mut self, k: ProfileKind) {
-        let (Some(d), Some(ce)) = (&self.doc, &mut self.circle) else { return };
-        ce.params.profile = k;
-        ce.params.levels = ce.circle.fewest_levels(&d.mesh, &d.topo, ce.params.height, k);
-        self.circle_refit();
-    }
-
-    /// The surface placed is kept.
-    pub fn circle_apply(&mut self) {
-        let Some(ce) = self.circle.take() else { return };
-        let p = ce.params;
-        let what = format!("Ø {} mm · {} mm · {} · {} rings", fmt(ce.circle.r * 2.0, 2), fmt(p.height, 1), profile_label(p.profile), p.levels + 1);
-        self.toast(format!("Kept: {what}"), false);
-        self.add_object(Object { tool: Tool::Circle, what, shape: Shape::Surface(ce.round.surface) });
-        self.overlay_gen += 1;
-    }
-
-    /// The surface placed taken away.
-    pub fn circle_cancel(&mut self) {
-        if self.circle.take().is_some() {
-            self.objects_gen += 1;
-        }
-        self.overlay_gen += 1;
     }
 }
 
@@ -738,10 +647,15 @@ impl AppState {
     }
 
     pub fn slot_release(&mut self) {
-        let Some(CircleDrag { a, b, tri, .. }) = self.slot_drag.take() else { return };
+        let Some(Drag { a, b, tri, .. }) = self.slot_drag.take() else { return };
         self.overlay_gen += 1;
         let Some(d) = &self.doc else { return };
-        match Slot::detect(&d.mesh, &d.topo, tri, a, b, d.edge) {
+        let found = match self.tool {
+            Tool::Box => Slot::detect_box(&d.mesh, &d.topo, tri, a, b, d.edge),
+            Tool::Circle => Slot::detect_round(&d.mesh, &d.topo, tri, a, b, d.edge),
+            _ => Slot::detect(&d.mesh, &d.topo, tri, a, b, d.edge),
+        };
+        match found {
             Ok(s) => {
                 // the simplest profile that follows this slot's wall
                 let (profile, levels) = s.best_profile(s.depth);
@@ -776,9 +690,16 @@ impl AppState {
     pub fn slot_apply(&mut self) {
         let Some(se) = self.slot.take() else { return };
         let p = se.params;
-        let what = format!("{} × {} mm · {} mm deep · {} · {} rows", fmt(se.slot.length(), 2), fmt(se.slot.r * 2.0, 2), fmt(p.depth, 1), slot_profile_label(p.profile), p.levels + 1);
+        let sl = &se.slot;
+        let size = if sl.kind == Kind::Round { format!("Ø {}", fmt(sl.width(), 2)) } else { format!("{} × {}", fmt(sl.length(), 2), fmt(sl.width(), 2)) };
+        let what = format!("{size} mm · {} mm {} · {} · {} rows", fmt(p.depth, 1), if sl.inward { "deep" } else { "high" }, slot_profile_label(p.profile), p.levels + 1);
         self.toast(format!("Kept: {what}"), false);
-        self.add_object(Object { tool: Tool::Slot, what, shape: Shape::Surface(se.laid.surface) });
+        let tool = match sl.kind {
+            Kind::Box => Tool::Box,
+            Kind::Round => Tool::Circle,
+            Kind::Slot => Tool::Slot,
+        };
+        self.add_object(Object { tool, what, shape: Shape::Surface(se.laid.surface) });
         self.overlay_gen += 1;
     }
 

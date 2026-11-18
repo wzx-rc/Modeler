@@ -3,13 +3,14 @@
 //! tool in hand draws over it.
 
 use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, Renderer};
-use crate::state::{AppState, Shape};
+use crate::state::{AppState, Shape, Tool};
 use crate::theme;
 use glam::DVec3;
 use rayon::prelude::*;
 use rectify_core::mesh::crease_normals;
 use rectify_core::nurbs::{Curve, Surface};
 use rectify_core::path::{Snap, SnapKind};
+use rectify_core::slot::Kind;
 use rectify_core::Mesh;
 
 /// The scan's colour: grey clay (sRGB).
@@ -136,9 +137,6 @@ impl Drawer {
                 Shape::Curve(c) => line_vertices(&[curve_lines(c)], [226, 92, 14, 255], 1.8, &mut wire),
             }
         }
-        if let Some(ce) = &st.circle {
-            surface_vertices(&ce.round.surface, 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
-        }
         if let Some(se) = &st.slot {
             surface_vertices(&se.laid.surface, 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
         }
@@ -164,7 +162,7 @@ impl Drawer {
         }
         let p = |x: DVec3| x.as_vec3().to_array();
         // the Circle drag: the diameter drawn, its circle on the plane
-        if let Some(cd) = &st.circle_drag {
+        if let Some(cd) = st.slot_drag.as_ref().filter(|_| st.tool == Tool::Circle) {
             let n = cd.n;
             let b = cd.b - n * n.dot(cd.b - cd.a);
             line_vertices(&[vec![p(cd.a), p(b)]], [235, 235, 235, 220], 1.0, &mut out);
@@ -180,8 +178,8 @@ impl Drawer {
                 .collect();
             line_vertices(&[ring], [255, 150, 60, 200], 1.2, &mut out);
         }
-        // the Slot drag: along the slot, on the plane under the press
-        if let Some(cd) = &st.slot_drag {
+        // the Slot and Box drag: along the slot, on the plane under the press
+        if let Some(cd) = st.slot_drag.as_ref().filter(|_| st.tool != Tool::Circle) {
             let n = cd.n;
             let b = cd.b - n * n.dot(cd.b - cd.a);
             line_vertices(&[vec![p(cd.a), p(b)]], [255, 150, 60, 220], 1.2, &mut out);
@@ -205,15 +203,14 @@ impl Drawer {
             };
             snap_lines(h, size, &mut out);
         }
-        // the surface placed: its axis
-        if let Some(ce) = &st.circle {
-            let ci = &ce.circle;
-            line_vertices(&[vec![p(ci.c - ci.a * (ci.r * 0.3)), p(ci.c + ci.a * (ce.params.height + ci.r * 0.3))]], [255, 150, 60, 160], 0.8, &mut out);
-        }
-        // the slot placed: its centre line
+        // the slot placed: its centre line; a round part: its axis
         if let Some(se) = &st.slot {
             let sl = &se.slot;
-            line_vertices(&[vec![p(sl.a), p(sl.b)]], [255, 150, 60, 160], 0.8, &mut out);
+            if sl.kind == Kind::Round {
+                line_vertices(&[vec![p(sl.a - sl.axis * (sl.r * 0.3)), p(sl.a + sl.axis * (se.params.depth + sl.r * 0.3))]], [255, 150, 60, 160], 0.8, &mut out);
+            } else {
+                line_vertices(&[vec![p(sl.a), p(sl.b)]], [255, 150, 60, 160], 0.8, &mut out);
+            }
         }
         self.r.upload_overlay(device, queue, &out);
     }

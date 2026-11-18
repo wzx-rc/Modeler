@@ -15,7 +15,10 @@
 //! the bare view), RECTIFY_SMOOTH, RECTIFY_PLANES=0; RECTIFY_HOVER="x,y;…":
 //! what would catch the pointer there, printed. RECTIFY_SLOT="x,y;x,y": a
 //! Slot drag (end to end, screen points of the bare view), with
-//! RECTIFY_DEPTH, RECTIFY_LEVELS, RECTIFY_PROFILE=straight|tapered|curve.
+//! RECTIFY_DEPTH, RECTIFY_LEVELS, RECTIFY_PROFILE=straight|tapered|curve;
+//! RECTIFY_BOX the same with the Box tool. Several drags separated by `|`
+//! are each kept and shown together, RECTIFY_TOOLS="b,c,s,…" the tool of
+//! each (Box, Circle, Slot).
 
 use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use glam::Vec3;
@@ -225,108 +228,21 @@ fn nums(s: &str) -> Vec<f32> {
     s.split(',').filter_map(|t| t.trim().parse().ok()).collect()
 }
 
-/// A Circle drag from one side of a rim to the other (screen points of the
-/// bare view): before, the drag, the NURBS surface placed (with the
-/// interface, then the view alone, with and without the scan), kept.
-fn circle_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
-    use rectify_core::circle::ProfileKind;
-    h.st.set_tool(Tool::Navigate);
-    h.st.bare = true;
-    h.shot(&format!("{name}-0-before"));
-    let world: Vec<glam::Vec3> = pts.iter().filter_map(|p| h.st.pick_hit(*p).map(|(_, x)| x.as_vec3())).collect();
-    h.st.bare = false;
-    h.st.set_tool(Tool::Circle);
-    match std::env::var("RECTIFY_PROFILE").as_deref() {
-        Ok("cone") => h.st.circle_profile = ProfileKind::Cone,
-        Ok("curve") => h.st.circle_profile = ProfileKind::Curve,
-        Ok("cylinder") => h.st.circle_profile = ProfileKind::Cylinder,
-        _ => {}
-    }
-    h.steps(2);
-    let view = h.st.view();
-    let scr: Vec<[f32; 2]> = world.iter().filter_map(|x| view.project(*x)).collect();
-    h.drag_screen(&scr, true);
-    h.shot(&format!("{name}-1-drag"));
-    let t = std::time::Instant::now();
-    h.release();
-    eprintln!("circle found and laid in {:.2}s", t.elapsed().as_secs_f64());
-    let env = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<f64>().ok());
-    if let Some(ce) = &mut h.st.circle {
-        if let Some(l) = env("RECTIFY_LEVELS") {
-            ce.params.levels = l as usize;
-        }
-        if let Some(hh) = env("RECTIFY_HEIGHT") {
-            ce.params.height = hh;
-        }
-        match std::env::var("RECTIFY_PROFILE").as_deref() {
-            Ok("cone") => ce.params.profile = ProfileKind::Cone,
-            Ok("curve") => ce.params.profile = ProfileKind::Curve,
-            Ok("cylinder") => ce.params.profile = ProfileKind::Cylinder,
-            _ => {}
-        }
-    }
-    let t = std::time::Instant::now();
-    h.st.circle_refit();
-    eprintln!("laid again in {:.3}s", t.elapsed().as_secs_f64());
-    match &h.st.circle {
-        Some(ce) => {
-            let c = &ce.circle;
-            let s = &ce.round.surface;
-            let rows: Vec<String> = (0..s.nv).map(|j| {
-                let q = s.pts[j * s.nu] - c.c;
-                format!("{:.2}:{:.3}", q.dot(c.a), q.reject_from(c.a).length() * 2.0)
-            }).collect();
-            eprintln!(
-                "CIRCLE {name}: c {:.2},{:.2},{:.2} axis {:.3},{:.3},{:.3} Ø {:.3} height {:.2} {:?} levels {} · degree 2x{} {}x{} · found {:.0} % · off {:.3} · inward {} · rows h:Ø {}",
-                c.c.x, c.c.y, c.c.z, c.a.x, c.a.y, c.a.z, c.r * 2.0, ce.params.height, ce.params.profile, ce.params.levels, s.dv, s.nu, s.nv, ce.round.found * 100.0, ce.round.off, ce.round.inward, rows.join(" ")
-            );
-        }
-        None => eprintln!("CIRCLE {name}: {}", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
-    }
-    h.shot(&format!("{name}-2-placed"));
-    let views = |h: &mut Harness, tag: &str| {
-        h.st.bare = true;
-        h.shot(&format!("{name}-{tag}"));
-        h.st.hide_scan = true;
-        h.shot(&format!("{name}-{tag}-alone"));
-        h.st.hide_scan = false;
-        h.st.bare = false;
-    };
-    views(h, "3-surface");
-    let look2 = std::env::var("RECTIFY_LOOK2").map(|s| nums(&s)).ok().filter(|v| v.len() == 6);
-    let cam = (h.st.camera.target, h.st.camera.dist, h.st.camera.yaw, h.st.camera.pitch);
-    if let Some(v) = &look2 {
-        look(h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
-        h.shot(&format!("{name}-2-placed-2"));
-        views(h, "3-surface-2");
-        h.st.camera.target = cam.0;
-        h.st.camera.dist = cam.1;
-        h.st.camera.yaw = cam.2;
-        h.st.camera.pitch = cam.3;
-    }
-    if h.st.circle.is_some() {
-        h.st.circle_apply();
-        if let Some(t) = &h.st.toast {
-            eprintln!("{}", t.text);
-        }
-        h.shot(&format!("{name}-4-kept"));
-    }
-}
-
-/// A Slot drag along a slot (screen points of the bare view): the surface
+/// A Slot drag along a slot, a Box drag across a block, a Circle drag
+/// across a round part (screen points of the bare view): the surface
 /// placed, alone, from a second camera, kept.
-fn slot_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
+fn slot_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]], tool: Tool) {
     use rectify_core::circle::ProfileKind;
     h.st.set_tool(Tool::Navigate);
     h.st.bare = true;
     h.shot(&format!("{name}-0-before"));
     let world: Vec<glam::Vec3> = pts.iter().filter_map(|p| h.st.pick_hit(*p).map(|(_, x)| x.as_vec3())).collect();
     h.st.bare = false;
-    h.st.set_tool(Tool::Slot);
+    h.st.set_tool(tool);
     let profile = match std::env::var("RECTIFY_PROFILE").as_deref() {
-        Ok("tapered") => Some(ProfileKind::Cone),
+        Ok("tapered" | "cone") => Some(ProfileKind::Cone),
         Ok("curve") => Some(ProfileKind::Curve),
-        Ok("straight") => Some(ProfileKind::Cylinder),
+        Ok("straight" | "cylinder") => Some(ProfileKind::Cylinder),
         _ => None,
     };
     if let Some(k) = profile {
@@ -345,7 +261,7 @@ fn slot_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
         if let Some(l) = env("RECTIFY_LEVELS") {
             se.params.levels = l as usize;
         }
-        if let Some(d) = env("RECTIFY_DEPTH") {
+        if let Some(d) = env("RECTIFY_DEPTH").or_else(|| env("RECTIFY_HEIGHT")) {
             se.params.depth = d;
         }
     }
@@ -355,8 +271,8 @@ fn slot_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
             let sl = &se.slot;
             let s = &se.laid.surface;
             eprintln!(
-                "SLOT {name}: A {:.2},{:.2},{:.2} B {:.2},{:.2},{:.2} axis {:.3},{:.3},{:.3} · {:.3} × {:.3} · depth {:.2} (found {:.2}) {:?} levels {} · degree 2x{} {}x{} · {} points · off {:.3} · inward {}",
-                sl.a.x, sl.a.y, sl.a.z, sl.b.x, sl.b.y, sl.b.z, sl.axis.x, sl.axis.y, sl.axis.z, sl.length(), sl.r * 2.0, se.params.depth, sl.depth, se.params.profile, se.params.levels, s.dv, s.nu, s.nv, se.laid.points, se.laid.off, sl.inward
+                "SLOT {name}: A {:.2},{:.2},{:.2} B {:.2},{:.2},{:.2} axis {:.3},{:.3},{:.3} · {:.3} × {:.3} r {:.3} · depth {:.2} (found {:.2}) {:?} levels {} · degree 2x{} {}x{} · {} points · off {:.3} · inward {}",
+                sl.a.x, sl.a.y, sl.a.z, sl.b.x, sl.b.y, sl.b.z, sl.axis.x, sl.axis.y, sl.axis.z, sl.length(), sl.width(), sl.r, se.params.depth, sl.depth, se.params.profile, se.params.levels, s.dv, s.nu, s.nv, se.laid.points, se.laid.off, sl.inward
             );
         }
         None => eprintln!("SLOT {name}: {}", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
@@ -388,26 +304,26 @@ fn slot_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
 
 /// Several Slot drags ("x,y;x,y|x,y;x,y…"), each kept: all of them shown
 /// at the end (and from RECTIFY_LOOK2).
-fn slot_many(h: &mut Harness, name: &str, s: &str) {
+fn slot_many(h: &mut Harness, name: &str, s: &str, tools: &[Tool]) {
     h.st.set_tool(Tool::Navigate);
     h.st.bare = true;
     h.shot(&format!("{name}-0-before"));
     let drags: Vec<Vec<glam::Vec3>> = s.split('|').map(|d| d.split(';').map(nums).filter(|v| v.len() == 2).filter_map(|v| h.st.pick_hit([v[0], v[1]]).map(|(_, x)| x.as_vec3())).collect()).collect();
     h.st.bare = false;
-    h.st.set_tool(Tool::Slot);
-    for w in &drags {
+    for (k, w) in drags.iter().enumerate() {
+        h.st.set_tool(tools[k.min(tools.len() - 1)]);
         h.steps(1);
         let view = h.st.view();
         let scr: Vec<[f32; 2]> = w.iter().filter_map(|x| view.project(*x)).collect();
         h.drag_screen(&scr, true);
         h.release();
         match &h.st.slot {
-            Some(se) => eprintln!("SLOT {name}: {:.3} × {:.3} · depth {:.2} {:?} levels {} · off {:.3}", se.slot.length(), se.slot.r * 2.0, se.params.depth, se.params.profile, se.params.levels, se.laid.off),
-            None => eprintln!("SLOT {name}: {}", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
+            Some(se) => eprintln!("{:?} {name} #{k}: {:.3} × {:.3} r {:.3} · depth {:.2} inward {} {:?} levels {} · {} points · off {:.3}", se.slot.kind, se.slot.length(), se.slot.width(), se.slot.r, se.params.depth, se.slot.inward, se.params.profile, se.params.levels, se.laid.points, se.laid.off),
+            None => eprintln!("{:?} {name} #{k}: {}", h.st.tool, h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
         }
         h.st.slot_apply();
+        h.st.set_tool(Tool::Navigate);
     }
-    h.st.set_tool(Tool::Navigate);
     h.shot(&format!("{name}-1-kept"));
     let views = |h: &mut Harness, tag: &str| {
         h.st.bare = true;
@@ -543,21 +459,28 @@ fn main() {
             path_clicks(&mut h, &tag, &pts, close);
             return;
         }
-        if let Ok(s) = std::env::var("RECTIFY_SLOT").map(|s| s.replace(' ', "")).as_deref().map(str::to_string) {
+        // RECTIFY_SLOT / RECTIFY_BOX: one drag, or several separated by |
+        // (RECTIFY_TOOLS="s,b,…" picks the tool of each)
+        let (var, tool) = if std::env::var("RECTIFY_BOX").is_ok() { ("RECTIFY_BOX", Tool::Box) } else { ("RECTIFY_SLOT", Tool::Slot) };
+        if let Ok(s) = std::env::var(var).map(|s| s.replace(' ', "")) {
             if s.contains('|') {
+                let tools: Vec<Tool> = match std::env::var("RECTIFY_TOOLS") {
+                    Ok(t) => t.split(',').map(|k| match k.trim() { "b" => Tool::Box, "c" => Tool::Circle, _ => Tool::Slot }).collect(),
+                    Err(_) => vec![tool],
+                };
                 let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "slots".into());
-                slot_many(&mut h, &tag, &s);
+                slot_many(&mut h, &tag, &s, &tools);
                 return;
             }
             let pts: Vec<[f32; 2]> = s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
-            let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "slot".into());
-            slot_drag(&mut h, &tag, &pts);
+            let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| if tool == Tool::Box { "box".into() } else { "slot".into() });
+            slot_drag(&mut h, &tag, &pts, tool);
             return;
         }
         if let Ok(s) = std::env::var("RECTIFY_CIRCLE") {
             let pts: Vec<[f32; 2]> = s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
             let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "circle".into());
-            circle_drag(&mut h, &tag, &pts);
+            slot_drag(&mut h, &tag, &pts, Tool::Circle);
             return;
         }
         h.shot("look-ui");

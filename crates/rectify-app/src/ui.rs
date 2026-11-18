@@ -4,6 +4,7 @@
 
 use crate::icons::{self, Icon};
 use crate::state::*;
+use rectify_core::slot::Kind;
 use crate::theme::*;
 use crate::widgets::*;
 use egui::{pos2, vec2, Align2, Id, Key, Margin, Order, Rect, Sense, Stroke, StrokeKind, Ui};
@@ -67,7 +68,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the scan (Esc)", "Esc"), (Tool::Circle, Icon::Cylinder, "Circle: drag across a hole or a boss, a NURBS surface is laid on its wall, every ring an exact circle (C)", "C"), (Tool::Slot, Icon::Capsule, "Slot: drag along a slot with round ends, a NURBS surface is laid on its wall, every row an exact slot outline (S)", "S"), (Tool::Path, Icon::Sketch, "Path: click points on the scan, one NURBS curve through them; flat faces, their edges and corners catch the points (P)", "P")];
+                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the scan (Esc)", "Esc"), (Tool::Circle, Icon::Cylinder, "Circle: drag across a hole or a boss, a NURBS surface is laid on its wall, every ring an exact circle (C)", "C"), (Tool::Slot, Icon::Capsule, "Slot: drag along a slot with round ends, a NURBS surface is laid on its wall, every row an exact slot outline (S)", "S"), (Tool::Box, Icon::Box, "Box: drag across a block with rounded corners, raised or cut in, corner to corner: a NURBS surface on its wall, every row an exact rounded rectangle (B)", "B"), (Tool::Path, Icon::Sketch, "Path: click points on the scan, one NURBS curve through them; flat faces, their edges and corners catch the points (P)", "P")];
                 for (t, icon, tip, key) in tools {
                     let r = icon_btn(ui, icon, st.tool == t, tip, 28.0);
                     key_hint(ui, &r, key);
@@ -220,7 +221,6 @@ fn slider_f64(ui: &mut Ui, label: &str, v: &mut f64, range: std::ops::RangeInclu
 }
 
 fn tool_card(ui: &mut Ui, st: &mut AppState) {
-    use rectify_core::circle::ProfileKind;
     match st.tool {
         Tool::Navigate => {
             title(ui, "Tools", "A retopology in NURBS, laid on the scan; the scan itself never changes");
@@ -231,57 +231,15 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
             if secondary_btn(ui, "Slot (S): a slot with round ends", w).clicked() {
                 st.set_tool(Tool::Slot);
             }
+            if secondary_btn(ui, "Box (B): a block with rounded corners", w).clicked() {
+                st.set_tool(Tool::Box);
+            }
             if secondary_btn(ui, "Path (P): lines and curves on the scan", w).clicked() {
                 st.set_tool(Tool::Path);
             }
         }
-        Tool::Circle => {
-            title(ui, "Circle", "Press on the rim of a hole or a boss, drag across to the other side: a NURBS surface is laid on its wall, every ring an exact circle");
-            let mut refit = false;
-            let mut apply = false;
-            let mut cancel = false;
-            let mut new_profile = None;
-            match &mut st.circle {
-                None => line(ui, "The plane and the base come from where you press; the circle is fitted on the wall next to it, its height found."),
-                Some(ce) => {
-                    let kind = if ce.round.inward { "a hole" } else { "a boss" };
-                    line(ui, format!("Ø {} mm · {kind} · found {} mm high", fmt(ce.circle.r * 2.0, 3), fmt(ce.circle.height, 1)));
-                    let max = (ce.circle.height * 3.0).max(ce.circle.r * 2.0) as f32;
-                    refit |= slider_f64(ui, "Height", &mut ce.params.height, 0.1..=max, 0.05, "mm");
-                    let items = [(ProfileKind::Cylinder, "Cylinder", accent()), (ProfileKind::Cone, "Cone", accent()), (ProfileKind::Curve, "Curve", accent())];
-                    if let Some(k) = segmented(ui, &items, ce.params.profile, 28.0) {
-                        new_profile = Some(k);
-                    }
-                    let mut lv = ce.params.levels as f32;
-                    if slider_row(ui, "Levels", &mut lv, 1.0..=24.0, 1.0, "").0 {
-                        ce.params.levels = lv.round().max(1.0) as usize;
-                        refit = true;
-                    }
-                    let s = &ce.round.surface;
-                    let (lo, hi) = (0..s.nv).map(|j| (s.pts[j * s.nu] - ce.circle.c).reject_from(ce.circle.a).length()).fold((f64::INFINITY, 0.0f64), |a, r| (a.0.min(r), a.1.max(r)));
-                    line(ui, format!("{} rings, each an exact circle · Ø {} to {} mm", ce.params.levels + 1, fmt(lo * 2.0, 2), fmt(hi * 2.0, 2)));
-                    line(ui, format!("NURBS degree 2 × {} · {} × {} control points", s.dv, s.nu, s.nv));
-                    line(ui, format!("{:.0} % of the lines cast found the scan · the scan is {} mm from it", ce.round.found * 100.0, fmt(ce.round.off, 3)));
-                    ui.add_space(6.0);
-                    let w = ui.available_width();
-                    apply = primary_btn(ui, Some(Icon::Cylinder), "Keep (Enter)", Some(w)).clicked();
-                    cancel = secondary_btn(ui, "Remove (Esc)", w).clicked();
-                }
-            }
-            if let Some(k) = new_profile {
-                st.circle_set_profile(k);
-            } else if refit {
-                st.circle_refit();
-            }
-            if apply {
-                st.circle_apply();
-            }
-            if cancel {
-                st.circle_cancel();
-            }
-        }
         Tool::Path => path_card(ui, st),
-        Tool::Slot => slot_card(ui, st),
+        Tool::Slot | Tool::Box | Tool::Circle => slot_card(ui, st),
     }
     ui.add_space(4.0);
     let w = ui.available_width();
@@ -292,19 +250,32 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
 
 fn slot_card(ui: &mut Ui, st: &mut AppState) {
     use rectify_core::circle::ProfileKind;
-    title(ui, "Slot", "Press at one end of a slot with round ends, drag along it to the other end: a NURBS surface is laid on its wall, every row an exact slot outline");
+    let tool = st.tool;
+    match tool {
+        Tool::Box => title(ui, "Box", "Press near a corner of a block with rounded corners, raised or cut in, drag across it to the far corner: a NURBS surface is laid on its wall, every row an exact rounded rectangle"),
+        Tool::Circle => title(ui, "Circle", "Press on the rim of a round part (a hole, a boss, a button, a rivet), drag across it to the other side: a NURBS surface is laid on its wall, every ring an exact circle"),
+        _ => title(ui, "Slot", "Press at one end of a slot with round ends, drag along it to the other end: a NURBS surface is laid on its wall, every row an exact slot outline"),
+    }
     let mut refit = false;
     let mut apply = false;
     let mut cancel = false;
     let mut new_profile = None;
     match &mut st.slot {
+        None if tool == Tool::Box => line(ui, "The face around gives the axis, its walls its turn; its sides and corners are fitted on its wall, its height found from the face around."),
+        None if tool == Tool::Circle => line(ui, "The face around gives the axis; the centre and the radius are fitted on the wall, its height or depth found from the face around and the top or the floor."),
         None => line(ui, "The face it is cut in gives the axis; its width, length and ends are fitted on its wall, its depth found from the floor."),
         Some(se) => {
             let sl = &se.slot;
-            let kind = if sl.inward { "cut in" } else { "raised" };
-            line(ui, format!("{} × {} mm · {kind} · found {} mm deep", fmt(sl.length(), 2), fmt(sl.r * 2.0, 2), fmt(sl.depth, 2)));
+            let (kind, way) = if sl.inward { ("cut in", "deep") } else { ("raised", "high") };
+            let round = sl.kind == Kind::Round;
+            let size = if round { format!("Ø {}", fmt(sl.width(), 2)) } else { format!("{} × {}", fmt(sl.length(), 2), fmt(sl.width(), 2)) };
+            let (kind, way) = if round { (if sl.inward { "a hole" } else { "a boss" }, way) } else { (kind, way) };
+            line(ui, format!("{size} mm · {kind} · found {} mm {way}", fmt(sl.depth, 2)));
+            if sl.kind == Kind::Box {
+                line(ui, format!("Corners rounded {} mm", fmt(sl.r, 2)));
+            }
             let max = (sl.depth * 3.0).max(sl.r * 2.0) as f32;
-            refit |= slider_f64(ui, "Depth", &mut se.params.depth, 0.1..=max, 0.05, "mm");
+            refit |= slider_f64(ui, if sl.inward { "Depth" } else { "Height" }, &mut se.params.depth, 0.1..=max, 0.05, "mm");
             let items = [(ProfileKind::Cylinder, "Straight", accent()), (ProfileKind::Cone, "Tapered", accent()), (ProfileKind::Curve, "Curve", accent())];
             if let Some(k) = segmented(ui, &items, se.params.profile, 28.0) {
                 new_profile = Some(k);
@@ -315,14 +286,25 @@ fn slot_card(ui: &mut Ui, st: &mut AppState) {
                 refit = true;
             }
             let s = &se.laid.surface;
-            let width = |j: usize| (s.pts[j * s.nu + 4] - s.pts[j * s.nu + 10]).reject_from(se.slot.axis).length();
-            let (lo, hi) = (0..s.nv).map(width).fold((f64::INFINITY, 0.0f64), |a, w| (a.0.min(w), a.1.max(w)));
-            line(ui, format!("{} rows, each two lines and two exact half circles · {} to {} mm long", se.params.levels + 1, fmt(lo, 2), fmt(hi, 2)));
+            // each row's length: the far ends of its two round ends
+            let e = (se.slot.b - se.slot.a).normalize_or_zero();
+            let along = |j: usize| (0..s.nu).map(|i| (s.pts[j * s.nu + i] - se.slot.a).dot(e)).fold((f64::INFINITY, f64::NEG_INFINITY), |m, x| (m.0.min(x), m.1.max(x)));
+            let (lo, hi) = (0..s.nv).map(|j| { let (a, b) = along(j); b - a }).fold((f64::INFINITY, 0.0f64), |a, w| (a.0.min(w), a.1.max(w)));
+            match se.slot.kind {
+                Kind::Box => line(ui, format!("{} rows, each four lines and four exact quarter circles · {} to {} mm long", se.params.levels + 1, fmt(lo, 2), fmt(hi, 2))),
+                Kind::Slot => line(ui, format!("{} rows, each two lines and two exact half circles · {} to {} mm long", se.params.levels + 1, fmt(lo, 2), fmt(hi, 2))),
+                Kind::Round => line(ui, format!("{} rings, each an exact circle · Ø {} to {} mm", se.params.levels + 1, fmt(lo, 2), fmt(hi, 2))),
+            }
             line(ui, format!("NURBS degree 2 × {} · {} × {} control points", s.dv, s.nu, s.nv));
             line(ui, format!("{} points of the wall · the scan is {} mm from it", se.laid.points, fmt(se.laid.off, 3)));
             ui.add_space(6.0);
             let w = ui.available_width();
-            apply = primary_btn(ui, Some(Icon::Capsule), "Keep (Enter)", Some(w)).clicked();
+            let icon = match se.slot.kind {
+                Kind::Box => Icon::Box,
+                Kind::Round => Icon::Cylinder,
+                Kind::Slot => Icon::Capsule,
+            };
+            apply = primary_btn(ui, Some(icon), "Keep (Enter)", Some(w)).clicked();
             cancel = secondary_btn(ui, "Remove (Esc)", w).clicked();
         }
     }
@@ -480,7 +462,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
     let (f, esc, z, y, enter) = ctx.input(|i| (i.key_pressed(Key::F), i.key_pressed(Key::Escape), i.key_pressed(Key::Z), i.key_pressed(Key::Y), i.key_pressed(Key::Enter)));
     let (c, h, pk, back) = ctx.input(|i| (i.key_pressed(Key::C), i.key_pressed(Key::H), i.key_pressed(Key::P), i.key_pressed(Key::Backspace) || i.key_pressed(Key::Delete)));
-    let sk = ctx.input(|i| i.key_pressed(Key::S));
+    let (sk, bk) = ctx.input(|i| (i.key_pressed(Key::S), i.key_pressed(Key::B)));
     if cmd && z {
         if shift {
             st.redo();
@@ -501,33 +483,30 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if sk && !cmd {
         st.set_tool(Tool::Slot);
     }
+    if bk && !cmd {
+        st.set_tool(Tool::Box);
+    }
     if back && st.path.is_some() {
         st.path_back();
     }
     if h && !cmd && st.doc.is_some() {
         st.hide_scan = !st.hide_scan;
     }
-    if enter && st.tool == Tool::Circle {
-        st.circle_apply();
-    }
     if enter && st.tool == Tool::Path {
         st.path_apply();
     }
-    if enter && st.tool == Tool::Slot {
+    if enter && matches!(st.tool, Tool::Slot | Tool::Box | Tool::Circle) {
         st.slot_apply();
     }
     if f {
         st.frame_all();
     }
-    if esc && st.circle.is_some() && st.circle_drag.is_none() {
-        st.circle_cancel();
-    } else if esc && st.path.is_some() {
+    if esc && st.path.is_some() {
         st.path_cancel();
     } else if esc && st.slot.is_some() && st.slot_drag.is_none() {
         st.slot_cancel();
     } else if esc {
-        if st.circle_drag.is_some() || st.slot_drag.is_some() {
-            st.circle_drag = None;
+        if st.slot_drag.is_some() {
             st.slot_drag = None;
             st.overlay_gen += 1;
         } else {
