@@ -79,7 +79,7 @@ fn flood(topo: &Topo, m: &Mesh, seeds: &[u32], keep: impl Fn(DVec3) -> bool) -> 
 
 /// The line where two planes meet (a point, the unit direction), its point
 /// nearest to `near`.
-fn meet(p1: (DVec3, DVec3), p2: (DVec3, DVec3), near: DVec3) -> Option<(DVec3, DVec3)> {
+pub(crate) fn meet(p1: (DVec3, DVec3), p2: (DVec3, DVec3), near: DVec3) -> Option<(DVec3, DVec3)> {
     let (c1, n1) = p1;
     let (c2, n2) = p2;
     let e = n1.cross(n2);

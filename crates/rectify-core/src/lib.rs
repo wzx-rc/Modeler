@@ -5,9 +5,12 @@
 //!
 //! - `line`: a segment dragged along an edge makes it straight and sharp;
 //! - `circle`: a round part made truly round, ring by ring;
+//! - `edges`: the straight edges between flat faces found everywhere, each
+//!   fixed like a Line;
 //! - `sym`: the mirror plane, both sides averaged or one copied.
 
 pub mod circle;
+pub mod edges;
 pub mod line;
 pub mod mesh;
 pub mod moves;

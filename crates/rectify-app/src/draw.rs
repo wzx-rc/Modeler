@@ -127,6 +127,19 @@ impl Drawer {
                 line_vertices(&[cross(e, st)], [255, 150, 60, 255], 1.4, &mut out);
             }
         }
+        // the edges found: on in orange, left out in grey
+        if let Some(ee) = &st.edges {
+            let mut on = vec![];
+            let mut off = vec![];
+            for (i, f) in ee.found.iter().enumerate() {
+                match ee.fits.get(i).and_then(|x| x.as_ref()) {
+                    Some(fit) if ee.on[i] => on.push(vec![p(fit.a), p(fit.b)]),
+                    _ => off.push(vec![p(f.a), p(f.b)]),
+                }
+            }
+            line_vertices(&on, [255, 150, 60, 255], 1.8, &mut out);
+            line_vertices(&off, [150, 150, 150, 200], 1.2, &mut out);
+        }
         // the Circle drag: the diameter drawn; the part found: its rings
         if let Some(cd) = &st.circle_drag {
             // on the plane under the press

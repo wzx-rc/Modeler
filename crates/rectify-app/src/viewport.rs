@@ -96,9 +96,18 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             return;
         }
     }
+    // the Edges tool: a click on an edge leaves it out (or takes it back);
+    // a drag orbits
+    if st.tool == Tool::Edges && !alt && resp.clicked() {
+        if let Some(p) = ctx.input(|i| i.pointer.latest_pos()) {
+            if let Some(i) = st.edges_pick([p.x, p.y]) {
+                st.edges_toggle(i);
+            }
+        }
+    }
     // the middle button alone pans; the left drag alone orbits when no
     // tool takes it
-    if (m || (l && st.tool == Tool::Navigate)) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
+    if (m || (l && matches!(st.tool, Tool::Navigate | Tool::Edges))) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
         if m {
             st.camera.pan(d.x, d.y, rect.height());
         } else {
@@ -164,6 +173,10 @@ pub fn hint(st: &AppState) -> String {
             (None, Some(c)) => format!("Ø {} mm, {} rings: strength, height and levels on the left, live · Enter applies · Esc removes", fmt(c.circle.r * 2.0, 2), c.rings.len()),
             (None, None) => "Circle: press on the rim of a hole or a boss and drag across it to the other side".into(),
         },
-        Tool::Navigate => "L line · C circle · M mirror · Ctrl+Z undo · Space the mesh as it came · drag to turn around".into(),
+        Tool::Edges => match &st.edges {
+            Some(ee) => format!("Edges: {} made sharp, at {:.0} % · click one to switch it · Enter applies · Esc removes", ee.fits.iter().filter(|x| x.is_some()).count(), st.edges_strength * 100.0),
+            None => "Edges: none placed (Find the edges again on the left)".into(),
+        },
+        Tool::Navigate => "L line · C circle · E edges · M mirror · Ctrl+Z undo · Space the mesh as it came · drag to turn around".into(),
     }
 }

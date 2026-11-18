@@ -465,6 +465,57 @@ fn main() {
         h.shot("mirror-4-ui");
         h.st.set_tool(Tool::Navigate);
     }
+    if want("edges") {
+        h.st.camera.preset(ViewPreset::Perspective);
+        h.st.frame_all();
+        let t = std::time::Instant::now();
+        h.st.set_tool(Tool::Edges);
+        eprintln!("edges found and fixed in {:.1}s", t.elapsed().as_secs_f64());
+        if let Some(ee) = &h.st.edges {
+            eprintln!("EDGES: {} found, {} fixed, {} vertices, {:.2} mm at most", ee.found.len(), ee.fits.iter().filter(|f| f.is_some()).count(), ee.moves.idx.len(), ee.moves.max_move());
+        }
+        h.shot("edges-0-ui");
+        look(&mut h, [0.45, 0.72, 0.5], 75.0, 0.3, 0.15);
+        h.shot("edges-0-ui-side");
+        look(&mut h, [0.85, 0.75, 0.5], 60.0, 0.9, 0.3);
+        h.shot("edges-0-ui-front");
+        // a click on an edge leaves it out
+        let first = h.st.edges.as_ref().and_then(|ee| ee.fits.iter().position(|f| f.is_some()).map(|i| ee.found[i].clone()));
+        if let Some(f) = first {
+            if let Some(p) = h.st.view().project(((f.a + f.b) * 0.5).as_vec3()) {
+                h.click(Pos2::new(p[0], p[1]));
+                h.shot("edges-0-ui-one-off");
+                h.click(Pos2::new(p[0], p[1]));
+            }
+        }
+        h.st.edges_apply();
+        if let Some(t) = &h.st.toast {
+            eprintln!("{}", t.text);
+        }
+        turned(&h.st);
+        let looks: Vec<(String, Vec<f32>)> = match std::env::var("RECTIFY_LOOK").map(|s| nums(&s)) {
+            Ok(v) if v.len() == 6 => vec![("look".into(), v)],
+            _ => vec![
+                ("side".into(), vec![0.3, 0.72, 0.5, 60.0, 0.35, 0.1]),
+                ("front".into(), vec![0.85, 0.75, 0.5, 60.0, 0.9, 0.3]),
+                ("back".into(), vec![0.1, 0.6, 0.5, 70.0, -0.9, 0.35]),
+            ],
+        };
+        h.st.set_tool(Tool::Navigate);
+        h.st.bare = true;
+        for (name, v) in &looks {
+            look(&mut h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+            h.shot(&format!("edges-{name}-after"));
+            h.st.settings.zebra = true;
+            h.shot(&format!("edges-{name}-after-zebra"));
+            h.st.undo();
+            h.shot(&format!("edges-{name}-before-zebra"));
+            h.st.settings.zebra = false;
+            h.shot(&format!("edges-{name}-before"));
+            h.st.redo();
+        }
+        h.st.bare = false;
+    }
     if want("look") {
         let v = std::env::var("RECTIFY_LOOK").map(|s| nums(&s)).unwrap_or_default();
         let v = if v.len() == 6 { v } else { vec![0.3, 0.72, 0.5, 60.0, 0.35, 0.1] };

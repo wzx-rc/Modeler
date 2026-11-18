@@ -6,6 +6,7 @@ use crate::view::View;
 use glam::{DVec3, Vec3};
 use rayon::prelude::*;
 use rectify_core::circle::Circle;
+use rectify_core::edges::{self, EdgeParams};
 use rectify_core::line::{self, LineFit, LineParams};
 use rectify_core::sym::{self, Axis, Found, SymMode};
 use rectify_core::{Mesh, Moves, Surface, Topo};
@@ -36,6 +37,8 @@ pub enum Tool {
     Mirror,
     /// Drag across a round part: its wall made truly round, ring by ring.
     Circle,
+    /// The straight edges between flat faces, found everywhere: all sharp.
+    Edges,
 }
 
 impl Tool {
@@ -45,6 +48,7 @@ impl Tool {
             Tool::Line => "Line",
             Tool::Mirror => "Mirror",
             Tool::Circle => "Circle",
+            Tool::Edges => "Edges",
         }
     }
 }
@@ -100,6 +104,18 @@ pub struct CircleEdit {
     pub off: f64,
     pub after: f64,
     /// The moves at full strength.
+    pub moves: Moves,
+}
+
+/// The edges found on the whole mesh, each fixed like a Line; shown at the
+/// strength set, those switched off left alone.
+pub struct EdgesEdit {
+    pub found: Vec<edges::Found>,
+    /// Each edge's fix (None: switched off, or left out because its fix
+    /// was not safe).
+    pub fits: Vec<Option<LineFit>>,
+    pub on: Vec<bool>,
+    /// The fixes of the edges on, together, at full strength.
     pub moves: Moves,
 }
 
@@ -179,6 +195,9 @@ pub struct AppState {
     /// The Circle tool's levels, kept from one part to the next.
     /// How much of the rounding is applied (0..1).
     pub circle_strength: f64,
+    pub edges: Option<EdgesEdit>,
+    pub edge_params: EdgeParams,
+    pub edges_strength: f64,
     /// The edits made, in order, and the ones undone.
     pub history: Vec<Step>,
     pub undone: Vec<Step>,
@@ -220,6 +239,9 @@ impl AppState {
             circle_drag: None,
             circle: None,
             circle_strength: 1.0,
+            edges: None,
+            edge_params: EdgeParams::default(),
+            edges_strength: 1.0,
             history: vec![],
             undone: vec![],
         }
@@ -279,6 +301,7 @@ impl AppState {
         self.line_edit = None;
         self.circle_drag = None;
         self.circle = None;
+        self.edges = None;
         self.sym.found = None;
         self.dirty.clear();
         self.gen += 1;
@@ -289,6 +312,7 @@ impl AppState {
     pub fn export(&mut self) {
         self.line_apply();
         self.circle_apply();
+        self.edges_apply();
         let Some(d) = &self.doc else { return };
         let m = d.mesh.clone();
         let path = crate::files::documents_dir().join(format!("{} rectified.obj", crate::files::sanitize(&self.name)));
@@ -367,9 +391,13 @@ impl AppState {
         // what is placed is kept
         self.line_apply();
         self.circle_apply();
+        self.edges_apply();
         self.tool = t;
         self.line_drag = None;
         self.circle_drag = None;
+        if t == Tool::Edges {
+            self.edges_find();
+        }
         self.overlay_gen += 1;
         if t == Tool::Mirror && self.sym.found.is_none() {
             self.find_mirror(None);
@@ -444,6 +472,11 @@ impl AppState {
             self.toast("Circle removed", false);
             return;
         }
+        if self.edges.is_some() {
+            self.edges_cancel();
+            self.toast("Edges removed", false);
+            return;
+        }
         let Some(d) = &mut self.doc else { return };
         let Some(s) = self.history.pop() else {
             self.toast("Nothing to undo", false);
@@ -474,6 +507,7 @@ impl AppState {
     pub fn revert_all(&mut self) {
         self.line_cancel();
         self.circle_cancel();
+        self.edges_cancel();
         while !self.history.is_empty() {
             self.undo();
         }
@@ -712,6 +746,107 @@ impl AppState {
     pub fn circle_cancel(&mut self) {
         self.circle_hide();
         self.circle = None;
+        self.overlay_gen += 1;
+    }
+}
+
+impl AppState {
+    // ------------------------------------------------------------ Edges
+
+    /// The edges found on the mesh as it is, each fixed, shown.
+    pub fn edges_find(&mut self) {
+        self.edges_cancel();
+        let Some(d) = &self.doc else { return };
+        let found = edges::find(&d.mesh, &d.topo, &self.edge_params);
+        let on = vec![true; found.len()];
+        self.edges = Some(EdgesEdit { found, fits: vec![], on, moves: Moves::default() });
+        self.edges_combine();
+        // the ones whose fix was not safe are shown off
+        if let Some(ee) = &mut self.edges {
+            for (o, f) in ee.on.iter_mut().zip(&ee.fits) {
+                *o = f.is_some();
+            }
+        }
+    }
+
+    /// The edges on fixed one after the other (see `edges::fix_all`).
+    fn edges_combine(&mut self) {
+        self.edges_hide();
+        let (Some(d), Some(ee)) = (&self.doc, &mut self.edges) else { return };
+        let (fits, moves) = edges::fix_all(&d.mesh, &d.topo, &ee.found, &ee.on, &self.line);
+        ee.fits = fits.into_iter().map(|f| f.ok()).collect();
+        ee.moves = moves;
+        self.edges_show();
+    }
+
+    fn edges_show(&mut self) {
+        let (Some(d), Some(ee)) = (&mut self.doc, &self.edges) else { return };
+        show_moves(&mut d.mesh, &ee.moves, self.edges_strength, &mut self.dirty);
+        self.overlay_gen += 1;
+    }
+
+    fn edges_hide(&mut self) {
+        let (Some(d), Some(ee)) = (&mut self.doc, &self.edges) else { return };
+        show_moves(&mut d.mesh, &ee.moves, 0.0, &mut self.dirty);
+        self.overlay_gen += 1;
+    }
+
+    pub fn edges_set_strength(&mut self, s: f64) {
+        self.edges_strength = s.clamp(0.0, 1.0);
+        self.edges_show();
+    }
+
+    /// An edge switched on or off.
+    pub fn edges_toggle(&mut self, i: usize) {
+        if let Some(ee) = &mut self.edges {
+            if i < ee.on.len() {
+                ee.on[i] = !ee.on[i];
+            }
+        }
+        self.edges_combine();
+    }
+
+    /// The edge nearest the pointer on screen (within 12 points).
+    pub fn edges_pick(&self, at: [f32; 2]) -> Option<usize> {
+        let ee = self.edges.as_ref()?;
+        let view = self.view();
+        let p = egui::vec2(at[0], at[1]);
+        let mut best = (12.0f32, None);
+        for (i, f) in ee.found.iter().enumerate() {
+            let (Some(a), Some(b)) = (view.project(f.a.as_vec3()), view.project(f.b.as_vec3())) else { continue };
+            let (a, b) = (egui::vec2(a[0], a[1]), egui::vec2(b[0], b[1]));
+            let ab = b - a;
+            let t = ((p - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+            let dd = (a + ab * t - p).length();
+            if dd < best.0 {
+                best = (dd, Some(i));
+            }
+        }
+        best.1
+    }
+
+    pub fn edges_apply(&mut self) {
+        if self.edges.is_none() {
+            return;
+        }
+        self.edges_hide();
+        let Some(ee) = self.edges.take() else { return };
+        let Some(d) = &self.doc else { return };
+        let s = self.edges_strength;
+        let targets: Vec<(u32, DVec3)> = ee.moves.idx.iter().zip(ee.moves.from.iter().zip(&ee.moves.to)).map(|(&v, (a, b))| (v, *a + (*b - *a) * s)).collect();
+        let moves = Moves::new(&d.mesh, targets);
+        let n_on = ee.on.iter().filter(|x| **x).count();
+        let what = format!("{n_on} edges · {:.0} %", s * 100.0);
+        let n = moves.idx.len();
+        let mx = moves.max_move();
+        self.commit(Tool::Edges, what, moves);
+        self.toast(format!("{n_on} edges made sharp at {:.0} %: {n} vertices moved, {} mm at most", s * 100.0, fmt(mx, 2)), false);
+        self.overlay_gen += 1;
+    }
+
+    pub fn edges_cancel(&mut self) {
+        self.edges_hide();
+        self.edges = None;
         self.overlay_gen += 1;
     }
 }

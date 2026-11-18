@@ -67,7 +67,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the mesh (Esc)", "Esc"), (Tool::Line, Icon::Sketch, "Line: drag along an edge, it becomes straight and sharp (L)", "L"), (Tool::Circle, Icon::Cylinder, "Circle: drag across a hole or a boss, its wall made truly round (C)", "C"), (Tool::Mirror, Icon::Mirror, "Mirror: the two sides made mirror images (M)", "M")];
+                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the mesh (Esc)", "Esc"), (Tool::Line, Icon::Sketch, "Line: drag along an edge, it becomes straight and sharp (L)", "L"), (Tool::Circle, Icon::Cylinder, "Circle: drag across a hole or a boss, its wall made truly round (C)", "C"), (Tool::Edges, Icon::Fillet, "Edges: the straight edges between flat faces, found everywhere, all made sharp (E)", "E"), (Tool::Mirror, Icon::Mirror, "Mirror: the two sides made mirror images (M)", "M")];
                 for (t, icon, tip, key) in tools {
                     let r = icon_btn(ui, icon, st.tool == t, tip, 28.0);
                     key_hint(ui, &r, key);
@@ -234,6 +234,9 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
             if secondary_btn(ui, "Circle (C): truly round", w).clicked() {
                 st.set_tool(Tool::Circle);
             }
+            if secondary_btn(ui, "Edges (E): all the edges sharper", w).clicked() {
+                st.set_tool(Tool::Edges);
+            }
             if secondary_btn(ui, "Mirror (M): both sides alike", w).clicked() {
                 st.set_tool(Tool::Mirror);
             }
@@ -308,6 +311,41 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
             }
             if cancel {
                 st.circle_cancel();
+            }
+        }
+        Tool::Edges => {
+            title(ui, "Edges", "The straight edges between flat faces, found on the whole mesh, each made sharp like a Line");
+            let mut s = (st.edges_strength * 100.0) as f32;
+            if slider_row(ui, "Strength", &mut s, 0.0..=100.0, 1.0, "%").0 {
+                st.edges_set_strength(s as f64 / 100.0);
+            }
+            let mut again = slider_f64(ui, "Min angle", &mut st.edge_params.min_angle, 5.0..=80.0, 1.0, "°");
+            again |= slider_f64(ui, "Min length", &mut st.edge_params.min_len, 0.5..=20.0, 0.5, "mm");
+            again |= slider_f64(ui, "Width", &mut st.line.width, 0.2..=8.0, 0.1, "mm");
+            if again {
+                st.edges_find();
+            }
+            match &st.edges {
+                Some(ee) => {
+                    let ok = ee.fits.iter().filter(|f| f.is_some()).count();
+                    line(ui, format!("{} edges found, {ok} made sharp · {} vertices · {} mm at most", ee.found.len(), ee.moves.idx.len(), fmt(ee.moves.max_move() * st.edges_strength, 2)));
+                    line(ui, "Grey: left out (its fix was not safe, or clicked off). Click an edge to switch it.");
+                    ui.add_space(6.0);
+                    let w = ui.available_width();
+                    let apply = primary_btn(ui, Some(Icon::Fillet), "Apply (Enter)", Some(w)).clicked();
+                    let cancel = secondary_btn(ui, "Cancel (Esc)", w).clicked();
+                    if apply {
+                        st.edges_apply();
+                    } else if cancel {
+                        st.edges_cancel();
+                    }
+                }
+                None => {
+                    let w = ui.available_width();
+                    if secondary_btn(ui, "Find the edges again", w).clicked() {
+                        st.edges_find();
+                    }
+                }
             }
         }
         Tool::Mirror => {
@@ -439,6 +477,12 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if enter && st.tool == Tool::Line {
         st.line_apply();
     }
+    if enter && st.tool == Tool::Edges {
+        st.edges_apply();
+    }
+    if ctx.input(|i| i.key_pressed(Key::E)) && !cmd {
+        st.set_tool(Tool::Edges);
+    }
     if ctx.input(|i| i.key_pressed(Key::C)) && !cmd {
         st.set_tool(Tool::Circle);
     }
@@ -459,7 +503,9 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if f {
         st.frame_all();
     }
-    if esc && st.line_edit.is_some() {
+    if esc && st.edges.is_some() {
+        st.edges_cancel();
+    } else if esc && st.line_edit.is_some() {
         st.line_cancel();
     } else if esc && st.circle.is_some() && st.circle_drag.is_none() {
         st.circle_cancel();
