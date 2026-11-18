@@ -63,6 +63,28 @@ The window title shows the version, branch, commit and commit date (`crates/nurb
   - `ui.rs` + `widgets.rs` + `theme.rs` + `icons.rs`: the Établi-style islands, inspector, history strip, files dialog; `draw.rs`: what is uploaded to the renderer each frame; `materials.rs`: the 6 materials (colour, metal, roughness) read per face by the shader; `files.rs`, `settings.rs`: `~/Documents/Forme NURBS`.
   - `bin/shot.rs`: the capture harness (`test_part()`: Block, Hole, Boss, Slot).
 
+## Forme Rectify (third app, asked 18 nov. 2026, 7 h 10)
+
+Romain: "une troisième version du soft… on garde que le viewport et l'interface (en orange)", to clean an AI-made mesh (test: `GUN_A_ORIGIN.obj`, a sci-fi pistol, 976 k vertices, 1.95 M triangles, in cm) with no retopology and no remodelling: **the triangles stay, the vertices move onto the shapes the part is made of** (scan-to-CAD, "reconstruction A"). Same window, theme and widgets as Forme NURBS, accent orange, UI in English; no kernel, no OpenCascade.
+
+- `crates/rectify-core` (glam + rayon, no UI), the five steps of `pipeline.rs` (`Pipeline::run(step)`, each step's result kept, a changed setting clears from its step):
+  1. `symmetry.rs`: mirror plane from the PCA axes refined by ICP; both sides averaged where they match (only when > 50 % matches).
+  2. `smooth.rs`: bilateral normal filtering, then vertices fitted to the normals (keeps edges).
+  3. `segment.rs`: region growing driven by the shape (plane, cylinder, sphere; seeds by flatness; a curved shape must cover 1.3× the plane), then `clean.rs`: merge neighbours whose union fits, borders relabelled to the closest shape, vote, islands, small regions freed.
+  4. `regularize.rs` (GlobFit-like): directions clustered, the object frame (Z = mirror normal), on the axes, coplanar, same radii, coaxial, mirror pairs; a shape whose fit gets much worse is put back.
+  5. `snap.rs`: each vertex's two nearest regions (geodesic), plane-plane edges rebuilt as a fillet of fitted radius (or sharp), feathered weights inside regions, relaxed displacement; applied to the symmetrised mesh (not the smoothed one, so the hose ribs stay). `crease_normals` for display.
+  `mesh.rs`: fast parallel .obj loader (cm → mm, UVs kept), `Topo`, uniform `Grid`, `eigen_sym`. The export writes the same triangles and UVs in the file's own unit.
+- `crates/rectify-app`: `state.rs` (pipeline runs on a thread, `ViewMode` Original / Regions / Result, Space shows the original, click picks a region, `retype` changes its kind or frees it and reruns from Regularize), `draw.rs` (regions coloured by kind: planes cool, cylinders warm), `ui.rs` (5 step cards + RUN ALL on the right, the step's settings or the picked region in the left inspector, Zebra chip), `render.rs` (NURBS's, plus a zebra mode to judge surfaces).
+
+```bash
+cargo build --release -p rectify-app                                         # forme-rectify and forme-rectify-shot
+cargo run --release -p rectify-app --bin forme-rectify -- mesh.obj           # the app (or drop an .obj on the window)
+./target/release/forme-rectify-shot /tmp/x mesh.obj [ui side persp back zebra close-…]   # captures, each in the three modes
+cargo run --release -p rectify-core --example probe -- in.obj [out.obj]     # the pipeline alone, with its numbers
+```
+
+State (18 nov., captures only, never tried at the mouse): the gun runs in about 17 s (cloud); about 590 planes, 395 cylinders, 86 % of the area on a shape, ~700 edges rebuilt (median radius 1.1 mm). Flat panels come out flat (straight zebra stripes). Not done: regions still broken up on rounded parts and the hose, small tears where a fillet meets a curved region (grip, square button), plane-cylinder edges, decimation, the brush to merge / split regions, primitives placed by gesture, B-rep.
+
 ## Rules that are easy to break
 
 - **No SDF, ever, on this branch**: the part on screen is always the kernel's mesh. While the kernel computes, the previous mesh stays, with the moved or created shape drawn as an outline.

@@ -1,0 +1,9 @@
+[package]
+name = "rectify-core"
+edition.workspace = true
+version.workspace = true
+description = "Forme Rectify: turns a noisy AI / scan mesh back into what it was meant to be (planes, cylinders, sharp edges)"
+
+[dependencies]
+glam.workspace = true
+rayon = "1"
