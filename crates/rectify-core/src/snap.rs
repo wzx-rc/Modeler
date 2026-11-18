@@ -592,7 +592,7 @@ pub fn snap(m: &mut Mesh, topo: &Topo, seg: &Segmentation, p: &SnapParams) -> Sn
             let x = old[v];
             let nb = near[v];
             let mut dmin = f64::INFINITY;
-            let mut cands: Vec<(f64, Spot, f64, (u32, u32), bool)> = vec![];
+            let mut cands: Vec<(f64, Spot, f64, (u32, u32), bool, bool)> = vec![];
             for i in 0..3 {
                 for j in i + 1..3 {
                     let ((di, li), (dj, lj)) = (nb[i], nb[j]);
@@ -611,7 +611,7 @@ pub fn snap(m: &mut Mesh, topo: &Topo, seg: &Segmentation, p: &SnapParams) -> Sn
                     // a move near the limit fades out instead of stopping dead
                     let far = ((p.max_move - mv) / (p.max_move * 0.5)).clamp(0.0, 1.0);
                     dmin = dmin.min(di + dj);
-                    cands.push((di + dj, sp, w * far, key, e.thin()));
+                    cands.push((di + dj, sp, w * far, key, e.thin(), e.tangent));
                 }
             }
             let mut sum = DVec3::ZERO;
@@ -619,17 +619,21 @@ pub fn snap(m: &mut Mesh, topo: &Topo, seg: &Segmentation, p: &SnapParams) -> Sn
             let mut wmove = 0.0;
             let mut ridge: Option<Ridge> = None;
             let mut top = 0.0;
-            for (d, sp, w, key, thin) in cands {
+            let mut top_tangent = false;
+            for (d, sp, w, key, thin, tangent) in cands {
                 let k = (-(d - dmin) / blend).exp();
                 sum += sp.q * k;
                 wmove += w * k;
                 wsum += k;
                 if k > top {
                     top = k;
+                    top_tangent = tangent;
                     ridge = thin.then_some(Ridge { key, side: sp.side, at: sp.ridge, d: sp.rd });
                 }
             }
-            let mut out = if wsum > 0.0 { (sum / wsum, wmove / wsum, 2u8, ridge) } else { (x, 0.0, 0u8, None) };
+            // a blend between two surfaces that continue each other is no
+            // crisp line: the clean-up judges it like the faces (kind 6)
+            let mut out = if wsum > 0.0 { (sum / wsum, wmove / wsum, if top_tangent { 6u8 } else { 2u8 }, ridge) } else { (x, 0.0, 0u8, None) };
             // Flatten: the inside of the faces too, a share of the way
             if p.flatten > 0.0 && inner[v] != NONE && out.1 < p.flatten {
                 let reg = &seg.regions[inner[v] as usize];
