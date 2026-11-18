@@ -3,6 +3,11 @@
 //! on 127.0.0.1:47820 (FORME_RECTIFY_PORT); when the app is not running it
 //! is started from the folder of this program.
 //!
+//! A call that takes long (a stage being computed) sends progress
+//! notifications when the client asked for them, and after
+//! FORME_RECTIFY_WAIT seconds (50) answers "still computing" while the app
+//! goes on: clients give up on a tool call after about a minute.
+//!
 //! Claude Desktop's config (claude_desktop_config.json):
 //! { "mcpServers": { "forme-rectify": { "command": "C:\\...\\forme-rectify-mcp.exe" } } }
 
@@ -96,7 +101,40 @@ fn text(v: &Value) -> Value {
     json!({ "type": "text", "text": serde_json::to_string_pretty(v).unwrap_or_default() })
 }
 
-fn call_tool(name: &str, args: Value) -> Result<Vec<Value>, String> {
+/// `call_app` on a thread: progress notifications every 5 s (when the
+/// client gave a token), "still computing" after the wait limit.
+fn call_app_waiting(method: &str, params: Value, progress: Option<&Value>) -> Result<Value, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (m, p) = (method.to_string(), params);
+    std::thread::spawn(move || {
+        let _ = tx.send(call_app(&m, p));
+    });
+    let limit = std::env::var("FORME_RECTIFY_WAIT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(50);
+    let t0 = Instant::now();
+    let mut n = 0u64;
+    loop {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(r) => return r,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err("the link to the app broke".into()),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if t0.elapsed() >= Duration::from_secs(limit) {
+                    return Ok(json!({
+                        "still_computing": true,
+                        "note": format!("the app is still computing after {limit} s and goes on: call status until busy is false, then call {} again (it answers at once when the stage is ready)", if method == "run" { "run_stage" } else { "this tool" }),
+                    }));
+                }
+                if let Some(tok) = progress {
+                    n += 1;
+                    let mut out = std::io::stdout();
+                    let _ = writeln!(out, "{}", json!({ "jsonrpc": "2.0", "method": "notifications/progress", "params": { "progressToken": tok, "progress": n, "message": "computing" } }));
+                    let _ = out.flush();
+                }
+            }
+        }
+    }
+}
+
+fn call_tool(name: &str, args: Value, progress: Option<&Value>) -> Result<Vec<Value>, String> {
     let (method, params) = match name {
         "status" => ("status", json!({})),
         "open_mesh" => ("open", args),
@@ -113,8 +151,8 @@ fn call_tool(name: &str, args: Value) -> Result<Vec<Value>, String> {
         "diff_report" => ("diff", args),
         other => return Err(format!("unknown tool {other}")),
     };
-    let mut v = call_app(method, params)?;
-    if name == "capture" {
+    let mut v = call_app_waiting(method, params, progress)?;
+    if name == "capture" && v.get("png_base64").is_some() {
         let data = v["png_base64"].as_str().unwrap_or("").to_string();
         if let Some(o) = v.as_object_mut() {
             o.remove("png_base64");
@@ -142,7 +180,8 @@ fn handle(msg: &Value) -> Option<Value> {
         "tools/call" => {
             let name = msg["params"]["name"].as_str().unwrap_or("");
             let args = msg["params"].get("arguments").cloned().unwrap_or(json!({}));
-            match call_tool(name, args) {
+            let progress = msg["params"]["_meta"].get("progressToken");
+            match call_tool(name, args, progress) {
                 Ok(content) => Ok(json!({ "content": content, "isError": false })),
                 Err(e) => Ok(json!({ "content": [{ "type": "text", "text": e }], "isError": true })),
             }
