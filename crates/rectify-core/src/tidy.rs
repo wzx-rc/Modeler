@@ -17,17 +17,28 @@ pub struct TidyParams {
     pub margin: f64,
     /// Same on the edges the snap built (they are sharper by design).
     pub edge_margin: f64,
-    /// Smoothing passes of the move where it is rough.
+    /// How much more a vertex's normal may stray from its neighbours' than
+    /// on the AI mesh (degrees): the small wrinkles the bend lets through.
+    pub noise: f64,
+    /// Same on the edges the snap built.
+    pub edge_noise: f64,
+    /// Smoothing passes where it is rough.
     pub iters: usize,
+    /// What is smoothed where it is rough: the result itself (true: its
+    /// wrinkles go, its lines mostly stay) or the move (false).
+    pub calm: bool,
     /// Rings around a rough vertex that are smoothed too.
     pub rings: usize,
     /// What is still rough after smoothing goes back to the AI mesh.
     pub revert: bool,
+    /// Over how far (mm, along the mesh) a part taken back fades into the
+    /// rest: a short fade makes a crease of its own.
+    pub fade: f64,
 }
 
 impl Default for TidyParams {
     fn default() -> Self {
-        TidyParams { on: true, margin: 14.0, edge_margin: 40.0, iters: 30, rings: 2, revert: true }
+        TidyParams { on: true, margin: 14.0, edge_margin: 40.0, noise: 1.5, edge_noise: 4.0, iters: 30, calm: true, rings: 2, revert: true, fade: 1.5 }
     }
 }
 
@@ -90,6 +101,35 @@ pub fn bend(m: &Mesh, topo: &Topo) -> Vec<f32> {
     b
 }
 
+/// Per vertex, how far its normal strays from the mean of its neighbours'
+/// (degrees): near 0 on a plane or a steady curve, larger on wrinkles.
+pub fn stray(m: &Mesh, topo: &Topo) -> Vec<f32> {
+    let vn = m.vertex_normals(topo);
+    (0..m.pos.len())
+        .into_par_iter()
+        .map(|v| {
+            let a = topo.verts_of(v).iter().map(|&u| vn[u as usize]).sum::<DVec3>().normalize_or_zero();
+            if a == DVec3::ZERO {
+                return 0.0;
+            }
+            vn[v].dot(a).clamp(-1.0, 1.0).acos().to_degrees() as f32
+        })
+        .collect()
+}
+
+/// How the AI mesh looks, per vertex: what the result is measured against.
+#[derive(Clone, Debug, Default)]
+pub struct Look {
+    pub bend: Vec<f32>,
+    pub stray: Vec<f32>,
+}
+
+impl Look {
+    pub fn of(m: &Mesh, topo: &Topo) -> Look {
+        Look { bend: bend(m, topo), stray: stray(m, topo) }
+    }
+}
+
 /// Faces turned over by more than 75° against the AI mesh: their corners.
 fn folds(base: &Mesh, m: &Mesh) -> Vec<bool> {
     let nb = base.normals();
@@ -107,14 +147,15 @@ fn folds(base: &Mesh, m: &Mesh) -> Vec<bool> {
 
 /// The diff map of `m` against the AI mesh `base`; `kinds` from the snap
 /// (vertices on an edge it built may be sharper).
-pub fn diff(base: &Mesh, base_bend: &[f32], m: &Mesh, topo: &Topo, kinds: &[u8], p: &TidyParams) -> Diff {
+pub fn diff(base: &Mesh, look: &Look, m: &Mesh, topo: &Topo, kinds: &[u8], p: &TidyParams) -> Diff {
     let b = bend(m, topo);
+    let st = stray(m, topo);
     let fold = folds(base, m);
     let worse = (0..m.pos.len())
         .map(|v| {
             let on_edge = matches!(kinds.get(v), Some(2) | Some(4));
-            let margin = if on_edge { p.edge_margin } else { p.margin } as f32;
-            let w = b[v] - base_bend[v] - margin;
+            let (margin, noise) = if on_edge { (p.edge_margin, p.edge_noise) } else { (p.margin, p.noise) };
+            let w = (b[v] - look.bend[v] - margin as f32).max(st[v] - look.stray[v] - noise as f32);
             if fold[v] {
                 w.max(90.0)
             } else {
@@ -124,6 +165,47 @@ pub fn diff(base: &Mesh, base_bend: &[f32], m: &Mesh, topo: &Topo, kinds: &[u8],
         .collect();
     let moved = (0..m.pos.len()).map(|v| (m.pos[v] - base.pos[v]).length() as f32).collect();
     Diff { moved, worse }
+}
+
+/// Distance along the mesh to the nearest marked vertex, up to `cap` (beyond:
+/// infinity).
+fn dist_from(m: &Mesh, topo: &Topo, marked: &[bool], cap: f64) -> Vec<f64> {
+    use std::cmp::Ordering;
+    use std::collections::BinaryHeap;
+    #[derive(PartialEq)]
+    struct It(f64, u32);
+    impl Eq for It {}
+    impl Ord for It {
+        fn cmp(&self, o: &Self) -> Ordering {
+            o.0.partial_cmp(&self.0).unwrap_or(Ordering::Equal)
+        }
+    }
+    impl PartialOrd for It {
+        fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+            Some(self.cmp(o))
+        }
+    }
+    let mut dist = vec![f64::INFINITY; m.pos.len()];
+    let mut heap = BinaryHeap::new();
+    for (v, &k) in marked.iter().enumerate() {
+        if k {
+            dist[v] = 0.0;
+            heap.push(It(0.0, v as u32));
+        }
+    }
+    while let Some(It(d, v)) = heap.pop() {
+        if d > dist[v as usize] {
+            continue;
+        }
+        for &u in topo.verts_of(v as usize) {
+            let nd = d + (m.pos[u as usize] - m.pos[v as usize]).length();
+            if nd < dist[u as usize] && nd <= cap {
+                dist[u as usize] = nd;
+                heap.push(It(nd, u));
+            }
+        }
+    }
+    dist
 }
 
 fn smooth01(t: f64) -> f64 {
@@ -158,8 +240,8 @@ fn rings_of(topo: &Topo, marked: &[bool], rings: usize) -> Vec<u8> {
 /// `keep`: zones (centre, radius) left as the AI mesh.
 pub fn tidy(base: &Mesh, m: &mut Mesh, topo: &Topo, kinds: &[u8], keep: &[(DVec3, f64)], p: &TidyParams) -> (TidyReport, Diff, Diff) {
     let nv = m.pos.len();
-    let base_bend = bend(base, topo);
-    let before = diff(base, &base_bend, m, topo, kinds, p);
+    let look = Look::of(base, topo);
+    let before = diff(base, &look, m, topo, kinds, p);
     let mut rep = TidyReport { rough_before: before.rough_count(), ..Default::default() };
     let mut d: Vec<DVec3> = (0..nv).map(|v| m.pos[v] - base.pos[v]).collect();
 
@@ -180,7 +262,7 @@ pub fn tidy(base: &Mesh, m: &mut Mesh, topo: &Topo, kinds: &[u8], keep: &[(DVec3
     }
 
     if p.on {
-        // 1. the move smoothed where the result is rough
+        // 1. smoothed where the result is rough
         let rough: Vec<bool> = before.worse.iter().map(|w| *w > 0.0).collect();
         let ring = rings_of(topo, &rough, p.rings);
         let free: Vec<usize> = (0..nv).filter(|&v| ring[v] != u8::MAX).collect();
@@ -194,50 +276,78 @@ pub fn tidy(base: &Mesh, m: &mut Mesh, topo: &Topo, kinds: &[u8], keep: &[(DVec3
                 r => r as f64 / (p.rings as f64 + 1.0),
             }
         };
-        for _ in 0..p.iters {
-            let cur = &d;
-            let upd: Vec<(usize, DVec3)> = free
-                .par_iter()
-                .map(|&v| {
-                    let ns = topo.verts_of(v);
-                    if ns.is_empty() {
-                        return (v, cur[v]);
-                    }
-                    let avg = ns.iter().map(|&u| cur[u as usize]).sum::<DVec3>() / ns.len() as f64;
-                    let k = keep_own(v);
-                    (v, cur[v] * k + avg * (1.0 - k))
-                })
-                .collect();
-            for (v, x) in upd {
-                d[v] = x;
+        if p.calm {
+            // Taubin's two steps (in, then a little more out): the result
+            // loses its wrinkles without shrinking
+            let weight = |v: usize| 1.0 - keep_own(v);
+            for it in 0..p.iters {
+                let lam = if it % 2 == 0 { 0.6 } else { -0.63 };
+                let cur = &m.pos;
+                let upd: Vec<(usize, DVec3)> = free
+                    .par_iter()
+                    .map(|&v| {
+                        let ns = topo.verts_of(v);
+                        if ns.is_empty() {
+                            return (v, cur[v]);
+                        }
+                        let avg = ns.iter().map(|&u| cur[u as usize]).sum::<DVec3>() / ns.len() as f64;
+                        (v, cur[v] + (avg - cur[v]) * (lam * weight(v)))
+                    })
+                    .collect();
+                for (v, x) in upd {
+                    m.pos[v] = x;
+                }
             }
-        }
-        for v in 0..nv {
-            m.pos[v] = base.pos[v] + d[v];
+            for v in 0..nv {
+                d[v] = m.pos[v] - base.pos[v];
+            }
+        } else {
+            for _ in 0..p.iters {
+                let cur = &d;
+                let upd: Vec<(usize, DVec3)> = free
+                    .par_iter()
+                    .map(|&v| {
+                        let ns = topo.verts_of(v);
+                        if ns.is_empty() {
+                            return (v, cur[v]);
+                        }
+                        let avg = ns.iter().map(|&u| cur[u as usize]).sum::<DVec3>() / ns.len() as f64;
+                        let k = keep_own(v);
+                        (v, cur[v] * k + avg * (1.0 - k))
+                    })
+                    .collect();
+                for (v, x) in upd {
+                    d[v] = x;
+                }
+            }
+            for v in 0..nv {
+                m.pos[v] = base.pos[v] + d[v];
+            }
         }
 
         // 2. still rough: back to the AI mesh, fully there and fading over
-        // a few rings around; a few rounds, as taking back can leave a
-        // crease at the edge of what was taken back
+        // `fade` mm around; a few rounds, as taking back can leave a crease
+        // at the edge of what was taken back
         if p.revert {
             let smoothed = d.clone();
             let mut back = vec![0.0f64; nv];
+            let mut marked = vec![false; nv];
             for _ in 0..4 {
-                let mid = diff(base, &base_bend, m, topo, kinds, p);
-                let rough: Vec<bool> = mid.worse.iter().map(|w| *w > 0.0).collect();
-                if !rough.iter().any(|r| *r) {
-                    break;
-                }
-                let k = 4usize;
-                let ring = rings_of(topo, &rough, k);
+                let mid = diff(base, &look, m, topo, kinds, p);
+                let mut new = false;
                 for v in 0..nv {
-                    if ring[v] != u8::MAX {
-                        let w = 1.0 - ring[v] as f64 / (k as f64 + 1.0);
-                        back[v] = back[v].max(w);
+                    if mid.worse[v] > 0.0 && !marked[v] {
+                        marked[v] = true;
+                        new = true;
                     }
                 }
+                if !new {
+                    break;
+                }
+                let dist = dist_from(base, topo, &marked, p.fade);
                 for v in 0..nv {
-                    d[v] = smoothed[v] * (1.0 - smooth01(back[v]));
+                    back[v] = if dist[v].is_finite() { 1.0 - smooth01(dist[v] / p.fade.max(1e-6)) } else { 0.0 };
+                    d[v] = smoothed[v] * (1.0 - back[v]);
                     m.pos[v] = base.pos[v] + d[v];
                 }
             }
@@ -248,7 +358,7 @@ pub fn tidy(base: &Mesh, m: &mut Mesh, topo: &Topo, kinds: &[u8], keep: &[(DVec3
             m.pos[v] = base.pos[v] + d[v];
         }
     }
-    let after = diff(base, &base_bend, m, topo, kinds, p);
+    let after = diff(base, &look, m, topo, kinds, p);
     rep.rough_after = after.rough_count();
     (rep, before, after)
 }

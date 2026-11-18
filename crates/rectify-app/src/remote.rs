@@ -50,6 +50,8 @@ pub struct Capture {
 pub struct Pending {
     rx: Option<Receiver<Request>>,
     after_job: Vec<Request>,
+    /// Came in while a job was running: handled when it ends.
+    deferred: Vec<Request>,
     pub captures: Vec<Capture>,
     pub port: Option<u16>,
     /// Requests answered (shown in the status line).
@@ -114,19 +116,25 @@ fn serve(conn: TcpStream, tx: Sender<Request>, wake: Arc<dyn Fn() + Send + Sync>
 /// Handles what came in, and what waited for a job that has ended.
 pub fn poll(st: &mut AppState) {
     let mut reqs = vec![];
+    if !st.busy() {
+        for mut r in std::mem::take(&mut st.remote.after_job) {
+            r.waited = true;
+            reqs.push(r);
+        }
+        reqs.append(&mut st.remote.deferred);
+    }
     if let Some(rx) = &st.remote.rx {
         while let Ok(r) = rx.try_recv() {
             reqs.push(r);
         }
     }
-    if !st.busy() && !st.remote.after_job.is_empty() {
-        for mut r in std::mem::take(&mut st.remote.after_job) {
-            r.waited = true;
-            reqs.push(r);
-        }
-    }
     for r in reqs {
-        handle(st, r);
+        // the mesh is with the job while it runs: wait for it
+        if st.busy() && !r.waited && r.method != "status" {
+            st.remote.deferred.push(r);
+        } else {
+            handle(st, r);
+        }
     }
 }
 
@@ -235,6 +243,7 @@ fn handle(st: &mut AppState, req: Request) {
                 w();
             }
         }
+        "pick" => req.answer(pick(st, &p)),
         "regions" => req.answer(regions(st, &p)),
         "region" => req.answer(region(st, &p)),
         "edit" => {
@@ -335,7 +344,11 @@ fn apply_view(st: &mut AppState, p: &Value) -> Result<(), String> {
                 st.camera.pitch = pitch;
                 st.camera.ortho = true;
             }
-            "all" | "frame" => st.frame_all(),
+            "all" | "frame" => {
+                st.frame_all();
+                // no interface in a capture: closer
+                st.camera.dist *= 0.62;
+            }
             other => return Err(format!("view \"{other}\": 3d, front, back, left, right, top, bottom, all")),
         }
     }
@@ -361,6 +374,37 @@ fn apply_view(st: &mut AppState, p: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// What lies under a spot of a capture (x, y: fractions from the top left;
+/// the capture's size and the current view).
+fn pick(st: &mut AppState, p: &Value) -> Result<Value, String> {
+    let (x, y) = (p["x"].as_f64().ok_or("x missing")?, p["y"].as_f64().ok_or("y missing")?);
+    let w = p["width"].as_u64().unwrap_or(1280) as f32;
+    let h = p["height"].as_u64().unwrap_or(800) as f32;
+    let (screen, rect) = (st.screen, st.view_rect);
+    st.screen = [w, h];
+    st.view_rect = [0.0, 0.0, w, h];
+    let hit = st.pick_hit([x as f32 * w, y as f32 * h]);
+    st.screen = screen;
+    st.view_rect = rect;
+    let (t, at) = hit.ok_or("nothing there (the background)")?;
+    let mut v = json!({ "point": r3(at), "triangle": t });
+    let pp = st.pipe.as_ref().ok_or("no mesh")?;
+    let seg = pp.seg_edit.as_ref().or(pp.seg_raw.as_ref());
+    if let Some(seg) = seg {
+        let l = seg.label[t];
+        if l == NONE {
+            v["region"] = json!(null);
+            v["note"] = json!("free faces (no region)");
+        } else {
+            let mut q = prim_json(&seg.regions[l as usize].prim);
+            q["id"] = json!(l);
+            q["area_mm2"] = json!(r(seg.regions[l as usize].area));
+            v["region"] = q;
+        }
+    }
+    Ok(v)
+}
+
 fn region_box(st: &AppState, r: u32) -> Option<(DVec3, DVec3)> {
     let pp = st.pipe.as_ref()?;
     let seg = st.shown_seg().or(pp.seg_raw.as_ref())?;
@@ -382,7 +426,10 @@ fn region_box(st: &AppState, r: u32) -> Option<(DVec3, DVec3)> {
 
 fn status(st: &AppState) -> Value {
     let Some(p) = &st.pipe else {
-        return json!({ "mesh": null, "note": "no mesh open: use open with the .obj path", "busy": st.busy() });
+        if st.busy() {
+            return json!({ "busy": true, "note": "a stage is being computed; other requests wait for it" });
+        }
+        return json!({ "mesh": null, "note": "no mesh open: use open with the .obj path", "busy": false });
     };
     let (lo, hi) = p.original.bounds();
     let stages: Vec<Value> = Stage::ALL.iter().map(|s| json!({ "stage": s.number(), "name": s.label(), "ready": p.ready(*s) })).collect();

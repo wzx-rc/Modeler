@@ -107,9 +107,13 @@ impl Params {
                 "tidy" => self.tidy.on = v != 0.0,
                 "tidy_margin" => self.tidy.margin = v,
                 "tidy_edge" => self.tidy.edge_margin = v,
+                "tidy_noise" => self.tidy.noise = v,
+                "tidy_edge_noise" => self.tidy.edge_noise = v,
                 "tidy_iters" => self.tidy.iters = v as usize,
                 "tidy_rings" => self.tidy.rings = v as usize,
                 "tidy_revert" => self.tidy.revert = v != 0.0,
+                "tidy_fade" => self.tidy.fade = v,
+                "tidy_calm" => self.tidy.calm = v != 0.0,
                 k => unknown.push(k.to_string()),
             }
         }

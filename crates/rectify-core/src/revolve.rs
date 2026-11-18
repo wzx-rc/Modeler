@@ -224,6 +224,10 @@ pub fn revolve(m: &mut Mesh, topo: &Topo, seg: &Segmentation, hints: &[Hint], of
         return rep;
     }
     let mut list = axes(m, seg, p);
+    // the pieces dropped by hand / by the AI pass (not the ones asked for)
+    list.retain(|ax| !off.iter().any(|o| line_dist(*o, ax.p, ax.a) < ax.r_max && (ax.h.0..=ax.h.1).contains(&ax.a.dot(*o - ax.p))));
+    // a piece asked for replaces the automatic ones on its spot
+    list.retain(|ax| !hints.iter().any(|h| (ax.p + ax.a * ax.a.dot(h.at - ax.p) - h.at).length() < h.radius * 0.5 && ax.a.dot(h.axis.normalize_or_zero()).abs() < 0.9));
     for h in hints {
         let a = h.axis.normalize_or_zero();
         if a == DVec3::ZERO {
@@ -231,7 +235,6 @@ pub fn revolve(m: &mut Mesh, topo: &Topo, seg: &Segmentation, hints: &[Hint], of
         }
         list.insert(0, Axis { p: h.at, a, members: vec![], r_max: h.radius + p.margin, h: (-h.depth, h.depth), hint: true });
     }
-    list.retain(|ax| !off.iter().any(|o| line_dist(*o, ax.p, ax.a) < ax.r_max && (ax.h.0..=ax.h.1).contains(&ax.a.dot(*o - ax.p))));
     let grid = Grid::new(&m.pos, 1.0);
     // a vertex's regions (its faces' labels)
     let mut done = vec![false; m.pos.len()];
