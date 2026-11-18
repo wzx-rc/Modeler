@@ -976,6 +976,31 @@ fn push_card(ui: &mut Ui, st: &mut AppState) {
 /// radius rounds it in its plane (a fillet on the short edge there).
 fn vertex_card(ui: &mut Ui, st: &mut AppState) {
     ui.label(egui::RichText::new("Drag the arrows to move it: the faces round it follow").font(regular(12.0)).color(TEXT2()));
+    // a sketch's corner: cut in its outline (exact arc or chamfer), the
+    // whole height follows
+    if let Some((size, chamfer, max)) = st.profile_corner_state() {
+        let n = st.picked_profile_corners().len();
+        section(ui, if n > 1 { "Sketch corners" } else { "Sketch corner" });
+        ui.label(egui::RichText::new("Cut in the sketch's outline: an exact arc or a straight bevel, the whole height follows").font(regular(12.0)).color(TEXT2()));
+        let kinds = [(false, "Fillet", EDGE_SEL), (true, "Chamfer", EDGE_SEL)];
+        if let Some(c) = segmented(ui, &kinds, chamfer, 36.0) {
+            st.set_profile_corners(if size > 0.0 { size } else { 2.0f64.min(max) }, c, true);
+            st.end_live();
+        }
+        let any_down = ui.input(|i| i.pointer.any_down());
+        let mut v = size.min(max) as f32;
+        let (ch, start) = slider_row(ui, if chamfer { "Distance" } else { "Radius" }, &mut v, 0.0..=(max as f32).max(0.1), 0.1, "mm");
+        if ch {
+            st.set_profile_corners(v as f64, chamfer, start);
+        }
+        if size > max + 1e-6 {
+            ui.label(egui::RichText::new(format!("Stops at {} mm: half of its shorter side", fmt_mm(max as f32))).font(regular(12.0)).color(TEXT2()));
+        }
+        if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
+            st.end_live();
+        }
+        return;
+    }
     let corners = st.vert_sel.iter().filter(|v| st.corner_edge(**v).is_some()).count();
     section(ui, "Round corner");
     if corners == 0 {

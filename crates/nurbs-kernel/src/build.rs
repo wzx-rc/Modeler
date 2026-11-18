@@ -109,7 +109,9 @@ fn tool(f: &Feature) -> Result<Shape, String> {
             // OpenCascade extrudes an outline of its XY plane along Z: local
             // (x, z) is OCC (x, -z), then turned so OCC Z is local Y
             let pts: Vec<[f64; 2]> = pr.scaled(x.max(0.01), z.max(0.01)).iter().map(|p| [p[0], -p[1]]).collect();
-            let s = Shape::prism(&pts, &pr.smooth, h * 0.5)?;
+            let flip = |q: [f64; 2]| [q[0], -q[1]];
+            let cuts: Vec<_> = pr.cuts(x.max(0.01), z.max(0.01)).into_iter().map(|c| c.map(|c| (c.chamfer, flip(c.a), flip(c.m), flip(c.b)))).collect();
+            let s = if cuts.iter().any(|c| c.is_some()) { Shape::prism_cut(&pts, &pr.smooth, &cuts, h * 0.5)? } else { Shape::prism(&pts, &pr.smooth, h * 0.5)? };
             s.transformed(rows(DMat4::from_rotation_x(-std::f64::consts::FRAC_PI_2)))?
         }
     };
@@ -673,7 +675,7 @@ mod tests {
         // an L of 20 × 20 mm, 10 mm high, its inside corner a curve point
         let mut d = Doc::default();
         let l = d.add(Op::Add, Prim::Profile { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        let pr = crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false, false, false, true, false, false] };
+        let pr = crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false, false, false, true, false, false], corner: vec![] };
         let pieces = pr.pieces(20.0, 20.0).len();
         d.feature_mut(l).unwrap().profile = Some(pr);
         let mut cache = Cache::default();
@@ -702,12 +704,12 @@ mod tests {
         let mut d = Doc::default();
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 40.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let c = d.add(Op::Carve, Prim::Profile { x: 20.0, y: 5.0, z: 20.0 }, DVec3::new(0.0, 20.0, 0.0), DQuat::from_rotation_x(std::f64::consts::PI));
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false, false, true] });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false, false, true], corner: vec![] });
         let m3 = build(&d, true, false, &[], &mut cache);
         assert!(m3.errors.is_empty(), "{:?}", m3.errors);
         assert!(m3.faces.iter().any(|f| f.tag.map(|t| t.feature) == Some(c)), "the pocket's faces carry the sketch's tags");
         // a bow tie crosses itself: an error, the block stays
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5]], smooth: vec![false; 4] });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![] });
         let m4 = build(&d, true, false, &[], &mut cache);
         assert_eq!(m4.errors.len(), 1, "{:?}", m4.errors);
     }
@@ -772,6 +774,30 @@ mod tests {
         assert_eq!(ff.len(), 1);
         let on_right = m6.triangles.iter().zip(&m6.tri_face).filter(|(_, f)| m6.faces[**f as usize].tag.map(|t| t.feature) == Some(r2)).all(|(t, _)| t.iter().all(|v| m6.positions[*v as usize][0] > 3.9));
         assert!(on_right, "the right piece of the edge");
+    }
+
+    #[test]
+    fn sketch_corners_cut() {
+        // a 20 mm square sketch, 6 mm high: one corner rounded at 4 mm, the
+        // next chamfered at 3 mm, a third asked too big (stops at the most
+        // its sides allow)
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Profile { x: 20.0, y: 6.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![4.0, -3.0, 50.0, 0.0] });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let cyl: Vec<f64> = m.faces.iter().filter(|f| f.kind == SurfKind::Cylinder).map(|f| f.radius).collect();
+        assert_eq!(cyl.len(), 2, "two rounded corners: {cyl:?}");
+        assert!(cyl.iter().any(|r| (r - 4.0).abs() < 1e-6), "{cyl:?}");
+        assert!(cyl.iter().any(|r| (r - 10.0 * 0.999).abs() < 1e-3), "the big one stops at half a side: {cyl:?}");
+        // the faces: top, bottom, 4 sides (one is gone: two cuts take half
+        // of it each), 2 arcs, 1 chamfer
+        assert_eq!(m.faces.len(), 2 + 4 + 2 + 1, "{}", m.faces.len());
+        // each cut face is tagged as its corner's piece
+        let pr = d.feature(c).unwrap().profile.clone().unwrap();
+        assert_eq!(pr.cuts(20.0, 20.0).iter().filter(|c| c.is_some()).count(), 3);
+        let tags: Vec<u16> = m.faces.iter().filter(|f| f.kind == SurfKind::Cylinder).filter_map(|f| f.tag.map(|t| t.sub)).collect();
+        assert!(tags.contains(&3) && tags.contains(&(3 + 4)), "{tags:?}");
     }
 
     #[test]

@@ -43,6 +43,7 @@
 #include <BRep_Builder.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <Geom_BezierSurface.hxx>
+#include <GC_MakeArcOfCircle.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <TColgp_Array1OfPnt2d.hxx>
 #include <TColStd_Array1OfReal.hxx>
@@ -253,7 +254,13 @@ FShape* focc_torus(double big, double small) {
 // between -h and +h. A smooth point is rounded into a quadratic curve from
 // the middle of its incoming edge to the middle of its outgoing one, like
 // the Sketch tool (nurbs-kernel `doc::Profile`).
-FShape* focc_prism(const double* xy, const int* smooth, int n, double h) {
+FShape* focc_prism_cut(const double* xy, const int* smooth, const int* cut, const double* abm, int n, double h);
+
+FShape* focc_prism(const double* xy, const int* smooth, int n, double h) { return focc_prism_cut(xy, smooth, nullptr, nullptr, n, h); }
+
+// The same, corners cut: cut[i] 1 a fillet (an arc through abm[6 i..]: its
+// start, middle, end), 2 a chamfer (a straight side from start to end).
+FShape* focc_prism_cut(const double* xy, const int* smooth, const int* cut, const double* abm, int n, double h) {
     return guard(
         [&]() -> FShape* {
             if (n < 3 || h <= 0) {
@@ -269,7 +276,11 @@ FShape* focc_prism(const double* xy, const int* smooth, int n, double h) {
                 const gp_Pnt& prev = p[(i + n - 1) % n];
                 const gp_Pnt& next = p[(i + 1) % n];
                 bool round = smooth[i] && prev.Distance(p[i]) > 1e-6 && next.Distance(p[i]) > 1e-6;
-                if (round) {
+                int ck = cut && !round ? cut[i] : 0;
+                if (ck) {
+                    vin[i] = BRepBuilderAPI_MakeVertex(gp_Pnt(abm[6 * i], abm[6 * i + 1], -h));
+                    vout[i] = BRepBuilderAPI_MakeVertex(gp_Pnt(abm[6 * i + 4], abm[6 * i + 5], -h));
+                } else if (round) {
                     vin[i] = BRepBuilderAPI_MakeVertex(mid(prev, p[i]));
                     vout[i] = BRepBuilderAPI_MakeVertex(mid(p[i], next));
                 } else {
@@ -287,7 +298,17 @@ FShape* focc_prism(const double* xy, const int* smooth, int n, double h) {
             }
             BRepBuilderAPI_MakeWire mw;
             for (int i = 0; i < n; i++) {
-                if (!vin[i].IsSame(vout[i])) {
+                int ck = cut ? cut[i] : 0;
+                if (!vin[i].IsSame(vout[i]) && ck == 2) {
+                    mw.Add(BRepBuilderAPI_MakeEdge(vin[i], vout[i]).Edge());
+                } else if (!vin[i].IsSame(vout[i]) && ck == 1) {
+                    GC_MakeArcOfCircle arc(BRep_Tool::Pnt(vin[i]), gp_Pnt(abm[6 * i + 2], abm[6 * i + 3], -h), BRep_Tool::Pnt(vout[i]));
+                    if (!arc.IsDone()) {
+                        set_err("a rounded corner could not be made");
+                        return nullptr;
+                    }
+                    mw.Add(BRepBuilderAPI_MakeEdge(arc.Value(), vin[i], vout[i]).Edge());
+                } else if (!vin[i].IsSame(vout[i])) {
                     TColgp_Array1OfPnt poles(1, 3);
                     poles(1) = BRep_Tool::Pnt(vin[i]);
                     poles(2) = p[i];

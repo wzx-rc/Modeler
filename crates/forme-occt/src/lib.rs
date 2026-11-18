@@ -35,6 +35,7 @@ extern "C" {
     fn focc_sphere(r: c_double) -> *mut FShape;
     fn focc_torus(big: c_double, small: c_double) -> *mut FShape;
     fn focc_prism(xy: *const c_double, smooth: *const c_int, n: c_int, h: c_double) -> *mut FShape;
+    fn focc_prism_cut(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int, h: c_double) -> *mut FShape;
     fn focc_transform(s: *const FShape, m: *const c_double) -> *mut FShape;
     fn focc_fuse(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_cut(a: *const FShape, b: *const FShape) -> *mut FShape;
@@ -385,6 +386,16 @@ impl Shape {
         let xy: Vec<f64> = points.iter().flatten().copied().collect();
         let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
         shape(unsafe { focc_prism(xy.as_ptr(), sm.as_ptr(), points.len() as c_int, h) })
+    }
+    /// The same with corners cut: per point, None, or (chamfer, start,
+    /// middle, end): a fillet is the arc through the three points, a
+    /// chamfer the straight side from start to end.
+    pub fn prism_cut(points: &[[f64; 2]], smooth: &[bool], cuts: &[Option<(bool, [f64; 2], [f64; 2], [f64; 2])>], h: f64) -> Result<Shape, String> {
+        let xy: Vec<f64> = points.iter().flat_map(|p| [p[0], p[1]]).collect();
+        let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
+        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((true, ..)) => 2, Some(_) => 1, None => 0 }).collect();
+        let abm: Vec<f64> = (0..points.len()).flat_map(|i| match cuts.get(i).copied().flatten() { Some((_, a, m, b)) => [a[0], a[1], m[0], m[1], b[0], b[1]], None => [0.0; 6] }).collect();
+        shape(unsafe { focc_prism_cut(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int, h) })
     }
 
     /// Copy moved by an affine map: 3 rows of 4 (rotation × uniform scale,

@@ -119,6 +119,90 @@ fn yes() -> bool {
 pub struct Profile {
     pub points: Vec<[f64; 2]>,
     pub smooth: Vec<bool>,
+    /// Each corner's cut (Romain 18 nov.: "Bevel fillet sur un path"): a
+    /// fillet radius (> 0) or a chamfer distance (< 0, its size along each
+    /// side), in mm; 0 or missing: a sharp corner. Curve points ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corner: Vec<f64>,
+}
+
+/// A corner of an outline cut by a fillet (an arc) or a chamfer (a straight
+/// side): where the cut leaves the incoming side, its middle, where it
+/// joins the outgoing side.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cut {
+    pub chamfer: bool,
+    pub a: [f64; 2],
+    pub m: [f64; 2],
+    pub b: [f64; 2],
+    /// The size it is made at (smaller than asked when the sides are too short).
+    pub size: f64,
+    /// The largest size the sides allow.
+    pub max: f64,
+}
+
+/// The cut of corner `i` of an outline (points already scaled, mm). It
+/// takes at most half of each side, so cuts and curve points never cross.
+pub fn corner_cut(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], i: usize) -> Option<Cut> {
+    let n = p.len();
+    let c = corner.get(i).copied().unwrap_or(0.0);
+    if n < 3 || c.abs() < 1e-9 || smooth.get(i).copied().unwrap_or(false) {
+        return None;
+    }
+    let q = p[i];
+    let (prev, next) = (p[(i + n - 1) % n], p[(i + 1) % n]);
+    let u = [prev[0] - q[0], prev[1] - q[1]];
+    let w = [next[0] - q[0], next[1] - q[1]];
+    let (lu, lw) = ((u[0] * u[0] + u[1] * u[1]).sqrt(), (w[0] * w[0] + w[1] * w[1]).sqrt());
+    if lu < 1e-9 || lw < 1e-9 {
+        return None;
+    }
+    let (du, dw) = ([u[0] / lu, u[1] / lu], [w[0] / lw, w[1] / lw]);
+    let theta = (du[0] * dw[0] + du[1] * dw[1]).clamp(-1.0, 1.0).acos();
+    if theta < 1e-3 || std::f64::consts::PI - theta < 1e-3 {
+        return None;
+    }
+    let tmax = 0.5 * lu.min(lw) * 0.999;
+    let at = |t: f64| ([q[0] + du[0] * t, q[1] + du[1] * t], [q[0] + dw[0] * t, q[1] + dw[1] * t]);
+    if c < 0.0 {
+        let t = (-c).min(tmax);
+        let (a, b) = at(t);
+        return Some(Cut { chamfer: true, a, m: [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5], b, size: t, max: tmax });
+    }
+    let half = (theta * 0.5).tan();
+    let t = (c / half).min(tmax);
+    let r = t * half;
+    let (a, b) = at(t);
+    let bl = ((du[0] + dw[0]).powi(2) + (du[1] + dw[1]).powi(2)).sqrt();
+    let bis = [(du[0] + dw[0]) / bl, (du[1] + dw[1]) / bl];
+    let d = r / (theta * 0.5).sin();
+    let centre = [q[0] + bis[0] * d, q[1] + bis[1] * d];
+    let m = [centre[0] - bis[0] * r, centre[1] - bis[1] * r];
+    Some(Cut { chamfer: false, a, m, b, size: r, max: tmax * half })
+}
+
+/// Points along a cut: the arc through a, m, b, or the straight chamfer.
+fn cut_points(c: &Cut) -> Vec<[f64; 2]> {
+    if c.chamfer {
+        return vec![c.a, c.b];
+    }
+    // the circle through the three points
+    let (a, m, b) = (c.a, c.m, c.b);
+    let d = 2.0 * (a[0] * (m[1] - b[1]) + m[0] * (b[1] - a[1]) + b[0] * (a[1] - m[1]));
+    if d.abs() < 1e-12 {
+        return vec![a, b];
+    }
+    let sq = |p: [f64; 2]| p[0] * p[0] + p[1] * p[1];
+    let ux = (sq(a) * (m[1] - b[1]) + sq(m) * (b[1] - a[1]) + sq(b) * (a[1] - m[1])) / d;
+    let uy = (sq(a) * (b[0] - m[0]) + sq(m) * (a[0] - b[0]) + sq(b) * (m[0] - a[0])) / d;
+    let r = ((a[0] - ux).powi(2) + (a[1] - uy).powi(2)).sqrt();
+    let ang = |p: [f64; 2]| (p[1] - uy).atan2(p[0] - ux);
+    let (t0, tm, t1) = (ang(a), ang(m), ang(b));
+    // the way round from a to b that passes m
+    let wrap = |x: f64| x.rem_euclid(std::f64::consts::TAU);
+    let sweep = if wrap(tm - t0) <= wrap(t1 - t0) { wrap(t1 - t0) } else { wrap(t1 - t0) - std::f64::consts::TAU };
+    let k = 16;
+    (0..=k).map(|j| { let t = t0 + sweep * j as f64 / k as f64; [ux + r * t.cos(), uy + r * t.sin()] }).collect()
 }
 
 /// One piece of an outline: a curve around a curve point, or a straight
@@ -138,7 +222,12 @@ impl Profile {
     /// Its pieces, in a box of `w` × `d`, curves sampled (as the kernel
     /// builds them: a curve between the middles of the two sides).
     pub fn pieces(&self, w: f64, d: f64) -> Vec<Piece> {
-        pieces(&self.scaled(w, d), &self.smooth)
+        pieces_cut(&self.scaled(w, d), &self.smooth, &self.corner)
+    }
+    /// Each point's cut, in a box of `w` × `d`.
+    pub fn cuts(&self, w: f64, d: f64) -> Vec<Option<Cut>> {
+        let p = self.scaled(w, d);
+        (0..p.len()).map(|i| corner_cut(&p, &self.smooth, &self.corner, i)).collect()
     }
     /// The closed outline as one polyline (last point = first).
     pub fn polyline(&self, w: f64, d: f64) -> Vec<[f64; 2]> {
@@ -157,12 +246,18 @@ impl Profile {
     }
     /// Mirrored across local X (the feature turned over to grow downwards).
     pub fn flipped(&self) -> Profile {
-        Profile { points: self.points.iter().map(|p| [p[0], -p[1]]).collect(), smooth: self.smooth.clone() }
+        Profile { points: self.points.iter().map(|p| [p[0], -p[1]]).collect(), smooth: self.smooth.clone(), corner: self.corner.clone() }
     }
 }
 
 /// The pieces of a closed outline of points (corners or curve points).
 pub fn pieces(p: &[[f64; 2]], smooth: &[bool]) -> Vec<Piece> {
+    pieces_cut(p, smooth, &[])
+}
+
+/// The same with the corners cut (`corner_cut`): the cut is the corner's
+/// piece (id 2 i).
+pub fn pieces_cut(p: &[[f64; 2]], smooth: &[bool], corner: &[f64]) -> Vec<Piece> {
     let n = p.len();
     let mut out = vec![];
     if n < 2 {
@@ -171,8 +266,17 @@ pub fn pieces(p: &[[f64; 2]], smooth: &[bool]) -> Vec<Piece> {
     let mid = |a: [f64; 2], b: [f64; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
     let far = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() > 1e-9;
     let round = |i: usize| smooth.get(i).copied().unwrap_or(false) && far(p[(i + n - 1) % n], p[i]) && far(p[i], p[(i + 1) % n]);
+    let cuts: Vec<Option<Cut>> = (0..n).map(|i| corner_cut(p, smooth, corner, i)).collect();
     // where each point's piece starts and ends (the point itself at a corner)
-    let ends = |i: usize| if round(i) { (mid(p[(i + n - 1) % n], p[i]), mid(p[i], p[(i + 1) % n])) } else { (p[i], p[i]) };
+    let ends = |i: usize| {
+        if round(i) {
+            (mid(p[(i + n - 1) % n], p[i]), mid(p[i], p[(i + 1) % n]))
+        } else if let Some(c) = &cuts[i] {
+            (c.a, c.b)
+        } else {
+            (p[i], p[i])
+        }
+    };
     for i in 0..n {
         let (a, b) = ends(i);
         if round(i) {
@@ -185,6 +289,8 @@ pub fn pieces(p: &[[f64; 2]], smooth: &[bool]) -> Vec<Piece> {
                 })
                 .collect();
             out.push(Piece { id: 2 * i, pts });
+        } else if let Some(c) = &cuts[i] {
+            out.push(Piece { id: 2 * i, pts: cut_points(c) });
         }
         let (next, _) = ends((i + 1) % n);
         if far(b, next) {
@@ -385,8 +491,9 @@ impl Feature {
                 let ring = |y: f64| -> Vec<DVec3> { line.iter().map(|q| m.transform_point3(DVec3::new(q[0], y, q[1]))).collect() };
                 let mut out = vec![ring(0.0), ring(h)];
                 // the corners' uprights
+                let cuts = pr.cuts(x, z);
                 for (i, q) in pr.scaled(x, z).iter().enumerate() {
-                    if !pr.smooth.get(i).copied().unwrap_or(false) {
+                    if !pr.smooth.get(i).copied().unwrap_or(false) && cuts[i].is_none() {
                         let b = m.transform_point3(DVec3::new(q[0], 0.0, q[1]));
                         out.push(vec![b, b + self.axis() * h]);
                     }

@@ -7,7 +7,7 @@ use crate::state::*;
 use glam::{DVec3, Vec3};
 use nurbs_kernel::doc::Push;
 use nurbs_kernel::model::{EdgeKind, SurfKind};
-use nurbs_kernel::{Comp, EdgeRef, FaceRef, Feature, FeatureId, Tweak};
+use nurbs_kernel::{Comp, EdgeRef, FaceRef, Feature, FeatureId, Prim, Tweak};
 
 /// A new inset (mm).
 const DEFAULT_INSET: f64 = 2.0;
@@ -451,6 +451,86 @@ fn point_triangle(p: Vec3, t: [Vec3; 3]) -> f32 {
 // ------------------------------------------------- component moves
 
 impl AppState {
+    /// The sketch corner at a vertex (top or bottom of a sketched shape, at
+    /// one of its outline's corners, or at either end of its cut): the
+    /// sketch and the point's index.
+    pub fn profile_corner(&self, v: DVec3) -> Option<(FeatureId, usize)> {
+        for f in self.doc.features.iter().filter(|f| f.visible) {
+            let (Prim::Profile { x, z, .. }, Some(pr)) = (&f.prim, &f.profile) else { continue };
+            let l = f.matrix().inverse().transform_point3(v);
+            let h = f.prim.height();
+            if !(l.y.abs() < 1e-3 || (l.y.abs() - h).abs() < 1e-3) {
+                continue;
+            }
+            let q = [l.x, l.z];
+            let near = |p: [f64; 2]| (p[0] - q[0]).hypot(p[1] - q[1]) < 0.05;
+            let pts = pr.scaled(*x, *z);
+            let cuts = pr.cuts(*x, *z);
+            for (i, p) in pts.iter().enumerate() {
+                if pr.smooth.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                if near(*p) || cuts[i].map(|c| near(c.a) || near(c.b)).unwrap_or(false) {
+                    return Some((f.id, i));
+                }
+            }
+        }
+        None
+    }
+
+    /// The picked vertices' sketch corners.
+    pub fn picked_profile_corners(&self) -> Vec<(FeatureId, usize)> {
+        let mut out: Vec<(FeatureId, usize)> = vec![];
+        for v in &self.vert_sel {
+            if let Some(c) = self.profile_corner(*v) {
+                if !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+        }
+        out
+    }
+
+    /// Cuts the picked sketch corners: a fillet of radius `size` (or a
+    /// chamfer of `size` along each side), 0 makes them sharp again. A
+    /// slider drag is one undo step (`start` begins it).
+    pub fn set_profile_corners(&mut self, size: f64, chamfer: bool, start: bool) {
+        let corners = self.picked_profile_corners();
+        if corners.is_empty() {
+            return;
+        }
+        if start || !self.is_live() {
+            self.end_live();
+            self.begin_live(if chamfer { "Chamfer corner" } else { "Fillet corner" });
+        }
+        let v = if chamfer { -size.max(0.0) } else { size.max(0.0) };
+        self.live(|d| {
+            for (id, i) in &corners {
+                if let Some(pr) = d.feature_mut(*id).and_then(|f| f.profile.as_mut()) {
+                    if pr.corner.len() < pr.points.len() {
+                        pr.corner.resize(pr.points.len(), 0.0);
+                    }
+                    pr.corner[*i] = v;
+                }
+            }
+        });
+    }
+
+    /// The first picked sketch corner's cut as asked (size, chamfer) and
+    /// the largest its sides allow.
+    pub fn profile_corner_state(&self) -> Option<(f64, bool, f64)> {
+        let (id, i) = *self.picked_profile_corners().first()?;
+        let f = self.doc.feature(id)?;
+        let (Prim::Profile { x, z, .. }, Some(pr)) = (&f.prim, &f.profile) else { return None };
+        let c = pr.corner.get(i).copied().unwrap_or(0.0);
+        // the largest: a cut asked very big stops there
+        let mut big = pr.clone();
+        big.corner.resize(big.points.len(), 0.0);
+        big.corner[i] = if c < 0.0 { -1e9 } else { 1e9 };
+        let max = nurbs_kernel::doc::corner_cut(&big.scaled(*x, *z), &big.smooth, &big.corner, i).map(|k| k.max).unwrap_or(0.0);
+        Some((c.abs(), c < 0.0, max))
+    }
+
     /// The edge a vertex fillet rounds (Romain 18 nov.: "Fillet sur les
     /// vertex quand on a une surface fine"): at a corner of a thin plate,
     /// the short straight edge across its thickness, much shorter than the
@@ -522,7 +602,8 @@ impl AppState {
         match self.picked_comp()? {
             Comp::Face(f) => Some(f.at),
             Comp::Edge(e) => Some(e.at),
-            Comp::Vertex(v) => Some(v),
+            // a vertex that is gone (a sketch corner just cut): no gizmo
+            Comp::Vertex(v) => self.vertices().iter().any(|q| q.as_dvec3().distance(v) < 1e-3).then_some(v),
         }
     }
 

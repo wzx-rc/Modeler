@@ -793,6 +793,44 @@ fn main() {
         h.steps(2);
         h.shot("zero-comp-7-corners-rounded");
         eprintln!("  plate: {:?}", h.st.doc.features.iter().map(|f| (f.name.clone(), f.round.as_ref().map(|r| (r.size, r.edges.len())))).collect::<Vec<_>>());
+
+        // a sketch (an L outline, 6 mm high): corners cut in its outline,
+        // fillets and a chamfer (Romain 18 nov.: "Bevel fillet sur un path")
+        let mut d = Doc::default();
+        let id = d.add(Op::Add, Prim::Profile { x: 40.0, y: 6.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(id).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.0], [0.0, 0.0], [0.0, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![] });
+        h.reset(d, "Sketch");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(25.0, 10.0, 20.0));
+        h.steps(2);
+        h.key(egui::Key::Num1);
+        // local (x, z) = the points scaled; the top at y = 6
+        let at = |x: f32, z: f32| Vec3::new(x, 6.0, z);
+        h.click(h.screen_of(at(20.0, -15.0)));
+        h.hold(egui::Modifiers::SHIFT);
+        h.click(h.screen_of(at(-20.0, 15.0)));
+        h.hold(egui::Modifiers::NONE);
+        h.steps(2);
+        h.shot("zero-comp-8-sketch-corners-picked");
+        h.st.set_profile_corners(6.0, false, true);
+        h.st.end_live();
+        h.settle();
+        // the inner corner rounded, the outer one beside it bevelled
+        h.click(h.screen_of(at(0.0, 0.0)));
+        h.st.set_profile_corners(4.0, false, true);
+        h.st.end_live();
+        h.settle();
+        h.click(h.screen_of(at(20.0, 0.0)));
+        h.st.set_profile_corners(3.0, true, true);
+        h.st.end_live();
+        h.settle();
+        h.steps(2);
+        h.shot("zero-comp-9-sketch-corners-cut");
+        eprintln!("  sketch corners {:?}, errors {:?}", h.st.doc.feature(id).and_then(|f| f.profile.as_ref()).map(|p| p.corner.clone()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.st.quads = true;
+        h.steps(2);
+        h.settle();
+        h.shot("zero-comp-10-sketch-quads");
+        h.st.quads = false;
     }
 
     if want("snap") {

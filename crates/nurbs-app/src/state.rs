@@ -1174,7 +1174,7 @@ impl AppState {
             return;
         }
         let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
-        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone() };
+        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: vec![] };
         self.sketch = None;
         self.begin_live("New Sketch");
         let op = self.mode;
