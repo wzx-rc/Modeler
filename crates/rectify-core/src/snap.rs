@@ -57,11 +57,15 @@ pub struct SnapParams {
     pub flatten: f64,
     /// Smoothing passes that carry the moves into the free areas.
     pub relax: usize,
+    /// Over how far (mm, along the mesh) an edge's move fades out where the
+    /// edge ends on free faces or on a pair with no edge (else it stops
+    /// dead and tears the surface there).
+    pub end_fade: f64,
 }
 
 impl Default for SnapParams {
     fn default() -> Self {
-        SnapParams { edges: Edges::Fillet, gap: 2.5, fade: 2.0, edge_angle: 25.0, max_move: 0.8, edge_tol: 0.15, round: 0.05, min_radius: 0.3, flatten: 0.0, relax: 80 }
+        SnapParams { edges: Edges::Fillet, gap: 2.5, fade: 2.0, edge_angle: 25.0, max_move: 0.8, edge_tol: 0.15, round: 0.05, min_radius: 0.3, flatten: 0.0, relax: 80, end_fade: 0.8 }
     }
 }
 
@@ -152,7 +156,6 @@ pub fn three_nearest(m: &Mesh, topo: &Topo, inner: &[u32], cap: f64) -> Vec<Near
 }
 
 /// Geodesic distance to the nearest vertex for which `src` is true, up to `cap`.
-#[allow(dead_code)]
 fn distance_to(m: &Mesh, topo: &Topo, src: &[bool], cap: f64) -> Vec<f64> {
     let nv = m.pos.len();
     let mut dist = vec![f64::INFINITY; nv];
@@ -702,6 +705,27 @@ pub fn snap(m: &mut Mesh, topo: &Topo, seg: &Segmentation, p: &SnapParams) -> Sn
             }
         }
     }
+    // where an edge ends on free faces, or on two regions with no edge
+    // between them, its move fades out along it
+    let end = if p.end_fade > 0.0 {
+        let loose: Vec<bool> = (0..nv)
+            .into_par_iter()
+            .map(|v| {
+                if res[v].1 > 0.0 {
+                    return false;
+                }
+                if topo.tris_of(v).iter().all(|&t| seg.label[t as usize] == NONE) {
+                    return true;
+                }
+                let nb = near[v];
+                nb[0].1 != NONE && nb[1].1 != NONE && nb[0].0 + nb[1].0 <= p.gap * 0.5
+            })
+            .collect();
+        let d = distance_to(m, topo, &loose, p.end_fade);
+        d.iter().map(|&x| if x.is_finite() { smoothstep(x / p.end_fade) } else { 1.0 }).collect()
+    } else {
+        vec![1.0; nv]
+    };
     let mut target = vec![DVec3::ZERO; nv];
     let mut weight = vec![0.0f64; nv];
     let mut kinds = vec![0u8; nv];
@@ -710,6 +734,7 @@ pub fn snap(m: &mut Mesh, topo: &Topo, seg: &Segmentation, p: &SnapParams) -> Sn
             Some(r) => (r, 1.0),
             None => (q, w),
         };
+        let w = w * end[v];
         target[v] = q - old[v];
         weight[v] = w;
         kinds[v] = if onto_ridge[v].is_some() { 4 } else if k == 2 && w >= 0.999 { 2 } else if w > 0.0 { 3 } else { 0 };

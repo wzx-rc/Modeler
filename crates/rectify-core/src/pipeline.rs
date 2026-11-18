@@ -87,6 +87,7 @@ impl Params {
                 "round" => self.snap.round = v,
                 "min_radius" => self.snap.min_radius = v,
                 "relax" => self.snap.relax = v as usize,
+                "end_fade" => self.snap.end_fade = v,
                 "tol" => self.seg.tol = v,
                 "angle" => self.seg.angle = v,
                 "min_area" => self.seg.min_area = v,
@@ -113,6 +114,7 @@ impl Params {
                 "tidy_rings" => self.tidy.rings = v as usize,
                 "tidy_revert" => self.tidy.revert = v != 0.0,
                 "tidy_fade" => self.tidy.fade = v,
+                "tidy_step" => self.tidy.revert_step = v,
                 "tidy_calm" => self.tidy.calm = v != 0.0,
                 k => unknown.push(k.to_string()),
             }

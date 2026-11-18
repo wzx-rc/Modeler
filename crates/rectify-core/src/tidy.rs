@@ -31,14 +31,18 @@ pub struct TidyParams {
     pub rings: usize,
     /// What is still rough after smoothing goes back to the AI mesh.
     pub revert: bool,
+    /// The share of the move taken back each round where it is still rough
+    /// (1: all at once).
+    pub revert_step: f64,
     /// Over how far (mm, along the mesh) a part taken back fades into the
-    /// rest: a short fade makes a crease of its own.
+    /// rest: a short fade makes a crease of its own. Scaled by the move
+    /// there, from 0.3 to 1.6 times this.
     pub fade: f64,
 }
 
 impl Default for TidyParams {
     fn default() -> Self {
-        TidyParams { on: true, margin: 14.0, edge_margin: 40.0, noise: 1.5, edge_noise: 4.0, iters: 30, calm: true, rings: 2, revert: true, fade: 1.5 }
+        TidyParams { on: true, margin: 14.0, edge_margin: 40.0, noise: 1.5, edge_noise: 4.0, iters: 30, calm: true, rings: 2, revert: true, revert_step: 0.34, fade: 1.5 }
     }
 }
 
@@ -47,6 +51,8 @@ pub struct TidyReport {
     /// Vertices rougher than the AI mesh before the clean-up, and after.
     pub rough_before: usize,
     pub rough_after: usize,
+    /// Still rough after the smoothing, before taking back.
+    pub rough_mid: usize,
     /// Vertices whose move was smoothed, and taken back (fully or partly).
     pub smoothed: usize,
     pub reverted: usize,
@@ -167,17 +173,19 @@ pub fn diff(base: &Mesh, look: &Look, m: &Mesh, topo: &Topo, kinds: &[u8], p: &T
     Diff { moved, worse }
 }
 
-/// Distance along the mesh to the nearest marked vertex, up to `cap` (beyond:
-/// infinity).
-fn dist_from(m: &Mesh, topo: &Topo, marked: &[bool], cap: f64) -> Vec<f64> {
+/// How much of its move each vertex gives back: `level[v]` on a vertex
+/// taken back, fading to nothing at its radius `radius[v]` along the mesh
+/// (the largest share where several overlap).
+fn back_from(m: &Mesh, topo: &Topo, level: &[f64], radius: &[f64]) -> Vec<f64> {
     use std::cmp::Ordering;
     use std::collections::BinaryHeap;
+    // value, vertex, the source's level, its radius, how far in (0-1)
     #[derive(PartialEq)]
-    struct It(f64, u32);
+    struct It(f64, u32, f64, f64, f64);
     impl Eq for It {}
     impl Ord for It {
         fn cmp(&self, o: &Self) -> Ordering {
-            o.0.partial_cmp(&self.0).unwrap_or(Ordering::Equal)
+            self.0.partial_cmp(&o.0).unwrap_or(Ordering::Equal)
         }
     }
     impl PartialOrd for It {
@@ -185,27 +193,31 @@ fn dist_from(m: &Mesh, topo: &Topo, marked: &[bool], cap: f64) -> Vec<f64> {
             Some(self.cmp(o))
         }
     }
-    let mut dist = vec![f64::INFINITY; m.pos.len()];
+    let mut back = vec![0.0f64; m.pos.len()];
     let mut heap = BinaryHeap::new();
-    for (v, &k) in marked.iter().enumerate() {
-        if k {
-            dist[v] = 0.0;
-            heap.push(It(0.0, v as u32));
+    for (v, &l) in level.iter().enumerate() {
+        if l > 0.0 {
+            back[v] = l;
+            heap.push(It(l, v as u32, l, radius[v].max(1e-6), 0.0));
         }
     }
-    while let Some(It(d, v)) = heap.pop() {
-        if d > dist[v as usize] {
+    while let Some(It(val, v, l, r, t)) = heap.pop() {
+        if val < back[v as usize] {
             continue;
         }
         for &u in topo.verts_of(v as usize) {
-            let nd = d + (m.pos[u as usize] - m.pos[v as usize]).length();
-            if nd < dist[u as usize] && nd <= cap {
-                dist[u as usize] = nd;
-                heap.push(It(nd, u));
+            let nt = t + (m.pos[u as usize] - m.pos[v as usize]).length() / r;
+            if nt >= 1.0 {
+                continue;
+            }
+            let nv = l * (1.0 - smooth01(nt));
+            if nv > back[u as usize] + 1e-9 {
+                back[u as usize] = nv;
+                heap.push(It(nv, u, l, r, nt));
             }
         }
     }
-    dist
+    back
 }
 
 fn smooth01(t: f64) -> f64 {
@@ -331,23 +343,36 @@ pub fn tidy(base: &Mesh, m: &mut Mesh, topo: &Topo, kinds: &[u8], keep: &[(DVec3
         if p.revert {
             let smoothed = d.clone();
             let mut back = vec![0.0f64; nv];
-            let mut marked = vec![false; nv];
-            for _ in 0..4 {
+            let mut level = vec![0.0f64; nv];
+            // a larger move needs a longer fade not to crease (the fade
+            // bends the surface by about 6 move / radius² per mm)
+            let radius: Vec<f64> = (0..nv)
+                .map(|v| {
+                    let mv = topo.verts_of(v).iter().map(|&u| smoothed[u as usize].length()).fold(smoothed[v].length(), f64::max);
+                    (20.0 * mv).sqrt().clamp(p.fade * 0.3, p.fade * 1.6)
+                })
+                .collect();
+            // a share at a time: often part of the move is enough to take back
+            let step = p.revert_step.clamp(0.05, 1.0);
+            let rounds = (1.0 / step).ceil() as usize + 3;
+            for _ in 0..rounds {
                 let mid = diff(base, &look, m, topo, kinds, p);
+                if rep.rough_mid == 0 {
+                    rep.rough_mid = mid.rough_count();
+                }
                 let mut new = false;
                 for v in 0..nv {
-                    if mid.worse[v] > 0.0 && !marked[v] {
-                        marked[v] = true;
+                    if mid.worse[v] > 0.0 && level[v] < 1.0 {
+                        level[v] = (back[v].max(level[v]) + step).min(1.0);
                         new = true;
                     }
                 }
                 if !new {
                     break;
                 }
-                let dist = dist_from(base, topo, &marked, p.fade);
+                back = back_from(base, topo, &level, &radius);
                 for v in 0..nv {
-                    back[v] = if dist[v].is_finite() { 1.0 - smooth01(dist[v] / p.fade.max(1e-6)) } else { 0.0 };
-                    d[v] = smoothed[v] * (1.0 - back[v]);
+                    d[v] = smoothed[v] * (1.0 - smooth01(back[v]));
                     m.pos[v] = base.pos[v] + d[v];
                 }
             }
