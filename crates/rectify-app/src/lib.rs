@@ -1,9 +1,9 @@
 #![allow(deprecated)]
 //! Forme Rectify, the app (Romain, 18 nov. 2026: a third version of the
 //! software, from zero, only Forme NURBS's viewport and interface kept, in
-//! orange). A mesh made by an AI (or scanned) put right by hand, one tool at
-//! a time: edges made straight and sharp, round parts truly round, the two
-//! sides made mirror images. No kernel, no OpenCascade.
+//! orange). A scan (a mesh made by an AI, or scanned) with a retopology in
+//! NURBS laid on it, semi-automatic; the scan itself never changes. No
+//! kernel, no OpenCascade.
 
 pub mod camera;
 pub mod draw;

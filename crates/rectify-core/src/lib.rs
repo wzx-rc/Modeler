@@ -1,20 +1,10 @@
-//! Forme Rectify's core: a noisy mesh (made by an AI, or scanned) put right
-//! by hand, one tool at a time (Romain, 18 nov. 2026, 13 h 27: the automatic
-//! version did not work visually; the hand tools fix what they are pointed
-//! at). The triangles never change: the tools move vertices.
+//! Forme Rectify's core: the scan (a mesh made by an AI, or scanned) that
+//! the NURBS tools are laid on. The scan itself never changes (Romain,
+//! 18 nov. 2026, 16 h 01: the tools that moved its vertices were dropped; a
+//! retopology in NURBS instead, semi-automatic on the scan).
 //!
-//! - `line`: a segment dragged along an edge makes it straight and sharp;
-//! - `circle`: a round part made truly round, ring by ring;
-//! - `edges`: the straight edges between flat faces found everywhere, each
-//!   fixed like a Line;
-//! - `sym`: the mirror plane, both sides averaged or one copied.
+//! - `mesh`: the scan (.obj in, millimetres), its topology, picking helpers.
 
-pub mod circle;
-pub mod edges;
-pub mod line;
 pub mod mesh;
-pub mod moves;
-pub mod sym;
 
 pub use mesh::{Mesh, Surface, Topo, NONE};
-pub use moves::Moves;

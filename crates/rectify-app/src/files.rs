@@ -1,4 +1,4 @@
-//! Meshes are read from and exported to Documents/Forme Rectify.
+//! Scans are read from Documents/Forme Rectify.
 
 use std::path::PathBuf;
 

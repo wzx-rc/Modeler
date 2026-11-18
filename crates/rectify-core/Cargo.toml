@@ -2,7 +2,7 @@
 name = "rectify-core"
 edition.workspace = true
 version.workspace = true
-description = "Forme Rectify: hand tools that put a noisy AI / scan mesh right (straight sharp edges, true circles, symmetry)"
+description = "Forme Rectify: the scan, and the NURBS tools laid on it"
 
 [dependencies]
 glam.workspace = true

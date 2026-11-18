@@ -2,7 +2,7 @@
 name = "rectify-app"
 edition.workspace = true
 version.workspace = true
-description = "Forme Rectify: the app (egui + wgpu). Opens a noisy AI / scan mesh and puts it right by hand with rectify-core"
+description = "Forme Rectify: the app (egui + wgpu). Opens a scan and lays NURBS on it with rectify-core"
 build = "build.rs"
 
 [lib]

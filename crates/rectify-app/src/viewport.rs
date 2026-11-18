@@ -1,7 +1,7 @@
 //! The 3D view's input: Maya navigation (Alt + left orbit, Alt + middle pan,
 //! Alt + right zoom, the wheel zooms, the middle button alone pans, the left
-//! drag alone orbits when no tool uses it), Space held shows the mesh as it
-//! came. The tool in hand takes the left button.
+//! drag alone orbits when no tool uses it). The tool in hand takes the left
+//! button.
 
 use crate::state::*;
 use crate::theme::*;
@@ -33,7 +33,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             i.pointer.button_down(PointerButton::Secondary),
         )
     });
-    if alt && (resp.hovered() || resp.dragged() || l || m || r) && st.line_drag.is_none() && st.circle_drag.is_none() {
+    if alt && (resp.hovered() || resp.dragged() || l || m || r) {
         if (l || m || r) && d != egui::Vec2::ZERO {
             if l {
                 st.camera.orbit(d.x, d.y);
@@ -56,58 +56,9 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             st.camera.zoom((scroll.y * 0.0022).exp());
         }
     }
-    // the Line tool: press on an edge, drag along it, release
-    if st.tool == Tool::Line && !alt {
-        let (pressed, released, pos) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.latest_pos()));
-        if pressed && resp.hovered() {
-            if let Some(p) = pos {
-                st.line_press([p.x, p.y]);
-            }
-        } else if st.line_drag.is_some() {
-            if let Some(p) = pos {
-                st.line_move([p.x, p.y]);
-            }
-            if released || !l {
-                st.line_release();
-            }
-        }
-        if st.line_drag.is_some() {
-            st.interacting = true;
-            return;
-        }
-    }
-    // the Circle tool: press on the rim, drag across, release
-    if st.tool == Tool::Circle && !alt {
-        let (pressed, released, pos) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.latest_pos()));
-        if pressed && resp.hovered() {
-            if let Some(p) = pos {
-                st.circle_press([p.x, p.y]);
-            }
-        } else if st.circle_drag.is_some() {
-            if let Some(p) = pos {
-                st.circle_move([p.x, p.y]);
-            }
-            if released || !l {
-                st.circle_release();
-            }
-        }
-        if st.circle_drag.is_some() {
-            st.interacting = true;
-            return;
-        }
-    }
-    // the Edges tool: a click on an edge leaves it out (or takes it back);
-    // a drag orbits
-    if st.tool == Tool::Edges && !alt && resp.clicked() {
-        if let Some(p) = ctx.input(|i| i.pointer.latest_pos()) {
-            if let Some(i) = st.edges_pick([p.x, p.y]) {
-                st.edges_toggle(i);
-            }
-        }
-    }
     // the middle button alone pans; the left drag alone orbits when no
     // tool takes it
-    if (m || (l && matches!(st.tool, Tool::Navigate | Tool::Edges))) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
+    if (m || (l && st.tool == Tool::Navigate)) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
         if m {
             st.camera.pan(d.x, d.y, rect.height());
         } else {
@@ -120,7 +71,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
 /// The tool's name at the pointer.
 fn tool_cursor(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Response) {
     let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else { return };
-    if !resp.hovered() && st.line_drag.is_none() && st.circle_drag.is_none() {
+    if !resp.hovered() {
         return;
     }
     let col = accent();
@@ -148,35 +99,9 @@ pub fn hint(st: &AppState) -> String {
         return format!("{} …", j.what);
     }
     if st.doc.is_none() {
-        return "Open a mesh to put right".into();
-    }
-    if st.compare {
-        return "The mesh as it came (release Space)".into();
+        return "Open a scan (an .obj)".into();
     }
     match st.tool {
-        Tool::Line => match &st.line_drag {
-            None if st.line_edit.is_some() => format!("Line placed at {:.0} %: set its strength on the left · Enter applies · Esc removes · a new stroke applies it", st.line_strength * 100.0),
-            Some(ld) => match &ld.fit {
-                Some(Ok(f)) => format!("Release to fix: an edge of {:.0}° · Esc cancels", f.angle),
-                Some(Err(e)) => e.clone(),
-                None => "Drag along the edge".into(),
-            },
-            None => "Line: press on an edge and drag along it, the edge becomes straight and sharp · Esc done".into(),
-        },
-        Tool::Mirror => match st.sym.found {
-            Some(f) if f.matched < 0.5 => format!("Mirror {}: only {:.0} % of the mesh has a partner, try another axis", st.sym.axis.label(), f.matched * 100.0),
-            Some(_) => format!("Mirror {}: the plane in orange · Enter applies · Esc done", st.sym.axis.label()),
-            None => "Mirror: finding the plane".into(),
-        },
-        Tool::Circle => match (&st.circle_drag, &st.circle) {
-            (Some(_), _) => "Across to the other side of the rim, then release".into(),
-            (None, Some(c)) => format!("Ø {} mm, {} rings: strength, height and levels on the left, live · Enter applies · Esc removes", fmt(c.circle.r * 2.0, 2), c.rings.len()),
-            (None, None) => "Circle: press on the rim of a hole or a boss and drag across it to the other side".into(),
-        },
-        Tool::Edges => match &st.edges {
-            Some(ee) => format!("Edges: {} made sharp, at {:.0} % · click one to switch it · Enter applies · Esc removes", ee.fits.iter().filter(|x| x.is_some()).count(), st.edges_strength * 100.0),
-            None => "Edges: none placed (Find the edges again on the left)".into(),
-        },
-        Tool::Navigate => "L line · C circle · E edges · M mirror · Ctrl+Z undo · Space the mesh as it came · drag to turn around".into(),
+        Tool::Navigate => "No tool yet: the scan as it came · drag to turn around · F frames it".into(),
     }
 }
