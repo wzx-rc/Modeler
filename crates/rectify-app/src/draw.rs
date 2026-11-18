@@ -79,6 +79,7 @@ impl Drawer {
             self.normals = Some((nkey, crease_normals(m, &p.topo, 40.0)));
         }
         let normals = &self.normals.as_ref().unwrap().1;
+        let hl: std::collections::HashSet<u32> = st.highlight.iter().copied().collect();
         let face_of = |t: usize| -> u32 {
             if let Some(d) = diff {
                 let tri = m.tris[t];
@@ -92,7 +93,9 @@ impl Drawer {
             match label {
                 None => 0,
                 Some(l) => {
-                    if l[t] == NONE {
+                    if !hl.is_empty() && (l[t] == NONE || !hl.contains(&l[t])) {
+                        0
+                    } else if l[t] == NONE {
                         1
                     } else {
                         l[t] + 2

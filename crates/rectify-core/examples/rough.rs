@@ -71,6 +71,16 @@ fn main() {
         }
     }
     println!("tidy {:?}", p.lanes[0].tidy);
+    // detail lost: the AI mesh bent there, the result much less
+    let bb = bend(&p.original, topo);
+    for (name, m) in [("stage1", p.stage_mesh(Stage::Algorithm)), ("stage2", p.stage_mesh(Stage::Cleaned))] {
+        let b = bend(m.unwrap(), topo);
+        for (lo_b, drop) in [(10.0f32, 6.0f32), (15.0, 8.0), (20.0, 10.0)] {
+            let all = (0..b.len()).filter(|&v| bb[v] > lo_b && bb[v] - b[v] > drop).count();
+            let inb2 = inb.iter().filter(|&&v| bb[v] > lo_b && bb[v] - b[v] > drop).count();
+            println!("{name} lost detail (base > {lo_b}, drop > {drop}): {all} all, {inb2} in box");
+        }
+    }
     // the moves' own roughness, by kind
     let kinds = &p.lanes[0].snap.as_ref().unwrap().kinds;
     let before = p.lanes[0].diff_result.as_ref().unwrap();

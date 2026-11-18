@@ -44,6 +44,8 @@ impl Request {
 pub struct Capture {
     pub req: Request,
     pub size: [u32; 2],
+    /// Regions in colour, the others in clay (Regions style).
+    pub highlight: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -247,7 +249,8 @@ fn handle(st: &mut AppState, req: Request) {
             }
             let w = p["width"].as_u64().unwrap_or(1280).clamp(256, 2400) as u32;
             let h = p["height"].as_u64().unwrap_or(800).clamp(256, 1600) as u32;
-            st.remote.captures.push(Capture { req, size: [w, h] });
+            let highlight: Vec<u32> = p["highlight"].as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).map(|x| x as u32).collect()).unwrap_or_default();
+            st.remote.captures.push(Capture { req, size: [w, h], highlight });
             if let Some(w) = &st.remote.wake {
                 w();
             }
@@ -292,6 +295,7 @@ fn handle(st: &mut AppState, req: Request) {
             req.answer(Ok(edits(st)))
         }
         "diff" => req.answer(diff(st, &p)),
+        "fragments" => req.answer(fragments(st, &p)),
         _ => req.answer(Err(format!("unknown method \"{method}\""))),
     }
 }
@@ -549,6 +553,106 @@ fn regions(st: &AppState, p: &Value) -> Result<Value, String> {
     Ok(json!({ "stage": stage.number(), "total": total, "shown": out.len(), "regions": out }))
 }
 
+/// Clusters of small regions that touch (directly or across a free
+/// triangle): where a detailed part (ribs, fins, grooves) was cut into many
+/// short pieces. Largest clusters first.
+fn fragments(st: &AppState, p: &Value) -> Result<Value, String> {
+    let pp = st.pipe.as_ref().ok_or("no mesh open")?;
+    let stage = stage_of(&p["stage"]).unwrap_or(Stage::Guided);
+    let seg = match stage {
+        Stage::Guided => pp.seg_edit.as_ref().or(pp.seg_raw.as_ref()),
+        Stage::Scan => pp.seg_raw.as_ref(),
+        s => pp.stage_seg(s),
+    }
+    .ok_or("no regions yet: run stage 1 first")?;
+    let max_area = p["max_area"].as_f64().unwrap_or(20.0);
+    let min_count = p["min_count"].as_u64().unwrap_or(6) as usize;
+    let limit = p["limit"].as_u64().unwrap_or(12) as usize;
+    let small: Vec<bool> = seg.regions.iter().map(|x| !x.faces.is_empty() && x.area < max_area).collect();
+    let n = seg.regions.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let topo = &pp.topo;
+    let label = &seg.label;
+    let mut join = |a: u32, b: u32| {
+        if a == NONE || b == NONE || a == b || !small[a as usize] || !small[b as usize] {
+            return;
+        }
+        let (x, y) = (find(&mut parent, a as usize), find(&mut parent, b as usize));
+        if x != y {
+            parent[x] = y;
+        }
+    };
+    for t in 0..label.len() {
+        let lt = label[t];
+        let ns: Vec<u32> = topo.adj[t].iter().filter(|&&o| o != NONE).map(|&o| label[o as usize]).collect();
+        if lt != NONE {
+            for &l in &ns {
+                join(lt, l);
+            }
+        } else {
+            // across a free triangle
+            for i in 0..ns.len() {
+                for j in i + 1..ns.len() {
+                    join(ns[i], ns[j]);
+                }
+            }
+        }
+    }
+    let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    for i in 0..n {
+        if small[i] {
+            let root = find(&mut parent, i);
+            groups.entry(root).or_default().push(i);
+        }
+    }
+    let m = pp.smooth_out();
+    let mut list: Vec<Vec<usize>> = groups.into_values().filter(|g| g.len() >= min_count).collect();
+    list.sort_by_key(|g| std::cmp::Reverse(g.len()));
+    let total = list.len();
+    let out: Vec<Value> = list
+        .iter()
+        .take(limit)
+        .map(|g| {
+            let mut lo = DVec3::splat(f64::INFINITY);
+            let mut hi = DVec3::splat(f64::NEG_INFINITY);
+            let (mut area, mut cyl, mut pla, mut sph, mut sum, mut w) = (0.0f64, 0, 0, 0, DVec3::ZERO, 0.0f64);
+            for &i in g {
+                let x = &seg.regions[i];
+                area += x.area;
+                match x.prim.kind() {
+                    rectify_core::Kind::Cylinder => cyl += 1,
+                    rectify_core::Kind::Sphere => sph += 1,
+                    _ => pla += 1,
+                }
+                for &f in &x.faces {
+                    let c = m.tri_centre(f as usize);
+                    lo = lo.min(c);
+                    hi = hi.max(c);
+                    sum += c;
+                    w += 1.0;
+                }
+            }
+            json!({
+                "regions": g,
+                "count": g.len(),
+                "planes": pla, "cylinders": cyl, "spheres": sph,
+                "area_mm2": r(area),
+                "centre": r3(sum / w.max(1.0)),
+                "box_min": r3(lo),
+                "box_max": r3(hi),
+            })
+        })
+        .collect();
+    Ok(json!({ "stage": stage.number(), "max_area_mm2": max_area, "clusters_total": total, "clusters": out }))
+}
+
 /// One region and its neighbours (the regions it touches, by shared border length).
 fn region(st: &AppState, p: &Value) -> Result<Value, String> {
     let pp = st.pipe.as_ref().ok_or("no mesh open")?;
@@ -769,7 +873,16 @@ pub fn render_captures(st: &mut AppState, mut render: impl FnMut(&mut AppState, 
         st.screen = [w as f32, h as f32];
         st.view_rect = [0.0, 0.0, w as f32, h as f32];
         st.bare = true;
+        let lit = !c.highlight.is_empty();
+        if lit {
+            st.highlight = c.highlight.clone();
+            st.gen += 1;
+        }
         let px = render(st, w, h);
+        if lit {
+            st.highlight.clear();
+            st.gen += 1;
+        }
         st.screen = screen;
         st.view_rect = rect;
         st.bare = bare;

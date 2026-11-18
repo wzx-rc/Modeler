@@ -165,6 +165,9 @@ pub struct AppState {
     pub edits_open: bool,
     /// Picked region (same index in every segmentation of the pipeline).
     pub selected: Option<u32>,
+    /// Regions shown in colour in the Regions style, the others in clay
+    /// (empty: all coloured). Set for a capture asked by Claude Desktop.
+    pub highlight: Vec<u32>,
     pub toast: Option<Toast>,
     pub time: f64,
     pub interacting: bool,
@@ -215,6 +218,7 @@ impl AppState {
             step: Step::Symmetry,
             edits_open: false,
             selected: None,
+            highlight: vec![],
             toast: None,
             time: 0.0,
             interacting: false,
