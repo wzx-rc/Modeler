@@ -64,6 +64,12 @@ fn launch(mesh: Option<&str>) -> Result<(), String> {
         cmd.arg(m);
     }
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    // no console window next to the app (it is a console program on Windows)
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
     cmd.spawn().map_err(|e| e.to_string())?;
     Ok(())
 }

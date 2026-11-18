@@ -20,6 +20,11 @@ use std::collections::HashMap;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RevolveParams {
     pub on: bool,
+    /// The axis found again from the normals of the piece.
+    pub refine: bool,
+    /// A region belongs to a piece when its faces' normals meet the axis
+    /// within this (sine of the angle).
+    pub turn_tol: f64,
     /// Two cylinders share an axis within this angle (degrees) and distance (mm).
     pub axis_angle: f64,
     pub axis_dist: f64,
@@ -42,7 +47,7 @@ pub struct RevolveParams {
 
 impl Default for RevolveParams {
     fn default() -> Self {
-        RevolveParams { on: true, axis_angle: 2.5, axis_dist: 0.25, min_area: 1.5, max_radius: 20.0, margin: 0.8, radius: 0.22, outlier: 0.12, max_thick: 0.05, min_cover: 260.0, max_move: 0.4 }
+        RevolveParams { on: true, refine: true, turn_tol: 0.15, axis_angle: 2.5, axis_dist: 0.25, min_area: 1.5, max_radius: 20.0, margin: 0.8, radius: 0.22, outlier: 0.12, max_thick: 0.05, min_cover: 260.0, max_move: 0.4 }
     }
 }
 
@@ -92,6 +97,201 @@ struct Axis {
     r_max: f64,
     h: (f64, f64),
     hint: bool,
+}
+
+/// The vertices of a piece around the axis (c, a): within its radius and
+/// height, all their faces on regions that belong to a turned piece (the
+/// group's cylinders, planes square to the axis, spheres centred on it,
+/// coaxial cylinders, free faces), not already in a piece.
+#[allow(clippy::too_many_arguments)]
+fn gather(base: &Mesh, tn: &[DVec3], topo: &Topo, seg: &Segmentation, grid: &Grid, done: &[bool], ax: &Axis, c: DVec3, a: DVec3, p: &RevolveParams) -> Vec<usize> {
+    let mid = c + a * ((ax.h.0 + ax.h.1) * 0.5);
+    let reach = (ax.r_max * ax.r_max + ((ax.h.1 - ax.h.0) * 0.5).powi(2)).sqrt();
+    // a region belongs when its faces could be turned about the axis: each
+    // face's normal line meets the axis ((x − c) · (n × a) = 0), whatever
+    // shape it was fitted with (a bore cut into flats belongs too)
+    let mut ok_region: HashMap<u32, bool> = HashMap::new();
+    let mut belongs = |l: u32| -> bool {
+        if l == NONE || ax.hint {
+            return true;
+        }
+        *ok_region.entry(l).or_insert_with(|| {
+            if ax.members.contains(&l) {
+                return true;
+            }
+            let faces = &seg.regions[l as usize].faces;
+            let step = (faces.len() / 60).max(1);
+            let (mut n_ok, mut n_all) = (0usize, 0usize);
+            for &f in faces.iter().step_by(step) {
+                let d = base.tri_centre(f as usize) - c;
+                let rp = (d - a * a.dot(d)).length();
+                if rp < 1e-6 {
+                    continue;
+                }
+                n_all += 1;
+                if (d.dot(tn[f as usize].cross(a)) / rp).abs() < p.turn_tol {
+                    n_ok += 1;
+                }
+            }
+            n_all > 0 && n_ok as f64 >= 0.8 * n_all as f64
+        })
+    };
+    let mut verts: Vec<usize> = vec![];
+    grid.near(mid, reach, |v| {
+        let v = v as usize;
+        if done[v] {
+            return;
+        }
+        let x = base.pos[v] - c;
+        let h = a.dot(x);
+        let r = (x - a * h).length();
+        if r > ax.r_max || h < ax.h.0 || h > ax.h.1 {
+            return;
+        }
+        if topo.tris_of(v).iter().all(|&t| belongs(seg.label[t as usize])) {
+            verts.push(v);
+        }
+    });
+    verts
+}
+
+struct Fit {
+    /// (radius, height) and angle bin of each vertex.
+    rh: Vec<(DVec2, u8)>,
+    /// Each vertex's point on the common profile.
+    fits: Vec<Option<(DVec2, f64)>>,
+    /// Median distance to the profile (mm).
+    thick: f64,
+}
+
+/// The common profile of a piece around (c, a), or why there is none.
+fn fit(base: &Mesh, topo: &Topo, verts: &[usize], c: DVec3, a: DVec3, r_max: f64, p: &RevolveParams) -> Result<Fit, String> {
+    if verts.len() < 60 {
+        return Err("too few vertices".into());
+    }
+    let u = a.any_orthonormal_vector();
+    let w = a.cross(u);
+    let rh: Vec<(DVec2, u8)> = verts
+        .iter()
+        .map(|&v| {
+            let x = base.pos[v] - c;
+            let h = a.dot(x);
+            let rad = x - a * h;
+            let ang = rad.dot(w).atan2(rad.dot(u));
+            let bin = (((ang + std::f64::consts::PI) / std::f64::consts::TAU * 36.0) as i64).clamp(0, 35) as u8;
+            (DVec2::new(rad.length(), h), bin)
+        })
+        .collect();
+    // the turn must be (mostly) there
+    let mut bins = [false; 36];
+    for (q, b) in &rh {
+        if q.x > r_max * 0.3 {
+            bins[*b as usize] = true;
+        }
+    }
+    let cover = bins.iter().filter(|b| **b).count() as f64 * 10.0;
+    if cover < p.min_cover {
+        return Err(format!("covers {cover:.0}° of the turn"));
+    }
+    // the neighbourhood in the (r, h) plane spans a few triangles at least
+    let edge = {
+        let mut e: Vec<f64> = verts.iter().take(400).filter_map(|&v| topo.verts_of(v).first().map(|&u| (base.pos[v] - base.pos[u as usize]).length())).collect();
+        e.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        e.get(e.len() / 2).copied().unwrap_or(p.radius)
+    };
+    let cell = p.radius.max(edge * 2.5);
+    let mut hash: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
+    for (i, (q, _)) in rh.iter().enumerate() {
+        hash.entry(((q.x / cell).floor() as i64, (q.y / cell).floor() as i64)).or_default().push(i as u32);
+    }
+    let sig = cell * 0.5;
+    let fits: Vec<Option<(DVec2, f64)>> = rh
+        .par_iter()
+        .map(|(q, _)| {
+            let (ci, cj) = ((q.x / cell).floor() as i64, (q.y / cell).floor() as i64);
+            let mut pts = vec![];
+            let mut nb = [false; 36];
+            for di in -1..=1 {
+                for dj in -1..=1 {
+                    let Some(list) = hash.get(&(ci + di, cj + dj)) else { continue };
+                    for &k in list {
+                        let (o, b) = rh[k as usize];
+                        let d2 = (o - *q).length_squared();
+                        if d2 <= cell * cell {
+                            pts.push((o, (-d2 / (sig * sig)).exp()));
+                            nb[b as usize] = true;
+                        }
+                    }
+                }
+            }
+            // a consensus of many angles, or nothing
+            if pts.len() < 12 || nb.iter().filter(|b| **b).count() < 8 {
+                return None;
+            }
+            profile_project(&pts, *q)
+        })
+        .collect();
+    let mut dists: Vec<f64> = rh.iter().zip(&fits).filter_map(|((q, _), f)| f.map(|(g, _)| (g - *q).length())).collect();
+    if dists.len() < verts.len() / 3 {
+        return Err("profile not found".into());
+    }
+    dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let thick = dists[dists.len() / 2];
+    if thick > p.max_thick {
+        return Err(format!("not round ({thick:.3} mm thick)"));
+    }
+    Ok(Fit { rh, fits, thick })
+}
+
+/// The axis of a surface of revolution from its points and normals: every
+/// normal line meets the axis, so (Pottmann) the normals' lines belong to
+/// a linear complex (c̄, c) with c̄·n + c·(x × n) = 0; c is the axis
+/// direction, c × c̄ a point of it. Least squares, |c| = 1.
+fn refine_axis(base: &Mesh, vn: &[DVec3], verts: &[usize], c0: DVec3, a0: DVec3) -> Option<(DVec3, DVec3)> {
+    let o = c0;
+    let mut am = [[0.0f64; 3]; 3];
+    let mut bm = [[0.0f64; 3]; 3];
+    let mut cm = [[0.0f64; 3]; 3];
+    for &v in verts {
+        let n = vn[v];
+        if n.length_squared() < 0.5 {
+            continue;
+        }
+        let x = base.pos[v] - o;
+        let m = x.cross(n);
+        let (nn, mm) = (n.to_array(), m.to_array());
+        for i in 0..3 {
+            for j in 0..3 {
+                am[i][j] += nn[i] * nn[j];
+                bm[i][j] += nn[i] * mm[j];
+                cm[i][j] += mm[i] * mm[j];
+            }
+        }
+    }
+    let tr = am[0][0] + am[1][1] + am[2][2];
+    if tr <= 0.0 {
+        return None;
+    }
+    for (i, row) in am.iter_mut().enumerate() {
+        row[i] += tr * 1e-6;
+    }
+    let ainv = glam::DMat3::from_cols_array_2d(&am).transpose().inverse();
+    let b = glam::DMat3::from_cols_array_2d(&bm).transpose();
+    let cmat = glam::DMat3::from_cols_array_2d(&cm).transpose();
+    // S = C − Bᵀ A⁻¹ B, its smallest eigenvector is c
+    let sm = cmat - b.transpose() * ainv * b;
+    let rows = [sm.row(0).to_array(), sm.row(1).to_array(), sm.row(2).to_array()];
+    let (vals, vecs) = crate::mesh::eigen_sym(rows);
+    let k = (0..3).min_by(|&i, &j| vals[i].partial_cmp(&vals[j]).unwrap())?;
+    let cdir = vecs[k].normalize_or_zero();
+    if cdir == DVec3::ZERO {
+        return None;
+    }
+    let cbar = -(ainv * (b * cdir));
+    // c̄ = p × c + h c: p = c × c̄ (the point nearest to o)
+    let p = cdir.cross(cbar);
+    let _ = a0;
+    Some((o + p, cdir))
 }
 
 fn line_dist(x: DVec3, p: DVec3, a: DVec3) -> f64 {
@@ -218,12 +418,15 @@ fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
 
 /// Puts the round pieces' vertices on their common profile. `hints` add
 /// pieces; `off` drops the pieces whose axis passes near one of its points.
-pub fn revolve(m: &mut Mesh, topo: &Topo, seg: &Segmentation, hints: &[Hint], off: &[DVec3], p: &RevolveParams) -> RevolveReport {
+/// `base`: the mesh before the snap (the AI mesh): the profile is read on it
+/// (the snap may have cut a turned lip into flats) and the piece's vertices
+/// are put on it from there.
+pub fn revolve(m: &mut Mesh, base: &Mesh, topo: &Topo, seg: &Segmentation, hints: &[Hint], off: &[DVec3], p: &RevolveParams) -> RevolveReport {
     let mut rep = RevolveReport::default();
     if !p.on {
         return rep;
     }
-    let mut list = axes(m, seg, p);
+    let mut list = axes(base, seg, p);
     // the pieces dropped by hand / by the AI pass (not the ones asked for)
     list.retain(|ax| !off.iter().any(|o| line_dist(*o, ax.p, ax.a) < ax.r_max && (ax.h.0..=ax.h.1).contains(&ax.a.dot(*o - ax.p))));
     // a piece asked for replaces the automatic ones on its spot
@@ -235,135 +438,82 @@ pub fn revolve(m: &mut Mesh, topo: &Topo, seg: &Segmentation, hints: &[Hint], of
         }
         list.insert(0, Axis { p: h.at, a, members: vec![], r_max: h.radius + p.margin, h: (-h.depth, h.depth), hint: true });
     }
-    let grid = Grid::new(&m.pos, 1.0);
-    // a vertex's regions (its faces' labels)
-    let mut done = vec![false; m.pos.len()];
-    let cos3 = 3f64.to_radians().cos();
+    let grid = Grid::new(&base.pos, 1.0);
+    let vn = base.vertex_normals(topo);
+    let tn = base.normals();
+    let mut done = vec![false; base.pos.len()];
     for ax in list {
-        let (c, a) = (ax.p, ax.a);
-        let mid = c + a * ((ax.h.0 + ax.h.1) * 0.5);
-        let reach = (ax.r_max * ax.r_max + ((ax.h.1 - ax.h.0) * 0.5).powi(2)).sqrt();
-        // which regions belong: the group's cylinders, planes square to the
-        // axis, spheres centred on it, free faces
-        let mut ok_region: HashMap<u32, bool> = HashMap::new();
-        let mut belongs = |l: u32| -> bool {
-            if l == NONE || ax.hint {
-                return true;
+        // the axis from the cylinders' fits can be off by tens of degrees on
+        // a short piece: it is also found again from the normals of the
+        // piece (each meets the axis), and the rounder of the two is kept
+        let (c0, a0) = (ax.p, ax.a);
+        let v0 = gather(base, &tn, topo, seg, &grid, &done, &ax, c0, a0, p);
+        let mut tries = vec![(c0, a0, v0)];
+        if p.refine && !ax.hint && tries[0].2.len() >= 60 {
+            // from the cylinders' axis, and from the nearest axis of the
+            // world when it is within 40° (parts are often modelled square)
+            let mut starts = vec![a0];
+            let e = [DVec3::X, DVec3::Y, DVec3::Z].into_iter().max_by(|x, y| x.dot(a0).abs().partial_cmp(&y.dot(a0).abs()).unwrap()).unwrap();
+            let e = if e.dot(a0) < 0.0 { -e } else { e };
+            let ang = e.dot(a0).clamp(-1.0, 1.0).acos().to_degrees();
+            if ang > 1.0 && ang < 40.0 {
+                starts.push(e);
             }
-            *ok_region.entry(l).or_insert_with(|| {
-                if ax.members.contains(&l) {
-                    return true;
+            for (k, &s0) in starts.iter().enumerate() {
+                let (mut c, mut a) = (c0, s0);
+                let mut verts = if k == 0 { tries[0].2.clone() } else { gather(base, &tn, topo, seg, &grid, &done, &ax, c, a, p) };
+                if k > 0 && verts.len() >= 60 {
+                    tries.push((c, a, verts.clone()));
                 }
-                match seg.regions[l as usize].prim {
-                    Prim::Plane { n, .. } => n.dot(a).abs() > cos3,
-                    Prim::Sphere { c: sc, .. } => line_dist(sc, c, a) < p.axis_dist,
-                    Prim::Cylinder { p: q, a: b, .. } => b.dot(a).abs() > p.axis_angle.to_radians().cos() && line_dist(q, c, a) < p.axis_dist,
+                for _ in 0..2 {
+                    if verts.len() < 60 {
+                        break;
+                    }
+                    let Some((c2, a2)) = refine_axis(base, &vn, &verts, c, a) else { break };
+                    let a2 = if a2.dot(a) < 0.0 { -a2 } else { a2 };
+                    if a2.dot(s0).clamp(-1.0, 1.0).acos().to_degrees() > 30.0 {
+                        break;
+                    }
+                    // the new axis through its point nearest to the old centre
+                    c = c2 + a2 * a2.dot(c - c2);
+                    a = a2;
+                    verts = gather(base, &tn, topo, seg, &grid, &done, &ax, c, a, p);
                 }
-            })
-        };
-        let mut verts: Vec<usize> = vec![];
-        grid.near(mid, reach, |v| {
-            let v = v as usize;
-            if done[v] {
-                return;
+                if (a.dot(s0) < 0.99995 || (c - c0).length() > 0.01) && verts.len() >= 60 {
+                    tries.push((c, a, verts));
+                }
             }
-            let x = m.pos[v] - c;
-            let h = a.dot(x);
-            let r = (x - a * h).length();
-            if r > ax.r_max || h < ax.h.0 || h > ax.h.1 {
-                return;
-            }
-            let ok = topo.tris_of(v).iter().all(|&t| belongs(seg.label[t as usize]));
-            if ok {
-                verts.push(v);
-            }
+        }
+        let mut best: Option<(DVec3, DVec3, Vec<usize>, Fit)> = None;
+        let mut first_err: Option<(usize, String)> = None;
+        let debug = std::env::var("RECTIFY_REV_DEBUG").ok().and_then(|s| {
+            let v: Vec<f64> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+            (v.len() == 4 && (DVec3::new(v[0], v[1], v[2]) - c0).length() < v[3]).then_some(())
         });
-        let mut piece = Piece { p: c, a, r_max: ax.r_max, h: ax.h, verts: verts.len(), moved: 0, details: 0, thick: 0.0, hint: ax.hint, skipped: None };
-        if verts.len() < 60 {
-            piece.skipped = Some("too few vertices".into());
-            rep.pieces.push(piece);
-            continue;
-        }
-        let u = a.any_orthonormal_vector();
-        let w = a.cross(u);
-        // (radius, height, angle bin) of each vertex
-        let rh: Vec<(DVec2, u8)> = verts
-            .iter()
-            .map(|&v| {
-                let x = m.pos[v] - c;
-                let h = a.dot(x);
-                let rad = x - a * h;
-                let ang = rad.dot(w).atan2(rad.dot(u));
-                let bin = (((ang + std::f64::consts::PI) / std::f64::consts::TAU * 36.0) as i64).clamp(0, 35) as u8;
-                (DVec2::new(rad.length(), h), bin)
-            })
-            .collect();
-        // the turn must be (mostly) there
-        let mut bins = [false; 36];
-        for (q, b) in &rh {
-            if q.x > ax.r_max * 0.3 {
-                bins[*b as usize] = true;
+        for (c, a, verts) in tries {
+            let res = fit(base, topo, &verts, c, a, ax.r_max, p);
+            if debug.is_some() {
+                eprintln!("REV try c {c:.2} a {a:.3} r {:.2} verts {}: {:?}", ax.r_max, verts.len(), res.as_ref().map(|f| f.thick));
             }
-        }
-        let cover = bins.iter().filter(|b| **b).count() as f64 * 10.0;
-        if cover < p.min_cover {
-            piece.skipped = Some(format!("covers {cover:.0}° of the turn"));
-            rep.pieces.push(piece);
-            continue;
-        }
-        // the profile: each vertex's neighbours in the (r, h) plane, from
-        // every angle
-        // the neighbourhood spans a few triangles at least
-        let edge = {
-            let mut e: Vec<f64> = verts.iter().take(400).filter_map(|&v| topo.verts_of(v).first().map(|&u| (m.pos[v] - m.pos[u as usize]).length())).collect();
-            e.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            e.get(e.len() / 2).copied().unwrap_or(p.radius)
-        };
-        let cell = p.radius.max(edge * 2.5);
-        let mut hash: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
-        for (i, (q, _)) in rh.iter().enumerate() {
-            hash.entry(((q.x / cell).floor() as i64, (q.y / cell).floor() as i64)).or_default().push(i as u32);
-        }
-        let sig = cell * 0.5;
-        let fits: Vec<Option<(DVec2, f64)>> = rh
-            .par_iter()
-            .map(|(q, _)| {
-                let (ci, cj) = ((q.x / cell).floor() as i64, (q.y / cell).floor() as i64);
-                let mut pts = vec![];
-                let mut nb = [false; 36];
-                for di in -1..=1 {
-                    for dj in -1..=1 {
-                        let Some(list) = hash.get(&(ci + di, cj + dj)) else { continue };
-                        for &k in list {
-                            let (o, b) = rh[k as usize];
-                            let d2 = (o - *q).length_squared();
-                            if d2 <= cell * cell {
-                                pts.push((o, (-d2 / (sig * sig)).exp()));
-                                nb[b as usize] = true;
-                            }
-                        }
+            match res {
+                Ok(f) => {
+                    if best.as_ref().map(|b| f.thick < b.3.thick).unwrap_or(true) {
+                        best = Some((c, a, verts, f));
                     }
                 }
-                // a consensus of many angles, or nothing
-                if pts.len() < 12 || nb.iter().filter(|b| **b).count() < 8 {
-                    return None;
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some((verts.len(), e));
+                    }
                 }
-                profile_project(&pts, *q)
-            })
-            .collect();
-        let mut dists: Vec<f64> = rh.iter().zip(&fits).filter_map(|((q, _), f)| f.map(|(g, _)| (g - *q).length())).collect();
-        if dists.len() < verts.len() / 3 {
-            piece.skipped = Some("profile not found".into());
-            rep.pieces.push(piece);
-            continue;
+            }
         }
-        dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        piece.thick = dists[dists.len() / 2];
-        if piece.thick > p.max_thick {
-            piece.skipped = Some(format!("not round ({:.3} mm thick)", piece.thick));
-            rep.pieces.push(piece);
+        let Some((c, a, verts, Fit { rh, fits, thick })) = best else {
+            let (n, e) = first_err.unwrap_or((0, "too few vertices".into()));
+            rep.pieces.push(Piece { p: c0, a: a0, r_max: ax.r_max, h: ax.h, verts: n, moved: 0, details: 0, thick: 0.0, hint: ax.hint, skipped: Some(e) });
             continue;
-        }
+        };
+        let mut piece = Piece { p: c, a, r_max: ax.r_max, h: ax.h, verts: verts.len(), moved: 0, details: 0, thick, hint: ax.hint, skipped: None };
         for (i, &v) in verts.iter().enumerate() {
             let Some((g, _)) = fits[i] else { continue };
             let q = rh[i].0;
@@ -379,7 +529,7 @@ pub fn revolve(m: &mut Mesh, topo: &Topo, seg: &Segmentation, hints: &[Hint], of
             if f <= 0.0 || q.x < 1e-6 {
                 continue;
             }
-            let x = m.pos[v] - c;
+            let x = base.pos[v] - c;
             let radial = (x - a * a.dot(x)) / q.x;
             let target = c + a * g.y + radial * g.x;
             let cur = m.pos[v];
@@ -440,7 +590,8 @@ mod tests {
         };
         let before = spread(&m);
         let p = RevolveParams { margin: 0.5, ..Default::default() };
-        let rep = revolve(&mut m, &topo, &seg, &[], &[], &p);
+        let base = m.clone();
+        let rep = revolve(&mut m, &base, &topo, &seg, &[], &[], &p);
         let after = spread(&m);
         assert_eq!(rep.done(), 1, "{:?}", rep.pieces);
         assert!(after < before * 0.4, "{before} -> {after}");

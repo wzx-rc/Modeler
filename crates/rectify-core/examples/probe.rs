@@ -68,8 +68,8 @@ fn main() {
             Step::Revolve => {
                 if let Some(r) = &l.revolve {
                     println!("lane {lane} round {:.1}s: {} pieces done of {}, {} vertices moved", secs, r.done(), r.pieces.len(), r.moved);
-                    for pc in r.pieces.iter().take(if std::env::var("RECTIFY_LIST").is_ok() { 40 } else { 0 }) {
-                        println!("   r {:.2} h {:.2}..{:.2} at {:.1?} verts {} moved {} details {} thick {:.3} {:?}", pc.r_max, pc.h.0, pc.h.1, pc.p, pc.verts, pc.moved, pc.details, pc.thick, pc.skipped);
+                    for pc in r.pieces.iter().filter(|pc| std::env::var("RECTIFY_NEAR").ok().and_then(|s| { let v: Vec<f64> = s.split(',').filter_map(|t| t.parse().ok()).collect(); (v.len() == 4).then(|| (pc.p - glam::DVec3::new(v[0], v[1], v[2])).length() < v[3]) }).unwrap_or(true)).take(if std::env::var("RECTIFY_LIST").is_ok() { 40 } else { 0 }) {
+                        println!("   r {:.2} h {:.2}..{:.2} at {:.1?} axis {:.2?} verts {} moved {} details {} thick {:.3} {:?}", pc.r_max, pc.h.0, pc.h.1, pc.p, pc.a, pc.verts, pc.moved, pc.details, pc.thick, pc.skipped);
                     }
                 }
             }

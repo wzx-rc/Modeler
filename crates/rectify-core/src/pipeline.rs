@@ -100,6 +100,8 @@ impl Params {
                 "symmetry" => self.symmetry = v != 0.0,
                 "reg" => self.reg_on = v != 0.0,
                 "revolve" => self.revolve.on = v != 0.0,
+                "rev_refine" => self.revolve.refine = v != 0.0,
+                "rev_turn_tol" => self.revolve.turn_tol = v,
                 "rev_radius" => self.revolve.radius = v,
                 "rev_thick" => self.revolve.max_thick = v,
                 "rev_outlier" => self.revolve.outlier = v,
@@ -481,7 +483,7 @@ impl Pipeline {
                 let (Some(m0), Some(s)) = (&self.lanes[lane].snapped, &self.lanes[lane].seg_final) else { return };
                 let mut m = m0.clone();
                 let (hints, off) = if lane == 1 { script::revolve_hints(&self.script.edits) } else { (vec![], vec![]) };
-                let rep = revolve(&mut m, &self.topo, s, &hints, &off, &p.revolve);
+                let rep = revolve(&mut m, self.sym_out(), &self.topo, s, &hints, &off, &p.revolve);
                 let l = &mut self.lanes[lane];
                 l.revolve = Some(rep);
                 l.result = Some(m);
