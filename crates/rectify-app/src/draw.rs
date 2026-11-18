@@ -114,6 +114,27 @@ impl Drawer {
                 None => {}
             }
         }
+        // the mirror plane: its outline across the mesh's box, and a grid
+        if let (crate::state::Tool::Mirror, Some(f), Some(d)) = (st.tool, st.sym.found, &st.doc) {
+            let (lo, hi) = d.original.bounds();
+            let c = (lo + hi) * 0.5;
+            let n = f.mirror.n;
+            let c = c - n * (n.dot(c) - f.mirror.d);
+            let a = if n.x.abs() > 0.9 { DVec3::Y } else { DVec3::X };
+            let u = (a - n * a.dot(n)).normalize();
+            let v = n.cross(u);
+            let ext = (hi - lo) * 0.5 * 1.08;
+            let (su, sv) = (ext.dot(u.abs()), ext.dot(v.abs()));
+            let corner = |i: f64, j: f64| p(c + u * su * i + v * sv * j);
+            let mut lines = vec![vec![corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0), corner(-1.0, -1.0)]];
+            for k in 1..8 {
+                let t = -1.0 + 2.0 * k as f64 / 8.0;
+                lines.push(vec![corner(t, -1.0), corner(t, 1.0)]);
+                lines.push(vec![corner(-1.0, t), corner(1.0, t)]);
+            }
+            line_vertices(&lines[..1], [255, 150, 60, 255], 1.6, &mut out);
+            line_vertices(&lines[1..], [255, 150, 60, 110], 0.8, &mut out);
+        }
         self.r.upload_overlay(device, queue, &out);
     }
 

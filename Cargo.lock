@@ -2105,7 +2105,6 @@ dependencies = [
  "pollster",
  "rayon",
  "rectify-core",
- "serde_json",
  "wgpu",
  "winit",
 ]
@@ -2116,8 +2115,6 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "rayon",
- "serde",
- "serde_json",
 ]
 
 [[package]]

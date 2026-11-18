@@ -271,6 +271,56 @@ fn main() {
     if let Some(w) = std::env::var("RECTIFY_WIDTH").ok().and_then(|s| s.parse().ok()) {
         h.st.line.width = w;
     }
+    if want("mirror") {
+        h.st.camera.preset(ViewPreset::Perspective);
+        h.st.frame_all();
+        h.st.set_tool(Tool::Mirror);
+        if let Some(m) = std::env::var("RECTIFY_MODE").ok() {
+            use rectify_core::sym::SymMode;
+            h.st.sym.mode = match m.as_str() {
+                "plus" => SymMode::PlusToMinus,
+                "minus" => SymMode::MinusToPlus,
+                _ => SymMode::Average,
+            };
+        }
+        h.shot("mirror-0-plane");
+        let v = std::env::var("RECTIFY_LOOK").map(|s| nums(&s)).unwrap_or_default();
+        let v = if v.len() == 6 { v } else { vec![0.3, 0.72, 0.5, 60.0, 0.35, 0.1] };
+        look(&mut h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+        h.st.bare = true;
+        h.shot("mirror-1-before");
+        h.st.settings.zebra = true;
+        h.shot("mirror-1-zebra");
+        h.st.settings.zebra = false;
+        h.st.camera.yaw += std::f32::consts::PI;
+        h.shot("mirror-3-other-before");
+        h.st.settings.zebra = true;
+        h.shot("mirror-3-other-zebra-before");
+        h.st.settings.zebra = false;
+        h.st.camera.yaw -= std::f32::consts::PI;
+        let t = std::time::Instant::now();
+        h.st.apply_mirror();
+        h.wait();
+        eprintln!("mirror applied in {:.1}s", t.elapsed().as_secs_f64());
+        if let Some(t) = &h.st.toast {
+            eprintln!("{}", t.text);
+        }
+        h.shot("mirror-2-after");
+        h.st.settings.zebra = true;
+        h.shot("mirror-2-zebra");
+        h.st.settings.zebra = false;
+        // the other side
+        h.st.camera.yaw += std::f32::consts::PI;
+        h.shot("mirror-3-other-after");
+        h.st.settings.zebra = true;
+        h.shot("mirror-3-other-zebra-after");
+        h.st.settings.zebra = false;
+        h.st.bare = false;
+        h.st.camera.preset(ViewPreset::Perspective);
+        h.st.frame_all();
+        h.shot("mirror-4-ui");
+        h.st.set_tool(Tool::Navigate);
+    }
     if want("look") {
         let v = std::env::var("RECTIFY_LOOK").map(|s| nums(&s)).unwrap_or_default();
         let v = if v.len() == 6 { v } else { vec![0.3, 0.72, 0.5, 60.0, 0.35, 0.1] };

@@ -133,6 +133,11 @@ pub fn hint(st: &AppState) -> String {
             },
             None => "Line: press on an edge and drag along it, the edge becomes straight and sharp · Esc done".into(),
         },
-        Tool::Navigate => "L line · Ctrl+Z undo · Space the mesh as it came · drag to turn around".into(),
+        Tool::Mirror => match st.sym.found {
+            Some(f) if f.matched < 0.5 => format!("Mirror {}: only {:.0} % of the mesh has a partner, try another axis", st.sym.axis.label(), f.matched * 100.0),
+            Some(_) => format!("Mirror {}: the plane in orange · Enter applies · Esc done", st.sym.axis.label()),
+            None => "Mirror: finding the plane".into(),
+        },
+        Tool::Navigate => "L line · M mirror · Ctrl+Z undo · Space the mesh as it came · drag to turn around".into(),
     }
 }

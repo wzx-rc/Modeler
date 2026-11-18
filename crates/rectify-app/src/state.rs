@@ -6,7 +6,8 @@ use crate::view::View;
 use glam::{DVec3, Vec3};
 use rayon::prelude::*;
 use rectify_core::line::{self, LineFit, LineParams};
-use rectify_core::{Mesh, Moves, Topo};
+use rectify_core::sym::{self, Axis, Found, SymMode};
+use rectify_core::{Mesh, Moves, Surface, Topo};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -30,6 +31,8 @@ pub enum Tool {
     Navigate,
     /// Drag a segment along an edge: straight and sharp there.
     Line,
+    /// The mirror plane: both sides made mirror images.
+    Mirror,
 }
 
 impl Tool {
@@ -37,6 +40,7 @@ impl Tool {
         match self {
             Tool::Navigate => "Navigate",
             Tool::Line => "Line",
+            Tool::Mirror => "Mirror",
         }
     }
 }
@@ -69,9 +73,20 @@ pub struct LineDrag {
     pub fitted_at: Option<DVec3>,
 }
 
+/// The Mirror tool's settings and the plane found.
+pub struct SymState {
+    pub axis: Axis,
+    pub mode: SymMode,
+    /// How far a vertex's image may be from the surface (mm).
+    pub reach: f64,
+    pub found: Option<Found>,
+}
+
 pub enum Msg {
     Loaded(Result<Box<Doc>, String>, PathBuf),
     Exported(Result<PathBuf, String>),
+    /// An edit computed in the background: its tool, what it did, the moves.
+    Edit(Tool, String, Moves, String),
 }
 
 pub struct Job {
@@ -113,6 +128,7 @@ pub struct AppState {
     pub tool: Tool,
     pub line: LineParams,
     pub line_drag: Option<LineDrag>,
+    pub sym: SymState,
     /// The edits made, in order, and the ones undone.
     pub history: Vec<Step>,
     pub undone: Vec<Step>,
@@ -148,6 +164,7 @@ impl AppState {
             tool: Tool::Navigate,
             line: LineParams::default(),
             line_drag: None,
+            sym: SymState { axis: Axis::Z, mode: SymMode::Average, reach: 1.0, found: None },
             history: vec![],
             undone: vec![],
         }
@@ -204,6 +221,7 @@ impl AppState {
         self.history.clear();
         self.undone.clear();
         self.line_drag = None;
+        self.sym.found = None;
         self.dirty.clear();
         self.gen += 1;
         self.overlay_gen += 1;
@@ -249,6 +267,11 @@ impl AppState {
             Msg::Loaded(Err(e), _) => self.toast(format!("Could not read the file: {e}"), true),
             Msg::Exported(Ok(path)) => self.toast(format!("Exported to {}", path.display()), false),
             Msg::Exported(Err(e)) => self.toast(format!("Export failed: {e}"), true),
+            Msg::Edit(tool, what, moves, note) => {
+                self.commit(tool, what, moves);
+                self.toast(note, false);
+                self.overlay_gen += 1;
+            }
         }
     }
 
@@ -284,6 +307,50 @@ impl AppState {
         self.tool = t;
         self.line_drag = None;
         self.overlay_gen += 1;
+        if t == Tool::Mirror && self.sym.found.is_none() {
+            self.find_mirror(None);
+        }
+    }
+
+    // ------------------------------------------------------------ Mirror
+
+    /// The mirror plane square to an axis (None: the axis that fits best).
+    pub fn find_mirror(&mut self, axis: Option<Axis>) {
+        let Some(d) = &self.doc else { return };
+        let reach = self.sym.reach;
+        let best = match axis {
+            Some(a) => (a, sym::find(&d.mesh, a, reach)),
+            None => Axis::ALL.into_iter().map(|a| (a, sym::find(&d.mesh, a, reach))).min_by(|x, y| x.1.gap.partial_cmp(&y.1.gap).unwrap()).unwrap(),
+        };
+        self.sym.axis = best.0;
+        self.sym.found = Some(best.1);
+        self.overlay_gen += 1;
+    }
+
+    /// Both sides made mirror images (in the background).
+    pub fn apply_mirror(&mut self) {
+        if self.busy() {
+            return;
+        }
+        let (Some(d), Some(f)) = (&self.doc, self.sym.found) else { return };
+        let m = d.mesh.clone();
+        let topo = Topo::new(&m);
+        let (mode, reach) = (self.sym.mode, self.sym.reach);
+        let axis = self.sym.axis;
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let surf = Surface::new(&m);
+            let (moves, share) = sym::apply(&m, &topo, &surf, &f.mirror, mode, reach);
+            let how = match mode {
+                SymMode::Average => "both sides averaged",
+                SymMode::PlusToMinus => "+ side copied",
+                SymMode::MinusToPlus => "− side copied",
+            };
+            let what = format!("{} · {how}", axis.label());
+            let note = format!("Mirror {}: {how} · {:.0} % of the vertices found their partner · {} mm at most", axis.label(), share * 100.0, fmt(moves.max_move(), 2));
+            let _ = tx.send(Msg::Edit(Tool::Mirror, what, moves, note));
+        });
+        self.job = Some(Job { rx, what: "Mirroring".into() });
     }
 
     // ------------------------------------------------------------ edits

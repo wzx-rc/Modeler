@@ -67,7 +67,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the mesh (Esc)", "Esc"), (Tool::Line, Icon::Sketch, "Line: drag along an edge, it becomes straight and sharp (L)", "L")];
+                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the mesh (Esc)", "Esc"), (Tool::Line, Icon::Sketch, "Line: drag along an edge, it becomes straight and sharp (L)", "L"), (Tool::Mirror, Icon::Mirror, "Mirror: the two sides made mirror images (M)", "M")];
                 for (t, icon, tip, key) in tools {
                     let r = icon_btn(ui, icon, st.tool == t, tip, 28.0);
                     key_hint(ui, &r, key);
@@ -231,12 +231,42 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
             if secondary_btn(ui, "Line (L): straight, sharp edges", w).clicked() {
                 st.set_tool(Tool::Line);
             }
+            if secondary_btn(ui, "Mirror (M): both sides alike", w).clicked() {
+                st.set_tool(Tool::Mirror);
+            }
         }
         Tool::Line => {
             title(ui, "Line", "Press on an edge, drag along it, release: there the edge becomes straight and sharp");
             slider_f64(ui, "Width", &mut st.line.width, 0.2..=8.0, 0.1, "mm");
             slider_f64(ui, "Hold", &mut st.line.hold, 0.0..=0.95, 0.05, "");
-            line(ui, "Width: how far from the edge the sides are put on their planes. Hold: the part of it moved fully, the rest fades.");
+            line(ui, "Width: how far from the edge the sides are put on their planes (more on a rounded edge). Hold: the part of it moved fully, the rest fades.");
+        }
+        Tool::Mirror => {
+            use rectify_core::sym::{Axis, SymMode};
+            title(ui, "Mirror", "The plane between the two sides, then both made mirror images");
+            let items = [(Axis::X, "X", accent()), (Axis::Y, "Y", accent()), (Axis::Z, "Z", accent())];
+            if let Some(a) = segmented(ui, &items, st.sym.axis, 28.0) {
+                st.find_mirror(Some(a));
+            }
+            if let Some(f) = st.sym.found {
+                let n = f.mirror.n;
+                let tilt = n.dot(st.sym.axis.dir()).clamp(-1.0, 1.0).acos().to_degrees();
+                line(ui, format!("Plane at {} mm, tilted {}°", fmt(f.mirror.d, 2), fmt(tilt, 2)));
+                line(ui, format!("{:.0} % of the vertices have a partner · gap {} mm", f.matched * 100.0, fmt(f.gap, 3)));
+            }
+            ui.add_space(4.0);
+            let items = [(SymMode::Average, "Average", accent()), (SymMode::PlusToMinus, "+ → −", accent()), (SymMode::MinusToPlus, "− → +", accent())];
+            if let Some(m) = segmented(ui, &items, st.sym.mode, 28.0) {
+                st.sym.mode = m;
+            }
+            slider_f64(ui, "Reach", &mut st.sym.reach, 0.1..=5.0, 0.1, "mm");
+            line(ui, "Average: each side half-way to the other. + → −: the + side copied onto the − side. Reach: farther than this from its partner, a vertex stays.");
+            ui.add_space(6.0);
+            let w = ui.available_width();
+            let label = if st.busy() { "Mirroring…" } else { "Apply (Enter)" };
+            if primary_btn(ui, Some(Icon::Mirror), label, Some(w)).clicked() {
+                st.apply_mirror();
+            }
         }
     }
 }
@@ -325,8 +355,15 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if ctx.egui_wants_keyboard_input() {
         return;
     }
-    let (f, esc, space, z, y, l) = ctx.input(|i| (i.key_pressed(Key::F), i.key_pressed(Key::Escape), i.key_down(Key::Space), i.key_pressed(Key::Z), i.key_pressed(Key::Y), i.key_pressed(Key::L)));
     let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
+    let (f, esc, space, z, y, l) = ctx.input(|i| (i.key_pressed(Key::F), i.key_pressed(Key::Escape), i.key_down(Key::Space), i.key_pressed(Key::Z), i.key_pressed(Key::Y), i.key_pressed(Key::L)));
+    let (mk, enter) = ctx.input(|i| (i.key_pressed(Key::M), i.key_pressed(Key::Enter)));
+    if mk && !cmd {
+        st.set_tool(Tool::Mirror);
+    }
+    if enter && st.tool == Tool::Mirror {
+        st.apply_mirror();
+    }
     if cmd && z {
         if shift {
             st.redo();
