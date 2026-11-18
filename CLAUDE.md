@@ -67,7 +67,7 @@ The window title shows the version, branch, commit and commit date (`crates/nurb
 
 Romain: "une troisième version du soft… on garde que le viewport et l'interface (en orange)", to clean an AI-made mesh (test: `GUN_A_ORIGIN.obj`, a sci-fi pistol, 976 k vertices, 1.95 M triangles, in cm, loaded in mm) with no retopology and no remodelling: **the triangles stay, the vertices move**. Same window, theme and widgets as Forme NURBS, accent orange, UI in English; no kernel, no OpenCascade.
 
-**The automatic version (segmentation, snap, Round, clean-up, the AI pass through MCP) was dropped** (18 nov., 13 h 27: "ça ne fonctionne pas visuellement… peut-être moins automatique"); it lives in the history up to commit `65a17a3`. Do not bring segmentation, automatic snapping or the AI pass back unless he asks. Now: **hand tools, one at a time, each placed and then adjusted live** (a Strength slider and its settings change the result on screen before Enter applies it; Esc removes it; a new stroke, another tool, export or undo first apply or remove the one pending). Romain (13 h 38): "on place le trait et on règle en temps réel la puissance du sharp".
+**The automatic version (segmentation, snap, Round, clean-up, the AI pass through MCP) was dropped** (18 nov., 13 h 27: "ça ne fonctionne pas visuellement… peut-être moins automatique"); it lives in the history up to commit `65a17a3`. Do not bring segmentation, automatic snapping or the AI pass back unless he asks. Now: **hand tools, one at a time, each placed and then adjusted live** (a Strength slider and its settings change the result on screen before Enter applies it; Esc removes it; a new stroke, another tool, export or undo first apply or remove the one pending). Romain (14 h 38): "on place le trait et on règle en temps réel la puissance du sharp".
 
 - `crates/rectify-core` (glam + rayon, no UI). A tool returns `Moves { idx, from, to }` (`moves.rs`): undo / redo only put positions back.
   - `line.rs` (L): a segment dragged along an edge; a band around it, its vertices split by normal into two sides, each fitted with a plane, the edge where they meet; a chain of mesh edges laid on it straight, the sides put on their planes, faded at the band's border and past the ends. `LineParams { width 1.5 mm, min_angle 12°, hold 0.6 }`.
@@ -86,7 +86,7 @@ cargo run --release -p rectify-core --example edges -- in.obj [out.obj]     # th
 
 Harness settings: `RECTIFY_LOOK="fx,fy,fz,dist,yaw,pitch"` (camera), `RECTIFY_DRAG="x,y;x,y"` (a Line drag, screen points), `RECTIFY_STRENGTH="0.3,1"` (shown at these strengths), `RECTIFY_WIDTH`, `RECTIFY_CIRCLE="x,y;x,y"` (a Circle drag, with `RECTIFY_LEVELS`, `RECTIFY_HEIGHT`, `RECTIFY_LOOK2` a second camera, `RECTIFY_CIRCLE_DUMP=file.csv` the moves' (h0, r0, h1, r1, t)), `RECTIFY_TAG` (file names), `RECTIFY_MODE=plus|minus` (Mirror).
 
-State (18 nov., 15 h, captures only, never tried at the mouse): Line, Mirror, Circle and Edges work in captures. Circle leaves a small mark at the foot of the muzzle ring. Edges is careful (63 of 199) and its effect is subtle; its overlay also draws the edges hidden behind the part.
+State (18 nov., 15 h 40, captures only, never tried at the mouse): Line, Mirror, Circle and Edges work in captures. Circle leaves a small mark at the foot of the muzzle ring. Edges is careful (63 of 199) and its effect is subtle; its overlay also draws the edges hidden behind the part.
 
 ## Rules that are easy to break
 
