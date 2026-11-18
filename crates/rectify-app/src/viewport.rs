@@ -33,7 +33,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             i.pointer.button_down(PointerButton::Secondary),
         )
     });
-    if alt && (resp.hovered() || resp.dragged() || l || m || r) {
+    if alt && (resp.hovered() || resp.dragged() || l || m || r) && st.circle_drag.is_none() {
         if (l || m || r) && d != egui::Vec2::ZERO {
             if l {
                 st.camera.orbit(d.x, d.y);
@@ -56,6 +56,26 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             st.camera.zoom((scroll.y * 0.0022).exp());
         }
     }
+    // the Circle tool: press on the rim, drag across, release
+    if st.tool == Tool::Circle && !alt {
+        let (pressed, released, pos) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.latest_pos()));
+        if pressed && resp.hovered() {
+            if let Some(p) = pos {
+                st.circle_press([p.x, p.y]);
+            }
+        } else if st.circle_drag.is_some() {
+            if let Some(p) = pos {
+                st.circle_move([p.x, p.y]);
+            }
+            if released || !l {
+                st.circle_release();
+            }
+        }
+        if st.circle_drag.is_some() {
+            st.interacting = true;
+            return;
+        }
+    }
     // the middle button alone pans; the left drag alone orbits when no
     // tool takes it
     if (m || (l && st.tool == Tool::Navigate)) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
@@ -71,7 +91,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
 /// The tool's name at the pointer.
 fn tool_cursor(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Response) {
     let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else { return };
-    if !resp.hovered() {
+    if !resp.hovered() && st.circle_drag.is_none() {
         return;
     }
     let col = accent();
@@ -102,6 +122,11 @@ pub fn hint(st: &AppState) -> String {
         return "Open a scan (an .obj)".into();
     }
     match st.tool {
-        Tool::Navigate => "No tool yet: the scan as it came · drag to turn around · F frames it".into(),
+        Tool::Navigate => "C circle · H hide the scan · Ctrl+Z undo · drag to turn around · F frames it".into(),
+        Tool::Circle => match (&st.circle_drag, &st.circle) {
+            (Some(_), _) => "Across to the other side of the rim, then release".into(),
+            (None, Some(c)) => format!("A NURBS surface, Ø {} mm, {} rings: height, profile and levels on the left, live · Enter keeps it · Esc removes · H hides the scan", fmt(c.circle.r * 2.0, 2), c.params.levels + 1),
+            (None, None) => "Circle: press on the rim of a hole or a boss and drag across it to the other side".into(),
+        },
     }
 }

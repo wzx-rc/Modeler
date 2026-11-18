@@ -154,7 +154,7 @@ struct MOut {
     return o;
 }
 
-@fragment fn fs_mesh(i: MOut) -> @location(0) vec4<f32> {
+fn shade(i: MOut) -> vec4<f32> {
     var n = normalize(i.nrm);
     let v = normalize(u.eye.xyz - i.wpos);
     if (dot(n, v) < 0.0) {
@@ -196,6 +196,34 @@ struct MOut {
         return vec4<f32>(pow(tinted, vec3<f32>(1.0 / 2.2)), 1.0);
     }
     return vec4<f32>(pow(aces(c * 0.9), vec3<f32>(1.0 / 2.2)), 1.0);
+}
+
+@fragment fn fs_mesh(i: MOut) -> @location(0) vec4<f32> {
+    return shade(i);
+}
+
+// a NURBS object lies on the scan, which is a little off it: drawn a
+// little off its surface towards the eye (along its normal, then along the
+// view) so it shows where the two meet
+@vertex fn vs_part(i: MIn) -> MOut {
+    var o: MOut;
+    let d = u.eye.xyz - i.pos;
+    let dist = length(d);
+    var n = normalize(i.nrm);
+    if (dot(n, d) < 0.0) {
+        n = -n;
+    }
+    let lifted = i.pos + n * (0.12 + 0.0015 * dist);
+    o.clip = project(lifted + d / max(dist, 1e-6) * (0.02 + 0.001 * dist));
+    o.nrm = i.nrm;
+    o.wpos = i.pos;
+    o.face = i.face;
+    return o;
+}
+
+// where the scan hides a NURBS object: seen through it, faint
+@fragment fn fs_part_hidden(i: MOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(shade(i).rgb, 0.28);
 }
 
 // ----------------------------------------------------------------- lines
@@ -335,6 +363,8 @@ pub struct Frame<'a> {
     pub origin: bool,
     /// Zebra stripes instead of the clay.
     pub zebra: bool,
+    /// The scan drawn (off: the NURBS objects alone).
+    pub scan: bool,
     /// Part colour (sRGB 0..1).
     pub base: [f32; 3],
     /// Selection and pre-selection tints (sRGB 0..1) and their strength.
@@ -382,6 +412,8 @@ pub struct Renderer {
     lines: wgpu::RenderPipeline,
     over_hidden: wgpu::RenderPipeline,
     over_visible: wgpu::RenderPipeline,
+    part: wgpu::RenderPipeline,
+    part_hidden: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     faces: wgpu::Buffer,
     faces_cap: u64,
@@ -389,8 +421,12 @@ pub struct Renderer {
     mesh_buf: Buf,
     edge_buf: Buf,
     over_buf: Buf,
+    /// The NURBS objects (tessellated) and their lines.
+    part_buf: Buf,
+    part_wire: Buf,
     /// Bounds of what is uploaded (depth range).
     mesh_bounds: Option<([f32; 3], [f32; 3])>,
+    part_bounds: Option<([f32; 3], [f32; 3])>,
     over_bounds: Option<([f32; 3], [f32; 3])>,
     targets: Option<Targets>,
     pub egui: egui_wgpu::Renderer,
@@ -470,6 +506,8 @@ impl Renderer {
         let lines = pipeline("edges", "vs_line", "fs_line", Some((&line_attrs, lstride)), alpha, depth(false, wgpu::CompareFunction::LessEqual));
         let over_hidden = pipeline("outline-hidden", "vs_line", "fs_line_hidden", Some((&line_attrs, lstride)), alpha, depth(false, wgpu::CompareFunction::Greater));
         let over_visible = pipeline("outline", "vs_line", "fs_line", Some((&line_attrs, lstride)), alpha, depth(false, wgpu::CompareFunction::LessEqual));
+        let part = pipeline("objects", "vs_part", "fs_mesh", Some((&mesh_attrs, mstride)), None, depth(true, wgpu::CompareFunction::Less));
+        let part_hidden = pipeline("objects-hidden", "vs_part", "fs_part_hidden", Some((&mesh_attrs, mstride)), alpha, depth(false, wgpu::CompareFunction::Greater));
         Renderer {
             format,
             layout,
@@ -478,6 +516,8 @@ impl Renderer {
             lines,
             over_hidden,
             over_visible,
+            part,
+            part_hidden,
             uniforms,
             faces,
             faces_cap,
@@ -485,7 +525,10 @@ impl Renderer {
             mesh_buf: Buf::new(),
             edge_buf: Buf::new(),
             over_buf: Buf::new(),
+            part_buf: Buf::new(),
+            part_wire: Buf::new(),
             mesh_bounds: None,
+            part_bounds: None,
             over_bounds: None,
             targets: None,
             egui: egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions::default()),
@@ -505,6 +548,14 @@ impl Renderer {
         self.mesh_buf.upload(device, queue, bytemuck::cast_slice(verts), verts.len() as u32, "part-mesh");
         self.edge_buf.upload(device, queue, bytemuck::cast_slice(edges), edges.len() as u32, "part-edges");
         self.mesh_bounds = bounds_of(verts.iter().map(|v| &v.pos));
+    }
+
+    /// The NURBS objects (triangles, face 1 kept, 2 being placed) and their
+    /// lines.
+    pub fn upload_parts(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, verts: &[MeshVertex], wire: &[LineVertex]) {
+        self.part_buf.upload(device, queue, bytemuck::cast_slice(verts), verts.len() as u32, "objects");
+        self.part_wire.upload(device, queue, bytemuck::cast_slice(wire), wire.len() as u32, "objects-wire");
+        self.part_bounds = bounds_of(verts.iter().map(|v| &v.pos));
     }
 
     /// Each face's material and state (FACE_SELECTED, FACE_HOVERED).
@@ -556,7 +607,7 @@ impl Renderer {
         // depth range from what is drawn
         let mut zmin = f32::MAX;
         let mut zmax = f32::MIN;
-        for (lo, hi) in [self.mesh_bounds, self.over_bounds].into_iter().flatten() {
+        for (lo, hi) in [self.mesh_bounds, self.over_bounds, self.part_bounds].into_iter().flatten() {
             for i in 0..8 {
                 let c = glam::Vec3::new(if i & 1 == 0 { lo[0] } else { hi[0] }, if i & 2 == 0 { lo[1] } else { hi[1] }, if i & 4 == 0 { lo[2] } else { hi[2] });
                 let z = (c - view.eye).dot(fwd);
@@ -610,10 +661,32 @@ impl Renderer {
             pass.set_bind_group(0, &self.bind, &[]);
             pass.set_pipeline(&self.bg);
             pass.draw(0..3, 0..1);
-            if let (Some(buf), n) = (&self.mesh_buf.buf, self.mesh_buf.count) {
+            if let (Some(buf), n, true) = (&self.mesh_buf.buf, self.mesh_buf.count, f.scan) {
                 if n > 0 {
                     pass.set_pipeline(&self.mesh);
                     pass.set_vertex_buffer(0, buf.slice(..));
+                    pass.draw(0..n, 0..1);
+                }
+            }
+            // the objects: faint where the scan hides them, then in full
+            if let (Some(buf), n) = (&self.part_buf.buf, self.part_buf.count) {
+                if n > 0 {
+                    pass.set_vertex_buffer(0, buf.slice(..));
+                    if f.scan {
+                        pass.set_pipeline(&self.part_hidden);
+                        pass.draw(0..n, 0..1);
+                    }
+                    pass.set_pipeline(&self.part);
+                    pass.draw(0..n, 0..1);
+                }
+            }
+            // the objects' lines: faint where the scan hides them
+            if let (Some(buf), n) = (&self.part_wire.buf, self.part_wire.count) {
+                if n > 0 {
+                    pass.set_vertex_buffer(0, buf.slice(..));
+                    pass.set_pipeline(&self.over_hidden);
+                    pass.draw(0..n, 0..1);
+                    pass.set_pipeline(&self.over_visible);
                     pass.draw(0..n, 0..1);
                 }
             }

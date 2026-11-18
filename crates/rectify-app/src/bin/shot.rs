@@ -6,13 +6,17 @@
 //! cargo run --release -p rectify-app --bin forme-rectify-shot -- OUT_DIR MESH.obj [scenario prefix…]
 //!
 //! RECTIFY_LOOK="fx,fy,fz,dist,yaw,pitch": the camera of the `look`
-//! scenario (a point of the mesh's box in fractions).
+//! scenario (a point of the mesh's box in fractions); RECTIFY_CIRCLE=
+//! "x,y;x,y": a Circle drag there (rim to rim, screen points of the bare
+//! view), the NURBS surface shown and kept (RECTIFY_HEIGHT, RECTIFY_LEVELS,
+//! RECTIFY_PROFILE=cylinder|cone|curve to set it first, RECTIFY_LOOK2 a
+//! second camera, RECTIFY_TAG the file names).
 
 use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use glam::Vec3;
 use rectify_app::camera::ViewPreset;
 use rectify_app::draw::Drawer;
-use rectify_app::state::AppState;
+use rectify_app::state::{AppState, Tool};
 use rectify_app::theme;
 use rectify_core::Mesh;
 
@@ -142,7 +146,6 @@ impl Harness {
 
     /// A left-button drag through world points (projected on screen); with
     /// `hold`, the button stays down at the end (a stroke being painted).
-    #[allow(dead_code)]
     fn drag_screen(&mut self, pts: &[[f32; 2]], hold: bool) {
         let scr: Vec<Pos2> = pts.iter().map(|a| Pos2::new(a[0], a[1])).collect();
         let Some(&first) = scr.first() else { return };
@@ -165,7 +168,6 @@ impl Harness {
         }
     }
 
-    #[allow(dead_code)]
     fn release(&mut self) {
         let p = self.ctx.input(|i| i.pointer.latest_pos()).unwrap_or(Pos2::ZERO);
         self.pending.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
@@ -214,6 +216,88 @@ fn nums(s: &str) -> Vec<f32> {
     s.split(',').filter_map(|t| t.trim().parse().ok()).collect()
 }
 
+/// A Circle drag from one side of a rim to the other (screen points of the
+/// bare view): before, the drag, the NURBS surface placed (with the
+/// interface, then the view alone, with and without the scan), kept.
+fn circle_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
+    use rectify_core::circle::ProfileKind;
+    h.st.set_tool(Tool::Navigate);
+    h.st.bare = true;
+    h.shot(&format!("{name}-0-before"));
+    let world: Vec<glam::Vec3> = pts.iter().filter_map(|p| h.st.pick_hit(*p).map(|(_, x)| x.as_vec3())).collect();
+    h.st.bare = false;
+    h.st.set_tool(Tool::Circle);
+    h.steps(2);
+    let view = h.st.view();
+    let scr: Vec<[f32; 2]> = world.iter().filter_map(|x| view.project(*x)).collect();
+    h.drag_screen(&scr, true);
+    h.shot(&format!("{name}-1-drag"));
+    let t = std::time::Instant::now();
+    h.release();
+    eprintln!("circle found and laid in {:.2}s", t.elapsed().as_secs_f64());
+    let env = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<f64>().ok());
+    if let Some(ce) = &mut h.st.circle {
+        if let Some(l) = env("RECTIFY_LEVELS") {
+            ce.params.levels = l as usize;
+        }
+        if let Some(hh) = env("RECTIFY_HEIGHT") {
+            ce.params.height = hh;
+        }
+        match std::env::var("RECTIFY_PROFILE").as_deref() {
+            Ok("cone") => ce.params.profile = ProfileKind::Cone,
+            Ok("curve") => ce.params.profile = ProfileKind::Curve,
+            Ok("cylinder") => ce.params.profile = ProfileKind::Cylinder,
+            _ => {}
+        }
+    }
+    let t = std::time::Instant::now();
+    h.st.circle_refit();
+    eprintln!("laid again in {:.3}s", t.elapsed().as_secs_f64());
+    match &h.st.circle {
+        Some(ce) => {
+            let c = &ce.circle;
+            let s = &ce.round.surface;
+            let rows: Vec<String> = (0..s.nv).map(|j| {
+                let q = s.pts[j * s.nu] - c.c;
+                format!("{:.2}:{:.3}", q.dot(c.a), q.reject_from(c.a).length() * 2.0)
+            }).collect();
+            eprintln!(
+                "CIRCLE {name}: c {:.2},{:.2},{:.2} axis {:.3},{:.3},{:.3} Ø {:.3} height {:.2} {:?} levels {} · degree 2x{} {}x{} · found {:.0} % · off {:.3} · inward {} · rows h:Ø {}",
+                c.c.x, c.c.y, c.c.z, c.a.x, c.a.y, c.a.z, c.r * 2.0, ce.params.height, ce.params.profile, ce.params.levels, s.dv, s.nu, s.nv, ce.round.found * 100.0, ce.round.off, ce.round.inward, rows.join(" ")
+            );
+        }
+        None => eprintln!("CIRCLE {name}: {}", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
+    }
+    h.shot(&format!("{name}-2-placed"));
+    let views = |h: &mut Harness, tag: &str| {
+        h.st.bare = true;
+        h.shot(&format!("{name}-{tag}"));
+        h.st.hide_scan = true;
+        h.shot(&format!("{name}-{tag}-alone"));
+        h.st.hide_scan = false;
+        h.st.bare = false;
+    };
+    views(h, "3-surface");
+    let look2 = std::env::var("RECTIFY_LOOK2").map(|s| nums(&s)).ok().filter(|v| v.len() == 6);
+    let cam = (h.st.camera.target, h.st.camera.dist, h.st.camera.yaw, h.st.camera.pitch);
+    if let Some(v) = &look2 {
+        look(h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+        h.shot(&format!("{name}-2-placed-2"));
+        views(h, "3-surface-2");
+        h.st.camera.target = cam.0;
+        h.st.camera.dist = cam.1;
+        h.st.camera.yaw = cam.2;
+        h.st.camera.pitch = cam.3;
+    }
+    if h.st.circle.is_some() {
+        h.st.circle_apply();
+        if let Some(t) = &h.st.toast {
+            eprintln!("{}", t.text);
+        }
+        h.shot(&format!("{name}-4-kept"));
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out = args.get(1).cloned().unwrap_or_else(|| "shots".into());
@@ -236,6 +320,12 @@ fn main() {
         let v = std::env::var("RECTIFY_LOOK").map(|s| nums(&s)).unwrap_or_default();
         let v = if v.len() == 6 { v } else { vec![0.3, 0.72, 0.5, 60.0, 0.35, 0.1] };
         look(&mut h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+        if let Ok(s) = std::env::var("RECTIFY_CIRCLE") {
+            let pts: Vec<[f32; 2]> = s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
+            let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "circle".into());
+            circle_drag(&mut h, &tag, &pts);
+            return;
+        }
         h.shot("look-ui");
         h.st.bare = true;
         h.shot("look");

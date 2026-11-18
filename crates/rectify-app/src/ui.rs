@@ -67,13 +67,20 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the scan (Esc)", "Esc")];
+                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the scan (Esc)", "Esc"), (Tool::Circle, Icon::Cylinder, "Circle: drag across a hole or a boss, a NURBS surface is laid on its wall, every ring an exact circle (C)", "C")];
                 for (t, icon, tip, key) in tools {
                     let r = icon_btn(ui, icon, st.tool == t, tip, 28.0);
                     key_hint(ui, &r, key);
                     if r.clicked() {
                         st.set_tool(t);
                     }
+                }
+                island_sep(ui);
+                if icon_btn(ui, Icon::Undo, false, "Undo (Ctrl+Z)", 28.0).clicked() {
+                    st.undo();
+                }
+                if icon_btn(ui, Icon::Redo, false, "Redo (Ctrl+Shift+Z)", 28.0).clicked() {
+                    st.redo();
                 }
                 island_sep(ui);
                 if chip(ui, None, "Zebra", st.settings.zebra, "Zebra stripes: flat and true surfaces give straight, even stripes (Z)").clicked() {
@@ -127,6 +134,11 @@ fn summary(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 let parts = [
                     format!("{} × {} × {} mm", fmt(s.x, 1), fmt(s.y, 1), fmt(s.z, 1)),
                     format!("{} k vertices · edges {} mm", d.mesh.pos.len() / 1000, fmt(d.edge, 2)),
+                    match st.objects.len() {
+                        0 => "No NURBS yet".to_string(),
+                        1 => "1 NURBS object".to_string(),
+                        n => format!("{n} NURBS objects"),
+                    },
                 ];
                 for (i, t) in parts.iter().enumerate() {
                     if i > 0 {
@@ -178,6 +190,10 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_width(inner_w);
             grip(ui, "props");
             tool_card(ui, st);
+            ui.add_space(6.0);
+            divider(ui);
+            ui.add_space(6.0);
+            objects_card(ui, st);
         });
     });
 }
@@ -194,13 +210,100 @@ fn line(ui: &mut Ui, t: impl Into<String>) {
     ui.label(egui::RichText::new(t.into()).font(regular(12.0)).color(TEXT()));
 }
 
+fn slider_f64(ui: &mut Ui, label: &str, v: &mut f64, range: std::ops::RangeInclusive<f32>, step: f64, suffix: &str) -> bool {
+    let mut f = *v as f32;
+    let (changed, _) = slider_row(ui, label, &mut f, range, step, suffix);
+    if changed {
+        *v = f as f64;
+    }
+    changed
+}
+
 fn tool_card(ui: &mut Ui, st: &mut AppState) {
+    use rectify_core::circle::ProfileKind;
     match st.tool {
         Tool::Navigate => {
             title(ui, "Tools", "A retopology in NURBS, laid on the scan; the scan itself never changes");
-            line(ui, "No tool yet.");
+            let w = ui.available_width();
+            if secondary_btn(ui, "Circle (C): a round part", w).clicked() {
+                st.set_tool(Tool::Circle);
+            }
+        }
+        Tool::Circle => {
+            title(ui, "Circle", "Press on the rim of a hole or a boss, drag across to the other side: a NURBS surface is laid on its wall, every ring an exact circle");
+            let mut refit = false;
+            let mut apply = false;
+            let mut cancel = false;
+            match &mut st.circle {
+                None => line(ui, "The plane and the base come from where you press; the circle is fitted on the wall next to it, its height found."),
+                Some(ce) => {
+                    let kind = if ce.round.inward { "a hole" } else { "a boss" };
+                    line(ui, format!("Ø {} mm · {kind} · found {} mm high", fmt(ce.circle.r * 2.0, 3), fmt(ce.circle.height, 1)));
+                    let max = (ce.circle.height * 3.0).max(ce.circle.r * 2.0) as f32;
+                    refit |= slider_f64(ui, "Height", &mut ce.params.height, 0.1..=max, 0.05, "mm");
+                    let items = [(ProfileKind::Cylinder, "Cylinder", accent()), (ProfileKind::Cone, "Cone", accent()), (ProfileKind::Curve, "Curve", accent())];
+                    if let Some(k) = segmented(ui, &items, ce.params.profile, 28.0) {
+                        ce.params.profile = k;
+                        refit = true;
+                    }
+                    let mut lv = ce.params.levels as f32;
+                    if slider_row(ui, "Levels", &mut lv, 1.0..=24.0, 1.0, "").0 {
+                        ce.params.levels = lv.round().max(1.0) as usize;
+                        refit = true;
+                    }
+                    let s = &ce.round.surface;
+                    let (lo, hi) = (0..s.nv).map(|j| (s.pts[j * s.nu] - ce.circle.c).reject_from(ce.circle.a).length()).fold((f64::INFINITY, 0.0f64), |a, r| (a.0.min(r), a.1.max(r)));
+                    line(ui, format!("{} rings, each an exact circle · Ø {} to {} mm", ce.params.levels + 1, fmt(lo * 2.0, 2), fmt(hi * 2.0, 2)));
+                    line(ui, format!("NURBS degree 2 × {} · {} × {} control points", s.dv, s.nu, s.nv));
+                    line(ui, format!("{:.0} % of the lines cast found the scan · the scan is {} mm from it", ce.round.found * 100.0, fmt(ce.round.off, 3)));
+                    ui.add_space(6.0);
+                    let w = ui.available_width();
+                    apply = primary_btn(ui, Some(Icon::Cylinder), "Keep (Enter)", Some(w)).clicked();
+                    cancel = secondary_btn(ui, "Remove (Esc)", w).clicked();
+                }
+            }
+            if refit {
+                st.circle_refit();
+            }
+            if apply {
+                st.circle_apply();
+            }
+            if cancel {
+                st.circle_cancel();
+            }
         }
     }
+    ui.add_space(4.0);
+    let w = ui.available_width();
+    if st.doc.is_some() && secondary_btn(ui, if st.hide_scan { "Show the scan (H)" } else { "Hide the scan (H)" }, w).clicked() {
+        st.hide_scan = !st.hide_scan;
+    }
+}
+
+fn objects_card(ui: &mut Ui, st: &mut AppState) {
+    title(ui, "NURBS", "");
+    if st.objects.is_empty() && st.undone.is_empty() {
+        line(ui, "Nothing made yet.");
+        return;
+    }
+    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+        for (i, o) in st.objects.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(egui::RichText::new(format!("{}", i + 1)).font(mono(10.5)).color(TEXT2()));
+                ui.label(egui::RichText::new(o.tool.label()).font(medium(12.0)).color(accent_text()));
+                ui.label(egui::RichText::new(&o.what).font(regular(12.0)).color(TEXT()));
+            });
+        }
+        for o in st.undone.iter().rev() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(egui::RichText::new("·").font(mono(10.5)).color(TEXT2()));
+                ui.label(egui::RichText::new(o.tool.label()).font(medium(12.0)).color(TEXT2()));
+                ui.label(egui::RichText::new(format!("{} (undone)", o.what)).font(regular(12.0)).color(TEXT2()));
+            });
+        }
+    });
 }
 
 // ---------------------------------------------------------------- files
@@ -245,15 +348,41 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if ctx.egui_wants_keyboard_input() {
         return;
     }
-    let (cmd, f, esc, z) = ctx.input(|i| (i.modifiers.command, i.key_pressed(Key::F), i.key_pressed(Key::Escape), i.key_pressed(Key::Z)));
-    if z && !cmd {
+    let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
+    let (f, esc, z, y, enter) = ctx.input(|i| (i.key_pressed(Key::F), i.key_pressed(Key::Escape), i.key_pressed(Key::Z), i.key_pressed(Key::Y), i.key_pressed(Key::Enter)));
+    let (c, h) = ctx.input(|i| (i.key_pressed(Key::C), i.key_pressed(Key::H)));
+    if cmd && z {
+        if shift {
+            st.redo();
+        } else {
+            st.undo();
+        }
+    } else if cmd && y {
+        st.redo();
+    } else if z {
         st.settings.zebra = !st.settings.zebra;
+    }
+    if c && !cmd {
+        st.set_tool(Tool::Circle);
+    }
+    if h && !cmd && st.doc.is_some() {
+        st.hide_scan = !st.hide_scan;
+    }
+    if enter && st.tool == Tool::Circle {
+        st.circle_apply();
     }
     if f {
         st.frame_all();
     }
-    if esc {
-        st.set_tool(Tool::Navigate);
+    if esc && st.circle.is_some() && st.circle_drag.is_none() {
+        st.circle_cancel();
+    } else if esc {
+        if st.circle_drag.is_some() {
+            st.circle_drag = None;
+            st.overlay_gen += 1;
+        } else {
+            st.set_tool(Tool::Navigate);
+        }
         st.files_open = false;
     }
 }
