@@ -1,7 +1,7 @@
 //! The 3D view's input: Maya navigation (Alt + left orbit, Alt + middle pan,
-//! Alt + right zoom, the wheel zooms, the middle button alone pans), a click
-//! picks a region, Space held shows the original. With the brush or the
-//! shape tool, the left button paints.
+//! Alt + right zoom, the wheel zooms, the middle button alone pans, the left
+//! drag alone orbits when no tool uses it), Space held shows the mesh as it
+//! came. The tool in hand takes the left button.
 
 use crate::state::*;
 use crate::theme::*;
@@ -13,10 +13,10 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     egui::Area::new(Id::new("viewport")).order(Order::Background).fixed_pos(screen.min).show(ctx, |ui| {
         let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
         handle_input(ctx, st, &resp, rect);
-        if st.tool != Tool::Select && !st.bare {
-            brush_cursor(ui.painter(), ctx, st, &resp);
+        if st.tool != Tool::Navigate && !st.bare {
+            tool_cursor(ui.painter(), ctx, st, &resp);
         }
-        if st.pipe.is_none() && st.job.is_none() {
+        if st.doc.is_none() && st.job.is_none() {
             empty(ui.painter(), st);
         }
     });
@@ -33,7 +33,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             i.pointer.button_down(PointerButton::Secondary),
         )
     });
-    if alt && (resp.hovered() || resp.dragged() || l || m || r) {
+    if alt && (resp.hovered() || resp.dragged() || l || m || r) && st.line_drag.is_none() {
         if (l || m || r) && d != egui::Vec2::ZERO {
             if l {
                 st.camera.orbit(d.x, d.y);
@@ -56,59 +56,48 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             st.camera.zoom((scroll.y * 0.0022).exp());
         }
     }
-    // a tool: the left button paints
-    if st.tool != Tool::Select && !alt {
+    // the Line tool: press on an edge, drag along it, release
+    if st.tool == Tool::Line && !alt {
         let (pressed, released, pos) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.latest_pos()));
         if pressed && resp.hovered() {
             if let Some(p) = pos {
-                st.stroke_begin([p.x, p.y]);
+                st.line_press([p.x, p.y]);
             }
-        } else if st.stroke.is_some() {
+        } else if st.line_drag.is_some() {
             if let Some(p) = pos {
-                st.stroke_to([p.x, p.y]);
+                st.line_move([p.x, p.y]);
             }
             if released || !l {
-                st.stroke_end();
+                st.line_release();
             }
         }
-        if st.stroke.is_some() {
+        if st.line_drag.is_some() {
             st.interacting = true;
             return;
         }
     }
-    // the middle button alone pans; the left drag alone orbits too (when no
-    // tool paints with it)
-    if (m || (l && st.tool == Tool::Select)) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
+    // the middle button alone pans; the left drag alone orbits when no
+    // tool takes it
+    if (m || (l && st.tool == Tool::Navigate)) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
         if m {
             st.camera.pan(d.x, d.y, rect.height());
         } else {
             st.camera.orbit(d.x, d.y);
         }
         st.interacting = true;
-        return;
-    }
-    if resp.clicked() && st.tool == Tool::Select {
-        if let Some(p) = resp.interact_pointer_pos() {
-            st.click([p.x, p.y]);
-        }
     }
 }
 
-/// The brush's circle at the pointer, and what it does.
-fn brush_cursor(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Response) {
+/// The tool's name at the pointer.
+fn tool_cursor(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Response) {
     let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else { return };
-    if !resp.hovered() && st.stroke.is_none() {
+    if !resp.hovered() && st.line_drag.is_none() {
         return;
     }
     let col = accent();
-    p.circle_stroke(pos, st.brush, Stroke::new(1.5, col));
-    p.circle_filled(pos, 1.5, col);
-    let label = match st.tool {
-        Tool::Brush(m) => m.label().to_string(),
-        Tool::Shape(k) => k.label().to_string(),
-        Tool::Select => return,
-    };
-    let at = pos + vec2(st.brush * 0.75 + 6.0, -st.brush * 0.75 - 6.0);
+    p.circle_filled(pos, 2.0, col);
+    let label = st.tool.label().to_string();
+    let at = pos + vec2(12.0, -12.0);
     let g = p.layout_no_wrap(label, medium(11.5), on_accent());
     let r = Rect::from_min_size(at - vec2(0.0, g.size().y + 4.0), g.size() + vec2(12.0, 4.0));
     p.rect_filled(r, 5.0, tint(col, 0.92));
@@ -127,33 +116,23 @@ fn empty(p: &egui::Painter, st: &AppState) {
 /// The line under the top bar: what to do now.
 pub fn hint(st: &AppState) -> String {
     if let Some(j) = &st.job {
-        return match j.step {
-            Some(_) => format!("{} … {:.0} %", j.what, j.progress * 100.0),
-            None => format!("{} …", j.what),
-        };
+        return format!("{} …", j.what);
     }
-    let Some(p) = &st.pipe else { return "Open a mesh to rectify".into() };
+    if st.doc.is_none() {
+        return "Open a mesh to put right".into();
+    }
     if st.compare {
-        return "Stage 0, the scan (release Space to compare)".into();
+        return "The mesh as it came (release Space)".into();
     }
     match st.tool {
-        Tool::Brush(BrushMode::Merge) => return "Merge: paint over the regions to join · [ ] size · Ctrl+Z undo · Esc done".into(),
-        Tool::Brush(BrushMode::Split) => return "Split: paint across a region to cut it in two · [ ] size · Ctrl+Z undo".into(),
-        Tool::Brush(BrushMode::Free) => return "Free: paint over faces to take them out of their region · [ ] size".into(),
-        Tool::Shape(k) => return format!("{}: paint over the surface, the shape fits it and grows · G next kind · Esc done", k.label()),
-        Tool::Select => {}
+        Tool::Line => match &st.line_drag {
+            Some(ld) => match &ld.fit {
+                Some(Ok(f)) => format!("Release to fix: an edge of {:.0}° · Esc cancels", f.angle),
+                Some(Err(e)) => e.clone(),
+                None => "Drag along the edge".into(),
+            },
+            None => "Line: press on an edge and drag along it, the edge becomes straight and sharp · Esc done".into(),
+        },
+        Tool::Navigate => "L line · Ctrl+Z undo · Space the mesh as it came · drag to turn around".into(),
     }
-    if st.edited && (st.shown() != rectify_core::Stage::Guided || st.style == Style::Regions) {
-        return "Stage 3 edited: its mesh follows when you show it (3, Surface or Diff)".into();
-    }
-    if p.next().is_some() {
-        return "Run the steps (R), or click a stage at the top: 1 algorithm, 2 cleaned, 3 AI".into();
-    }
-    if !p.ready(st.shown()) {
-        return format!("Stage {} is not computed yet: click it at the top (or R)", st.shown().number());
-    }
-    if st.selected.is_some() {
-        return "Change the region's shape on the left, or free it · Esc to deselect".into();
-    }
-    "0-3 stages · V surface / regions / diff · Space the scan · click a region to inspect it".into()
 }

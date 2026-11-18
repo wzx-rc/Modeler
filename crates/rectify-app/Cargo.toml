@@ -2,7 +2,7 @@
 name = "rectify-app"
 edition.workspace = true
 version.workspace = true
-description = "Forme Rectify: the app (egui + wgpu). Opens a noisy AI / scan mesh and rectifies it with rectify-core"
+description = "Forme Rectify: the app (egui + wgpu). Opens a noisy AI / scan mesh and puts it right by hand with rectify-core"
 build = "build.rs"
 
 [lib]
@@ -12,10 +12,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "forme-rectify"
 path = "src/main.rs"
-
-[[bin]]
-name = "forme-rectify-mcp"
-path = "src/bin/mcp.rs"
 
 [[bin]]
 name = "forme-rectify-shot"
@@ -34,4 +30,3 @@ pollster.workspace = true
 log.workspace = true
 image.workspace = true
 rayon = "1"
-serde_json.workspace = true

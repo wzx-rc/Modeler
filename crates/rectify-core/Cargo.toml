@@ -2,10 +2,8 @@
 name = "rectify-core"
 edition.workspace = true
 version.workspace = true
-description = "Forme Rectify: turns a noisy AI / scan mesh back into what it was meant to be (planes, cylinders, sharp edges)"
+description = "Forme Rectify: hand tools that put a noisy AI / scan mesh right (straight sharp edges, true circles, symmetry)"
 
 [dependencies]
 glam.workspace = true
 rayon = "1"
-serde.workspace = true
-serde_json.workspace = true

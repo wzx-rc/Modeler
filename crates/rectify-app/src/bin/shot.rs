@@ -1,16 +1,21 @@
 #![allow(deprecated)]
 //! forme-rectify-shot: runs the real app headless (egui + wgpu, a software
-//! GPU is fine) on a mesh, runs the steps and saves PNGs.
+//! GPU is fine) on a mesh, drives its tools with real mouse events and saves
+//! PNGs.
 //!
 //! cargo run --release -p rectify-app --bin forme-rectify-shot -- OUT_DIR MESH.obj [scenario prefix…]
+//!
+//! RECTIFY_LOOK="fx,fy,fz,dist,yaw,pitch": the camera of the `look`
+//! scenario (a point of the mesh's box in fractions); RECTIFY_DRAG="x,y;x,y":
+//! a Line drag there (screen points), shot before, during and after.
 
 use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use glam::Vec3;
 use rectify_app::camera::ViewPreset;
 use rectify_app::draw::Drawer;
-use rectify_app::state::{AppState, Style};
+use rectify_app::state::{AppState, Tool};
 use rectify_app::theme;
-use rectify_core::{Mesh, Stage};
+use rectify_core::Mesh;
 
 const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
@@ -178,7 +183,7 @@ impl Harness {
         let (w, h) = ((self.size[0] * self.ppp) as u32, (self.size[1] * self.ppp) as u32);
         let target = self.gpu.target(w, h);
         let view = target.create_view(&Default::default());
-        self.drawer.render(&self.gpu.device, &self.gpu.queue, &view, [w, h], self.ppp, &self.st, &paint, &mut tex);
+        self.drawer.render(&self.gpu.device, &self.gpu.queue, &view, [w, h], self.ppp, &mut self.st, &paint, &mut tex);
         let px = self.gpu.read_rgba(&target);
         let path = format!("{}/{}.png", self.out, name);
         if let Some(dir) = std::path::Path::new(&path).parent() {
@@ -187,47 +192,11 @@ impl Harness {
         image::save_buffer(&path, &px, w, h, image::ExtendedColorType::Rgba8).expect("png");
         eprintln!("{path}");
     }
-
-    /// Shows a stage in a style (computing it when needed).
-    fn show(&mut self, stage: Stage, style: Style) {
-        self.st.style = style;
-        self.st.set_stage(stage);
-        self.st.gen += 1;
-        self.steps(2);
-        self.wait();
-    }
-
-    /// The same view at each stage (`bare`: no interface): the regions,
-    /// stages 0 to 2 (3 when there are edits) as surfaces, 1 and 2 as diff
-    /// maps.
-    fn trio(&mut self, name: &str, bare: bool) {
-        self.st.bare = bare;
-        self.st.settings.edges = true;
-        self.show(Stage::Algorithm, Style::Regions);
-        self.shot(&format!("{name}-regions"));
-        // the surfaces without the lines: the surface itself
-        self.st.settings.edges = false;
-        let mut stages = vec![Stage::Scan, Stage::Algorithm, Stage::Cleaned];
-        if self.st.pipe.as_ref().map(|p| !p.script.edits.is_empty()).unwrap_or(false) {
-            stages.push(Stage::Guided);
-        }
-        for s in stages.clone() {
-            self.show(s, Style::Surface);
-            self.shot(&format!("{name}-{}-{}", s.number(), s.label().to_lowercase()));
-        }
-        for s in stages.into_iter().skip(1) {
-            self.show(s, Style::Diff);
-            self.shot(&format!("{name}-{}-diff", s.number()));
-        }
-        self.st.settings.edges = true;
-        self.st.gen += 1;
-        self.st.bare = false;
-    }
 }
 
 /// Camera on a point of the mesh (fractions of its box), at a distance.
 fn look(h: &mut Harness, frac: [f32; 3], dist: f32, yaw: f32, pitch: f32) {
-    let (lo, hi) = h.st.pipe.as_ref().unwrap().original.bounds();
+    let (lo, hi) = h.st.doc.as_ref().unwrap().original.bounds();
     let (lo, hi) = (lo.as_vec3(), hi.as_vec3());
     let c = lo + (hi - lo) * Vec3::from(frac);
     h.st.camera.target = c;
@@ -237,40 +206,49 @@ fn look(h: &mut Harness, frac: [f32; 3], dist: f32, yaw: f32, pitch: f32) {
     h.st.camera.ortho = false;
 }
 
-/// --serve MESH.obj: the app headless, driven through its local port like
-/// the real one (the MCP server, tests of the AI pass in the cloud). The
-/// edits are saved next to the mesh.
-fn serve(mesh: &str) {
-    let mut h = Harness::new("/tmp");
-    let path = std::path::PathBuf::from(mesh);
-    h.st.open(path);
-    h.st.wait();
-    match rectify_app::remote::start(&mut h.st, std::sync::Arc::new(|| {})) {
-        Ok(p) => eprintln!("serving on 127.0.0.1:{p}"),
-        Err(e) => panic!("{e}"),
-    }
-    loop {
-        h.step();
-        if !h.st.remote.captures.is_empty() {
-            let gpu = &h.gpu;
-            let drawer = &mut h.drawer;
-            rectify_app::remote::render_captures(&mut h.st, |st, w, hh| {
-                let target = gpu.target(w, hh);
-                let view = target.create_view(&Default::default());
-                drawer.render(&gpu.device, &gpu.queue, &view, [w, hh], 1.0, st, &[], &mut egui::TexturesDelta::default());
-                gpu.read_rgba(&target)
-            });
+/// Numbers from an env var ("a,b,c").
+fn nums(s: &str) -> Vec<f32> {
+    s.split(',').filter_map(|t| t.trim().parse().ok()).collect()
+}
+
+/// A Line drag through screen points: before (bare), during (the
+/// interface, the edge it would fix), after (bare), and zebra before / after.
+fn line_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
+    h.st.set_tool(Tool::Navigate);
+    h.st.bare = true;
+    h.shot(&format!("{name}-0-before"));
+    // the points are given in the bare view: the same mesh points once the
+    // interface is shown (the view's centre moves)
+    let world: Vec<glam::Vec3> = pts.iter().filter_map(|p| h.st.pick_hit(*p).map(|(_, x)| x.as_vec3())).collect();
+    h.st.settings.zebra = true;
+    h.shot(&format!("{name}-0-zebra"));
+    h.st.settings.zebra = false;
+    h.st.bare = false;
+    h.st.set_tool(Tool::Line);
+    h.steps(2);
+    let view = h.st.view();
+    let scr: Vec<[f32; 2]> = world.iter().filter_map(|x| view.project(*x)).collect();
+    h.drag_screen(&scr, true);
+    if let Some(ld) = &h.st.line_drag {
+        match &ld.fit {
+            Some(Ok(f)) => eprintln!("LINE {name}: {:.1}° rms {:.3} mm, {} moved, {} on the edge", f.angle, f.rms, f.moves.idx.len(), f.edge.len()),
+            Some(Err(e)) => eprintln!("LINE {name}: {e}"),
+            None => eprintln!("LINE {name}: no fit"),
         }
-        std::thread::sleep(std::time::Duration::from_millis(if h.st.busy() { 5 } else { 15 }));
     }
+    h.shot(&format!("{name}-1-drag"));
+    h.release();
+    h.shot(&format!("{name}-2-done"));
+    h.st.bare = true;
+    h.shot(&format!("{name}-3-after"));
+    h.st.settings.zebra = true;
+    h.shot(&format!("{name}-3-zebra"));
+    h.st.settings.zebra = false;
+    h.st.bare = false;
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(|a| a == "--serve").unwrap_or(false) {
-        serve(args.get(2).expect("MESH.obj"));
-        return;
-    }
     let out = args.get(1).cloned().unwrap_or_else(|| "shots".into());
     let mesh = args.get(2).expect("MESH.obj");
     let filters: Vec<String> = args.iter().skip(3).cloned().collect();
@@ -280,150 +258,34 @@ fn main() {
     let m = Mesh::load_obj(mesh.as_ref()).expect("mesh");
     let name = std::path::Path::new(mesh).file_stem().unwrap().to_string_lossy().to_string();
     h.st.set_mesh(m, &name);
-    // RECTIFY_SCRIPT=path: stage 3's edits
-    if let Ok(sp) = std::env::var("RECTIFY_SCRIPT") {
-        let sc = rectify_core::script::Script::load(sp.as_ref()).expect("script");
-        h.st.pipe.as_mut().unwrap().script = sc;
-    }
     eprintln!("loaded in {:.1}s", t.elapsed().as_secs_f64());
     h.steps(3);
     if want("ui") {
         h.st.camera.preset(ViewPreset::Perspective);
         h.st.frame_all();
         h.shot("ui-0-loaded");
+        h.st.set_tool(Tool::Line);
+        h.shot("ui-1-line");
+        h.st.set_tool(Tool::Navigate);
     }
-    // RECTIFY_PARAMS="fade=2,flatten=0.3,tol=0.3,…": settings to try
-    if let Ok(s) = std::env::var("RECTIFY_PARAMS") {
-        for k in h.st.params.apply(&s) {
-            eprintln!("unknown setting {k}");
-        }
+    if let Some(w) = std::env::var("RECTIFY_WIDTH").ok().and_then(|s| s.parse().ok()) {
+        h.st.line.width = w;
     }
-    h.st.run_all();
-    h.wait();
-    eprintln!("steps done in {:.1}s", t.elapsed().as_secs_f64());
-    if want("ui") {
-        h.st.frame_all();
-        h.st.camera.preset(ViewPreset::Perspective);
-        h.st.step = rectify_core::Step::Segment;
-        h.show(Stage::Algorithm, Style::Regions);
-        h.shot("ui-1-regions");
-        h.st.step = rectify_core::Step::Revolve;
-        h.show(Stage::Algorithm, Style::Surface);
-        h.shot("ui-2-algorithm");
-        h.st.step = rectify_core::Step::Clean;
-        h.show(Stage::Cleaned, Style::Diff);
-        h.shot("ui-3-cleaned-diff");
-        // a region picked
-        let c = h.st.principal();
-        h.show(Stage::Algorithm, Style::Regions);
-        h.click(egui::pos2(c[0] - 40.0, c[1] - 30.0));
-        h.shot("ui-4-picked");
-        h.st.selected = None;
-        if h.st.pipe.as_ref().map(|p| !p.script.edits.is_empty()).unwrap_or(false) {
-            h.st.edits_open = true;
-            h.show(Stage::Guided, Style::Surface);
-            h.shot("ui-5-ai");
-            h.st.edits_open = false;
-        }
-    }
-    if want("side") {
-        h.st.frame_all();
-        h.st.camera.preset(ViewPreset::Front);
-        h.st.camera.dist *= 0.62;
-        h.trio("side", true);
-    }
-    if want("persp") {
-        h.st.frame_all();
-        h.st.camera.dist *= 0.62;
-        h.st.camera.yaw = 0.55;
-        h.st.camera.pitch = 0.22;
-        h.st.camera.ortho = false;
-        h.trio("persp", true);
-    }
-    if want("back") {
-        h.st.frame_all();
-        h.st.camera.dist *= 0.62;
-        h.st.camera.yaw = 0.55 + std::f32::consts::PI;
-        h.st.camera.pitch = 0.22;
-        h.st.camera.ortho = false;
-        h.trio("back", true);
-    }
-    if want("zebra") {
-        h.st.settings.zebra = true;
-        h.st.frame_all();
-        h.st.camera.dist *= 0.62;
-        h.st.camera.yaw = 0.55;
-        h.st.camera.pitch = 0.22;
-        h.st.camera.ortho = false;
-        h.trio("zebra-persp", true);
-        look(&mut h, [0.3, 0.72, 0.5], 60.0, 0.35, 0.1);
-        h.trio("zebra-vents", true);
-        h.st.settings.zebra = false;
-    }
-    if want("tools") {
-        use rectify_app::state::{BrushMode, Tool};
-        use rectify_core::Kind;
-        look(&mut h, [0.3, 0.72, 0.5], 60.0, 0.35, 0.1);
-        h.st.bare = false;
-        h.st.style = Style::Regions;
-        h.st.settings.edges = true;
-        h.st.gen += 1;
-        h.steps(3);
-        h.shot("tools-0-regions");
-        // strokes in screen points (this camera, the interface shown)
-        let line = |a: [f32; 2], b: [f32; 2], n: usize| -> Vec<[f32; 2]> { (0..=n).map(|i| { let t = i as f32 / n as f32; [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t] }).collect() };
-        // the big panel cut across, then joined again
-        h.st.set_tool(Tool::Brush(BrushMode::Split));
-        h.st.brush = 8.0;
-        h.drag_screen(&line([500.0, 160.0], [956.0, 160.0], 8), true);
-        h.shot("tools-1-split-stroke");
-        h.release();
-        h.shot("tools-2-split");
-        h.st.set_tool(Tool::Brush(BrushMode::Merge));
-        h.st.brush = 12.0;
-        h.drag_screen(&line([800.0, 100.0], [800.0, 230.0], 4), true);
-        h.shot("tools-3-merge-stroke");
-        h.release();
-        h.shot("tools-4-merged");
-        // the pieces of the round button's ring joined
-        h.drag_screen(&[[608.0, 344.0], [680.0, 248.0], [776.0, 256.0], [848.0, 360.0], [824.0, 480.0]], false);
-        h.shot("tools-5-ring-merged");
-        // a cylinder painted along the pipe under the panel
-        h.st.set_tool(Tool::Shape(Kind::Cylinder));
-        h.st.brush = 14.0;
-        h.drag_screen(&line([520.0, 722.0], [990.0, 722.0], 6), true);
-        h.shot("tools-6-shape-stroke");
-        h.release();
-        h.shot("tools-7-shape");
-        // the result follows when it is shown
-        h.st.set_tool(Tool::Select);
-        h.show(Stage::Guided, Style::Surface);
-        h.st.bare = true;
-        h.st.settings.edges = false;
-        h.st.gen += 1;
-        h.shot("tools-8-result");
-        h.st.settings.edges = true;
-        h.st.bare = false;
-    }
-    let close: [(&str, [f32; 3], f32, f32, f32); 3] = [("close-muzzle", [0.1, 0.72, 0.5], 70.0, -0.9, 0.15), ("close-vents", [0.3, 0.72, 0.5], 60.0, 0.35, 0.1), ("close-grip", [0.65, 0.35, 0.5], 75.0, 0.4, 0.05)];
-    for (n, f, d, y, p) in close {
-        if want(n) {
-            look(&mut h, f, d, y, p);
-            // RECTIFY_PICK="x,y;x,y": the world points under these screen points
-            if let Ok(s) = std::env::var("RECTIFY_PICK") {
-                h.st.bare = true;
-                h.steps(2);
-                for xy in s.split(';') {
-                    let v: Vec<f32> = xy.split(',').filter_map(|t| t.trim().parse().ok()).collect();
-                    if v.len() == 2 {
-                        if let Some(t) = h.st.pick([v[0], v[1]]) {
-                            let m = h.st.pipe.as_ref().unwrap().original.tri_centre(t);
-                            eprintln!("PICK {n} {xy}: tri {t} at {:.3} {:.3} {:.3}", m.x, m.y, m.z);
-                        }
-                    }
-                }
+    if want("look") {
+        let v = std::env::var("RECTIFY_LOOK").map(|s| nums(&s)).unwrap_or_default();
+        let v = if v.len() == 6 { v } else { vec![0.3, 0.72, 0.5, 60.0, 0.35, 0.1] };
+        look(&mut h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+        match std::env::var("RECTIFY_DRAG") {
+            Ok(s) => {
+                let pts: Vec<[f32; 2]> = s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
+                let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "look".into());
+                line_drag(&mut h, &tag, &pts);
             }
-            h.trio(n, true);
+            Err(_) => {
+                h.st.bare = true;
+                h.shot("look");
+                h.st.bare = false;
+            }
         }
     }
 }

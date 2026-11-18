@@ -337,6 +337,8 @@ pub struct Frame<'a> {
     pub zebra: bool,
     /// Part colour (sRGB 0..1).
     pub base: [f32; 3],
+    /// The second mesh drawn instead of the part (the original, Space held).
+    pub alt: bool,
     /// Selection and pre-selection tints (sRGB 0..1) and their strength.
     pub sel: ([f32; 3], f32),
     pub hover: ([f32; 3], f32),
@@ -387,6 +389,7 @@ pub struct Renderer {
     faces_cap: u64,
     bind: wgpu::BindGroup,
     mesh_buf: Buf,
+    alt_buf: Buf,
     edge_buf: Buf,
     over_buf: Buf,
     /// Bounds of what is uploaded (depth range).
@@ -483,6 +486,7 @@ impl Renderer {
             faces_cap,
             bind,
             mesh_buf: Buf::new(),
+            alt_buf: Buf::new(),
             edge_buf: Buf::new(),
             over_buf: Buf::new(),
             mesh_bounds: None,
@@ -505,6 +509,20 @@ impl Renderer {
         self.mesh_buf.upload(device, queue, bytemuck::cast_slice(verts), verts.len() as u32, "part-mesh");
         self.edge_buf.upload(device, queue, bytemuck::cast_slice(edges), edges.len() as u32, "part-edges");
         self.mesh_bounds = bounds_of(verts.iter().map(|v| &v.pos));
+    }
+
+    /// Part triangles from `first_vertex` on rewritten (same count).
+    pub fn patch_part(&mut self, queue: &wgpu::Queue, first_vertex: u32, verts: &[MeshVertex]) {
+        if let Some(buf) = &self.mesh_buf.buf {
+            if first_vertex as usize + verts.len() <= self.mesh_buf.count as usize && !verts.is_empty() {
+                queue.write_buffer(buf, first_vertex as u64 * std::mem::size_of::<MeshVertex>() as u64, bytemuck::cast_slice(verts));
+            }
+        }
+    }
+
+    /// The second mesh (drawn instead of the part when `Frame::alt`).
+    pub fn upload_alt(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, verts: &[MeshVertex]) {
+        self.alt_buf.upload(device, queue, bytemuck::cast_slice(verts), verts.len() as u32, "alt-mesh");
     }
 
     /// Each face's material and state (FACE_SELECTED, FACE_HOVERED).
@@ -610,7 +628,8 @@ impl Renderer {
             pass.set_bind_group(0, &self.bind, &[]);
             pass.set_pipeline(&self.bg);
             pass.draw(0..3, 0..1);
-            if let (Some(buf), n) = (&self.mesh_buf.buf, self.mesh_buf.count) {
+            let part = if f.alt && self.alt_buf.count > 0 { &self.alt_buf } else { &self.mesh_buf };
+            if let (Some(buf), n) = (&part.buf, part.count) {
                 if n > 0 {
                     pass.set_pipeline(&self.mesh);
                     pass.set_vertex_buffer(0, buf.slice(..));

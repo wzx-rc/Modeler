@@ -513,3 +513,110 @@ pub fn add_outer(m: &mut [[f64; 3]; 3], a: DVec3, w: f64) {
         }
     }
 }
+
+/// Display normals per triangle corner: smooth across the mesh, sharp where
+/// the surface turns more than `angle` degrees.
+pub fn crease_normals(m: &Mesh, topo: &Topo, angle: f64) -> Vec<[DVec3; 3]> {
+    let cos = angle.to_radians().cos();
+    let fnorm = m.normals();
+    (0..m.tris.len())
+        .into_par_iter()
+        .map(|t| {
+            let n0 = fnorm[t];
+            let mut out = [n0; 3];
+            for c in 0..3 {
+                let v = m.tris[t][c] as usize;
+                let mut s = DVec3::ZERO;
+                for &o in topo.tris_of(v) {
+                    if fnorm[o as usize].dot(n0) >= cos {
+                        s += m.tri_cross(o as usize);
+                    }
+                }
+                out[c] = s.normalize_or(n0);
+            }
+            out
+        })
+        .collect()
+}
+
+/// The same normals for some triangles only (after a hand edit).
+pub fn crease_normals_of(m: &Mesh, topo: &Topo, angle: f64, tris: &[u32]) -> Vec<[DVec3; 3]> {
+    let cos = angle.to_radians().cos();
+    tris.par_iter()
+        .map(|&t| {
+            let t = t as usize;
+            let n0 = m.tri_normal(t);
+            let mut out = [n0; 3];
+            for c in 0..3 {
+                let v = m.tris[t][c] as usize;
+                let mut s = DVec3::ZERO;
+                for &o in topo.tris_of(v) {
+                    let x = m.tri_cross(o as usize);
+                    if x.normalize_or_zero().dot(n0) >= cos {
+                        s += x;
+                    }
+                }
+                out[c] = s.normalize_or(n0);
+            }
+            out
+        })
+        .collect()
+}
+
+/// The closest point on the surface: a grid over the triangles' centres.
+pub struct Surface {
+    grid: Grid,
+    centres: Vec<DVec3>,
+    /// The largest distance from a triangle's centre to its corners.
+    reach: f64,
+}
+
+impl Surface {
+    pub fn new(m: &Mesh) -> Surface {
+        let centres = m.centres();
+        let reach = (0..m.tris.len())
+            .into_par_iter()
+            .map(|t| m.tri_pts(t).iter().map(|p| (*p - centres[t]).length()).fold(0.0, f64::max))
+            .reduce(|| 0.0, f64::max);
+        let cell = (m.edge_median() * 3.0).max(1e-3);
+        Surface { grid: Grid::new(&centres, cell), centres, reach }
+    }
+
+    /// The closest point of the surface to `p` within `r`, and its triangle.
+    pub fn closest(&self, m: &Mesh, p: DVec3, r: f64) -> Option<(u32, DVec3)> {
+        self.closest_where(m, p, r, |_| true)
+    }
+
+    /// The same among the triangles that pass `keep`.
+    pub fn closest_where(&self, m: &Mesh, p: DVec3, r: f64, keep: impl Fn(u32) -> bool) -> Option<(u32, DVec3)> {
+        let mut best: (f64, Option<(u32, DVec3)>) = (r * r, None);
+        self.grid.near(p, r + self.reach, |t| {
+            if (self.centres[t as usize] - p).length_squared() > (r + self.reach).powi(2) || !keep(t) {
+                return;
+            }
+            let [a, b, c] = m.tri_pts(t as usize);
+            let q = closest_on_tri(p, a, b, c);
+            let d = (q - p).length_squared();
+            if d < best.0 {
+                best = (d, Some((t, q)));
+            }
+        });
+        best.1
+    }
+}
+
+/// A plane through the points (weighted): its centre and unit normal (the
+/// direction of least spread), or None with too few points.
+pub fn fit_plane(pts: &[(DVec3, f64)]) -> Option<(DVec3, DVec3)> {
+    let w: f64 = pts.iter().map(|p| p.1).sum();
+    if pts.len() < 3 || w <= 0.0 {
+        return None;
+    }
+    let c = pts.iter().map(|(p, w)| *p * *w).sum::<DVec3>() / w;
+    let mut cov = [[0.0; 3]; 3];
+    for (p, wi) in pts {
+        add_outer(&mut cov, *p - c, *wi);
+    }
+    let (_, v) = eigen_sym(cov);
+    Some((c, v[0]))
+}
