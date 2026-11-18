@@ -8,11 +8,14 @@
 //! - `circle`: the Circle tool: a round part found under a drag, a NURBS
 //!   surface laid on its wall;
 //! - `path`: the Path tool: points on the scan caught by its flat faces,
-//!   their edges and corners, joined into one NURBS curve.
+//!   their edges and corners, joined into one NURBS curve;
+//! - `slot`: the Slot tool: a slot with round ends found under a drag along
+//!   it, a NURBS surface laid on its wall.
 
 pub mod circle;
 pub mod mesh;
 pub mod nurbs;
 pub mod path;
+pub mod slot;
 
 pub use mesh::{Mesh, Surface, Topo, NONE};

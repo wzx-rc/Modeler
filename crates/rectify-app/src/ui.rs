@@ -67,7 +67,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the scan (Esc)", "Esc"), (Tool::Circle, Icon::Cylinder, "Circle: drag across a hole or a boss, a NURBS surface is laid on its wall, every ring an exact circle (C)", "C"), (Tool::Path, Icon::Sketch, "Path: click points on the scan, one NURBS curve through them; flat faces, their edges and corners catch the points (P)", "P")];
+                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the scan (Esc)", "Esc"), (Tool::Circle, Icon::Cylinder, "Circle: drag across a hole or a boss, a NURBS surface is laid on its wall, every ring an exact circle (C)", "C"), (Tool::Slot, Icon::Capsule, "Slot: drag along a slot with round ends, a NURBS surface is laid on its wall, every row an exact slot outline (S)", "S"), (Tool::Path, Icon::Sketch, "Path: click points on the scan, one NURBS curve through them; flat faces, their edges and corners catch the points (P)", "P")];
                 for (t, icon, tip, key) in tools {
                     let r = icon_btn(ui, icon, st.tool == t, tip, 28.0);
                     key_hint(ui, &r, key);
@@ -228,6 +228,9 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
             if secondary_btn(ui, "Circle (C): a round part", w).clicked() {
                 st.set_tool(Tool::Circle);
             }
+            if secondary_btn(ui, "Slot (S): a slot with round ends", w).clicked() {
+                st.set_tool(Tool::Slot);
+            }
             if secondary_btn(ui, "Path (P): lines and curves on the scan", w).clicked() {
                 st.set_tool(Tool::Path);
             }
@@ -278,11 +281,61 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
             }
         }
         Tool::Path => path_card(ui, st),
+        Tool::Slot => slot_card(ui, st),
     }
     ui.add_space(4.0);
     let w = ui.available_width();
     if st.doc.is_some() && secondary_btn(ui, if st.hide_scan { "Show the scan (H)" } else { "Hide the scan (H)" }, w).clicked() {
         st.hide_scan = !st.hide_scan;
+    }
+}
+
+fn slot_card(ui: &mut Ui, st: &mut AppState) {
+    use rectify_core::circle::ProfileKind;
+    title(ui, "Slot", "Press at one end of a slot with round ends, drag along it to the other end: a NURBS surface is laid on its wall, every row an exact slot outline");
+    let mut refit = false;
+    let mut apply = false;
+    let mut cancel = false;
+    let mut new_profile = None;
+    match &mut st.slot {
+        None => line(ui, "The face it is cut in gives the axis; its width, length and ends are fitted on its wall, its depth found from the floor."),
+        Some(se) => {
+            let sl = &se.slot;
+            let kind = if sl.inward { "cut in" } else { "raised" };
+            line(ui, format!("{} × {} mm · {kind} · found {} mm deep", fmt(sl.length(), 2), fmt(sl.r * 2.0, 2), fmt(sl.depth, 2)));
+            let max = (sl.depth * 3.0).max(sl.r * 2.0) as f32;
+            refit |= slider_f64(ui, "Depth", &mut se.params.depth, 0.1..=max, 0.05, "mm");
+            let items = [(ProfileKind::Cylinder, "Straight", accent()), (ProfileKind::Cone, "Tapered", accent()), (ProfileKind::Curve, "Curve", accent())];
+            if let Some(k) = segmented(ui, &items, se.params.profile, 28.0) {
+                new_profile = Some(k);
+            }
+            let mut lv = se.params.levels as f32;
+            if slider_row(ui, "Levels", &mut lv, 1.0..=24.0, 1.0, "").0 {
+                se.params.levels = lv.round().max(1.0) as usize;
+                refit = true;
+            }
+            let s = &se.laid.surface;
+            let width = |j: usize| (s.pts[j * s.nu + 4] - s.pts[j * s.nu + 10]).reject_from(se.slot.axis).length();
+            let (lo, hi) = (0..s.nv).map(width).fold((f64::INFINITY, 0.0f64), |a, w| (a.0.min(w), a.1.max(w)));
+            line(ui, format!("{} rows, each two lines and two exact half circles · {} to {} mm long", se.params.levels + 1, fmt(lo, 2), fmt(hi, 2)));
+            line(ui, format!("NURBS degree 2 × {} · {} × {} control points", s.dv, s.nu, s.nv));
+            line(ui, format!("{} points of the wall · the scan is {} mm from it", se.laid.points, fmt(se.laid.off, 3)));
+            ui.add_space(6.0);
+            let w = ui.available_width();
+            apply = primary_btn(ui, Some(Icon::Capsule), "Keep (Enter)", Some(w)).clicked();
+            cancel = secondary_btn(ui, "Remove (Esc)", w).clicked();
+        }
+    }
+    if let Some(k) = new_profile {
+        st.slot_set_profile(k);
+    } else if refit {
+        st.slot_refit();
+    }
+    if apply {
+        st.slot_apply();
+    }
+    if cancel {
+        st.slot_cancel();
     }
 }
 
@@ -427,6 +480,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
     let (f, esc, z, y, enter) = ctx.input(|i| (i.key_pressed(Key::F), i.key_pressed(Key::Escape), i.key_pressed(Key::Z), i.key_pressed(Key::Y), i.key_pressed(Key::Enter)));
     let (c, h, pk, back) = ctx.input(|i| (i.key_pressed(Key::C), i.key_pressed(Key::H), i.key_pressed(Key::P), i.key_pressed(Key::Backspace) || i.key_pressed(Key::Delete)));
+    let sk = ctx.input(|i| i.key_pressed(Key::S));
     if cmd && z {
         if shift {
             st.redo();
@@ -444,6 +498,9 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if pk && !cmd {
         st.set_tool(Tool::Path);
     }
+    if sk && !cmd {
+        st.set_tool(Tool::Slot);
+    }
     if back && st.path.is_some() {
         st.path_back();
     }
@@ -456,6 +513,9 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if enter && st.tool == Tool::Path {
         st.path_apply();
     }
+    if enter && st.tool == Tool::Slot {
+        st.slot_apply();
+    }
     if f {
         st.frame_all();
     }
@@ -463,9 +523,12 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.circle_cancel();
     } else if esc && st.path.is_some() {
         st.path_cancel();
+    } else if esc && st.slot.is_some() && st.slot_drag.is_none() {
+        st.slot_cancel();
     } else if esc {
-        if st.circle_drag.is_some() {
+        if st.circle_drag.is_some() || st.slot_drag.is_some() {
             st.circle_drag = None;
+            st.slot_drag = None;
             st.overlay_gen += 1;
         } else {
             st.set_tool(Tool::Navigate);

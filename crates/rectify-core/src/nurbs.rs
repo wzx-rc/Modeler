@@ -303,7 +303,7 @@ fn circle_knots() -> Vec<f64> {
 }
 
 /// Gaussian elimination with partial pivoting.
-fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+pub(crate) fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
     let n = b.len();
     for col in 0..n {
         let piv = (col..n).max_by(|&i, &j| a[i][col].abs().partial_cmp(&a[j][col].abs()).unwrap())?;
@@ -360,6 +360,26 @@ impl Surface {
             }
         }
         Surface { du: 2, dv: profile.degree, ku: circle_knots(), kv: profile.knots.clone(), nu: 9, nv: profile.pts.len(), pts, w }
+    }
+
+    /// A surface swept from a section given by its control points, each a
+    /// point and a direction (`section`, with its weights `sw` and knots
+    /// `ku`, degree `du`): each control point of `profile` (x: how far along
+    /// the directions, y: the height along `a`) makes one copy of the
+    /// section, every control point moved by x along its direction. u runs
+    /// along the section, v along the profile. When the directions are the
+    /// section's normals (a circle round its centre, a slot round its
+    /// centre line), every row is the section offset exactly.
+    pub fn sweep(section: &[(DVec3, DVec3)], sw: &[f64], ku: Vec<f64>, du: usize, a: DVec3, profile: &Curve) -> Surface {
+        let mut pts = vec![];
+        let mut w = vec![];
+        for (j, q) in profile.pts.iter().enumerate() {
+            for (i, (b, d)) in section.iter().enumerate() {
+                pts.push(*b + *d * q.x + a * q.y);
+                w.push(sw[i] * profile.w[j]);
+            }
+        }
+        Surface { du, dv: profile.degree, ku, kv: profile.knots.clone(), nu: section.len(), nv: profile.pts.len(), pts, w }
     }
 
     pub fn eval(&self, u: f64, v: f64) -> DVec3 {

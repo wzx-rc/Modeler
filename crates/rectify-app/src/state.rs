@@ -9,6 +9,7 @@ use rectify_core::circle::{Circle, ProfileKind, Round, RoundParams};
 use rectify_core::mesh::Surface as Closest;
 use rectify_core::nurbs::{Curve, Surface};
 use rectify_core::path::{self, Built, PathParams, Snap, SnapKind};
+use rectify_core::slot::{Laid, Slot, SlotParams};
 use rectify_core::{Mesh, Topo};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -38,6 +39,9 @@ pub enum Tool {
     /// Click points on the scan: one NURBS curve through them, caught by
     /// the flat faces, their edges and corners.
     Path,
+    /// Drag along a slot with round ends: a NURBS surface on its wall,
+    /// every row an exact slot outline.
+    Slot,
 }
 
 impl Tool {
@@ -46,6 +50,7 @@ impl Tool {
             Tool::Navigate => "Navigate",
             Tool::Circle => "Circle",
             Tool::Path => "Path",
+            Tool::Slot => "Slot",
         }
     }
 }
@@ -104,6 +109,8 @@ pub struct PathPress {
 pub struct CircleDrag {
     pub a: DVec3,
     pub b: DVec3,
+    /// The triangle pressed, and its vertices.
+    pub tri: u32,
     pub seeds: Vec<u32>,
     /// The plane's normal at the press.
     pub n: DVec3,
@@ -115,6 +122,14 @@ pub struct CircleEdit {
     pub circle: Circle,
     pub params: RoundParams,
     pub round: Round,
+}
+
+/// The slot found by the Slot tool, the surface laid on it and its
+/// settings (changed live; kept with Enter).
+pub struct SlotEdit {
+    pub slot: Slot,
+    pub params: SlotParams,
+    pub laid: Laid,
 }
 
 pub enum Msg {
@@ -172,6 +187,11 @@ pub struct AppState {
     pub path_press: Option<PathPress>,
     /// The Path's settings, kept from one to the next.
     pub path_params: PathParams,
+    /// The Slot drag (from one end to the other), the surface placed, its
+    /// profile kept from one to the next.
+    pub slot_drag: Option<CircleDrag>,
+    pub slot: Option<SlotEdit>,
+    pub slot_profile: ProfileKind,
 }
 
 impl Default for AppState {
@@ -212,6 +232,9 @@ impl AppState {
             hover_key: None,
             path_press: None,
             path_params: PathParams::default(),
+            slot_drag: None,
+            slot: None,
+            slot_profile: ProfileKind::Cylinder,
         }
     }
 
@@ -270,6 +293,8 @@ impl AppState {
         self.path = None;
         self.path_hover = None;
         self.path_press = None;
+        self.slot = None;
+        self.slot_drag = None;
         self.hide_scan = false;
         self.objects_gen += 1;
         self.gen += 1;
@@ -340,6 +365,8 @@ impl AppState {
         self.path_apply();
         self.path_hover = None;
         self.path_press = None;
+        self.slot_apply();
+        self.slot_drag = None;
         self.tool = t;
         self.overlay_gen += 1;
     }
@@ -368,6 +395,11 @@ impl AppState {
             self.path_back();
             return;
         }
+        if self.slot.is_some() {
+            self.slot_cancel();
+            self.toast("Slot removed", false);
+            return;
+        }
         let Some(o) = self.objects.pop() else {
             self.toast("Nothing to undo", false);
             return;
@@ -389,30 +421,38 @@ impl AppState {
 
     // ------------------------------------------------------------ Circle
 
-    pub fn circle_press(&mut self, at: [f32; 2]) {
-        let Some((t, x)) = self.pick_hit(at) else { return };
+    /// A drag starting on the scan (Circle, Slot): where, and the plane
+    /// under it.
+    fn drag_start(&self, at: [f32; 2]) -> Option<CircleDrag> {
+        let (t, x) = self.pick_hit(at)?;
         let seeds = self.tri_verts(t);
+        let d = self.doc.as_ref()?;
+        let n = seeds.iter().flat_map(|&v| d.topo.tris_of(v as usize).iter()).map(|&t| d.mesh.tri_cross(t as usize).normalize_or_zero()).sum::<DVec3>().normalize_or_zero();
+        Some(CircleDrag { a: x, b: x, tri: t as u32, seeds, n })
+    }
+
+    /// Where a drag goes: on the plane under the press (else the scan
+    /// under the pointer).
+    fn drag_to(&self, cd: &CircleDrag, at: [f32; 2]) -> Option<DVec3> {
+        let (o, dir) = self.view().ray(at[0], at[1]);
+        let (o, dir) = (o.as_dvec3(), dir.as_dvec3());
+        let dn = dir.dot(cd.n);
+        let on_plane = (dn.abs() > 0.05).then(|| o + dir * ((cd.a - o).dot(cd.n) / dn)).filter(|x| (*x - o).dot(dir) > 0.0);
+        on_plane.or_else(|| self.pick_hit(at).map(|h| h.1))
+    }
+
+    pub fn circle_press(&mut self, at: [f32; 2]) {
+        let Some(cd) = self.drag_start(at) else { return };
         // a new circle keeps the one placed before
         self.circle_apply();
-        let Some(d) = &self.doc else { return };
-        let n = seeds.iter().flat_map(|&v| d.topo.tris_of(v as usize).iter()).map(|&t| d.mesh.tri_cross(t as usize).normalize_or_zero()).sum::<DVec3>().normalize_or_zero();
-        self.circle_drag = Some(CircleDrag { a: x, b: x, seeds, n });
+        self.circle_drag = Some(cd);
         self.overlay_gen += 1;
     }
 
     pub fn circle_move(&mut self, at: [f32; 2]) {
-        if self.circle_drag.is_none() {
-            return;
-        }
-        // on the plane under the press (else the scan under the pointer)
-        let (o, dir) = self.view().ray(at[0], at[1]);
-        let (o, dir) = (o.as_dvec3(), dir.as_dvec3());
-        let hit = self.pick_hit(at).map(|h| h.1);
-        let Some(cd) = &mut self.circle_drag else { return };
-        let dn = dir.dot(cd.n);
-        let on_plane = (dn.abs() > 0.05).then(|| o + dir * ((cd.a - o).dot(cd.n) / dn)).filter(|x| (*x - o).dot(dir) > 0.0);
-        if let Some(x) = on_plane.or(hit) {
-            cd.b = x;
+        let Some(cd) = &self.circle_drag else { return };
+        if let Some(x) = self.drag_to(cd, at) {
+            self.circle_drag.as_mut().unwrap().b = x;
         }
         self.overlay_gen += 1;
     }
@@ -673,6 +713,90 @@ impl AppState {
         }
         self.path_press = None;
         self.overlay_gen += 1;
+    }
+}
+
+impl AppState {
+    // ------------------------------------------------------------ Slot
+
+    pub fn slot_press(&mut self, at: [f32; 2]) {
+        let Some(cd) = self.drag_start(at) else { return };
+        // a new slot keeps the one placed before
+        self.slot_apply();
+        self.slot_drag = Some(cd);
+        self.overlay_gen += 1;
+    }
+
+    pub fn slot_move(&mut self, at: [f32; 2]) {
+        let Some(cd) = &self.slot_drag else { return };
+        // on the scan under the pointer (the press may be on a slope: its
+        // plane would send the end far away), else on the plane
+        if let Some(x) = self.pick_hit(at).map(|h| h.1).or_else(|| self.drag_to(cd, at)) {
+            self.slot_drag.as_mut().unwrap().b = x;
+        }
+        self.overlay_gen += 1;
+    }
+
+    pub fn slot_release(&mut self) {
+        let Some(CircleDrag { a, b, tri, .. }) = self.slot_drag.take() else { return };
+        self.overlay_gen += 1;
+        let Some(d) = &self.doc else { return };
+        match Slot::detect(&d.mesh, &d.topo, tri, a, b, d.edge) {
+            Ok(s) => {
+                // the simplest profile that follows this slot's wall
+                let (profile, levels) = s.best_profile(s.depth);
+                let params = SlotParams { depth: s.depth, profile, levels };
+                let laid = s.nurbs(params);
+                self.slot = Some(SlotEdit { slot: s, params, laid });
+                self.objects_gen += 1;
+            }
+            Err(e) => self.toast(e, true),
+        }
+    }
+
+    /// The surface again after the depth, the profile or the levels changed.
+    pub fn slot_refit(&mut self) {
+        let Some(se) = &mut self.slot else { return };
+        se.params.levels = se.params.levels.clamp(1, 64);
+        se.laid = se.slot.nurbs(se.params);
+        self.slot_profile = se.params.profile;
+        self.objects_gen += 1;
+        self.overlay_gen += 1;
+    }
+
+    /// Another profile: the fewest levels for it again.
+    pub fn slot_set_profile(&mut self, k: ProfileKind) {
+        let Some(se) = &mut self.slot else { return };
+        se.params.profile = k;
+        se.params.levels = se.slot.fewest_levels(se.params.depth, k);
+        self.slot_refit();
+    }
+
+    /// The surface placed is kept.
+    pub fn slot_apply(&mut self) {
+        let Some(se) = self.slot.take() else { return };
+        let p = se.params;
+        let what = format!("{} × {} mm · {} mm deep · {} · {} rows", fmt(se.slot.length(), 2), fmt(se.slot.r * 2.0, 2), fmt(p.depth, 1), slot_profile_label(p.profile), p.levels + 1);
+        self.toast(format!("Kept: {what}"), false);
+        self.add_object(Object { tool: Tool::Slot, what, shape: Shape::Surface(se.laid.surface) });
+        self.overlay_gen += 1;
+    }
+
+    /// The surface placed taken away.
+    pub fn slot_cancel(&mut self) {
+        if self.slot.take().is_some() {
+            self.objects_gen += 1;
+        }
+        self.overlay_gen += 1;
+    }
+}
+
+/// The Slot's profiles, as its walls go down.
+pub fn slot_profile_label(p: ProfileKind) -> &'static str {
+    match p {
+        ProfileKind::Cylinder => "straight",
+        ProfileKind::Cone => "tapered",
+        ProfileKind::Curve => "curve",
     }
 }
 

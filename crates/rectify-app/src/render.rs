@@ -213,7 +213,10 @@ fn shade(i: MOut) -> vec4<f32> {
     if (dot(n, d) < 0.0) {
         n = -n;
     }
-    let lifted = i.pos + n * (0.12 + 0.0015 * dist);
+    // less where it is seen edge on: the normal flips there from one
+    // vertex to the next, and a full lift would tear the outline
+    let facing = smoothstep(0.0, 0.35, dot(n, d / max(dist, 1e-6)));
+    let lifted = i.pos + n * ((0.12 + 0.0015 * dist) * facing);
     o.clip = project(lifted + d / max(dist, 1e-6) * (0.02 + 0.001 * dist));
     o.nrm = i.nrm;
     o.wpos = i.pos;

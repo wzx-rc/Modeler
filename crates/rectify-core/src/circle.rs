@@ -40,7 +40,7 @@ fn debug() -> bool {
     std::env::var("RECTIFY_DEBUG").is_ok()
 }
 
-fn median(mut v: Vec<f64>) -> Option<f64> {
+pub(crate) fn median(mut v: Vec<f64>) -> Option<f64> {
     if v.is_empty() {
         return None;
     }
@@ -48,7 +48,7 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
     Some(v[v.len() / 2])
 }
 
-fn vertex_normal(m: &Mesh, topo: &Topo, v: u32) -> DVec3 {
+pub(crate) fn vertex_normal(m: &Mesh, topo: &Topo, v: u32) -> DVec3 {
     topo.tris_of(v as usize).iter().map(|&t| m.tri_cross(t as usize)).sum::<DVec3>().normalize_or_zero()
 }
 
@@ -619,43 +619,48 @@ impl Circle {
     /// The surface on the wall read.
     fn lay(&self, wall: &Wall, p: RoundParams) -> Round {
         let (u, v) = self.basis();
-        let height = wall.height;
-        let (found, inward) = (wall.found, wall.inward);
-        // the profile: control values of the radius along the height; the
-        // rings are its knots (straight between them for a cylinder or a
-        // cone, a cubic for a curve)
-        let levels = p.levels.clamp(1, 64);
-        let fit = |data: &[(f64, f64)]| -> (usize, Vec<f64>) {
-            match p.profile {
-                ProfileKind::Cylinder => (1, vec![median(data.iter().map(|x| x.1).collect()).unwrap_or(self.r); levels + 1]),
-                ProfileKind::Cone => {
-                    let ab = Curve::fit_1d(data, 1, 1).unwrap_or(vec![self.r; 2]);
-                    (1, (0..=levels).map(|i| ab[0] + (ab[1] - ab[0]) * i as f64 / levels as f64).collect())
-                }
-                ProfileKind::Curve => (3, Curve::fit_1d(data, 3, levels).unwrap_or(vec![self.r; 3 + levels])),
-            }
-        };
-        let spans_of = |deg: usize, n: usize| n - deg;
-        let eval = |deg: usize, ctrl: &[f64], t: f64| -> f64 {
-            let c = Curve { degree: deg, knots: uniform_knots(deg, spans_of(deg, ctrl.len())), pts: ctrl.iter().map(|&r| DVec3::new(r, 0.0, 0.0)).collect(), w: vec![1.0; ctrl.len()] };
-            c.eval(t).x
-        };
-        let mut data = wall.data.clone();
-        let (mut deg, mut ctrl) = fit(&data);
-        // again without the hits far from the first fit (another wall, a
-        // detail on this one)
-        let res: Vec<f64> = data.iter().map(|&(t, r)| (r - eval(deg, &ctrl, t)).abs()).collect();
-        let cut = (median(res.clone()).unwrap_or(0.0) * 4.0).max(self.edge * 0.5);
-        let kept: Vec<(f64, f64)> = data.iter().zip(&res).filter(|(_, &e)| e <= cut).map(|(d, _)| *d).collect();
-        if kept.len() >= 8 {
-            (deg, ctrl) = fit(&kept);
-            data = kept;
-        }
-        let off = if data.is_empty() { 0.0 } else { (data.iter().map(|&(t, r)| (r - eval(deg, &ctrl, t)).powi(2)).sum::<f64>() / data.len() as f64).sqrt() };
-        let knots = uniform_knots(deg, spans_of(deg, ctrl.len()));
-        let hs = greville(&knots, deg);
-        let profile = Curve { degree: deg, knots, pts: ctrl.iter().zip(&hs).map(|(&r, &g)| DVec3::new(r.max(0.0), g * height, 0.0)).collect(), w: vec![1.0; ctrl.len()] };
+        let (profile, off) = fit_profile(&wall.data, p.profile, p.levels, wall.height, self.r, self.edge);
         let surface = Surface::revolve(self.c, self.a, u, v, &profile);
-        Round { surface, found, off, inward }
+        Round { surface, found: wall.found, off, inward: wall.inward }
     }
+}
+
+/// A wall's profile fitted to `data` (height 0..1, distance from the axis
+/// or the centre line): one radius (`Cylinder`), the radius changing evenly
+/// (`Cone`) or a cubic (`Curve`), `levels` + 1 rows its knots (straight
+/// between them, or a cubic). Fitted twice, the second time without the
+/// points far from the first fit (another wall, a detail on this one). The
+/// curve's control points: (radius, height up to `height`); and how far the
+/// points kept are from it (mm, root mean square).
+pub(crate) fn fit_profile(data: &[(f64, f64)], kind: ProfileKind, levels: usize, height: f64, r0: f64, edge: f64) -> (Curve, f64) {
+    let levels = levels.clamp(1, 64);
+    let fit = |data: &[(f64, f64)]| -> (usize, Vec<f64>) {
+        match kind {
+            ProfileKind::Cylinder => (1, vec![median(data.iter().map(|x| x.1).collect()).unwrap_or(r0); levels + 1]),
+            ProfileKind::Cone => {
+                let ab = Curve::fit_1d(data, 1, 1).unwrap_or(vec![r0; 2]);
+                (1, (0..=levels).map(|i| ab[0] + (ab[1] - ab[0]) * i as f64 / levels as f64).collect())
+            }
+            ProfileKind::Curve => (3, Curve::fit_1d(data, 3, levels).unwrap_or(vec![r0; 3 + levels])),
+        }
+    };
+    let spans_of = |deg: usize, n: usize| n - deg;
+    let eval = |deg: usize, ctrl: &[f64], t: f64| -> f64 {
+        let c = Curve { degree: deg, knots: uniform_knots(deg, spans_of(deg, ctrl.len())), pts: ctrl.iter().map(|&r| DVec3::new(r, 0.0, 0.0)).collect(), w: vec![1.0; ctrl.len()] };
+        c.eval(t).x
+    };
+    let mut data = data.to_vec();
+    let (mut deg, mut ctrl) = fit(&data);
+    let res: Vec<f64> = data.iter().map(|&(t, r)| (r - eval(deg, &ctrl, t)).abs()).collect();
+    let cut = (median(res.clone()).unwrap_or(0.0) * 4.0).max(edge * 0.5);
+    let kept: Vec<(f64, f64)> = data.iter().zip(&res).filter(|(_, &e)| e <= cut).map(|(d, _)| *d).collect();
+    if kept.len() >= 8 {
+        (deg, ctrl) = fit(&kept);
+        data = kept;
+    }
+    let off = if data.is_empty() { 0.0 } else { (data.iter().map(|&(t, r)| (r - eval(deg, &ctrl, t)).powi(2)).sum::<f64>() / data.len() as f64).sqrt() };
+    let knots = uniform_knots(deg, spans_of(deg, ctrl.len()));
+    let hs = greville(&knots, deg);
+    let profile = Curve { degree: deg, knots, pts: ctrl.iter().zip(&hs).map(|(&r, &g)| DVec3::new(r.max(0.0), g * height, 0.0)).collect(), w: vec![1.0; ctrl.len()] };
+    (profile, off)
 }

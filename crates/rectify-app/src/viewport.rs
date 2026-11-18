@@ -33,7 +33,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             i.pointer.button_down(PointerButton::Secondary),
         )
     });
-    if alt && (resp.hovered() || resp.dragged() || l || m || r) && st.circle_drag.is_none() && st.path_press.is_none() {
+    if alt && (resp.hovered() || resp.dragged() || l || m || r) && st.circle_drag.is_none() && st.slot_drag.is_none() && st.path_press.is_none() {
         if (l || m || r) && d != egui::Vec2::ZERO {
             if l {
                 st.camera.orbit(d.x, d.y);
@@ -72,6 +72,27 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
         }
         if st.circle_drag.is_some() {
+            st.interacting = true;
+            return;
+        }
+    }
+    // the Slot tool: press at one end of the slot, drag along it, release
+    // at the other end
+    if st.tool == Tool::Slot && !alt {
+        let (pressed, released, pos) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.latest_pos()));
+        if pressed && resp.hovered() {
+            if let Some(p) = pos {
+                st.slot_press([p.x, p.y]);
+            }
+        } else if st.slot_drag.is_some() {
+            if let Some(p) = pos {
+                st.slot_move([p.x, p.y]);
+            }
+            if released || !l {
+                st.slot_release();
+            }
+        }
+        if st.slot_drag.is_some() {
             st.interacting = true;
             return;
         }
@@ -158,7 +179,7 @@ fn path_marks(p: &egui::Painter, st: &AppState) -> Option<String> {
 fn tool_cursor(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Response) {
     let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else { return };
     let snap = if st.tool == Tool::Path { path_marks(p, st) } else { None };
-    if !resp.hovered() && st.circle_drag.is_none() && st.path_press.is_none() {
+    if !resp.hovered() && st.circle_drag.is_none() && st.slot_drag.is_none() && st.path_press.is_none() {
         return;
     }
     let col = accent();
@@ -192,11 +213,16 @@ pub fn hint(st: &AppState) -> String {
         return "Open a scan (an .obj)".into();
     }
     match st.tool {
-        Tool::Navigate => "C circle · P path · H hide the scan · Ctrl+Z undo · drag to turn around · F frames it".into(),
+        Tool::Navigate => "C circle · S slot · P path · H hide the scan · Ctrl+Z undo · drag to turn around · F frames it".into(),
         Tool::Circle => match (&st.circle_drag, &st.circle) {
             (Some(_), _) => "Across to the other side of the rim, then release".into(),
             (None, Some(c)) => format!("A NURBS surface, Ø {} mm, {} rings: height, profile and levels on the left, live · Enter keeps it · Esc removes · H hides the scan", fmt(c.circle.r * 2.0, 2), c.params.levels + 1),
             (None, None) => "Circle: press on the rim of a hole or a boss and drag across it to the other side".into(),
+        },
+        Tool::Slot => match (&st.slot_drag, &st.slot) {
+            (Some(_), _) => "Along the slot to its other end, then release".into(),
+            (None, Some(se)) => format!("A NURBS surface, {} × {} mm, {} rows: depth, profile and levels on the left, live · Enter keeps it · Esc removes · H hides the scan", fmt(se.slot.length(), 2), fmt(se.slot.r * 2.0, 2), se.params.levels + 1),
+            (None, None) => "Slot: press at one end of a slot with round ends and drag along it to the other end".into(),
         },
         Tool::Path => match &st.path {
             None => "Path: click on the scan to place points · flat faces, their edges and corners catch the pointer · Ctrl: the scan only".into(),

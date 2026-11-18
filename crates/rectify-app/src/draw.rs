@@ -139,6 +139,9 @@ impl Drawer {
         if let Some(ce) = &st.circle {
             surface_vertices(&ce.round.surface, 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
         }
+        if let Some(se) = &st.slot {
+            surface_vertices(&se.laid.surface, 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
+        }
         // the path being drawn, and its control points
         if let Some(b) = st.path.as_ref().and_then(|pe| pe.built.as_ref()) {
             let hull: Vec<[f32; 3]> = b.curve.pts.iter().map(|x| x.as_vec3().to_array()).collect();
@@ -177,6 +180,12 @@ impl Drawer {
                 .collect();
             line_vertices(&[ring], [255, 150, 60, 200], 1.2, &mut out);
         }
+        // the Slot drag: along the slot, on the plane under the press
+        if let Some(cd) = &st.slot_drag {
+            let n = cd.n;
+            let b = cd.b - n * n.dot(cd.b - cd.a);
+            line_vertices(&[vec![p(cd.a), p(b)]], [255, 150, 60, 220], 1.2, &mut out);
+        }
         // the Path: the next segment, and what catches the pointer
         if let Some(pe) = &st.path {
             if let (Some(pv), Some(b)) = (&pe.preview, &pe.built) {
@@ -200,6 +209,11 @@ impl Drawer {
         if let Some(ce) = &st.circle {
             let ci = &ce.circle;
             line_vertices(&[vec![p(ci.c - ci.a * (ci.r * 0.3)), p(ci.c + ci.a * (ce.params.height + ci.r * 0.3))]], [255, 150, 60, 160], 0.8, &mut out);
+        }
+        // the slot placed: its centre line
+        if let Some(se) = &st.slot {
+            let sl = &se.slot;
+            line_vertices(&[vec![p(sl.a), p(sl.b)]], [255, 150, 60, 160], 0.8, &mut out);
         }
         self.r.upload_overlay(device, queue, &out);
     }
