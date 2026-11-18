@@ -94,13 +94,13 @@ fn fit_circle(pts: &[DVec2]) -> Option<(DVec2, f64)> {
 
 impl Circle {
     /// Two directions square to the axis.
-    fn basis(&self) -> (DVec3, DVec3) {
+    pub fn basis(&self) -> (DVec3, DVec3) {
         let u = self.a.any_orthonormal_vector();
         (u, self.a.cross(u))
     }
 
     /// Height along the axis, distance from it, and the unit direction out.
-    fn local(&self, x: DVec3) -> (f64, f64, DVec3) {
+    pub fn local(&self, x: DVec3) -> (f64, f64, DVec3) {
         let d = x - self.c;
         let hh = d.dot(self.a);
         let radial = d - self.a * hh;
@@ -198,54 +198,45 @@ impl Circle {
                 n = sum.normalize();
             }
         }
+        if debug() {
+            eprintln!("circle: seed n {:.3},{:.3},{:.3}, flat {} → plane n, then axis {:.3},{:.3},{:.3}; p0 {:.2},{:.2},{:.2} p1 {:.2},{:.2},{:.2}", n_seed.x, n_seed.y, n_seed.z, flat.len(), n.x, n.y, n.z, p0.x, p0.y, p0.z, p1.x, p1.y, p1.z);
+        }
         let c = c - n * n.dot(c - pc);
         let mut circle = Circle { c, a: n, r, height: 0.0, region, normals, edge: h };
-        // 4. the walls: normals square to the axis, off the plane, within half
-        // a radius of the circle drawn; which way they go from the plane
-        let wall = |ci: &Circle, band: f64| -> Vec<(DVec3, f64, f64)> {
-            ci.region
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &v)| {
-                    let x = m.pos[v as usize];
-                    let (hh, rho, _) = ci.local(x);
-                    (ci.normals[i].dot(ci.a).abs() < 0.5 && (rho - ci.r).abs() < band).then_some((x, hh, rho))
-                })
-                .collect()
-        };
-        let w0 = wall(&circle, r * 0.5);
-        let up = w0.iter().filter(|x| x.1 > h).count();
-        let down = w0.iter().filter(|x| x.1 < -h).count();
-        if up + down < 12 {
-            return Err("No round wall there: drag across a hole or a boss, rim to rim".into());
-        }
-        if down > up {
-            circle.a = -n;
-        }
-        let (u, v) = circle.basis();
-        // (from here on, heights along the axis: the wall's side is above 0)
+        // (the same two directions square to the axis whichever way it turns)
+        let u = n.any_orthonormal_vector();
+        let v = n.cross(u);
         let to2 = |ci: &Circle, x: DVec3| {
             let d = x - ci.c;
             DVec2::new(d.dot(u), d.dot(v))
         };
+        // 4. the walls near the rim, on both sides of the plane: normals
+        // square to the axis, within half a radius of the circle drawn and
+        // not far along the axis (the rest of the part around does not count)
+        let win = r.max(h * 10.0);
+        let near: Vec<usize> = (0..circle.region.len())
+            .filter(|&i| {
+                let (hh, rho, _) = circle.local(m.pos[circle.region[i] as usize]);
+                circle.normals[i].dot(n).abs() < 0.5 && hh.abs() > h * 0.5 && hh.abs() < win && (rho - r).abs() < r * 0.6
+            })
+            .collect();
+        if near.len() < 12 {
+            return Err("No round wall there: drag across a hole or a boss, rim to rim".into());
+        }
         // 5. the centre: on a round wall every normal points at the axis.
         // The point nearest the wall's normal lines (the drag rarely goes
         // through the middle), lines far from it counting less and less:
         // the other shapes around do not pull it.
-        let lines: Vec<(DVec2, DVec2)> = circle
-            .region
+        let lines: Vec<(DVec2, DVec2)> = near
             .iter()
-            .enumerate()
-            .filter_map(|(i, &vx)| {
-                let x = m.pos[vx as usize];
-                let (hh, rho, _) = circle.local(x);
+            .filter_map(|&i| {
                 let nn = circle.normals[i];
                 let d2 = DVec2::new(nn.dot(u), nn.dot(v));
-                (nn.dot(circle.a).abs() < 0.5 && hh > h * 0.5 && (rho - r).abs() < r * 0.5 && d2.length() > 0.5).then(|| (to2(&circle, x), d2.normalize()))
+                (d2.length() > 0.5).then(|| (to2(&circle, m.pos[circle.region[i] as usize]), d2.normalize()))
             })
             .collect();
         let mut cen = DVec2::ZERO;
-        for k in 0..6 {
+        for k in 0..7 {
             let sigma = (r * 0.3 * 0.6f64.powi(k)).max(h * 1.5);
             let (mut a11, mut a12, mut a22, mut b1, mut b2) = (0.0, 0.0, 0.0, 0.0, 0.0);
             for (p, d) in &lines {
@@ -273,58 +264,72 @@ impl Circle {
         // the rim: where it was pressed (where it was let go only tells
         // across what)
         let (r_press, r_end) = (circle.local(p0).1, circle.local(p1).1);
-        let r = r_press;
-        circle.r = r;
-        // the wall nearest the circle drawn: the distances from the axis of
-        // the vertices facing it, in a histogram, its peak nearest the radius
-        // drawn
+        // 6. the wall: on each side of the plane, the distances from the axis
+        // of the vertices facing it in a histogram; the peak nearest the rim
+        // pressed, on the side where it is nearest
+        let bin = (h * 0.5).max(r_press / 60.0);
+        let lo = r_press * 0.4;
+        let nb = ((r_press * 1.2 / bin).ceil() as usize).max(3);
+        let facing_at = |ci: &Circle, i: usize| -> Option<(f64, f64)> {
+            let (hh, rho, out) = ci.local(m.pos[ci.region[i] as usize]);
+            let nn = ci.normals[i];
+            let flat = nn - ci.a * nn.dot(ci.a);
+            (nn.dot(ci.a).abs() < 0.5 && nn.dot(out).abs() > 0.85 * flat.length()).then_some((hh, rho))
+        };
+        let mut best: Option<(f64, f64, f64)> = None; // (sign, peak, votes)
+        for sign in [1.0, -1.0] {
+            let mut hist = vec![0.0f64; nb];
+            for &i in &near {
+                if let Some((hh, rho)) = facing_at(&circle, i) {
+                    let b = ((rho - lo) / bin) as isize;
+                    if hh * sign > h * 0.5 && (0..nb as isize).contains(&b) {
+                        hist[b as usize] += 1.0;
+                    }
+                }
+            }
+            let sm: Vec<f64> = (0..nb).map(|i| hist[i.saturating_sub(1)] + 2.0 * hist[i] + hist[(i + 1).min(nb - 1)]).collect();
+            let top = sm.iter().cloned().fold(0.0, f64::max);
+            let peak = (1..nb - 1)
+                .filter(|&i| sm[i] >= sm[i - 1] && sm[i] >= sm[i + 1] && sm[i] >= (top * 0.05).max(8.0))
+                .map(|i| (lo + (i as f64 + 0.5) * bin, sm[i]))
+                .min_by(|a, b| (a.0 - r_press).abs().partial_cmp(&(b.0 - r_press).abs()).unwrap());
+            if debug() {
+                eprintln!("circle: side {sign}: peak {peak:?} (top {top})");
+            }
+            if let Some((pr, votes)) = peak {
+                let better = match best {
+                    None => true,
+                    Some((_, bp, bv)) => {
+                        let (d, bd) = ((pr - r_press).abs(), (bp - r_press).abs());
+                        if (d - bd).abs() < bin * 3.0 {
+                            votes > bv
+                        } else {
+                            d < bd
+                        }
+                    }
+                };
+                if better {
+                    best = Some((sign, pr, votes));
+                }
+            }
+        }
+        let Some((sign, peak, _)) = best else {
+            return Err("No round wall there: drag across a hole or a boss, rim to rim".into());
+        };
+        circle.a = n * sign;
+        circle.r = peak;
+        if debug() {
+            eprintln!("circle: axis {:.3},{:.3},{:.3}, rim r {r_press:.3} (end {r_end:.3}), centre moved {:.3}, {} lines, wall r {peak:.3}", circle.a.x, circle.a.y, circle.a.z, cen.length(), lines.len());
+        }
+        // centre and radius fitted on that wall alone (twice, tighter)
         let facing = |ci: &Circle, band: f64| -> Vec<(DVec3, f64, f64)> {
-            ci.region
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &vx)| {
-                    let x = m.pos[vx as usize];
-                    let (hh, rho, out) = ci.local(x);
-                    let nn = ci.normals[i];
-                    let flat = nn - ci.a * nn.dot(ci.a);
-                    (nn.dot(ci.a).abs() < 0.5 && hh > h * 0.5 && (rho - ci.r).abs() < band && nn.dot(out).abs() > 0.85 * flat.length()).then_some((x, hh, rho))
+            (0..ci.region.len())
+                .filter_map(|i| {
+                    let (hh, rho) = facing_at(ci, i)?;
+                    (hh > h * 0.5 && hh < win && (rho - ci.r).abs() < band).then(|| (m.pos[ci.region[i] as usize], hh, rho))
                 })
                 .collect()
         };
-        let rhos: Vec<f64> = facing(&circle, r * 0.5).iter().map(|x| x.2).collect();
-        let bin = (h * 0.5).max(r / 60.0);
-        let lo = r * 0.5;
-        let nb = ((r / bin).ceil() as usize).max(3);
-        let mut hist = vec![0.0f64; nb];
-        for rho in &rhos {
-            let b = ((rho - lo) / bin) as isize;
-            if (0..nb as isize).contains(&b) {
-                hist[b as usize] += 1.0;
-            }
-        }
-        let sm: Vec<f64> = (0..nb).map(|i| hist[i.saturating_sub(1)] + 2.0 * hist[i] + hist[(i + 1).min(nb - 1)]).collect();
-        let top = sm.iter().cloned().fold(0.0, f64::max);
-        let peak = (1..nb - 1)
-            .filter(|&i| sm[i] >= sm[i - 1] && sm[i] >= sm[i + 1] && sm[i] >= top * 0.05)
-            .map(|i| lo + (i as f64 + 0.5) * bin)
-            .min_by(|a, b| (a - r).abs().partial_cmp(&(b - r).abs()).unwrap());
-        if let Some(pr) = peak {
-            circle.r = pr;
-        }
-        if debug() {
-            eprintln!("circle: axis {:.3},{:.3},{:.3}, rim r {r:.3} (end {r_end:.3}), centre moved {:.3}, {} lines, peak {peak:?}", circle.a.x, circle.a.y, circle.a.z, cen.length(), lines.len());
-            let all: Vec<(f64, f64, f64)> = circle.region.iter().enumerate().map(|(i, &vx)| { let (hh, rho, _) = circle.local(m.pos[vx as usize]); (rho, hh, circle.normals[i].dot(circle.a)) }).collect();
-            for k in 0..((r * 1.5 / bin) as usize) {
-                let (r0, r1) = (k as f64 * bin, (k + 1) as f64 * bin);
-                let sel: Vec<&(f64, f64, f64)> = all.iter().filter(|x| x.0 >= r0 && x.0 < r1).collect();
-                if sel.is_empty() { continue; }
-                let mh = sel.iter().map(|x| x.1).sum::<f64>() / sel.len() as f64;
-                let mn = sel.iter().map(|x| x.2.abs()).sum::<f64>() / sel.len() as f64;
-                let hk = if r0 >= lo && ((r0 - lo) / bin) < nb as f64 { sm[((r0 - lo) / bin) as usize] } else { -1.0 };
-                eprintln!("  rho {r0:6.2} n {:5} h {mh:6.3} |n.a| {mn:.2} wall {hk}", sel.len());
-            }
-        }
-        // centre and radius fitted on that wall alone (twice, tighter)
         for band in [bin * 4.0 + h, bin * 2.5 + h] {
             let pts: Vec<DVec2> = facing(&circle, band).iter().map(|x| to2(&circle, x.0)).collect();
             if let Some((c2, r2)) = fit_circle(&pts) {
@@ -334,6 +339,18 @@ impl Circle {
                 }
             }
         }
+        // the walls, at any height (for the height below)
+        let wall = |ci: &Circle, band: f64| -> Vec<(DVec3, f64, f64)> {
+            ci.region
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &vx)| {
+                    let x = m.pos[vx as usize];
+                    let (hh, rho, _) = ci.local(x);
+                    (ci.normals[i].dot(ci.a).abs() < 0.5 && (rho - ci.r).abs() < band).then_some((x, hh, rho))
+                })
+                .collect()
+        };
         let r = circle.r;
         // 6. the wall's height: its vertices, from the base up, step by step
         // until a gap
@@ -380,7 +397,7 @@ impl Circle {
                 .enumerate()
                 .filter_map(|(k, &v)| {
                     let (hh, rho, _) = self.local(m.pos[v as usize]);
-                    ((hh - hi).abs() <= half && self.normals[k].dot(self.a).abs() < 0.6 && (rho - prev).abs() < (self.r * 0.12).max(self.edge * 4.0)).then_some(rho)
+                    ((hh - hi).abs() <= half && self.normals[k].dot(self.a).abs() < 0.4 && (rho - prev).abs() < (self.r * 0.12).max(self.edge * 4.0)).then_some(rho)
                 })
                 .collect();
             let ri = median(rs).unwrap_or(prev);
@@ -440,45 +457,123 @@ impl Circle {
     /// The wall's vertices put on the rings, straight out from the axis.
     /// `reach`: how far from its ring a vertex may be and still move.
     pub fn apply(&self, m: &Mesh, topo: &Topo, rings: &[(f64, f64)], reach: f64) -> Moves {
-        let height = rings.last().map(|r| r.0).unwrap_or(0.0);
-        let fade = (reach * 0.5).min(height * 0.25).max(1e-6);
-        let index: std::collections::HashMap<u32, usize> = self.region.iter().enumerate().map(|(i, &v)| (v, i)).collect();
-        // how much each vertex moves: near its ring, a wall's normal, along
-        // the height (fading past the ends)
-        let mut w: Vec<f64> = self
+        use rayon::prelude::*;
+        let height = rings.last().map(|r| r.0).unwrap_or(0.0).max(1e-6);
+        let (u, v) = self.basis();
+        let n = self.region.len();
+        let local: Vec<(f64, f64, f64)> = self
             .region
             .iter()
-            .enumerate()
-            .map(|(i, &v)| {
-                let (hh, rho, _) = self.local(m.pos[v as usize]);
-                let along = if hh < 0.0 {
-                    smooth((hh + fade) / fade)
-                } else if hh > height {
-                    smooth((height + fade - hh) / fade)
-                } else {
-                    1.0
-                };
-                let d = (Self::radius_at(rings, hh) - rho).abs();
-                let near = smooth((reach - d) / (reach * 0.5));
-                let wall = smooth((0.85 - self.normals[i].dot(self.a).abs()) / 0.35);
-                along * near * wall
+            .map(|&vx| {
+                let x = m.pos[vx as usize];
+                let (hh, rho, _) = self.local(x);
+                let q = x - self.c;
+                (hh, rho, q.dot(v).atan2(q.dot(u)))
             })
             .collect();
-        // evened out between neighbours: no ragged border
-        for _ in 0..3 {
-            w = (0..self.region.len())
+        // the wall itself: between the base and the top, a wall's normal,
+        // near its ring. There each vertex goes exactly onto its ring.
+        let (core, delta): (Vec<f64>, Vec<f64>) = (0..n)
+            .map(|i| {
+                let (hh, rho, _) = local[i];
+                if hh < 0.0 || hh > height {
+                    return (0.0, 0.0);
+                }
+                let d = Self::radius_at(rings, hh) - rho;
+                let near = smooth((reach - d.abs()) / (reach * 0.5));
+                let wall = smooth((0.5 - self.normals[i].dot(self.a).abs()) / 0.2);
+                (near * wall, d)
+            })
+            .unzip();
+        // how far out of round the wall is, by angle and height: a grid of
+        // its corrections (an AI mesh's wall is oval or off-centre, smoothly)
+        let r_mean = rings.iter().map(|r| r.1).sum::<f64>() / rings.len().max(1) as f64;
+        let nt = ((std::f64::consts::TAU * r_mean / (self.edge * 3.0)) as usize).clamp(24, 360);
+        let nh = rings.len().max(2);
+        let cell = |t: f64, hh: f64| -> (usize, usize) {
+            let ti = (((t + std::f64::consts::PI) / std::f64::consts::TAU * nt as f64) as usize).min(nt - 1);
+            let hi = ((hh.clamp(0.0, height) / height * (nh - 1) as f64).round() as usize).min(nh - 1);
+            (ti, hi)
+        };
+        let mut sum = vec![0.0f64; nt * nh];
+        let mut wsum = vec![0.0f64; nt * nh];
+        for i in 0..n {
+            if core[i] > 0.5 {
+                let (ti, hi) = cell(local[i].2, local[i].0);
+                sum[hi * nt + ti] += delta[i] * core[i];
+                wsum[hi * nt + ti] += core[i];
+            }
+        }
+        let mut grid: Vec<Option<f64>> = (0..nt * nh).map(|k| (wsum[k] > 0.0).then(|| sum[k] / wsum[k])).collect();
+        // holes in the grid filled from their neighbours (around, then up and down)
+        for _ in 0..(nt + nh) {
+            let mut any = false;
+            let prev = grid.clone();
+            for hi in 0..nh {
+                for ti in 0..nt {
+                    if prev[hi * nt + ti].is_some() {
+                        continue;
+                    }
+                    let mut acc = (0.0, 0);
+                    for (dt, dh) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
+                        let (t2, h2) = ((ti as isize + dt).rem_euclid(nt as isize) as usize, hi as isize + dh);
+                        if h2 < 0 || h2 >= nh as isize {
+                            continue;
+                        }
+                        if let Some(x) = prev[h2 as usize * nt + t2] {
+                            acc.0 += x;
+                            acc.1 += 1;
+                        }
+                    }
+                    if acc.1 > 0 {
+                        grid[hi * nt + ti] = Some(acc.0 / acc.1 as f64);
+                        any = true;
+                    }
+                }
+            }
+            if !any {
+                break;
+            }
+        }
+        let mut g: Vec<f64> = grid.iter().map(|x| x.unwrap_or(0.0)).collect();
+        // a little smoother around
+        for _ in 0..2 {
+            g = (0..nt * nh).map(|k| (g[k] * 2.0 + g[(k / nt) * nt + (k % nt + 1) % nt] + g[(k / nt) * nt + (k % nt + nt - 1) % nt]) / 4.0).collect();
+        }
+        // past the wall (its fillets, the faces around) the same correction,
+        // the one at the wall's nearest end at that angle, fading with the
+        // distance from that end in the profile: on a flat face a move out
+        // from the axis only slides the vertices along it
+        let fd = (r_mean * 0.25).max(self.edge * 6.0);
+        let mut disp: Vec<f64> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let (hh, rho, t) = local[i];
+                let hc = hh.clamp(0.0, height);
+                let (ti, hi) = cell(t, hc);
+                let corr = g[hi * nt + ti];
+                let dist = ((hh - hc).powi(2) + (rho - Self::radius_at(rings, hc)).powi(2)).sqrt();
+                let fade = smooth((fd - dist) / fd);
+                core[i] * delta[i] + (1.0 - core[i]) * corr * fade
+            })
+            .collect();
+        // evened out a little outside the wall: no step where it starts
+        let index: std::collections::HashMap<u32, usize> = self.region.iter().enumerate().map(|(i, &vx)| (vx, i)).collect();
+        let nbs: Vec<Vec<usize>> = self.region.iter().map(|&vx| topo.verts_of(vx as usize).iter().filter_map(|x| index.get(x).copied()).collect()).collect();
+        for _ in 0..4 {
+            disp = (0..n)
+                .into_par_iter()
                 .map(|i| {
-                    let nb = topo.verts_of(self.region[i] as usize);
-                    let s: f64 = nb.iter().map(|x| index.get(x).map(|&j| w[j]).unwrap_or(0.0)).sum();
-                    (w[i] + s) / (nb.len() + 1) as f64
+                    let nb = &nbs[i];
+                    let mean = if nb.is_empty() { disp[i] } else { nb.iter().map(|&j| disp[j]).sum::<f64>() / nb.len() as f64 };
+                    core[i] * delta[i] + (1.0 - core[i]) * (disp[i] + mean) * 0.5
                 })
                 .collect();
         }
-        let targets = self.region.iter().enumerate().filter(|(i, _)| w[*i] > 1e-4).map(|(i, &v)| {
-            let x = m.pos[v as usize];
-            let (hh, rho, out) = self.local(x);
-            let target = Self::radius_at(rings, hh.clamp(0.0, height));
-            (v, x + out * ((target - rho) * w[i]))
+        let targets = self.region.iter().enumerate().filter(|(i, _)| disp[*i].abs() > 1e-5).map(|(i, &vx)| {
+            let x = m.pos[vx as usize];
+            let (_, _, out) = self.local(x);
+            (vx, x + out * disp[i])
         });
         Moves::new(m, targets.collect::<Vec<_>>())
     }

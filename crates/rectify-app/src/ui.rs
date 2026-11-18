@@ -270,27 +270,35 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
             let mut refit = false;
             let mut apply = false;
             let mut cancel = false;
+            let mut strength = None;
             match &mut st.circle {
                 None => line(ui, "The plane comes from where you press; the circle is then fitted on the wall next to it."),
                 Some(ce) => {
                     line(ui, format!("Ø {} mm · centre on the plane", fmt(ce.circle.r * 2.0, 3)));
+                    let mut s = (st.circle_strength * 100.0) as f32;
+                    if slider_row(ui, "Strength", &mut s, 0.0..=100.0, 1.0, "%").0 {
+                        strength = Some(s as f64 / 100.0);
+                    }
                     let found = ce.circle.height;
                     let max = (found * 3.0).max(ce.circle.r * 2.0) as f32;
                     refit |= slider_f64(ui, "Height", &mut ce.height, 0.1..=max, 0.05, "mm");
                     let mut lv = ce.levels as f32;
-                    if slider_row(ui, "Levels", &mut lv, 1.0..=24.0, 1.0, "").0 {
+                    if slider_row(ui, "Levels", &mut lv, 1.0..=48.0, 1.0, "").0 {
                         ce.levels = lv.round().max(1.0) as usize;
                         refit = true;
                     }
-                    slider_f64(ui, "Reach", &mut ce.reach, 0.05..=(ce.circle.r as f32).max(0.5), 0.05, "mm");
-                    let rs: Vec<String> = ce.rings.iter().map(|r| fmt(r.1 * 2.0, 2)).collect();
-                    line(ui, format!("Rings Ø {} mm (found {} mm high)", rs.join(" · "), fmt(found, 1)));
-                    line(ui, format!("Out of round now: {} mm", fmt(ce.off, 3)));
+                    refit |= slider_f64(ui, "Reach", &mut ce.reach, 0.05..=(ce.circle.r as f32).max(0.5), 0.05, "mm");
+                    let (lo, hi) = ce.rings.iter().fold((f64::INFINITY, 0.0f64), |a, r| (a.0.min(r.1), a.1.max(r.1)));
+                    line(ui, format!("{} rings, Ø {} to {} mm (found {} mm high)", ce.rings.len(), fmt(lo * 2.0, 2), fmt(hi * 2.0, 2), fmt(found, 1)));
+                    line(ui, format!("Out of round: {} → {} mm", fmt(ce.off, 3), fmt(ce.after, 3)));
                     ui.add_space(6.0);
                     let w = ui.available_width();
                     apply = primary_btn(ui, Some(Icon::Cylinder), "Apply (Enter)", Some(w)).clicked();
                     cancel = secondary_btn(ui, "Cancel (Esc)", w).clicked();
                 }
+            }
+            if let Some(s) = strength {
+                st.circle_set_strength(s);
             }
             if refit {
                 st.circle_refit();
@@ -299,8 +307,7 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
                 st.circle_apply();
             }
             if cancel {
-                st.circle = None;
-                st.overlay_gen += 1;
+                st.circle_cancel();
             }
         }
         Tool::Mirror => {
@@ -454,11 +461,12 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     }
     if esc && st.line_edit.is_some() {
         st.line_cancel();
+    } else if esc && st.circle.is_some() && st.circle_drag.is_none() {
+        st.circle_cancel();
     } else if esc {
-        if st.line_drag.is_some() || st.circle_drag.is_some() || st.circle.is_some() {
+        if st.line_drag.is_some() || st.circle_drag.is_some() {
             st.line_drag = None;
             st.circle_drag = None;
-            st.circle = None;
             st.overlay_gen += 1;
         } else {
             st.set_tool(Tool::Navigate);

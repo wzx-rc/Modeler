@@ -161,7 +161,7 @@ pub fn hint(st: &AppState) -> String {
         },
         Tool::Circle => match (&st.circle_drag, &st.circle) {
             (Some(_), _) => "Across to the other side of the rim, then release".into(),
-            (None, Some(c)) => format!("Ø {} mm, {} rings: set the height and the levels on the left · Enter applies · Esc cancels", fmt(c.circle.r * 2.0, 2), c.rings.len()),
+            (None, Some(c)) => format!("Ø {} mm, {} rings: strength, height and levels on the left, live · Enter applies · Esc removes", fmt(c.circle.r * 2.0, 2), c.rings.len()),
             (None, None) => "Circle: press on the rim of a hole or a boss and drag across it to the other side".into(),
         },
         Tool::Navigate => "L line · C circle · M mirror · Ctrl+Z undo · Space the mesh as it came · drag to turn around".into(),

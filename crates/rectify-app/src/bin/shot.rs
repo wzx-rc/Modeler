@@ -268,6 +268,28 @@ fn line_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
     h.st.bare = false;
 }
 
+/// How many triangles the last edit turned (> 20°, > 60°), and where the
+/// largest moves are.
+fn turned(st: &AppState) {
+    let (Some(d), Some(step)) = (&st.doc, st.history.last()) else { return };
+    let mut tris: Vec<u32> = step.moves.idx.iter().flat_map(|&v| d.topo.tris_of(v as usize).iter().copied()).collect();
+    tris.sort_unstable();
+    tris.dedup();
+    let (mut t20, mut t60) = (0, 0);
+    for &t in &tris {
+        let a = d.original.tri_cross(t as usize).normalize_or_zero();
+        let b = d.mesh.tri_cross(t as usize).normalize_or_zero();
+        let ang = a.dot(b).clamp(-1.0, 1.0).acos().to_degrees();
+        if ang > 20.0 {
+            t20 += 1;
+        }
+        if ang > 60.0 {
+            t60 += 1;
+        }
+    }
+    eprintln!("TURNED: {} triangles near the moves, {t20} turned > 20°, {t60} > 60°", tris.len());
+}
+
 /// A Circle drag from one side of a rim to the other (screen points of the
 /// bare view): before, the rings with the interface, after (bare and zebra).
 fn circle_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
@@ -297,20 +319,57 @@ fn circle_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
         }
     }
     h.st.circle_refit();
+    for s in std::env::var("RECTIFY_STRENGTH").map(|s| nums(&s)).unwrap_or_default() {
+        h.st.circle_set_strength(s as f64);
+        let pc = (s * 100.0).round();
+        h.st.bare = true;
+        h.shot(&format!("{name}-2-s{pc}"));
+        h.st.settings.zebra = true;
+        h.shot(&format!("{name}-2-s{pc}-zebra"));
+        h.st.settings.zebra = false;
+        h.st.bare = false;
+    }
     match &h.st.circle {
         Some(ce) => {
             let c = &ce.circle;
             let rings: Vec<String> = ce.rings.iter().map(|(hh, r)| format!("{hh:.2}:{:.3}", r * 2.0)).collect();
-            eprintln!("CIRCLE {name}: c {:.2},{:.2},{:.2} axis {:.3},{:.3},{:.3} Ø {:.3} height {:.2} region {} rings {}", c.c.x, c.c.y, c.c.z, c.a.x, c.a.y, c.a.z, c.r * 2.0, ce.height, c.region.len(), rings.join(" "));
+            eprintln!("CIRCLE {name}: c {:.2},{:.2},{:.2} axis {:.3},{:.3},{:.3} Ø {:.3} height {:.2} region {} rings {} · off {:.3} → {:.3}", c.c.x, c.c.y, c.c.z, c.a.x, c.a.y, c.a.z, c.r * 2.0, ce.height, c.region.len(), rings.join(" "), ce.off, ce.after);
         }
         None => eprintln!("CIRCLE {name}: {}", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
     }
     h.shot(&format!("{name}-2-rings"));
+    // another camera to look at it (RECTIFY_LOOK2): the rings, then after /
+    // before (undone, redone)
+    let look2 = std::env::var("RECTIFY_LOOK2").map(|s| nums(&s)).ok().filter(|v| v.len() == 6);
+    let cam = (h.st.camera.target, h.st.camera.dist, h.st.camera.yaw, h.st.camera.pitch);
+    if let Some(v) = &look2 {
+        look(h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+        h.shot(&format!("{name}-2-rings-2"));
+        h.st.camera.target = cam.0;
+        h.st.camera.dist = cam.1;
+        h.st.camera.yaw = cam.2;
+        h.st.camera.pitch = cam.3;
+    }
+    let dump = h.st.circle.as_ref().map(|ce| ce.circle.clone());
     if h.st.circle.is_some() {
         h.st.circle_apply();
+        if let (Ok(path), Some(c), Some(d)) = (std::env::var("RECTIFY_CIRCLE_DUMP"), &dump, &h.st.doc) {
+            let (u, v) = c.basis();
+            let mut out = String::from("h0,r0,h1,r1,t\n");
+            for &vx in &c.region {
+                let (x0, x1) = (d.original.pos[vx as usize], d.mesh.pos[vx as usize]);
+                let (h0, r0, _) = c.local(x0);
+                let (h1, r1, _) = c.local(x1);
+                let q = x0 - c.c;
+                let t = q.dot(v).atan2(q.dot(u));
+                out += &format!("{h0:.4},{r0:.4},{h1:.4},{r1:.4},{t:.4}\n");
+            }
+            std::fs::write(path, out).ok();
+        }
         if let Some(t) = &h.st.toast {
             eprintln!("{}", t.text);
         }
+        turned(&h.st);
         h.shot(&format!("{name}-3-done"));
     }
     h.st.bare = true;
@@ -318,6 +377,17 @@ fn circle_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
     h.st.settings.zebra = true;
     h.shot(&format!("{name}-4-zebra"));
     h.st.settings.zebra = false;
+    if let Some(v) = &look2 {
+        look(h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+        h.shot(&format!("{name}-5-after-2"));
+        h.st.settings.zebra = true;
+        h.shot(&format!("{name}-5-after-2-zebra"));
+        h.st.undo();
+        h.shot(&format!("{name}-5-before-2-zebra"));
+        h.st.settings.zebra = false;
+        h.shot(&format!("{name}-5-before-2"));
+        h.st.redo();
+    }
     h.st.bare = false;
 }
 

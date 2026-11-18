@@ -95,8 +95,12 @@ pub struct CircleEdit {
     pub reach: f64,
     /// (height, radius) of each ring, read on the mesh.
     pub rings: Vec<(f64, f64)>,
-    /// How far the wall is from those rings now (mm, root mean square).
+    /// How far the wall is from those rings before (mm, root mean square),
+    /// and as shown.
     pub off: f64,
+    pub after: f64,
+    /// The moves at full strength.
+    pub moves: Moves,
 }
 
 /// A Circle drag: from the press on the rim to the pointer, on the plane
@@ -173,7 +177,8 @@ pub struct AppState {
     pub circle_drag: Option<CircleDrag>,
     pub circle: Option<CircleEdit>,
     /// The Circle tool's levels, kept from one part to the next.
-    pub circle_levels: usize,
+    /// How much of the rounding is applied (0..1).
+    pub circle_strength: f64,
     /// The edits made, in order, and the ones undone.
     pub history: Vec<Step>,
     pub undone: Vec<Step>,
@@ -214,7 +219,7 @@ impl AppState {
             sym: SymState { axis: Axis::Z, mode: SymMode::Average, reach: 1.0, found: None },
             circle_drag: None,
             circle: None,
-            circle_levels: 4,
+            circle_strength: 1.0,
             history: vec![],
             undone: vec![],
         }
@@ -283,6 +288,7 @@ impl AppState {
 
     pub fn export(&mut self) {
         self.line_apply();
+        self.circle_apply();
         let Some(d) = &self.doc else { return };
         let m = d.mesh.clone();
         let path = crate::files::documents_dir().join(format!("{} rectified.obj", crate::files::sanitize(&self.name)));
@@ -358,14 +364,12 @@ impl AppState {
             self.toast("Open a mesh first", true);
             return;
         }
-        // a Line placed is kept
+        // what is placed is kept
         self.line_apply();
+        self.circle_apply();
         self.tool = t;
         self.line_drag = None;
         self.circle_drag = None;
-        if t != Tool::Circle {
-            self.circle = None;
-        }
         self.overlay_gen += 1;
         if t == Tool::Mirror && self.sym.found.is_none() {
             self.find_mirror(None);
@@ -429,10 +433,15 @@ impl AppState {
     }
 
     pub fn undo(&mut self) {
-        // a Line placed and not applied goes first
+        // what is placed and not applied goes first
         if self.line_edit.is_some() {
             self.line_cancel();
             self.toast("Line removed", false);
+            return;
+        }
+        if self.circle.is_some() {
+            self.circle_cancel();
+            self.toast("Circle removed", false);
             return;
         }
         let Some(d) = &mut self.doc else { return };
@@ -464,6 +473,7 @@ impl AppState {
     /// Back to the mesh as it came (undoable step by step).
     pub fn revert_all(&mut self) {
         self.line_cancel();
+        self.circle_cancel();
         while !self.history.is_empty() {
             self.undo();
         }
@@ -538,23 +548,14 @@ impl AppState {
     /// The Line placed, on the mesh at the strength set.
     fn line_show(&mut self) {
         let (Some(d), Some(le)) = (&mut self.doc, &self.line_edit) else { return };
-        let s = self.line_strength;
-        let mv = &le.fit.moves;
-        for k in 0..mv.idx.len() {
-            d.mesh.pos[mv.idx[k] as usize] = mv.from[k] + (mv.to[k] - mv.from[k]) * s;
-        }
-        self.dirty.extend_from_slice(&mv.idx);
+        show_moves(&mut d.mesh, &le.fit.moves, self.line_strength, &mut self.dirty);
         self.overlay_gen += 1;
     }
 
     /// The mesh as it was before the Line placed.
     fn line_hide(&mut self) {
         let (Some(d), Some(le)) = (&mut self.doc, &self.line_edit) else { return };
-        let mv = &le.fit.moves;
-        for k in 0..mv.idx.len() {
-            d.mesh.pos[mv.idx[k] as usize] = mv.from[k];
-        }
-        self.dirty.extend_from_slice(&mv.idx);
+        show_moves(&mut d.mesh, &le.fit.moves, 0.0, &mut self.dirty);
         self.overlay_gen += 1;
     }
 
@@ -612,10 +613,11 @@ impl AppState {
     pub fn circle_press(&mut self, at: [f32; 2]) {
         let Some((t, x)) = self.pick_hit(at) else { return };
         let seeds = self.tri_verts(t);
+        // a new circle keeps the one placed before
+        self.circle_apply();
         let Some(d) = &self.doc else { return };
         let n = seeds.iter().flat_map(|&v| d.topo.tris_of(v as usize).iter()).map(|&t| d.mesh.tri_cross(t as usize).normalize_or_zero()).sum::<DVec3>().normalize_or_zero();
         self.circle_drag = Some(CircleDrag { a: x, b: x, seeds, n });
-        self.circle = None;
         self.overlay_gen += 1;
     }
 
@@ -643,37 +645,83 @@ impl AppState {
         match Circle::detect(&d.mesh, &d.topo, &seeds, a, b, d.edge) {
             Ok(c) => {
                 let height = c.height;
-                let reach = (c.r * 0.3).max(d.edge * 4.0);
-                let levels = self.circle_levels;
+                let reach = (c.r * 0.05).max(d.edge * 3.0);
+                // as many rings as the mesh shows (about one per two edges):
+                // the profile kept, only made round; fewer straighten it
+                let levels = ((height / (d.edge * 2.0)).round() as usize).clamp(4, 48);
                 let rings = c.rings(&d.mesh, height, levels);
                 let off = c.out_of_round(&d.mesh, &rings);
-                self.circle = Some(CircleEdit { circle: c, height, levels, reach, rings, off });
+                let moves = c.apply(&d.mesh, &d.topo, &rings, reach);
+                self.circle = Some(CircleEdit { circle: c, height, levels, reach, rings, off, after: off, moves });
+                self.circle_show();
             }
             Err(e) => self.toast(e, true),
         }
     }
 
-    /// The rings again after the height or the levels changed.
-    pub fn circle_refit(&mut self) {
-        let (Some(d), Some(ce)) = (&self.doc, &mut self.circle) else { return };
-        ce.rings = ce.circle.rings(&d.mesh, ce.height, ce.levels);
-        ce.off = ce.circle.out_of_round(&d.mesh, &ce.rings);
-        self.circle_levels = ce.levels;
+    /// The circle placed, on the mesh at the strength set.
+    fn circle_show(&mut self) {
+        let (Some(d), Some(ce)) = (&mut self.doc, &mut self.circle) else { return };
+        show_moves(&mut d.mesh, &ce.moves, self.circle_strength, &mut self.dirty);
+        ce.after = ce.circle.out_of_round(&d.mesh, &ce.rings);
         self.overlay_gen += 1;
     }
 
+    fn circle_hide(&mut self) {
+        let (Some(d), Some(ce)) = (&mut self.doc, &self.circle) else { return };
+        show_moves(&mut d.mesh, &ce.moves, 0.0, &mut self.dirty);
+        self.overlay_gen += 1;
+    }
+
+    pub fn circle_set_strength(&mut self, s: f64) {
+        self.circle_strength = s.clamp(0.0, 1.0);
+        self.circle_show();
+    }
+
+    /// The rings again after the height, the levels or the reach changed.
+    pub fn circle_refit(&mut self) {
+        self.circle_hide();
+        let (Some(d), Some(ce)) = (&self.doc, &mut self.circle) else { return };
+        ce.rings = ce.circle.rings(&d.mesh, ce.height, ce.levels);
+        ce.off = ce.circle.out_of_round(&d.mesh, &ce.rings);
+        ce.moves = ce.circle.apply(&d.mesh, &d.topo, &ce.rings, ce.reach);
+        self.circle_show();
+    }
+
+    /// The circle placed goes into the history, at the strength set.
     pub fn circle_apply(&mut self) {
+        if self.circle.is_none() {
+            return;
+        }
+        self.circle_hide();
         let Some(ce) = self.circle.take() else { return };
         let Some(d) = &self.doc else { return };
-        let moves = ce.circle.apply(&d.mesh, &d.topo, &ce.rings, ce.reach);
-        let what = format!("Ø {} mm · {} mm high · {} rings", fmt(ce.circle.r * 2.0, 2), fmt(ce.height, 1), ce.rings.len());
+        let s = self.circle_strength;
+        let targets: Vec<(u32, DVec3)> = ce.moves.idx.iter().zip(ce.moves.from.iter().zip(&ce.moves.to)).map(|(&v, (a, b))| (v, *a + (*b - *a) * s)).collect();
+        let moves = Moves::new(&d.mesh, targets);
+        let what = format!("Ø {} mm · {} mm high · {} rings · {:.0} %", fmt(ce.circle.r * 2.0, 2), fmt(ce.height, 1), ce.rings.len(), s * 100.0);
         let n = moves.idx.len();
         let mx = moves.max_move();
         self.commit(Tool::Circle, what, moves);
         let after = self.doc.as_ref().map(|d| ce.circle.out_of_round(&d.mesh, &ce.rings)).unwrap_or(0.0);
-        self.toast(format!("Made round: {n} vertices moved, {} mm at most · out of round {} → {} mm", fmt(mx, 2), fmt(ce.off, 3), fmt(after, 3)), false);
+        self.toast(format!("Made round at {:.0} %: {n} vertices moved, {} mm at most · out of round {} → {} mm", s * 100.0, fmt(mx, 2), fmt(ce.off, 3), fmt(after, 3)), false);
         self.overlay_gen += 1;
     }
+
+    /// The circle placed taken away.
+    pub fn circle_cancel(&mut self) {
+        self.circle_hide();
+        self.circle = None;
+        self.overlay_gen += 1;
+    }
+}
+
+/// Moved vertices shown at a strength (0: where they were).
+fn show_moves(m: &mut Mesh, mv: &Moves, s: f64, dirty: &mut Vec<u32>) {
+    for k in 0..mv.idx.len() {
+        m.pos[mv.idx[k] as usize] = mv.from[k] + (mv.to[k] - mv.from[k]) * s;
+    }
+    dirty.extend_from_slice(&mv.idx);
 }
 
 /// A number with a decimal comma.
