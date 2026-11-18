@@ -35,6 +35,12 @@ extern "C" {
     fn focc_sphere(r: c_double) -> *mut FShape;
     fn focc_torus(big: c_double, small: c_double) -> *mut FShape;
     fn focc_prism(xy: *const c_double, smooth: *const c_int, n: c_int, h: c_double) -> *mut FShape;
+    fn focc_prism_cut(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int, h: c_double) -> *mut FShape;
+    fn focc_outline(o: *const c_double, n: *const c_double, xyz: *const c_double, count: c_int, closed: c_int, cut: *const c_int, abm: *const c_double) -> *mut FShape;
+    fn focc_disc(o: *const c_double, n: *const c_double, r: c_double) -> *mut FShape;
+    fn focc_extrude_edge(s: *const FShape, index: c_int, v: *const c_double, tag: i64) -> *mut FShape;
+    fn focc_thicken(s: *const FShape, t: c_double, salt: i64) -> *mut FShape;
+    fn focc_round(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
     fn focc_transform(s: *const FShape, m: *const c_double) -> *mut FShape;
     fn focc_fuse(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_cut(a: *const FShape, b: *const FShape) -> *mut FShape;
@@ -50,6 +56,9 @@ extern "C" {
     fn focc_extrude(s: *const FShape, dx: c_double, dy: c_double, dz: c_double) -> *mut FShape;
     fn focc_imprint(s: *const FShape, tool: *const FShape) -> *mut FShape;
     fn focc_face_distance(s: *const FShape, face: c_int, p: *const c_double) -> c_double;
+    fn focc_vertex_points(s: *const FShape, xyz: *mut c_double, cap: c_int) -> c_int;
+    fn focc_sub_vertices(s: *const FShape, kind: c_int, index: c_int, out: *mut c_int, cap: c_int) -> c_int;
+    fn focc_move_vertices(s: *const FShape, idx: *const c_int, xyz: *const c_double, n: c_int) -> *mut FShape;
     fn focc_face_count(s: *const FShape) -> c_int;
     fn focc_face_info(s: *const FShape, index: c_int, out: *mut c_double) -> c_int;
     fn focc_set_tags(s: *mut FShape, tags: *const i64, n: c_int);
@@ -383,6 +392,47 @@ impl Shape {
         let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
         shape(unsafe { focc_prism(xy.as_ptr(), sm.as_ptr(), points.len() as c_int, h) })
     }
+    /// The same with corners cut: per point, None, or (chamfer, start,
+    /// middle, end): a fillet is the arc through the three points, a
+    /// chamfer the straight side from start to end.
+    pub fn prism_cut(points: &[[f64; 2]], smooth: &[bool], cuts: &[Option<(bool, [f64; 2], [f64; 2], [f64; 2])>], h: f64) -> Result<Shape, String> {
+        let xy: Vec<f64> = points.iter().flat_map(|p| [p[0], p[1]]).collect();
+        let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
+        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((true, ..)) => 2, Some(_) => 1, None => 0 }).collect();
+        let abm: Vec<f64> = (0..points.len()).flat_map(|i| match cuts.get(i).copied().flatten() { Some((_, a, m, b)) => [a[0], a[1], m[0], m[1], b[0], b[1]], None => [0.0; 6] }).collect();
+        shape(unsafe { focc_prism_cut(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int, h) })
+    }
+
+    /// A flat outline (Forme Rectify's Pen) through `pts` on the plane
+    /// through `o` facing `n`: closed, a face facing `n`; open, a line (its
+    /// edges free). Corner i cut by an arc through `cuts[i]` (its start,
+    /// middle and end); an open line's ends are never cut.
+    pub fn outline(o: [f64; 3], n: [f64; 3], pts: &[[f64; 3]], closed: bool, cuts: &[Option<[[f64; 3]; 3]>]) -> Result<Shape, String> {
+        let xyz: Vec<f64> = pts.iter().flatten().copied().collect();
+        let ck: Vec<c_int> = (0..pts.len()).map(|i| cuts.get(i).copied().flatten().is_some() as c_int).collect();
+        let abm: Vec<f64> = (0..pts.len()).flat_map(|i| cuts.get(i).copied().flatten().map(|c| [c[0], c[1], c[2]]).unwrap_or([[0.0; 3]; 3]).into_iter().flatten()).collect();
+        shape(unsafe { focc_outline(o.as_ptr(), n.as_ptr(), xyz.as_ptr(), pts.len() as c_int, closed as c_int, ck.as_ptr(), abm.as_ptr()) })
+    }
+    /// A disc of radius `r` round `o`, facing `n`.
+    pub fn disc(o: [f64; 3], n: [f64; 3], r: f64) -> Result<Shape, String> {
+        shape(unsafe { focc_disc(o.as_ptr(), n.as_ptr(), r) })
+    }
+    /// Edge `edge` (1-based) pulled along `v` into a new face (tag `tag`),
+    /// sewn to the faces along it; a free edge (a line's) becomes its side.
+    pub fn extrude_edge(&self, edge: i32, v: [f64; 3], tag: i64) -> Result<Shape, String> {
+        shape(unsafe { focc_extrude_edge(self.0, edge, v.as_ptr(), tag) })
+    }
+    /// The faces made a solid `t` thick along their normals (< 0: the
+    /// other way); the tops and sides get tags mixed from their face's and
+    /// `salt`.
+    pub fn thicken(&self, t: f64, salt: i64) -> Result<Shape, String> {
+        shape(unsafe { focc_thicken(self.0, t, salt) })
+    }
+    /// Edges rounded with radius `r` on the shape's faces (a solid or a
+    /// sheet), free edges kept; the new faces get `fresh`.
+    pub fn round(&self, edges: &[i32], r: f64, fresh: i64) -> Result<Shape, String> {
+        shape(unsafe { focc_round(self.0, edges.as_ptr(), edges.len() as c_int, r, fresh) })
+    }
 
     /// Copy moved by an affine map: 3 rows of 4 (rotation × uniform scale,
     /// a mirror allowed, then translation).
@@ -482,6 +532,36 @@ impl Shape {
     pub fn face_distance(&self, face: usize, p: [f64; 3]) -> Option<f64> {
         let d = unsafe { focc_face_distance(self.0, face as c_int, p.as_ptr()) };
         (d >= 0.0).then_some(d)
+    }
+    /// The vertices' points, vertex `i` (1-based in OpenCascade's vertex
+    /// map) at `[i - 1]`.
+    pub fn vertex_points(&self) -> Vec<[f64; 3]> {
+        let n = unsafe { focc_vertex_points(self.0, std::ptr::null_mut(), 0) }.max(0) as usize;
+        let mut v = vec![0.0f64; 3 * n];
+        unsafe { focc_vertex_points(self.0, v.as_mut_ptr(), n as c_int) };
+        v.chunks(3).map(|c| [c[0], c[1], c[2]]).collect()
+    }
+    /// The vertices (1-based) of an edge (1-based index in the edge map).
+    pub fn edge_vertices(&self, edge: i32) -> Vec<i32> {
+        self.sub_vertices(1, edge)
+    }
+    /// The vertices (1-based) of a face (0-based).
+    pub fn face_vertices(&self, face: usize) -> Vec<i32> {
+        self.sub_vertices(2, face as i32)
+    }
+    fn sub_vertices(&self, kind: i32, index: i32) -> Vec<i32> {
+        let mut v = vec![0 as c_int; 256];
+        let n = unsafe { focc_sub_vertices(self.0, kind, index, v.as_mut_ptr(), v.len() as c_int) };
+        v.truncate(n.max(0) as usize);
+        v
+    }
+    /// The solid with vertices moved (1-based index, new point), the faces
+    /// round them following (flat faces with straight edges for now; a bent
+    /// four-sided face becomes a bilinear patch). Tags stay.
+    pub fn move_vertices(&self, moves: &[(i32, [f64; 3])]) -> Result<Shape, String> {
+        let idx: Vec<c_int> = moves.iter().map(|m| m.0).collect();
+        let xyz: Vec<f64> = moves.iter().flat_map(|m| m.1).collect();
+        shape(unsafe { focc_move_vertices(self.0, idx.as_ptr(), xyz.as_ptr(), idx.len() as c_int) })
     }
     pub fn face_count(&self) -> usize {
         unsafe { focc_face_count(self.0) }.max(0) as usize
@@ -740,6 +820,43 @@ mod tests {
         let p = Shape::prism(&l, &[false; 6], 2.0).unwrap();
         let all: Vec<i32> = p.edges(2).iter().map(|e| e.index).collect();
         assert!(p.fillet(&all, 0.5, 99).unwrap().is_valid());
+    }
+
+    #[test]
+    fn vertices_moved() {
+        // a 20 mm cube centred: its top face (y = 10) moved up, then aside
+        let mut cube = Shape::cuboid(20.0, 20.0, 20.0).unwrap();
+        let n = cube.face_count();
+        cube.set_tags(&(0..n as i64).collect::<Vec<_>>());
+        let pts = cube.vertex_points();
+        let top: Vec<i32> = (1..=pts.len() as i32).filter(|i| (pts[(*i - 1) as usize][1] - 10.0).abs() < 1e-6).collect();
+        assert_eq!(top.len(), 4);
+        let up = cube.move_vertices(&top.iter().map(|i| (*i, { let p = pts[(*i - 1) as usize]; [p[0], p[1] + 5.0, p[2]] })).collect::<Vec<_>>()).unwrap();
+        assert!((up.volume() - 20.0 * 20.0 * 25.0).abs() < 1e-6, "{}", up.volume());
+        let mut tags: Vec<i64> = (0..up.face_count()).map(|f| up.face_tag(f)).collect();
+        tags.sort();
+        assert_eq!(tags, (0..n as i64).collect::<Vec<_>>(), "each face keeps its tag");
+        let aside = cube.move_vertices(&top.iter().map(|i| (*i, { let p = pts[(*i - 1) as usize]; [p[0] + 6.0, p[1], p[2]] })).collect::<Vec<_>>()).unwrap();
+        assert!((aside.volume() - 8000.0).abs() < 1e-6, "a shear keeps the volume: {}", aside.volume());
+        // one edge of the top raised: two faces tilt, two stay flat and grow
+        let edge: Vec<i32> = top.iter().copied().filter(|i| pts[(*i - 1) as usize][2] > 0.0).collect();
+        let e = cube.move_vertices(&edge.iter().map(|i| (*i, { let p = pts[(*i - 1) as usize]; [p[0], p[1] + 4.0, p[2]] })).collect::<Vec<_>>()).unwrap();
+        assert!((e.volume() - (8000.0 + 0.5 * 4.0 * 20.0 * 20.0)).abs() < 1e-6, "{}", e.volume());
+        // one corner up: three faces bend into bilinear patches
+        let c = cube.move_vertices(&[(top[0], { let p = pts[(top[0] - 1) as usize]; [p[0], p[1] + 4.0, p[2]] })]).unwrap();
+        assert!(c.volume() > 8000.0 && c.volume() < 8000.0 + 4.0 * 400.0, "{}", c.volume());
+        // a block with a hole: its side face moved out, the top grows round the hole
+        let hole = Shape::cylinder(4.0, 40.0).unwrap();
+        let block = Shape::cuboid(40.0, 20.0, 20.0).unwrap().cut(&hole).unwrap();
+        let pts = block.vertex_points();
+        let side: Vec<(i32, [f64; 3])> = (1..=pts.len() as i32).filter(|i| (pts[(*i - 1) as usize][0] - 20.0).abs() < 1e-6).map(|i| { let p = pts[(i - 1) as usize]; (i, [p[0] + 5.0, p[1], p[2]]) }).collect();
+        assert_eq!(side.len(), 4);
+        let v0 = block.volume();
+        let b = block.move_vertices(&side).unwrap();
+        assert!((b.volume() - (v0 + 5.0 * 20.0 * 20.0)).abs() < 1e-6, "{} vs {}", b.volume(), v0);
+        // the top face (with the hole) cannot tilt
+        let top: Vec<(i32, [f64; 3])> = (1..=pts.len() as i32).filter(|i| { let p = pts[(*i - 1) as usize]; (p[1] - 10.0).abs() < 1e-6 && (p[0] - 20.0).abs() < 1e-6 }).map(|i| { let p = pts[(i - 1) as usize]; (i, [p[0], p[1] + 3.0, p[2]]) }).collect();
+        assert!(block.move_vertices(&top).is_err());
     }
 
     #[test]

@@ -1,10 +1,13 @@
 #![allow(deprecated)]
 //! Forme Rectify, the app (Romain, 18 nov. 2026: a third version of the
 //! software, from zero, only Forme NURBS's viewport and interface kept, in
-//! orange). A scan (a mesh made by an AI, or scanned) with a retopology in
-//! NURBS laid on it, semi-automatic; the scan itself never changes. No
-//! kernel, no OpenCascade.
+//! orange). A scan (a mesh made by an AI, or scanned) with clean shapes laid
+//! on it; the scan itself never changes. The Pen's and the Circle's shapes
+//! are exact B-rep bodies built by OpenCascade in the app's process
+//! (`body`, through `forme-occt`); the Slot's and the Box's are NURBS
+//! surfaces.
 
+pub mod body;
 pub mod camera;
 pub mod draw;
 pub mod files;

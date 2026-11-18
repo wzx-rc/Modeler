@@ -215,12 +215,15 @@ fn shade(i: MOut) -> vec4<f32> {
     }
     // less where it is seen edge on: the normal flips there from one
     // vertex to the next, and a full lift would tear the outline
-    let facing = smoothstep(0.0, 0.35, dot(n, d / max(dist, 1e-6)));
+    // (a body, its material's bit 15 set: moved off the scan as a whole
+    // already, so its faces stay joined at their edges)
+    let whole = (i.face & 0x8000u) != 0u;
+    let facing = select(smoothstep(0.0, 0.35, dot(n, d / max(dist, 1e-6))), 0.0, whole);
     let lifted = i.pos + n * ((0.12 + 0.0015 * dist) * facing);
     o.clip = project(lifted + d / max(dist, 1e-6) * (0.02 + 0.001 * dist));
     o.nrm = i.nrm;
     o.wpos = i.pos;
-    o.face = i.face;
+    o.face = i.face & 0x7fffu;
     return o;
 }
 

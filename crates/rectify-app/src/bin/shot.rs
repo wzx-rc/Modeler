@@ -1,36 +1,32 @@
 #![allow(deprecated)]
 //! forme-rectify-shot: runs the real app headless (egui + wgpu, a software
-//! GPU is fine) on a mesh, drives its tools with real mouse events and saves
-//! PNGs.
+//! GPU is fine) on a mesh, drives its tools with real mouse and key events
+//! and saves PNGs.
 //!
 //! cargo run --release -p rectify-app --bin forme-rectify-shot -- OUT_DIR MESH.obj [scenario prefix…]
 //!
+//! RECTIFY_DO="cmd args | cmd args | …": a script, screen points of the
+//! view with the interface (a capture's pixels / 2):
+//! `look fx,fy,fz,dist,yaw,pitch` (the camera: a point of the mesh's box in
+//! fractions; `cam x,y,z,dist,yaw,pitch`: a point in mm), `tool q|p|c|s|b`, `mode 1|2|3|4`, `click x,y …` (`sclick`
+//! with Shift, `cclick` with Ctrl), `drag x,y x,y …` (`sdrag`, `cdrag`;
+//! `hold`, `shold`: not released, `release`),
+//! `hover x,y` (`shover`), `key enter|esc|back|del`, `corner r`, `fillet
+//! r`, `thick t`, `shot NAME` (with the interface), `bare NAME` (the view
+//! alone), `alone NAME` (the shapes alone), `print` (the shapes, what is
+//! picked).
 //! RECTIFY_LOOK="fx,fy,fz,dist,yaw,pitch": the camera of the `look`
-//! scenario (a point of the mesh's box in fractions); RECTIFY_CIRCLE=
-//! "x,y;x,y": a Circle drag there (rim to rim, screen points of the bare
-//! view), the NURBS surface shown and kept (RECTIFY_HEIGHT, RECTIFY_LEVELS,
-//! RECTIFY_PROFILE=cylinder|cone|curve to set it first, RECTIFY_LOOK2 a
-//! second camera, RECTIFY_TAG the file names). RECTIFY_PATH="x,y;x,y;…"
-//! (add ";close" to close it): Path points clicked there (screen points of
-//! the bare view), RECTIFY_SMOOTH, RECTIFY_PLANES=0; RECTIFY_HOVER="x,y;…":
-//! what would catch the pointer there, printed. RECTIFY_SLOT="x,y;x,y": a
-//! Slot drag (end to end, screen points of the bare view), with
-//! RECTIFY_DEPTH, RECTIFY_LEVELS, RECTIFY_PROFILE=straight|tapered|curve;
-//! RECTIFY_BOX the same with the Box tool. Several drags separated by `|`
-//! are each kept and shown together, RECTIFY_TOOLS="b,c,s,…" the tool of
-//! each (Box, Circle, Slot). RECTIFY_LINE="x,y;x,y;…|…": pencil strokes
-//! with the Line tool (each a polyline through those points), then
-//! RECTIFY_PATCH="0;1;…" the paths kept clicked with the Patch tool (their
-//! places in the list), or "x,y" points of the bare view clicked (inside a
-//! cell of the paths: its patch, the one before kept). RECTIFY_FACE="x,y;…":
-//! clicks with the Face tool there (screen points of the bare view), each
-//! flat face's outline and patch printed and kept.
+//! scenario. RECTIFY_SLOT="x,y;x,y": a Slot drag (end to end, screen points
+//! of the bare view), with RECTIFY_DEPTH, RECTIFY_LEVELS,
+//! RECTIFY_PROFILE=straight|tapered|curve; RECTIFY_BOX the same with the
+//! Box tool. Several drags separated by `|` are each kept and shown
+//! together, RECTIFY_TOOLS="b,s,…" the tool of each.
 
 use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use glam::Vec3;
 use rectify_app::camera::ViewPreset;
 use rectify_app::draw::Drawer;
-use rectify_app::state::{AppState, Tool};
+use rectify_app::state::{AppState, SelMode, Tool};
 use rectify_app::theme;
 use rectify_core::Mesh;
 
@@ -100,6 +96,8 @@ struct Harness {
     pending: Vec<Event>,
     out: String,
     pending_tex: egui::TexturesDelta,
+    /// The keys held (Shift, Ctrl).
+    mods: Modifiers,
 }
 
 impl Harness {
@@ -108,7 +106,7 @@ impl Harness {
         let drawer = Drawer::new(&gpu.device, FMT);
         let ctx = egui::Context::default();
         theme::install(&ctx);
-        Harness { gpu, drawer, ctx, st: AppState::new(), t: 0.0, size: [1600.0, 900.0], ppp: 2.0, pending: vec![], out: out.to_string(), pending_tex: Default::default() }
+        Harness { gpu, drawer, ctx, st: AppState::new(), t: 0.0, size: [1600.0, 900.0], ppp: 2.0, pending: vec![], out: out.to_string(), pending_tex: Default::default(), mods: Modifiers::NONE }
     }
 
     fn raw(&mut self) -> RawInput {
@@ -116,7 +114,7 @@ impl Harness {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(self.size[0], self.size[1]))),
             time: Some(self.t),
             predicted_dt: 1.0 / 60.0,
-            events: std::mem::take(&mut self.pending),
+            events: std::iter::once(Event::ModifiersChanged(self.mods)).chain(std::mem::take(&mut self.pending)).collect(),
             focused: true,
             ..Default::default()
         };
@@ -139,48 +137,41 @@ impl Harness {
         }
     }
 
-    #[allow(dead_code)]
-    fn wait(&mut self) {
-        while self.st.job.is_some() {
-            self.step();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        self.steps(2);
-    }
-
     fn hover(&mut self, p: Pos2) {
         self.pending.push(Event::PointerMoved(p));
         self.steps(2);
     }
 
     fn click(&mut self, p: Pos2) {
+        self.pending.push(Event::PointerMoved(p));
+        self.step();
         for down in [true, false] {
             self.pending.push(Event::PointerMoved(p));
-            self.pending.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: down, modifiers: Modifiers::NONE });
+            self.pending.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: down, modifiers: self.mods });
             self.step();
         }
         self.steps(2);
     }
 
-    /// A left-button drag through world points (projected on screen); with
-    /// `hold`, the button stays down at the end (a stroke being painted).
+    /// A left-button drag through screen points; with `hold`, the button
+    /// stays down at the end.
     fn drag_screen(&mut self, pts: &[[f32; 2]], hold: bool) {
         let scr: Vec<Pos2> = pts.iter().map(|a| Pos2::new(a[0], a[1])).collect();
         let Some(&first) = scr.first() else { return };
         self.pending.push(Event::PointerMoved(first));
         self.step();
-        self.pending.push(Event::PointerButton { pos: first, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        self.pending.push(Event::PointerButton { pos: first, button: PointerButton::Primary, pressed: true, modifiers: self.mods });
         self.step();
         for w in scr.windows(2) {
-            for k in 1..=3 {
-                let t = k as f32 / 3.0;
+            for k in 1..=4 {
+                let t = k as f32 / 4.0;
                 self.pending.push(Event::PointerMoved(w[0] + (w[1] - w[0]) * t));
                 self.step();
             }
         }
         if !hold {
             let last = *scr.last().unwrap();
-            self.pending.push(Event::PointerButton { pos: last, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+            self.pending.push(Event::PointerButton { pos: last, button: PointerButton::Primary, pressed: false, modifiers: self.mods });
             self.step();
             self.steps(2);
         }
@@ -188,9 +179,17 @@ impl Harness {
 
     fn release(&mut self) {
         let p = self.ctx.input(|i| i.pointer.latest_pos()).unwrap_or(Pos2::ZERO);
-        self.pending.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        self.pending.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: self.mods });
         self.step();
         self.steps(2);
+    }
+
+    fn key(&mut self, key: egui::Key) {
+        for pressed in [true, false] {
+            self.pending.push(Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: self.mods });
+            self.step();
+        }
+        self.steps(1);
     }
 
     fn shot(&mut self, name: &str) {
@@ -239,7 +238,7 @@ fn nums(s: &str) -> Vec<f32> {
 /// placed, alone, from a second camera, kept.
 fn slot_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]], tool: Tool) {
     use rectify_core::circle::ProfileKind;
-    h.st.set_tool(Tool::Navigate);
+    h.st.set_tool(Tool::Select);
     h.st.bare = true;
     h.shot(&format!("{name}-0-before"));
     let world: Vec<glam::Vec3> = pts.iter().filter_map(|p| h.st.pick_hit(*p).map(|(_, x)| x.as_vec3())).collect();
@@ -311,7 +310,7 @@ fn slot_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]], tool: Tool) {
 /// Several Slot drags ("x,y;x,y|x,y;x,y…"), each kept: all of them shown
 /// at the end (and from RECTIFY_LOOK2).
 fn slot_many(h: &mut Harness, name: &str, s: &str, tools: &[Tool]) {
-    h.st.set_tool(Tool::Navigate);
+    h.st.set_tool(Tool::Select);
     h.st.bare = true;
     h.shot(&format!("{name}-0-before"));
     let drags: Vec<Vec<glam::Vec3>> = s.split('|').map(|d| d.split(';').map(nums).filter(|v| v.len() == 2).filter_map(|v| h.st.pick_hit([v[0], v[1]]).map(|(_, x)| x.as_vec3())).collect()).collect();
@@ -328,7 +327,7 @@ fn slot_many(h: &mut Harness, name: &str, s: &str, tools: &[Tool]) {
             None => eprintln!("{:?} {name} #{k}: {}", h.st.tool, h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
         }
         h.st.slot_apply();
-        h.st.set_tool(Tool::Navigate);
+        h.st.set_tool(Tool::Select);
     }
     h.shot(&format!("{name}-1-kept"));
     let views = |h: &mut Harness, tag: &str| {
@@ -347,274 +346,157 @@ fn slot_many(h: &mut Harness, name: &str, s: &str, tools: &[Tool]) {
     }
 }
 
-/// Pencil strokes with the Line tool ("x,y;x,y;…|…", screen points of the
-/// bare view, each stroke a polyline drawn through them at 4-point steps
-/// with a slight tremble): each made, set, then kept by the next; all of
-/// them shown at the end (and from RECTIFY_LOOK2).
-fn line_strokes(h: &mut Harness, name: &str, s: &str) {
-    use rectify_core::path::{PieceKind, SnapKind};
-    h.st.set_tool(Tool::Navigate);
-    h.st.bare = true;
-    h.shot(&format!("{name}-0-before"));
-    // each stroke densified on screen, then put on the scan
-    let strokes: Vec<Vec<glam::Vec3>> = s
-        .split('|')
-        .map(|d| {
-            let pts: Vec<[f32; 2]> = d.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
-            let mut dense: Vec<[f32; 2]> = vec![];
-            let mut k = 0usize;
-            for w in pts.windows(2) {
-                let l = (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
-                let n = (l / 4.0).ceil().max(1.0) as usize;
-                let (dx, dy) = ((w[1][0] - w[0][0]) / l.max(1e-6), (w[1][1] - w[0][1]) / l.max(1e-6));
-                for q in 0..n {
-                    let t = q as f32 / n as f32;
-                    let tremble = (k as f32 * 0.7).sin() * 0.8;
-                    k += 1;
-                    dense.push([w[0][0] + (w[1][0] - w[0][0]) * t - dy * tremble, w[0][1] + (w[1][1] - w[0][1]) * t + dx * tremble]);
-                }
-            }
-            if let Some(l) = pts.last() {
-                dense.push(*l);
-            }
-            dense.iter().filter_map(|p| h.st.pick_hit(*p).map(|(_, x)| x.as_vec3())).collect()
-        })
-        .collect();
-    h.st.bare = false;
-    h.st.set_tool(Tool::Line);
-    h.steps(2);
-    for (k, w) in strokes.iter().enumerate() {
-        let view = h.st.view();
-        let scr: Vec<[f32; 2]> = w.iter().filter_map(|x| view.project(*x)).collect();
-        let t = std::time::Instant::now();
-        h.drag_screen(&scr, false);
-        match &h.st.path {
-            Some(pe) => {
-                let count = |kd: SnapKind| pe.pts.iter().filter(|s| s.kind == kd && !s.through).count();
-                let through = pe.pts.iter().filter(|s| s.through).count();
-                let kinds = pe.built.as_ref().map(|b| {
-                    let c = |x: PieceKind| b.kinds.iter().filter(|&&y| y == x).count();
-                    format!("{} line {} fold {} scan · {:.1} mm · {} ctrl · off {:.3}", c(PieceKind::Line), c(PieceKind::Fold), c(PieceKind::Scan), b.length, b.curve.pts.len(), b.off)
-                });
-                eprintln!(
-                    "LINE {name} #{k}: {} pts ({} corner {} edge {} face {} scan {} joined, {through} through){} · {} · {:.2}s",
-                    pe.pts.len(),
-                    count(SnapKind::Corner),
-                    count(SnapKind::Edge),
-                    count(SnapKind::Plane),
-                    count(SnapKind::Scan),
-                    count(SnapKind::Path),
-                    if pe.params.closed { " closed" } else { "" },
-                    kinds.unwrap_or_default(),
-                    t.elapsed().as_secs_f64()
-                );
-            }
-            None => eprintln!("LINE {name} #{k}: {}", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
-        }
-        if k + 1 == strokes.len() {
-            h.shot(&format!("{name}-1-last"));
+/// The shapes and what is picked, printed.
+fn print_state(h: &Harness, what: &str) {
+    eprintln!("== {what}: tool {:?}, mode {:?}, {} shapes, picked {:?}", h.st.tool, h.st.mode, h.st.objects.len(), h.st.sel);
+    for (i, o) in h.st.objects.iter().enumerate() {
+        match o.body() {
+            Some(b) => eprintln!(
+                "  {} {:?}: {} · {} faces, {} edges, {} vertices, size {:.2}{}{}",
+                i + 1,
+                o.tool,
+                o.what,
+                b.built.topo.faces.len(),
+                b.built.topo.edges.len(),
+                b.built.verts.len(),
+                b.built.size,
+                if b.built.solid() { " · solid" } else { "" },
+                b.built.failed.as_ref().map(|f| format!(" · FAILED step {}: {}", f.0, f.1)).unwrap_or_default()
+            ),
+            None => eprintln!("  {} {:?}: {}", i + 1, o.tool, o.what),
         }
     }
-    h.st.path_apply();
-    h.shot(&format!("{name}-2-kept"));
-    let views = |h: &mut Harness, tag: &str| {
-        h.st.bare = true;
-        h.shot(&format!("{name}-{tag}"));
-        h.st.hide_scan = true;
-        h.shot(&format!("{name}-{tag}-alone"));
-        h.st.hide_scan = false;
-        h.st.bare = false;
-    };
-    views(h, "3-view");
-    // RECTIFY_PATCH="0;1;…": the paths kept (their places in the list)
-    // clicked with the Patch tool, at their middle; "x,y" a point of the
-    // bare view clicked instead
-    let mut tag = "3-view-2";
-    if let Ok(s) = std::env::var("RECTIFY_PATCH") {
-        h.st.set_tool(Tool::Patch);
-        h.steps(2);
-        for e in s.split(';').map(|e| e.trim()).filter(|e| !e.is_empty()) {
-            let world = if let Ok(i) = e.parse::<usize>() {
-                match h.st.objects.get(i).map(|o| &o.shape) {
-                    Some(rectify_app::state::Shape::Curve(c)) => {
-                        let (a, b) = c.domain();
-                        Some(c.eval((a + b) * 0.5).as_vec3())
+    if let Some(pe) = &h.st.pen {
+        eprintln!("  pen: {} points on {} plane n {:.3},{:.3},{:.3} o {:.2},{:.2},{:.2}", pe.pts.len(), if pe.flat { "a flat" } else { "the tangent" }, pe.frame.n.x, pe.frame.n.y, pe.frame.n.z, pe.frame.o.x, pe.frame.o.y, pe.frame.o.z);
+        let on: Vec<String> = pe.pts.iter().map(|q| h.st.project(pe.frame.to3(*q)).map(|s| format!("{:.0},{:.0}", s[0], s[1])).unwrap_or_default()).collect();
+        eprintln!("  pen points on screen: {}", on.join(" "));
+    }
+    if let Some(hv) = &h.st.pen_hover {
+        eprintln!("  pen hover: {:?} at {:.2},{:.2},{:.2}", hv.snap, hv.p.x, hv.p.y, hv.p.z);
+    }
+    if let Some(pl) = &h.st.pen_plane {
+        eprintln!("  plane under the pointer: {} n {:.3},{:.3},{:.3}", if pl.flat { "flat" } else { "tangent" }, pl.frame.n.x, pl.frame.n.y, pl.frame.n.z);
+    }
+    if let Some(t) = &h.st.toast {
+        eprintln!("  toast: {}", t.text);
+    }
+}
+
+/// Runs a RECTIFY_DO script (see the top of this file).
+fn script(h: &mut Harness, s: &str) {
+    let shift = Modifiers { shift: true, ..Modifiers::NONE };
+    let ctrl = Modifiers { ctrl: true, command: true, ..Modifiers::NONE };
+    for cmd in s.split('|').map(|c| c.trim()).filter(|c| !c.is_empty()) {
+        let mut it = cmd.split_whitespace();
+        let op = it.next().unwrap_or("");
+        let args: Vec<&str> = it.collect();
+        let pts: Vec<[f32; 2]> = args.iter().map(|a| nums(a)).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
+        let num = args.first().and_then(|a| a.parse::<f64>().ok()).unwrap_or(0.0);
+        let t0 = std::time::Instant::now();
+        let mods = match op {
+            "sclick" | "shover" | "sdrag" | "shold" => shift,
+            "cclick" | "cdrag" => ctrl,
+            _ => Modifiers::NONE,
+        };
+        h.mods = mods;
+        h.steps(1);
+        match op {
+            "look" => {
+                let v = nums(args.first().copied().unwrap_or(""));
+                if v.len() == 6 {
+                    look(h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+                    h.steps(2);
+                }
+            }
+            "cam" => {
+                let v = nums(args.first().copied().unwrap_or(""));
+                if v.len() == 6 {
+                    h.st.camera.target = Vec3::new(v[0], v[1], v[2]);
+                    h.st.camera.dist = v[3];
+                    h.st.camera.yaw = v[4];
+                    h.st.camera.pitch = v[5];
+                    h.steps(2);
+                }
+            }
+            "tool" => {
+                let t = match args.first().copied().unwrap_or("q") {
+                    "p" => Tool::Pen,
+                    "c" => Tool::Circle,
+                    "s" => Tool::Slot,
+                    "b" => Tool::Box,
+                    _ => Tool::Select,
+                };
+                h.st.set_tool(t);
+                h.steps(2);
+            }
+            "mode" => {
+                let m = match num as i32 {
+                    1 => SelMode::Vertex,
+                    2 => SelMode::Edge,
+                    3 => SelMode::Face,
+                    _ => SelMode::Object,
+                };
+                h.st.set_mode(m);
+                h.steps(2);
+            }
+            "click" | "sclick" | "cclick" => {
+                for p in &pts {
+                    h.click(Pos2::new(p[0], p[1]));
+                }
+            }
+            "hover" | "shover" => {
+                for p in &pts {
+                    h.hover(Pos2::new(p[0], p[1]));
+                }
+            }
+            "drag" | "sdrag" | "cdrag" => h.drag_screen(&pts, false),
+            "hold" | "shold" => h.drag_screen(&pts, true),
+            "release" => {
+                h.release();
+                h.steps(2);
+            }
+            "key" => {
+                let k = match args.first().copied().unwrap_or("") {
+                    "enter" => egui::Key::Enter,
+                    "esc" => egui::Key::Escape,
+                    "back" => egui::Key::Backspace,
+                    "del" => egui::Key::Delete,
+                    other => {
+                        eprintln!("unknown key {other}");
+                        continue;
                     }
-                    _ => None,
+                };
+                h.key(k);
+            }
+            "corner" => {
+                h.st.set_corners(num, false);
+                h.steps(2);
+            }
+            "fillet" => {
+                h.st.make_fillet(num);
+                h.st.end_live();
+                h.steps(2);
+            }
+            "thick" => {
+                if let Some(o) = h.st.sel.first().map(|c| c.obj()) {
+                    h.st.set_thickness(o, num, false);
                 }
-            } else {
-                let v = nums(e);
+                h.steps(2);
+            }
+            "shot" => h.shot(args.first().copied().unwrap_or("x")),
+            "bare" | "alone" => {
                 h.st.bare = true;
-                h.steps(1);
-                let w = if v.len() == 2 { h.st.pick_hit([v[0], v[1]]).map(|(_, x)| x.as_vec3()) } else { None };
+                h.st.hide_scan = op == "alone";
+                h.shot(args.first().copied().unwrap_or("x"));
                 h.st.bare = false;
-                h.steps(1);
-                w
-            };
-            let Some(x) = world else {
-                eprintln!("PATCH {name}: nothing at {e}");
-                continue;
-            };
-            let Some(sp) = h.st.view().project(x) else { continue };
-            let on = h.st.curve_at(sp);
-            let t = std::time::Instant::now();
-            h.click(Pos2::new(sp[0], sp[1]));
-            match (&h.st.patch, on) {
-                (Some(pe), None) => match &pe.made {
-                    Ok(pt) => eprintln!("PATCH {name} inside {e}: paths {:?} · {}x{} spans · off {:.3} · gap {:.3} · {:.2}s", pe.picked, pt.spans[0], pt.spans[1], pt.off, pt.gap, t.elapsed().as_secs_f64()),
-                    Err(er) => eprintln!("PATCH {name} inside {e}: paths {:?} · {er}", pe.picked),
-                },
-                (None, None) => eprintln!("PATCH {name} inside {e}: {}", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
-                (_, Some(i)) => eprintln!("PATCH {name} on path {i}"),
+                h.st.hide_scan = false;
+                h.steps(2);
             }
+            "print" => print_state(h, args.first().copied().unwrap_or("")),
+            _ => eprintln!("unknown command: {cmd}"),
         }
-        let t = std::time::Instant::now();
-        h.st.patch_rebuild();
-        let el = t.elapsed().as_secs_f64();
-        match &h.st.patch {
-            Some(pe) => match &pe.made {
-                Ok(pt) => eprintln!("PATCH {name}: {} paths · {}x{} spans · off {:.3} · gap {:.3} · {:.2}s", pe.picked.len(), pt.spans[0], pt.spans[1], pt.off, pt.gap, el),
-                Err(e) => eprintln!("PATCH {name}: {} paths · {e}", pe.picked.len()),
-            },
-            None => eprintln!("PATCH {name}: no path picked"),
-        }
-        h.shot(&format!("{name}-4-patch"));
-        h.st.patch_apply();
-        views(h, "5-view");
-        tag = "5-view-2";
-    }
-    if let Some(v) = std::env::var("RECTIFY_LOOK2").map(|s| nums(&s)).ok().filter(|v| v.len() == 6) {
-        look(h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
-        views(h, tag);
-    }
-}
-
-/// Clicks with the Face tool ("x,y;…", screen points of the bare view): each
-/// face found, its outline and its patch printed, the patch shown then kept
-/// by the next click; all of them shown at the end (and from RECTIFY_LOOK2).
-fn face_clicks(h: &mut Harness, name: &str, s: &str) {
-    h.st.set_tool(Tool::Navigate);
-    h.st.bare = true;
-    h.steps(1);
-    h.shot(&format!("{name}-0-before"));
-    if std::env::var("RECTIFY_ZEBRA").is_ok() {
-        h.st.settings.zebra = true;
-        h.shot(&format!("{name}-0-zebra"));
-        h.st.settings.zebra = false;
-    }
-    let world: Vec<glam::Vec3> = s.split(';').map(nums).filter(|v| v.len() == 2).filter_map(|v| h.st.pick_hit([v[0], v[1]]).map(|(_, x)| x.as_vec3())).collect();
-    h.st.bare = false;
-    h.st.set_tool(Tool::Face);
-    h.steps(2);
-    for (k, x) in world.iter().enumerate() {
-        let Some(sp) = h.st.view().project(*x) else { continue };
-        let t = std::time::Instant::now();
-        h.click(Pos2::new(sp[0], sp[1]));
-        let el = t.elapsed().as_secs_f64();
-        match (&h.st.face_info, &h.st.patch) {
-            (Some(fi), Some(pe)) => {
-                let out = h.st.objects.last().map(|o| o.what.clone()).unwrap_or_default();
-                match &pe.made {
-                    Ok(pt) => eprintln!("FACE {name} #{k}: {:.1} mm² · {} holes · {out} · patch {}x{} spans · off {:.3} · gap {:.3} · passed {:.0}% · {el:.2}s", fi.area, fi.holes, pt.spans[0], pt.spans[1], pt.off, pt.gap, pt.passed * 100.0),
-                    Err(e) => eprintln!("FACE {name} #{k}: {:.1} mm² · {} holes · {out} · patch: {e} · {el:.2}s", fi.area, fi.holes),
-                }
-            }
-            _ => eprintln!("FACE {name} #{k}: {}", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
-        }
-        h.shot(&format!("{name}-1-face{k}"));
-    }
-    h.st.patch_apply();
-    h.st.set_tool(Tool::Navigate);
-    h.shot(&format!("{name}-2-kept"));
-    let views = |h: &mut Harness, tag: &str| {
-        h.st.bare = true;
-        h.shot(&format!("{name}-{tag}"));
-        h.st.hide_scan = true;
-        h.shot(&format!("{name}-{tag}-alone"));
-        h.st.hide_scan = false;
-        h.st.bare = false;
-    };
-    views(h, "3-view");
-    if let Some(v) = std::env::var("RECTIFY_LOOK2").map(|s| nums(&s)).ok().filter(|v| v.len() == 6) {
-        look(h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
-        views(h, "3-view-2");
-    }
-}
-
-/// Points clicked with the Path tool (screen points of the bare view): the
-/// next segment shown before the last click, the curve placed (with the
-/// interface, then the view alone), kept.
-fn path_clicks(h: &mut Harness, name: &str, pts: &[[f32; 2]], close: bool) {
-    h.st.set_tool(Tool::Navigate);
-    h.st.bare = true;
-    h.shot(&format!("{name}-0-before"));
-    let world: Vec<glam::Vec3> = pts.iter().filter_map(|p| h.st.pick_hit(*p).map(|(_, x)| x.as_vec3())).collect();
-    h.st.bare = false;
-    let env = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<f64>().ok());
-    if let Some(v) = env("RECTIFY_SMOOTH") {
-        h.st.path_params.smooth = v;
-    }
-    if env("RECTIFY_PLANES") == Some(0.0) {
-        h.st.path_params.planes = false;
-    }
-    h.st.set_tool(Tool::Path);
-    h.steps(2);
-    let view = h.st.view();
-    let scr: Vec<Pos2> = world.iter().filter_map(|x| view.project(*x)).map(|a| Pos2::new(a[0], a[1])).collect();
-    let t = std::time::Instant::now();
-    for (i, &p) in scr.iter().enumerate() {
-        h.hover(p);
-        if i + 1 == scr.len() && i > 0 {
-            h.shot(&format!("{name}-1-next"));
-        }
-        h.click(p);
-    }
-    if close && scr.len() >= 3 {
-        // on the first point as drawn (where it went)
-        let f = h.st.path_screen()[0];
-        h.hover(Pos2::new(f[0], f[1]));
-        h.click(Pos2::new(f[0], f[1]));
-    }
-    eprintln!("{} points placed in {:.2}s", scr.len(), t.elapsed().as_secs_f64());
-    // the pointer away from the path
-    h.hover(Pos2::new(h.st.view_rect[2] - 30.0, h.st.view_rect[3] - 30.0));
-    match &h.st.path {
-        Some(pe) => {
-            for (i, s) in pe.pts.iter().enumerate() {
-                eprintln!("  point {i}: {:?} {:.0}° at {:.3},{:.3},{:.3} ({:.3} mm from the click) planes {}", s.kind, s.angle, s.p.x, s.p.y, s.p.z, (s.p - s.hit).length(), s.planes.iter().map(|p| format!("[n {:.2},{:.2},{:.2} rms {:.3} area {:.1}]", p.n.x, p.n.y, p.n.z, p.rms, p.area)).collect::<Vec<_>>().join(" "));
-            }
-            if let Some(b) = &pe.built {
-                eprintln!("PATH {name}: {:?} · {} control points · {:.2} mm · off {:.3} · closed {}", b.kinds, b.curve.pts.len(), b.length, b.off, pe.params.closed);
-            }
-        }
-        None => eprintln!("PATH {name}: none ({})", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
-    }
-    h.shot(&format!("{name}-2-placed"));
-    let views = |h: &mut Harness, tag: &str| {
-        h.st.bare = true;
-        h.shot(&format!("{name}-{tag}"));
-        h.st.hide_scan = true;
-        h.shot(&format!("{name}-{tag}-alone"));
-        h.st.hide_scan = false;
-        h.st.bare = false;
-    };
-    views(h, "3-path");
-    if let Some(v) = std::env::var("RECTIFY_LOOK2").map(|s| nums(&s)).ok().filter(|v| v.len() == 6) {
-        let cam = (h.st.camera.target, h.st.camera.dist, h.st.camera.yaw, h.st.camera.pitch);
-        look(h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
-        h.shot(&format!("{name}-2-placed-2"));
-        views(h, "3-path-2");
-        h.st.camera.target = cam.0;
-        h.st.camera.dist = cam.1;
-        h.st.camera.yaw = cam.2;
-        h.st.camera.pitch = cam.3;
-    }
-    if h.st.path.is_some() {
-        h.st.path_apply();
-        if let Some(t) = &h.st.toast {
-            eprintln!("{}", t.text);
-        }
-        h.shot(&format!("{name}-4-kept"));
+        h.mods = Modifiers::NONE;
+        eprintln!("[{cmd}] {:.2}s", t0.elapsed().as_secs_f64());
     }
 }
 
@@ -631,6 +513,10 @@ fn main() {
     h.st.set_mesh(m, &name);
     eprintln!("loaded in {:.1}s", t.elapsed().as_secs_f64());
     h.steps(3);
+    if let Ok(s) = std::env::var("RECTIFY_DO") {
+        script(&mut h, &s);
+        return;
+    }
     if want("ui") {
         h.st.camera.preset(ViewPreset::Perspective);
         h.st.frame_all();
@@ -640,42 +526,13 @@ fn main() {
         let v = std::env::var("RECTIFY_LOOK").map(|s| nums(&s)).unwrap_or_default();
         let v = if v.len() == 6 { v } else { vec![0.3, 0.72, 0.5, 60.0, 0.35, 0.1] };
         look(&mut h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
-        if let Ok(s) = std::env::var("RECTIFY_HOVER") {
-            h.st.bare = true;
-            h.steps(2);
-            for v in s.split(';').map(nums).filter(|v| v.len() == 2) {
-                let t = std::time::Instant::now();
-                match h.st.snap_at([v[0], v[1]], false) {
-                    Some(sn) => eprintln!("HOVER {},{}: {:?} {:.0}° at {:.3},{:.3},{:.3} ({:.3} mm off) {} planes [{}] in {:.3}s", v[0], v[1], sn.kind, sn.angle, sn.p.x, sn.p.y, sn.p.z, (sn.p - sn.hit).length(), sn.planes.len(), sn.planes.iter().map(|p| format!("n {:.2},{:.2},{:.2} rms {:.3} area {:.1}", p.n.x, p.n.y, p.n.z, p.rms, p.area)).collect::<Vec<_>>().join(" | "), t.elapsed().as_secs_f64()),
-                    None => eprintln!("HOVER {},{}: nothing", v[0], v[1]),
-                }
-            }
-            h.st.bare = false;
-        }
-        if let Ok(s) = std::env::var("RECTIFY_PATH") {
-            let close = s.contains("close");
-            let pts: Vec<[f32; 2]> = s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
-            let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "path".into());
-            path_clicks(&mut h, &tag, &pts, close);
-            return;
-        }
-        if let Ok(s) = std::env::var("RECTIFY_FACE") {
-            let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "face".into());
-            face_clicks(&mut h, &tag, &s.replace(' ', ""));
-            return;
-        }
-        if let Ok(s) = std::env::var("RECTIFY_LINE") {
-            let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "line".into());
-            line_strokes(&mut h, &tag, &s.replace(' ', ""));
-            return;
-        }
         // RECTIFY_SLOT / RECTIFY_BOX: one drag, or several separated by |
         // (RECTIFY_TOOLS="s,b,…" picks the tool of each)
         let (var, tool) = if std::env::var("RECTIFY_BOX").is_ok() { ("RECTIFY_BOX", Tool::Box) } else { ("RECTIFY_SLOT", Tool::Slot) };
         if let Ok(s) = std::env::var(var).map(|s| s.replace(' ', "")) {
             if s.contains('|') {
                 let tools: Vec<Tool> = match std::env::var("RECTIFY_TOOLS") {
-                    Ok(t) => t.split(',').map(|k| match k.trim() { "b" => Tool::Box, "c" => Tool::Circle, _ => Tool::Slot }).collect(),
+                    Ok(t) => t.split(',').map(|k| if k.trim() == "b" { Tool::Box } else { Tool::Slot }).collect(),
                     Err(_) => vec![tool],
                 };
                 let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "slots".into());
@@ -685,12 +542,6 @@ fn main() {
             let pts: Vec<[f32; 2]> = s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
             let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| if tool == Tool::Box { "box".into() } else { "slot".into() });
             slot_drag(&mut h, &tag, &pts, tool);
-            return;
-        }
-        if let Ok(s) = std::env::var("RECTIFY_CIRCLE") {
-            let pts: Vec<[f32; 2]> = s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
-            let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "circle".into());
-            slot_drag(&mut h, &tag, &pts, Tool::Circle);
             return;
         }
         h.shot("look-ui");

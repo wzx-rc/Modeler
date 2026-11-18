@@ -1,25 +1,34 @@
 //! From the app state to the renderer: the scan (uploaded when opened), the
-//! NURBS objects (tessellated, with their rings and seams), and what the
-//! tool in hand draws over it.
+//! shapes (bodies as OpenCascade meshed them, with their edges; the Slot's
+//! and the Box's surfaces with their rings), and what the tool in hand
+//! draws over it.
 
-use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, Renderer};
-use crate::state::{AppState, Shape, Tool};
-use crate::theme;
-use glam::{DVec2, DVec3};
+use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, Renderer, FACE_HOVERED, FACE_SELECTED};
+use crate::state::{AppState, Comp, SelMode, Shape, Tool};
+use glam::DVec3;
 use rayon::prelude::*;
 use rectify_core::mesh::crease_normals;
-use rectify_core::nurbs::{Curve, Surface};
-use rectify_core::path::{Snap, SnapKind};
+use rectify_core::nurbs::Surface;
 use rectify_core::slot::Kind;
 use rectify_core::Mesh;
+use std::collections::HashSet;
 
 /// The scan's colour: grey clay (sRGB).
 pub const CLAY: [f32; 3] = [0.52, 0.52, 0.51];
 /// Sharp where the surface turns more than this (degrees), else smooth.
 pub const CREASE: f64 = 40.0;
-/// The NURBS objects: kept, and being placed (sRGB).
+/// The shapes: kept, and being placed (sRGB).
 pub const OBJECT: [f32; 3] = [0.78, 0.52, 0.33];
 pub const OBJECT_LIVE: [f32; 3] = [0.96, 0.56, 0.24];
+/// The renderer's materials: 0 the scan, 1 a surface, 2 one being placed,
+/// 3 a body, 4 its faces picked, 5 under the pointer, 6 a body just made.
+const BODY: u32 = 3;
+const BODY_SEL: u32 = 4;
+const BODY_HOVER: u32 = 5;
+const BODY_FRESH: u32 = 6;
+/// Read by the shader: not lifted along its normal (a body is moved off
+/// the scan as a whole, so its faces stay joined at their edges).
+const NO_LIFT: u32 = 0x8000;
 
 pub struct Drawer {
     pub r: Renderer,
@@ -30,117 +39,90 @@ pub struct Drawer {
 }
 
 /// A NURBS surface as triangles (`face`: the renderer's material) and its
-/// lines: the knot lines (its rings and seams) and, `hull`, the control net;
-/// `trim`: the outline that cuts it, in its (u, v) (empty: all of it).
-fn surface_vertices(s: &Surface, trim: &[DVec2], face: u32, line: [u8; 4], hull: Option<[u8; 4]>, verts: &mut Vec<MeshVertex>, wire: &mut Vec<LineVertex>) {
+/// lines: the knot lines (its rings and seams) and, `hull`, the control net.
+fn surface_vertices(s: &Surface, face: u32, line: [u8; 4], hull: Option<[u8; 4]>, verts: &mut Vec<MeshVertex>, wire: &mut Vec<LineVertex>) {
     let to32 = |l: Vec<DVec3>| l.iter().map(|p| p.as_vec3().to_array()).collect::<Vec<_>>();
-    if !trim.is_empty() {
-        // cut by its outline: the inside in triangles, each corner on the
-        // surface (its normal from the points next to it)
-        let (u0, u1, v0, v1) = (s.ku[s.du], s.ku[s.nu], s.kv[s.dv], s.kv[s.nv]);
-        let at = |q: DVec2| (u0 + (u1 - u0) * q.x.clamp(0.0, 1.0), v0 + (v1 - v0) * q.y.clamp(0.0, 1.0));
-        let e = 1e-4;
-        let vx = |q: DVec2| {
-            let (u, v) = at(q);
-            let du = s.eval((u + e).min(u1), v) - s.eval((u - e).max(u0), v);
-            let dv = s.eval(u, (v + e).min(v1)) - s.eval(u, (v - e).max(v0));
-            MeshVertex { pos: s.eval(u, v).as_vec3().to_array(), nrm: du.cross(dv).normalize_or_zero().as_vec3().to_array(), face }
-        };
-        let tris = rectify_core::face::trim_triangles(trim, 64);
-        let made: Vec<[MeshVertex; 3]> = tris.par_iter().map(|t| [vx(t[0]), vx(t[1]), vx(t[2])]).collect();
-        for t in made {
-            verts.extend_from_slice(&t);
+    let su = 96;
+    let sv = ((s.nv.saturating_sub(s.dv)) * 6).clamp(8, 256);
+    let (pts, nrm) = s.tessellate(su, sv);
+    let at = |i: usize, j: usize| j * (su + 1) + i;
+    let vx = |k: usize| MeshVertex { pos: pts[k].as_vec3().to_array(), nrm: nrm[k].as_vec3().to_array(), face };
+    for j in 0..sv {
+        for i in 0..su {
+            let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+            verts.extend_from_slice(&[vx(a), vx(b), vx(c), vx(a), vx(c), vx(d)]);
         }
-        // the knot lines inside, and the outline
-        let on = |l: Vec<DVec2>| l.into_iter().map(|q| {
-            let (u, v) = at(q);
-            s.eval(u, v)
-        }).collect::<Vec<DVec3>>();
-        let mut lines: Vec<Vec<[f32; 3]>> = vec![];
-        let norm = |k: f64, a: f64, b: f64| (k - a) / (b - a);
-        let mut uk: Vec<f64> = s.ku[s.du..=s.nu].to_vec();
-        uk.dedup();
-        let mut vk: Vec<f64> = s.kv[s.dv..=s.nv].to_vec();
-        vk.dedup();
-        for &k in &uk {
-            let x = norm(k, u0, u1);
-            for r in rectify_core::face::trim_runs(trim, |t| DVec2::new(x, t), 400) {
-                lines.push(to32(on(r)));
-            }
-        }
-        for &k in &vk {
-            let y = norm(k, v0, v1);
-            for r in rectify_core::face::trim_runs(trim, |t| DVec2::new(t, y), 400) {
-                lines.push(to32(on(r)));
-            }
-        }
-        let mut border = trim.to_vec();
-        border.push(trim[0]);
-        lines.push(to32(on(border)));
-        line_vertices(&lines, line, 1.0, wire);
-    } else {
-        let su = 96;
-        let sv = ((s.nv.saturating_sub(s.dv)) * 6).clamp(8, 256);
-        let (pts, nrm) = s.tessellate(su, sv);
-        let at = |i: usize, j: usize| j * (su + 1) + i;
-        let vx = |k: usize| MeshVertex { pos: pts[k].as_vec3().to_array(), nrm: nrm[k].as_vec3().to_array(), face };
-        for j in 0..sv {
-            for i in 0..su {
-                let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
-                verts.extend_from_slice(&[vx(a), vx(b), vx(c), vx(a), vx(c), vx(d)]);
-            }
-        }
-        let isos: Vec<Vec<[f32; 3]>> = s.isos(24).into_iter().map(to32).collect();
-        line_vertices(&isos, line, 1.0, wire);
     }
+    let isos: Vec<Vec<[f32; 3]>> = s.isos(24).into_iter().map(to32).collect();
+    line_vertices(&isos, line, 1.0, wire);
     if let Some(col) = hull {
         let net: Vec<Vec<[f32; 3]>> = s.hull().into_iter().map(to32).collect();
         line_vertices(&net, col, 0.6, wire);
     }
 }
 
-/// A NURBS curve as a line: each of its knot spans sampled (a straight one
-/// stays straight).
-fn curve_lines(c: &Curve) -> Vec<[f32; 3]> {
-    let mut ks: Vec<f64> = c.knots[c.degree..=c.pts.len()].to_vec();
-    ks.dedup();
-    let mut out = vec![c.eval(ks[0]).as_vec3().to_array()];
-    for w in ks.windows(2) {
-        for k in 1..=16 {
-            out.push(c.eval(w[0] + (w[1] - w[0]) * k as f64 / 16.0).as_vec3().to_array());
-        }
+/// How far a body is drawn off the scan, along its plane's normal (mm): a
+/// flat one more (an AI's flat faces bow some tenths of a millimetre round
+/// the plane fitted to them).
+fn lift_of(st: &AppState, b: &crate::body::Body) -> f64 {
+    let e = st.doc.as_ref().map(|d| d.edge).unwrap_or(0.1);
+    if b.built.solid() {
+        (e * 0.6).clamp(0.03, 0.1)
+    } else {
+        (e * 2.5).clamp(0.15, 0.45)
     }
-    out
 }
 
-/// What caught the pointer, drawn on the scan: the face (a small square on
-/// its plane), the edge (along the faces), the corner (its three edges).
-fn snap_lines(s: &Snap, size: f64, out: &mut Vec<LineVertex>) {
-    let col = [40, 140, 255, 240];
-    let p = |x: DVec3| x.as_vec3().to_array();
-    match s.kind {
-        SnapKind::Scan | SnapKind::Path => {}
-        SnapKind::Plane => {
-            let pl = &s.planes[0];
-            let u = pl.n.any_orthonormal_vector() * size;
-            let v = pl.n.cross(u.normalize()) * size;
-            let c = s.p;
-            line_vertices(&[vec![p(c - u - v), p(c + u - v), p(c + u + v), p(c - u + v), p(c - u - v)]], [40, 140, 255, 170], 1.0, out);
+/// A body's triangles (its faces picked or under the pointer tinted) and
+/// its edges (open ones, which can be pulled, brighter).
+fn body_vertices(st: &AppState, obj: usize, verts: &mut Vec<MeshVertex>, wire: &mut Vec<LineVertex>) {
+    let Some(b) = st.body(obj) else { return };
+    let t = &b.built.topo;
+    let lift = (b.frame.n * lift_of(st, b)).as_vec3();
+    let mut sel: HashSet<usize> = HashSet::new();
+    for c in &st.sel {
+        sel.extend(st.comp_faces(c).into_iter().filter(|f| f.0 == obj).map(|f| f.1));
+    }
+    let hover: HashSet<usize> = st.hover.as_ref().map(|c| st.comp_faces(c).into_iter().filter(|f| f.0 == obj).map(|f| f.1).collect()).unwrap_or_default();
+    let fresh = st.fresh == Some(obj);
+    let at = |j: u32| (glam::Vec3::from_array(t.positions[j as usize]) + lift).to_array();
+    for (k, tri) in t.triangles.iter().enumerate() {
+        let f = t.tri_face.get(k).copied().unwrap_or(0) as usize;
+        let m = if sel.contains(&f) {
+            BODY_SEL
+        } else if hover.contains(&f) {
+            BODY_HOVER
+        } else if fresh {
+            BODY_FRESH
+        } else {
+            BODY
+        };
+        for &j in tri {
+            verts.push(MeshVertex { pos: at(j), nrm: t.normals.get(j as usize).copied().unwrap_or([0.0, 1.0, 0.0]), face: m | NO_LIFT });
         }
-        SnapKind::Edge => {
-            let (a, b) = (s.p - s.dir * s.run.0, s.p + s.dir * s.run.1);
-            line_vertices(&[vec![p(a), p(b)]], col, 1.2, out);
+    }
+    // its edges: picked, under the pointer, open, the others
+    let mut picked: HashSet<usize> = HashSet::new();
+    for c in &st.sel {
+        picked.extend(st.comp_edges(c).into_iter().filter(|e| e.0 == obj).map(|e| e.1));
+    }
+    let hovered: HashSet<usize> = st.hover.as_ref().map(|c| st.comp_edges(c).into_iter().filter(|e| e.0 == obj).map(|e| e.1).collect()).unwrap_or_default();
+    let edge_mode = st.tool == Tool::Select && st.mode == SelMode::Edge;
+    for (e, ed) in t.edges.iter().enumerate() {
+        if ed.seam {
+            continue;
         }
-        SnapKind::Corner => {
-            let pl = &s.planes;
-            for (i, j) in [(0, 1), (1, 2), (0, 2)] {
-                let e = pl[i].n.cross(pl[j].n).normalize_or_zero();
-                // along the side where the two faces are
-                let k = 3 - i - j;
-                let e = if pl[k].dist(s.p + e) > 0.0 { -e } else { e };
-                line_vertices(&[vec![p(s.p), p(s.p + e * size * 3.0)]], col, 1.2, out);
-            }
-        }
+        let line: Vec<[f32; 3]> = ed.pts.iter().map(|p| (DVec3::from_array(*p).as_vec3() + lift).to_array()).collect();
+        let (col, w) = if picked.contains(&e) {
+            ([255, 255, 255, 255], 2.6)
+        } else if hovered.contains(&e) {
+            ([255, 214, 170, 240], 2.2)
+        } else if b.built.edge_open(e) {
+            ([255, 150, 60, 255], if edge_mode { 1.6 } else { 1.3 })
+        } else {
+            ([48, 28, 14, 230], if edge_mode { 1.3 } else { 1.0 })
+        };
+        line_vertices(&[line], col, w, wire);
     }
 }
 
@@ -154,6 +136,21 @@ fn mesh_vertices(m: &Mesh, normals: &[[DVec3; 3]]) -> Vec<MeshVertex> {
             (0..3).map(move |c| MeshVertex { pos: m.pos[tri[c] as usize].as_vec3().to_array(), nrm: n[c].as_vec3().to_array(), face: 0 })
         })
         .collect()
+}
+
+/// A square grid on a plane round `c` (`size`: half its side).
+fn plane_grid(f: &crate::body::Frame, c: DVec3, size: f64, col: [u8; 4], out: &mut Vec<LineVertex>) {
+    let p = |x: DVec3| x.as_vec3().to_array();
+    let n = 4;
+    let mut lines = vec![];
+    for i in 0..=n {
+        let s = -size + 2.0 * size * i as f64 / n as f64;
+        lines.push(vec![p(c + f.x * s - f.y * size), p(c + f.x * s + f.y * size)]);
+        lines.push(vec![p(c - f.x * size + f.y * s), p(c + f.x * size + f.y * s)]);
+    }
+    line_vertices(&lines, col, 0.8, out);
+    // its normal, short
+    line_vertices(&[vec![p(c), p(c + f.n * size * 0.5)]], col, 1.0, out);
 }
 
 impl Drawer {
@@ -170,35 +167,27 @@ impl Drawer {
         }
     }
 
-    /// The NURBS objects: those kept, and the one being placed (with its
-    /// control net).
+    /// The shapes: those kept, and the one being placed (with its control
+    /// net).
     fn sync_objects(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, st: &AppState) {
         if self.objects_gen == st.objects_gen {
             return;
         }
         self.objects_gen = st.objects_gen;
         let (mut verts, mut wire) = (vec![], vec![]);
-        let picked: &[usize] = st.patch.as_ref().map(|pe| pe.picked.as_slice()).unwrap_or(&[]);
         for (i, o) in st.objects.iter().enumerate() {
             match &o.shape {
-                Shape::Surface(s) => surface_vertices(s, &[], 1, [60, 32, 14, 200], None, &mut verts, &mut wire),
-                Shape::Trimmed(s, trim) => surface_vertices(s, trim, 1, [60, 32, 14, 200], None, &mut verts, &mut wire),
-                // the paths picked for a patch in blue
-                Shape::Curve(c) if picked.contains(&i) => line_vertices(&[curve_lines(c)], [60, 150, 255, 255], 2.6, &mut wire),
-                Shape::Curve(c) => line_vertices(&[curve_lines(c)], [226, 92, 14, 255], 1.8, &mut wire),
+                Shape::Surface(s) => {
+                    let picked = st.sel.contains(&Comp::Object(i));
+                    let hovered = st.hover == Some(Comp::Object(i));
+                    let m = if picked { BODY_SEL } else if hovered { BODY_HOVER } else { 1 };
+                    surface_vertices(s, m, [60, 32, 14, 200], None, &mut verts, &mut wire);
+                }
+                Shape::Body(_) => body_vertices(st, i, &mut verts, &mut wire),
             }
         }
-        if let Some(Ok(pt)) = st.patch.as_ref().map(|pe| &pe.made) {
-            surface_vertices(&pt.surface, &pt.trim, 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
-        }
         if let Some(se) = &st.slot {
-            surface_vertices(&se.laid.surface, &[], 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
-        }
-        // the path being drawn, and its control points
-        if let Some(b) = st.path.as_ref().and_then(|pe| pe.built.as_ref()) {
-            let hull: Vec<[f32; 3]> = b.curve.pts.iter().map(|x| x.as_vec3().to_array()).collect();
-            line_vertices(&[hull], [255, 150, 70, 110], 0.6, &mut wire);
-            line_vertices(&[curve_lines(&b.curve)], [255, 118, 24, 255], 2.0, &mut wire);
+            surface_vertices(&se.laid.surface, 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
         }
         self.r.upload_parts(device, queue, &verts, &wire);
     }
@@ -215,11 +204,34 @@ impl Drawer {
             return;
         }
         let p = |x: DVec3| x.as_vec3().to_array();
-        // the Circle drag: the diameter drawn, its circle on the plane
-        if let Some(cd) = st.slot_drag.as_ref().filter(|_| st.tool == Tool::Circle) {
-            let n = cd.n;
-            let b = cd.b - n * n.dot(cd.b - cd.a);
-            line_vertices(&[vec![p(cd.a), p(b)]], [235, 235, 235, 220], 1.0, &mut out);
+        // the Pen: the plane under the pointer before the first point
+        if let (Some(h), Some(hv)) = (&st.pen_plane, &st.pen_hover) {
+            let size = st.px_at(hv.p) * 46.0;
+            let col = if h.flat { [70, 160, 255, 210] } else { [200, 200, 200, 150] };
+            plane_grid(&h.frame, hv.p, size, col, &mut out);
+        }
+        // the outline being drawn, the next side, and its plane round the
+        // pointer
+        if let Some(pe) = &st.pen {
+            let f = &pe.frame;
+            let pts: Vec<[f32; 3]> = pe.pts.iter().map(|q| p(f.to3(*q))).collect();
+            if pts.len() >= 2 {
+                line_vertices(&[pts.clone()], [255, 118, 24, 255], 2.0, &mut out);
+            }
+            if let (Some(h), Some(last)) = (&st.pen_hover, pts.last()) {
+                line_vertices(&[vec![*last, p(h.p)]], [255, 160, 90, 220], 1.4, &mut out);
+                if pe.pts.len() >= 2 {
+                    line_vertices(&[vec![p(h.p), pts[0]]], [255, 160, 90, 70], 0.8, &mut out);
+                }
+                let size = st.px_at(h.p) * 30.0;
+                plane_grid(f, h.p, size, if pe.flat { [70, 160, 255, 90] } else { [200, 200, 200, 70] }, &mut out);
+            }
+        }
+        // the Circle being drawn: its diameter and its ring on the plane
+        if let Some(cd) = &st.circle {
+            let n = cd.ring_normal();
+            let b = cd.b;
+            line_vertices(&[vec![p(cd.a), p(b)]], [235, 235, 235, 200], 1.0, &mut out);
             let c = (cd.a + b) * 0.5;
             let r = (b - cd.a).length() * 0.5;
             let u = (b - cd.a).normalize_or_zero();
@@ -230,52 +242,25 @@ impl Drawer {
                     p(c + (u * t.cos() + v * t.sin()) * r)
                 })
                 .collect();
-            line_vertices(&[ring], [255, 150, 60, 200], 1.2, &mut out);
-        }
-        // the Line's stroke being drawn, on the scan
-        if let Some(sk) = &st.stroke {
-            let line: Vec<[f32; 3]> = sk.hits.iter().map(|h| p(h.1)).collect();
-            if line.len() >= 2 {
-                line_vertices(&[line], [255, 150, 60, 230], 1.4, &mut out);
-            }
+            line_vertices(&[ring], [255, 150, 60, 230], 1.6, &mut out);
         }
         // the Slot and Box drag: along the slot, on the plane under the press
-        if let Some(cd) = st.slot_drag.as_ref().filter(|_| st.tool != Tool::Circle) {
+        if let Some(cd) = &st.slot_drag {
             let n = cd.n;
             let b = cd.b - n * n.dot(cd.b - cd.a);
             line_vertices(&[vec![p(cd.a), p(b)]], [255, 150, 60, 220], 1.2, &mut out);
         }
-        // the Path: the next segment, and what catches the pointer
-        if let Some(pe) = &st.path {
-            if let (Some(pv), Some(b)) = (&pe.preview, &pe.built) {
-                let n = b.breaks.len() - 1;
-                let rest: Vec<Vec<[f32; 3]>> = pv.polylines().into_iter().skip(n).map(|l| l.iter().map(|x| p(*x)).collect()).collect();
-                line_vertices(&rest, [255, 118, 24, 170], 1.2, &mut out);
-            } else if let (Some(h), true) = (&st.path_hover, pe.pts.len() == 1) {
-                let a = if pe.params.planes { pe.pts[0].p } else { pe.pts[0].hit };
-                line_vertices(&[vec![p(a), p(h.p)]], [255, 118, 24, 170], 1.2, &mut out);
-            }
-        }
-        if let Some(h) = &st.path_hover {
-            let size = {
-                let v = st.view();
-                let (fwd, _, _) = v.basis();
-                v.pixel_size_at((h.p.as_vec3() - v.eye).dot(fwd).max(1e-3)) as f64 * 10.0
-            };
-            snap_lines(h, size, &mut out);
-        }
-        // the Patch tool: the path under the pointer
-        if let Some(Shape::Curve(c)) = st.patch_hover.filter(|_| st.tool == Tool::Patch).and_then(|i| st.objects.get(i)).map(|o| &o.shape) {
-            line_vertices(&[curve_lines(c)], [140, 200, 255, 200], 3.4, &mut out);
-        }
-        // the slot placed: its centre line; a round part: its axis
+        // the slot placed: its centre line
         if let Some(se) = &st.slot {
             let sl = &se.slot;
-            if sl.kind == Kind::Round {
-                line_vertices(&[vec![p(sl.a - sl.axis * (sl.r * 0.3)), p(sl.a + sl.axis * (se.params.depth + sl.r * 0.3))]], [255, 150, 60, 160], 0.8, &mut out);
-            } else {
+            if sl.kind != Kind::Round {
                 line_vertices(&[vec![p(sl.a), p(sl.b)]], [255, 150, 60, 160], 0.8, &mut out);
             }
+        }
+        // a thickness being pulled: its arrow
+        if let Some(crate::state::Gesture::Thick { o, n, .. }) = &st.gesture {
+            let size = st.px_at(*o) * 40.0;
+            line_vertices(&[vec![p(*o - *n * size), p(*o + *n * size)]], [120, 190, 255, 200], 1.2, &mut out);
         }
         self.r.upload_overlay(device, queue, &out);
     }
@@ -287,12 +272,10 @@ impl Drawer {
         self.sync_overlay(device, queue, st);
         self.sync_objects(device, queue, st);
         if !self.faces_done {
-            let face = |c: [f32; 3]| FaceGpu { color: linear(c), flags: 0, metal: 0.0, rough: 0.55, pad: [0.0; 2] };
-            self.r.upload_faces(device, queue, &[face(CLAY), face(OBJECT), face(OBJECT_LIVE)]);
+            let face = |c: [f32; 3], flags: u32| FaceGpu { color: linear(c), flags, metal: 0.0, rough: 0.55, pad: [0.0; 2] };
+            self.r.upload_faces(device, queue, &[face(CLAY, 0), face(OBJECT, 0), face(OBJECT_LIVE, 0), face(OBJECT, 0), face(OBJECT, FACE_SELECTED), face(OBJECT, FACE_HOVERED), face(OBJECT_LIVE, 0)]);
             self.faces_done = true;
         }
-        let a = theme::accent();
-        let sel = [a.r() as f32 / 255.0, a.g() as f32 / 255.0, a.b() as f32 / 255.0];
         let frame = Frame {
             view: st.view().scaled(ppp),
             points_to_px: ppp,
@@ -302,8 +285,8 @@ impl Drawer {
             zebra: st.settings.zebra,
             scan: !st.hide_scan,
             base: CLAY,
-            sel: (sel, 0.6),
-            hover: (sel, 0.25),
+            sel: ([1.0, 0.6, 0.22], 0.55),
+            hover: ([1.0, 0.82, 0.62], 0.3),
             paint,
             textures,
         };

@@ -1,27 +1,20 @@
 //! Forme Rectify's core: the scan (a mesh made by an AI, or scanned) that
 //! the NURBS tools are laid on. The scan itself never changes (Romain,
 //! 18 nov. 2026, 16 h 01: the tools that moved its vertices were dropped; a
-//! retopology in NURBS instead, semi-automatic on the scan).
+//! retopology in NURBS instead; 22 h 30: the Line, Patch, Face and Path
+//! tools dropped for a simple Pen, see the app's `body`).
 //!
 //! - `mesh`: the scan (.obj in, millimetres), its topology, picking helpers;
 //! - `nurbs`: NURBS curves and surfaces (exact circles);
-//! - `circle`: the Circle tool: a round part found under a drag, a NURBS
-//!   surface laid on its wall;
-//! - `path`: the Path tool: points on the scan caught by its flat faces,
-//!   their edges and corners, joined into one NURBS curve;
-//! - `face`: the Face tool: a flat face found under a click, all of it,
-//!   and its outline;
-//! - `patch`: the Patch tool: a loop of paths filled with one NURBS
-//!   surface laid on the scan;
-//! - `slot`: the Slot tool: a slot with round ends found under a drag along
-//!   it, a NURBS surface laid on its wall.
+//! - `planes`: the scan's flat faces near a point, the plane to draw on;
+//! - `circle`: a round part's wall, its profile;
+//! - `slot`: a slot, a box or a round part found under a drag, a NURBS
+//!   surface laid on its wall.
 
 pub mod circle;
-pub mod face;
 pub mod mesh;
 pub mod nurbs;
-pub mod patch;
-pub mod path;
+pub mod planes;
 pub mod slot;
 
 pub use mesh::{Mesh, Surface, Topo, NONE};

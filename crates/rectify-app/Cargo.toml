@@ -19,6 +19,9 @@ path = "src/bin/shot.rs"
 
 [dependencies]
 rectify-core = { path = "../rectify-core" }
+# OpenCascade (the shapes drawn on the scan): built from source the first
+# time (feature `builtin`, cached in target/OCCT), or FORME_OCCT_ROOT
+forme-occt = { path = "../forme-occt" }
 glam.workspace = true
 bytemuck.workspace = true
 egui.workspace = true

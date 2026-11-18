@@ -40,6 +40,19 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRep_Tool.hxx>
+#include <BRep_Builder.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <Geom_BezierSurface.hxx>
+#include <GC_MakeArcOfCircle.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <TColgp_Array1OfPnt2d.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <Precision.hxx>
+#include <TColgp_Array2OfPnt.hxx>
+#include <TopTools_DataMapOfShapeShape.hxx>
+#include <TopoDS_Shell.hxx>
+#include <TopoDS_Solid.hxx>
 #include <ShapeAnalysis_Surface.hxx>
 #include <GCPnts_TangentialDeflection.hxx>
 #include <GProp_GProps.hxx>
@@ -63,7 +76,18 @@
 #include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 
+#include <BRepOffset_MakeOffset.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Ax3.hxx>
+#include <TopoDS_Compound.hxx>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <BRepCheck_Result.hxx>
+#include <BRepCheck_ListOfStatus.hxx>
 #include <cstring>
 #include <exception>
 #include <string>
@@ -235,7 +259,13 @@ FShape* focc_torus(double big, double small) {
 // between -h and +h. A smooth point is rounded into a quadratic curve from
 // the middle of its incoming edge to the middle of its outgoing one, like
 // the Sketch tool (nurbs-kernel `doc::Profile`).
-FShape* focc_prism(const double* xy, const int* smooth, int n, double h) {
+FShape* focc_prism_cut(const double* xy, const int* smooth, const int* cut, const double* abm, int n, double h);
+
+FShape* focc_prism(const double* xy, const int* smooth, int n, double h) { return focc_prism_cut(xy, smooth, nullptr, nullptr, n, h); }
+
+// The same, corners cut: cut[i] 1 a fillet (an arc through abm[6 i..]: its
+// start, middle, end), 2 a chamfer (a straight side from start to end).
+FShape* focc_prism_cut(const double* xy, const int* smooth, const int* cut, const double* abm, int n, double h) {
     return guard(
         [&]() -> FShape* {
             if (n < 3 || h <= 0) {
@@ -251,7 +281,11 @@ FShape* focc_prism(const double* xy, const int* smooth, int n, double h) {
                 const gp_Pnt& prev = p[(i + n - 1) % n];
                 const gp_Pnt& next = p[(i + 1) % n];
                 bool round = smooth[i] && prev.Distance(p[i]) > 1e-6 && next.Distance(p[i]) > 1e-6;
-                if (round) {
+                int ck = cut && !round ? cut[i] : 0;
+                if (ck) {
+                    vin[i] = BRepBuilderAPI_MakeVertex(gp_Pnt(abm[6 * i], abm[6 * i + 1], -h));
+                    vout[i] = BRepBuilderAPI_MakeVertex(gp_Pnt(abm[6 * i + 4], abm[6 * i + 5], -h));
+                } else if (round) {
                     vin[i] = BRepBuilderAPI_MakeVertex(mid(prev, p[i]));
                     vout[i] = BRepBuilderAPI_MakeVertex(mid(p[i], next));
                 } else {
@@ -269,7 +303,17 @@ FShape* focc_prism(const double* xy, const int* smooth, int n, double h) {
             }
             BRepBuilderAPI_MakeWire mw;
             for (int i = 0; i < n; i++) {
-                if (!vin[i].IsSame(vout[i])) {
+                int ck = cut ? cut[i] : 0;
+                if (!vin[i].IsSame(vout[i]) && ck == 2) {
+                    mw.Add(BRepBuilderAPI_MakeEdge(vin[i], vout[i]).Edge());
+                } else if (!vin[i].IsSame(vout[i]) && ck == 1) {
+                    GC_MakeArcOfCircle arc(BRep_Tool::Pnt(vin[i]), gp_Pnt(abm[6 * i + 2], abm[6 * i + 3], -h), BRep_Tool::Pnt(vout[i]));
+                    if (!arc.IsDone()) {
+                        set_err("a rounded corner could not be made");
+                        return nullptr;
+                    }
+                    mw.Add(BRepBuilderAPI_MakeEdge(arc.Value(), vin[i], vout[i]).Edge());
+                } else if (!vin[i].IsSame(vout[i])) {
                     TColgp_Array1OfPnt poles(1, 3);
                     poles(1) = BRep_Tool::Pnt(vin[i]);
                     poles(2) = p[i];
@@ -752,6 +796,275 @@ FShape* focc_imprint(const FShape* s, const FShape* tool) {
         (FShape*)nullptr);
 }
 
+// ------------------------------------------------------- component moves
+
+// The points of the shape's vertices (vertex map order, 1-based index i at
+// xyz[3 (i - 1)]); returns how many.
+int focc_vertex_points(const FShape* s, double* xyz, int cap) {
+    return guard(
+        [&] {
+            TopTools_IndexedMapOfShape vm;
+            TopExp::MapShapes(s->s, TopAbs_VERTEX, vm);
+            for (int i = 1; i <= vm.Extent() && i <= cap; i++) {
+                gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vm(i)));
+                xyz[3 * (i - 1)] = p.X();
+                xyz[3 * (i - 1) + 1] = p.Y();
+                xyz[3 * (i - 1) + 2] = p.Z();
+            }
+            return vm.Extent();
+        },
+        -1);
+}
+
+// The vertices (1-based, vertex map order) of edge `index` (kind 1,
+// 1-based edge map index) or face `index` (kind 2, 0-based face map index).
+int focc_sub_vertices(const FShape* s, int kind, int index, int* out, int cap) {
+    return guard(
+        [&] {
+            TopTools_IndexedMapOfShape vm, sub;
+            TopExp::MapShapes(s->s, TopAbs_VERTEX, vm);
+            TopoDS_Shape x;
+            if (kind == 1) {
+                edge_map(s->s, sub);
+                if (index < 1 || index > sub.Extent()) return -1;
+                x = sub(index);
+            } else {
+                face_map(s->s, sub);
+                if (index < 0 || index >= sub.Extent()) return -1;
+                x = sub(index + 1);
+            }
+            TopTools_IndexedMapOfShape mine;
+            TopExp::MapShapes(x, TopAbs_VERTEX, mine);
+            int n = 0;
+            for (int i = 1; i <= mine.Extent(); i++) {
+                int j = vm.FindIndex(mine(i));
+                if (j > 0 && n < cap) out[n++] = j;
+            }
+            return n;
+        },
+        -1);
+}
+
+// The solid with some vertices moved (1-based indices, new points), direct
+// modelling style: the faces round them follow. A face that stays flat
+// stays a plane, a four-sided face that bends becomes a bilinear patch.
+// For now the faces that follow must be flat with straight edges, their
+// holes untouched. Tags stay on their faces.
+FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, int n) {
+    return guard(
+        [&]() -> FShape* {
+            // work on a copy: new pcurves are added to shared edges
+            BRepBuilderAPI_Copy cp(s->s);
+            TopoDS_Shape src = cp.Shape();
+            TopTools_IndexedMapOfShape vm, fm;
+            TopExp::MapShapes(src, TopAbs_VERTEX, vm);
+            face_map(src, fm);
+            TopTools_DataMapOfShapeShape vnew, enew;
+            for (int i = 0; i < n; i++) {
+                if (vidx[i] < 1 || vidx[i] > vm.Extent()) {
+                    set_err("no such vertex");
+                    return nullptr;
+                }
+                TopoDS_Vertex nv = BRepBuilderAPI_MakeVertex(gp_Pnt(xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]));
+                vnew.Bind(vm(vidx[i]), nv);
+            }
+            Bnd_Box box;
+            BRepBndLib::Add(src, box);
+            double size = box.IsVoid() ? 1.0 : std::sqrt(box.SquareExtent());
+            BRep_Builder bb;
+            TopoDS_Shell shell;
+            bb.MakeShell(shell);
+            std::vector<long long> tags;
+            for (int i = 1; i <= fm.Extent(); i++) {
+                TopoDS_Face f = TopoDS::Face(fm(i));
+                long long tag = i - 1 < (int)s->tags.size() ? s->tags[i - 1] : -1;
+                bool touched = false;
+                for (TopExp_Explorer x(f, TopAbs_VERTEX); x.More() && !touched; x.Next()) touched = vnew.IsBound(x.Current());
+                if (!touched) {
+                    bb.Add(shell, f);
+                    tags.push_back(tag);
+                    continue;
+                }
+                BRepAdaptor_Surface as(f);
+                if (as.GetType() != GeomAbs_Plane) {
+                    set_err("only flat faces can follow a move for now");
+                    return nullptr;
+                }
+                TopoDS_Face fw = TopoDS::Face(f.Oriented(TopAbs_FORWARD));
+                TopoDS_Wire ow = BRepTools::OuterWire(fw);
+                std::vector<TopoDS_Wire> inner;
+                for (TopExp_Explorer x(fw, TopAbs_WIRE); x.More(); x.Next())
+                    if (!x.Current().IsSame(ow)) inner.push_back(TopoDS::Wire(x.Current()));
+                for (const TopoDS_Wire& w : inner)
+                    for (TopExp_Explorer x(w, TopAbs_VERTEX); x.More(); x.Next())
+                        if (vnew.IsBound(x.Current())) {
+                            set_err("a hole or a boss next to the moved element cannot follow yet");
+                            return nullptr;
+                        }
+                // the outline again, its moved edges remade (once, shared
+                // with the face on their other side)
+                BRepBuilderAPI_MakeWire mw;
+                std::vector<gp_Pnt> pts;
+                std::vector<TopoDS_Vertex> corners;
+                for (BRepTools_WireExplorer x(ow, fw); x.More(); x.Next()) {
+                    TopoDS_Edge e = x.Current();
+                    TopoDS_Vertex cv = x.CurrentVertex();
+                    pts.push_back(vnew.IsBound(cv) ? BRep_Tool::Pnt(TopoDS::Vertex(vnew(cv))) : BRep_Tool::Pnt(cv));
+                    corners.push_back(vnew.IsBound(cv) ? TopoDS::Vertex(vnew(cv)) : cv);
+                    TopoDS_Vertex a, b;
+                    TopExp::Vertices(e, a, b);
+                    bool ma = vnew.IsBound(a), mb = vnew.IsBound(b);
+                    if (!ma && !mb) {
+                        mw.Add(e);
+                        continue;
+                    }
+                    BRepAdaptor_Curve c(e);
+                    if (c.GetType() != GeomAbs_Line) {
+                        set_err("only straight edges can follow a move for now");
+                        return nullptr;
+                    }
+                    TopoDS_Edge ne;
+                    if (enew.IsBound(e)) {
+                        ne = TopoDS::Edge(enew(e));
+                    } else {
+                        TopoDS_Vertex na = ma ? TopoDS::Vertex(vnew(a)) : a;
+                        TopoDS_Vertex nb = mb ? TopoDS::Vertex(vnew(b)) : b;
+                        if (BRep_Tool::Pnt(na).Distance(BRep_Tool::Pnt(nb)) < 1e-4) {
+                            set_err("the move folds an edge to nothing");
+                            return nullptr;
+                        }
+                        BRepBuilderAPI_MakeEdge me(TopoDS::Vertex(na.Oriented(TopAbs_FORWARD)), TopoDS::Vertex(nb.Oriented(TopAbs_FORWARD)));
+                        if (!me.IsDone()) {
+                            set_err("an edge could not follow the move");
+                            return nullptr;
+                        }
+                        ne = me.Edge();
+                        enew.Bind(e.Oriented(TopAbs_FORWARD), ne);
+                    }
+                    // same direction as the old edge: same orientation in the wire
+                    mw.Add(TopoDS::Edge(ne.Oriented(e.Orientation())));
+                }
+                if (!mw.IsDone()) {
+                    set_err("a face's outline could not follow the move");
+                    return nullptr;
+                }
+                TopoDS_Wire nw = mw.Wire();
+                // flat still? (Newell's normal, along the surface's own
+                // normal for an outline wound counter-clockwise)
+                gp_XYZ nrm(0, 0, 0), cen(0, 0, 0);
+                for (size_t k = 0; k < pts.size(); k++) {
+                    const gp_Pnt& p = pts[k];
+                    const gp_Pnt& q = pts[(k + 1) % pts.size()];
+                    nrm += gp_XYZ((p.Y() - q.Y()) * (p.Z() + q.Z()), (p.Z() - q.Z()) * (p.X() + q.X()), (p.X() - q.X()) * (p.Y() + q.Y()));
+                    cen += p.XYZ();
+                }
+                if (pts.size() < 3 || nrm.Modulus() < 1e-12) {
+                    set_err("the move folds a face flat");
+                    return nullptr;
+                }
+                cen /= (double)pts.size();
+                gp_Dir nd(nrm);
+                double off = 0;
+                for (const gp_Pnt& p : pts) off = std::max(off, std::abs((p.XYZ() - cen).Dot(nd.XYZ())));
+                TopoDS_Face nf;
+                if (off <= 1e-6 * size + 1e-6) {
+                    gp_Pln pl(gp_Pnt(cen), nd);
+                    gp_Pln old = as.Plane();
+                    bool same = std::abs(std::abs(old.Axis().Direction().Dot(nd)) - 1) < 1e-9 && old.Distance(gp_Pnt(cen)) < 1e-6 * size + 1e-7;
+                    if (!inner.empty() && !same) {
+                        set_err("a face with a hole cannot tilt or move off its plane yet");
+                        return nullptr;
+                    }
+                    if (same) pl = gp_Pln(old.Location(), old.Axis().Direction().Dot(nd) > 0 ? old.Axis().Direction() : old.Axis().Direction().Reversed());
+                    BRepBuilderAPI_MakeFace mf(pl, nw, Standard_True);
+                    for (const TopoDS_Wire& w : inner) mf.Add(w);
+                    if (!mf.IsDone()) {
+                        set_err("a face could not follow the move");
+                        return nullptr;
+                    }
+                    nf = mf.Face();
+                } else if (pts.size() == 4 && inner.empty()) {
+                    // a bent four-sided face: the bilinear patch on its corners
+                    TColgp_Array2OfPnt poles(1, 2, 1, 2);
+                    poles(1, 1) = pts[0];
+                    poles(2, 1) = pts[1];
+                    poles(2, 2) = pts[2];
+                    poles(1, 2) = pts[3];
+                    opencascade::handle<Geom_BezierSurface> bs = new Geom_BezierSurface(poles);
+                    // each edge's curve on the patch: a straight segment
+                    // between its corners' (u, v), linear in the edge's
+                    // parameter like the edge itself
+                    const double cuv[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+                    bb.MakeFace(nf, bs, Precision::Confusion());
+                    bb.Add(nf, nw);
+                    for (TopExp_Explorer x(nw, TopAbs_EDGE); x.More(); x.Next()) {
+                        TopoDS_Edge e = TopoDS::Edge(x.Current());
+                        TopoDS_Vertex a, b;
+                        TopExp::Vertices(e, a, b);
+                        int ia = -1, ib = -1;
+                        for (int k = 0; k < 4; k++) {
+                            if (corners[k].IsSame(a)) ia = k;
+                            if (corners[k].IsSame(b)) ib = k;
+                        }
+                        double t0, t1;
+                        BRep_Tool::Range(e, t0, t1);
+                        if (ia < 0 || ib < 0 || t1 <= t0) {
+                            set_err("a bent face could not follow the move");
+                            return nullptr;
+                        }
+                        TColgp_Array1OfPnt2d pp(1, 2);
+                        pp(1) = gp_Pnt2d(cuv[ia][0], cuv[ia][1]);
+                        pp(2) = gp_Pnt2d(cuv[ib][0], cuv[ib][1]);
+                        TColStd_Array1OfReal kn(1, 2);
+                        kn(1) = t0;
+                        kn(2) = t1;
+                        TColStd_Array1OfInteger mu(1, 2);
+                        mu(1) = 2;
+                        mu(2) = 2;
+                        opencascade::handle<Geom2d_BSplineCurve> pc = new Geom2d_BSplineCurve(pp, kn, mu, 1);
+                        bb.UpdateEdge(e, pc, nf, BRep_Tool::Tolerance(e));
+                    }
+                } else if (!inner.empty()) {
+                    set_err("a face with a hole cannot bend yet");
+                    return nullptr;
+                } else {
+                    set_err("a face with more than four sides would bend; move it along its plane");
+                    return nullptr;
+                }
+                nf.Orientation(f.Orientation());
+                bb.Add(shell, nf);
+                tags.push_back(tag);
+            }
+            shell.Closed(BRep_Tool::IsClosed(shell));
+            TopoDS_Solid solid;
+            bb.MakeSolid(solid);
+            bb.Add(solid, shell);
+            BRepLib::OrientClosedSolid(solid);
+            if (!valid(solid)) {
+                if (getenv("FORME_OCCT_DEBUG")) {
+                    BRepCheck_Analyzer an(solid);
+                    for (TopAbs_ShapeEnum t : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_WIRE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID})
+                        for (TopExp_Explorer x(solid, t); x.More(); x.Next()) {
+                            opencascade::handle<BRepCheck_Result> res = an.Result(x.Current());
+                            if (res.IsNull()) continue;
+                            for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More(); it.Next())
+                                if (it.Value() != BRepCheck_NoError) fprintf(stderr, "check: shape type %d status %d\n", (int)t, (int)it.Value());
+                            for (res->InitContextIterator(); res->MoreShapeInContext(); res->NextShapeInContext())
+                                for (BRepCheck_ListOfStatus::Iterator it(res->StatusOnShape()); it.More(); it.Next())
+                                    if (it.Value() != BRepCheck_NoError) fprintf(stderr, "check: shape type %d in context status %d\n", (int)t, (int)it.Value());
+                        }
+                }
+                set_err("the move gives an invalid solid (a face crosses another?)");
+                return nullptr;
+            }
+            FShape* r = wrap(solid);
+            if (!r) return nullptr;
+            r->tags = tags;
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
 // Distance from a point to a face (-1 when it cannot be measured).
 double focc_face_distance(const FShape* s, int index, const double* p) {
     return guard(
@@ -896,6 +1209,397 @@ int focc_face_info(const FShape* s, int index, double* out) {
 void focc_set_tags(FShape* s, const long long* tags, int n) { s->tags.assign(tags, tags + (n > 0 ? n : 0)); }
 
 long long focc_face_tag(const FShape* s, int index) { return index >= 0 && index < (int)s->tags.size() ? s->tags[index] : -1; }
+
+// ------------------------------------------------- Forme Rectify's shapes
+//
+// A shape drawn on a scan (rectify-app `body`): a flat outline (a face, or
+// a line of free edges), an edge pulled into a new face, the faces
+// thickened into a solid, edges filleted.
+
+// A tag made from two numbers (a thickness's top and side faces): the same
+// numbers give the same tag; always positive, never one of the app's step
+// tags (bit 40 set).
+static long long mix_tag(long long a, long long b) {
+    unsigned long long x = (unsigned long long)a * 0x9E3779B97F4A7C15ULL;
+    x ^= (unsigned long long)b + 0x632BE59BD9B4E019ULL + (x << 6) + (x >> 2);
+    x ^= x >> 31;
+    x *= 0xBF58476D1CE4E5B9ULL;
+    x ^= x >> 29;
+    return (long long)(x & 0x3FFFFFFFFFFFFFFFULL) | (1LL << 40);
+}
+
+// The faces of a shape, and its free edges (on no face: a line's).
+static void split_free(const TopoDS_Shape& s, std::vector<TopoDS_Face>& faces, std::vector<TopoDS_Edge>& free_edges) {
+    TopTools_IndexedMapOfShape fm, em;
+    face_map(s, fm);
+    for (int i = 1; i <= fm.Extent(); i++) faces.push_back(TopoDS::Face(fm(i)));
+    TopTools_IndexedDataMapOfShapeListOfShape adj;
+    TopExp::MapShapesAndAncestors(s, TopAbs_EDGE, TopAbs_FACE, adj);
+    edge_map(s, em);
+    for (int i = 1; i <= em.Extent(); i++) {
+        const TopoDS_Shape& e = em(i);
+        int k = adj.FindIndex(e);
+        if (k == 0 || adj(k).IsEmpty()) free_edges.push_back(TopoDS::Edge(e));
+    }
+}
+
+// The part of a shape made of faces: its solid, its shell, its face, or a
+// compound of its faces (null: none).
+static TopoDS_Shape faces_part(const TopoDS_Shape& s) {
+    TopoDS_Shape found[3];
+    int count[3] = {0, 0, 0};
+    const TopAbs_ShapeEnum kinds[3] = {TopAbs_SOLID, TopAbs_SHELL, TopAbs_FACE};
+    for (int k = 0; k < 3; k++)
+        for (TopExp_Explorer x(s, kinds[k]); x.More(); x.Next()) {
+            if (!count[k]) found[k] = x.Current();
+            count[k]++;
+        }
+    for (int k = 0; k < 3; k++)
+        if (count[k] == 1) return found[k];
+    if (!count[2]) return TopoDS_Shape();
+    BRep_Builder bb;
+    TopoDS_Compound c;
+    bb.MakeCompound(c);
+    for (TopExp_Explorer x(s, TopAbs_FACE); x.More(); x.Next()) bb.Add(c, x.Current());
+    return c;
+}
+
+// A shape with free edges added (a compound when there are some).
+static TopoDS_Shape with_free(const TopoDS_Shape& body, const std::vector<TopoDS_Edge>& free_edges) {
+    if (free_edges.empty()) return body;
+    BRep_Builder bb;
+    TopoDS_Compound c;
+    bb.MakeCompound(c);
+    if (!body.IsNull()) bb.Add(c, body);
+    for (const TopoDS_Edge& e : free_edges) bb.Add(c, e);
+    return c;
+}
+
+// The outward normal of a flat face.
+static gp_Dir plane_normal(const TopoDS_Face& f) {
+    BRepAdaptor_Surface sa(f);
+    gp_Dir n = sa.Plane().Axis().Direction();
+    if (f.Orientation() == TopAbs_REVERSED) n.Reverse();
+    return n;
+}
+
+// A flat outline through n points (xyz, on the plane through o facing
+// nrm): closed, a face facing nrm; open, a line (its edges free). Corner i
+// cut: cut[i] 1, an arc through abm[9 i..9 i + 9] (its start, middle and
+// end), 2, a straight side from start to end. An open line's ends are never
+// cut.
+FShape* focc_outline(const double* o, const double* nrm, const double* xyz, int n, int closed, const int* cut, const double* abm) {
+    return guard(
+        [&]() -> FShape* {
+            if (n < 2 || (closed && n < 3)) {
+                set_err("an outline needs more points");
+                return nullptr;
+            }
+            auto P = [](const double* a) { return gp_Pnt(a[0], a[1], a[2]); };
+            std::vector<TopoDS_Vertex> vin(n), vout(n);
+            std::vector<int> ck(n, 0);
+            for (int i = 0; i < n; i++) {
+                bool end = !closed && (i == 0 || i == n - 1);
+                ck[i] = (cut && !end) ? cut[i] : 0;
+                if (ck[i]) {
+                    vin[i] = BRepBuilderAPI_MakeVertex(P(abm + 9 * i));
+                    vout[i] = BRepBuilderAPI_MakeVertex(P(abm + 9 * i + 6));
+                } else {
+                    vin[i] = BRepBuilderAPI_MakeVertex(P(xyz + 3 * i));
+                    vout[i] = vin[i];
+                }
+            }
+            BRepBuilderAPI_MakeWire mw;
+            int edges = 0;
+            for (int i = 0; i < n; i++) {
+                if (ck[i] == 1) {
+                    GC_MakeArcOfCircle arc(BRep_Tool::Pnt(vin[i]), P(abm + 9 * i + 3), BRep_Tool::Pnt(vout[i]));
+                    if (!arc.IsDone()) {
+                        set_err("a rounded corner could not be made");
+                        return nullptr;
+                    }
+                    mw.Add(BRepBuilderAPI_MakeEdge(arc.Value(), vin[i], vout[i]).Edge());
+                    edges++;
+                } else if (ck[i] == 2) {
+                    mw.Add(BRepBuilderAPI_MakeEdge(vin[i], vout[i]).Edge());
+                    edges++;
+                }
+                if (closed || i + 1 < n) {
+                    int j = (i + 1) % n;
+                    if (BRep_Tool::Pnt(vout[i]).Distance(BRep_Tool::Pnt(vin[j])) > 1e-7) {
+                        mw.Add(BRepBuilderAPI_MakeEdge(vout[i], vin[j]).Edge());
+                        edges++;
+                    }
+                }
+                if (!mw.IsDone() && edges > 0) {
+                    set_err("the outline's sides do not join");
+                    return nullptr;
+                }
+            }
+            if (!edges || !mw.IsDone()) {
+                set_err("the outline has no length");
+                return nullptr;
+            }
+            TopoDS_Wire w = mw.Wire();
+            if (!closed) return wrap(w);
+            gp_Dir dn(nrm[0], nrm[1], nrm[2]);
+            BRepBuilderAPI_MakeFace mf(gp_Pln(P(o), dn), w, Standard_True);
+            if (!mf.IsDone()) {
+                set_err("the outline does not make a face");
+                return nullptr;
+            }
+            TopoDS_Face f = mf.Face();
+            if (!valid(f)) {
+                set_err("the outline crosses itself");
+                return nullptr;
+            }
+            if (plane_normal(f).Dot(dn) < 0) f.Reverse();
+            return wrap(f);
+        },
+        (FShape*)nullptr);
+}
+
+// A disc of radius r round o, facing nrm.
+FShape* focc_disc(const double* o, const double* nrm, double r) {
+    return guard(
+        [&]() -> FShape* {
+            if (r <= 1e-9) {
+                set_err("the circle has no size");
+                return nullptr;
+            }
+            gp_Dir dn(nrm[0], nrm[1], nrm[2]);
+            gp_Ax2 ax(gp_Pnt(o[0], o[1], o[2]), dn);
+            TopoDS_Edge e = BRepBuilderAPI_MakeEdge(gp_Circ(ax, r)).Edge();
+            TopoDS_Wire w = BRepBuilderAPI_MakeWire(e).Wire();
+            BRepBuilderAPI_MakeFace mf(gp_Pln(gp_Ax3(ax)), w, Standard_True);
+            if (!mf.IsDone()) {
+                set_err("the disc could not be made");
+                return nullptr;
+            }
+            TopoDS_Face f = mf.Face();
+            if (plane_normal(f).Dot(dn) < 0) f.Reverse();
+            return wrap(f);
+        },
+        (FShape*)nullptr);
+}
+
+// Edge `index` (1-based) pulled along v into a new face (tag `tag`), sewn
+// to the faces along it. A free edge (a line's) becomes the new face's
+// side; the other free edges stay free. Faces keep their tags.
+FShape* focc_extrude_edge(const FShape* s, int index, const double* v, long long tag) {
+    return guard(
+        [&]() -> FShape* {
+            TopTools_IndexedMapOfShape em;
+            edge_map(s->s, em);
+            if (index < 1 || index > em.Extent()) {
+                set_err("no such edge");
+                return nullptr;
+            }
+            gp_Vec vec(v[0], v[1], v[2]);
+            if (vec.Magnitude() < 1e-6) {
+                set_err("pulled too little");
+                return nullptr;
+            }
+            TopoDS_Edge e = TopoDS::Edge(em(index));
+            BRepPrimAPI_MakePrism pr(e, vec);
+            pr.Build();
+            if (!pr.IsDone()) {
+                set_err("the edge could not be pulled");
+                return nullptr;
+            }
+            TopoDS_Shape nf;
+            for (TopExp_Explorer x(pr.Shape(), TopAbs_FACE); x.More() && nf.IsNull(); x.Next()) nf = x.Current();
+            if (nf.IsNull()) {
+                set_err("the edge made no face");
+                return nullptr;
+            }
+            std::vector<TopoDS_Face> faces;
+            std::vector<TopoDS_Edge> loose;
+            split_free(s->s, faces, loose);
+            loose.erase(std::remove_if(loose.begin(), loose.end(), [&](const TopoDS_Edge& x) { return x.IsSame(e); }), loose.end());
+            BRepBuilderAPI_Sewing sew(1e-6);
+            for (const TopoDS_Face& f : faces) sew.Add(f);
+            sew.Add(nf);
+            sew.Perform();
+            TopoDS_Shape sewn = sew.SewedShape();
+            if (sewn.IsNull()) {
+                set_err("the new face could not be joined");
+                return nullptr;
+            }
+            FShape* r = wrap(with_free(sewn, loose));
+            if (!r) return r;
+            TopTools_IndexedMapOfShape fin, fout;
+            face_map(s->s, fin);
+            face_map(r->s, fout);
+            r->tags.assign(fout.Extent(), -1);
+            auto image = [&](const TopoDS_Shape& f) -> int {
+                if (sew.IsModified(f)) {
+                    int j = fout.FindIndex(sew.Modified(f));
+                    if (j > 0) return j;
+                }
+                return fout.FindIndex(f);
+            };
+            for (int i = 1; i <= fin.Extent(); i++) {
+                int j = image(fin(i));
+                if (j > 0) r->tags[j - 1] = i - 1 < (int)s->tags.size() ? s->tags[i - 1] : -1;
+            }
+            int j = image(nf);
+            if (j > 0) r->tags[j - 1] = tag;
+            for (long long& t : r->tags)
+                if (t < 0) t = tag;
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
+// The faces made a solid t thick along their normals (t < 0: the other
+// way). One flat face: swept along its normal; else offset, the sides
+// joined (OpenCascade's thickening). A face tagged T keeps its tag; its top
+// gets mix(T, 8 salt + 1), its sides mix(mix(T, 8 salt + 2), k). Free edges
+// stay as they are.
+FShape* focc_thicken(const FShape* s, double t, long long salt) {
+    return guard(
+        [&]() -> FShape* {
+            std::vector<TopoDS_Face> faces;
+            std::vector<TopoDS_Edge> loose;
+            split_free(s->s, faces, loose);
+            if (faces.empty()) {
+                set_err("nothing to thicken: close the outline, or pull an edge out first");
+                return nullptr;
+            }
+            if (std::fabs(t) < 1e-6) {
+                set_err("no thickness");
+                return nullptr;
+            }
+            TopTools_IndexedMapOfShape fin;
+            face_map(s->s, fin);
+            auto tag_in = [&](int i) { return i - 1 < (int)s->tags.size() ? s->tags[i - 1] : -1LL; };
+            if (faces.size() == 1 && BRepAdaptor_Surface(faces[0]).GetType() == GeomAbs_Plane) {
+                const TopoDS_Face& f = faces[0];
+                BRepPrimAPI_MakePrism pr(f, gp_Vec(plane_normal(f)) * t);
+                pr.Build();
+                if (!pr.IsDone()) {
+                    set_err("the face could not be thickened");
+                    return nullptr;
+                }
+                FShape* r = wrap(with_free(pr.Shape(), loose));
+                if (!r) return r;
+                TopTools_IndexedMapOfShape fout;
+                face_map(r->s, fout);
+                r->tags.assign(fout.Extent(), -1);
+                auto put = [&](const TopoDS_Shape& x, long long tg) {
+                    for (TopExp_Explorer ex(x, TopAbs_FACE); ex.More(); ex.Next()) {
+                        int j = fout.FindIndex(ex.Current());
+                        if (j > 0) r->tags[j - 1] = tg;
+                    }
+                };
+                long long T = tag_in(fin.FindIndex(f));
+                put(pr.FirstShape(), T);
+                put(pr.LastShape(), mix_tag(T, 8 * salt + 1));
+                TopTools_IndexedMapOfShape fe;
+                edge_map(f, fe);
+                long long side = mix_tag(T, 8 * salt + 2);
+                for (int k = 1; k <= fe.Extent(); k++) {
+                    const TopTools_ListOfShape& g = pr.Generated(fe(k));
+                    for (TopTools_ListOfShape::Iterator it(g); it.More(); it.Next()) put(it.Value(), mix_tag(side, k));
+                }
+                for (long long& tg : r->tags)
+                    if (tg < 0) tg = mix_tag(T, 8 * salt + 3);
+                return r;
+            }
+            TopoDS_Shape in = faces_part(s->s);
+            BRepOffset_MakeOffset mo;
+            mo.Initialize(in, t, 1e-5, BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Intersection, Standard_True, Standard_False);
+            mo.MakeOffsetShape();
+            if (!mo.IsDone() || mo.Shape().IsNull()) {
+                set_err("the faces could not be thickened");
+                return nullptr;
+            }
+            FShape* r = wrap(with_free(mo.Shape(), loose));
+            if (!r) return r;
+            if (!valid(mo.Shape())) {
+                delete r;
+                set_err("the thickness gave an invalid solid");
+                return nullptr;
+            }
+            // tags by where each face lies: on a face (it), at the
+            // thickness from it (its top), else a side
+            TopTools_IndexedMapOfShape fout;
+            face_map(r->s, fout);
+            r->tags.assign(fout.Extent(), -1);
+            std::vector<int> sides(fin.Extent() + 1, 0);
+            double info[13];
+            for (int j = 1; j <= fout.Extent(); j++) {
+                face_info(TopoDS::Face(fout(j)), info);
+                TopoDS_Vertex mv = BRepBuilderAPI_MakeVertex(gp_Pnt(info[0], info[1], info[2]));
+                int best = 0;
+                double bd = 1e300;
+                for (int i = 1; i <= fin.Extent(); i++) {
+                    BRepExtrema_DistShapeShape d(mv, fin(i));
+                    if (d.IsDone() && d.NbSolution() > 0 && d.Value() < bd) {
+                        bd = d.Value();
+                        best = i;
+                    }
+                }
+                if (!best) continue;
+                long long T = tag_in(best);
+                double at = std::fabs(t);
+                if (bd < 1e-4)
+                    r->tags[j - 1] = T;
+                else if (std::fabs(bd - at) < 1e-3 * std::max(1.0, at))
+                    r->tags[j - 1] = mix_tag(T, 8 * salt + 1);
+                else
+                    r->tags[j - 1] = mix_tag(mix_tag(T, 8 * salt + 2), ++sides[best]);
+            }
+            for (long long& tg : r->tags)
+                if (tg < 0) tg = mix_tag(salt, 8 * salt + 3);
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
+// Edges (1-based indices) rounded with radius r, in one operation, on the
+// shape's faces (a solid or a sheet); free edges stay. The new faces get
+// `fresh`, the others keep their tags.
+FShape* focc_round(const FShape* s, const int* idx, int n, double r, long long fresh) {
+    return guard(
+        [&]() -> FShape* {
+            TopTools_IndexedMapOfShape m;
+            edge_map(s->s, m);
+            std::vector<TopoDS_Face> faces;
+            std::vector<TopoDS_Edge> loose;
+            split_free(s->s, faces, loose);
+            TopoDS_Shape part = faces_part(s->s);
+            if (part.IsNull()) {
+                set_err("a fillet needs faces");
+                return nullptr;
+            }
+            BRepFilletAPI_MakeFillet op(part);
+            int added = 0;
+            for (int i = 0; i < n; i++)
+                if (idx[i] >= 1 && idx[i] <= m.Extent()) {
+                    op.Add(r, TopoDS::Edge(m(idx[i])));
+                    added++;
+                }
+            if (!added) {
+                set_err("no edge to round");
+                return nullptr;
+            }
+            op.Build();
+            if (!op.IsDone()) {
+                set_err("fillet failed");
+                return nullptr;
+            }
+            if (!valid(op.Shape())) {
+                set_err("fillet gave an invalid shape");
+                return nullptr;
+            }
+            FShape* res = wrap(with_free(op.Shape(), loose));
+            if (res) carry_tags(op, s, res, fresh);
+            return res;
+        },
+        (FShape*)nullptr);
+}
 
 // -------------------------------------------------------------- topology
 
