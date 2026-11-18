@@ -975,7 +975,9 @@ fn push_card(ui: &mut Ui, st: &mut AppState) {
 /// Vertices picked: the arrows move them; at a corner of a thin plate, a
 /// radius rounds it in its plane (a fillet on the short edge there).
 fn vertex_card(ui: &mut Ui, st: &mut AppState) {
-    ui.label(egui::RichText::new("Drag the arrows to move it: the faces round it follow").font(regular(12.0)).color(TEXT2()));
+    if st.comp_pivot().is_some() {
+        ui.label(egui::RichText::new("Drag the arrows to move it: the faces round it follow").font(regular(12.0)).color(TEXT2()));
+    }
     // a sketch's corner: cut in its outline (exact arc or chamfer), the
     // whole height follows
     if let Some((size, chamfer, max)) = st.profile_corner_state() {
