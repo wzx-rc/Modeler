@@ -90,6 +90,7 @@ pub fn prim_icon(k: PrimKind) -> Icon {
         PrimKind::Box => Icon::Box,
         PrimKind::Cylinder => Icon::Cylinder,
         PrimKind::Profile => Icon::Sketch,
+        PrimKind::Path => Icon::Path,
     }
 }
 
@@ -98,6 +99,7 @@ pub fn prim_key(k: PrimKind) -> &'static str {
         PrimKind::Box => "B",
         PrimKind::Cylinder => "C",
         PrimKind::Profile => "L",
+        PrimKind::Path => "P",
     }
 }
 
@@ -348,6 +350,11 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             if card(ui, Some(Icon::Sketch), "SKETCH", &format!("{m} · L"), st.tool == Tool::Create(sk), op_color(mode), tip).clicked() {
                 st.arm(sk);
             }
+            let pk = PrimKind::Path;
+            let tip = "Path (P): a curve with no thickness, on a face or the ground. Click the corners, drag for curve points; Enter ends it open, a click on the first point closes it. Its corners take a fillet or a bevel in Vertex mode (1)";
+            if card(ui, Some(Icon::Path), "PATH", "CURVE · P", st.tool == Tool::Create(pk), PATH, tip).clicked() {
+                st.arm(pk);
+            }
             divider(ui);
             for (k, icon, tip) in [
                 (PushKind::Inset, Icon::Inset, "Inset (I): a flat face's outline moved in (2 mm), sized with its dot; its arrow raises or sinks it. Click a face, or pick a face (3) and press I"),
@@ -422,7 +429,10 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 }
 
 fn history_chip(ui: &mut Ui, st: &AppState, f: &Feature) -> Response {
-    let sub = if f.is_solid() { format!("{} · {}", f.prim.kind().label(), f.op.label()) } else { format!("{} · {}", f.kind_label(), step_info(f)) };
+    let sub = if f.is_path() {
+        let n = f.profile.as_ref().map(|p| p.points.len()).unwrap_or(0);
+        format!("Path · {} · {n} points", if f.profile.as_ref().map(|p| p.open).unwrap_or(false) { "open" } else { "closed" })
+    } else if f.is_solid() { format!("{} · {}", f.prim.kind().label(), f.op.label()) } else { format!("{} · {}", f.kind_label(), step_info(f)) };
     let tg = ui.painter().layout_no_wrap(f.name.clone(), semibold(12.5), TEXT());
     let sg = ui.painter().layout_no_wrap(sub, regular(11.0), TEXT2());
     let w = 8.0 + 28.0 + 8.0 + tg.size().x.max(sg.size().x) + 12.0;
@@ -673,20 +683,27 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
 
 /// Nothing selected: what new shapes will be.
 fn defaults(ui: &mut Ui, st: &mut AppState) {
-    section(ui, "New shapes");
+    let path = st.tool == Tool::Create(PrimKind::Path);
+    section(ui, if path { "New path" } else { "New shapes" });
     let items = [(Op::Add, "Add", accent()), (Op::Carve, "Carve", carve())];
-    if let Some(m) = segmented(ui, &items, st.mode, 40.0) {
-        st.mode = m;
+    if !path {
+        if let Some(m) = segmented(ui, &items, st.mode, 40.0) {
+            st.mode = m;
+        }
+        ui.add_space(4.0);
     }
-    ui.add_space(4.0);
-    let help = if st.tool == Tool::Create(PrimKind::Profile) {
+    let help = if st.tool == Tool::Create(PrimKind::Path) {
+        "Click on a flat face or the ground: the path is drawn on it. A click puts a corner, a drag a curve point. Enter ends it open; a click on the first point closes it. It stays a curve, with no thickness."
+    } else if st.tool == Tool::Create(PrimKind::Profile) {
         "Click on a flat face or the ground: the outline is drawn on it. A click puts a corner, a drag a curve point. Click the first point (or Enter) to close it, then move for the height and click."
     } else {
         "Press on the ground or on a flat face and drag the base, release, then move for the height. A click alone places a 20 mm shape; the tool's key again places one at once."
     };
     ui.label(egui::RichText::new(help).font(regular(12.0)).color(TEXT2()));
-    let m = st.material;
-    material_section(ui, st, m);
+    if !path {
+        let m = st.material;
+        material_section(ui, st, m);
+    }
     section(ui, "Display");
     if toggle_row(ui, "Shape list", st.settings.show_tree) {
         st.settings.show_tree = !st.settings.show_tree;
@@ -791,6 +808,10 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         round_card(ui, st);
         return;
     }
+    if f.is_path() {
+        path_card(ui, st, &f);
+        return;
+    }
 
     // a slider drag is one undo step: it ends when no pointer button is down
     let any_down = ui.input(|i| i.pointer.any_down());
@@ -826,6 +847,7 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
                 feature_edit(st, id, "Height", start, |g| g.prim.set_height(h.max(0.1) as f64));
             }
         }
+        Prim::Path { .. } => {}
     }
 
     section(ui, "Combine");
@@ -837,6 +859,54 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
 
     section(ui, "Position and rotation");
     position_rows(ui, st, &f);
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+        st.end_live();
+    }
+}
+
+/// A path: open or closed, its box, where it is. Its corners are cut in
+/// Vertex mode.
+fn path_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let id = f.id;
+    let Some(pr) = f.profile.clone() else { return };
+    let Prim::Path { x, z } = f.prim else { return };
+    section(ui, "Path");
+    let cut = pr.corner.iter().filter(|c| c.abs() > 1e-9).count();
+    let what = format!(
+        "{} path, {} points{}",
+        if pr.open { "An open" } else { "A closed" },
+        pr.points.len(),
+        if cut > 0 { format!(", {cut} corner{} cut", if cut > 1 { "s" } else { "" }) } else { String::new() }
+    );
+    ui.label(egui::RichText::new(what).font(regular(12.0)).color(TEXT()));
+    ui.label(egui::RichText::new("A curve with no thickness. Vertex mode (1): pick its corners for a fillet or a bevel").font(regular(12.0)).color(TEXT2()));
+    let items = [(true, "Open", PATH), (false, "Closed", PATH)];
+    if let Some(o) = segmented(ui, &items, pr.open, 40.0) {
+        let closable = o || pr.points.len() >= 3;
+        if closable {
+            feature_edit(st, id, if o { "Open path" } else { "Close path" }, true, |g| {
+                if let Some(p) = g.profile.as_mut() {
+                    p.open = o;
+                }
+            });
+            st.end_live();
+        }
+    }
+    section(ui, "Size");
+    for (k, label, v) in [(0, "Width", x), (2, "Depth", z)] {
+        let mut val = v as f32;
+        let (ch, start) = slider_row(ui, label, &mut val, 0.01..=2000.0, 0.1, "mm");
+        if ch {
+            feature_edit(st, id, "Size", start, |g| {
+                if let Prim::Path { x, z } = &mut g.prim {
+                    *(if k == 0 { x } else { z }) = val.max(0.01) as f64;
+                }
+            });
+        }
+    }
+    section(ui, "Position and rotation");
+    position_rows(ui, st, f);
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
         st.end_live();
     }
@@ -982,8 +1052,15 @@ fn vertex_card(ui: &mut Ui, st: &mut AppState) {
     // whole height follows
     if let Some((size, chamfer, max)) = st.profile_corner_state() {
         let n = st.picked_profile_corners().len();
-        section(ui, if n > 1 { "Sketch corners" } else { "Sketch corner" });
-        ui.label(egui::RichText::new("Cut in the sketch's outline: an exact arc or a straight bevel, the whole height follows").font(regular(12.0)).color(TEXT2()));
+        let on_path = st.picked_profile_corners().iter().all(|(id, _)| st.doc.feature(*id).map(|f| f.is_path()).unwrap_or(false));
+        section(ui, match (on_path, n > 1) {
+            (true, true) => "Path corners",
+            (true, false) => "Path corner",
+            (false, true) => "Sketch corners",
+            (false, false) => "Sketch corner",
+        });
+        let txt = if on_path { "Cut in the path: an exact arc or a straight bevel" } else { "Cut in the sketch's outline: an exact arc or a straight bevel, the whole height follows" };
+        ui.label(egui::RichText::new(txt).font(regular(12.0)).color(TEXT2()));
         let kinds = [(false, "Fillet", EDGE_SEL), (true, "Chamfer", EDGE_SEL)];
         if let Some(c) = segmented(ui, &kinds, chamfer, 36.0) {
             st.set_profile_corners(if size > 0.0 { size } else { 2.0f64.min(max) }, c, true);
@@ -1230,7 +1307,11 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if st.sketch.is_some() {
         if pressed(Key::Enter) {
             let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]).unwrap_or(st.principal());
-            st.sketch_close(at);
+            if st.tool == Tool::Create(PrimKind::Path) {
+                st.path_finish(false);
+            } else {
+                st.sketch_close(at);
+            }
         }
         if pressed(Key::Backspace) || pressed(Key::Delete) {
             st.sketch_back();
@@ -1264,7 +1345,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.arm_push(kind, at);
         }
     }
-    for (k, kind) in [(Key::B, PrimKind::Box), (Key::C, PrimKind::Cylinder), (Key::L, PrimKind::Profile)] {
+    for (k, kind) in [(Key::B, PrimKind::Box), (Key::C, PrimKind::Cylinder), (Key::L, PrimKind::Profile), (Key::P, PrimKind::Path)] {
         if pressed(k) {
             if shift {
                 st.quick_add(kind);

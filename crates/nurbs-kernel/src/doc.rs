@@ -50,6 +50,11 @@ pub enum Prim {
     /// outline's box width (local X), the height (local Y), its box depth
     /// (local Z). Resizing it stretches the outline.
     Profile { x: f64, y: f64, z: f64 },
+    /// A path (Romain 18 nov.: "un path sans épaisseur"): a curve of
+    /// corners and curve points (`Feature::profile`, open or closed) with
+    /// no thickness, its box width (local X) and depth (local Z). The
+    /// kernel builds nothing from it.
+    Path { x: f64, z: f64 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -58,6 +63,8 @@ pub enum PrimKind {
     Cylinder,
     /// The Sketch tool's outlines.
     Profile,
+    /// The Path tool's curves.
+    Path,
 }
 
 impl PrimKind {
@@ -66,6 +73,7 @@ impl PrimKind {
             PrimKind::Box => "Cube",
             PrimKind::Cylinder => "Cylinder",
             PrimKind::Profile => "Sketch",
+            PrimKind::Path => "Path",
         }
     }
     /// Default primitive: 20 mm.
@@ -74,6 +82,7 @@ impl PrimKind {
             PrimKind::Box => Prim::Box { x: 20.0, y: 20.0, z: 20.0 },
             PrimKind::Cylinder => Prim::Cylinder { radius: 10.0, height: 20.0 },
             PrimKind::Profile => Prim::Profile { x: 20.0, y: 20.0, z: 20.0 },
+            PrimKind::Path => Prim::Path { x: 20.0, z: 20.0 },
         }
     }
 }
@@ -84,24 +93,27 @@ impl Prim {
             Prim::Box { .. } => PrimKind::Box,
             Prim::Cylinder { .. } => PrimKind::Cylinder,
             Prim::Profile { .. } => PrimKind::Profile,
+            Prim::Path { .. } => PrimKind::Path,
         }
     }
     pub fn height(&self) -> f64 {
         match *self {
             Prim::Box { y, .. } | Prim::Profile { y, .. } => y,
             Prim::Cylinder { height, .. } => height,
+            Prim::Path { .. } => 0.0,
         }
     }
     pub fn set_height(&mut self, h: f64) {
         match self {
             Prim::Box { y, .. } | Prim::Profile { y, .. } => *y = h,
             Prim::Cylinder { height, .. } => *height = h,
+            Prim::Path { .. } => {}
         }
     }
     /// Half extents in the local frame, around the base centre: x, height, z.
     pub fn half_xz(&self) -> (f64, f64) {
         match *self {
-            Prim::Box { x, z, .. } | Prim::Profile { x, z, .. } => (x * 0.5, z * 0.5),
+            Prim::Box { x, z, .. } | Prim::Profile { x, z, .. } | Prim::Path { x, z } => (x * 0.5, z * 0.5),
             Prim::Cylinder { radius, .. } => (radius, radius),
         }
     }
@@ -124,6 +136,10 @@ pub struct Profile {
     /// side), in mm; 0 or missing: a sharp corner. Curve points ignore it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub corner: Vec<f64>,
+    /// An open path (`Prim::Path` only): no side from the last point back
+    /// to the first, and its two ends are plain points.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open: bool,
 }
 
 /// A corner of an outline cut by a fillet (an arc) or a chamfer (a straight
@@ -181,6 +197,14 @@ pub fn corner_cut(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], i: usize) -> 
     Some(Cut { chamfer: false, a, m, b, size: r, max: tmax * half })
 }
 
+/// The same on an outline that may be open: its two ends have no cut.
+pub fn corner_cut_open(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], i: usize, open: bool) -> Option<Cut> {
+    if open && (i == 0 || i + 1 >= p.len()) {
+        return None;
+    }
+    corner_cut(p, smooth, corner, i)
+}
+
 /// Points along a cut: the arc through a, m, b, or the straight chamfer.
 fn cut_points(c: &Cut) -> Vec<[f64; 2]> {
     if c.chamfer {
@@ -222,14 +246,14 @@ impl Profile {
     /// Its pieces, in a box of `w` × `d`, curves sampled (as the kernel
     /// builds them: a curve between the middles of the two sides).
     pub fn pieces(&self, w: f64, d: f64) -> Vec<Piece> {
-        pieces_cut(&self.scaled(w, d), &self.smooth, &self.corner)
+        pieces_open(&self.scaled(w, d), &self.smooth, &self.corner, self.open)
     }
     /// Each point's cut, in a box of `w` × `d`.
     pub fn cuts(&self, w: f64, d: f64) -> Vec<Option<Cut>> {
         let p = self.scaled(w, d);
-        (0..p.len()).map(|i| corner_cut(&p, &self.smooth, &self.corner, i)).collect()
+        (0..p.len()).map(|i| corner_cut_open(&p, &self.smooth, &self.corner, i, self.open)).collect()
     }
-    /// The closed outline as one polyline (last point = first).
+    /// The outline as one polyline (closed: last point = first).
     pub fn polyline(&self, w: f64, d: f64) -> Vec<[f64; 2]> {
         let mut out: Vec<[f64; 2]> = vec![];
         for piece in self.pieces(w, d) {
@@ -239,14 +263,16 @@ impl Profile {
                 }
             }
         }
-        if let Some(f) = out.first().copied() {
-            out.push(f);
+        if !self.open {
+            if let Some(f) = out.first().copied() {
+                out.push(f);
+            }
         }
         out
     }
     /// Mirrored across local X (the feature turned over to grow downwards).
     pub fn flipped(&self) -> Profile {
-        Profile { points: self.points.iter().map(|p| [p[0], -p[1]]).collect(), smooth: self.smooth.clone(), corner: self.corner.clone() }
+        Profile { points: self.points.iter().map(|p| [p[0], -p[1]]).collect(), smooth: self.smooth.clone(), corner: self.corner.clone(), open: self.open }
     }
 }
 
@@ -258,15 +284,22 @@ pub fn pieces(p: &[[f64; 2]], smooth: &[bool]) -> Vec<Piece> {
 /// The same with the corners cut (`corner_cut`): the cut is the corner's
 /// piece (id 2 i).
 pub fn pieces_cut(p: &[[f64; 2]], smooth: &[bool], corner: &[f64]) -> Vec<Piece> {
+    pieces_open(p, smooth, corner, false)
+}
+
+/// The same on an outline that may be open (a path): no closing side, and
+/// its two ends are plain points.
+pub fn pieces_open(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], open: bool) -> Vec<Piece> {
     let n = p.len();
+    let end = |i: usize| open && (i == 0 || i + 1 == n);
     let mut out = vec![];
     if n < 2 {
         return out;
     }
     let mid = |a: [f64; 2], b: [f64; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
     let far = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() > 1e-9;
-    let round = |i: usize| smooth.get(i).copied().unwrap_or(false) && far(p[(i + n - 1) % n], p[i]) && far(p[i], p[(i + 1) % n]);
-    let cuts: Vec<Option<Cut>> = (0..n).map(|i| corner_cut(p, smooth, corner, i)).collect();
+    let round = |i: usize| !end(i) && smooth.get(i).copied().unwrap_or(false) && far(p[(i + n - 1) % n], p[i]) && far(p[i], p[(i + 1) % n]);
+    let cuts: Vec<Option<Cut>> = (0..n).map(|i| corner_cut_open(p, smooth, corner, i, open)).collect();
     // where each point's piece starts and ends (the point itself at a corner)
     let ends = |i: usize| {
         if round(i) {
@@ -291,6 +324,9 @@ pub fn pieces_cut(p: &[[f64; 2]], smooth: &[bool], corner: &[f64]) -> Vec<Piece>
             out.push(Piece { id: 2 * i, pts });
         } else if let Some(c) = &cuts[i] {
             out.push(Piece { id: 2 * i, pts: cut_points(c) });
+        }
+        if open && i + 1 == n {
+            break;
         }
         let (next, _) = ends((i + 1) % n);
         if far(b, next) {
@@ -439,6 +475,10 @@ impl Feature {
     pub fn is_solid(&self) -> bool {
         self.round.is_none() && self.push.is_none() && self.tweak.is_none()
     }
+    /// A path: a curve with no thickness, nothing for the kernel.
+    pub fn is_path(&self) -> bool {
+        matches!(self.prim, Prim::Path { .. })
+    }
     /// What it is: "Cube", "Cylinder", "Fillet", "Chamfer", "Inset", "Extrude".
     pub fn kind_label(&self) -> &'static str {
         match (&self.round, &self.push, &self.tweak) {
@@ -485,6 +525,10 @@ impl Feature {
         let m = self.matrix();
         let h = self.prim.height();
         match self.prim {
+            Prim::Path { x, z } => {
+                let Some(pr) = &self.profile else { return vec![] };
+                vec![pr.polyline(x, z).iter().map(|q| m.transform_point3(DVec3::new(q[0], 0.0, q[1]))).collect()]
+            }
             Prim::Profile { x, z, .. } => {
                 let Some(pr) = &self.profile else { return vec![] };
                 let line = pr.polyline(x, z);

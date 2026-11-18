@@ -87,6 +87,7 @@ fn sub_of(f: &Feature, kind: OccSurf, n: DVec3, at: DVec3) -> u16 {
                 3 + near.map(|(id, _)| id).unwrap_or(0).min(60000) as u16
             }
         }
+        Prim::Path { .. } => 0,
     }
 }
 
@@ -114,6 +115,7 @@ fn tool(f: &Feature) -> Result<Shape, String> {
             let s = if cuts.iter().any(|c| c.is_some()) { Shape::prism_cut(&pts, &pr.smooth, &cuts, h * 0.5)? } else { Shape::prism(&pts, &pr.smooth, h * 0.5)? };
             s.transformed(rows(DMat4::from_rotation_x(-std::f64::consts::FRAC_PI_2)))?
         }
+        Prim::Path { .. } => return Err("a path has no solid".into()),
     };
     let mut s = s;
     // the shape is centred on its local origin: tag it in its own frame
@@ -406,7 +408,7 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let mut used_stages = vec![];
     // the stage before each feature (blended fillets start again from there)
     let mut befores: Vec<(&Feature, Stage)> = vec![];
-    for f in doc.features.iter().filter(|f| f.visible) {
+    for f in doc.features.iter().filter(|f| f.visible && !f.is_path()) {
         befores.push((f, stage.clone()));
         let fh = f.hash();
         key = hash2(key, fh);
@@ -675,7 +677,7 @@ mod tests {
         // an L of 20 × 20 mm, 10 mm high, its inside corner a curve point
         let mut d = Doc::default();
         let l = d.add(Op::Add, Prim::Profile { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        let pr = crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false, false, false, true, false, false], corner: vec![] };
+        let pr = crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false, false, false, true, false, false], corner: vec![], open: false };
         let pieces = pr.pieces(20.0, 20.0).len();
         d.feature_mut(l).unwrap().profile = Some(pr);
         let mut cache = Cache::default();
@@ -704,12 +706,12 @@ mod tests {
         let mut d = Doc::default();
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 40.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let c = d.add(Op::Carve, Prim::Profile { x: 20.0, y: 5.0, z: 20.0 }, DVec3::new(0.0, 20.0, 0.0), DQuat::from_rotation_x(std::f64::consts::PI));
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false, false, true], corner: vec![] });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false, false, true], corner: vec![], open: false });
         let m3 = build(&d, true, false, &[], &mut cache);
         assert!(m3.errors.is_empty(), "{:?}", m3.errors);
         assert!(m3.faces.iter().any(|f| f.tag.map(|t| t.feature) == Some(c)), "the pocket's faces carry the sketch's tags");
         // a bow tie crosses itself: an error, the block stays
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![] });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![], open: false });
         let m4 = build(&d, true, false, &[], &mut cache);
         assert_eq!(m4.errors.len(), 1, "{:?}", m4.errors);
     }
@@ -783,7 +785,7 @@ mod tests {
         // its sides allow)
         let mut d = Doc::default();
         let c = d.add(Op::Add, Prim::Profile { x: 20.0, y: 6.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![4.0, -3.0, 50.0, 0.0] });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![4.0, -3.0, 50.0, 0.0], open: false });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let cyl: Vec<f64> = m.faces.iter().filter(|f| f.kind == SurfKind::Cylinder).map(|f| f.radius).collect();
@@ -798,6 +800,33 @@ mod tests {
         assert_eq!(pr.cuts(20.0, 20.0).iter().filter(|c| c.is_some()).count(), 3);
         let tags: Vec<u16> = m.faces.iter().filter(|f| f.kind == SurfKind::Cylinder).filter_map(|f| f.tag.map(|t| t.sub)).collect();
         assert!(tags.contains(&3) && tags.contains(&(3 + 4)), "{tags:?}");
+    }
+
+    #[test]
+    fn paths_have_no_solid() {
+        // a block and an open path (an L of 3 points, its middle corner
+        // rounded at 5 mm) over it: the path changes nothing in the part
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        let p = d.add(Op::Add, Prim::Path { x: 20.0, z: 20.0 }, DVec3::new(0.0, 20.0, 0.0), DQuat::IDENTITY);
+        let pr = crate::doc::Profile { points: vec![[-0.5, 0.5], [-0.5, -0.5], [0.5, -0.5]], smooth: vec![false; 3], corner: vec![0.0, 5.0, 0.0], open: true };
+        d.feature_mut(p).unwrap().profile = Some(pr.clone());
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.len(), m0.faces.len());
+        // open: a side, the arc, a side; no closing side; the ends uncut
+        let ids: Vec<usize> = pr.pieces(20.0, 20.0).iter().map(|pc| pc.id).collect();
+        assert_eq!(ids, vec![1, 2, 3], "{ids:?}");
+        let line = pr.polyline(20.0, 20.0);
+        assert!((line[0][0] + 10.0).abs() < 1e-9 && (line[0][1] - 10.0).abs() < 1e-9, "{:?}", line[0]);
+        assert!((line.last().unwrap()[0] - 10.0).abs() < 1e-9, "it ends on its last point");
+        let c = pr.cuts(20.0, 20.0);
+        assert!(c[0].is_none() && c[2].is_none() && c[1].map(|c| (c.size - 5.0).abs() < 1e-9).unwrap_or(false));
+        // its outline: one polyline, on its plane
+        let o = d.feature(p).unwrap().outline();
+        assert_eq!(o.len(), 1);
+        assert!(o[0].iter().all(|q| (q.y - 20.0).abs() < 1e-9));
     }
 
     #[test]

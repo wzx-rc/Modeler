@@ -123,7 +123,15 @@ impl Drawer {
         let carve = theme::carve();
         let accent = theme::accent();
         let moving = st.drag.is_some();
-        for f in st.doc.features.iter().filter(|f| f.is_solid()) {
+        // paths: always drawn (they have no faces), white when selected
+        for f in st.doc.features.iter().filter(|f| f.visible && f.is_path()) {
+            let selected = st.selection.contains(&f.id);
+            let hovered = st.hover_feature == Some(f.id);
+            let (c, w) = if selected { (theme::accent(), 2.2) } else if hovered { (theme::PATH, 2.2) } else { (theme::PATH, 1.6) };
+            let lines: Vec<Vec<[f32; 3]>> = f.outline().iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
+            line_vertices(&lines, [c.r(), c.g(), c.b(), 240], w, &mut over);
+        }
+        for f in st.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()) {
             let creating = st.creation.as_ref().map(|c| c.id == f.id).unwrap_or(false);
             let selected = st.selection.contains(&f.id);
             let show = creating || (selected && (moving || f.op == Op::Carve || !f.visible)) || (st.tool == Tool::Select && st.hover_feature == Some(f.id) && f.op == Op::Carve);

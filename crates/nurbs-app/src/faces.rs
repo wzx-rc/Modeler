@@ -85,8 +85,27 @@ impl AppState {
 
     // ------------------------------------------------------------ vertices
 
-    /// The part's B-rep vertices: the ends of its edges (seams left out).
+    /// The vertices Vertex mode picks: the part's, and the paths' points
+    /// (a cut corner by the middle of its cut).
     pub fn vertices(&self) -> Vec<Vec3> {
+        let mut out = self.part_vertices();
+        for f in self.doc.features.iter().filter(|f| f.visible) {
+            let (Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { continue };
+            let m = f.matrix();
+            let cuts = pr.cuts(*x, *z);
+            for (i, q) in pr.scaled(*x, *z).iter().enumerate() {
+                if pr.smooth.get(i).copied().unwrap_or(false) && !(pr.open && (i == 0 || i + 1 == pr.points.len())) {
+                    continue;
+                }
+                let q = cuts[i].map(|c| c.m).unwrap_or(*q);
+                out.push(m.transform_point3(DVec3::new(q[0], 0.0, q[1])).as_vec3());
+            }
+        }
+        out
+    }
+
+    /// The part's B-rep vertices: the ends of its edges (seams left out).
+    pub fn part_vertices(&self) -> Vec<Vec3> {
         let Some(m) = &self.model else { return vec![] };
         let mut out: Vec<Vec3> = vec![];
         for e in m.edges.iter().filter(|e| !e.seam) {
@@ -456,7 +475,7 @@ impl AppState {
     /// sketch and the point's index.
     pub fn profile_corner(&self, v: DVec3) -> Option<(FeatureId, usize)> {
         for f in self.doc.features.iter().filter(|f| f.visible) {
-            let (Prim::Profile { x, z, .. }, Some(pr)) = (&f.prim, &f.profile) else { continue };
+            let (Prim::Profile { x, z, .. } | Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { continue };
             let l = f.matrix().inverse().transform_point3(v);
             let h = f.prim.height();
             if !(l.y.abs() < 1e-3 || (l.y.abs() - h).abs() < 1e-3) {
@@ -467,10 +486,11 @@ impl AppState {
             let pts = pr.scaled(*x, *z);
             let cuts = pr.cuts(*x, *z);
             for (i, p) in pts.iter().enumerate() {
-                if pr.smooth.get(i).copied().unwrap_or(false) {
+                // a path's open ends are plain points
+                if pr.smooth.get(i).copied().unwrap_or(false) || (pr.open && (i == 0 || i + 1 == pts.len())) {
                     continue;
                 }
-                if near(*p) || cuts[i].map(|c| near(c.a) || near(c.b)).unwrap_or(false) {
+                if near(*p) || cuts[i].map(|c| near(c.a) || near(c.b) || near(c.m)).unwrap_or(false) {
                     return Some((f.id, i));
                 }
             }
@@ -504,6 +524,9 @@ impl AppState {
             self.begin_live(if chamfer { "Chamfer corner" } else { "Fillet corner" });
         }
         let v = if chamfer { -size.max(0.0) } else { size.max(0.0) };
+        // a path's corner is picked by the middle of its cut, which moves
+        // with the size: the pick follows it
+        let picks: Vec<(usize, (FeatureId, usize))> = self.vert_sel.iter().enumerate().filter_map(|(k, q)| self.profile_corner(*q).map(|c| (k, c))).collect();
         self.live(|d| {
             for (id, i) in &corners {
                 if let Some(pr) = d.feature_mut(*id).and_then(|f| f.profile.as_mut()) {
@@ -514,6 +537,12 @@ impl AppState {
                 }
             }
         });
+        for (k, (id, i)) in picks {
+            let Some(f) = self.doc.feature(id) else { continue };
+            let (Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { continue };
+            let q = pr.cuts(*x, *z)[i].map(|c| c.m).unwrap_or(pr.scaled(*x, *z)[i]);
+            self.vert_sel[k] = f.matrix().transform_point3(DVec3::new(q[0], 0.0, q[1]));
+        }
     }
 
     /// The first picked sketch corner's cut as asked (size, chamfer) and
@@ -521,13 +550,13 @@ impl AppState {
     pub fn profile_corner_state(&self) -> Option<(f64, bool, f64)> {
         let (id, i) = *self.picked_profile_corners().first()?;
         let f = self.doc.feature(id)?;
-        let (Prim::Profile { x, z, .. }, Some(pr)) = (&f.prim, &f.profile) else { return None };
+        let (Prim::Profile { x, z, .. } | Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { return None };
         let c = pr.corner.get(i).copied().unwrap_or(0.0);
         // the largest: a cut asked very big stops there
         let mut big = pr.clone();
         big.corner.resize(big.points.len(), 0.0);
         big.corner[i] = if c < 0.0 { -1e9 } else { 1e9 };
-        let max = nurbs_kernel::doc::corner_cut(&big.scaled(*x, *z), &big.smooth, &big.corner, i).map(|k| k.max).unwrap_or(0.0);
+        let max = nurbs_kernel::doc::corner_cut_open(&big.scaled(*x, *z), &big.smooth, &big.corner, i, big.open).map(|k| k.max).unwrap_or(0.0);
         Some((c.abs(), c < 0.0, max))
     }
 
@@ -603,7 +632,7 @@ impl AppState {
             Comp::Face(f) => Some(f.at),
             Comp::Edge(e) => Some(e.at),
             // a vertex that is gone (a sketch corner just cut): no gizmo
-            Comp::Vertex(v) => self.vertices().iter().any(|q| q.as_dvec3().distance(v) < 1e-3).then_some(v),
+            Comp::Vertex(v) => self.part_vertices().iter().any(|q| q.as_dvec3().distance(v) < 1e-3).then_some(v),
         }
     }
 

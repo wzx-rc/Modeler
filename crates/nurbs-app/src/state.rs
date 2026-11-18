@@ -568,7 +568,7 @@ impl AppState {
     /// Arms a creation tool; the armed tool again places a shape at once
     /// (`quick_add`).
     pub fn arm(&mut self, kind: PrimKind) {
-        if kind == PrimKind::Profile && self.tool == Tool::Create(kind) {
+        if matches!(kind, PrimKind::Profile | PrimKind::Path) && self.tool == Tool::Create(kind) {
             return;
         }
         self.abort_gestures();
@@ -584,7 +584,7 @@ impl AppState {
     /// shape's top along its axis (at the world origin with nothing
     /// selected). Carve: drilled through the selected shape, from its top.
     pub fn quick_add(&mut self, kind: PrimKind) {
-        if kind == PrimKind::Profile {
+        if matches!(kind, PrimKind::Profile | PrimKind::Path) {
             self.arm(kind);
             return;
         }
@@ -599,7 +599,7 @@ impl AppState {
                 // a quarter of the base's smaller side, at most 5 mm
                 let r = (hx.min(hz) * 0.5).clamp(0.2, 5.0);
                 let prim = match kind {
-                    PrimKind::Box | PrimKind::Profile => Prim::Box { x: 2.0 * r, y: h + 2.0, z: 2.0 * r },
+                    PrimKind::Box | PrimKind::Profile | PrimKind::Path => Prim::Box { x: 2.0 * r, y: h + 2.0, z: 2.0 * r },
                     PrimKind::Cylinder => Prim::Cylinder { radius: r, height: h + 2.0 },
                 };
                 // from 1 mm above the top, down through the base
@@ -916,7 +916,7 @@ impl AppState {
 
     /// Starts a creation at `p` (screen).
     pub fn begin_creation(&mut self, kind: PrimKind, p: [f32; 2]) {
-        if kind == PrimKind::Profile {
+        if matches!(kind, PrimKind::Profile | PrimKind::Path) {
             return;
         }
         let Some((plane, a, snapped)) = self.start_plane(p) else { return };
@@ -927,7 +927,7 @@ impl AppState {
         let rot = basis_rotation(plane.u, plane.n);
         // a tiny shape at first: it grows with the drag
         let prim = match kind {
-            PrimKind::Box | PrimKind::Profile => Prim::Box { x: 0.01, y: 0.01, z: 0.01 },
+            PrimKind::Box | PrimKind::Profile | PrimKind::Path => Prim::Box { x: 0.01, y: 0.01, z: 0.01 },
             PrimKind::Cylinder => Prim::Cylinder { radius: 0.01, height: 0.01 },
         };
         let mut id = 0;
@@ -977,7 +977,7 @@ impl AppState {
 
     fn creation_base_centre(&self, c: &Creation) -> DVec3 {
         match c.kind {
-            PrimKind::Box | PrimKind::Profile => c.plane.at([(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5]),
+            PrimKind::Box | PrimKind::Profile | PrimKind::Path => c.plane.at([(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5]),
             PrimKind::Cylinder => c.plane.at(c.a),
         }
     }
@@ -989,7 +989,7 @@ impl AppState {
         let (w, dpt) = (tidy((c.b[0] - c.a[0]).abs()), tidy((c.b[1] - c.a[1]).abs()));
         let r = tidy(((c.b[0] - c.a[0]).powi(2) + (c.b[1] - c.a[1]).powi(2)).sqrt());
         let base_ok = match c.kind {
-            PrimKind::Box | PrimKind::Profile => w > 1e-6 && dpt > 1e-6,
+            PrimKind::Box | PrimKind::Profile | PrimKind::Path => w > 1e-6 && dpt > 1e-6,
             PrimKind::Cylinder => r > 1e-6,
         };
         let h = match c.phase {
@@ -1010,6 +1010,7 @@ impl AppState {
                     PrimKind::Box => Prim::Box { x: w.max(0.01), y: shown_h, z: dpt.max(0.01) },
                     PrimKind::Cylinder => Prim::Cylinder { radius: r.max(0.01), height: shown_h },
                     PrimKind::Profile => Prim::Profile { x: w.max(0.01), y: shown_h, z: dpt.max(0.01) },
+                    PrimKind::Path => Prim::Path { x: w.max(0.01), z: dpt.max(0.01) },
                 };
                 // turned over to grow down: the outline mirrored stays in place
                 if let Some(pr) = &c.profile {
@@ -1025,14 +1026,14 @@ impl AppState {
     pub fn base_released(&mut self, p: [f32; 2]) {
         let Some(mut c) = self.creation.clone() else { return };
         let tiny = match c.kind {
-            PrimKind::Box | PrimKind::Profile => (c.b[0] - c.a[0]).abs() < 0.5 || (c.b[1] - c.a[1]).abs() < 0.5,
+            PrimKind::Box | PrimKind::Profile | PrimKind::Path => (c.b[0] - c.a[0]).abs() < 0.5 || (c.b[1] - c.a[1]).abs() < 0.5,
             PrimKind::Cylinder => ((c.b[0] - c.a[0]).powi(2) + (c.b[1] - c.a[1]).powi(2)).sqrt() < 0.5,
         };
         if tiny {
             // direct: a default shape, centred on the click
             let s = 10.0;
             match c.kind {
-                PrimKind::Box | PrimKind::Profile => {
+                PrimKind::Box | PrimKind::Profile | PrimKind::Path => {
                     c.b = [c.a[0] + s, c.a[1] + s];
                     c.a = [c.a[0] - s, c.a[1] - s];
                 }
@@ -1161,6 +1162,10 @@ impl AppState {
     /// Closes the outline (Enter, or a click on its first point): it becomes
     /// a shape whose height follows the pointer, like the other tools.
     pub fn sketch_close(&mut self, p: [f32; 2]) {
+        if self.tool == Tool::Create(PrimKind::Path) {
+            self.path_finish(true);
+            return;
+        }
         let Some(k) = self.sketch.clone() else { return };
         if k.pts.len() < 3 {
             self.toast("A sketch needs 3 points at least", true);
@@ -1174,7 +1179,7 @@ impl AppState {
             return;
         }
         let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
-        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: vec![] };
+        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: vec![], open: false };
         self.sketch = None;
         self.begin_live("New Sketch");
         let op = self.mode;
@@ -1193,6 +1198,63 @@ impl AppState {
         self.creation = Some(cr.clone());
         self.selection = vec![id];
         self.apply_creation(&cr);
+    }
+
+    /// Ends the Path tool's curve: open (Enter) or closed (a click on its
+    /// first point). It is kept as drawn, with no thickness, and selected.
+    pub fn path_finish(&mut self, closed: bool) {
+        let Some(k) = self.sketch.clone() else { return };
+        let need = if closed { 3 } else { 2 };
+        if k.pts.len() < need {
+            self.toast(if closed { "A closed path needs 3 points at least" } else { "A path needs 2 points at least" }, true);
+            return;
+        }
+        let lo = k.pts.iter().fold([f64::MAX; 2], |a, q| [a[0].min(q[0]), a[1].min(q[1])]);
+        let hi = k.pts.iter().fold([f64::MIN; 2], |a, q| [a[0].max(q[0]), a[1].max(q[1])]);
+        let (w, dp) = (hi[0] - lo[0], hi[1] - lo[1]);
+        if w.max(dp) < 0.5 {
+            self.toast("The path is too short: draw it longer", true);
+            return;
+        }
+        // a straight path along X or Z: its box is 0.01 mm across
+        let (w, dp) = (w.max(0.01), dp.max(0.01));
+        let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
+        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: vec![], open: !closed };
+        self.sketch = None;
+        let (origin, rot) = (k.plane.at(c), basis_rotation(k.plane.u, k.plane.n));
+        let mut id = 0;
+        self.edit("New Path", |d| {
+            id = d.add(Op::Add, Prim::Path { x: w, z: dp }, origin, rot);
+            if let Some(f) = d.feature_mut(id) {
+                f.profile = Some(profile);
+            }
+        });
+        self.selection = vec![id];
+        self.tool = Tool::Select;
+        self.sel_mode = SelMode::Object;
+    }
+
+    /// The path drawn under the pointer (within a few points), in Object
+    /// mode: paths have no faces for the picker.
+    pub fn pick_path(&self, p: [f32; 2]) -> Option<FeatureId> {
+        let v = self.view();
+        let mut best: Option<(FeatureId, f32)> = None;
+        for f in self.doc.features.iter().filter(|f| f.visible && f.is_path()) {
+            for line in f.outline() {
+                let s: Vec<Option<[f32; 2]>> = line.iter().map(|q| v.project(q.as_vec3())).collect();
+                for w in s.windows(2) {
+                    let (Some(a), Some(b)) = (w[0], w[1]) else { continue };
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    let l = dx * dx + dy * dy;
+                    let t = if l > 0.0 { (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l).clamp(0.0, 1.0) } else { 0.0 };
+                    let d = (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy);
+                    if d < 7.0 && best.map(|b| d < b.1).unwrap_or(true) {
+                        best = Some((f.id, d));
+                    }
+                }
+            }
+        }
+        best.map(|b| b.0)
     }
 
     // --------------------------------------------------------------- moves
@@ -1314,12 +1376,12 @@ impl AppState {
                 }
                 let mut f = s.clone();
                 match (&mut f.prim, k) {
-                    (Prim::Box { x, .. } | Prim::Profile { x, .. }, 0) => {
+                    (Prim::Box { x, .. } | Prim::Profile { x, .. } | Prim::Path { x, .. }, 0) => {
                         let nx = (*x + amount).max(0.1);
                         f.origin = s.origin + axis * (nx - *x) * 0.5;
                         *x = nx;
                     }
-                    (Prim::Box { z, .. } | Prim::Profile { z, .. }, 2) => {
+                    (Prim::Box { z, .. } | Prim::Profile { z, .. } | Prim::Path { z, .. }, 2) => {
                         let nz = (*z + amount).max(0.1);
                         f.origin = s.origin + axis * (nz - *z) * 0.5;
                         *z = nz;
@@ -1538,8 +1600,8 @@ pub fn size_handle_pos(f: &Feature, h: Handle) -> Option<DVec3> {
     let hh = f.prim.height();
     let (hx, hz) = f.prim.half_xz();
     let local = match (h, f.prim) {
-        (Handle::Size(0), Prim::Box { .. } | Prim::Profile { .. }) => DVec3::new(hx, hh * 0.5, 0.0),
-        (Handle::Size(2), Prim::Box { .. } | Prim::Profile { .. }) => DVec3::new(0.0, hh * 0.5, hz),
+        (Handle::Size(0), Prim::Box { .. } | Prim::Profile { .. } | Prim::Path { .. }) => DVec3::new(hx, hh * 0.5, 0.0),
+        (Handle::Size(2), Prim::Box { .. } | Prim::Profile { .. } | Prim::Path { .. }) => DVec3::new(0.0, hh * 0.5, hz),
         (Handle::Size(1), _) => DVec3::new(0.0, hh, 0.0),
         (Handle::Size(3), Prim::Cylinder { .. }) => DVec3::new(hx, hh * 0.5, 0.0),
         _ => return None,
@@ -1555,5 +1617,6 @@ pub fn size_handles(f: &Feature) -> Vec<Handle> {
     match f.prim {
         Prim::Box { .. } | Prim::Profile { .. } => vec![Handle::Size(0), Handle::Size(1), Handle::Size(2)],
         Prim::Cylinder { .. } => vec![Handle::Size(3), Handle::Size(1)],
+        Prim::Path { .. } => vec![Handle::Size(0), Handle::Size(2)],
     }
 }

@@ -206,7 +206,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         st.hover_vertex = if verts { hover.and_then(|h| st.pick_vertex(p2(h))) } else { None };
         st.hover_face = if faces { st.hover_hit.map(|h| h.face) } else { None };
         let by_feature = select && matches!(st.sel_mode, SelMode::Object | SelMode::Edge);
-        st.hover_feature = if st.hot_handle.is_none() && by_feature { st.hover_hit.and_then(|h| st.feature_of_face(h.face)) } else { None };
+        st.hover_feature = if st.hot_handle.is_none() && by_feature { hover.and_then(|h| st.pick_path(p2(h))).or_else(|| st.hover_hit.and_then(|h| st.feature_of_face(h.face))) } else { None };
         // edges: only a fillet's faces light up (a click there selects it)
         if edges && (st.hover_edge.is_some() || st.hover_feature.and_then(|id| st.doc.feature(id)).map(|f| f.round.is_none()).unwrap_or(true)) {
             st.hover_feature = None;
@@ -342,11 +342,11 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
             if resp.clicked_by(PointerButton::Primary) {
                 let at = resp.interact_pointer_pos().or(hover);
-                let id = at.and_then(|p| st.pick_at(p2(p))).and_then(|h| st.feature_of_face(h.face));
+                let id = at.and_then(|p| st.pick_path(p2(p))).or_else(|| at.and_then(|p| st.pick_at(p2(p))).and_then(|h| st.feature_of_face(h.face)));
                 st.select(id, shift || ctrl);
             }
         }
-        Tool::Create(PrimKind::Profile) if st.creation.is_none() => {
+        Tool::Create(PrimKind::Profile | PrimKind::Path) if st.creation.is_none() => {
             // the outline: a click puts a corner, a drag a curve point
             if resp.drag_started_by(PointerButton::Primary) {
                 let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
@@ -484,8 +484,8 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
         p.circle(q, if on { 7.0 } else { 5.5 }, if on { HOT } else { Color32::WHITE }, Stroke::new(1.5, Color32::from_rgb(0x20, 0x22, 0x26)));
         if on {
             let (label, v) = match (h, f.prim) {
-                (Handle::Size(0), Prim::Box { x, .. } | Prim::Profile { x, .. }) => ("W", x),
-                (Handle::Size(2), Prim::Box { z, .. } | Prim::Profile { z, .. }) => ("D", z),
+                (Handle::Size(0), Prim::Box { x, .. } | Prim::Profile { x, .. } | Prim::Path { x, .. }) => ("W", x),
+                (Handle::Size(2), Prim::Box { z, .. } | Prim::Profile { z, .. } | Prim::Path { z, .. }) => ("D", z),
                 (Handle::Size(3), Prim::Cylinder { radius, .. }) => ("R", radius),
                 (_, pr) => ("H", pr.height()),
             };
@@ -498,7 +498,8 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
 /// the pointer as the next point, the side back to the first point dimmed.
 fn draw_sketch(p: &Painter, st: &AppState) {
     let Some(k) = &st.sketch else { return };
-    let col = if st.mode == Op::Carve { carve() } else { accent() };
+    let path = st.tool == Tool::Create(PrimKind::Path);
+    let col = if path { PATH } else if st.mode == Op::Carve { carve() } else { accent() };
     let hover = p.ctx().input(|i| i.pointer.hover_pos());
     let closing = hover.map(|h| st.sketch_on_first(p2(h))).unwrap_or(false);
     let mut pts = k.pts.clone();
@@ -517,7 +518,7 @@ fn draw_sketch(p: &Painter, st: &AppState) {
     for piece in nurbs_kernel::doc::pieces(&pts, &smooth) {
         // the side from the last point back to the first one closes it
         let back = piece.id == 2 * (n - 1) + 1;
-        if n < 3 && back {
+        if (n < 3 || path && !closing) && back {
             continue;
         }
         let line: Vec<Pos2> = piece.pts.iter().filter_map(|q| screen(*q)).collect();
@@ -541,7 +542,7 @@ fn draw_sketch(p: &Painter, st: &AppState) {
     }
     if let Some(h) = hover {
         let on = if k.plane.face.is_some() { "on the face" } else { "on the ground" };
-        let txt = if closing { "close".to_string() } else { format!("{} point{} · {on}", k.pts.len(), if k.pts.len() == 1 { "" } else { "s" }) };
+        let txt = if closing { "close".to_string() } else if path && k.pts.len() >= 2 { format!("{} points · Enter: an open path", k.pts.len()) } else { format!("{} point{} · {on}", k.pts.len(), if k.pts.len() == 1 { "" } else { "s" }) };
         chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, tint(col, 0.6), if closing { HOT } else { TEXT2() });
     }
 }
@@ -574,7 +575,7 @@ fn draw_creation(p: &Painter, st: &AppState) {
     let col = if f.op == Op::Carve { carve() } else { accent() };
     let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
     let txt = match (c.phase, f.prim) {
-        (Phase::Base, Prim::Box { x, z, .. } | Prim::Profile { x, z, .. }) => format!("{} × {} mm", fmt_mm(x as f32), fmt_mm(z as f32)),
+        (Phase::Base, Prim::Box { x, z, .. } | Prim::Profile { x, z, .. } | Prim::Path { x, z }) => format!("{} × {} mm", fmt_mm(x as f32), fmt_mm(z as f32)),
         (Phase::Base, Prim::Cylinder { radius, .. }) => format!("R {} mm", fmt_mm(radius as f32)),
         (Phase::Height, _) => format!("H {} mm", fmt_mm(c.height as f32)),
     };
@@ -781,10 +782,15 @@ pub fn hint(st: &AppState) -> String {
     }
     match (&st.creation, st.tool) {
         (Some(c), _) if c.phase == Phase::Base => match c.kind {
-            PrimKind::Box | PrimKind::Profile => "Drag the base · Shift: a square · release, then the height".into(),
+            PrimKind::Box | PrimKind::Profile | PrimKind::Path => "Drag the base · Shift: a square · release, then the height".into(),
             PrimKind::Cylinder => "Drag the radius · release, then the height".into(),
         },
         (Some(_), _) => "Move for the height (up +, down −) · click to finish · Esc cancels".into(),
+        (None, Tool::Create(PrimKind::Path)) => match &st.sketch {
+            None => "Path: click on a face or the ground for the first point".into(),
+            Some(k) if k.pts.len() < 2 => "Click: a corner · drag: a curve point · Backspace removes the last one · Esc drops it".into(),
+            Some(_) => "Enter: an open path · click the first point: a closed one · drag: a curve point · Backspace: the last one".into(),
+        },
         (None, Tool::Create(PrimKind::Profile)) => match &st.sketch {
             None => format!("Sketch · {}: click on a face or the ground for the first point", st.mode.label()),
             Some(k) if k.pts.len() < 3 => "Click: a corner · drag: a curve point · Backspace removes the last one · Esc drops it".into(),
@@ -802,7 +808,8 @@ pub fn hint(st: &AppState) -> String {
             if st.vert_sel.is_empty() {
                 "Vertices: click one · Shift + click adds · the arrows move it".into()
             } else {
-                format!("{} vert{} picked · drag an arrow to move · Esc deselects", st.vert_sel.len(), if st.vert_sel.len() == 1 { "ex" } else { "ices" })
+                let what = if st.comp_pivot().is_some() { "drag an arrow to move" } else if !st.picked_profile_corners().is_empty() { "a fillet or a bevel on the left" } else { "Shift + click adds" };
+                format!("{} vert{} picked · {what} · Esc deselects", st.vert_sel.len(), if st.vert_sel.len() == 1 { "ex" } else { "ices" })
             }
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Face => {

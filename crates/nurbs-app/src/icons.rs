@@ -43,6 +43,8 @@ pub enum Icon {
     Scale,
     /// Sketch (Forme NURBS): an outline of corners and a curve, its points.
     Sketch,
+    /// Path: an open curve with a rounded corner, its two ends.
+    Path,
     /// Quads view: a patch of quads bending round a corner.
     Quads,
     /// Selection modes: a cube with a corner, an edge, a face, or all of it.
@@ -194,6 +196,13 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(3.0, 16.0), (3.0, 6.0), (9.0, 6.0)]);
             pen.line(&[(9.0, 6.0), (14.5, 6.5), (16.5, 11.0), (14.0, 15.5), (8.0, 16.0), (3.0, 16.0)]);
             for (x, y) in [(3.0, 16.0), (3.0, 6.0), (9.0, 6.0)] {
+                pen.closed(&[(x - 1.3, y - 1.3), (x + 1.3, y - 1.3), (x + 1.3, y + 1.3), (x - 1.3, y + 1.3)]);
+            }
+        }
+        Icon::Path => {
+            pen.line(&[(3.5, 15.5), (3.5, 9.0), (4.0, 6.8), (5.6, 5.2), (7.8, 4.6), (16.5, 4.6)]);
+            pen.line(&[(16.5, 4.6), (16.5, 9.5), (10.0, 16.0)]);
+            for (x, y) in [(3.5, 15.5), (10.0, 16.0)] {
                 pen.closed(&[(x - 1.3, y - 1.3), (x + 1.3, y - 1.3), (x + 1.3, y + 1.3), (x - 1.3, y + 1.3)]);
             }
         }

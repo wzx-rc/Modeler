@@ -798,7 +798,7 @@ fn main() {
         // fillets and a chamfer (Romain 18 nov.: "Bevel fillet sur un path")
         let mut d = Doc::default();
         let id = d.add(Op::Add, Prim::Profile { x: 40.0, y: 6.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(id).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.0], [0.0, 0.0], [0.0, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![] });
+        d.feature_mut(id).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.0], [0.0, 0.0], [0.0, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], open: false });
         h.reset(d, "Sketch");
         h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(25.0, 10.0, 20.0));
         h.steps(2);
@@ -831,6 +831,86 @@ fn main() {
         h.settle();
         h.shot("zero-comp-10-sketch-quads");
         h.st.quads = false;
+    }
+
+    if want("path") {
+        // the Path tool (P), Romain 18 nov.: "un path sans épaisseur": an
+        // open path on the ground in front of the block (a curve point in
+        // it), a closed one beside it, then fillets and a bevel on corners
+        h.reset(test_part(), "Test part");
+        h.st.camera.frame(Vec3::new(-60.0, 0.0, -20.0), Vec3::new(40.0, 25.0, 45.0));
+        h.steps(2);
+        h.key(egui::Key::P);
+        let g = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 0.0, z));
+        h.click(g(&h, -35.0, 25.0));
+        h.click(g(&h, -5.0, 25.0));
+        h.click(g(&h, 5.0, 40.0));
+        h.click(g(&h, 30.0, 40.0));
+        h.drag(g(&h, 35.0, 30.0), g(&h, 40.0, 30.0), 8, true);
+        h.click(g(&h, 30.0, 20.0));
+        h.move_to(g(&h, 15.0, 15.0));
+        h.steps(2);
+        h.shot("zero-path-1-drawing");
+        h.key(egui::Key::Enter);
+        h.settle();
+        h.shot("zero-path-2-open");
+        // a closed one: back on its first point
+        h.key(egui::Key::P);
+        let first = g(&h, -55.0, -15.0);
+        h.click(first);
+        h.click(g(&h, -30.0, -15.0));
+        h.click(g(&h, -30.0, 10.0));
+        h.click(g(&h, -55.0, 10.0));
+        h.move_to(first);
+        h.steps(2);
+        h.shot("zero-path-3-closing");
+        h.click(first);
+        h.settle();
+        h.shot("zero-path-4-closed");
+        for f in h.st.doc.features.iter().filter(|f| f.is_path()) {
+            eprintln!("  {} {:?} open {:?} {:?}", f.name, f.prim, f.profile.as_ref().map(|p| p.open), f.profile.as_ref().map(|p| p.points.len()));
+        }
+        // Vertex mode: the open path's two sharp corners and a corner of
+        // the closed one picked, rounded at 6 mm; then two more corners of
+        // the closed one bevelled (the fourth is behind the block)
+        h.st.camera.frame(Vec3::new(-58.0, 0.0, -17.0), Vec3::new(42.0, 0.0, 42.0));
+        h.st.camera.pitch = 0.8;
+        h.st.camera.target = Vec3::new(-8.0, 0.0, 12.0);
+        h.st.camera.dist *= 0.62;
+        h.steps(2);
+        h.key(egui::Key::Num1);
+        h.click(g(&h, -5.0, 25.0));
+        h.hold(egui::Modifiers::SHIFT);
+        h.click(g(&h, 5.0, 40.0));
+        h.click(g(&h, -30.0, 10.0));
+        h.hold(egui::Modifiers::NONE);
+        h.steps(2);
+        h.shot("zero-path-5-corners-picked");
+        eprintln!("  picked corners {:?}", h.st.picked_profile_corners());
+        h.st.set_profile_corners(6.0, false, true);
+        h.st.end_live();
+        h.settle();
+        h.steps(2);
+        h.shot("zero-path-6-filleted");
+        h.click(g(&h, -55.0, -15.0));
+        h.st.set_profile_corners(4.0, true, true);
+        h.st.end_live();
+        h.settle();
+        h.click(g(&h, -55.0, 10.0));
+        h.st.set_profile_corners(8.0, true, true);
+        h.st.end_live();
+        h.settle();
+        h.steps(2);
+        h.shot("zero-path-7-bevelled");
+        for f in h.st.doc.features.iter().filter(|f| f.is_path()) {
+            eprintln!("  {} corners {:?}", f.name, f.profile.as_ref().map(|p| p.corner.clone()));
+        }
+        // Object mode: a click on the open path selects it
+        h.key(egui::Key::Num4);
+        h.click(g(&h, -20.0, 25.0));
+        h.steps(2);
+        h.shot("zero-path-8-selected");
+        eprintln!("  selected {:?}, model errors {:?}", h.st.selection, h.st.model.as_ref().map(|m| m.errors.clone()));
     }
 
     if want("snap") {
