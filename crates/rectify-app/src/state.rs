@@ -6,10 +6,13 @@ use crate::view::View;
 use glam::{DVec3, Vec3};
 use rayon::prelude::*;
 use rectify_core::circle::{Circle, ProfileKind, Round, RoundParams};
-use rectify_core::nurbs::Surface;
+use rectify_core::mesh::Surface as Closest;
+use rectify_core::nurbs::{Curve, Surface};
+use rectify_core::path::{self, Built, PathParams, Snap, SnapKind};
 use rectify_core::{Mesh, Topo};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::OnceLock;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -32,6 +35,9 @@ pub enum Tool {
     /// Drag across a round part: a NURBS surface on its wall, its rings
     /// exact circles.
     Circle,
+    /// Click points on the scan: one NURBS curve through them, caught by
+    /// the flat faces, their edges and corners.
+    Path,
 }
 
 impl Tool {
@@ -39,6 +45,7 @@ impl Tool {
         match self {
             Tool::Navigate => "Navigate",
             Tool::Circle => "Circle",
+            Tool::Path => "Path",
         }
     }
 }
@@ -49,6 +56,20 @@ pub struct Doc {
     pub topo: Topo,
     /// Median edge length (mm).
     pub edge: f64,
+    /// The closest point on the scan, made the first time it is needed.
+    closest: OnceLock<Closest>,
+}
+
+impl Doc {
+    pub fn closest(&self) -> &Closest {
+        self.closest.get_or_init(|| Closest::new(&self.mesh))
+    }
+}
+
+/// What a NURBS object is.
+pub enum Shape {
+    Surface(Surface),
+    Curve(Curve),
 }
 
 /// A NURBS object laid on the scan.
@@ -56,7 +77,25 @@ pub struct Object {
     pub tool: Tool,
     /// What it is, in a few words (the list on the left).
     pub what: String,
-    pub surface: Surface,
+    pub shape: Shape,
+}
+
+/// The path being drawn: its points (where they went, what caught them),
+/// its settings (live) and the curve made.
+pub struct PathEdit {
+    pub pts: Vec<Snap>,
+    pub params: PathParams,
+    pub built: Option<Built>,
+    /// The curve with the point under the pointer added (the next segment).
+    pub preview: Option<Built>,
+}
+
+/// A press in the Path tool: on one of the path's points (to move it), or
+/// not (a click adds a point).
+pub struct PathPress {
+    pub at: [f32; 2],
+    pub point: Option<usize>,
+    pub moved: bool,
 }
 
 /// A Circle drag: from the press on the rim to the pointer, on the plane
@@ -126,6 +165,13 @@ pub struct AppState {
     pub circle: Option<CircleEdit>,
     /// The Circle's profile, kept from one to the next.
     pub circle_profile: ProfileKind,
+    pub path: Option<PathEdit>,
+    /// What the pointer would place (the Path tool), and where it was.
+    pub path_hover: Option<Snap>,
+    hover_key: Option<([f32; 2], [f32; 4], bool)>,
+    pub path_press: Option<PathPress>,
+    /// The Path's settings, kept from one to the next.
+    pub path_params: PathParams,
 }
 
 impl Default for AppState {
@@ -161,6 +207,11 @@ impl AppState {
             circle_drag: None,
             circle: None,
             circle_profile: ProfileKind::Cylinder,
+            path: None,
+            path_hover: None,
+            hover_key: None,
+            path_press: None,
+            path_params: PathParams::default(),
         }
     }
 
@@ -185,7 +236,7 @@ impl AppState {
     fn make_doc(m: Mesh) -> Doc {
         let topo = Topo::new(&m);
         let edge = m.edge_median();
-        Doc { mesh: m, topo, edge }
+        Doc { mesh: m, topo, edge, closest: OnceLock::new() }
     }
 
     /// Reads an .obj in the background.
@@ -216,6 +267,9 @@ impl AppState {
         self.undone.clear();
         self.circle = None;
         self.circle_drag = None;
+        self.path = None;
+        self.path_hover = None;
+        self.path_press = None;
         self.hide_scan = false;
         self.objects_gen += 1;
         self.gen += 1;
@@ -283,6 +337,9 @@ impl AppState {
         // what is placed is kept
         self.circle_apply();
         self.circle_drag = None;
+        self.path_apply();
+        self.path_hover = None;
+        self.path_press = None;
         self.tool = t;
         self.overlay_gen += 1;
     }
@@ -305,6 +362,10 @@ impl AppState {
         if self.circle.is_some() {
             self.circle_cancel();
             self.toast("Circle removed", false);
+            return;
+        }
+        if self.path.is_some() {
+            self.path_back();
             return;
         }
         let Some(o) = self.objects.pop() else {
@@ -362,9 +423,9 @@ impl AppState {
         let Some(d) = &self.doc else { return };
         match Circle::detect(&d.mesh, &d.topo, &seeds, a, b, d.edge) {
             Ok(c) => {
-                // rings about a third of the radius apart
-                let gap = (c.r / 3.0).max(d.edge * 4.0);
-                let params = RoundParams { height: c.height, profile: self.circle_profile, levels: ((c.height / gap).round() as usize).clamp(1, 24) };
+                // the fewest rings that follow the wall
+                let levels = c.fewest_levels(&d.mesh, &d.topo, c.height, self.circle_profile);
+                let params = RoundParams { height: c.height, profile: self.circle_profile, levels };
                 let round = c.nurbs(&d.mesh, &d.topo, params);
                 self.circle = Some(CircleEdit { circle: c, params, round });
                 self.objects_gen += 1;
@@ -383,13 +444,21 @@ impl AppState {
         self.overlay_gen += 1;
     }
 
+    /// Another profile: the fewest levels for it again.
+    pub fn circle_set_profile(&mut self, k: ProfileKind) {
+        let (Some(d), Some(ce)) = (&self.doc, &mut self.circle) else { return };
+        ce.params.profile = k;
+        ce.params.levels = ce.circle.fewest_levels(&d.mesh, &d.topo, ce.params.height, k);
+        self.circle_refit();
+    }
+
     /// The surface placed is kept.
     pub fn circle_apply(&mut self) {
         let Some(ce) = self.circle.take() else { return };
         let p = ce.params;
         let what = format!("Ø {} mm · {} mm · {} · {} rings", fmt(ce.circle.r * 2.0, 2), fmt(p.height, 1), profile_label(p.profile), p.levels + 1);
         self.toast(format!("Kept: {what}"), false);
-        self.add_object(Object { tool: Tool::Circle, what, surface: ce.round.surface });
+        self.add_object(Object { tool: Tool::Circle, what, shape: Shape::Surface(ce.round.surface) });
         self.overlay_gen += 1;
     }
 
@@ -398,6 +467,211 @@ impl AppState {
         if self.circle.take().is_some() {
             self.objects_gen += 1;
         }
+        self.overlay_gen += 1;
+    }
+}
+
+impl AppState {
+    // ------------------------------------------------------------ Path
+
+    /// How far the pointer catches at `x` (mm): 12 points on screen.
+    fn catch_at(&self, x: DVec3) -> f64 {
+        let v = self.view();
+        let (fwd, _, _) = v.basis();
+        let depth = (x.as_vec3() - v.eye).dot(fwd).max(1e-3);
+        (v.pixel_size_at(depth) * 12.0) as f64
+    }
+
+    /// The point the pointer would place: on the scan under it, caught by
+    /// a corner, an edge or a face near it (`free`: the scan only).
+    pub fn snap_at(&self, at: [f32; 2], free: bool) -> Option<Snap> {
+        let (t, x) = self.pick_hit(at)?;
+        let d = self.doc.as_ref()?;
+        if free || !self.path_params.planes {
+            return Some(Snap::scan(x, t as u32));
+        }
+        Some(path::snap(&d.mesh, &d.topo, t as u32, x, self.catch_at(x), d.edge))
+    }
+
+    /// The pointer moved over the scan (no button down).
+    pub fn path_hover_at(&mut self, at: [f32; 2], free: bool) {
+        let cam = &self.camera;
+        let key = (at, [cam.yaw, cam.pitch, cam.dist, cam.target.x + cam.target.y * 3.1 + cam.target.z * 7.3], free);
+        if self.hover_key == Some(key) {
+            return;
+        }
+        self.hover_key = Some(key);
+        self.path_hover = self.snap_at(at, free);
+        self.path_preview();
+        self.overlay_gen += 1;
+    }
+
+    /// The pointer left the view.
+    pub fn path_hover_off(&mut self) {
+        if self.path_hover.is_some() || self.hover_key.is_some() {
+            self.path_hover = None;
+            self.hover_key = None;
+            if let Some(pe) = &mut self.path {
+                pe.preview = None;
+            }
+            self.overlay_gen += 1;
+        }
+    }
+
+    fn path_preview(&mut self) {
+        let Some(d) = &self.doc else { return };
+        let Some(pe) = &mut self.path else { return };
+        pe.preview = match (&self.path_hover, pe.params.closed) {
+            (Some(h), false) => {
+                let mut pts = pe.pts.clone();
+                pts.push(h.clone());
+                path::build(&d.mesh, &d.topo, d.closest(), &pts, &pe.params, d.edge)
+            }
+            _ => None,
+        };
+    }
+
+    /// The path's points on screen.
+    pub fn path_screen(&self) -> Vec<[f32; 2]> {
+        let v = self.view();
+        let Some(pe) = &self.path else { return vec![] };
+        pe.pts.iter().map(|s| v.project(if pe.params.planes { s.p } else { s.hit }.as_vec3()).unwrap_or([-1e6, -1e6])).collect()
+    }
+
+    /// The nearest of the path's points within 9 points of `at`.
+    fn path_point_at(&self, at: [f32; 2]) -> Option<usize> {
+        let scr = self.path_screen();
+        let d2 = |p: [f32; 2]| (p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2);
+        (0..scr.len()).filter(|&i| d2(scr[i]) <= 81.0).min_by(|&a, &b| d2(scr[a]).partial_cmp(&d2(scr[b])).unwrap())
+    }
+
+    pub fn path_press_at(&mut self, at: [f32; 2]) {
+        let point = self.path_point_at(at);
+        self.path_press = Some(PathPress { at, point, moved: false });
+    }
+
+    /// The button down, the pointer moving: a point of the path follows.
+    pub fn path_drag(&mut self, at: [f32; 2], free: bool) {
+        let Some(pr) = &mut self.path_press else { return };
+        if !pr.moved && (at[0] - pr.at[0]).hypot(at[1] - pr.at[1]) < 3.0 {
+            return;
+        }
+        pr.moved = true;
+        let Some(i) = pr.point else { return };
+        let Some(s) = self.snap_at(at, free) else { return };
+        if let Some(pe) = &mut self.path {
+            if i < pe.pts.len() {
+                pe.pts[i] = s;
+            }
+        }
+        self.path_hover = None;
+        self.path_rebuild();
+    }
+
+    /// The button up: a click adds a point (on the first one: closes the
+    /// path); a drag ends.
+    pub fn path_release(&mut self, at: [f32; 2], free: bool) {
+        let Some(pr) = self.path_press.take() else { return };
+        if pr.moved {
+            self.hover_key = None;
+            return;
+        }
+        let n = self.path.as_ref().map(|p| p.pts.len()).unwrap_or(0);
+        let closed = self.path.as_ref().map(|p| p.params.closed).unwrap_or(false);
+        match pr.point {
+            Some(0) if n >= 3 && !closed => {
+                if let Some(pe) = &mut self.path {
+                    pe.params.closed = true;
+                }
+                self.path_rebuild();
+                self.toast("Path closed: Enter keeps it", false);
+            }
+            Some(_) => {}
+            None => self.path_add(at, free),
+        }
+    }
+
+    fn path_add(&mut self, at: [f32; 2], free: bool) {
+        let Some(s) = self.snap_at(at, free) else { return };
+        // a closed path is done: kept, and a new one starts
+        if self.path.as_ref().map(|p| p.params.closed).unwrap_or(false) {
+            self.path_apply();
+        }
+        let params = PathParams { closed: false, ..self.path_params };
+        let pe = self.path.get_or_insert(PathEdit { pts: vec![], params, built: None, preview: None });
+        pe.pts.push(s);
+        self.path_rebuild();
+    }
+
+    /// The curve again (points or settings changed).
+    pub fn path_rebuild(&mut self) {
+        let Some(d) = &self.doc else { return };
+        let Some(pe) = &mut self.path else { return };
+        if pe.pts.len() < 3 {
+            pe.params.closed = false;
+        }
+        pe.built = path::build(&d.mesh, &d.topo, d.closest(), &pe.pts, &pe.params, d.edge);
+        self.path_params = PathParams { closed: false, ..pe.params };
+        self.path_preview();
+        self.objects_gen += 1;
+        self.overlay_gen += 1;
+    }
+
+    /// Settings changed in the panel; the points caught again when the
+    /// faces are switched on or off.
+    pub fn path_set(&mut self, p: PathParams) {
+        let Some(pe) = &mut self.path else {
+            self.path_params = PathParams { closed: false, ..p };
+            return;
+        };
+        let recatch = p.planes && !pe.params.planes;
+        pe.params = p;
+        if recatch {
+            let catches: Vec<f64> = self.path.as_ref().unwrap().pts.iter().map(|s| self.catch_at(s.hit)).collect();
+            if let (Some(d), Some(pe)) = (&self.doc, &mut self.path) {
+                for (s, c) in pe.pts.iter_mut().zip(catches) {
+                    *s = path::snap(&d.mesh, &d.topo, s.tri, s.hit, c, d.edge);
+                }
+            }
+        }
+        self.path_rebuild();
+    }
+
+    /// The last point taken away (Backspace, Ctrl+Z).
+    pub fn path_back(&mut self) {
+        let Some(pe) = &mut self.path else { return };
+        if pe.params.closed {
+            pe.params.closed = false;
+        } else {
+            pe.pts.pop();
+        }
+        if pe.pts.is_empty() {
+            self.path = None;
+            self.objects_gen += 1;
+            self.overlay_gen += 1;
+            return;
+        }
+        self.path_rebuild();
+    }
+
+    /// The path drawn is kept (two points at least).
+    pub fn path_apply(&mut self) {
+        let Some(pe) = self.path.take() else { return };
+        self.objects_gen += 1;
+        self.overlay_gen += 1;
+        let Some(b) = pe.built else { return };
+        let corners = pe.pts.iter().filter(|s| pe.params.planes && s.kind != SnapKind::Scan).count();
+        let what = format!("{} points{} · {} mm{}", pe.pts.len(), if corners > 0 { format!(" ({corners} caught)") } else { String::new() }, fmt(b.length, 1), if pe.params.closed { " · closed" } else { "" });
+        self.toast(format!("Kept: path, {what}"), false);
+        self.add_object(Object { tool: Tool::Path, what, shape: Shape::Curve(b.curve) });
+    }
+
+    /// The path drawn taken away.
+    pub fn path_cancel(&mut self) {
+        if self.path.take().is_some() {
+            self.objects_gen += 1;
+        }
+        self.path_press = None;
         self.overlay_gen += 1;
     }
 }

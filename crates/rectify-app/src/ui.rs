@@ -67,7 +67,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the scan (Esc)", "Esc"), (Tool::Circle, Icon::Cylinder, "Circle: drag across a hole or a boss, a NURBS surface is laid on its wall, every ring an exact circle (C)", "C")];
+                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the scan (Esc)", "Esc"), (Tool::Circle, Icon::Cylinder, "Circle: drag across a hole or a boss, a NURBS surface is laid on its wall, every ring an exact circle (C)", "C"), (Tool::Path, Icon::Sketch, "Path: click points on the scan, one NURBS curve through them; flat faces, their edges and corners catch the points (P)", "P")];
                 for (t, icon, tip, key) in tools {
                     let r = icon_btn(ui, icon, st.tool == t, tip, 28.0);
                     key_hint(ui, &r, key);
@@ -228,12 +228,16 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
             if secondary_btn(ui, "Circle (C): a round part", w).clicked() {
                 st.set_tool(Tool::Circle);
             }
+            if secondary_btn(ui, "Path (P): lines and curves on the scan", w).clicked() {
+                st.set_tool(Tool::Path);
+            }
         }
         Tool::Circle => {
             title(ui, "Circle", "Press on the rim of a hole or a boss, drag across to the other side: a NURBS surface is laid on its wall, every ring an exact circle");
             let mut refit = false;
             let mut apply = false;
             let mut cancel = false;
+            let mut new_profile = None;
             match &mut st.circle {
                 None => line(ui, "The plane and the base come from where you press; the circle is fitted on the wall next to it, its height found."),
                 Some(ce) => {
@@ -243,8 +247,7 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
                     refit |= slider_f64(ui, "Height", &mut ce.params.height, 0.1..=max, 0.05, "mm");
                     let items = [(ProfileKind::Cylinder, "Cylinder", accent()), (ProfileKind::Cone, "Cone", accent()), (ProfileKind::Curve, "Curve", accent())];
                     if let Some(k) = segmented(ui, &items, ce.params.profile, 28.0) {
-                        ce.params.profile = k;
-                        refit = true;
+                        new_profile = Some(k);
                     }
                     let mut lv = ce.params.levels as f32;
                     if slider_row(ui, "Levels", &mut lv, 1.0..=24.0, 1.0, "").0 {
@@ -262,7 +265,9 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
                     cancel = secondary_btn(ui, "Remove (Esc)", w).clicked();
                 }
             }
-            if refit {
+            if let Some(k) = new_profile {
+                st.circle_set_profile(k);
+            } else if refit {
                 st.circle_refit();
             }
             if apply {
@@ -272,11 +277,82 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
                 st.circle_cancel();
             }
         }
+        Tool::Path => path_card(ui, st),
     }
     ui.add_space(4.0);
     let w = ui.available_width();
     if st.doc.is_some() && secondary_btn(ui, if st.hide_scan { "Show the scan (H)" } else { "Hide the scan (H)" }, w).clicked() {
         st.hide_scan = !st.hide_scan;
+    }
+}
+
+fn path_card(ui: &mut Ui, st: &mut AppState) {
+    use rectify_core::path::{PieceKind, SnapKind};
+    title(ui, "Path", "Click points on the scan: one NURBS curve through them. Flat faces catch the points, and so do their edges (where two faces' planes meet, sharp) and corners");
+    let mut p = st.path.as_ref().map(|pe| pe.params).unwrap_or(st.path_params);
+    let mut changed = false;
+    if toggle_row(ui, "Catch faces, edges, corners", p.planes) {
+        p.planes = !p.planes;
+        changed = true;
+    }
+    let mut sm = p.smooth as f32;
+    if slider_row(ui, "Smooth", &mut sm, 0.0..=1.0, 0.05, "").0 {
+        p.smooth = sm as f64;
+        changed = true;
+    }
+    let n = st.path.as_ref().map(|pe| pe.pts.len()).unwrap_or(0);
+    if n >= 3 && toggle_row(ui, "Closed", p.closed) {
+        p.closed = !p.closed;
+        changed = true;
+    }
+    if changed {
+        st.path_set(p);
+    }
+    let mut apply = false;
+    let mut back = false;
+    let mut cancel = false;
+    match &st.path {
+        None => line(ui, "Between two points on one face the path is straight on it; from a face to the next it folds over their edge; elsewhere it follows the scan, smooth. Ctrl held: the scan only."),
+        Some(pe) => {
+            let count = |k: SnapKind| pe.pts.iter().filter(|s| s.kind == k).count();
+            if pe.params.planes {
+                line(ui, format!("{n} points: {} on corners, {} on edges, {} on faces, {} on the scan", count(SnapKind::Corner), count(SnapKind::Edge), count(SnapKind::Plane), count(SnapKind::Scan)));
+            } else {
+                line(ui, format!("{n} points on the scan"));
+            }
+            if let Some(b) = &pe.built {
+                let k = |x: PieceKind| b.kinds.iter().filter(|&&y| y == x).count();
+                let mut parts = vec![];
+                if k(PieceKind::Line) > 0 {
+                    parts.push(format!("{} straight on a face", k(PieceKind::Line)));
+                }
+                if k(PieceKind::Fold) > 0 {
+                    parts.push(format!("{} folded over an edge", k(PieceKind::Fold)));
+                }
+                if k(PieceKind::Scan) > 0 {
+                    parts.push(format!("{} on the scan", k(PieceKind::Scan)));
+                }
+                line(ui, format!("Segments: {}", parts.join(", ")));
+                line(ui, format!("NURBS degree 3 · {} control points · {} mm{}", b.curve.pts.len(), fmt(b.length, 1), if pe.params.closed { " · closed" } else { "" }));
+                if k(PieceKind::Scan) > 0 {
+                    line(ui, format!("The scan is {} mm from the parts that follow it", fmt(b.off, 3)));
+                }
+            }
+            ui.add_space(6.0);
+            let w = ui.available_width();
+            apply = n >= 2 && primary_btn(ui, Some(Icon::Sketch), "Keep (Enter)", Some(w)).clicked();
+            back = secondary_btn(ui, "Remove the last point (Backspace)", w).clicked();
+            cancel = secondary_btn(ui, "Remove (Esc)", w).clicked();
+        }
+    }
+    if apply {
+        st.path_apply();
+    }
+    if back {
+        st.path_back();
+    }
+    if cancel {
+        st.path_cancel();
     }
 }
 
@@ -350,7 +426,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     }
     let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
     let (f, esc, z, y, enter) = ctx.input(|i| (i.key_pressed(Key::F), i.key_pressed(Key::Escape), i.key_pressed(Key::Z), i.key_pressed(Key::Y), i.key_pressed(Key::Enter)));
-    let (c, h) = ctx.input(|i| (i.key_pressed(Key::C), i.key_pressed(Key::H)));
+    let (c, h, pk, back) = ctx.input(|i| (i.key_pressed(Key::C), i.key_pressed(Key::H), i.key_pressed(Key::P), i.key_pressed(Key::Backspace) || i.key_pressed(Key::Delete)));
     if cmd && z {
         if shift {
             st.redo();
@@ -365,17 +441,28 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if c && !cmd {
         st.set_tool(Tool::Circle);
     }
+    if pk && !cmd {
+        st.set_tool(Tool::Path);
+    }
+    if back && st.path.is_some() {
+        st.path_back();
+    }
     if h && !cmd && st.doc.is_some() {
         st.hide_scan = !st.hide_scan;
     }
     if enter && st.tool == Tool::Circle {
         st.circle_apply();
     }
+    if enter && st.tool == Tool::Path {
+        st.path_apply();
+    }
     if f {
         st.frame_all();
     }
     if esc && st.circle.is_some() && st.circle_drag.is_none() {
         st.circle_cancel();
+    } else if esc && st.path.is_some() {
+        st.path_cancel();
     } else if esc {
         if st.circle_drag.is_some() {
             st.circle_drag = None;

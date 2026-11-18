@@ -6,10 +6,13 @@
 //! - `mesh`: the scan (.obj in, millimetres), its topology, picking helpers;
 //! - `nurbs`: NURBS curves and surfaces (exact circles);
 //! - `circle`: the Circle tool: a round part found under a drag, a NURBS
-//!   surface laid on its wall.
+//!   surface laid on its wall;
+//! - `path`: the Path tool: points on the scan caught by its flat faces,
+//!   their edges and corners, joined into one NURBS curve.
 
 pub mod circle;
 pub mod mesh;
 pub mod nurbs;
+pub mod path;
 
 pub use mesh::{Mesh, Surface, Topo, NONE};

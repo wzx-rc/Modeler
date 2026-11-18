@@ -10,7 +10,10 @@
 //! "x,y;x,y": a Circle drag there (rim to rim, screen points of the bare
 //! view), the NURBS surface shown and kept (RECTIFY_HEIGHT, RECTIFY_LEVELS,
 //! RECTIFY_PROFILE=cylinder|cone|curve to set it first, RECTIFY_LOOK2 a
-//! second camera, RECTIFY_TAG the file names).
+//! second camera, RECTIFY_TAG the file names). RECTIFY_PATH="x,y;x,y;…"
+//! (add ";close" to close it): Path points clicked there (screen points of
+//! the bare view), RECTIFY_SMOOTH, RECTIFY_PLANES=0; RECTIFY_HOVER="x,y;…":
+//! what would catch the pointer there, printed.
 
 use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use glam::Vec3;
@@ -134,7 +137,11 @@ impl Harness {
         self.steps(2);
     }
 
-    #[allow(dead_code)]
+    fn hover(&mut self, p: Pos2) {
+        self.pending.push(Event::PointerMoved(p));
+        self.steps(2);
+    }
+
     fn click(&mut self, p: Pos2) {
         for down in [true, false] {
             self.pending.push(Event::PointerMoved(p));
@@ -227,6 +234,12 @@ fn circle_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
     let world: Vec<glam::Vec3> = pts.iter().filter_map(|p| h.st.pick_hit(*p).map(|(_, x)| x.as_vec3())).collect();
     h.st.bare = false;
     h.st.set_tool(Tool::Circle);
+    match std::env::var("RECTIFY_PROFILE").as_deref() {
+        Ok("cone") => h.st.circle_profile = ProfileKind::Cone,
+        Ok("curve") => h.st.circle_profile = ProfileKind::Curve,
+        Ok("cylinder") => h.st.circle_profile = ProfileKind::Cylinder,
+        _ => {}
+    }
     h.steps(2);
     let view = h.st.view();
     let scr: Vec<[f32; 2]> = world.iter().filter_map(|x| view.project(*x)).collect();
@@ -298,6 +311,83 @@ fn circle_drag(h: &mut Harness, name: &str, pts: &[[f32; 2]]) {
     }
 }
 
+/// Points clicked with the Path tool (screen points of the bare view): the
+/// next segment shown before the last click, the curve placed (with the
+/// interface, then the view alone), kept.
+fn path_clicks(h: &mut Harness, name: &str, pts: &[[f32; 2]], close: bool) {
+    h.st.set_tool(Tool::Navigate);
+    h.st.bare = true;
+    h.shot(&format!("{name}-0-before"));
+    let world: Vec<glam::Vec3> = pts.iter().filter_map(|p| h.st.pick_hit(*p).map(|(_, x)| x.as_vec3())).collect();
+    h.st.bare = false;
+    let env = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<f64>().ok());
+    if let Some(v) = env("RECTIFY_SMOOTH") {
+        h.st.path_params.smooth = v;
+    }
+    if env("RECTIFY_PLANES") == Some(0.0) {
+        h.st.path_params.planes = false;
+    }
+    h.st.set_tool(Tool::Path);
+    h.steps(2);
+    let view = h.st.view();
+    let scr: Vec<Pos2> = world.iter().filter_map(|x| view.project(*x)).map(|a| Pos2::new(a[0], a[1])).collect();
+    let t = std::time::Instant::now();
+    for (i, &p) in scr.iter().enumerate() {
+        h.hover(p);
+        if i + 1 == scr.len() && i > 0 {
+            h.shot(&format!("{name}-1-next"));
+        }
+        h.click(p);
+    }
+    if close && scr.len() >= 3 {
+        // on the first point as drawn (where it went)
+        let f = h.st.path_screen()[0];
+        h.hover(Pos2::new(f[0], f[1]));
+        h.click(Pos2::new(f[0], f[1]));
+    }
+    eprintln!("{} points placed in {:.2}s", scr.len(), t.elapsed().as_secs_f64());
+    // the pointer away from the path
+    h.hover(Pos2::new(h.st.view_rect[2] - 30.0, h.st.view_rect[3] - 30.0));
+    match &h.st.path {
+        Some(pe) => {
+            for (i, s) in pe.pts.iter().enumerate() {
+                eprintln!("  point {i}: {:?} {:.0}° at {:.3},{:.3},{:.3} ({:.3} mm from the click) planes {}", s.kind, s.angle, s.p.x, s.p.y, s.p.z, (s.p - s.hit).length(), s.planes.iter().map(|p| format!("[n {:.2},{:.2},{:.2} rms {:.3} area {:.1}]", p.n.x, p.n.y, p.n.z, p.rms, p.area)).collect::<Vec<_>>().join(" "));
+            }
+            if let Some(b) = &pe.built {
+                eprintln!("PATH {name}: {:?} · {} control points · {:.2} mm · off {:.3} · closed {}", b.kinds, b.curve.pts.len(), b.length, b.off, pe.params.closed);
+            }
+        }
+        None => eprintln!("PATH {name}: none ({})", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
+    }
+    h.shot(&format!("{name}-2-placed"));
+    let views = |h: &mut Harness, tag: &str| {
+        h.st.bare = true;
+        h.shot(&format!("{name}-{tag}"));
+        h.st.hide_scan = true;
+        h.shot(&format!("{name}-{tag}-alone"));
+        h.st.hide_scan = false;
+        h.st.bare = false;
+    };
+    views(h, "3-path");
+    if let Some(v) = std::env::var("RECTIFY_LOOK2").map(|s| nums(&s)).ok().filter(|v| v.len() == 6) {
+        let cam = (h.st.camera.target, h.st.camera.dist, h.st.camera.yaw, h.st.camera.pitch);
+        look(h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+        h.shot(&format!("{name}-2-placed-2"));
+        views(h, "3-path-2");
+        h.st.camera.target = cam.0;
+        h.st.camera.dist = cam.1;
+        h.st.camera.yaw = cam.2;
+        h.st.camera.pitch = cam.3;
+    }
+    if h.st.path.is_some() {
+        h.st.path_apply();
+        if let Some(t) = &h.st.toast {
+            eprintln!("{}", t.text);
+        }
+        h.shot(&format!("{name}-4-kept"));
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out = args.get(1).cloned().unwrap_or_else(|| "shots".into());
@@ -320,6 +410,25 @@ fn main() {
         let v = std::env::var("RECTIFY_LOOK").map(|s| nums(&s)).unwrap_or_default();
         let v = if v.len() == 6 { v } else { vec![0.3, 0.72, 0.5, 60.0, 0.35, 0.1] };
         look(&mut h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+        if let Ok(s) = std::env::var("RECTIFY_HOVER") {
+            h.st.bare = true;
+            h.steps(2);
+            for v in s.split(';').map(nums).filter(|v| v.len() == 2) {
+                let t = std::time::Instant::now();
+                match h.st.snap_at([v[0], v[1]], false) {
+                    Some(sn) => eprintln!("HOVER {},{}: {:?} {:.0}° at {:.3},{:.3},{:.3} ({:.3} mm off) {} planes [{}] in {:.3}s", v[0], v[1], sn.kind, sn.angle, sn.p.x, sn.p.y, sn.p.z, (sn.p - sn.hit).length(), sn.planes.len(), sn.planes.iter().map(|p| format!("n {:.2},{:.2},{:.2} rms {:.3} area {:.1}", p.n.x, p.n.y, p.n.z, p.rms, p.area)).collect::<Vec<_>>().join(" | "), t.elapsed().as_secs_f64()),
+                    None => eprintln!("HOVER {},{}: nothing", v[0], v[1]),
+                }
+            }
+            h.st.bare = false;
+        }
+        if let Ok(s) = std::env::var("RECTIFY_PATH") {
+            let close = s.contains("close");
+            let pts: Vec<[f32; 2]> = s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
+            let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "path".into());
+            path_clicks(&mut h, &tag, &pts, close);
+            return;
+        }
         if let Ok(s) = std::env::var("RECTIFY_CIRCLE") {
             let pts: Vec<[f32; 2]> = s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
             let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "circle".into());

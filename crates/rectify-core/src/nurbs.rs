@@ -153,6 +153,141 @@ impl Curve {
         }
         solve(ata, atb)
     }
+
+    /// A non-rational curve of `degree` with `spans` equal spans fitted to
+    /// weighted points `(t in 0..1, point, weight)` by least squares; `lam`
+    /// keeps its bend small (second divided differences of the control
+    /// points at their Greville abscissae: zero on a straight line). A
+    /// large weight pins the curve on a point.
+    pub fn fit_3d(data: &[(f64, DVec3, f64)], degree: usize, spans: usize, lam: f64) -> Option<Curve> {
+        let degree = degree.max(1);
+        let knots = uniform_knots(degree, spans.max(1));
+        let n = knots.len() - degree - 1;
+        if data.len() < 2 {
+            return None;
+        }
+        let mut ata = vec![vec![0.0f64; n]; n];
+        let mut atb = vec![DVec3::ZERO; n];
+        for &(t, p, w) in data {
+            let t = t.clamp(0.0, 1.0);
+            let s = find_span(&knots, degree, n, t);
+            let b = basis(&knots, degree, s, t);
+            for (a, ba) in b.iter().enumerate() {
+                let i = s - degree + a;
+                atb[i] += p * (w * ba);
+                for (c, bc) in b.iter().enumerate() {
+                    ata[i][s - degree + c] += w * ba * bc;
+                }
+            }
+        }
+        let g = greville(&knots, degree);
+        let hm = 1.0 / n.max(2) as f64;
+        for i in 1..n.saturating_sub(1) {
+            let (h0, h1) = ((g[i] - g[i - 1]).max(1e-9), (g[i + 1] - g[i]).max(1e-9));
+            let k = 2.0 * hm * hm;
+            let d = [(i - 1, k / (h0 * (h0 + h1))), (i, -k / (h0 * h1)), (i + 1, k / (h1 * (h0 + h1)))];
+            for &(a, wa) in &d {
+                for &(b, wb) in &d {
+                    ata[a][b] += lam * wa * wb;
+                }
+            }
+        }
+        let xs = solve(ata.clone(), atb.iter().map(|p| p.x).collect())?;
+        let ys = solve(ata.clone(), atb.iter().map(|p| p.y).collect())?;
+        let zs = solve(ata, atb.iter().map(|p| p.z).collect())?;
+        let pts = (0..n).map(|i| DVec3::new(xs[i], ys[i], zs[i])).collect();
+        Some(Curve { degree, knots, pts, w: vec![1.0; n] })
+    }
+
+    /// The same curve raised to degree 3 (lines and cubics only: a line's
+    /// points at its thirds).
+    fn cubic(&self) -> Curve {
+        if self.degree == 1 && self.pts.len() == 2 {
+            let (a, b) = (self.pts[0], self.pts[1]);
+            let (k0, k1) = self.domain();
+            return Curve { degree: 3, knots: vec![k0, k0, k0, k0, k1, k1, k1, k1], pts: vec![a, a + (b - a) / 3.0, a + (b - a) * (2.0 / 3.0), b], w: vec![1.0; 4] };
+        }
+        assert!(self.degree == 3, "only lines and cubics are joined");
+        self.clone()
+    }
+
+    /// Non-rational lines and cubics joined end to end into one cubic
+    /// (corners where they meet: a knot of multiplicity 3), each on a part
+    /// of 0..1 as long as `lens` says. Also where each piece starts and
+    /// ends in the parameter.
+    pub fn join(pieces: &[Curve], lens: &[f64]) -> (Curve, Vec<f64>) {
+        let total: f64 = lens.iter().map(|l| l.max(1e-9)).sum();
+        let mut breaks = vec![0.0];
+        for l in lens {
+            breaks.push(breaks.last().unwrap() + l.max(1e-9) / total);
+        }
+        *breaks.last_mut().unwrap() = 1.0;
+        let mut pts: Vec<DVec3> = vec![];
+        let mut knots: Vec<f64> = vec![0.0; 4];
+        for (i, c) in pieces.iter().enumerate() {
+            let c = c.cubic();
+            let (k0, k1) = c.domain();
+            let (s0, s1) = (breaks[i], breaks[i + 1]);
+            let map = |k: f64| s0 + (k - k0) / (k1 - k0).max(1e-12) * (s1 - s0);
+            let n = c.pts.len();
+            // inner knots, then the end three times (four at the very end)
+            knots.extend(c.knots[4..n].iter().map(|&k| map(k)));
+            knots.extend([s1; 3]);
+            if i == 0 {
+                pts.extend_from_slice(&c.pts);
+            } else {
+                pts.extend_from_slice(&c.pts[1..]);
+            }
+        }
+        knots.push(1.0);
+        let n = pts.len();
+        (Curve { degree: 3, knots, pts, w: vec![1.0; n] }, breaks)
+    }
+
+    /// The curve cut in two at `t` (non-rational, `t` inside its domain):
+    /// `t` inserted until it is `degree` times a knot (Boehm), the point
+    /// there shared.
+    pub fn split(&self, t: f64) -> Option<(Curve, Curve)> {
+        let p = self.degree;
+        let (a, b) = self.domain();
+        if !(t > a + 1e-12 && t < b - 1e-12) {
+            return None;
+        }
+        let mut knots = self.knots.clone();
+        let mut pts = self.pts.clone();
+        let mult = |k: &[f64]| k.iter().filter(|&&x| (x - t).abs() < 1e-12).count();
+        while mult(&knots) < p {
+            let n = pts.len();
+            let k = find_span(&knots, p, n, t);
+            let mut q = Vec::with_capacity(n + 1);
+            for i in 0..=n {
+                if i + p <= k {
+                    q.push(pts[i]);
+                } else if i > k {
+                    q.push(pts[i - 1]);
+                } else {
+                    let al = (t - knots[i]) / (knots[i + p] - knots[i]).max(1e-300);
+                    q.push(pts[i] * al + pts[i - 1] * (1.0 - al));
+                }
+            }
+            knots.insert(k + 1, t);
+            pts = q;
+        }
+        let first = knots.iter().position(|&x| (x - t).abs() < 1e-12)?;
+        let mut lk: Vec<f64> = knots[..first + p].to_vec();
+        lk.push(t);
+        let lp = pts[..first].to_vec();
+        let mut rk = vec![t];
+        rk.extend_from_slice(&knots[first..]);
+        let rp = pts[first - 1..].to_vec();
+        let (nl, nr) = (lp.len(), rp.len());
+        Some((Curve { degree: p, knots: lk, pts: lp, w: vec![1.0; nl] }, Curve { degree: p, knots: rk, pts: rp, w: vec![1.0; nr] }))
+    }
+
+    /// Points along the part of the parameter from `a` to `b`.
+    pub fn sample_range(&self, a: f64, b: f64, n: usize) -> Vec<DVec3> {
+        (0..=n).map(|k| self.eval(a + (b - a) * k as f64 / n as f64)).collect()
+    }
 }
 
 /// The unit circle's 9 control points (x, y) and weights.
@@ -320,6 +455,22 @@ mod tests {
             for k in 0..50 {
                 let p = s.eval(k as f64 / 50.0, v);
                 assert!(((p.x * p.x + p.y * p.y).sqrt() - r0).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn split_keeps_the_curve() {
+        let c = Curve { degree: 3, knots: uniform_knots(3, 4), pts: (0..7).map(|i| DVec3::new(i as f64, ((i * 7) % 5) as f64, (i * i) as f64 * 0.1)).collect(), w: vec![1.0; 7] };
+        for t in [0.1, 0.25, 0.6] {
+            let (l, r) = c.split(t).unwrap();
+            assert_eq!(l.knots.len(), l.pts.len() + 4);
+            assert_eq!(r.knots.len(), r.pts.len() + 4);
+            for k in 0..=20 {
+                let u = t * k as f64 / 20.0;
+                assert!((l.eval(u) - c.eval(u)).length() < 1e-9);
+                let v = t + (1.0 - t) * k as f64 / 20.0;
+                assert!((r.eval(v) - c.eval(v)).length() < 1e-9);
             }
         }
     }

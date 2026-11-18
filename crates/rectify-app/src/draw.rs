@@ -3,12 +3,13 @@
 //! tool in hand draws over it.
 
 use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, Renderer};
-use crate::state::AppState;
+use crate::state::{AppState, Shape};
 use crate::theme;
 use glam::DVec3;
 use rayon::prelude::*;
 use rectify_core::mesh::crease_normals;
-use rectify_core::nurbs::Surface;
+use rectify_core::nurbs::{Curve, Surface};
+use rectify_core::path::{Snap, SnapKind};
 use rectify_core::Mesh;
 
 /// The scan's colour: grey clay (sRGB).
@@ -50,6 +51,51 @@ fn surface_vertices(s: &Surface, face: u32, line: [u8; 4], hull: Option<[u8; 4]>
     }
 }
 
+/// A NURBS curve as a line: each of its knot spans sampled (a straight one
+/// stays straight).
+fn curve_lines(c: &Curve) -> Vec<[f32; 3]> {
+    let mut ks: Vec<f64> = c.knots[c.degree..=c.pts.len()].to_vec();
+    ks.dedup();
+    let mut out = vec![c.eval(ks[0]).as_vec3().to_array()];
+    for w in ks.windows(2) {
+        for k in 1..=16 {
+            out.push(c.eval(w[0] + (w[1] - w[0]) * k as f64 / 16.0).as_vec3().to_array());
+        }
+    }
+    out
+}
+
+/// What caught the pointer, drawn on the scan: the face (a small square on
+/// its plane), the edge (along the faces), the corner (its three edges).
+fn snap_lines(s: &Snap, size: f64, out: &mut Vec<LineVertex>) {
+    let col = [40, 140, 255, 240];
+    let p = |x: DVec3| x.as_vec3().to_array();
+    match s.kind {
+        SnapKind::Scan => {}
+        SnapKind::Plane => {
+            let pl = &s.planes[0];
+            let u = pl.n.any_orthonormal_vector() * size;
+            let v = pl.n.cross(u.normalize()) * size;
+            let c = s.p;
+            line_vertices(&[vec![p(c - u - v), p(c + u - v), p(c + u + v), p(c - u + v), p(c - u - v)]], [40, 140, 255, 170], 1.0, out);
+        }
+        SnapKind::Edge => {
+            let (a, b) = (s.p - s.dir * s.run.0, s.p + s.dir * s.run.1);
+            line_vertices(&[vec![p(a), p(b)]], col, 1.2, out);
+        }
+        SnapKind::Corner => {
+            let pl = &s.planes;
+            for (i, j) in [(0, 1), (1, 2), (0, 2)] {
+                let e = pl[i].n.cross(pl[j].n).normalize_or_zero();
+                // along the side where the two faces are
+                let k = 3 - i - j;
+                let e = if pl[k].dist(s.p + e) > 0.0 { -e } else { e };
+                line_vertices(&[vec![p(s.p), p(s.p + e * size * 3.0)]], col, 1.2, out);
+            }
+        }
+    }
+}
+
 /// The triangles as the renderer takes them (three corners each).
 fn mesh_vertices(m: &Mesh, normals: &[[DVec3; 3]]) -> Vec<MeshVertex> {
     (0..m.tris.len())
@@ -85,10 +131,19 @@ impl Drawer {
         self.objects_gen = st.objects_gen;
         let (mut verts, mut wire) = (vec![], vec![]);
         for o in &st.objects {
-            surface_vertices(&o.surface, 1, [60, 32, 14, 200], None, &mut verts, &mut wire);
+            match &o.shape {
+                Shape::Surface(s) => surface_vertices(s, 1, [60, 32, 14, 200], None, &mut verts, &mut wire),
+                Shape::Curve(c) => line_vertices(&[curve_lines(c)], [226, 92, 14, 255], 1.8, &mut wire),
+            }
         }
         if let Some(ce) = &st.circle {
             surface_vertices(&ce.round.surface, 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
+        }
+        // the path being drawn, and its control points
+        if let Some(b) = st.path.as_ref().and_then(|pe| pe.built.as_ref()) {
+            let hull: Vec<[f32; 3]> = b.curve.pts.iter().map(|x| x.as_vec3().to_array()).collect();
+            line_vertices(&[hull], [255, 150, 70, 110], 0.6, &mut wire);
+            line_vertices(&[curve_lines(&b.curve)], [255, 118, 24, 255], 2.0, &mut wire);
         }
         self.r.upload_parts(device, queue, &verts, &wire);
     }
@@ -121,6 +176,25 @@ impl Drawer {
                 })
                 .collect();
             line_vertices(&[ring], [255, 150, 60, 200], 1.2, &mut out);
+        }
+        // the Path: the next segment, and what catches the pointer
+        if let Some(pe) = &st.path {
+            if let (Some(pv), Some(b)) = (&pe.preview, &pe.built) {
+                let n = b.breaks.len() - 1;
+                let rest: Vec<Vec<[f32; 3]>> = pv.polylines().into_iter().skip(n).map(|l| l.iter().map(|x| p(*x)).collect()).collect();
+                line_vertices(&rest, [255, 118, 24, 170], 1.2, &mut out);
+            } else if let (Some(h), true) = (&st.path_hover, pe.pts.len() == 1) {
+                let a = if pe.params.planes { pe.pts[0].p } else { pe.pts[0].hit };
+                line_vertices(&[vec![p(a), p(h.p)]], [255, 118, 24, 170], 1.2, &mut out);
+            }
+        }
+        if let Some(h) = &st.path_hover {
+            let size = {
+                let v = st.view();
+                let (fwd, _, _) = v.basis();
+                v.pixel_size_at((h.p.as_vec3() - v.eye).dot(fwd).max(1e-3)) as f64 * 10.0
+            };
+            snap_lines(h, size, &mut out);
         }
         // the surface placed: its axis
         if let Some(ce) = &st.circle {

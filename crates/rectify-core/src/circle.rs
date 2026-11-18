@@ -441,6 +441,15 @@ pub struct Round {
     pub inward: bool,
 }
 
+/// The wall as read: (height 0..1, distance from the axis) of each line
+/// cast that met it.
+struct Wall {
+    data: Vec<(f64, f64)>,
+    found: f64,
+    inward: bool,
+    height: f64,
+}
+
 /// The triangles around the part, binned by angle and height, for casting
 /// lines straight out from the axis onto them.
 struct Caster {
@@ -552,9 +561,31 @@ impl Circle {
     /// by height, is fitted to all the hits (a second pass without those
     /// far from the first).
     pub fn nurbs(&self, m: &Mesh, topo: &Topo, p: RoundParams) -> Round {
+        let wall = self.read_wall(m, topo, p.height);
+        self.lay(&wall, p)
+    }
+
+    /// The fewest levels that follow the wall about as well as many do
+    /// (Romain, 18 nov., 16 h 34: "pourquoi il y a autant de subdivisions
+    /// sur la cage ?"): one for a cylinder or a cone (more rings do not
+    /// change them); for a curve, the first count within 0.01 mm (or 5 %)
+    /// of what 16 levels give.
+    pub fn fewest_levels(&self, m: &Mesh, topo: &Topo, height: f64, profile: ProfileKind) -> usize {
+        if profile != ProfileKind::Curve {
+            return 1;
+        }
+        let wall = self.read_wall(m, topo, height);
+        let off = |levels: usize| self.lay(&wall, RoundParams { height, profile, levels }).off;
+        let best = off(16);
+        let enough = best + (best * 0.05).max(0.01);
+        (1..16).find(|&l| off(l) <= enough).unwrap_or(16)
+    }
+
+    /// The wall read by lines cast out from the axis.
+    fn read_wall(&self, m: &Mesh, topo: &Topo, height: f64) -> Wall {
         use rayon::prelude::*;
         use std::f64::consts::TAU;
-        let height = p.height.max(self.edge * 2.0);
+        let height = height.max(self.edge * 2.0);
         let caster = Caster::new(self, m, topo);
         // a height every ~1.5 edges (at most 120), 64 angles
         let nh = ((height / (self.edge * 1.5)).round() as usize).clamp(4, 120);
@@ -578,6 +609,18 @@ impl Circle {
             .collect();
         let found = hits.len() as f64 / ((nh + 1) * na) as f64;
         let inward = hits.iter().map(|x| x.2).sum::<f64>() < 0.0;
+        let mut data: Vec<(f64, f64)> = hits.iter().map(|x| (x.0, x.1)).collect();
+        if data.is_empty() {
+            data = guess.iter().map(|g| (g.0 / height, g.1)).collect();
+        }
+        Wall { data, found, inward, height }
+    }
+
+    /// The surface on the wall read.
+    fn lay(&self, wall: &Wall, p: RoundParams) -> Round {
+        let (u, v) = self.basis();
+        let height = wall.height;
+        let (found, inward) = (wall.found, wall.inward);
         // the profile: control values of the radius along the height; the
         // rings are its knots (straight between them for a cylinder or a
         // cone, a cubic for a curve)
@@ -597,10 +640,7 @@ impl Circle {
             let c = Curve { degree: deg, knots: uniform_knots(deg, spans_of(deg, ctrl.len())), pts: ctrl.iter().map(|&r| DVec3::new(r, 0.0, 0.0)).collect(), w: vec![1.0; ctrl.len()] };
             c.eval(t).x
         };
-        let mut data: Vec<(f64, f64)> = hits.iter().map(|x| (x.0, x.1)).collect();
-        if data.is_empty() {
-            data = guess.iter().map(|g| (g.0 / height, g.1)).collect();
-        }
+        let mut data = wall.data.clone();
         let (mut deg, mut ctrl) = fit(&data);
         // again without the hits far from the first fit (another wall, a
         // detail on this one)
