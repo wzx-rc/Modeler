@@ -84,6 +84,9 @@ pub struct SnapReport {
     pub eased: usize,
     pub mean_move: f64,
     pub max_move: f64,
+    /// What each vertex was given: 0 left free, 2 on an edge, 3 fading
+    /// near one, 4 on a sharp ridge, 5 eased (neighbours disagreed).
+    pub kinds: Vec<u8>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -709,7 +712,7 @@ pub fn snap(m: &mut Mesh, topo: &Topo, seg: &Segmentation, p: &SnapParams) -> Sn
         };
         target[v] = q - old[v];
         weight[v] = w;
-        kinds[v] = if k == 2 && w >= 0.999 { 2 } else if w > 0.0 { 3 } else { 0 };
+        kinds[v] = if onto_ridge[v].is_some() { 4 } else if k == 2 && w >= 0.999 { 2 } else if w > 0.0 { 3 } else { 0 };
     }
     // neighbours sent far apart (two edges disagreeing, a corner) are eased:
     // the relaxation below joins them smoothly
@@ -736,11 +739,15 @@ pub fn snap(m: &mut Mesh, topo: &Topo, seg: &Segmentation, p: &SnapParams) -> Sn
             rep.eased += 1;
         }
         match kinds[v] {
-            2 => rep.on_edge += 1,
+            2 | 4 => rep.on_edge += 1,
             3 => rep.faded += 1,
             _ => rep.free += 1,
         }
+        if eased[v] {
+            kinds[v] = 5;
+        }
     }
+    rep.kinds = kinds;
     // the vertices not fully placed take the moves of their neighbours,
     // smoothly (a vertex placed at w keeps that share of its own move)
     let mut delta: Vec<DVec3> = (0..nv).map(|v| target[v] * weight[v]).collect();

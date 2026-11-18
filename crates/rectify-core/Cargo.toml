@@ -7,3 +7,5 @@ description = "Forme Rectify: turns a noisy AI / scan mesh back into what it was
 [dependencies]
 glam.workspace = true
 rayon = "1"
+serde.workspace = true
+serde_json.workspace = true

@@ -14,6 +14,10 @@ name = "forme-rectify"
 path = "src/main.rs"
 
 [[bin]]
+name = "forme-rectify-mcp"
+path = "src/bin/mcp.rs"
+
+[[bin]]
 name = "forme-rectify-shot"
 path = "src/bin/shot.rs"
 
@@ -30,3 +34,4 @@ pollster.workspace = true
 log.workspace = true
 image.workspace = true
 rayon = "1"
+serde_json.workspace = true

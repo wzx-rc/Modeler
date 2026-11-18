@@ -7,7 +7,7 @@ use crate::state::*;
 use crate::theme::*;
 use crate::widgets::*;
 use egui::{pos2, vec2, Align2, Id, Key, Margin, Order, Rect, Sense, Stroke, StrokeKind, Ui};
-use rectify_core::{Kind, Prim, Step};
+use rectify_core::{Kind, Prim, Stage, Step};
 
 const EDGE: f32 = 14.0;
 const ISLAND_H: f32 = 40.0;
@@ -22,6 +22,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     top_bar(ctx, st, screen);
     rail(ctx, st, screen);
     summary(ctx, st, screen);
+    legend(ctx, st, screen);
     hud(ctx, st);
     if st.panel_visible {
         inspector(ctx, st, screen);
@@ -67,34 +68,57 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         });
     });
 
-    // centre: what the view shows
+    // centre: the stage shown (0-3) and how
     let cx = st.principal()[0];
     egui::Area::new(Id::new("isl-modes")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(pos2(cx, screen.min.y + EDGE)).show(ctx, |ui| {
         island().show(ui, |ui| {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                let modes = [ViewMode::Original, ViewMode::Regions, ViewMode::Result];
-                let (well, _) = ui.allocate_exact_size(vec2(3.0 * 86.0 + 6.0, 28.0), Sense::hover());
+                let widths = [74.0, 112.0, 98.0, 62.0];
+                let total: f32 = widths.iter().sum::<f32>() + 6.0;
+                let (well, _) = ui.allocate_exact_size(vec2(total, 28.0), Sense::hover());
                 ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
-                for (i, m) in modes.into_iter().enumerate() {
-                    let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 86.0, 3.0), vec2(86.0, 22.0));
-                    let resp = ui.interact(r, Id::new(("isl-mode", i)), Sense::click());
-                    let on = st.shown() == m;
+                let mut x = well.min.x + 3.0;
+                let running = st.job.as_ref().map(|j| j.what.starts_with("Stage") || j.step.is_some()).unwrap_or(false);
+                for (i, s) in Stage::ALL.into_iter().enumerate() {
+                    let r = Rect::from_min_size(pos2(x, well.min.y + 3.0), vec2(widths[i], 22.0));
+                    x += widths[i];
+                    let resp = ui.interact(r, Id::new(("isl-stage", i)), Sense::click());
+                    let on = st.shown() == s;
                     if on {
                         ui.painter().rect_filled(r, 11.0, accent());
                     } else if resp.hovered() {
                         ui.painter().rect_filled(r, 11.0, RAISED());
                     }
-                    ui.painter().text(r.center(), Align2::CENTER_CENTER, m.label().to_uppercase(), mono(11.0), if on { on_accent() } else { TEXT2() });
-                    let tip = match m {
-                        ViewMode::Original => "The mesh as it came (1, or hold Space)",
-                        ViewMode::Regions => "The regions found: planes in cool colours, cylinders warm, free faces dark (2)",
-                        ViewMode::Result => "The rectified mesh (3)",
-                    };
-                    if resp.on_hover_text(tip).clicked() {
-                        st.set_mode(m);
+                    let ready = st.pipe.as_ref().map(|p| p.ready(s)).unwrap_or(false);
+                    let col = if on { on_accent() } else { TEXT2() };
+                    // a dot: filled when computed, a ring when not yet
+                    let dot = pos2(r.min.x + 12.0, r.center().y);
+                    if ready {
+                        ui.painter().circle_filled(dot, 3.0, if on { on_accent() } else { OK });
+                    } else if running && st.stage == s {
+                        ui.painter().circle_filled(dot, 3.0, if on { on_accent() } else { accent() });
+                    } else {
+                        ui.painter().circle_stroke(dot, 2.6, Stroke::new(1.0, col));
                     }
+                    ui.painter().text(pos2(r.min.x + 21.0, r.center().y), Align2::LEFT_CENTER, format!("{} {}", s.number(), s.label().to_uppercase()), mono(11.0), col);
+                    let tip = match s {
+                        Stage::Scan => "0 · The mesh as it came: the scan, the AI's output (0, or hold Space)",
+                        Stage::Algorithm => "1 · The algorithm alone: regions, shapes, edges and fillets, round pieces (1)",
+                        Stage::Cleaned => "2 · Then cleaned: where it got rougher than the AI mesh, smoothed or taken back (2)",
+                        Stage::Guided => "3 · The algorithm driven by the edits: the AI pass from Claude Desktop and your brush strokes (3)",
+                    };
+                    let tip = if ready || s == Stage::Scan { tip.to_string() } else { format!("{tip}\nNot computed yet: a click computes it, then it is a switch") };
+                    if resp.on_hover_text(tip).clicked() {
+                        st.set_stage(s);
+                    }
+                }
+                island_sep(ui);
+                let items = [(Style::Surface, "Surface", accent()), (Style::Regions, "Regions", accent()), (Style::Diff, "Diff", accent())];
+                let cur = st.style;
+                if let Some(v) = seg_inline(ui, "isl-style", &items.map(|(s, l, _)| (s, l, "")), cur) {
+                    st.set_style(v);
                 }
                 island_sep(ui);
                 if icon_btn(ui, Icon::Fillet, st.settings.edges, "Lines where the regions meet", 28.0).clicked() {
@@ -127,8 +151,8 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 if icon_btn(ui, Icon::Frame, false, "Frame the mesh (F)", 28.0).clicked() {
                     st.frame_all();
                 }
-                let can = st.pipe.as_ref().map(|p| p.result.is_some()).unwrap_or(false);
-                if icon_btn(ui, Icon::Export, false, "Export the result as .obj, with the original UVs (Documents/Forme Rectify)", 28.0).clicked() && can {
+                let can = st.pipe.as_ref().map(|p| p.stage_mesh(Stage::Cleaned).is_some()).unwrap_or(false);
+                if icon_btn(ui, Icon::Export, false, "Export the stage shown as .obj, with the original UVs (Documents/Forme Rectify)", 28.0).clicked() && can {
                     st.export();
                 }
                 if icon_btn(ui, Icon::Light, st.settings.light, "Light theme", 28.0).clicked() {
@@ -148,6 +172,8 @@ fn step_icon(s: Step) -> Icon {
         Step::Segment => Icon::Quads,
         Step::Regularize => Icon::Grid,
         Step::Snap => Icon::Magnet,
+        Step::Revolve => Icon::Sphere,
+        Step::Clean => Icon::Fillet,
     }
 }
 
@@ -180,8 +206,13 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             grip(ui, "rail");
             ui.spacing_mut().item_spacing.y = 5.0;
             for (i, s) in Step::ALL.into_iter().enumerate() {
+                match s {
+                    Step::Symmetry => group_label(ui, "1 · ALGORITHM"),
+                    Step::Clean => group_label(ui, "2 · CLEANED"),
+                    _ => {}
+                }
                 let running = st.job.as_ref().and_then(|j| j.step) == Some(s);
-                let done = st.pipe.as_ref().and_then(|p| p.times[s.index()]);
+                let done = st.pipe.as_ref().and_then(|p| p.time_of(s, 0));
                 let (sub, col) = if running {
                     (format!("RUNNING {:.0} %", st.job.as_ref().map(|j| j.progress * 100.0).unwrap_or(0.0)), accent())
                 } else if let Some(t) = done {
@@ -197,10 +228,31 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     Step::Segment => "Cuts the mesh into regions, each a plane, a cylinder or a sphere",
                     Step::Regularize => "Makes the shapes agree: parallel, square, on the object's axes, same radii, coaxial, mirrored",
                     Step::Snap => "Puts the vertices on their shapes; edges where two shapes meet",
+                    Step::Revolve => "Round pieces (buttons, rings): every angle put on one common profile, so they come out truly round",
+                    Step::Clean => "Compares with the AI mesh: where the result got rougher, the move is smoothed or taken back",
                 };
                 let progress = if running { st.job.as_ref().map(|j| j.progress) } else { None };
-                if card(ui, i + 1, step_icon(s), &s.label().to_uppercase(), &sub, st.step == s, col, progress, tip).clicked() {
+                if card(ui, i + 1, step_icon(s), &s.label().to_uppercase(), &sub, st.step == s && !st.edits_open, col, progress, tip).clicked() {
                     st.step = s;
+                    st.edits_open = false;
+                    st.panel_visible = true;
+                }
+            }
+            group_label(ui, "3 · AI");
+            {
+                let (n_ai, n_hand) = st.pipe.as_ref().map(|p| (p.script.count("ai"), p.script.count("hand"))).unwrap_or((0, 0));
+                let lane_done = st.pipe.as_ref().map(|p| p.ready(Stage::Guided)).unwrap_or(false);
+                let sub = if n_ai + n_hand == 0 {
+                    "NO EDITS YET".to_string()
+                } else if lane_done {
+                    format!("{n_ai} AI · {n_hand} HAND · DONE")
+                } else {
+                    format!("{n_ai} AI · {n_hand} HAND · TO RUN")
+                };
+                let col = if lane_done && n_ai + n_hand > 0 { OK } else { TEXT2() };
+                let tip = "The edits of stage 3: the AI pass (Claude Desktop, through the MCP link) and your brush strokes, replayed on the algorithm's regions";
+                if card(ui, 8, Icon::Magnet, "EDITS", &sub, st.edits_open, col, None, tip).clicked() {
+                    st.edits_open = true;
                     st.panel_visible = true;
                 }
             }
@@ -220,8 +272,15 @@ fn step_on(st: &AppState, s: Step) -> bool {
         Step::Symmetry => st.params.symmetry,
         Step::Smooth => st.params.smooth_on,
         Step::Regularize => st.params.reg_on,
+        Step::Revolve => st.params.revolve.on,
+        Step::Clean => st.params.tidy.on,
         _ => true,
     }
+}
+
+fn group_label(ui: &mut Ui, t: &str) {
+    ui.add_space(2.0);
+    ui.label(egui::RichText::new(t).font(mono(9.5)).color(TEXT2()));
 }
 
 // --------------------------------------------------------------- summary
@@ -238,14 +297,25 @@ fn summary(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 };
                 let (lo, hi) = p.original.bounds();
                 let d = hi - lo;
+                let stage = st.shown();
                 let mut parts = vec![format!("{} × {} × {} mm", fmt(d.x, 1), fmt(d.y, 1), fmt(d.z, 1)), format!("{} k vertices", p.original.pos.len() / 1000)];
-                if let Some(s) = p.seg_final.as_ref().or(p.seg.as_ref()).or(p.seg_raw.as_ref()) {
+                if st.style == crate::state::Style::Diff && stage != Stage::Scan {
+                    match p.stage_diff(stage) {
+                        Some(df) => {
+                            let n = df.rough_count();
+                            parts.push(format!("{} rougher than the AI mesh", if n == 0 { "nothing".to_string() } else { format!("{} vertices", n) }));
+                        }
+                        None => parts.push("not computed yet".into()),
+                    }
+                } else if let Some(s) = st.shown_seg() {
                     let areas = p.smooth_out().areas();
                     parts.push(format!("{} planes · {} cylinders · {} spheres", s.count(Kind::Plane), s.count(Kind::Cylinder), s.count(Kind::Sphere)));
                     parts.push(format!("{:.0} % on a shape", s.covered(&areas) * 100.0));
                 }
-                if let Some(r) = &p.snap {
-                    parts.push(format!("moved {} mm on average", fmt(r.mean_move, 2)));
+                if let Some(df) = p.stage_diff(stage) {
+                    if st.style != crate::state::Style::Diff {
+                        parts.push(format!("{} rougher than the AI mesh", df.rough_count()));
+                    }
                 }
                 for (i, t) in parts.iter().enumerate() {
                     if i > 0 {
@@ -254,6 +324,40 @@ fn summary(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     }
                     ui.label(egui::RichText::new(t).font(regular(12.5)).color(if i < 2 { TEXT2() } else { TEXT() }));
                 }
+            });
+        });
+    });
+}
+
+/// The diff map's colours, above the summary.
+fn legend(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+    if st.style != crate::state::Style::Diff || st.pipe.is_none() {
+        return;
+    }
+    use crate::draw::{diff_color, DIFF_FULL, DIFF_RED, DIFF_STEPS};
+    let cx = st.principal()[0];
+    let c = |b: u32| {
+        let k = diff_color(b);
+        egui::Color32::from_rgb((k[0] * 255.0) as u8, (k[1] * 255.0) as u8, (k[2] * 255.0) as u8)
+    };
+    egui::Area::new(Id::new("legend")).order(Order::Middle).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(cx, screen.max.y - 58.0)).interactable(false).show(ctx, |ui| {
+        panel().inner_margin(Margin::symmetric(12, 6)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let sw = |ui: &mut Ui, col: egui::Color32, t: &str| {
+                    let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+                    ui.painter().rect_filled(r, 3.0, col);
+                    ui.label(egui::RichText::new(t).font(regular(11.5)).color(TEXT()));
+                };
+                sw(ui, c(0), "untouched");
+                let (r, _) = ui.allocate_exact_size(vec2(60.0, 12.0), Sense::hover());
+                for i in 0..DIFF_STEPS {
+                    let x0 = r.min.x + r.width() * i as f32 / DIFF_STEPS as f32;
+                    let rr = Rect::from_min_max(pos2(x0, r.min.y), pos2(x0 + r.width() / DIFF_STEPS as f32 + 0.5, r.max.y));
+                    ui.painter().rect_filled(rr, 0.0, c(i + 1));
+                }
+                ui.label(egui::RichText::new(format!("moved, up to {} mm", fmt(DIFF_FULL as f64, 1))).font(regular(11.5)).color(TEXT()));
+                sw(ui, c(DIFF_RED), "rougher than the AI mesh");
             });
         });
     });
@@ -309,7 +413,11 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 divider(ui);
                 ui.add_space(6.0);
             }
-            step_card(ui, st);
+            if st.edits_open {
+                edits_card(ui, st);
+            } else {
+                step_card(ui, st);
+            }
         });
     });
 }
@@ -404,7 +512,7 @@ fn step_card(ui: &mut Ui, st: &mut AppState) {
             if toggle_row(ui, "Mirror pairs", p.reg.mirror) {
                 p.reg.mirror = !p.reg.mirror;
             }
-            if let Some(r) = pipe.and_then(|p| p.reg.as_ref()) {
+            if let Some(r) = pipe.and_then(|p| p.lanes[0].reg.as_ref()) {
                 line(ui, format!("{} directions, {} on the axes", r.directions, r.on_axes));
                 line(ui, format!("{} coplanar · {} radius groups · {} coaxial", r.coplanar, r.radii, r.coaxial));
                 line(ui, format!("{} mirror pairs", r.mirrored));
@@ -425,18 +533,53 @@ fn step_card(ui: &mut Ui, st: &mut AppState) {
             slider_f64(ui, "Fade", &mut p.snap.fade, 0.0..=3.0, 0.05, "mm");
             slider_f64(ui, "Flatten", &mut p.snap.flatten, 0.0..=1.0, 0.05, "");
             slider_f64(ui, "Max move", &mut p.snap.max_move, 0.05..=5.0, 0.05, "mm");
-            if let Some(r) = pipe.and_then(|p| p.snap.as_ref()) {
+            if let Some(r) = pipe.and_then(|p| p.lanes[0].snap.as_ref()) {
                 line(ui, format!("{} edges rebuilt{}", r.edges, if r.radii.is_empty() { String::new() } else { format!(" · {} radii, median {} mm", r.radius_groups, fmt(r.radii[r.radii.len() / 2], 2)) }));
                 line(ui, format!("{} continue each other · {} left alone", r.tangent, r.rejected));
                 line(ui, format!("{} k on an edge · {} k faded · {} k untouched", r.on_edge / 1000, r.faded / 1000, r.free / 1000));
                 line(ui, format!("Moved {} mm on average, {} at most", fmt(r.mean_move, 3), fmt(r.max_move, 2)));
             }
         }
+        Step::Revolve => {
+            title(ui, "6 · Round", "Turned pieces (coaxial cylinders, the planes square to them): every angle on one common profile");
+            if toggle_row(ui, "Round pieces", p.revolve.on) {
+                p.revolve.on = !p.revolve.on;
+            }
+            slider_f64(ui, "Profile fit", &mut p.revolve.radius, 0.05..=1.0, 0.01, "mm");
+            slider_f64(ui, "Max thickness", &mut p.revolve.max_thick, 0.01..=0.3, 0.01, "mm");
+            slider_f64(ui, "Detail", &mut p.revolve.outlier, 0.03..=0.5, 0.01, "mm");
+            slider_f64(ui, "Reach", &mut p.revolve.margin, 0.1..=3.0, 0.05, "mm");
+            slider_f64(ui, "Min turn", &mut p.revolve.min_cover, 90.0..=360.0, 10.0, "°");
+            if let Some(r) = pipe.and_then(|p| p.lanes[0].revolve.as_ref()) {
+                line(ui, format!("{} round pieces of {} axes · {} k vertices", r.done(), r.pieces.len(), r.moved / 1000));
+                let partial = r.pieces.iter().filter(|x| x.skipped.as_deref().map(|t| t.starts_with("covers")).unwrap_or(false)).count();
+                let thick = r.pieces.iter().filter(|x| x.skipped.as_deref().map(|t| t.starts_with("not round")).unwrap_or(false)).count();
+                line(ui, format!("Skipped: {partial} only part of a turn, {thick} not round"));
+            }
+        }
+        Step::Clean => {
+            title(ui, "7 · Clean", "Never rougher than the AI mesh: where the result got sharper than it, the move is smoothed, then taken back");
+            if toggle_row(ui, "Clean", p.tidy.on) {
+                p.tidy.on = !p.tidy.on;
+            }
+            slider_f64(ui, "Margin", &mut p.tidy.margin, 2.0..=45.0, 1.0, "°");
+            slider_f64(ui, "On edges", &mut p.tidy.edge_margin, 5.0..=90.0, 1.0, "°");
+            slider_usize(ui, "Smoothing", &mut p.tidy.iters, 0.0..=100.0);
+            slider_usize(ui, "Rings", &mut p.tidy.rings, 0.0..=6.0);
+            if toggle_row(ui, "Take back", p.tidy.revert) {
+                p.tidy.revert = !p.tidy.revert;
+            }
+            if let Some(r) = pipe.and_then(|p| p.lanes[0].tidy.as_ref()) {
+                line(ui, format!("Rougher than the AI mesh: {} k → {} k vertices", fmt(r.rough_before as f64 / 1000.0, 1), fmt(r.rough_after as f64 / 1000.0, 1)));
+                line(ui, format!("{} k smoothed · {} k taken back", r.smoothed / 1000, r.reverted / 1000));
+            }
+            line(ui, "Diff view: red where still rougher");
+        }
     }
     if st.params != before {
         // a changed setting: this step and the ones after it are out of date
         if let Some(p) = &mut st.pipe {
-            if p.done(s) {
+            if p.done(s) || p.done_in(s, 1) {
                 p.clear_from(s);
                 st.gen += 1;
             }
@@ -511,6 +654,71 @@ fn tools_card(ui: &mut Ui, st: &mut AppState) {
     }
 }
 
+/// Stage 3's edits, in order, with what each did.
+fn edits_card(ui: &mut Ui, st: &mut AppState) {
+    title(ui, "3 · AI edits", "Replayed in order on the algorithm's regions: the AI pass from Claude Desktop and your brush strokes");
+    let link = match st.remote.port {
+        Some(port) => format!("Claude Desktop link: on (port {port}) · {} requests", st.remote.served),
+        None => "Claude Desktop link: off (the port is taken?)".to_string(),
+    };
+    ui.label(egui::RichText::new(link).font(regular(12.0)).color(if st.remote.port.is_some() { OK } else { ERROR }));
+    if let Some(path) = st.script_path() {
+        ui.label(egui::RichText::new(format!("Saved in {}", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())).font(regular(11.5)).color(TEXT2()));
+    }
+    ui.add_space(4.0);
+    let Some(p) = &st.pipe else { return };
+    let rows: Vec<(usize, String, String, String, Option<Result<String, String>>)> = p
+        .script
+        .edits
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let op = serde_json::to_value(&e.cmd).ok().and_then(|v| v["op"].as_str().map(|s| s.replace('_', " "))).unwrap_or_default();
+            (i, if e.by == "ai" { "AI".to_string() } else { "HAND".to_string() }, op, e.note.clone(), p.edit_log.get(i).cloned())
+        })
+        .collect();
+    if rows.is_empty() {
+        line(ui, "No edits yet. Ask Claude in Claude Desktop (the forme-rectify tools), or use the brush (B) and shapes (G).");
+    }
+    let mut remove = None;
+    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+        for (i, by, op, note, res) in rows {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(egui::RichText::new(format!("{} {}", i + 1, by)).font(mono(10.5)).color(if by == "AI" { accent() } else { TEXT2() }));
+                ui.label(egui::RichText::new(op).font(medium(12.0)).color(TEXT()));
+                if ui.small_button("×").on_hover_text("Remove this edit").clicked() {
+                    remove = Some(i);
+                }
+            });
+            if !note.is_empty() {
+                ui.label(egui::RichText::new(note).font(regular(11.5)).color(TEXT2()));
+            }
+            if let Some(r) = res {
+                match r {
+                    Ok(t) if !t.is_empty() => {
+                        ui.label(egui::RichText::new(t).font(regular(11.0)).color(TEXT2()));
+                    }
+                    Err(e) => {
+                        ui.label(egui::RichText::new(format!("Failed: {e}")).font(regular(11.0)).color(ERROR));
+                    }
+                    _ => {}
+                }
+            }
+            ui.add_space(3.0);
+        }
+    });
+    if let Some(i) = remove {
+        st.remove_edit(i);
+    }
+    ui.add_space(6.0);
+    let w = ui.available_width();
+    if primary_btn(ui, None, "Show stage 3", Some(w)).clicked() {
+        st.style = crate::state::Style::Surface;
+        st.set_stage(Stage::Guided);
+    }
+}
+
 fn region_card(ui: &mut Ui, st: &mut AppState) {
     let Some(r) = st.selected else { return };
     let Some(seg) = st.shown_seg() else { return };
@@ -578,7 +786,8 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if ctx.egui_wants_keyboard_input() {
         return;
     }
-    let (k1, k2, k3, f, r, esc, space, z) = ctx.input(|i| (i.key_pressed(Key::Num1), i.key_pressed(Key::Num2), i.key_pressed(Key::Num3), i.key_pressed(Key::F), i.key_pressed(Key::R), i.key_pressed(Key::Escape), i.key_down(Key::Space), i.key_pressed(Key::Z)));
+    let (k0, k1, k2, k3) = ctx.input(|i| (i.key_pressed(Key::Num0), i.key_pressed(Key::Num1), i.key_pressed(Key::Num2), i.key_pressed(Key::Num3)));
+    let (f, r, esc, space, z, v) = ctx.input(|i| (i.key_pressed(Key::F), i.key_pressed(Key::R), i.key_pressed(Key::Escape), i.key_down(Key::Space), i.key_pressed(Key::Z), i.key_pressed(Key::V)));
     let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
     let (b, g, y, lb, rb) = ctx.input(|i| (i.key_pressed(Key::B), i.key_pressed(Key::G), i.key_pressed(Key::Y), i.key_pressed(Key::OpenBracket), i.key_pressed(Key::CloseBracket)));
     if cmd && z {
@@ -604,14 +813,14 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if rb {
         st.brush = (st.brush * 1.2).min(80.0);
     }
-    if k1 {
-        st.set_mode(ViewMode::Original);
+    for (k, s) in [(k0, Stage::Scan), (k1, Stage::Algorithm), (k2, Stage::Cleaned), (k3, Stage::Guided)] {
+        if k {
+            st.set_stage(s);
+        }
     }
-    if k2 {
-        st.set_mode(ViewMode::Regions);
-    }
-    if k3 {
-        st.set_mode(ViewMode::Result);
+    if v && !cmd {
+        let n = st.style.next();
+        st.set_style(n);
     }
     if f {
         st.frame_all();

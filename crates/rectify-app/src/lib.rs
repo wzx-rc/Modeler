@@ -9,6 +9,7 @@ pub mod camera;
 pub mod draw;
 pub mod files;
 pub mod icons;
+pub mod remote;
 pub mod render;
 pub mod state;
 pub mod theme;

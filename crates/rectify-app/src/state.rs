@@ -5,30 +5,41 @@ use crate::camera::OrbitCamera;
 use crate::view::View;
 use glam::{DVec3, Vec3};
 use rectify_core::edit;
-use rectify_core::prim::{fit_cylinder, fit_plane, fit_sphere, Sample};
+use rectify_core::script::{self, Cmd, Entry, Ref, Script};
 use rectify_core::segment::Segmentation;
-use rectify_core::{Kind, Mesh, Params, Pipeline, Prim, Step, NONE};
+use rectify_core::{Kind, Mesh, Params, Pipeline, Prim, Stage, Step, NONE};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ViewMode {
-    /// The mesh as it came.
-    Original,
-    /// The regions found, one colour each (planes cool, curved warm).
+/// How the shown stage is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Style {
+    /// The mesh in clay.
+    Surface,
+    /// The regions it was made with, one colour each (planes cool, curved
+    /// warm, free faces dark).
     Regions,
-    /// The rectified mesh.
-    Result,
+    /// The diff map against the AI mesh: grey untouched, orange moved, red
+    /// rougher than the AI mesh.
+    Diff,
 }
 
-impl ViewMode {
+impl Style {
+    pub const ALL: [Style; 3] = [Style::Surface, Style::Regions, Style::Diff];
     pub fn label(self) -> &'static str {
         match self {
-            ViewMode::Original => "Original",
-            ViewMode::Regions => "Regions",
-            ViewMode::Result => "Result",
+            Style::Surface => "Surface",
+            Style::Regions => "Regions",
+            Style::Diff => "Diff",
+        }
+    }
+    pub fn next(self) -> Style {
+        match self {
+            Style::Surface => Style::Regions,
+            Style::Regions => Style::Diff,
+            Style::Diff => Style::Surface,
         }
     }
 }
@@ -142,13 +153,16 @@ pub struct AppState {
     pub file: Option<PathBuf>,
     pub name: String,
     pub job: Option<Job>,
-    pub mode: ViewMode,
-    /// Space held: the original shown whatever the mode.
+    /// The stage shown (0 scan, 1 algorithm, 2 cleaned, 3 AI) and how.
+    pub stage: Stage,
+    pub style: Style,
+    /// Space held: the scan shown whatever the stage.
     pub compare: bool,
     /// Bumped whenever what is drawn changes.
     pub gen: u64,
-    /// The step whose settings the inspector shows.
+    /// The step whose settings the inspector shows (or stage 3's edits).
     pub step: Step,
+    pub edits_open: bool,
     /// Picked region (same index in every segmentation of the pipeline).
     pub selected: Option<u32>,
     pub toast: Option<Toast>,
@@ -166,11 +180,14 @@ pub struct AppState {
     pub stroke_gen: u64,
     /// Bumped when a mesh changes (not the labels): cached normals.
     pub mesh_gen: u64,
-    /// Regions before each hand edit, and the ones undone.
-    pub undo: Vec<Segmentation>,
-    pub redo: Vec<Segmentation>,
-    /// Hand edits not carried to the result yet (done when Result is shown).
+    /// The edited regions and edits before each hand edit, and the ones
+    /// undone.
+    pub undo: Vec<(Segmentation, Vec<Entry>)>,
+    pub redo: Vec<(Segmentation, Vec<Entry>)>,
+    /// Edits not carried to stage 3's mesh yet (done when it is shown).
     pub edited: bool,
+    /// Requests from the MCP bridge (Claude Desktop) waiting for an answer.
+    pub remote: crate::remote::Pending,
 }
 
 impl Default for AppState {
@@ -191,10 +208,12 @@ impl AppState {
             file: None,
             name: String::new(),
             job: None,
-            mode: ViewMode::Original,
+            stage: Stage::Scan,
+            style: Style::Surface,
             compare: false,
             gen: 1,
             step: Step::Symmetry,
+            edits_open: false,
             selected: None,
             toast: None,
             time: 0.0,
@@ -210,6 +229,7 @@ impl AppState {
             undo: vec![],
             redo: vec![],
             edited: false,
+            remote: Default::default(),
         }
     }
 
@@ -229,19 +249,37 @@ impl AppState {
         self.job.is_some()
     }
 
-    /// The mode actually drawn (Space shows the original).
-    pub fn shown(&self) -> ViewMode {
+    /// The stage actually drawn (Space shows the scan).
+    pub fn shown(&self) -> Stage {
         if self.compare {
-            ViewMode::Original
+            Stage::Scan
         } else {
-            self.mode
+            self.stage
         }
     }
 
-    pub fn set_mode(&mut self, m: ViewMode) {
-        if self.mode != m {
-            self.mode = m;
+    /// Shows a stage; computes it first when it is not (then it is only a
+    /// switch).
+    pub fn set_stage(&mut self, s: Stage) {
+        if self.stage != s {
+            self.stage = s;
             self.gen += 1;
+        }
+        let need = self.pipe.as_ref().map(|p| !p.ready(s)).unwrap_or(false);
+        if need && !self.busy() && !(s == Stage::Guided && self.style == Style::Regions) {
+            self.run_stage(s);
+        }
+    }
+
+    pub fn set_style(&mut self, s: Style) {
+        if self.style != s {
+            self.style = s;
+            self.gen += 1;
+        }
+        // regions are drawn from the edits, the rest needs the mesh
+        let st = self.stage;
+        if s != Style::Regions {
+            self.set_stage(st);
         }
     }
 
@@ -256,7 +294,14 @@ impl AppState {
         let (tx, rx) = channel();
         let p = path.clone();
         std::thread::spawn(move || {
-            let r = Mesh::load_obj(&p).map(|m| Box::new(Pipeline::new(m)));
+            let r = Mesh::load_obj(&p).map(|m| {
+                let mut pipe = Pipeline::new(m);
+                // the edits saved next to the mesh (AI pass, hand tools)
+                if let Ok(s) = Script::load(&Script::path_for(&p)) {
+                    pipe.script = s;
+                }
+                Box::new(pipe)
+            });
             let _ = tx.send(Msg::Loaded(r, p));
         });
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -278,20 +323,42 @@ impl AppState {
         self.redo.clear();
         self.edited = false;
         self.mesh_gen += 1;
-        self.mode = ViewMode::Original;
+        self.stage = Stage::Scan;
+        self.style = Style::Surface;
         self.step = Step::Symmetry;
         self.gen += 1;
         self.frame_all();
+        let n = self.pipe.as_ref().map(|p| p.script.edits.len()).unwrap_or(0);
+        if n > 0 {
+            let ai = self.pipe.as_ref().map(|p| p.script.count("ai")).unwrap_or(0);
+            self.toast(format!("{n} edits loaded for stage 3 ({ai} by the AI pass)"), false);
+        }
+    }
+
+    /// The edits' file next to the mesh (None: no file, the harness).
+    pub fn script_path(&self) -> Option<PathBuf> {
+        self.file.as_ref().map(|f| Script::path_for(f))
+    }
+
+    /// Saves the edits next to the mesh.
+    pub fn save_script(&mut self) {
+        let (Some(path), Some(p)) = (self.script_path(), &self.pipe) else { return };
+        let mut sc = p.script.clone();
+        sc.mesh = self.file.as_ref().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if let Err(e) = sc.save(&path) {
+            self.toast(format!("Could not save the edits: {e}"), true);
+        }
     }
 
     pub fn export(&mut self) {
         let Some(p) = &self.pipe else { return };
-        let Some(m) = &p.result else {
+        let stage = if self.stage == Stage::Scan { Stage::Cleaned } else { self.stage };
+        let Some(m) = p.stage_mesh(stage) else {
             self.toast("Nothing to export: run the steps first", true);
             return;
         };
         let m = m.clone();
-        let path = crate::files::documents_dir().join(format!("{} rectified.obj", crate::files::sanitize(&self.name)));
+        let path = crate::files::documents_dir().join(format!("{} stage {}.obj", crate::files::sanitize(&self.name), stage.number()));
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let r = std::fs::write(&path, m.obj(None)).map(|_| path.clone()).map_err(|e| e.to_string());
@@ -302,12 +369,32 @@ impl AppState {
 
     // ------------------------------------------------------------ steps
 
-    /// Runs `from` and every step after it in the background.
+    /// Runs a job on the pipeline in the background.
+    fn spawn(&mut self, what: String, first: Option<Step>, f: impl FnOnce(&mut Pipeline, &Params, &(dyn Fn(Step, f32) + Sync)) + Send + 'static) {
+        let Some(mut pipe) = self.pipe.take() else {
+            self.toast("Open an .obj first", true);
+            return;
+        };
+        self.stroke = None;
+        let params = self.params;
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let tx2 = std::sync::Mutex::new(tx.clone());
+            f(&mut pipe, &params, &move |s, x| {
+                let _ = tx2.lock().unwrap().send(Msg::Progress(s, x));
+            });
+            let _ = tx.send(Msg::Done(Box::new(pipe)));
+        });
+        self.job = Some(Job { rx, what, step: first, progress: 0.0 });
+    }
+
+    /// Runs `from` and every step after it in the background (stage 3's
+    /// lane too when there are edits).
     pub fn run_from(&mut self, from: Step) {
         if self.busy() {
             return;
         }
-        let Some(mut pipe) = self.pipe.take() else {
+        let Some(pipe) = &self.pipe else {
             self.toast("Open an .obj first", true);
             return;
         };
@@ -319,26 +406,35 @@ impl AppState {
         if from.index() <= Step::Segment.index() && !self.undo.is_empty() {
             self.undo.clear();
             self.redo.clear();
-            self.toast("Regions found again: the hand edits are dropped", true);
         }
         self.edited = false;
-        self.stroke = None;
-        let params = self.params;
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let tx2 = tx.clone();
-            pipe.run_from(from, &params, &move |s, f| {
-                let _ = tx2.send(Msg::Progress(s, f));
-            });
-            let _ = tx.send(Msg::Done(Box::new(pipe)));
-        });
-        self.job = Some(Job { rx, what: from.label().to_string(), step: Some(from), progress: 0.0 });
+        self.spawn(from.label().to_string(), Some(from), move |p, params, prog| p.run_from(from, params, prog));
     }
 
-    /// Runs what is out of date (every step the first time).
+    /// Computes what a stage needs (nothing when it is ready).
+    pub fn run_stage(&mut self, stage: Stage) {
+        if self.busy() {
+            return;
+        }
+        let Some(first) = self.pipe.as_ref().and_then(|p| p.next_for(stage)) else { return };
+        if stage == Stage::Guided {
+            self.edited = false;
+        }
+        self.spawn(format!("Stage {}", stage.number()), Some(first), move |p, params, prog| p.run_stage(stage, params, prog));
+    }
+
+    /// Runs what is out of date (every step the first time), up to the
+    /// stage shown (at least stage 2).
     pub fn run_all(&mut self) {
-        match self.pipe.as_ref().map(|p| p.next()) {
-            Some(Some(s)) => self.run_from(s),
+        let target = if self.stage == Stage::Guided { Stage::Guided } else { Stage::Cleaned };
+        match self.pipe.as_ref().map(|p| p.next_for(target)) {
+            Some(Some(_)) => {
+                if self.stage == Stage::Scan {
+                    self.stage = Stage::Cleaned;
+                    self.gen += 1;
+                }
+                self.run_stage(target)
+            }
             Some(None) => self.toast("Everything is up to date", false),
             None => self.toast("Open an .obj first", true),
         }
@@ -358,13 +454,12 @@ impl AppState {
         if self.toast.as_ref().map(|t| now > t.until).unwrap_or(false) {
             self.toast = None;
         }
-        // hand edits reach the result when it is looked at
-        if self.edited && self.job.is_none() && self.stroke.is_none() && self.shown() == ViewMode::Result {
-            if let Some(Some(s)) = self.pipe.as_ref().map(|p| p.next()) {
-                self.run_from(s);
-            }
+        // edits reach stage 3's mesh when it is looked at
+        if self.edited && self.job.is_none() && self.stroke.is_none() && self.shown() == Stage::Guided && self.style != Style::Regions {
             self.edited = false;
+            self.run_stage(Stage::Guided);
         }
+        crate::remote::poll(self);
         let Some(job) = &mut self.job else { return };
         let mut finished = None;
         while let Ok(m) = job.rx.try_recv() {
@@ -391,35 +486,59 @@ impl AppState {
                 self.pipe = Some(*p);
                 self.gen += 1;
                 self.mesh_gen += 1;
-                if self.mode == ViewMode::Original {
-                    self.mode = ViewMode::Result;
+                if self.stage == Stage::Scan {
+                    self.stage = Stage::Cleaned;
                 }
+                self.check_log();
             }
             Msg::Exported(Ok(path)) => self.toast(format!("Exported to {}", path.display()), false),
             Msg::Exported(Err(e)) => self.toast(format!("Export failed: {e}"), true),
             Msg::Progress(..) => {}
         }
+        crate::remote::poll(self);
+    }
+
+    /// Edits that failed when replayed: said once.
+    fn check_log(&mut self) {
+        let failed = self.pipe.as_ref().map(|p| p.edit_log.iter().filter(|r| r.is_err()).count()).unwrap_or(0);
+        if failed > 0 {
+            self.toast(format!("{failed} edits could not be applied (see Edits)"), true);
+        }
     }
 
     // ------------------------------------------------------------ view
 
-    /// The mesh drawn in the current mode.
+    /// The mesh drawn: the shown stage's, or (not computed yet) the latest
+    /// one before it.
     pub fn shown_mesh(&self) -> Option<&Mesh> {
         let p = self.pipe.as_ref()?;
-        Some(match self.shown() {
-            ViewMode::Original => &p.original,
-            ViewMode::Regions => p.smooth_out(),
-            ViewMode::Result => p.result.as_ref().unwrap_or_else(|| p.smooth_out()),
-        })
+        let order = match self.shown() {
+            Stage::Scan => vec![Stage::Scan],
+            Stage::Algorithm => vec![Stage::Algorithm, Stage::Scan],
+            Stage::Cleaned => vec![Stage::Cleaned, Stage::Algorithm, Stage::Scan],
+            Stage::Guided => vec![Stage::Guided, Stage::Cleaned, Stage::Algorithm, Stage::Scan],
+        };
+        if self.style == Style::Regions && self.shown() == Stage::Scan {
+            return Some(p.smooth_out());
+        }
+        order.into_iter().find_map(|s| p.stage_mesh(s))
     }
 
-    /// The latest segmentation (after the snap step's border clean-up if run).
-    pub fn shown_seg(&self) -> Option<&rectify_core::segment::Segmentation> {
+    /// The regions drawn (Regions style) and picked: the shown stage's;
+    /// stage 3's are the edited ones.
+    pub fn shown_seg(&self) -> Option<&Segmentation> {
         let p = self.pipe.as_ref()?;
-        if self.shown() == ViewMode::Original {
-            return None;
+        match self.shown() {
+            Stage::Scan => {
+                if self.style == Style::Regions {
+                    p.seg_raw.as_ref()
+                } else {
+                    None
+                }
+            }
+            Stage::Guided => p.seg_edit.as_ref().or(p.stage_seg(Stage::Guided)),
+            s => p.stage_seg(s),
         }
-        p.seg_final.as_ref().or(p.seg.as_ref()).or(p.seg_raw.as_ref())
     }
 
     pub fn frame_all(&mut self) {
@@ -483,8 +602,12 @@ impl AppState {
         self.stroke = None;
         self.stroke_gen += 1;
         if t != Tool::Select {
+            // the tools edit stage 3's regions
             self.selected = None;
-            self.set_mode(ViewMode::Regions);
+            self.ensure_edit();
+            self.stage = Stage::Guided;
+            self.style = Style::Regions;
+            self.gen += 1;
         }
     }
 
@@ -544,11 +667,8 @@ impl AppState {
             }
         }
         let Some(p) = &self.pipe else { return };
-        let m = match self.shown() {
-            ViewMode::Original => &p.original,
-            _ => p.smooth_out(),
-        };
-        let label = p.seg_raw.as_ref().map(|s| &s.label);
+        let m = p.smooth_out();
+        let label = p.seg_edit.as_ref().or(p.seg_raw.as_ref()).map(|s| &s.label);
         let st = self.stroke.as_mut().unwrap();
         st.last = Some(at);
         for (t, x) in hits {
@@ -574,72 +694,137 @@ impl AppState {
         self.stroke_gen += 1;
     }
 
-    /// The stroke applied to the regions (undoable).
+    /// The edited regions (stage 3), built from the edits when missing.
+    fn ensure_edit(&mut self) -> bool {
+        let params = self.params;
+        let Some(p) = &mut self.pipe else { return false };
+        if p.seg_raw.is_none() {
+            return false;
+        }
+        if p.seg_edit.is_none() {
+            p.build_edits(&params);
+        }
+        true
+    }
+
+    /// Adds an edit to stage 3 and applies it to the edited regions at once
+    /// (region edits) or when stage 3 is computed (the others). Undoable.
+    pub fn add_edit(&mut self, e: Entry) -> Result<String, String> {
+        if !self.ensure_edit() {
+            return Err("Run the steps first: the edits change the regions".into());
+        }
+        let segp = self.params.seg;
+        let p = self.pipe.as_mut().unwrap();
+        let before = (p.seg_edit.clone().unwrap(), p.script.edits.clone());
+        let Pipeline { original, sym_mesh, smooth_mesh, seg_edit, topo, .. } = p;
+        let m: &Mesh = smooth_mesh.as_ref().or(sym_mesh.as_ref()).unwrap_or(original);
+        let seg = seg_edit.as_mut().unwrap();
+        let res = script::apply_region_edit(m, topo, seg, &e.cmd, &segp);
+        match res {
+            Err(t) => {
+                *seg = before.0;
+                Err(t)
+            }
+            Ok(msg) => {
+                p.script.edits.push(e.clone());
+                p.edit_log.push(Ok(msg.clone().unwrap_or_default()));
+                p.clear_lane(1, Step::Regularize);
+                self.undo.push(before);
+                if self.undo.len() > 30 {
+                    self.undo.remove(0);
+                }
+                self.redo.clear();
+                self.after_edit();
+                Ok(msg.unwrap_or_else(|| match &e.cmd {
+                    Cmd::SameRadius { .. } | Cmd::Coaxial { .. } | Cmd::Coplanar { .. } => "shape rule added (applied after Regularize)".into(),
+                    Cmd::Revolve { .. } | Cmd::NoRevolve { .. } => "round piece rule added (applied in Round)".into(),
+                    Cmd::Keep { .. } => "zone kept as the AI mesh (applied in Clean)".into(),
+                    _ => "done".into(),
+                }))
+            }
+        }
+    }
+
+    /// Removes the edit at `i` (the edits are replayed without it).
+    pub fn remove_edit(&mut self, i: usize) {
+        let Some(p) = &mut self.pipe else { return };
+        if i >= p.script.edits.len() {
+            return;
+        }
+        let before = (p.seg_edit.clone().unwrap_or_else(|| p.seg_raw.clone().unwrap_or(Segmentation { label: vec![], regions: vec![] })), p.script.edits.clone());
+        p.script.edits.remove(i);
+        p.edits_changed();
+        self.undo.push(before);
+        self.redo.clear();
+        self.ensure_edit();
+        self.after_edit();
+    }
+
+    /// The stroke applied to stage 3's regions (undoable).
     pub fn stroke_end(&mut self) {
         let Some(st) = self.stroke.take() else { return };
         self.stroke_gen += 1;
         if st.faces.is_empty() {
             return;
         }
-        let tool = self.tool;
-        let segp = self.params.seg;
-        let Some(p) = &mut self.pipe else { return };
-        let Pipeline { original, sym_mesh, smooth_mesh, seg_raw, topo, .. } = p;
-        let m: &Mesh = smooth_mesh.as_ref().or(sym_mesh.as_ref()).unwrap_or(original);
-        let Some(seg) = seg_raw.as_mut() else { return };
-        let before = seg.clone();
-        let msg: Result<String, String> = match tool {
+        let mut faces: Vec<u32> = st.faces.iter().copied().collect();
+        faces.sort_unstable();
+        let hint = st.direction().map(|d| d.to_array());
+        let cmd = match self.tool {
             Tool::Select => return,
-            Tool::Brush(BrushMode::Merge) => match edit::merge(m, seg, &st.regions, &st.faces, &segp) {
-                Some(r) => {
-                    let k = seg.regions[r as usize].prim.kind();
-                    Ok(format!("{} regions merged into one {}", st.regions.len().max(1), k.label().to_lowercase()))
+            Tool::Brush(BrushMode::Merge) => {
+                if st.regions.is_empty() {
+                    self.toast("Paint over two regions or more to merge them", true);
+                    return;
                 }
-                None => Err("Paint over two regions or more to merge them".into()),
-            },
-            Tool::Brush(BrushMode::Split) => match edit::split(m, topo, seg, &st.faces) {
-                0 => Err("Paint across a region, from one side to the other, to cut it".into()),
-                n => Ok(format!("Cut in {} pieces", n + 1)),
-            },
-            Tool::Brush(BrushMode::Free) => match edit::erase(m, seg, &st.faces) {
-                0 => Err("Nothing to free there".into()),
-                n => Ok(format!("{n} faces freed")),
-            },
-            Tool::Shape(k) => {
-                let faces: Vec<u32> = st.faces.iter().copied().collect();
-                edit::place(m, topo, seg, &faces, Some(k), st.direction(), &segp).map(|r| {
-                    let reg = &seg.regions[r as usize];
-                    format!("{} placed: {} mm², {}", k.label(), reg.area.round(), reg.prim.describe())
-                })
+                Cmd::Paint { mode: "merge".into(), faces, regions: st.regions.clone() }
             }
+            Tool::Brush(BrushMode::Split) => Cmd::Paint { mode: "split".into(), faces, regions: vec![] },
+            Tool::Brush(BrushMode::Free) => Cmd::Paint { mode: "free".into(), faces, regions: vec![] },
+            Tool::Shape(k) => Cmd::Place { kind: k.label().to_lowercase(), faces, hint },
         };
-        match msg {
-            Ok(text) => {
-                self.undo.push(before);
-                if self.undo.len() > 12 {
-                    self.undo.remove(0);
-                }
-                self.redo.clear();
-                self.after_edit();
-                self.toast(text, false);
+        let tool = self.tool;
+        match self.add_edit(Entry { by: "hand".into(), note: String::new(), cmd }) {
+            Ok(t) => {
+                let t = match tool {
+                    Tool::Brush(BrushMode::Merge) => {
+                        let k = self.selected_kind_after_merge().unwrap_or_default();
+                        format!("{} regions merged into one {k}", st.regions.len().max(1))
+                    }
+                    Tool::Brush(BrushMode::Split) => t.replace("cut", "Cut"),
+                    _ => capitalize(&t),
+                };
+                self.toast(t, false);
             }
-            Err(text) => {
-                *seg = before;
-                self.toast(text, true);
+            Err(t) => {
+                let t = match tool {
+                    Tool::Brush(BrushMode::Merge) => "Paint over two regions or more to merge them".into(),
+                    Tool::Brush(BrushMode::Split) => "Paint across a region, from one side to the other, to cut it".into(),
+                    Tool::Brush(BrushMode::Free) => "Nothing to free there".into(),
+                    _ => capitalize(&t),
+                };
+                self.toast(t, true);
             }
         }
     }
 
-    /// The regions changed by hand: the later steps are out of date (run
-    /// again when the result is shown).
+    /// The kind of the region the last merge made (for its message).
+    fn selected_kind_after_merge(&self) -> Option<String> {
+        let p = self.pipe.as_ref()?;
+        let msg = p.edit_log.last()?.as_ref().ok()?;
+        let r: u32 = msg.rsplit(' ').next()?.parse().ok()?;
+        let reg = p.seg_edit.as_ref()?.regions.get(r as usize)?;
+        Some(reg.prim.kind().label().to_lowercase())
+    }
+
+    /// The edits changed: stage 3 is out of date (computed again when its
+    /// mesh is shown).
     fn after_edit(&mut self) {
-        if let Some(p) = &mut self.pipe {
-            p.clear_from(Step::Regularize);
-        }
         self.edited = true;
         self.gen += 1;
+        self.save_script();
         if let Some(r) = self.selected {
-            let gone = self.pipe.as_ref().and_then(|p| p.seg_raw.as_ref()).map(|s| s.regions.get(r as usize).map(|x| x.faces.is_empty()).unwrap_or(true)).unwrap_or(true);
+            let gone = self.shown_seg().map(|s| s.regions.get(r as usize).map(|x| x.faces.is_empty()).unwrap_or(true)).unwrap_or(true);
             if gone {
                 self.selected = None;
             }
@@ -650,12 +835,15 @@ impl AppState {
         if !self.can_edit() {
             return;
         }
-        let Some(prev) = self.undo.pop() else {
+        let Some((seg, edits)) = self.undo.pop() else {
             self.toast("Nothing to undo", false);
             return;
         };
-        let seg = self.pipe.as_mut().and_then(|p| p.seg_raw.as_mut()).unwrap();
-        self.redo.push(std::mem::replace(seg, prev));
+        let p = self.pipe.as_mut().unwrap();
+        let cur = (p.seg_edit.replace(seg).unwrap_or_else(|| p.seg_raw.clone().unwrap()), std::mem::replace(&mut p.script.edits, edits));
+        p.clear_lane(1, Step::Regularize);
+        p.edit_log.truncate(p.script.edits.len());
+        self.redo.push(cur);
         self.after_edit();
     }
 
@@ -663,59 +851,55 @@ impl AppState {
         if !self.can_edit() {
             return;
         }
-        let Some(next) = self.redo.pop() else {
+        let Some((seg, edits)) = self.redo.pop() else {
             self.toast("Nothing to redo", false);
             return;
         };
-        let seg = self.pipe.as_mut().and_then(|p| p.seg_raw.as_mut()).unwrap();
-        self.undo.push(std::mem::replace(seg, next));
+        let p = self.pipe.as_mut().unwrap();
+        let cur = (p.seg_edit.replace(seg).unwrap_or_else(|| p.seg_raw.clone().unwrap()), std::mem::replace(&mut p.script.edits, edits));
+        p.clear_lane(1, Step::Regularize);
+        self.undo.push(cur);
         self.after_edit();
     }
 
+    /// A reference to region `r` of the shown regions, for an edit.
+    pub fn region_ref(&self, r: u32) -> Ref {
+        let at = self.pipe.as_ref().and_then(|p| {
+            let m = p.smooth_out();
+            self.shown_seg().and_then(|s| script::point_of(m, s, r))
+        });
+        Ref { id: Some(r), at }
+    }
+
     /// Gives the picked region another shape (fitted on its faces), or frees
-    /// it (`None`).
+    /// it (`None`): an edit of stage 3.
     pub fn retype(&mut self, kind: Option<Kind>) {
         let Some(r) = self.selected else { return };
         if !self.can_edit() {
             return;
         }
-        let Some(p) = &mut self.pipe else { return };
-        let Pipeline { original, sym_mesh, smooth_mesh, seg_raw, .. } = p;
-        let mesh: &Mesh = smooth_mesh.as_ref().or(sym_mesh.as_ref()).unwrap_or(original);
-        let Some(seg) = seg_raw.as_mut() else { return };
-        let before = seg.clone();
-        let reg = &mut seg.regions[r as usize];
-        match kind {
-            None => {
-                for &f in &reg.faces {
-                    seg.label[f as usize] = NONE;
-                }
-                reg.faces.clear();
-                reg.area = 0.0;
-                self.selected = None;
-            }
-            Some(k) => {
-                let s: Vec<Sample> = edit::samples(mesh, &reg.faces);
-                let q = match k {
-                    Kind::Plane => fit_plane(&s),
-                    Kind::Cylinder => fit_cylinder(&s, None, None),
-                    Kind::Sphere => fit_sphere(&s, None),
-                };
-                match q {
-                    Some(q) => {
-                        reg.rms = q.rms(&s);
-                        reg.prim = q;
-                    }
-                    None => {
-                        self.toast(format!("This region is not a {}", k.label().to_lowercase()), true);
-                        return;
-                    }
-                }
-            }
+        // the region as stage 3 sees it
+        if self.stage != Stage::Guided {
+            self.stage = Stage::Guided;
+            self.style = Style::Regions;
         }
-        self.undo.push(before);
-        self.redo.clear();
-        self.after_edit();
+        let region = self.region_ref(r);
+        let kind_s = kind.map(|k| k.label().to_lowercase()).unwrap_or_else(|| "free".into());
+        match self.add_edit(Entry { by: "hand".into(), note: String::new(), cmd: Cmd::Retype { region, kind: kind_s } }) {
+            Ok(t) => self.toast(capitalize(&t), false),
+            Err(t) => self.toast(capitalize(&t), true),
+        }
+        if kind.is_none() {
+            self.selected = None;
+        }
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
     }
 }
 

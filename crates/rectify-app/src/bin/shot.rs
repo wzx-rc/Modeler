@@ -8,9 +8,9 @@ use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use glam::Vec3;
 use rectify_app::camera::ViewPreset;
 use rectify_app::draw::Drawer;
-use rectify_app::state::{AppState, ViewMode};
+use rectify_app::state::{AppState, Style};
 use rectify_app::theme;
-use rectify_core::Mesh;
+use rectify_core::{Mesh, Stage};
 
 const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
@@ -188,15 +188,36 @@ impl Harness {
         eprintln!("{path}");
     }
 
-    /// The same view in the three modes (`bare`: no interface).
+    /// Shows a stage in a style (computing it when needed).
+    fn show(&mut self, stage: Stage, style: Style) {
+        self.st.style = style;
+        self.st.set_stage(stage);
+        self.st.gen += 1;
+        self.steps(2);
+        self.wait();
+    }
+
+    /// The same view at each stage (`bare`: no interface): the regions,
+    /// stages 0 to 2 (3 when there are edits) as surfaces, 1 and 2 as diff
+    /// maps.
     fn trio(&mut self, name: &str, bare: bool) {
         self.st.bare = bare;
-        for m in [ViewMode::Original, ViewMode::Regions, ViewMode::Result] {
-            self.st.set_mode(m);
-            // the result without the lines: the surface itself
-            self.st.settings.edges = m != ViewMode::Result;
-            self.st.gen += 1;
-            self.shot(&format!("{name}-{}", m.label().to_lowercase()));
+        self.st.settings.edges = true;
+        self.show(Stage::Algorithm, Style::Regions);
+        self.shot(&format!("{name}-regions"));
+        // the surfaces without the lines: the surface itself
+        self.st.settings.edges = false;
+        let mut stages = vec![Stage::Scan, Stage::Algorithm, Stage::Cleaned];
+        if self.st.pipe.as_ref().map(|p| !p.script.edits.is_empty()).unwrap_or(false) {
+            stages.push(Stage::Guided);
+        }
+        for s in stages.clone() {
+            self.show(s, Style::Surface);
+            self.shot(&format!("{name}-{}-{}", s.number(), s.label().to_lowercase()));
+        }
+        for s in stages.into_iter().skip(1) {
+            self.show(s, Style::Diff);
+            self.shot(&format!("{name}-{}-diff", s.number()));
         }
         self.st.settings.edges = true;
         self.st.gen += 1;
@@ -216,8 +237,40 @@ fn look(h: &mut Harness, frac: [f32; 3], dist: f32, yaw: f32, pitch: f32) {
     h.st.camera.ortho = false;
 }
 
+/// --serve MESH.obj: the app headless, driven through its local port like
+/// the real one (the MCP server, tests of the AI pass in the cloud). The
+/// edits are saved next to the mesh.
+fn serve(mesh: &str) {
+    let mut h = Harness::new("/tmp");
+    let path = std::path::PathBuf::from(mesh);
+    h.st.open(path);
+    h.st.wait();
+    match rectify_app::remote::start(&mut h.st, std::sync::Arc::new(|| {})) {
+        Ok(p) => eprintln!("serving on 127.0.0.1:{p}"),
+        Err(e) => panic!("{e}"),
+    }
+    loop {
+        h.step();
+        if !h.st.remote.captures.is_empty() {
+            let gpu = &h.gpu;
+            let drawer = &mut h.drawer;
+            rectify_app::remote::render_captures(&mut h.st, |st, w, hh| {
+                let target = gpu.target(w, hh);
+                let view = target.create_view(&Default::default());
+                drawer.render(&gpu.device, &gpu.queue, &view, [w, hh], 1.0, st, &[], &mut egui::TexturesDelta::default());
+                gpu.read_rgba(&target)
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(if h.st.busy() { 5 } else { 15 }));
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|a| a == "--serve").unwrap_or(false) {
+        serve(args.get(2).expect("MESH.obj"));
+        return;
+    }
     let out = args.get(1).cloned().unwrap_or_else(|| "shots".into());
     let mesh = args.get(2).expect("MESH.obj");
     let filters: Vec<String> = args.iter().skip(3).cloned().collect();
@@ -227,6 +280,11 @@ fn main() {
     let m = Mesh::load_obj(mesh.as_ref()).expect("mesh");
     let name = std::path::Path::new(mesh).file_stem().unwrap().to_string_lossy().to_string();
     h.st.set_mesh(m, &name);
+    // RECTIFY_SCRIPT=path: stage 3's edits
+    if let Ok(sp) = std::env::var("RECTIFY_SCRIPT") {
+        let sc = rectify_core::script::Script::load(sp.as_ref()).expect("script");
+        h.st.pipe.as_mut().unwrap().script = sc;
+    }
     eprintln!("loaded in {:.1}s", t.elapsed().as_secs_f64());
     h.steps(3);
     if want("ui") {
@@ -247,17 +305,26 @@ fn main() {
         h.st.frame_all();
         h.st.camera.preset(ViewPreset::Perspective);
         h.st.step = rectify_core::Step::Segment;
-        h.st.set_mode(ViewMode::Regions);
+        h.show(Stage::Algorithm, Style::Regions);
         h.shot("ui-1-regions");
-        h.st.step = rectify_core::Step::Snap;
-        h.st.set_mode(ViewMode::Result);
-        h.shot("ui-2-result");
+        h.st.step = rectify_core::Step::Revolve;
+        h.show(Stage::Algorithm, Style::Surface);
+        h.shot("ui-2-algorithm");
+        h.st.step = rectify_core::Step::Clean;
+        h.show(Stage::Cleaned, Style::Diff);
+        h.shot("ui-3-cleaned-diff");
         // a region picked
         let c = h.st.principal();
-        h.st.set_mode(ViewMode::Regions);
+        h.show(Stage::Algorithm, Style::Regions);
         h.click(egui::pos2(c[0] - 40.0, c[1] - 30.0));
-        h.shot("ui-3-picked");
+        h.shot("ui-4-picked");
         h.st.selected = None;
+        if h.st.pipe.as_ref().map(|p| !p.script.edits.is_empty()).unwrap_or(false) {
+            h.st.edits_open = true;
+            h.show(Stage::Guided, Style::Surface);
+            h.shot("ui-5-ai");
+            h.st.edits_open = false;
+        }
     }
     if want("side") {
         h.st.frame_all();
@@ -298,7 +365,7 @@ fn main() {
         use rectify_core::Kind;
         look(&mut h, [0.3, 0.72, 0.5], 60.0, 0.35, 0.1);
         h.st.bare = false;
-        h.st.set_mode(ViewMode::Regions);
+        h.st.style = Style::Regions;
         h.st.settings.edges = true;
         h.st.gen += 1;
         h.steps(3);
@@ -330,9 +397,7 @@ fn main() {
         h.shot("tools-7-shape");
         // the result follows when it is shown
         h.st.set_tool(Tool::Select);
-        h.st.set_mode(ViewMode::Result);
-        h.steps(2);
-        h.wait();
+        h.show(Stage::Guided, Style::Surface);
         h.st.bare = true;
         h.st.settings.edges = false;
         h.st.gen += 1;

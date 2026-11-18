@@ -3,13 +3,13 @@
 //! meet, and each region's colour and state.
 
 use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, Renderer, FACE_HOVERED, FACE_SELECTED};
-use crate::state::{AppState, BrushMode, Tool, ViewMode};
+use crate::state::{AppState, BrushMode, Style, Tool};
 use glam::DVec3;
 use rectify_core::Prim;
 use crate::theme;
 use rayon::prelude::*;
 use rectify_core::snap::crease_normals;
-use rectify_core::{Kind, NONE};
+use rectify_core::{Kind, Stage, NONE};
 
 /// The mesh's colour: grey clay (sRGB).
 pub const CLAY: [f32; 3] = [0.52, 0.52, 0.51];
@@ -19,10 +19,10 @@ pub const FREE: [f32; 3] = [0.20, 0.20, 0.21];
 pub struct Drawer {
     pub r: Renderer,
     gen: u64,
-    mode: Option<ViewMode>,
+    key: Option<(Stage, Style)>,
     flags: Vec<FaceGpu>,
-    /// Display normals of the mesh shown, by (mesh generation, mode).
-    normals: Option<((u64, ViewMode), Vec<[DVec3; 3]>)>,
+    /// Display normals of the mesh shown, by (mesh generation, stage, style).
+    normals: Option<((u64, Stage, bool), Vec<[DVec3; 3]>)>,
     stroke_gen: Option<u64>,
 }
 
@@ -55,32 +55,43 @@ pub fn region_color(i: u32, k: Kind) -> [f32; 3] {
 
 impl Drawer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Drawer {
-        Drawer { r: Renderer::new(device, format), gen: 0, mode: None, flags: vec![], normals: None, stroke_gen: None }
+        Drawer { r: Renderer::new(device, format), gen: 0, key: None, flags: vec![], normals: None, stroke_gen: None }
     }
 
     fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, st: &AppState) {
         // while a step runs the pipeline is away: what is uploaded stays
-        if (self.gen == st.gen && self.mode == Some(st.shown())) || st.pipe.is_none() {
+        let key = (st.shown(), st.style);
+        if (self.gen == st.gen && self.key == Some(key)) || st.pipe.is_none() {
             return;
         }
         self.gen = st.gen;
-        self.mode = Some(st.shown());
+        self.key = Some(key);
         let p = st.pipe.as_ref().unwrap();
-        let mode = st.shown();
+        let (stage, style) = key;
         let m = st.shown_mesh().unwrap();
-        let seg = st.shown_seg();
+        let seg = if style == Style::Regions { st.shown_seg() } else { None };
         let label: Option<&[u32]> = seg.map(|s| s.label.as_slice());
-        // the same in every mode, so that they compare: sharp where the
+        let diff = if style == Style::Diff { p.stage_diff(stage).filter(|d| d.moved.len() == m.pos.len()) } else { None };
+        // the same in every stage, so that they compare: sharp where the
         // surface turns more than 40°, else smooth
-        let key = (st.mesh_gen, mode);
-        if self.normals.as_ref().map(|n| n.0 != key).unwrap_or(true) {
-            self.normals = Some((key, crease_normals(m, &p.topo, 40.0)));
+        let nkey = (st.mesh_gen, stage, style == Style::Regions && stage == Stage::Scan);
+        if self.normals.as_ref().map(|n| n.0 != nkey).unwrap_or(true) {
+            self.normals = Some((nkey, crease_normals(m, &p.topo, 40.0)));
         }
         let normals = &self.normals.as_ref().unwrap().1;
         let face_of = |t: usize| -> u32 {
-            match (mode, label) {
-                (ViewMode::Original, _) | (_, None) => 0,
-                (_, Some(l)) => {
+            if let Some(d) = diff {
+                let tri = m.tris[t];
+                let worse = tri.iter().map(|&v| d.worse[v as usize]).fold(0.0f32, f32::max);
+                if worse > 0.0 {
+                    return DIFF_RED;
+                }
+                let mv = tri.iter().map(|&v| d.moved[v as usize]).fold(0.0f32, f32::max);
+                return diff_bin(mv);
+            }
+            match label {
+                None => 0,
+                Some(l) => {
                     if l[t] == NONE {
                         1
                     } else {
@@ -100,7 +111,8 @@ impl Drawer {
             .collect();
         // the lines where regions meet
         let mut edges = vec![];
-        if let (Some(l), true) = (label, st.settings.edges && mode != ViewMode::Original) {
+        let lines_label = if style == Style::Surface && st.settings.edges && stage != Stage::Scan { st.shown_seg().map(|s| s.label.as_slice()) } else { label };
+        if let (Some(l), true) = (lines_label, st.settings.edges && style != Style::Diff) {
             let lines: Vec<Vec<[f32; 3]>> = (0..m.tris.len())
                 .into_par_iter()
                 .flat_map_iter(|t| {
@@ -115,7 +127,7 @@ impl Drawer {
                     })
                 })
                 .collect();
-            let col = if mode == ViewMode::Regions { [12, 13, 16, 200] } else { [20, 22, 26, 170] };
+            let col = if style == Style::Regions { [12, 13, 16, 200] } else { [20, 22, 26, 170] };
             line_vertices(&lines, col, 0.9, &mut edges);
         }
         self.r.upload_part(device, queue, &verts, &edges);
@@ -154,11 +166,19 @@ impl Drawer {
         if st.pipe.is_none() {
             return;
         }
-        let mode = st.shown();
+        let style = st.style;
         let seg = st.shown_seg();
+        if style == Style::Diff {
+            let flags = diff_colors();
+            if flags != self.flags {
+                self.r.upload_faces(device, queue, &flags);
+                self.flags = flags;
+            }
+            return;
+        }
         // colours: 0 clay, 1 free, 2.. the regions
         let mut flags = vec![FaceGpu { color: linear(CLAY), flags: 0, metal: 0.0, rough: 0.55, pad: [0.0; 2] }];
-        flags.push(FaceGpu { color: linear(if mode == ViewMode::Regions { FREE } else { CLAY }), flags: 0, metal: 0.0, rough: 0.55, pad: [0.0; 2] });
+        flags.push(FaceGpu { color: linear(if style == Style::Regions { FREE } else { CLAY }), flags: 0, metal: 0.0, rough: 0.55, pad: [0.0; 2] });
         // the regions a merge stroke has touched so far
         let touched: &[u32] = match (&st.stroke, st.tool) {
             (Some(s), Tool::Brush(BrushMode::Merge)) => &s.regions,
@@ -166,7 +186,7 @@ impl Drawer {
         };
         if let Some(s) = seg {
             for (i, r) in s.regions.iter().enumerate() {
-                let color = if mode == ViewMode::Regions { region_color(i as u32, r.prim.kind()) } else { CLAY };
+                let color = if style == Style::Regions { region_color(i as u32, r.prim.kind()) } else { CLAY };
                 let sel = st.selected == Some(i as u32);
                 let f = if sel { FACE_SELECTED } else if touched.contains(&(i as u32)) { FACE_HOVERED } else { 0 };
                 flags.push(FaceGpu { color: linear(color), flags: f, metal: 0.0, rough: 0.55, pad: [0.0; 2] });
@@ -201,6 +221,39 @@ impl Drawer {
         };
         self.r.render(device, queue, target, size, frame);
     }
+}
+
+/// Diff map colours: 0 untouched (clay), 1..=DIFF_STEPS moved (to orange,
+/// 0.4 mm and more), then red: rougher than the AI mesh.
+pub const DIFF_STEPS: u32 = 10;
+pub const DIFF_RED: u32 = DIFF_STEPS + 1;
+/// The move (mm) at which the diff map is fully orange.
+pub const DIFF_FULL: f32 = 0.4;
+
+fn diff_bin(mv: f32) -> u32 {
+    if mv < 0.01 {
+        0
+    } else {
+        1 + ((mv / DIFF_FULL).min(1.0) * (DIFF_STEPS - 1) as f32).round() as u32
+    }
+}
+
+/// The colour of a diff bin (sRGB), for the legend too.
+pub fn diff_color(bin: u32) -> [f32; 3] {
+    if bin == 0 {
+        return [0.46, 0.47, 0.49];
+    }
+    if bin >= DIFF_RED {
+        return [0.86, 0.16, 0.14];
+    }
+    let t = (bin - 1) as f32 / (DIFF_STEPS - 1) as f32;
+    let a = [0.62, 0.62, 0.58];
+    let b = [0.98, 0.58, 0.18];
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+}
+
+fn diff_colors() -> Vec<FaceGpu> {
+    (0..=DIFF_RED).map(|b| FaceGpu { color: linear(diff_color(b)), flags: 0, metal: 0.0, rough: 0.6, pad: [0.0; 2] }).collect()
 }
 
 /// Lines that show a shape around the stroke that fitted it: a disc for a

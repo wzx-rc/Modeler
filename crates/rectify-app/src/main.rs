@@ -1,5 +1,6 @@
 // Forme Rectify: the desktop app. An .obj given on the command line or
-// dropped on the window is opened.
+// dropped on the window is opened. Claude Desktop drives it through the MCP
+// server forme-rectify-mcp, on a local port (see remote.rs).
 
 use rectify_app::draw::Drawer;
 use rectify_app::state::AppState;
@@ -8,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 struct Gfx {
@@ -27,17 +28,25 @@ struct App {
     egui_state: Option<egui_winit::State>,
     t0: Instant,
     redraw_until: f64,
+    _proxy: EventLoopProxy<()>,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(proxy: EventLoopProxy<()>) -> Self {
         let ctx = egui::Context::default();
         theme::install(&ctx);
         let mut st = AppState::new();
         if let Some(p) = std::env::args().nth(1) {
             st.open(p.into());
         }
-        App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0 }
+        // the link with Claude Desktop (the MCP server connects here)
+        let px = proxy.clone();
+        if let Err(e) = rectify_app::remote::start(&mut st, std::sync::Arc::new(move || {
+            let _ = px.send_event(());
+        })) {
+            eprintln!("Claude Desktop link off: {e}");
+        }
+        App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0, _proxy: proxy }
     }
 
     fn now(&self) -> f64 {
@@ -68,6 +77,26 @@ impl App {
         gfx.drawer.render(&gfx.device, &gfx.queue, &view, [gfx.config.width, gfx.config.height], ppp, &self.st, &paint, &mut out.textures_delta);
         window.pre_present_notify();
         gfx.queue.present(frame);
+        // pictures asked by Claude Desktop: the view alone, offscreen
+        if !self.st.remote.captures.is_empty() {
+            let (device, queue, format, drawer) = (&gfx.device, &gfx.queue, gfx.config.format, &mut gfx.drawer);
+            rectify_app::remote::render_captures(&mut self.st, |st, w, h| {
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("capture"),
+                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let view = tex.create_view(&Default::default());
+                drawer.render(device, queue, &view, [w, h], 1.0, st, &[], &mut egui::TexturesDelta::default());
+                rectify_app::remote::read_rgba(device, queue, &tex)
+            });
+            window.request_redraw();
+        }
         // a step is running: keep looking for its answer
         let busy = self.st.interacting || self.st.toast.is_some() || self.st.busy();
         let egui_wants = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay.as_secs_f32() < 0.05).unwrap_or(false);
@@ -77,7 +106,14 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<()> for App {
+    /// Claude Desktop sent a request: a frame reads it.
+    fn user_event(&mut self, _el: &ActiveEventLoop, _e: ()) {
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -154,7 +190,7 @@ fn install_crash_log() {
 
 fn main() {
     install_crash_log();
-    let event_loop = EventLoop::new().expect("event loop");
-    let mut app = App::new();
+    let event_loop = EventLoop::<()>::with_user_event().build().expect("event loop");
+    let mut app = App::new(event_loop.create_proxy());
     event_loop.run_app(&mut app).expect("run");
 }

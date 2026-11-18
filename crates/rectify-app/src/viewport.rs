@@ -134,7 +134,7 @@ pub fn hint(st: &AppState) -> String {
     }
     let Some(p) = &st.pipe else { return "Open a mesh to rectify".into() };
     if st.compare {
-        return "Original (release Space to compare)".into();
+        return "Stage 0, the scan (release Space to compare)".into();
     }
     match st.tool {
         Tool::Brush(BrushMode::Merge) => return "Merge: paint over the regions to join · [ ] size · Ctrl+Z undo · Esc done".into(),
@@ -143,14 +143,17 @@ pub fn hint(st: &AppState) -> String {
         Tool::Shape(k) => return format!("{}: paint over the surface, the shape fits it and grows · G next kind · Esc done", k.label()),
         Tool::Select => {}
     }
-    if st.edited && st.shown() != ViewMode::Result {
-        return "Regions edited: the result follows when you show it (3)".into();
+    if st.edited && (st.shown() != rectify_core::Stage::Guided || st.style == Style::Regions) {
+        return "Stage 3 edited: its mesh follows when you show it (3, Surface or Diff)".into();
     }
     if p.next().is_some() {
-        return "Run the steps (R), or one by one from the cards on the right".into();
+        return "Run the steps (R), or click a stage at the top: 1 algorithm, 2 cleaned, 3 AI".into();
+    }
+    if !p.ready(st.shown()) {
+        return format!("Stage {} is not computed yet: click it at the top (or R)", st.shown().number());
     }
     if st.selected.is_some() {
         return "Change the region's shape on the left, or free it · Esc to deselect".into();
     }
-    "Hold Space to see the original · click a region to inspect it".into()
+    "0-3 stages · V surface / regions / diff · Space the scan · click a region to inspect it".into()
 }
