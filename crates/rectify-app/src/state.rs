@@ -3,11 +3,12 @@
 
 use crate::camera::OrbitCamera;
 use crate::view::View;
-use glam::{DVec3, Vec3};
+use glam::{DVec2, DVec3, Vec3};
 use rayon::prelude::*;
 use rectify_core::circle::ProfileKind;
 use rectify_core::mesh::Surface as Closest;
 use rectify_core::nurbs::{Curve, Surface};
+use rectify_core::patch::{self, PatchParams, Patched};
 use rectify_core::path::{self, Built, PathParams, Snap, SnapKind};
 use rectify_core::slot::{Kind, Laid, Slot, SlotParams};
 use rectify_core::{Mesh, Topo};
@@ -45,6 +46,13 @@ pub enum Tool {
     /// Drag across a block with rounded corners (raised or cut in), corner
     /// to corner: the same, every row an exact rounded rectangle.
     Box,
+    /// Draw on the scan with a pencil: the stroke becomes a path (straight
+    /// stretches, curves, caught by the faces, edges and corners), its ends
+    /// joining the paths already there.
+    Line,
+    /// Click the paths around a part of the scan: one NURBS surface fills
+    /// the loop they close, laid on the scan.
+    Patch,
 }
 
 impl Tool {
@@ -55,6 +63,8 @@ impl Tool {
             Tool::Path => "Path",
             Tool::Slot => "Slot",
             Tool::Box => "Box",
+            Tool::Line => "Line",
+            Tool::Patch => "Patch",
         }
     }
 }
@@ -105,6 +115,24 @@ pub struct PathPress {
     pub at: [f32; 2],
     pub point: Option<usize>,
     pub moved: bool,
+}
+
+/// A pencil stroke being drawn (the Line tool): the pointer's positions on
+/// screen and the scan under them (triangle, point).
+pub struct Stroke {
+    pub scr: Vec<[f32; 2]>,
+    pub hits: Vec<(u32, DVec3)>,
+}
+
+/// The Patch being made: the paths picked (their places in `objects`), its
+/// settings (live) and the surface made, or why not. A click inside a cell
+/// of the paths gives its loop (`lines`, runs of one path each); else the
+/// loop is found from the paths picked.
+pub struct PatchEdit {
+    pub picked: Vec<usize>,
+    pub lines: Option<Vec<Vec<DVec3>>>,
+    pub params: PatchParams,
+    pub made: Result<Patched, String>,
 }
 
 /// A drag on the scan (Circle, Slot, Box): from the press to the pointer.
@@ -182,6 +210,13 @@ pub struct AppState {
     pub slot_drag: Option<Drag>,
     pub slot: Option<SlotEdit>,
     pub slot_profile: ProfileKind,
+    /// The Line's stroke being drawn.
+    pub stroke: Option<Stroke>,
+    /// The Patch being made, its settings kept from one to the next, the
+    /// path under the pointer.
+    pub patch: Option<PatchEdit>,
+    pub patch_params: PatchParams,
+    pub patch_hover: Option<usize>,
 }
 
 impl Default for AppState {
@@ -222,6 +257,10 @@ impl AppState {
             slot_drag: None,
             slot: None,
             slot_profile: ProfileKind::Cylinder,
+            stroke: None,
+            patch: None,
+            patch_params: PatchParams::default(),
+            patch_hover: None,
         }
     }
 
@@ -280,6 +319,9 @@ impl AppState {
         self.path_press = None;
         self.slot = None;
         self.slot_drag = None;
+        self.stroke = None;
+        self.patch = None;
+        self.patch_hover = None;
         self.hide_scan = false;
         self.objects_gen += 1;
         self.gen += 1;
@@ -350,6 +392,9 @@ impl AppState {
         self.path_press = None;
         self.slot_apply();
         self.slot_drag = None;
+        self.stroke = None;
+        self.patch_apply();
+        self.patch_hover = None;
         self.tool = t;
         self.overlay_gen += 1;
     }
@@ -378,12 +423,18 @@ impl AppState {
             self.toast("Removed", false);
             return;
         }
+        if self.patch.is_some() {
+            self.patch_cancel();
+            self.toast("Removed", false);
+            return;
+        }
         let Some(o) = self.objects.pop() else {
             self.toast("Nothing to undo", false);
             return;
         };
         self.toast(format!("Undone: {} {}", o.tool.label(), o.what), false);
         self.undone.push(o);
+        self.patch_hover = None;
         self.objects_gen += 1;
     }
 
@@ -612,7 +663,8 @@ impl AppState {
         let corners = pe.pts.iter().filter(|s| pe.params.planes && s.kind != SnapKind::Scan).count();
         let what = format!("{} points{} · {} mm{}", pe.pts.len(), if corners > 0 { format!(" ({corners} caught)") } else { String::new() }, fmt(b.length, 1), if pe.params.closed { " · closed" } else { "" });
         self.toast(format!("Kept: path, {what}"), false);
-        self.add_object(Object { tool: Tool::Path, what, shape: Shape::Curve(b.curve) });
+        let tool = if self.tool == Tool::Line { Tool::Line } else { Tool::Path };
+        self.add_object(Object { tool, what, shape: Shape::Curve(b.curve) });
     }
 
     /// The path drawn taken away.
@@ -622,6 +674,116 @@ impl AppState {
         }
         self.path_press = None;
         self.overlay_gen += 1;
+    }
+}
+
+impl AppState {
+    // ------------------------------------------------------------ Line
+
+    /// The pencil down on the scan: the path placed before is kept, a
+    /// stroke starts.
+    pub fn line_press(&mut self, at: [f32; 2]) {
+        let Some((t, x)) = self.pick_hit(at) else { return };
+        self.path_apply();
+        self.stroke = Some(Stroke { scr: vec![at], hits: vec![(t as u32, x)] });
+        self.overlay_gen += 1;
+    }
+
+    /// The pencil moving: the scan under it, every 2 points or more.
+    pub fn line_move(&mut self, at: [f32; 2]) {
+        let Some(st) = &self.stroke else { return };
+        let last = *st.scr.last().unwrap();
+        if (at[0] - last[0]).hypot(at[1] - last[1]) < 2.0 {
+            return;
+        }
+        let Some((t, x)) = self.pick_hit(at) else { return };
+        let st = self.stroke.as_mut().unwrap();
+        st.scr.push(at);
+        st.hits.push((t as u32, x));
+        self.overlay_gen += 1;
+    }
+
+    /// The pencil up: the stroke becomes a path, set live like a Path
+    /// (Enter keeps it; the next stroke keeps it too). Its ends join the
+    /// paths already there; ending where it began closes it. `free`: the
+    /// scan only, nothing caught.
+    pub fn line_release(&mut self, free: bool) {
+        let Some(st) = self.stroke.take() else { return };
+        self.overlay_gen += 1;
+        let scr: Vec<DVec2> = st.scr.iter().map(|p| DVec2::new(p[0] as f64, p[1] as f64)).collect();
+        let len: f64 = scr.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+        if len < 8.0 {
+            return;
+        }
+        let mut keys = path::stroke_keys(&scr, 45.0, 12.0, 40.0);
+        let closed = keys.len() >= 3 && len > 80.0 && (scr[0] - scr[scr.len() - 1]).length() <= 14.0;
+        if closed {
+            keys.pop();
+        }
+        let free = free || !self.path_params.planes;
+        let catches: Vec<f64> = keys.iter().map(|&(i, _)| self.catch_at(st.hits[i].1)).collect();
+        let Some(d) = &self.doc else { return };
+        let mut pts: Vec<Snap> = keys
+            .iter()
+            .zip(&catches)
+            .map(|(&(i, through), &c)| {
+                let (t, x) = st.hits[i];
+                let mut s = if free {
+                    Snap::scan(x, t)
+                } else if through {
+                    path::snap_face(&d.mesh, &d.topo, t, x, c, d.edge)
+                } else {
+                    path::snap(&d.mesh, &d.topo, t, x, c, d.edge)
+                };
+                s.through = through;
+                s
+            })
+            .collect();
+        // the ends join the paths already there (their ends first)
+        if !closed {
+            let n = pts.len();
+            for k in [0, n - 1] {
+                let c = catches[if k == 0 { 0 } else { catches.len() - 1 }];
+                if let Some(j) = self.join_at(pts[k].hit, c) {
+                    let tol = (d.edge * 1.5).max(0.08) * 3.0;
+                    let s = &mut pts[k];
+                    s.planes.retain(|pl| pl.dist(j).abs() <= tol + pl.rms * 3.0);
+                    s.p = j;
+                    s.hit = j;
+                    s.kind = SnapKind::Path;
+                }
+            }
+        }
+        let params = PathParams { closed, ..self.path_params };
+        self.path = Some(PathEdit { pts, params, built: None, preview: None });
+        self.path_rebuild();
+        if self.path.as_ref().map(|pe| pe.built.is_none()).unwrap_or(false) {
+            self.path = None;
+            self.toast("No path there: draw on the scan", true);
+        }
+    }
+
+    /// The nearest point of a path already kept within `catch` of `x`: one
+    /// of its ends when one is that close (a little further), else on it.
+    fn join_at(&self, x: DVec3, catch: f64) -> Option<DVec3> {
+        let mut best: Option<(f64, DVec3)> = None;
+        for o in &self.objects {
+            let Shape::Curve(c) = &o.shape else { continue };
+            let (a, b) = c.domain();
+            for e in [c.eval(a), c.eval(b)] {
+                let d = (e - x).length();
+                if d <= catch * 1.5 && best.map(|(bd, _)| d - catch < bd).unwrap_or(true) {
+                    // an end wins over a point on a curve by a catch
+                    best = Some((d - catch, e));
+                }
+            }
+            let (_, p) = c.nearest(x);
+            let d = (p - x).length();
+            if d <= catch && best.map(|(bd, _)| d < bd).unwrap_or(true) {
+                best = Some((d, p));
+            }
+        }
+        best.map(|b| b.1)
     }
 }
 
@@ -706,6 +868,145 @@ impl AppState {
     /// The surface placed taken away.
     pub fn slot_cancel(&mut self) {
         if self.slot.take().is_some() {
+            self.objects_gen += 1;
+        }
+        self.overlay_gen += 1;
+    }
+}
+
+impl AppState {
+    // ------------------------------------------------------------ Patch
+
+    /// The kept path within 9 points of `at` on screen (the nearest).
+    pub fn curve_at(&self, at: [f32; 2]) -> Option<usize> {
+        let v = self.view();
+        let mut best: Option<(f32, usize)> = None;
+        for (i, o) in self.objects.iter().enumerate() {
+            let Shape::Curve(c) = &o.shape else { continue };
+            let scr: Vec<[f32; 2]> = patch::polyline(c).iter().filter_map(|x| v.project(x.as_vec3())).collect();
+            for w in scr.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let l2 = (dx * dx + dy * dy).max(1e-6);
+                let t = (((at[0] - a[0]) * dx + (at[1] - a[1]) * dy) / l2).clamp(0.0, 1.0);
+                let d = (a[0] + dx * t - at[0]).hypot(a[1] + dy * t - at[1]);
+                if d <= 9.0 && best.map(|b| d < b.0).unwrap_or(true) {
+                    best = Some((d, i));
+                }
+            }
+        }
+        best.map(|b| b.1)
+    }
+
+    /// The pointer moved (no button down): the path under it.
+    pub fn patch_hover_at(&mut self, at: [f32; 2]) {
+        let h = self.curve_at(at);
+        if h != self.patch_hover {
+            self.patch_hover = h;
+            self.overlay_gen += 1;
+        }
+    }
+
+    /// A click: on a path, the path picked (or no longer); inside a cell of
+    /// the paths, its loop filled (the patch placed before is kept).
+    pub fn patch_click(&mut self, at: [f32; 2]) {
+        let Some(i) = self.curve_at(at) else {
+            self.patch_inside(at);
+            return;
+        };
+        let params = self.patch_params;
+        let pe = self.patch.get_or_insert(PatchEdit { picked: vec![], lines: None, params, made: Err(String::new()) });
+        pe.lines = None;
+        if let Some(k) = pe.picked.iter().position(|&j| j == i) {
+            pe.picked.remove(k);
+        } else {
+            pe.picked.push(i);
+        }
+        if pe.picked.is_empty() {
+            self.patch = None;
+            self.objects_gen += 1;
+            self.overlay_gen += 1;
+            return;
+        }
+        self.patch_rebuild();
+    }
+
+    /// The smallest loop of paths around the click, filled.
+    fn patch_inside(&mut self, at: [f32; 2]) {
+        let Some((_, near)) = self.pick_hit(at) else { return };
+        let Some(d) = &self.doc else { return };
+        let curves: Vec<(usize, Vec<DVec3>)> = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| match &o.shape {
+                Shape::Curve(c) => Some((i, patch::polyline(c))),
+                _ => None,
+            })
+            .collect();
+        if curves.is_empty() {
+            self.toast("Draw the paths around the patch first (Line), then click inside them", true);
+            return;
+        }
+        let v = self.view();
+        let scr = |x: DVec3| v.project(x.as_vec3()).map(|p| DVec2::new(p[0] as f64, p[1] as f64));
+        let lines: Vec<Vec<DVec3>> = curves.iter().map(|c| c.1.clone()).collect();
+        let tol = (d.edge * 4.0).max(0.3);
+        match patch::loop_around(&lines, tol, scr, DVec2::new(at[0] as f64, at[1] as f64), near) {
+            Ok((runs, used)) => {
+                self.patch_apply();
+                let picked = used.iter().map(|&k| curves[k].0).collect();
+                self.patch = Some(PatchEdit { picked, lines: Some(runs), params: self.patch_params, made: Err(String::new()) });
+                self.patch_rebuild();
+            }
+            Err(e) => self.toast(e, true),
+        }
+    }
+
+    /// The surface again (paths picked or settings changed).
+    pub fn patch_rebuild(&mut self) {
+        let Some(d) = &self.doc else { return };
+        let Some(pe) = &mut self.patch else { return };
+        let lines: Vec<Vec<DVec3>> = match &pe.lines {
+            Some(l) => l.clone(),
+            None => pe
+                .picked
+                .iter()
+                .filter_map(|&i| match self.objects.get(i).map(|o| &o.shape) {
+                    Some(Shape::Curve(c)) => Some(patch::polyline(c)),
+                    _ => None,
+                })
+                .collect(),
+        };
+        let tol = (d.edge * 4.0).max(0.3);
+        pe.made = patch::loop_sides(&lines, tol).and_then(|sides| patch::patch(&d.mesh, d.closest(), &sides, pe.params, d.edge));
+        self.patch_params = pe.params;
+        self.objects_gen += 1;
+        self.overlay_gen += 1;
+    }
+
+    pub fn patch_set(&mut self, p: PatchParams) {
+        self.patch_params = p;
+        if let Some(pe) = &mut self.patch {
+            pe.params = p;
+            self.patch_rebuild();
+        }
+    }
+
+    /// The surface made is kept.
+    pub fn patch_apply(&mut self) {
+        let Some(pe) = self.patch.take() else { return };
+        self.objects_gen += 1;
+        self.overlay_gen += 1;
+        let Ok(made) = pe.made else { return };
+        let what = format!("{} paths · {} × {} spans · {} mm from the scan", pe.picked.len(), made.spans[0], made.spans[1], fmt(made.off, 3));
+        self.toast(format!("Kept: patch, {what}"), false);
+        self.add_object(Object { tool: Tool::Patch, what, shape: Shape::Surface(made.surface) });
+    }
+
+    /// The patch taken away (the paths stay).
+    pub fn patch_cancel(&mut self) {
+        if self.patch.take().is_some() {
             self.objects_gen += 1;
         }
         self.overlay_gen += 1;

@@ -33,7 +33,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             i.pointer.button_down(PointerButton::Secondary),
         )
     });
-    if alt && (resp.hovered() || resp.dragged() || l || m || r) && st.slot_drag.is_none() && st.path_press.is_none() {
+    if alt && (resp.hovered() || resp.dragged() || l || m || r) && st.slot_drag.is_none() && st.stroke.is_none() && st.path_press.is_none() {
         if (l || m || r) && d != egui::Vec2::ZERO {
             if l {
                 st.camera.orbit(d.x, d.y);
@@ -77,6 +77,27 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             return;
         }
     }
+    // the Line tool: a pencil on the scan; released, the stroke becomes a
+    // path (Ctrl: the scan only, nothing caught)
+    if st.tool == Tool::Line && !alt {
+        let (pressed, released, pos, free) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.latest_pos(), i.modifiers.ctrl || i.modifiers.command));
+        if pressed && resp.hovered() {
+            if let Some(p) = pos {
+                st.line_press([p.x, p.y]);
+            }
+        } else if st.stroke.is_some() {
+            if let Some(p) = pos {
+                st.line_move([p.x, p.y]);
+            }
+            if released || !l {
+                st.line_release(free);
+            }
+        }
+        if st.stroke.is_some() {
+            st.interacting = true;
+            return;
+        }
+    }
     // the Path tool: a click adds a point (on the first one: closes it), a
     // drag moves one; the pointer shows what would catch it (Ctrl: the
     // scan only)
@@ -104,9 +125,21 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
         }
     }
+    // the Patch tool: a click picks a path (or no longer), the pointer
+    // shows the path under it
+    if st.tool == Tool::Patch && !alt {
+        let (clicked, pos) = (resp.clicked_by(PointerButton::Primary), ctx.input(|i| i.pointer.latest_pos()));
+        if let Some(p) = pos {
+            if clicked {
+                st.patch_click([p.x, p.y]);
+            } else if resp.hovered() && !l && !m && !r {
+                st.patch_hover_at([p.x, p.y]);
+            }
+        }
+    }
     // the middle button alone pans; the left drag alone orbits when no
     // tool takes it
-    if (m || (l && st.tool == Tool::Navigate)) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
+    if (m || (l && matches!(st.tool, Tool::Navigate | Tool::Patch))) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
         if m {
             st.camera.pan(d.x, d.y, rect.height());
         } else {
@@ -122,10 +155,20 @@ fn path_marks(p: &egui::Painter, st: &AppState) -> Option<String> {
     let v = st.view();
     let scr = st.path_screen();
     let closable = st.path.as_ref().map(|pe| pe.pts.len() >= 3 && !pe.params.closed).unwrap_or(false);
+    let through: Vec<bool> = st.path.as_ref().map(|pe| pe.pts.iter().map(|s| s.through).collect()).unwrap_or_default();
     for (i, s) in scr.iter().enumerate() {
         let c = pos2(s[0], s[1]);
+        // a point the curve passes near (a pencil's bend): small
+        if through.get(i).copied().unwrap_or(false) {
+            p.circle_filled(c, 2.2, egui::Color32::from_rgb(255, 150, 70));
+            continue;
+        }
+        let joined = st.path.as_ref().and_then(|pe| pe.pts.get(i)).map(|s| s.kind == SnapKind::Path).unwrap_or(false);
         p.circle_filled(c, 4.5, egui::Color32::from_rgb(255, 118, 24));
         p.circle_stroke(c, 4.5, Stroke::new(1.5, egui::Color32::WHITE));
+        if joined {
+            p.circle_stroke(c, 7.5, Stroke::new(1.4, egui::Color32::from_rgb(40, 140, 255)));
+        }
         if i == 0 && closable {
             p.circle_stroke(c, 8.0, Stroke::new(1.2, tint(accent(), 0.8)));
         }
@@ -148,6 +191,9 @@ fn path_marks(p: &egui::Painter, st: &AppState) -> Option<String> {
         SnapKind::Scan => {
             p.circle_stroke(c, 4.0, Stroke::new(1.2, TEXT2()));
         }
+        SnapKind::Path => {
+            p.circle_stroke(c, 7.5, Stroke::new(1.6, col));
+        }
     }
     Some(match h.kind {
         SnapKind::Corner | SnapKind::Edge => format!("{} {:.0}°", h.kind.label(), h.angle),
@@ -155,17 +201,37 @@ fn path_marks(p: &egui::Painter, st: &AppState) -> Option<String> {
     })
 }
 
+/// The patch's four corners.
+fn patch_marks(p: &egui::Painter, st: &AppState) {
+    let Some(Ok(pt)) = st.patch.as_ref().map(|pe| &pe.made) else { return };
+    let v = st.view();
+    for c in pt.corners {
+        if let Some(s) = v.project(c.as_vec3()) {
+            let c = pos2(s[0], s[1]);
+            p.rect_filled(Rect::from_center_size(c, vec2(7.0, 7.0)), 1.0, egui::Color32::WHITE);
+            p.rect_stroke(Rect::from_center_size(c, vec2(7.0, 7.0)), 1.0, Stroke::new(1.2, egui::Color32::from_rgb(40, 140, 255)), StrokeKind::Outside);
+        }
+    }
+}
+
 /// The tool's name at the pointer.
 fn tool_cursor(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Response) {
     let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else { return };
-    let snap = if st.tool == Tool::Path { path_marks(p, st) } else { None };
-    if !resp.hovered() && st.slot_drag.is_none() && st.path_press.is_none() {
+    let snap = if matches!(st.tool, Tool::Path | Tool::Line) { path_marks(p, st) } else { None };
+    if st.tool == Tool::Patch {
+        patch_marks(p, st);
+    }
+    if !resp.hovered() && st.slot_drag.is_none() && st.stroke.is_none() && st.path_press.is_none() {
         return;
     }
     let col = accent();
     p.circle_filled(pos, 2.0, col);
     let label = match snap {
         Some(s) => format!("Path · {s}"),
+        None if st.tool == Tool::Patch && st.patch_hover.is_some() => {
+            let picked = st.patch.as_ref().map(|pe| pe.picked.contains(&st.patch_hover.unwrap())).unwrap_or(false);
+            if picked { "Patch · unpick this path".into() } else { "Patch · pick this path".into() }
+        }
         None => st.tool.label().to_string(),
     };
     let at = pos + vec2(12.0, -12.0);
@@ -193,7 +259,19 @@ pub fn hint(st: &AppState) -> String {
         return "Open a scan (an .obj)".into();
     }
     match st.tool {
-        Tool::Navigate => "C circle · S slot · B box · P path · H hide the scan · Ctrl+Z undo · drag to turn around · F frames it".into(),
+        Tool::Navigate => "C circle · S slot · B box · L line · G patch · P path · H hide the scan · Ctrl+Z undo · drag to turn around · F frames it".into(),
+        Tool::Patch => match &st.patch {
+            None => "Patch: click inside a loop of paths to fill it · or click the paths themselves to pick them · drag to turn around".into(),
+            Some(pe) => match &pe.made {
+                Ok(pt) => format!("{} paths · a NURBS surface of {} × {} spans, live · Enter keeps it · Esc removes · click in the next cell (keeps this one)", pe.picked.len(), pt.spans[0], pt.spans[1]),
+                Err(e) => format!("{} paths: {e} · click a path to pick it or not", pe.picked.len()),
+            },
+        },
+        Tool::Line => match (&st.stroke, &st.path) {
+            (Some(_), _) => "Drawing: release to make the path · back to where it began closes it".into(),
+            (None, Some(pe)) => format!("A path of {} points: smooth and catching on the left, live · Enter keeps it · Esc removes · draw again to keep it and start another (its ends join this one)", pe.pts.len()),
+            (None, None) => "Line: draw on the scan like a pencil · straight stretches stay straight, sharp turns make corners · Ctrl: the scan only".into(),
+        },
         Tool::Circle => match (&st.slot_drag, &st.slot) {
             (Some(_), _) => "Across to the other side of the rim, then release".into(),
             (None, Some(se)) => format!("A NURBS surface, Ø {} mm, {} rings: {}, profile and levels on the left, live · Enter keeps it · Esc removes · H hides the scan", fmt(se.slot.width(), 2), se.params.levels + 1, if se.slot.inward { "depth" } else { "height" }),

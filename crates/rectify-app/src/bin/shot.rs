@@ -18,7 +18,11 @@
 //! RECTIFY_DEPTH, RECTIFY_LEVELS, RECTIFY_PROFILE=straight|tapered|curve;
 //! RECTIFY_BOX the same with the Box tool. Several drags separated by `|`
 //! are each kept and shown together, RECTIFY_TOOLS="b,c,s,…" the tool of
-//! each (Box, Circle, Slot).
+//! each (Box, Circle, Slot). RECTIFY_LINE="x,y;x,y;…|…": pencil strokes
+//! with the Line tool (each a polyline through those points), then
+//! RECTIFY_PATCH="0;1;…" the paths kept clicked with the Patch tool (their
+//! places in the list), or "x,y" points of the bare view clicked (inside a
+//! cell of the paths: its patch, the one before kept).
 
 use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use glam::Vec3;
@@ -341,6 +345,148 @@ fn slot_many(h: &mut Harness, name: &str, s: &str, tools: &[Tool]) {
     }
 }
 
+/// Pencil strokes with the Line tool ("x,y;x,y;…|…", screen points of the
+/// bare view, each stroke a polyline drawn through them at 4-point steps
+/// with a slight tremble): each made, set, then kept by the next; all of
+/// them shown at the end (and from RECTIFY_LOOK2).
+fn line_strokes(h: &mut Harness, name: &str, s: &str) {
+    use rectify_core::path::{PieceKind, SnapKind};
+    h.st.set_tool(Tool::Navigate);
+    h.st.bare = true;
+    h.shot(&format!("{name}-0-before"));
+    // each stroke densified on screen, then put on the scan
+    let strokes: Vec<Vec<glam::Vec3>> = s
+        .split('|')
+        .map(|d| {
+            let pts: Vec<[f32; 2]> = d.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
+            let mut dense: Vec<[f32; 2]> = vec![];
+            let mut k = 0usize;
+            for w in pts.windows(2) {
+                let l = (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
+                let n = (l / 4.0).ceil().max(1.0) as usize;
+                let (dx, dy) = ((w[1][0] - w[0][0]) / l.max(1e-6), (w[1][1] - w[0][1]) / l.max(1e-6));
+                for q in 0..n {
+                    let t = q as f32 / n as f32;
+                    let tremble = (k as f32 * 0.7).sin() * 0.8;
+                    k += 1;
+                    dense.push([w[0][0] + (w[1][0] - w[0][0]) * t - dy * tremble, w[0][1] + (w[1][1] - w[0][1]) * t + dx * tremble]);
+                }
+            }
+            if let Some(l) = pts.last() {
+                dense.push(*l);
+            }
+            dense.iter().filter_map(|p| h.st.pick_hit(*p).map(|(_, x)| x.as_vec3())).collect()
+        })
+        .collect();
+    h.st.bare = false;
+    h.st.set_tool(Tool::Line);
+    h.steps(2);
+    for (k, w) in strokes.iter().enumerate() {
+        let view = h.st.view();
+        let scr: Vec<[f32; 2]> = w.iter().filter_map(|x| view.project(*x)).collect();
+        let t = std::time::Instant::now();
+        h.drag_screen(&scr, false);
+        match &h.st.path {
+            Some(pe) => {
+                let count = |kd: SnapKind| pe.pts.iter().filter(|s| s.kind == kd && !s.through).count();
+                let through = pe.pts.iter().filter(|s| s.through).count();
+                let kinds = pe.built.as_ref().map(|b| {
+                    let c = |x: PieceKind| b.kinds.iter().filter(|&&y| y == x).count();
+                    format!("{} line {} fold {} scan · {:.1} mm · {} ctrl · off {:.3}", c(PieceKind::Line), c(PieceKind::Fold), c(PieceKind::Scan), b.length, b.curve.pts.len(), b.off)
+                });
+                eprintln!(
+                    "LINE {name} #{k}: {} pts ({} corner {} edge {} face {} scan {} joined, {through} through){} · {} · {:.2}s",
+                    pe.pts.len(),
+                    count(SnapKind::Corner),
+                    count(SnapKind::Edge),
+                    count(SnapKind::Plane),
+                    count(SnapKind::Scan),
+                    count(SnapKind::Path),
+                    if pe.params.closed { " closed" } else { "" },
+                    kinds.unwrap_or_default(),
+                    t.elapsed().as_secs_f64()
+                );
+            }
+            None => eprintln!("LINE {name} #{k}: {}", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
+        }
+        if k + 1 == strokes.len() {
+            h.shot(&format!("{name}-1-last"));
+        }
+    }
+    h.st.path_apply();
+    h.shot(&format!("{name}-2-kept"));
+    let views = |h: &mut Harness, tag: &str| {
+        h.st.bare = true;
+        h.shot(&format!("{name}-{tag}"));
+        h.st.hide_scan = true;
+        h.shot(&format!("{name}-{tag}-alone"));
+        h.st.hide_scan = false;
+        h.st.bare = false;
+    };
+    views(h, "3-view");
+    // RECTIFY_PATCH="0;1;…": the paths kept (their places in the list)
+    // clicked with the Patch tool, at their middle; "x,y" a point of the
+    // bare view clicked instead
+    let mut tag = "3-view-2";
+    if let Ok(s) = std::env::var("RECTIFY_PATCH") {
+        h.st.set_tool(Tool::Patch);
+        h.steps(2);
+        for e in s.split(';').map(|e| e.trim()).filter(|e| !e.is_empty()) {
+            let world = if let Ok(i) = e.parse::<usize>() {
+                match h.st.objects.get(i).map(|o| &o.shape) {
+                    Some(rectify_app::state::Shape::Curve(c)) => {
+                        let (a, b) = c.domain();
+                        Some(c.eval((a + b) * 0.5).as_vec3())
+                    }
+                    _ => None,
+                }
+            } else {
+                let v = nums(e);
+                h.st.bare = true;
+                h.steps(1);
+                let w = if v.len() == 2 { h.st.pick_hit([v[0], v[1]]).map(|(_, x)| x.as_vec3()) } else { None };
+                h.st.bare = false;
+                h.steps(1);
+                w
+            };
+            let Some(x) = world else {
+                eprintln!("PATCH {name}: nothing at {e}");
+                continue;
+            };
+            let Some(sp) = h.st.view().project(x) else { continue };
+            let on = h.st.curve_at(sp);
+            let t = std::time::Instant::now();
+            h.click(Pos2::new(sp[0], sp[1]));
+            match (&h.st.patch, on) {
+                (Some(pe), None) => match &pe.made {
+                    Ok(pt) => eprintln!("PATCH {name} inside {e}: paths {:?} · {}x{} spans · off {:.3} · gap {:.3} · {:.2}s", pe.picked, pt.spans[0], pt.spans[1], pt.off, pt.gap, t.elapsed().as_secs_f64()),
+                    Err(er) => eprintln!("PATCH {name} inside {e}: paths {:?} · {er}", pe.picked),
+                },
+                (None, None) => eprintln!("PATCH {name} inside {e}: {}", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
+                (_, Some(i)) => eprintln!("PATCH {name} on path {i}"),
+            }
+        }
+        let t = std::time::Instant::now();
+        h.st.patch_rebuild();
+        let el = t.elapsed().as_secs_f64();
+        match &h.st.patch {
+            Some(pe) => match &pe.made {
+                Ok(pt) => eprintln!("PATCH {name}: {} paths · {}x{} spans · off {:.3} · gap {:.3} · {:.2}s", pe.picked.len(), pt.spans[0], pt.spans[1], pt.off, pt.gap, el),
+                Err(e) => eprintln!("PATCH {name}: {} paths · {e}", pe.picked.len()),
+            },
+            None => eprintln!("PATCH {name}: no path picked"),
+        }
+        h.shot(&format!("{name}-4-patch"));
+        h.st.patch_apply();
+        views(h, "5-view");
+        tag = "5-view-2";
+    }
+    if let Some(v) = std::env::var("RECTIFY_LOOK2").map(|s| nums(&s)).ok().filter(|v| v.len() == 6) {
+        look(h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+        views(h, tag);
+    }
+}
+
 /// Points clicked with the Path tool (screen points of the bare view): the
 /// next segment shown before the last click, the curve placed (with the
 /// interface, then the view alone), kept.
@@ -457,6 +603,11 @@ fn main() {
             let pts: Vec<[f32; 2]> = s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
             let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "path".into());
             path_clicks(&mut h, &tag, &pts, close);
+            return;
+        }
+        if let Ok(s) = std::env::var("RECTIFY_LINE") {
+            let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "line".into());
+            line_strokes(&mut h, &tag, &s.replace(' ', ""));
             return;
         }
         // RECTIFY_SLOT / RECTIFY_BOX: one drag, or several separated by |

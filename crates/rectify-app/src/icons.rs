@@ -54,6 +54,11 @@ pub enum Icon {
     Inset,
     /// Extrude face: a face and an arrow up out of it.
     Extrude,
+    /// Line (Forme Rectify): a pencil and the stroke it leaves.
+    Pencil,
+    /// Patch (Forme Rectify): four curved sides and the surface's lines
+    /// across.
+    Patch,
 }
 
 struct Pen<'a> {
@@ -196,6 +201,23 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             for (x, y) in [(3.0, 16.0), (3.0, 6.0), (9.0, 6.0)] {
                 pen.closed(&[(x - 1.3, y - 1.3), (x + 1.3, y - 1.3), (x + 1.3, y + 1.3), (x - 1.3, y + 1.3)]);
             }
+        }
+        Icon::Pencil => {
+            // the pencil, slanted, its tip down at the left
+            pen.closed(&[(6.0, 12.0), (14.0, 4.0), (17.0, 7.0), (9.0, 15.0)]);
+            pen.line(&[(6.0, 12.0), (4.5, 16.5), (9.0, 15.0)]);
+            pen.line(&[(12.5, 5.5), (15.5, 8.5)]);
+            // the stroke
+            pen.line(&[(3.0, 18.5), (8.0, 18.5)]);
+        }
+        Icon::Patch => {
+            // four sides, two of them bent, and the lines across
+            pen.line(&[(3.0, 5.0), (7.0, 3.5), (12.0, 3.5), (17.0, 5.0)]);
+            pen.line(&[(17.0, 5.0), (17.0, 15.0)]);
+            pen.line(&[(3.0, 15.0), (7.0, 16.5), (12.0, 16.5), (17.0, 15.0)]);
+            pen.line(&[(3.0, 5.0), (3.0, 15.0)]);
+            pen.line(&[(3.0, 10.0), (10.0, 10.0), (17.0, 10.0)]);
+            pen.line(&[(10.0, 3.3), (10.0, 16.7)]);
         }
         Icon::Quads => {
             // a flat run that bends down: three rows of quads

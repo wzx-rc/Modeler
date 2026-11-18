@@ -8,7 +8,7 @@ use glam::DVec3;
 
 /// Where `t` falls in the knots: the span index `i` with
 /// knots[i] <= t < knots[i + 1] (the last span holds the end).
-fn find_span(knots: &[f64], degree: usize, n: usize, t: f64) -> usize {
+pub(crate) fn find_span(knots: &[f64], degree: usize, n: usize, t: f64) -> usize {
     if t >= knots[n] {
         return n - 1;
     }
@@ -29,7 +29,7 @@ fn find_span(knots: &[f64], degree: usize, n: usize, t: f64) -> usize {
 }
 
 /// The `degree + 1` basis functions not zero in `span` at `t`.
-fn basis(knots: &[f64], degree: usize, span: usize, t: f64) -> Vec<f64> {
+pub(crate) fn basis(knots: &[f64], degree: usize, span: usize, t: f64) -> Vec<f64> {
     let mut n = vec![0.0; degree + 1];
     let mut left = vec![0.0; degree + 1];
     let mut right = vec![0.0; degree + 1];
@@ -107,6 +107,35 @@ impl Curve {
     }
 
     /// `n` + 1 points evenly in the parameter.
+    /// The point of the curve nearest `x`: its parameter and the point.
+    pub fn nearest(&self, x: DVec3) -> (f64, DVec3) {
+        let (a, b) = self.domain();
+        let n = (self.pts.len() * 16).max(64);
+        let mut best = (a, f64::INFINITY);
+        for k in 0..=n {
+            let t = a + (b - a) * k as f64 / n as f64;
+            let d = (self.eval(t) - x).length_squared();
+            if d < best.1 {
+                best = (t, d);
+            }
+        }
+        // closer, by halves round the best sample
+        let mut step = (b - a) / n as f64;
+        let mut t = best.0;
+        for _ in 0..30 {
+            step *= 0.5;
+            for c in [t - step, t + step] {
+                let c = c.clamp(a, b);
+                let d = (self.eval(c) - x).length_squared();
+                if d < best.1 {
+                    best = (c, d);
+                }
+            }
+            t = best.0;
+        }
+        (t, self.eval(t))
+    }
+
     pub fn sample(&self, n: usize) -> Vec<DVec3> {
         let (a, b) = self.domain();
         (0..=n).map(|k| self.eval(a + (b - a) * k as f64 / n as f64)).collect()

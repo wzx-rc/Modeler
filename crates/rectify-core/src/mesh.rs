@@ -605,6 +605,56 @@ impl Surface {
     }
 }
 
+impl Surface {
+    /// Where the line through `p` along `d` (unit) meets the surface within
+    /// `r` of `p`, either way, the nearest to `p` first, on the triangles
+    /// that pass `keep`: the triangle and how far along `d` (signed).
+    pub fn hit_along(&self, m: &Mesh, p: DVec3, d: DVec3, r: f64, keep: impl Fn(u32) -> bool) -> Option<(u32, f64)> {
+        let cell = self.grid.cell;
+        let n = ((2.0 * r / cell).ceil() as usize).max(1);
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut best: Option<(u32, f64)> = None;
+        for k in 0..=n {
+            let q = p + d * (-r + 2.0 * r * k as f64 / n as f64);
+            self.grid.near(q, cell * 0.87 + self.reach, |t| {
+                if !seen.insert(t) || !keep(t) {
+                    return;
+                }
+                let [a, b, c] = m.tri_pts(t as usize);
+                if let Some(s) = line_tri(p, d, a, b, c) {
+                    if s.abs() <= r && best.map(|bb| s.abs() < bb.1.abs()).unwrap_or(true) {
+                        best = Some((t, s));
+                    }
+                }
+            });
+        }
+        best
+    }
+}
+
+/// Where the line `o + s d` crosses the triangle (any sign of `s`).
+fn line_tri(o: DVec3, d: DVec3, a: DVec3, b: DVec3, c: DVec3) -> Option<f64> {
+    let e1 = b - a;
+    let e2 = c - a;
+    let p = d.cross(e2);
+    let det = e1.dot(p);
+    if det.abs() < 1e-14 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let t = o - a;
+    let u = t.dot(p) * inv;
+    if !(-1e-9..=1.0 + 1e-9).contains(&u) {
+        return None;
+    }
+    let q = t.cross(e1);
+    let v = d.dot(q) * inv;
+    if v < -1e-9 || u + v > 1.0 + 1e-9 {
+        return None;
+    }
+    Some(e2.dot(q) * inv)
+}
+
 /// A plane through the points (weighted): its centre and unit normal (the
 /// direction of least spread), or None with too few points.
 pub fn fit_plane(pts: &[(DVec3, f64)]) -> Option<(DVec3, DVec3)> {

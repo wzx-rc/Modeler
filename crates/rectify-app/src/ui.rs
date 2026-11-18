@@ -68,7 +68,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the scan (Esc)", "Esc"), (Tool::Circle, Icon::Cylinder, "Circle: drag across a hole or a boss, a NURBS surface is laid on its wall, every ring an exact circle (C)", "C"), (Tool::Slot, Icon::Capsule, "Slot: drag along a slot with round ends, a NURBS surface is laid on its wall, every row an exact slot outline (S)", "S"), (Tool::Box, Icon::Box, "Box: drag across a block with rounded corners, raised or cut in, corner to corner: a NURBS surface on its wall, every row an exact rounded rectangle (B)", "B"), (Tool::Path, Icon::Sketch, "Path: click points on the scan, one NURBS curve through them; flat faces, their edges and corners catch the points (P)", "P")];
+                let tools = [(Tool::Navigate, Icon::Select, "Navigate: the left button turns around the scan (Esc)", "Esc"), (Tool::Circle, Icon::Cylinder, "Circle: drag across a hole or a boss, a NURBS surface is laid on its wall, every ring an exact circle (C)", "C"), (Tool::Slot, Icon::Capsule, "Slot: drag along a slot with round ends, a NURBS surface is laid on its wall, every row an exact slot outline (S)", "S"), (Tool::Box, Icon::Box, "Box: drag across a block with rounded corners, raised or cut in, corner to corner: a NURBS surface on its wall, every row an exact rounded rectangle (B)", "B"), (Tool::Line, Icon::Pencil, "Line: draw on the scan like a pencil; the stroke becomes a path, straight where it is straight, its corners caught by the faces, edges and corners; its ends join the paths already there (L)", "L"), (Tool::Patch, Icon::Patch, "Patch: click the paths around a part of the scan; one NURBS surface fills the loop they close, laid on the scan (G)", "G"), (Tool::Path, Icon::Sketch, "Path: click points on the scan, one NURBS curve through them; flat faces, their edges and corners catch the points (P)", "P")];
                 for (t, icon, tip, key) in tools {
                     let r = icon_btn(ui, icon, st.tool == t, tip, 28.0);
                     key_hint(ui, &r, key);
@@ -234,12 +234,19 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
             if secondary_btn(ui, "Box (B): a block with rounded corners", w).clicked() {
                 st.set_tool(Tool::Box);
             }
+            if secondary_btn(ui, "Line (L): draw paths with a pencil", w).clicked() {
+                st.set_tool(Tool::Line);
+            }
+            if secondary_btn(ui, "Patch (G): a surface between paths", w).clicked() {
+                st.set_tool(Tool::Patch);
+            }
             if secondary_btn(ui, "Path (P): lines and curves on the scan", w).clicked() {
                 st.set_tool(Tool::Path);
             }
         }
-        Tool::Path => path_card(ui, st),
+        Tool::Path | Tool::Line => path_card(ui, st),
         Tool::Slot | Tool::Box | Tool::Circle => slot_card(ui, st),
+        Tool::Patch => patch_card(ui, st),
     }
     ui.add_space(4.0);
     let w = ui.available_width();
@@ -323,7 +330,11 @@ fn slot_card(ui: &mut Ui, st: &mut AppState) {
 
 fn path_card(ui: &mut Ui, st: &mut AppState) {
     use rectify_core::path::{PieceKind, SnapKind};
-    title(ui, "Path", "Click points on the scan: one NURBS curve through them. Flat faces catch the points, and so do their edges (where two faces' planes meet, sharp) and corners");
+    if st.tool == Tool::Line {
+        title(ui, "Line", "Draw on the scan like a pencil: the stroke becomes a path, straight where it is straight, a corner where it turns sharply, a smooth curve where it bends. Its ends and corners are caught by the faces, their edges and corners, and its ends join the paths already there");
+    } else {
+        title(ui, "Path", "Click points on the scan: one NURBS curve through them. Flat faces catch the points, and so do their edges (where two faces' planes meet, sharp) and corners");
+    }
     let mut p = st.path.as_ref().map(|pe| pe.params).unwrap_or(st.path_params);
     let mut changed = false;
     if toggle_row(ui, "Catch faces, edges, corners", p.planes) {
@@ -347,11 +358,17 @@ fn path_card(ui: &mut Ui, st: &mut AppState) {
     let mut back = false;
     let mut cancel = false;
     match &st.path {
+        None if st.tool == Tool::Line => line(ui, "Draw again to keep the path and start another. Back to where it began closes it. Ctrl held: the scan only."),
         None => line(ui, "Between two points on one face the path is straight on it; from a face to the next it folds over their edge; elsewhere it follows the scan, smooth. Ctrl held: the scan only."),
         Some(pe) => {
             let count = |k: SnapKind| pe.pts.iter().filter(|s| s.kind == k).count();
             if pe.params.planes {
-                line(ui, format!("{n} points: {} on corners, {} on edges, {} on faces, {} on the scan", count(SnapKind::Corner), count(SnapKind::Edge), count(SnapKind::Plane), count(SnapKind::Scan)));
+                let joined = count(SnapKind::Path);
+                let through = pe.pts.iter().filter(|s| s.through).count();
+                line(ui, format!("{n} points: {} on corners, {} on edges, {} on faces, {} on the scan{}", count(SnapKind::Corner), count(SnapKind::Edge), count(SnapKind::Plane) - pe.pts.iter().filter(|s| s.through && s.kind == SnapKind::Plane).count(), count(SnapKind::Scan) - pe.pts.iter().filter(|s| s.through && s.kind == SnapKind::Scan).count(), if joined > 0 { format!(", {joined} joining a path") } else { String::new() }));
+                if through > 0 {
+                    line(ui, format!("{through} more along its curves, passed near"));
+                }
             } else {
                 line(ui, format!("{n} points on the scan"));
             }
@@ -388,6 +405,62 @@ fn path_card(ui: &mut Ui, st: &mut AppState) {
     }
     if cancel {
         st.path_cancel();
+    }
+}
+
+fn patch_card(ui: &mut Ui, st: &mut AppState) {
+    title(ui, "Patch", "Click inside a loop of paths (drawn with Line, their ends on each other): one NURBS surface fills the smallest loop around the click, laid on the scan. Or click the paths themselves to pick them");
+    let mut p = st.patch.as_ref().map(|pe| pe.params).unwrap_or(st.patch_params);
+    let mut changed = false;
+    if toggle_row(ui, "Follow the scan", p.follow) {
+        p.follow = !p.follow;
+        changed = true;
+    }
+    if toggle_row(ui, "Fewest spans that follow", p.spans == 0) {
+        p.spans = if p.spans == 0 { st.patch.as_ref().and_then(|pe| pe.made.as_ref().ok()).map(|m| m.spans[0].max(m.spans[1])).unwrap_or(4) } else { 0 };
+        changed = true;
+    }
+    if p.spans > 0 {
+        let mut k = p.spans as f32;
+        if slider_row(ui, "Spans", &mut k, 1.0..=12.0, 1.0, "").0 {
+            p.spans = k.round().clamp(1.0, 12.0) as usize;
+            changed = true;
+        }
+    }
+    if changed {
+        st.patch_set(p);
+    }
+    let mut apply = false;
+    let mut cancel = false;
+    match &st.patch {
+        None => line(ui, "The loop is cut in four sides where its paths meet (the sharpest four), else at its sharpest turns; the inside follows the scan, its border the paths. Draw a network of paths, then click in each cell."),
+        Some(pe) => {
+            line(ui, format!("{} path{} picked", pe.picked.len(), if pe.picked.len() == 1 { "" } else { "s" }));
+            match &pe.made {
+                Err(e) => line(ui, e.clone()),
+                Ok(pt) => {
+                    let s = &pt.surface;
+                    line(ui, format!("NURBS degree 3 × 3 · {} × {} spans · {} × {} control points", pt.spans[0], pt.spans[1], s.nu, s.nv));
+                    if pe.params.follow {
+                        line(ui, format!("The scan is {} mm from it", fmt(pt.off, 3)));
+                        if pt.passed >= 0.005 {
+                            line(ui, format!("{} % of the inside passed over (a part raised or sunk in it)", (pt.passed * 100.0).round()));
+                        }
+                    }
+                    line(ui, format!("Its border {} mm from the paths at most", fmt(pt.gap, 3)));
+                }
+            }
+            ui.add_space(6.0);
+            let w = ui.available_width();
+            apply = pe.made.is_ok() && primary_btn(ui, Some(Icon::Patch), "Keep (Enter)", Some(w)).clicked();
+            cancel = secondary_btn(ui, "Remove (Esc)", w).clicked();
+        }
+    }
+    if apply {
+        st.patch_apply();
+    }
+    if cancel {
+        st.patch_cancel();
     }
 }
 
@@ -462,7 +535,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
     let (f, esc, z, y, enter) = ctx.input(|i| (i.key_pressed(Key::F), i.key_pressed(Key::Escape), i.key_pressed(Key::Z), i.key_pressed(Key::Y), i.key_pressed(Key::Enter)));
     let (c, h, pk, back) = ctx.input(|i| (i.key_pressed(Key::C), i.key_pressed(Key::H), i.key_pressed(Key::P), i.key_pressed(Key::Backspace) || i.key_pressed(Key::Delete)));
-    let (sk, bk) = ctx.input(|i| (i.key_pressed(Key::S), i.key_pressed(Key::B)));
+    let (sk, bk, lk, gk) = ctx.input(|i| (i.key_pressed(Key::S), i.key_pressed(Key::B), i.key_pressed(Key::L), i.key_pressed(Key::G)));
     if cmd && z {
         if shift {
             st.redo();
@@ -480,8 +553,14 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if pk && !cmd {
         st.set_tool(Tool::Path);
     }
+    if lk && !cmd {
+        st.set_tool(Tool::Line);
+    }
     if sk && !cmd {
         st.set_tool(Tool::Slot);
+    }
+    if gk && !cmd {
+        st.set_tool(Tool::Patch);
     }
     if bk && !cmd {
         st.set_tool(Tool::Box);
@@ -492,22 +571,28 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if h && !cmd && st.doc.is_some() {
         st.hide_scan = !st.hide_scan;
     }
-    if enter && st.tool == Tool::Path {
+    if enter && matches!(st.tool, Tool::Path | Tool::Line) {
         st.path_apply();
     }
     if enter && matches!(st.tool, Tool::Slot | Tool::Box | Tool::Circle) {
         st.slot_apply();
+    }
+    if enter && st.tool == Tool::Patch {
+        st.patch_apply();
     }
     if f {
         st.frame_all();
     }
     if esc && st.path.is_some() {
         st.path_cancel();
+    } else if esc && st.patch.is_some() {
+        st.patch_cancel();
     } else if esc && st.slot.is_some() && st.slot_drag.is_none() {
         st.slot_cancel();
     } else if esc {
-        if st.slot_drag.is_some() {
+        if st.slot_drag.is_some() || st.stroke.is_some() {
             st.slot_drag = None;
+            st.stroke = None;
             st.overlay_gen += 1;
         } else {
             st.set_tool(Tool::Navigate);

@@ -72,7 +72,7 @@ fn snap_lines(s: &Snap, size: f64, out: &mut Vec<LineVertex>) {
     let col = [40, 140, 255, 240];
     let p = |x: DVec3| x.as_vec3().to_array();
     match s.kind {
-        SnapKind::Scan => {}
+        SnapKind::Scan | SnapKind::Path => {}
         SnapKind::Plane => {
             let pl = &s.planes[0];
             let u = pl.n.any_orthonormal_vector() * size;
@@ -131,11 +131,17 @@ impl Drawer {
         }
         self.objects_gen = st.objects_gen;
         let (mut verts, mut wire) = (vec![], vec![]);
-        for o in &st.objects {
+        let picked: &[usize] = st.patch.as_ref().map(|pe| pe.picked.as_slice()).unwrap_or(&[]);
+        for (i, o) in st.objects.iter().enumerate() {
             match &o.shape {
                 Shape::Surface(s) => surface_vertices(s, 1, [60, 32, 14, 200], None, &mut verts, &mut wire),
+                // the paths picked for a patch in blue
+                Shape::Curve(c) if picked.contains(&i) => line_vertices(&[curve_lines(c)], [60, 150, 255, 255], 2.6, &mut wire),
                 Shape::Curve(c) => line_vertices(&[curve_lines(c)], [226, 92, 14, 255], 1.8, &mut wire),
             }
+        }
+        if let Some(Ok(pt)) = st.patch.as_ref().map(|pe| &pe.made) {
+            surface_vertices(&pt.surface, 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
         }
         if let Some(se) = &st.slot {
             surface_vertices(&se.laid.surface, 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
@@ -178,6 +184,13 @@ impl Drawer {
                 .collect();
             line_vertices(&[ring], [255, 150, 60, 200], 1.2, &mut out);
         }
+        // the Line's stroke being drawn, on the scan
+        if let Some(sk) = &st.stroke {
+            let line: Vec<[f32; 3]> = sk.hits.iter().map(|h| p(h.1)).collect();
+            if line.len() >= 2 {
+                line_vertices(&[line], [255, 150, 60, 230], 1.4, &mut out);
+            }
+        }
         // the Slot and Box drag: along the slot, on the plane under the press
         if let Some(cd) = st.slot_drag.as_ref().filter(|_| st.tool != Tool::Circle) {
             let n = cd.n;
@@ -202,6 +215,10 @@ impl Drawer {
                 v.pixel_size_at((h.p.as_vec3() - v.eye).dot(fwd).max(1e-3)) as f64 * 10.0
             };
             snap_lines(h, size, &mut out);
+        }
+        // the Patch tool: the path under the pointer
+        if let Some(Shape::Curve(c)) = st.patch_hover.filter(|_| st.tool == Tool::Patch).and_then(|i| st.objects.get(i)).map(|o| &o.shape) {
+            line_vertices(&[curve_lines(c)], [140, 200, 255, 200], 3.4, &mut out);
         }
         // the slot placed: its centre line; a round part: its axis
         if let Some(se) = &st.slot {

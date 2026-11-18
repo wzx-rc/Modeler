@@ -12,10 +12,18 @@
 //! line on it; from one face to another it folds over their edge (the
 //! shortest way across the two planes); elsewhere it follows the scan, one
 //! smooth B-spline through the points (`build`). The scan does not change.
+//!
+//! The Line tool (Romain, 18 nov., 18 h 51, for the gun's body: "un outil
+//! où je peux tracer des Line et ça fait des path") draws the same paths
+//! with a pencil: the stroke is cut at its sharp turns (`stroke_keys`); a
+//! straight stretch keeps its two ends (caught like clicked points), a
+//! curved one gets points along it that the curve passes near (`through`,
+//! on their face's plane or the scan). Its ends join the paths already
+//! there.
 
 use crate::mesh::{fit_plane, Mesh, Surface, Topo, NONE};
 use crate::nurbs::Curve;
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 use std::collections::{HashMap, VecDeque};
 
 fn debug() -> bool {
@@ -319,6 +327,8 @@ pub enum SnapKind {
     Edge,
     /// On the corner where three cross.
     Corner,
+    /// On a path already there (a Line's end joining it).
+    Path,
 }
 
 impl SnapKind {
@@ -328,6 +338,7 @@ impl SnapKind {
             SnapKind::Plane => "Face",
             SnapKind::Edge => "Edge",
             SnapKind::Corner => "Corner",
+            SnapKind::Path => "Path",
         }
     }
 }
@@ -349,11 +360,15 @@ pub struct Snap {
     /// An edge or a corner: the angle between the faces (degrees; the
     /// smallest of a corner's three).
     pub angle: f64,
+    /// A point a curve passes near (along a pencil stroke's bend), not a
+    /// corner: the segments on each side follow the scan as one smooth
+    /// curve.
+    pub through: bool,
 }
 
 impl Snap {
     pub fn scan(hit: DVec3, tri: u32) -> Snap {
-        Snap { kind: SnapKind::Scan, p: hit, hit, tri, planes: vec![], dir: DVec3::ZERO, run: (0.0, 0.0), angle: 0.0 }
+        Snap { kind: SnapKind::Scan, p: hit, hit, tri, planes: vec![], dir: DVec3::ZERO, run: (0.0, 0.0), angle: 0.0, through: false }
     }
 }
 
@@ -399,7 +414,7 @@ fn snap_within(m: &Mesh, topo: &Topo, tri: u32, hit: DVec3, catch: f64, h: f64, 
                     continue;
                 }
                 if best.as_ref().map(|(bd, _)| d < *bd).unwrap_or(true) {
-                    let s = Snap { kind: SnapKind::Corner, p: x, hit, tri, planes: vec![a.clone(), b.clone(), c.clone()], dir: DVec3::ZERO, run: (0.0, 0.0), angle: t1.min(t2).min(t3) };
+                    let s = Snap { kind: SnapKind::Corner, p: x, hit, tri, planes: vec![a.clone(), b.clone(), c.clone()], dir: DVec3::ZERO, run: (0.0, 0.0), angle: t1.min(t2).min(t3), through: false };
                     best = Some((d, s));
                 }
             }
@@ -438,7 +453,7 @@ fn snap_within(m: &Mesh, topo: &Topo, tri: u32, hit: DVec3, catch: f64, h: f64, 
                     s
                 };
                 let run = (along(-1.0), along(1.0));
-                let s = Snap { kind: SnapKind::Edge, p: q, hit, tri, planes: vec![a.clone(), b.clone()], dir: e, run, angle: t };
+                let s = Snap { kind: SnapKind::Edge, p: q, hit, tri, planes: vec![a.clone(), b.clone()], dir: e, run, angle: t, through: false };
                 best = Some((d, s));
             }
         }
@@ -449,9 +464,87 @@ fn snap_within(m: &Mesh, topo: &Topo, tri: u32, hit: DVec3, catch: f64, h: f64, 
     // a face: the one the pointer is on
     let own = planes.iter().filter(|pl| pl.dist(hit).abs() <= tol + pl.rms * 3.0 && pl.gap(hit) <= h * 3.0).min_by(|a, b| a.gap(hit).partial_cmp(&b.gap(hit)).unwrap());
     if let Some(pl) = own {
-        return Snap { kind: SnapKind::Plane, p: pl.onto(hit), hit, tri, planes: vec![pl.clone()], dir: DVec3::ZERO, run: (0.0, 0.0), angle: 0.0 };
+        return Snap { kind: SnapKind::Plane, p: pl.onto(hit), hit, tri, planes: vec![pl.clone()], dir: DVec3::ZERO, run: (0.0, 0.0), angle: 0.0, through: false };
     }
     Snap::scan(hit, tri)
+}
+
+/// The point at `hit` onto the flat face it is on (else the scan): for the
+/// points a curve passes near, which must not jump onto an edge.
+pub fn snap_face(m: &Mesh, topo: &Topo, tri: u32, hit: DVec3, catch: f64, h: f64) -> Snap {
+    let reach = (catch * 6.0).max(h * 30.0);
+    let planes = planes_near(m, topo, tri, hit, reach, h);
+    let tol = (h * 1.5).max(0.08);
+    let own = planes.iter().filter(|pl| pl.dist(hit).abs() <= tol + pl.rms * 3.0 && pl.gap(hit) <= h * 3.0).min_by(|a, b| a.gap(hit).partial_cmp(&b.gap(hit)).unwrap());
+    match own {
+        Some(pl) => Snap { kind: SnapKind::Plane, p: pl.onto(hit), hit, tri, planes: vec![pl.clone()], dir: DVec3::ZERO, run: (0.0, 0.0), angle: 0.0, through: false },
+        None => Snap::scan(hit, tri),
+    }
+}
+
+/// A pencil stroke on screen (points, in order) cut into the points of a
+/// path: its ends and its sharp turns (more than `corner` degrees over
+/// `window` points of stroke), and, along a stretch that is not straight,
+/// points every `every` points of stroke that the curve passes near (true).
+/// Indices into the stroke.
+pub fn stroke_keys(scr: &[DVec2], corner: f64, window: f64, every: f64) -> Vec<(usize, bool)> {
+    let n = scr.len();
+    if n < 2 {
+        return (0..n).map(|i| (i, false)).collect();
+    }
+    let mut arc = vec![0.0f64];
+    for w in scr.windows(2) {
+        arc.push(arc.last().unwrap() + (w[1] - w[0]).length());
+    }
+    let total = arc[n - 1];
+    let at = |s: f64| arc.partition_point(|&a| a < s).min(n - 1);
+    // how much it turns at each point, over the window on each side
+    let turn: Vec<f64> = (0..n)
+        .map(|i| {
+            if arc[i] < window || arc[i] > total - window {
+                return 0.0;
+            }
+            let (a, b, c) = (scr[at(arc[i] - window)], scr[i], scr[at(arc[i] + window)]);
+            let (u, v) = (b - a, c - b);
+            if u.length() < 1e-9 || v.length() < 1e-9 {
+                return 0.0;
+            }
+            (u.normalize().dot(v.normalize())).clamp(-1.0, 1.0).acos().to_degrees()
+        })
+        .collect();
+    let mut cand: Vec<usize> = (1..n - 1).filter(|&i| turn[i] >= corner).collect();
+    cand.sort_by(|&a, &b| turn[b].partial_cmp(&turn[a]).unwrap());
+    let mut corners: Vec<usize> = vec![];
+    for i in cand {
+        if corners.iter().all(|&c| (arc[c] - arc[i]).abs() >= window * 1.5) {
+            corners.push(i);
+        }
+    }
+    corners.sort_unstable();
+    let mut keys = vec![0];
+    keys.extend(corners);
+    keys.push(n - 1);
+    let mut out: Vec<(usize, bool)> = vec![];
+    for w in keys.windows(2) {
+        let (i, j) = (w[0], w[1]);
+        out.push((i, false));
+        let (a, b) = (scr[i], scr[j]);
+        let ab = b - a;
+        let l2 = ab.length_squared().max(1e-12);
+        let dev = (i..=j).map(|k| (scr[k] - (a + ab * ((scr[k] - a).dot(ab) / l2).clamp(0.0, 1.0))).length()).fold(0.0, f64::max);
+        let len = arc[j] - arc[i];
+        // straight: its two ends
+        if dev <= (ab.length() * 0.04).max(2.5) {
+            continue;
+        }
+        let cnt = ((len / every).round() as usize).max(2);
+        for q in 1..cnt {
+            out.push((at(arc[i] + len * q as f64 / cnt as f64), true));
+        }
+    }
+    out.push((n - 1, false));
+    out.dedup_by_key(|x| x.0);
+    out
 }
 
 /// The shortest way over the scan's edges from the triangle `ta` (point
@@ -634,6 +727,11 @@ pub fn build(m: &Mesh, topo: &Topo, scan: &Surface, pts: &[Snap], p: &PathParams
                     let x = a + (b - a) * (k as f64 / 16.0);
                     scan.closest(m, x, lean).is_some()
                 }));
+        // a point a curve passes near: the scan, smoothly
+        if pts[i].through || pts[j].through {
+            kinds.push(Seg::Scan);
+            continue;
+        }
         if shared || (a - b).length() < h {
             kinds.push(Seg::Line);
             continue;
@@ -748,9 +846,10 @@ pub fn build(m: &Mesh, topo: &Topo, scan: &Surface, pts: &[Snap], p: &PathParams
                             samples.push((pos(i), 1e6));
                         }
                         samples.extend(between(i, j).into_iter().map(|x| (x, 1.0)));
-                        // a clicked point inside the run: passed close by;
-                        // the run's end: pinned
-                        samples.push((pos(j), if k + 1 == e - s { 1e6 } else { 1e3 }));
+                        // a clicked point inside the run: passed close by
+                        // (a pencil's point: drawn by hand, only drawn
+                        // towards); the run's end: pinned
+                        samples.push((pos(j), if k + 1 == e - s { 1e6 } else if pts[j].through { 10.0 } else { 1e3 }));
                     }
                 }
                 let mut acc = vec![0.0];
@@ -807,6 +906,54 @@ pub fn build(m: &Mesh, topo: &Topo, scan: &Surface, pts: &[Snap], p: &PathParams
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hand-drawn stroke: `pts` joined at 4-point steps, trembling a
+    /// little across.
+    fn stroke(pts: &[(f64, f64)]) -> Vec<DVec2> {
+        let mut out = vec![];
+        let mut k = 0;
+        for w in pts.windows(2) {
+            let (a, b) = (DVec2::new(w[0].0, w[0].1), DVec2::new(w[1].0, w[1].1));
+            let d = b - a;
+            let n = (d.length() / 4.0).ceil() as usize;
+            let across = DVec2::new(-d.y, d.x).normalize();
+            for q in 0..n {
+                out.push(a + d * (q as f64 / n as f64) + across * ((k as f64 * 0.7).sin() * 0.8));
+                k += 1;
+            }
+        }
+        let l = pts[pts.len() - 1];
+        out.push(DVec2::new(l.0, l.1));
+        out
+    }
+
+    #[test]
+    fn a_straight_stroke_keeps_its_ends() {
+        let s = stroke(&[(0.0, 0.0), (300.0, 20.0)]);
+        assert_eq!(stroke_keys(&s, 45.0, 12.0, 40.0), vec![(0, false), (s.len() - 1, false)]);
+    }
+
+    #[test]
+    fn a_turn_makes_a_corner() {
+        let s = stroke(&[(0.0, 0.0), (200.0, 0.0), (200.0, 150.0)]);
+        let k = stroke_keys(&s, 45.0, 12.0, 40.0);
+        assert_eq!(k.len(), 3, "{k:?}");
+        assert!(!k[1].1);
+        assert!((s[k[1].0] - DVec2::new(200.0, 0.0)).length() < 8.0, "{:?}", s[k[1].0]);
+    }
+
+    #[test]
+    fn a_bend_gets_points_passed_near() {
+        let arc: Vec<(f64, f64)> = (0..=24).map(|i| {
+            let a = i as f64 / 24.0 * std::f64::consts::PI;
+            (150.0 - 150.0 * a.cos(), 150.0 * a.sin())
+        }).collect();
+        let s = stroke(&arc);
+        let k = stroke_keys(&s, 45.0, 12.0, 40.0);
+        assert!(!k[0].1 && !k[k.len() - 1].1);
+        assert!(k[1..k.len() - 1].iter().all(|x| x.1), "{k:?}");
+        assert!(k.len() >= 8, "{k:?}");
+    }
 
     /// A box of `s` mm, cut into small triangles (`k` per side).
     fn boxy(s: f64, k: usize) -> Mesh {

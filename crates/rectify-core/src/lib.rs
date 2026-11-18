@@ -9,12 +9,15 @@
 //!   surface laid on its wall;
 //! - `path`: the Path tool: points on the scan caught by its flat faces,
 //!   their edges and corners, joined into one NURBS curve;
+//! - `patch`: the Patch tool: a loop of paths filled with one NURBS
+//!   surface laid on the scan;
 //! - `slot`: the Slot tool: a slot with round ends found under a drag along
 //!   it, a NURBS surface laid on its wall.
 
 pub mod circle;
 pub mod mesh;
 pub mod nurbs;
+pub mod patch;
 pub mod path;
 pub mod slot;
 
