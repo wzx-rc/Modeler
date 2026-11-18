@@ -1,6 +1,7 @@
 //! The 3D view's input: Maya navigation (Alt + left orbit, Alt + middle pan,
 //! Alt + right zoom, the wheel zooms, the middle button alone pans), a click
-//! picks a region, Space held shows the original.
+//! picks a region, Space held shows the original. With the brush or the
+//! shape tool, the left button paints.
 
 use crate::state::*;
 use crate::theme::*;
@@ -12,6 +13,9 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     egui::Area::new(Id::new("viewport")).order(Order::Background).fixed_pos(screen.min).show(ctx, |ui| {
         let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
         handle_input(ctx, st, &resp, rect);
+        if st.tool != Tool::Select && !st.bare {
+            brush_cursor(ui.painter(), ctx, st, &resp);
+        }
         if st.pipe.is_none() && st.job.is_none() {
             empty(ui.painter(), st);
         }
@@ -52,9 +56,29 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             st.camera.zoom((scroll.y * 0.0022).exp());
         }
     }
-    // the middle button alone pans; the left drag alone orbits too (nothing
-    // else uses it here)
-    if (m || l) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
+    // a tool: the left button paints
+    if st.tool != Tool::Select && !alt {
+        let (pressed, released, pos) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.latest_pos()));
+        if pressed && resp.hovered() {
+            if let Some(p) = pos {
+                st.stroke_begin([p.x, p.y]);
+            }
+        } else if st.stroke.is_some() {
+            if let Some(p) = pos {
+                st.stroke_to([p.x, p.y]);
+            }
+            if released || !l {
+                st.stroke_end();
+            }
+        }
+        if st.stroke.is_some() {
+            st.interacting = true;
+            return;
+        }
+    }
+    // the middle button alone pans; the left drag alone orbits too (when no
+    // tool paints with it)
+    if (m || (l && st.tool == Tool::Select)) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
         if m {
             st.camera.pan(d.x, d.y, rect.height());
         } else {
@@ -63,11 +87,32 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         st.interacting = true;
         return;
     }
-    if resp.clicked() {
+    if resp.clicked() && st.tool == Tool::Select {
         if let Some(p) = resp.interact_pointer_pos() {
             st.click([p.x, p.y]);
         }
     }
+}
+
+/// The brush's circle at the pointer, and what it does.
+fn brush_cursor(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Response) {
+    let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else { return };
+    if !resp.hovered() && st.stroke.is_none() {
+        return;
+    }
+    let col = accent();
+    p.circle_stroke(pos, st.brush, Stroke::new(1.5, col));
+    p.circle_filled(pos, 1.5, col);
+    let label = match st.tool {
+        Tool::Brush(m) => m.label().to_string(),
+        Tool::Shape(k) => k.label().to_string(),
+        Tool::Select => return,
+    };
+    let at = pos + vec2(st.brush * 0.75 + 6.0, -st.brush * 0.75 - 6.0);
+    let g = p.layout_no_wrap(label, medium(11.5), on_accent());
+    let r = Rect::from_min_size(at - vec2(0.0, g.size().y + 4.0), g.size() + vec2(12.0, 4.0));
+    p.rect_filled(r, 5.0, tint(col, 0.92));
+    p.galley(r.min + vec2(6.0, 2.0), g, on_accent());
 }
 
 /// Nothing open: how to start.
@@ -90,6 +135,16 @@ pub fn hint(st: &AppState) -> String {
     let Some(p) = &st.pipe else { return "Open a mesh to rectify".into() };
     if st.compare {
         return "Original (release Space to compare)".into();
+    }
+    match st.tool {
+        Tool::Brush(BrushMode::Merge) => return "Merge: paint over the regions to join · [ ] size · Ctrl+Z undo · Esc done".into(),
+        Tool::Brush(BrushMode::Split) => return "Split: paint across a region to cut it in two · [ ] size · Ctrl+Z undo".into(),
+        Tool::Brush(BrushMode::Free) => return "Free: paint over faces to take them out of their region · [ ] size".into(),
+        Tool::Shape(k) => return format!("{}: paint over the surface, the shape fits it and grows · G next kind · Esc done", k.label()),
+        Tool::Select => {}
+    }
+    if st.edited && st.shown() != ViewMode::Result {
+        return "Regions edited: the result follows when you show it (3)".into();
     }
     if p.next().is_some() {
         return "Run the steps (R), or one by one from the cards on the right".into();

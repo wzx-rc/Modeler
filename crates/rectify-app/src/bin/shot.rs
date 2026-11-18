@@ -134,6 +134,37 @@ impl Harness {
         self.steps(2);
     }
 
+    /// A left-button drag through world points (projected on screen); with
+    /// `hold`, the button stays down at the end (a stroke being painted).
+    fn drag_screen(&mut self, pts: &[[f32; 2]], hold: bool) {
+        let scr: Vec<Pos2> = pts.iter().map(|a| Pos2::new(a[0], a[1])).collect();
+        let Some(&first) = scr.first() else { return };
+        self.pending.push(Event::PointerMoved(first));
+        self.step();
+        self.pending.push(Event::PointerButton { pos: first, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        self.step();
+        for w in scr.windows(2) {
+            for k in 1..=3 {
+                let t = k as f32 / 3.0;
+                self.pending.push(Event::PointerMoved(w[0] + (w[1] - w[0]) * t));
+                self.step();
+            }
+        }
+        if !hold {
+            let last = *scr.last().unwrap();
+            self.pending.push(Event::PointerButton { pos: last, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+            self.step();
+            self.steps(2);
+        }
+    }
+
+    fn release(&mut self) {
+        let p = self.ctx.input(|i| i.pointer.latest_pos()).unwrap_or(Pos2::ZERO);
+        self.pending.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        self.step();
+        self.steps(2);
+    }
+
     fn shot(&mut self, name: &str) {
         self.steps(2);
         self.t += 1.0 / 60.0;
@@ -261,6 +292,53 @@ fn main() {
         look(&mut h, [0.3, 0.72, 0.5], 60.0, 0.35, 0.1);
         h.trio("zebra-vents", true);
         h.st.settings.zebra = false;
+    }
+    if want("tools") {
+        use rectify_app::state::{BrushMode, Tool};
+        use rectify_core::Kind;
+        look(&mut h, [0.3, 0.72, 0.5], 60.0, 0.35, 0.1);
+        h.st.bare = false;
+        h.st.set_mode(ViewMode::Regions);
+        h.st.settings.edges = true;
+        h.st.gen += 1;
+        h.steps(3);
+        h.shot("tools-0-regions");
+        // strokes in screen points (this camera, the interface shown)
+        let line = |a: [f32; 2], b: [f32; 2], n: usize| -> Vec<[f32; 2]> { (0..=n).map(|i| { let t = i as f32 / n as f32; [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t] }).collect() };
+        // the big panel cut across, then joined again
+        h.st.set_tool(Tool::Brush(BrushMode::Split));
+        h.st.brush = 8.0;
+        h.drag_screen(&line([500.0, 160.0], [956.0, 160.0], 8), true);
+        h.shot("tools-1-split-stroke");
+        h.release();
+        h.shot("tools-2-split");
+        h.st.set_tool(Tool::Brush(BrushMode::Merge));
+        h.st.brush = 12.0;
+        h.drag_screen(&line([800.0, 100.0], [800.0, 230.0], 4), true);
+        h.shot("tools-3-merge-stroke");
+        h.release();
+        h.shot("tools-4-merged");
+        // the pieces of the round button's ring joined
+        h.drag_screen(&[[608.0, 344.0], [680.0, 248.0], [776.0, 256.0], [848.0, 360.0], [824.0, 480.0]], false);
+        h.shot("tools-5-ring-merged");
+        // a cylinder painted along the pipe under the panel
+        h.st.set_tool(Tool::Shape(Kind::Cylinder));
+        h.st.brush = 14.0;
+        h.drag_screen(&line([520.0, 722.0], [990.0, 722.0], 6), true);
+        h.shot("tools-6-shape-stroke");
+        h.release();
+        h.shot("tools-7-shape");
+        // the result follows when it is shown
+        h.st.set_tool(Tool::Select);
+        h.st.set_mode(ViewMode::Result);
+        h.steps(2);
+        h.wait();
+        h.st.bare = true;
+        h.st.settings.edges = false;
+        h.st.gen += 1;
+        h.shot("tools-8-result");
+        h.st.settings.edges = true;
+        h.st.bare = false;
     }
     let close: [(&str, [f32; 3], f32, f32, f32); 3] = [("close-muzzle", [0.1, 0.72, 0.5], 70.0, -0.9, 0.15), ("close-vents", [0.3, 0.72, 0.5], 60.0, 0.35, 0.1), ("close-grip", [0.65, 0.35, 0.5], 75.0, 0.4, 0.05)];
     for (n, f, d, y, p) in close {

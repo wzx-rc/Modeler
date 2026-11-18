@@ -297,6 +297,12 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_width(inner_w);
             grip(ui, "props");
             let _ = total;
+            if st.pipe.as_ref().map(|p| p.seg_raw.is_some()).unwrap_or(false) {
+                tools_card(ui, st);
+                ui.add_space(6.0);
+                divider(ui);
+                ui.add_space(6.0);
+            }
             if st.selected.is_some() {
                 region_card(ui, st);
                 ui.add_space(6.0);
@@ -443,6 +449,68 @@ fn step_card(ui: &mut Ui, st: &mut AppState) {
     }
 }
 
+/// The hand tools: the brush (merge, split, free) and the shapes placed by
+/// a stroke.
+fn tools_card(ui: &mut Ui, st: &mut AppState) {
+    title(ui, "Edit regions", "The software proposes, you correct with a stroke");
+    let kind = match st.tool {
+        Tool::Select => 0,
+        Tool::Brush(_) => 1,
+        Tool::Shape(_) => 2,
+    };
+    let items = [(0, "Select", accent()), (1, "Brush", accent()), (2, "Shape", accent())];
+    if let Some(k) = segmented(ui, &items, kind, 28.0) {
+        match k {
+            0 => st.set_tool(Tool::Select),
+            1 => st.set_tool(Tool::Brush(BrushMode::Merge)),
+            _ => st.set_tool(Tool::Shape(Kind::Plane)),
+        }
+    }
+    match st.tool {
+        Tool::Brush(m) => {
+            ui.add_space(4.0);
+            let items = [(BrushMode::Merge, "Merge", accent()), (BrushMode::Split, "Split", accent()), (BrushMode::Free, "Free", accent())];
+            if let Some(m2) = segmented(ui, &items, m, 26.0) {
+                st.set_tool(Tool::Brush(m2));
+            }
+        }
+        Tool::Shape(k) => {
+            ui.add_space(4.0);
+            let items = [(Kind::Plane, "Plane", accent()), (Kind::Cylinder, "Cylinder", accent()), (Kind::Sphere, "Sphere", accent())];
+            if let Some(k2) = segmented(ui, &items, k, 26.0) {
+                st.set_tool(Tool::Shape(k2));
+            }
+        }
+        Tool::Select => {}
+    }
+    if st.tool != Tool::Select {
+        let mut b = st.brush;
+        if slider_row(ui, "Brush size", &mut b, 3.0..=80.0, 1.0, "pt").0 {
+            st.brush = b;
+        }
+    }
+    let line_txt = match st.tool {
+        Tool::Select => "B brush · G shape · Ctrl+Z undo",
+        Tool::Brush(BrushMode::Merge) => "Paint over regions: they become one shape",
+        Tool::Brush(BrushMode::Split) => "Paint across a region: each side becomes its own",
+        Tool::Brush(BrushMode::Free) => "Paint over faces: they leave their region",
+        Tool::Shape(_) => "Paint over the surface: the shape fits what you paint, live, then grows over the mesh",
+    };
+    ui.label(egui::RichText::new(line_txt).font(regular(12.0)).color(TEXT2()));
+    if !st.undo.is_empty() || !st.redo.is_empty() {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let w = (ui.available_width() - 6.0) * 0.5;
+            if secondary_btn(ui, &format!("Undo ({})", st.undo.len()), w).clicked() {
+                st.undo();
+            }
+            if secondary_btn(ui, &format!("Redo ({})", st.redo.len()), w).clicked() {
+                st.redo();
+            }
+        });
+    }
+}
+
 fn region_card(ui: &mut Ui, st: &mut AppState) {
     let Some(r) = st.selected else { return };
     let Some(seg) = st.shown_seg() else { return };
@@ -511,8 +579,30 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         return;
     }
     let (k1, k2, k3, f, r, esc, space, z) = ctx.input(|i| (i.key_pressed(Key::Num1), i.key_pressed(Key::Num2), i.key_pressed(Key::Num3), i.key_pressed(Key::F), i.key_pressed(Key::R), i.key_pressed(Key::Escape), i.key_down(Key::Space), i.key_pressed(Key::Z)));
-    if z {
+    let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
+    let (b, g, y, lb, rb) = ctx.input(|i| (i.key_pressed(Key::B), i.key_pressed(Key::G), i.key_pressed(Key::Y), i.key_pressed(Key::OpenBracket), i.key_pressed(Key::CloseBracket)));
+    if cmd && z {
+        if shift {
+            st.redo();
+        } else {
+            st.undo();
+        }
+    } else if cmd && y {
+        st.redo();
+    } else if z {
         st.settings.zebra = !st.settings.zebra;
+    }
+    if b && !cmd {
+        st.brush_key();
+    }
+    if g && !cmd {
+        st.shape_key();
+    }
+    if lb {
+        st.brush = (st.brush / 1.2).max(3.0);
+    }
+    if rb {
+        st.brush = (st.brush * 1.2).min(80.0);
     }
     if k1 {
         st.set_mode(ViewMode::Original);
@@ -526,11 +616,15 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if f {
         st.frame_all();
     }
-    if r {
+    if r && !cmd {
         st.run_all();
     }
     if esc {
-        st.selected = None;
+        if st.tool != Tool::Select {
+            st.set_tool(Tool::Select);
+        } else {
+            st.selected = None;
+        }
         st.files_open = false;
     }
     st.compare = space;

@@ -2,8 +2,10 @@
 //! original, the regions in colour, or the result), the lines where regions
 //! meet, and each region's colour and state.
 
-use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, Renderer, FACE_SELECTED};
-use crate::state::{AppState, ViewMode};
+use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, Renderer, FACE_HOVERED, FACE_SELECTED};
+use crate::state::{AppState, BrushMode, Tool, ViewMode};
+use glam::DVec3;
+use rectify_core::Prim;
 use crate::theme;
 use rayon::prelude::*;
 use rectify_core::snap::crease_normals;
@@ -19,6 +21,9 @@ pub struct Drawer {
     gen: u64,
     mode: Option<ViewMode>,
     flags: Vec<FaceGpu>,
+    /// Display normals of the mesh shown, by (mesh generation, mode).
+    normals: Option<((u64, ViewMode), Vec<[DVec3; 3]>)>,
+    stroke_gen: Option<u64>,
 }
 
 fn hsv(h: f32, s: f32, v: f32) -> [f32; 3] {
@@ -50,7 +55,7 @@ pub fn region_color(i: u32, k: Kind) -> [f32; 3] {
 
 impl Drawer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Drawer {
-        Drawer { r: Renderer::new(device, format), gen: 0, mode: None, flags: vec![] }
+        Drawer { r: Renderer::new(device, format), gen: 0, mode: None, flags: vec![], normals: None, stroke_gen: None }
     }
 
     fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, st: &AppState) {
@@ -67,7 +72,11 @@ impl Drawer {
         let label: Option<&[u32]> = seg.map(|s| s.label.as_slice());
         // the same in every mode, so that they compare: sharp where the
         // surface turns more than 40°, else smooth
-        let normals = crease_normals(m, &p.topo, 40.0);
+        let key = (st.mesh_gen, mode);
+        if self.normals.as_ref().map(|n| n.0 != key).unwrap_or(true) {
+            self.normals = Some((key, crease_normals(m, &p.topo, 40.0)));
+        }
+        let normals = &self.normals.as_ref().unwrap().1;
         let face_of = |t: usize| -> u32 {
             match (mode, label) {
                 (ViewMode::Original, _) | (_, None) => 0,
@@ -110,7 +119,34 @@ impl Drawer {
             line_vertices(&lines, col, 0.9, &mut edges);
         }
         self.r.upload_part(device, queue, &verts, &edges);
-        self.r.upload_overlay(device, queue, &[] as &[LineVertex]);
+        self.stroke_gen = None;
+    }
+
+    /// The stroke being painted: the outline of what it covers, and the
+    /// shape fitted on it (Shape tool).
+    fn sync_overlay(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, st: &AppState) {
+        if self.stroke_gen == Some(st.stroke_gen) {
+            return;
+        }
+        self.stroke_gen = Some(st.stroke_gen);
+        let mut out: Vec<LineVertex> = vec![];
+        if let (Some(stroke), Some(p), Some(m)) = (&st.stroke, &st.pipe, st.shown_mesh()) {
+            let mut lines: Vec<Vec<[f32; 3]>> = vec![];
+            for &f in &stroke.faces {
+                let tri = m.tris[f as usize];
+                for k in 0..3 {
+                    let o = p.topo.adj[f as usize][k];
+                    if o == rectify_core::NONE || !stroke.faces.contains(&o) {
+                        lines.push(vec![m.pos[tri[k] as usize].as_vec3().to_array(), m.pos[tri[(k + 1) % 3] as usize].as_vec3().to_array()]);
+                    }
+                }
+            }
+            line_vertices(&lines, [255, 176, 112, 255], 1.1, &mut out);
+            if let Some(q) = &stroke.prim {
+                line_vertices(&shape_wire(q, &stroke.points), [242, 140, 58, 255], 1.6, &mut out);
+            }
+        }
+        self.r.upload_overlay(device, queue, &out);
     }
 
     /// Each region's colour and state (cheap: compared every frame).
@@ -123,11 +159,17 @@ impl Drawer {
         // colours: 0 clay, 1 free, 2.. the regions
         let mut flags = vec![FaceGpu { color: linear(CLAY), flags: 0, metal: 0.0, rough: 0.55, pad: [0.0; 2] }];
         flags.push(FaceGpu { color: linear(if mode == ViewMode::Regions { FREE } else { CLAY }), flags: 0, metal: 0.0, rough: 0.55, pad: [0.0; 2] });
+        // the regions a merge stroke has touched so far
+        let touched: &[u32] = match (&st.stroke, st.tool) {
+            (Some(s), Tool::Brush(BrushMode::Merge)) => &s.regions,
+            _ => &[],
+        };
         if let Some(s) = seg {
             for (i, r) in s.regions.iter().enumerate() {
                 let color = if mode == ViewMode::Regions { region_color(i as u32, r.prim.kind()) } else { CLAY };
                 let sel = st.selected == Some(i as u32);
-                flags.push(FaceGpu { color: linear(color), flags: if sel { FACE_SELECTED } else { 0 }, metal: 0.0, rough: 0.55, pad: [0.0; 2] });
+                let f = if sel { FACE_SELECTED } else if touched.contains(&(i as u32)) { FACE_HOVERED } else { 0 };
+                flags.push(FaceGpu { color: linear(color), flags: f, metal: 0.0, rough: 0.55, pad: [0.0; 2] });
             }
         }
         if flags != self.flags {
@@ -141,6 +183,7 @@ impl Drawer {
     pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::TextureView, size: [u32; 2], ppp: f32, st: &AppState, paint: &[egui::ClippedPrimitive], textures: &mut egui::TexturesDelta) {
         self.sync(device, queue, st);
         self.sync_flags(device, queue, st);
+        self.sync_overlay(device, queue, st);
         let a = theme::accent();
         let sel = [a.r() as f32 / 255.0, a.g() as f32 / 255.0, a.b() as f32 / 255.0];
         let frame = Frame {
@@ -157,5 +200,54 @@ impl Drawer {
             textures,
         };
         self.r.render(device, queue, target, size, frame);
+    }
+}
+
+/// Lines that show a shape around the stroke that fitted it: a disc for a
+/// plane, rings and lines for a cylinder, three great circles for a sphere.
+pub fn shape_wire(q: &Prim, pts: &[DVec3]) -> Vec<Vec<[f32; 3]>> {
+    let n = pts.len().max(1) as f64;
+    let mean = pts.iter().copied().sum::<DVec3>() / n;
+    let circle = |c: DVec3, u: DVec3, v: DVec3, r: f64| -> Vec<[f32; 3]> {
+        (0..=64)
+            .map(|i| {
+                let t = i as f64 / 64.0 * std::f64::consts::TAU;
+                (c + (u * t.cos() + v * t.sin()) * r).as_vec3().to_array()
+            })
+            .collect()
+    };
+    match *q {
+        Prim::Plane { n, .. } => {
+            let c = q.project(mean);
+            let r = pts.iter().map(|p| (q.project(*p) - c).length()).fold(0.0, f64::max).max(2.0) * 1.3;
+            let u = n.any_orthonormal_vector();
+            let v = n.cross(u);
+            vec![
+                circle(c, u, v, r),
+                vec![(c - u * r).as_vec3().to_array(), (c + u * r).as_vec3().to_array()],
+                vec![(c - v * r).as_vec3().to_array(), (c + v * r).as_vec3().to_array()],
+            ]
+        }
+        Prim::Cylinder { p, a, r } => {
+            let ts: Vec<f64> = pts.iter().map(|x| a.dot(*x - p)).collect();
+            let (mut t0, mut t1) = ts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| (lo.min(*t), hi.max(*t)));
+            if !t0.is_finite() {
+                t0 = 0.0;
+                t1 = 0.0;
+            }
+            let extra = (r * 1.5 - (t1 - t0) * 0.5).max(r * 0.5);
+            t0 -= extra;
+            t1 += extra;
+            let u = a.any_orthonormal_vector();
+            let v = a.cross(u);
+            let mut out = vec![circle(p + a * t0, u, v, r), circle(p + a * ((t0 + t1) * 0.5), u, v, r), circle(p + a * t1, u, v, r)];
+            for k in 0..8 {
+                let ang = k as f64 / 8.0 * std::f64::consts::TAU;
+                let d = (u * ang.cos() + v * ang.sin()) * r;
+                out.push(vec![(p + a * t0 + d).as_vec3().to_array(), (p + a * t1 + d).as_vec3().to_array()]);
+            }
+            out
+        }
+        Prim::Sphere { c, r } => vec![circle(c, DVec3::X, DVec3::Y, r), circle(c, DVec3::Y, DVec3::Z, r), circle(c, DVec3::Z, DVec3::X, r)],
     }
 }
