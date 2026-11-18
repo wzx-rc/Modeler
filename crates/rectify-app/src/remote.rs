@@ -54,6 +54,8 @@ pub struct Pending {
     deferred: Vec<Request>,
     pub captures: Vec<Capture>,
     pub port: Option<u16>,
+    /// Why the link could not start.
+    pub error: Option<String>,
     /// Requests answered (shown in the status line).
     pub served: usize,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -69,7 +71,14 @@ impl Pending {
 /// sleeps when nothing moves).
 pub fn start(st: &mut AppState, wake: Arc<dyn Fn() + Send + Sync>) -> Result<u16, String> {
     let port = std::env::var("FORME_RECTIFY_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_PORT);
-    let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("port {port}: {e}"))?;
+    let listener = match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(l) => l,
+        Err(e) => {
+            let e = format!("port {port}: {e}");
+            st.remote.error = Some(e.clone());
+            return Err(e);
+        }
+    };
     let (tx, rx) = channel::<Request>();
     let w = wake.clone();
     std::thread::spawn(move || {

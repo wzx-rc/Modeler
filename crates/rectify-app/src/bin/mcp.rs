@@ -16,7 +16,9 @@ const PORT: u16 = 47820;
 const INSTRUCTIONS: &str = "Forme Rectify cleans a noisy mesh made by an AI (or a scan): its triangles stay, its vertices move onto the shapes the object is made of. \
 The app shows 4 stages: 0 the scan, 1 the algorithm alone (regions = planes / cylinders / spheres, edges and fillets rebuilt, round pieces), 2 cleaned (nowhere rougher than the AI mesh), 3 the algorithm driven by edits: yours (the AI pass) and the user's brush strokes. \
 Your job in the AI pass: look at the mesh (capture), read the regions (list_regions, region_info), and decide what the algorithm got wrong: regions that are one surface split in pieces (merge), wrong shape kinds (retype), organic parts that should stay as they are (free, keep), parts that should share a radius / axis / plane (same_radius, coaxial, coplanar), round turned pieces it missed (revolve) or wrongly made round (no_revolve). Then run stage 3 and compare it with stage 2 (capture both, same view, style surface or diff). \
-Work in small batches and check each with a capture. Units are millimetres. The user cares about straight lines and clean fillets, not micro noise.";
+Work in small batches and check each with a capture. Units are millimetres. The user cares about straight lines and clean fillets, not micro noise. \
+What usually goes wrong: small repeated details (ribbed hoses, fins, grooves, knurls) are cut into many short cylinders and small planes, and the snap flattens their detail or leaves lumps where they meet: free all of their regions (list_regions near the part, keep those inside its box, leave the big faces of the frame around it). Stage 2 never gets rougher than the AI mesh but can lose such details: compare it with stage 0. \
+To find what is where: capture, then pick on the picture (x, y as fractions); capture with edges false for a clean look, style regions to see the regions.";
 
 fn tools() -> Value {
     let stage = json!({ "type": ["integer", "string"], "description": "0 scan, 1 algorithm, 2 cleaned, 3 ai (default 3)" });

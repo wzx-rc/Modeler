@@ -531,6 +531,7 @@ fn step_card(ui: &mut Ui, st: &mut AppState) {
             slider_f64(ui, "Min radius", &mut p.snap.min_radius, 0.0..=2.0, 0.05, "mm");
             slider_f64(ui, "Radius step", &mut p.snap.round, 0.0..=0.5, 0.05, "mm");
             slider_f64(ui, "Fade", &mut p.snap.fade, 0.0..=3.0, 0.05, "mm");
+            slider_f64(ui, "End fade", &mut p.snap.end_fade, 0.0..=3.0, 0.05, "mm");
             slider_f64(ui, "Flatten", &mut p.snap.flatten, 0.0..=1.0, 0.05, "");
             slider_f64(ui, "Max move", &mut p.snap.max_move, 0.05..=5.0, 0.05, "mm");
             if let Some(r) = pipe.and_then(|p| p.lanes[0].snap.as_ref()) {
@@ -558,20 +559,24 @@ fn step_card(ui: &mut Ui, st: &mut AppState) {
             }
         }
         Step::Clean => {
-            title(ui, "7 · Clean", "Never rougher than the AI mesh: where the result got sharper than it, the move is smoothed, then taken back");
+            title(ui, "7 · Clean", "Never rougher than the AI mesh: where the result bends more or wrinkles more than it, it is smoothed, then taken back a third at a time");
             if toggle_row(ui, "Clean", p.tidy.on) {
                 p.tidy.on = !p.tidy.on;
             }
-            slider_f64(ui, "Margin", &mut p.tidy.margin, 2.0..=45.0, 1.0, "°");
-            slider_f64(ui, "On edges", &mut p.tidy.edge_margin, 5.0..=90.0, 1.0, "°");
+            slider_f64(ui, "Bend", &mut p.tidy.margin, 2.0..=45.0, 1.0, "°");
+            slider_f64(ui, "Wrinkles", &mut p.tidy.noise, 0.3..=8.0, 0.1, "°");
+            slider_f64(ui, "Edge bend", &mut p.tidy.edge_margin, 5.0..=90.0, 1.0, "°");
+            slider_f64(ui, "Edge wrinkle", &mut p.tidy.edge_noise, 0.5..=15.0, 0.1, "°");
             slider_usize(ui, "Smoothing", &mut p.tidy.iters, 0.0..=100.0);
             slider_usize(ui, "Rings", &mut p.tidy.rings, 0.0..=6.0);
             if toggle_row(ui, "Take back", p.tidy.revert) {
                 p.tidy.revert = !p.tidy.revert;
             }
+            slider_f64(ui, "Fade", &mut p.tidy.fade, 0.3..=4.0, 0.05, "mm");
+            slider_f64(ui, "Share", &mut p.tidy.revert_step, 0.1..=1.0, 0.01, "");
             if let Some(r) = pipe.and_then(|p| p.lanes[0].tidy.as_ref()) {
-                line(ui, format!("Rougher than the AI mesh: {} k → {} k vertices", fmt(r.rough_before as f64 / 1000.0, 1), fmt(r.rough_after as f64 / 1000.0, 1)));
-                line(ui, format!("{} k smoothed · {} k taken back", r.smoothed / 1000, r.reverted / 1000));
+                line(ui, format!("Rougher than the AI mesh: {} k → {} k → {} k vertices", fmt(r.rough_before as f64 / 1000.0, 1), fmt(r.rough_mid as f64 / 1000.0, 1), fmt(r.rough_after as f64 / 1000.0, 1)));
+                line(ui, format!("{} k smoothed · {} k taken back (some only in part)", r.smoothed / 1000, r.reverted / 1000));
             }
             line(ui, "Diff view: red where still rougher");
         }
@@ -659,7 +664,10 @@ fn edits_card(ui: &mut Ui, st: &mut AppState) {
     title(ui, "3 · AI edits", "Replayed in order on the algorithm's regions: the AI pass from Claude Desktop and your brush strokes");
     let link = match st.remote.port {
         Some(port) => format!("Claude Desktop link: on (port {port}) · {} requests", st.remote.served),
-        None => "Claude Desktop link: off (the port is taken?)".to_string(),
+        None => match &st.remote.error {
+            Some(e) => format!("Claude Desktop link: off ({e})"),
+            None => "Claude Desktop link: off".to_string(),
+        },
     };
     ui.label(egui::RichText::new(link).font(regular(12.0)).color(if st.remote.port.is_some() { OK } else { ERROR }));
     if let Some(path) = st.script_path() {
