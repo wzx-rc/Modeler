@@ -115,6 +115,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         inspector(ctx, st, screen);
     }
     context_bar(ctx, st);
+    op_window(ctx, st);
     files_dialog(ctx, st, screen);
     toast(ctx, st, screen);
     shortcuts(ctx, st);
@@ -551,6 +552,162 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
     });
 }
 
+// ------------------------------------------------- the operation window
+
+/// What the operation window shows: the picked edges, faces or vertices,
+/// or the selected step (fillet, chamfer, inset, extrude, move) or path.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum OpPop {
+    Edges,
+    Faces,
+    Verts,
+    Step(FeatureId),
+}
+
+fn op_pop(st: &AppState) -> Option<OpPop> {
+    if st.creation.is_some() || st.sketch.is_some() || st.push.is_some() || st.tool != Tool::Select {
+        return None;
+    }
+    if st.selection.is_empty() {
+        return if !st.edge_sel.is_empty() {
+            Some(OpPop::Edges)
+        } else if !st.face_sel.is_empty() {
+            Some(OpPop::Faces)
+        } else if !st.vert_sel.is_empty() {
+            Some(OpPop::Verts)
+        } else {
+            None
+        };
+    }
+    let f = st.single()?;
+    (!f.is_solid() || f.is_path()).then_some(OpPop::Step(f.id))
+}
+
+/// Where the worked component is on screen: the box round its points.
+fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
+    let pts: Vec<DVec3> = match k {
+        OpPop::Edges => st.edge_sel.iter().map(|e| e.at).collect(),
+        OpPop::Faces => st.face_sel.iter().map(|f| f.at).collect(),
+        OpPop::Verts => st.vert_sel.clone(),
+        OpPop::Step(id) => {
+            let f = st.doc.feature(id)?;
+            if f.is_path() {
+                f.outline().concat()
+            } else if let Some(t) = &f.tweak {
+                vec![t.at() + t.delta]
+            } else if let Some(r) = &f.round {
+                r.edges.iter().map(|e| e.at).collect()
+            } else {
+                vec![f.origin]
+            }
+        }
+    };
+    let view = st.view();
+    let mut r: Option<Rect> = None;
+    for p in pts {
+        if let Some(s) = view.project(p.as_vec3()) {
+            let q = pos2(s[0], s[1]);
+            r = Some(r.map(|r| r.union(Rect::from_min_max(q, q))).unwrap_or(Rect::from_min_max(q, q)));
+        }
+    }
+    r
+}
+
+/// The settings of the operation under way, in a small window next to the
+/// component it works on (Romain 18 nov., 22 h 31: "en pop-up fenêtre avec
+/// grip de déplacement… comme dans Maya quand on fait un Bevel"). It
+/// follows the component; its grip moves it (double-click: back by it).
+fn op_window(ctx: &egui::Context, st: &mut AppState) {
+    let Some(k) = op_pop(st) else { return };
+    let Some(anchor) = op_anchor(st, k) else { return };
+    // a new subject: the window comes back next to it
+    let subject = format!("{k:?}");
+    let key = Id::new("op-pop-subject");
+    if ctx.data(|d| d.get_temp::<String>(key)) != Some(subject.clone()) {
+        ctx.data_mut(|d| {
+            d.insert_temp(key, subject);
+            d.insert_persisted(Id::new(("panel-offset", "op-pop")), egui::Vec2::ZERO);
+        });
+    }
+    const W: f32 = 236.0;
+    let full = W + 20.0;
+    let vr = st.view_rect;
+    // at the component's height, beside the part so it covers neither the
+    // part nor the gizmo: on its right, else its left, else by the component
+    let view = st.view();
+    let mut part = anchor;
+    if let Some((lo, hi)) = st.model.as_ref().and_then(|m| m.bounds()) {
+        for i in 0..8 {
+            let c = glam::Vec3::new(if i & 1 == 0 { lo[0] } else { hi[0] }, if i & 2 == 0 { lo[1] } else { hi[1] }, if i & 4 == 0 { lo[2] } else { hi[2] });
+            if let Some(p) = view.project(c) {
+                part = part.union(Rect::from_min_max(pos2(p[0], p[1]), pos2(p[0], p[1])));
+            }
+        }
+    }
+    // the paths too: they have no mesh
+    for f in st.doc.features.iter().filter(|f| f.visible && f.is_path()) {
+        for q in f.outline().concat() {
+            if let Some(p) = view.project(q.as_vec3()) {
+                part = part.union(Rect::from_min_max(pos2(p[0], p[1]), pos2(p[0], p[1])));
+            }
+        }
+    }
+    let gap = 28.0;
+    // its height as drawn last frame keeps it inside the view
+    let h = ctx.memory(|m| m.area_rect(Id::new("op-pop"))).map(|r| r.height()).unwrap_or(200.0);
+    let (left, right, top, bottom) = (vr[0] + 8.0, vr[2] - 8.0, vr[1] + 48.0, vr[3] - 8.0);
+    let y_by = (anchor.center().y - 60.0).clamp(top, (bottom - h).max(top));
+    let x_by = (anchor.center().x - full * 0.5).clamp(left, (right - full).max(left));
+    let at = if part.max.x + gap + full < right {
+        pos2(part.max.x + gap, y_by)
+    } else if part.min.x - gap - full > left {
+        pos2(part.min.x - gap - full, y_by)
+    } else if part.max.y + gap + h < bottom {
+        pos2(x_by, part.max.y + gap)
+    } else if part.min.y - gap - h > top {
+        pos2(x_by, part.min.y - gap - h)
+    } else {
+        let x = if anchor.max.x + 96.0 + full < right { anchor.max.x + 96.0 } else { anchor.min.x - 96.0 - full };
+        pos2(x.clamp(left, (right - full).max(left)), y_by)
+    } + panel_offset(ctx, "op-pop");
+    egui::Area::new(Id::new("op-pop")).order(Order::Foreground).fixed_pos(at).show(ctx, |ui| {
+        island().inner_margin(Margin::same(10)).show(ui, |ui| {
+            ui.set_width(W);
+            grip(ui, "op-pop");
+            match k {
+                OpPop::Edges => round_card(ui, st),
+                OpPop::Faces => face_card(ui, st),
+                OpPop::Verts => {
+                    let n = st.vert_sel.len();
+                    ui.label(egui::RichText::new(if n > 1 { format!("{n} vertices") } else { "Vertex".to_string() }).font(semibold(14.0)).color(TEXT()));
+                    vertex_card(ui, st);
+                }
+                OpPop::Step(id) => {
+                    let Some(f) = st.doc.feature(id).cloned() else { return };
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&f.name).font(semibold(14.0)).color(TEXT()));
+                        chip_label(ui, f.kind_label(), RAISED(), LABEL());
+                    });
+                    if f.push.is_some() {
+                        push_card(ui, st);
+                    } else if f.tweak.is_some() {
+                        tweak_card(ui, st, id);
+                    } else if f.is_path() {
+                        path_card(ui, st, &f);
+                    } else {
+                        round_card(ui, st);
+                    }
+                }
+            }
+        });
+    });
+}
+
+/// In the left panel: the settings are in the window in the view.
+fn pop_note(ui: &mut Ui) {
+    ui.label(egui::RichText::new("Its settings are in the window next to it in the view (its grip moves it)").font(regular(12.0)).color(TEXT2()));
+}
+
 // ------------------------------------------------------------ inspector
 
 fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
@@ -575,15 +732,19 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             egui::ScrollArea::vertical().id_salt("props-scroll").max_height(props_max).min_scrolled_height(props_max).auto_shrink([false, true]).show(ui, |ui| {
                 ui.set_width(inner_w);
                 if st.selection.is_empty() && !st.edge_sel.is_empty() {
-                    round_card(ui, st);
+                    let n = st.edge_sel.len();
+                    ui.label(egui::RichText::new(if n > 1 { format!("{n} edges picked") } else { "Edge picked".to_string() }).font(semibold(14.0)).color(TEXT()));
+                    pop_note(ui);
                 } else if st.selection.is_empty() && !st.face_sel.is_empty() {
-                    face_card(ui, st);
+                    let n = st.face_sel.len();
+                    ui.label(egui::RichText::new(if n > 1 { format!("{n} faces picked") } else { "Face picked".to_string() }).font(semibold(14.0)).color(TEXT()));
+                    pop_note(ui);
                 } else if st.selection.is_empty() && !st.vert_sel.is_empty() {
                     let n = st.vert_sel.len();
                     ui.label(egui::RichText::new(if n > 1 { format!("{n} vertices picked") } else { "Vertex picked".to_string() }).font(semibold(14.0)).color(TEXT()));
                     let v = st.vert_sel[0];
                     ui.label(egui::RichText::new(format!("X {}  Y {}  Z {} mm", fmt_mm(v.x as f32), fmt_mm(v.y as f32), fmt_mm(v.z as f32))).font(regular(12.0)).color(TEXT2()));
-                    vertex_card(ui, st);
+                    pop_note(ui);
                 } else if st.single().is_some() {
                     properties(ui, st);
                 } else if !st.selection.is_empty() {
@@ -796,20 +957,17 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         return;
     }
     divider(ui);
-    if f.push.is_some() {
-        push_card(ui, st);
-        return;
-    }
-    if f.tweak.is_some() {
-        tweak_card(ui, st, id);
-        return;
-    }
-    if !f.is_solid() {
-        round_card(ui, st);
-        return;
-    }
-    if f.is_path() {
-        path_card(ui, st, &f);
+    // a step or a path: its settings are in the window by it in the view
+    if !f.is_solid() || f.is_path() {
+        pop_note(ui);
+        if f.is_path() {
+            let any_down = ui.input(|i| i.pointer.any_down());
+            section(ui, "Position and rotation");
+            position_rows(ui, st, &f);
+            if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+                st.end_live();
+            }
+        }
         return;
     }
 
@@ -905,8 +1063,6 @@ fn path_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
             });
         }
     }
-    section(ui, "Position and rotation");
-    position_rows(ui, st, f);
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
         st.end_live();
     }

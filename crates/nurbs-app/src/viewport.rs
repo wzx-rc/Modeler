@@ -802,13 +802,13 @@ pub fn hint(st: &AppState) -> String {
             PushKind::Extrude => "Extrude: press on a flat face and drag it out (adds) or in (carves)".into(),
         },
         (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => {
-            format!("{} · drag the arrows, or set X, Y, Z on the left · Del deletes", st.selected_tweak().map(|f| f.kind_label()).unwrap_or("Move"))
+            format!("{} · drag the arrows, or set X, Y, Z in its window · Del deletes", st.selected_tweak().map(|f| f.kind_label()).unwrap_or("Move"))
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Vertex => {
             if st.vert_sel.is_empty() {
                 "Vertices: click one · Shift + click adds · the arrows move it".into()
             } else {
-                let what = if st.comp_pivot().is_some() { "drag an arrow to move" } else if !st.picked_profile_corners().is_empty() { "a fillet or a bevel on the left" } else { "Shift + click adds" };
+                let what = if st.comp_pivot().is_some() { "drag an arrow to move" } else if !st.picked_profile_corners().is_empty() { "a fillet or a bevel in the window" } else { "Shift + click adds" };
                 format!("{} vert{} picked · {what} · Esc deselects", st.vert_sel.len(), if st.vert_sel.len() == 1 { "ex" } else { "ices" })
             }
         }
@@ -827,11 +827,11 @@ pub fn hint(st: &AppState) -> String {
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Edge => {
             if let Some(f) = st.selected_round() {
-                format!("{} · set its size on the left · Shift + click an edge to add it · Del deletes", f.kind_label())
+                format!("{} · set its size in its window · Shift + click an edge to add it · Del deletes", f.kind_label())
             } else if st.edge_sel.is_empty() {
                 "Edges: click an edge of the part · Shift + click adds · click a fillet to edit it · 4 or Q: objects".into()
             } else {
-                "Arrows: move the edge · or a fillet / chamfer on the left · Shift + click adds an edge · Esc deselects".into()
+                "Arrows: move the edge · or a fillet / chamfer in the window · Shift + click adds an edge · Esc deselects".into()
             }
         }
         (None, Tool::Select) => {
