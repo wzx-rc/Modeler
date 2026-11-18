@@ -53,6 +53,9 @@ pub enum Tool {
     /// Click the paths around a part of the scan: one NURBS surface fills
     /// the loop they close, laid on the scan.
     Patch,
+    /// Click a flat face: all of it found, its outline made a closed path
+    /// (caught by its edges and corners) and filled with a patch.
+    Face,
 }
 
 impl Tool {
@@ -65,6 +68,7 @@ impl Tool {
             Tool::Box => "Box",
             Tool::Line => "Line",
             Tool::Patch => "Patch",
+            Tool::Face => "Face",
         }
     }
 }
@@ -88,6 +92,8 @@ impl Doc {
 /// What a NURBS object is.
 pub enum Shape {
     Surface(Surface),
+    /// A surface cut by an outline (in its (u, v), closed): a flat face's.
+    Trimmed(Surface, Vec<DVec2>),
     Curve(Curve),
 }
 
@@ -127,10 +133,13 @@ pub struct Stroke {
 /// The Patch being made: the paths picked (their places in `objects`), its
 /// settings (live) and the surface made, or why not. A click inside a cell
 /// of the paths gives its loop (`lines`, runs of one path each); else the
-/// loop is found from the paths picked.
+/// loop is found from the paths picked. A flat face (the Face tool) is
+/// filled by a surface cut by its outline instead (`face`: the face and
+/// its outline path as a polyline).
 pub struct PatchEdit {
     pub picked: Vec<usize>,
     pub lines: Option<Vec<Vec<DVec3>>>,
+    pub face: Option<(rectify_core::face::Face, Vec<DVec3>)>,
     pub params: PatchParams,
     pub made: Result<Patched, String>,
 }
@@ -217,6 +226,18 @@ pub struct AppState {
     pub patch: Option<PatchEdit>,
     pub patch_params: PatchParams,
     pub patch_hover: Option<usize>,
+    /// The face found by the last Face click.
+    pub face_info: Option<FaceInfo>,
+}
+
+/// The face found by a Face click: its area (mm²), its holes (parts raised
+/// or sunk in it), the corners of its outline and its length (mm).
+#[derive(Clone, Copy, Debug)]
+pub struct FaceInfo {
+    pub area: f64,
+    pub holes: usize,
+    pub corners: usize,
+    pub length: f64,
 }
 
 impl Default for AppState {
@@ -261,6 +282,7 @@ impl AppState {
             patch: None,
             patch_params: PatchParams::default(),
             patch_hover: None,
+            face_info: None,
         }
     }
 
@@ -915,7 +937,7 @@ impl AppState {
             return;
         };
         let params = self.patch_params;
-        let pe = self.patch.get_or_insert(PatchEdit { picked: vec![], lines: None, params, made: Err(String::new()) });
+        let pe = self.patch.get_or_insert(PatchEdit { picked: vec![], lines: None, face: None, params, made: Err(String::new()) });
         pe.lines = None;
         if let Some(k) = pe.picked.iter().position(|&j| j == i) {
             pe.picked.remove(k);
@@ -956,10 +978,37 @@ impl AppState {
             Ok((runs, used)) => {
                 self.patch_apply();
                 let picked = used.iter().map(|&k| curves[k].0).collect();
-                self.patch = Some(PatchEdit { picked, lines: Some(runs), params: self.patch_params, made: Err(String::new()) });
+                self.patch = Some(PatchEdit { picked, lines: Some(runs), face: None, params: self.patch_params, made: Err(String::new()) });
                 self.patch_rebuild();
             }
             Err(e) => self.toast(e, true),
+        }
+    }
+
+    /// A click on a flat face (the Face tool): all of it found, its outline
+    /// made a closed path (kept) and the face filled by a surface cut by it
+    /// (set live; the one before is kept).
+    pub fn face_click(&mut self, at: [f32; 2]) {
+        let Some((t, x)) = self.pick_hit(at) else { return };
+        self.patch_apply();
+        let made = {
+            let Some(d) = &self.doc else { return };
+            rectify_core::face::find(&d.mesh, &d.topo, t as u32, x, d.edge).and_then(|f| rectify_core::face::outline_path(&f, d.edge).map(|(c, corners, length)| (f, c, corners, length)))
+        };
+        match made {
+            Ok((f, curve, corners, length)) => {
+                let what = format!("outline · {corners} corners · {} mm · closed", fmt(length, 1));
+                self.face_info = Some(FaceInfo { area: f.area, holes: f.holes, corners, length });
+                let line = patch::polyline(&curve);
+                self.add_object(Object { tool: Tool::Face, what, shape: Shape::Curve(curve) });
+                let idx = self.objects.len() - 1;
+                self.patch = Some(PatchEdit { picked: vec![idx], lines: None, face: Some((f, line)), params: self.patch_params, made: Err(String::new()) });
+                self.patch_rebuild();
+            }
+            Err(e) => {
+                self.face_info = None;
+                self.toast(e, true);
+            }
         }
     }
 
@@ -978,8 +1027,13 @@ impl AppState {
                 })
                 .collect(),
         };
-        let tol = (d.edge * 4.0).max(0.3);
-        pe.made = patch::loop_sides(&lines, tol).and_then(|sides| patch::patch(&d.mesh, d.closest(), &sides, pe.params, d.edge));
+        pe.made = match &pe.face {
+            Some((f, outline)) => rectify_core::face::fill(&d.mesh, f, outline, pe.params, d.edge),
+            None => {
+                let tol = (d.edge * 4.0).max(0.3);
+                patch::loop_sides(&lines, tol).and_then(|sides| patch::patch(&d.mesh, d.closest(), &sides, pe.params, d.edge))
+            }
+        };
         self.patch_params = pe.params;
         self.objects_gen += 1;
         self.overlay_gen += 1;
@@ -999,6 +1053,12 @@ impl AppState {
         self.objects_gen += 1;
         self.overlay_gen += 1;
         let Ok(made) = pe.made else { return };
+        if pe.face.is_some() {
+            let what = format!("face · {} × {} spans · cut by its outline · {} mm from the scan", made.spans[0], made.spans[1], fmt(made.off, 3));
+            self.toast(format!("Kept: {what}"), false);
+            self.add_object(Object { tool: Tool::Face, what, shape: Shape::Trimmed(made.surface, made.trim) });
+            return;
+        }
         let what = format!("{} paths · {} × {} spans · {} mm from the scan", pe.picked.len(), made.spans[0], made.spans[1], fmt(made.off, 3));
         self.toast(format!("Kept: patch, {what}"), false);
         self.add_object(Object { tool: Tool::Patch, what, shape: Shape::Surface(made.surface) });

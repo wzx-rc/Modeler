@@ -22,7 +22,9 @@
 //! with the Line tool (each a polyline through those points), then
 //! RECTIFY_PATCH="0;1;…" the paths kept clicked with the Patch tool (their
 //! places in the list), or "x,y" points of the bare view clicked (inside a
-//! cell of the paths: its patch, the one before kept).
+//! cell of the paths: its patch, the one before kept). RECTIFY_FACE="x,y;…":
+//! clicks with the Face tool there (screen points of the bare view), each
+//! flat face's outline and patch printed and kept.
 
 use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use glam::Vec3;
@@ -487,6 +489,58 @@ fn line_strokes(h: &mut Harness, name: &str, s: &str) {
     }
 }
 
+/// Clicks with the Face tool ("x,y;…", screen points of the bare view): each
+/// face found, its outline and its patch printed, the patch shown then kept
+/// by the next click; all of them shown at the end (and from RECTIFY_LOOK2).
+fn face_clicks(h: &mut Harness, name: &str, s: &str) {
+    h.st.set_tool(Tool::Navigate);
+    h.st.bare = true;
+    h.steps(1);
+    h.shot(&format!("{name}-0-before"));
+    if std::env::var("RECTIFY_ZEBRA").is_ok() {
+        h.st.settings.zebra = true;
+        h.shot(&format!("{name}-0-zebra"));
+        h.st.settings.zebra = false;
+    }
+    let world: Vec<glam::Vec3> = s.split(';').map(nums).filter(|v| v.len() == 2).filter_map(|v| h.st.pick_hit([v[0], v[1]]).map(|(_, x)| x.as_vec3())).collect();
+    h.st.bare = false;
+    h.st.set_tool(Tool::Face);
+    h.steps(2);
+    for (k, x) in world.iter().enumerate() {
+        let Some(sp) = h.st.view().project(*x) else { continue };
+        let t = std::time::Instant::now();
+        h.click(Pos2::new(sp[0], sp[1]));
+        let el = t.elapsed().as_secs_f64();
+        match (&h.st.face_info, &h.st.patch) {
+            (Some(fi), Some(pe)) => {
+                let out = h.st.objects.last().map(|o| o.what.clone()).unwrap_or_default();
+                match &pe.made {
+                    Ok(pt) => eprintln!("FACE {name} #{k}: {:.1} mm² · {} holes · {out} · patch {}x{} spans · off {:.3} · gap {:.3} · passed {:.0}% · {el:.2}s", fi.area, fi.holes, pt.spans[0], pt.spans[1], pt.off, pt.gap, pt.passed * 100.0),
+                    Err(e) => eprintln!("FACE {name} #{k}: {:.1} mm² · {} holes · {out} · patch: {e} · {el:.2}s", fi.area, fi.holes),
+                }
+            }
+            _ => eprintln!("FACE {name} #{k}: {}", h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default()),
+        }
+        h.shot(&format!("{name}-1-face{k}"));
+    }
+    h.st.patch_apply();
+    h.st.set_tool(Tool::Navigate);
+    h.shot(&format!("{name}-2-kept"));
+    let views = |h: &mut Harness, tag: &str| {
+        h.st.bare = true;
+        h.shot(&format!("{name}-{tag}"));
+        h.st.hide_scan = true;
+        h.shot(&format!("{name}-{tag}-alone"));
+        h.st.hide_scan = false;
+        h.st.bare = false;
+    };
+    views(h, "3-view");
+    if let Some(v) = std::env::var("RECTIFY_LOOK2").map(|s| nums(&s)).ok().filter(|v| v.len() == 6) {
+        look(h, [v[0], v[1], v[2]], v[3], v[4], v[5]);
+        views(h, "3-view-2");
+    }
+}
+
 /// Points clicked with the Path tool (screen points of the bare view): the
 /// next segment shown before the last click, the curve placed (with the
 /// interface, then the view alone), kept.
@@ -603,6 +657,11 @@ fn main() {
             let pts: Vec<[f32; 2]> = s.split(';').map(nums).filter(|v| v.len() == 2).map(|v| [v[0], v[1]]).collect();
             let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "path".into());
             path_clicks(&mut h, &tag, &pts, close);
+            return;
+        }
+        if let Ok(s) = std::env::var("RECTIFY_FACE") {
+            let tag = std::env::var("RECTIFY_TAG").unwrap_or_else(|_| "face".into());
+            face_clicks(&mut h, &tag, &s.replace(' ', ""));
             return;
         }
         if let Ok(s) = std::env::var("RECTIFY_LINE") {

@@ -137,9 +137,15 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
         }
     }
+    // the Face tool: a click on a flat face
+    if st.tool == Tool::Face && !alt && resp.clicked_by(PointerButton::Primary) {
+        if let Some(p) = ctx.input(|i| i.pointer.latest_pos()) {
+            st.face_click([p.x, p.y]);
+        }
+    }
     // the middle button alone pans; the left drag alone orbits when no
     // tool takes it
-    if (m || (l && matches!(st.tool, Tool::Navigate | Tool::Patch))) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
+    if (m || (l && matches!(st.tool, Tool::Navigate | Tool::Patch | Tool::Face))) && !alt && d != egui::Vec2::ZERO && resp.dragged() {
         if m {
             st.camera.pan(d.x, d.y, rect.height());
         } else {
@@ -204,6 +210,9 @@ fn path_marks(p: &egui::Painter, st: &AppState) -> Option<String> {
 /// The patch's four corners.
 fn patch_marks(p: &egui::Painter, st: &AppState) {
     let Some(Ok(pt)) = st.patch.as_ref().map(|pe| &pe.made) else { return };
+    if !pt.trim.is_empty() {
+        return;
+    }
     let v = st.view();
     for c in pt.corners {
         if let Some(s) = v.project(c.as_vec3()) {
@@ -218,7 +227,7 @@ fn patch_marks(p: &egui::Painter, st: &AppState) {
 fn tool_cursor(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Response) {
     let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else { return };
     let snap = if matches!(st.tool, Tool::Path | Tool::Line) { path_marks(p, st) } else { None };
-    if st.tool == Tool::Patch {
+    if matches!(st.tool, Tool::Patch | Tool::Face) {
         patch_marks(p, st);
     }
     if !resp.hovered() && st.slot_drag.is_none() && st.stroke.is_none() && st.path_press.is_none() {
@@ -259,7 +268,14 @@ pub fn hint(st: &AppState) -> String {
         return "Open a scan (an .obj)".into();
     }
     match st.tool {
-        Tool::Navigate => "C circle · S slot · B box · L line · G patch · P path · H hide the scan · Ctrl+Z undo · drag to turn around · F frames it".into(),
+        Tool::Navigate => "C circle · S slot · B box · L line · G patch · A face · P path · H hide the scan · Ctrl+Z undo · drag to turn around · F frames it".into(),
+        Tool::Face => match &st.patch {
+            None => "Face: click a flat face · its outline becomes a path, filled with a patch · drag to turn around".into(),
+            Some(pe) => match &pe.made {
+                Ok(pt) => format!("A NURBS surface of {} × {} spans on the face, live · Enter keeps it · Esc removes it (the outline stays) · click the next face (keeps this one)", pt.spans[0], pt.spans[1]),
+                Err(e) => format!("{e} · Esc removes"),
+            },
+        },
         Tool::Patch => match &st.patch {
             None => "Patch: click inside a loop of paths to fill it · or click the paths themselves to pick them · drag to turn around".into(),
             Some(pe) => match &pe.made {

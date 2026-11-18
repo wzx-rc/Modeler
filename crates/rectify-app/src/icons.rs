@@ -59,6 +59,8 @@ pub enum Icon {
     /// Patch (Forme Rectify): four curved sides and the surface's lines
     /// across.
     Patch,
+    /// Face (Forme Rectify): a face's outline and the pointer clicking in it.
+    FacePick,
 }
 
 struct Pen<'a> {
@@ -209,6 +211,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(12.5, 5.5), (15.5, 8.5)]);
             // the stroke
             pen.line(&[(3.0, 18.5), (8.0, 18.5)]);
+        }
+        Icon::FacePick => {
+            // the outline, a corner cut, and the pointer in it
+            pen.closed(&[(3.0, 3.0), (13.0, 3.0), (17.0, 7.0), (17.0, 17.0), (3.0, 17.0)]);
+            pen.closed(&[(8.0, 8.0), (8.0, 15.0), (10.0, 13.0), (12.5, 16.0), (13.5, 15.0), (11.0, 12.0), (13.5, 11.5)]);
         }
         Icon::Patch => {
             // four sides, two of them bent, and the lines across

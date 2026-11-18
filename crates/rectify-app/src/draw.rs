@@ -5,7 +5,7 @@
 use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, Renderer};
 use crate::state::{AppState, Shape, Tool};
 use crate::theme;
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 use rayon::prelude::*;
 use rectify_core::mesh::crease_normals;
 use rectify_core::nurbs::{Curve, Surface};
@@ -30,22 +30,69 @@ pub struct Drawer {
 }
 
 /// A NURBS surface as triangles (`face`: the renderer's material) and its
-/// lines: the knot lines (its rings and seams) and, `hull`, the control net.
-fn surface_vertices(s: &Surface, face: u32, line: [u8; 4], hull: Option<[u8; 4]>, verts: &mut Vec<MeshVertex>, wire: &mut Vec<LineVertex>) {
-    let su = 96;
-    let sv = ((s.nv.saturating_sub(s.dv)) * 6).clamp(8, 256);
-    let (pts, nrm) = s.tessellate(su, sv);
-    let at = |i: usize, j: usize| j * (su + 1) + i;
-    let vx = |k: usize| MeshVertex { pos: pts[k].as_vec3().to_array(), nrm: nrm[k].as_vec3().to_array(), face };
-    for j in 0..sv {
-        for i in 0..su {
-            let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
-            verts.extend_from_slice(&[vx(a), vx(b), vx(c), vx(a), vx(c), vx(d)]);
-        }
-    }
+/// lines: the knot lines (its rings and seams) and, `hull`, the control net;
+/// `trim`: the outline that cuts it, in its (u, v) (empty: all of it).
+fn surface_vertices(s: &Surface, trim: &[DVec2], face: u32, line: [u8; 4], hull: Option<[u8; 4]>, verts: &mut Vec<MeshVertex>, wire: &mut Vec<LineVertex>) {
     let to32 = |l: Vec<DVec3>| l.iter().map(|p| p.as_vec3().to_array()).collect::<Vec<_>>();
-    let isos: Vec<Vec<[f32; 3]>> = s.isos(24).into_iter().map(to32).collect();
-    line_vertices(&isos, line, 1.0, wire);
+    if !trim.is_empty() {
+        // cut by its outline: the inside in triangles, each corner on the
+        // surface (its normal from the points next to it)
+        let (u0, u1, v0, v1) = (s.ku[s.du], s.ku[s.nu], s.kv[s.dv], s.kv[s.nv]);
+        let at = |q: DVec2| (u0 + (u1 - u0) * q.x.clamp(0.0, 1.0), v0 + (v1 - v0) * q.y.clamp(0.0, 1.0));
+        let e = 1e-4;
+        let vx = |q: DVec2| {
+            let (u, v) = at(q);
+            let du = s.eval((u + e).min(u1), v) - s.eval((u - e).max(u0), v);
+            let dv = s.eval(u, (v + e).min(v1)) - s.eval(u, (v - e).max(v0));
+            MeshVertex { pos: s.eval(u, v).as_vec3().to_array(), nrm: du.cross(dv).normalize_or_zero().as_vec3().to_array(), face }
+        };
+        let tris = rectify_core::face::trim_triangles(trim, 64);
+        let made: Vec<[MeshVertex; 3]> = tris.par_iter().map(|t| [vx(t[0]), vx(t[1]), vx(t[2])]).collect();
+        for t in made {
+            verts.extend_from_slice(&t);
+        }
+        // the knot lines inside, and the outline
+        let on = |l: Vec<DVec2>| l.into_iter().map(|q| {
+            let (u, v) = at(q);
+            s.eval(u, v)
+        }).collect::<Vec<DVec3>>();
+        let mut lines: Vec<Vec<[f32; 3]>> = vec![];
+        let norm = |k: f64, a: f64, b: f64| (k - a) / (b - a);
+        let mut uk: Vec<f64> = s.ku[s.du..=s.nu].to_vec();
+        uk.dedup();
+        let mut vk: Vec<f64> = s.kv[s.dv..=s.nv].to_vec();
+        vk.dedup();
+        for &k in &uk {
+            let x = norm(k, u0, u1);
+            for r in rectify_core::face::trim_runs(trim, |t| DVec2::new(x, t), 400) {
+                lines.push(to32(on(r)));
+            }
+        }
+        for &k in &vk {
+            let y = norm(k, v0, v1);
+            for r in rectify_core::face::trim_runs(trim, |t| DVec2::new(t, y), 400) {
+                lines.push(to32(on(r)));
+            }
+        }
+        let mut border = trim.to_vec();
+        border.push(trim[0]);
+        lines.push(to32(on(border)));
+        line_vertices(&lines, line, 1.0, wire);
+    } else {
+        let su = 96;
+        let sv = ((s.nv.saturating_sub(s.dv)) * 6).clamp(8, 256);
+        let (pts, nrm) = s.tessellate(su, sv);
+        let at = |i: usize, j: usize| j * (su + 1) + i;
+        let vx = |k: usize| MeshVertex { pos: pts[k].as_vec3().to_array(), nrm: nrm[k].as_vec3().to_array(), face };
+        for j in 0..sv {
+            for i in 0..su {
+                let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+                verts.extend_from_slice(&[vx(a), vx(b), vx(c), vx(a), vx(c), vx(d)]);
+            }
+        }
+        let isos: Vec<Vec<[f32; 3]>> = s.isos(24).into_iter().map(to32).collect();
+        line_vertices(&isos, line, 1.0, wire);
+    }
     if let Some(col) = hull {
         let net: Vec<Vec<[f32; 3]>> = s.hull().into_iter().map(to32).collect();
         line_vertices(&net, col, 0.6, wire);
@@ -134,17 +181,18 @@ impl Drawer {
         let picked: &[usize] = st.patch.as_ref().map(|pe| pe.picked.as_slice()).unwrap_or(&[]);
         for (i, o) in st.objects.iter().enumerate() {
             match &o.shape {
-                Shape::Surface(s) => surface_vertices(s, 1, [60, 32, 14, 200], None, &mut verts, &mut wire),
+                Shape::Surface(s) => surface_vertices(s, &[], 1, [60, 32, 14, 200], None, &mut verts, &mut wire),
+                Shape::Trimmed(s, trim) => surface_vertices(s, trim, 1, [60, 32, 14, 200], None, &mut verts, &mut wire),
                 // the paths picked for a patch in blue
                 Shape::Curve(c) if picked.contains(&i) => line_vertices(&[curve_lines(c)], [60, 150, 255, 255], 2.6, &mut wire),
                 Shape::Curve(c) => line_vertices(&[curve_lines(c)], [226, 92, 14, 255], 1.8, &mut wire),
             }
         }
         if let Some(Ok(pt)) = st.patch.as_ref().map(|pe| &pe.made) {
-            surface_vertices(&pt.surface, 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
+            surface_vertices(&pt.surface, &pt.trim, 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
         }
         if let Some(se) = &st.slot {
-            surface_vertices(&se.laid.surface, 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
+            surface_vertices(&se.laid.surface, &[], 2, [255, 240, 225, 240], Some([255, 196, 140, 110]), &mut verts, &mut wire);
         }
         // the path being drawn, and its control points
         if let Some(b) = st.path.as_ref().and_then(|pe| pe.built.as_ref()) {

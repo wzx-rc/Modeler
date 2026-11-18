@@ -48,6 +48,9 @@ pub struct Patched {
     pub passed: f64,
     /// The loop's four corners, in order.
     pub corners: [DVec3; 4],
+    /// For a surface cut by an outline (a flat face's): the outline in its
+    /// (u, v), closed, counter-clockwise; empty for a four-sided patch.
+    pub trim: Vec<DVec2>,
 }
 
 /// A curve as a polyline, its corners kept (every knot span sampled).
@@ -487,7 +490,7 @@ pub fn loop_sides(lines: &[Vec<DVec3>], tol: f64) -> Result<[Vec<DVec3>; 4], Str
 
 /// The bicubic surface with `su` × `sv` equal spans nearest the weighted
 /// points `(u, v, point, weight)`; `lam` keeps its control net calm.
-fn fit(data: &[(f64, f64, DVec3, f64)], su: usize, sv: usize, lam: f64) -> Option<Surface> {
+pub(crate) fn fit(data: &[(f64, f64, DVec3, f64)], su: usize, sv: usize, lam: f64) -> Option<Surface> {
     let (ku, kv) = (uniform_knots(3, su), uniform_knots(3, sv));
     let (nu, nv) = (su + 3, sv + 3);
     let nn = nu * nv;
@@ -785,7 +788,7 @@ pub fn patch(m: &Mesh, scan: &Closest, sides: &[Vec<DVec3>; 4], p: PatchParams, 
     };
     let spans = [f.nu - 3, f.nv - 3];
     let passed = 1.0 - kept as f64 / inner.len().max(1) as f64;
-    Ok(Patched { surface: f, spans, off, gap, passed, corners: co.c })
+    Ok(Patched { surface: f, spans, off, gap, passed, corners: co.c, trim: vec![] })
 }
 
 #[cfg(test)]
