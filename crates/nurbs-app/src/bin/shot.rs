@@ -162,6 +162,13 @@ impl Harness {
         self.step();
     }
 
+    /// The right button (the marking menu).
+    fn rpress(&mut self, p: Pos2, down: bool) {
+        self.pending.push(Event::PointerMoved(p));
+        self.pending.push(Event::PointerButton { pos: p, button: PointerButton::Secondary, pressed: down, modifiers: self.mods });
+        self.step();
+    }
+
     fn move_to(&mut self, p: Pos2) {
         self.pending.push(Event::PointerMoved(p));
         self.step();
@@ -1274,6 +1281,64 @@ fn main() {
         h.shot("zero-qwer-8-move");
         let names: Vec<String> = h.st.undo_labels();
         eprintln!("  undo steps: {names:?}");
+    }
+
+    if want("marking") {
+        // the marking menu (right button): on a shape, its material arc, a
+        // quick flick, on a picked edge, in empty space
+        h.reset(test_part(), "Test part");
+        let boss = h.screen_of(Vec3::new(10.0, 30.0, 0.0));
+        h.rpress(boss, true);
+        h.steps(15);
+        h.move_to(boss + vec2(70.0, 0.0));
+        h.steps(2);
+        h.shot("zero-marking-1-shape");
+        // up: the material arc, then the third ball (Orange)
+        h.move_to(boss + vec2(0.0, -60.0));
+        h.steps(12);
+        let ball = boss + vec2((-0.17f32).sin() * 150.0, -(-0.17f32).cos() * 150.0 * 0.86);
+        h.move_to(ball);
+        h.steps(3);
+        h.shot("zero-marking-2-materials");
+        h.rpress(ball, false);
+        h.settle();
+        h.shot("zero-marking-3-orange");
+        eprintln!("  boss material {}", h.st.doc.features[2].material);
+        // a quick flick to the right: Make it Carve, at once
+        h.rpress(boss, true);
+        h.move_to(boss + vec2(40.0, 0.0));
+        h.move_to(boss + vec2(80.0, 0.0));
+        h.rpress(boss + vec2(80.0, 0.0), false);
+        h.steps(3);
+        h.shot("zero-marking-4-flick");
+        h.settle();
+        eprintln!("  boss op {:?}", h.st.doc.features[2].op);
+        h.st.undo();
+        h.settle();
+        // Edge mode: on an edge, Fillet
+        h.key(egui::Key::F10);
+        let e = h.screen_of(Vec3::new(-12.0, 20.0, 15.0));
+        h.rpress(e, true);
+        h.steps(15);
+        h.move_to(e + vec2(0.0, -70.0));
+        h.steps(2);
+        h.shot("zero-marking-5-edge");
+        h.rpress(e + vec2(0.0, -70.0), false);
+        h.settle();
+        h.shot("zero-marking-6-fillet");
+        // empty space: new shapes, Frame all, Snap
+        h.key(egui::Key::F8);
+        let empty = pos2(1150.0, 300.0);
+        h.rpress(empty, true);
+        h.steps(15);
+        eprintln!("  empty at {empty:?}: open {} ctx {:?}", h.st.marking.is_open(), h.st.marking.menu.as_ref().map(|m| m.ctx));
+        h.move_to(empty + vec2(60.0, 0.0));
+        h.steps(2);
+        h.shot("zero-marking-7-empty");
+        h.key(egui::Key::Escape);
+        h.rpress(empty + vec2(60.0, 0.0), false);
+        h.steps(2);
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
     if want("tension") {

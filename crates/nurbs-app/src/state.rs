@@ -366,6 +366,8 @@ pub struct AppState {
     pub gizmo: GizmoMode,
     /// The rotation or scale under way, as shown by the gizmo.
     pub gizmo_readout: Option<String>,
+    /// The marking menu (right button), open or flashing.
+    pub marking: crate::marking::Marking,
     /// Selection rectangle (screen).
     pub marquee: Option<([f32; 2], [f32; 2])>,
 
@@ -453,6 +455,7 @@ impl AppState {
             drag: None,
             gizmo: GizmoMode::Move,
             gizmo_readout: None,
+            marking: Default::default(),
             hot_handle: None,
             marquee: None,
             camera: OrbitCamera { target: Vec3::new(0.0, 10.0, 0.0), yaw: 0.62, pitch: 0.42, dist: 160.0, ..Default::default() },

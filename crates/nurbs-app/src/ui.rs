@@ -540,6 +540,9 @@ fn history_chip(ui: &mut Ui, st: &AppState, f: &Feature) -> Response {
 
 /// What the help box is about: the tool, or Select and its mode.
 fn help_title(st: &AppState) -> String {
+    if st.marking.is_open() {
+        return "Marking menu".into();
+    }
     match st.tool {
         Tool::Create(k) if matches!(k, PrimKind::Path) => "Path".into(),
         Tool::Create(k) => format!("{} · {}", k.label(), st.mode.label()),
@@ -764,6 +767,10 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
 /// grip de déplacement… comme dans Maya quand on fait un Bevel"). It
 /// follows the component; its grip moves it (double-click: back by it).
 fn op_window(ctx: &egui::Context, st: &mut AppState) {
+    // the marking menu open: nothing over it
+    if st.marking.is_open() {
+        return;
+    }
     let Some(k) = op_pop(st) else { return };
     let Some(anchor) = op_anchor(st, k) else { return };
     // a new subject: the window comes back next to it
@@ -1514,7 +1521,7 @@ fn tweak_card(ui: &mut Ui, st: &mut AppState, id: FeatureId) {
 
 /// A material as a small shaded ball: discs shrinking toward the light, a
 /// rim, a highlight sharper on metals.
-fn material_ball(p: &egui::Painter, c: egui::Pos2, r: f32, m: &materials::Material) {
+pub fn material_ball(p: &egui::Painter, c: egui::Pos2, r: f32, m: &materials::Material) {
     let steps = 18;
     for k in 0..steps {
         let t = k as f32 / (steps - 1) as f32;

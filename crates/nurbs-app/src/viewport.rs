@@ -52,6 +52,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_marquee(p, st);
         status(p, st);
     });
+    crate::marking::draw(ctx, st);
 }
 
 fn world(st: &AppState, w: DVec3) -> Option<Pos2> {
@@ -250,6 +251,10 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         if l || m || r || resp.clicked() || resp.drag_stopped() {
             return;
         }
+    }
+    // the marking menu (right button) takes the pointer while it is open
+    if crate::marking::input(ctx, st, rect) {
+        return;
     }
     if resp.hovered() {
         let (scroll, zoom) = ctx.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
@@ -1020,6 +1025,12 @@ fn status(p: &Painter, st: &AppState) {
 
 /// What the help box says: "Key: what it does" parts joined by " · ".
 pub fn hint(st: &AppState) -> String {
+    if let Some(m) = &st.marking.menu {
+        return match m.ctx {
+            crate::marking::Ctx::Shape(_) => "Release on an item: run it · Up: the materials · In the middle: nothing · Esc: close".into(),
+            _ => "Release on an item: run it · Quick flick: at once · In the middle: nothing · Esc: close".into(),
+        };
+    }
     if let Some(g) = &st.push {
         return if g.held { "Drag: out adds, in carves · Release: done · Esc: cancel".into() } else { "Move: out adds, in carves · Click: done · Esc: cancel".into() };
     }
@@ -1098,11 +1109,11 @@ pub fn hint(st: &AppState) -> String {
                 if st.doc.features.is_empty() {
                     "B: a cube · C: a cylinder · L: a sketch · Then: drag in the view".into()
                 } else {
-                    "Click: a shape · Drag: a rectangle · Alt + drag: orbit · F9 F10 F11: vertex, edge, face".into()
+                    "Click: a shape · Drag: a rectangle · Right button: menu · Alt + drag: orbit · F9 F10 F11: vertex, edge, face".into()
                 }
             } else {
                 match st.gizmo {
-                    GizmoMode::Select => "W: move · E: rotate · R: scale · Del: delete · Esc: deselect".into(),
+                    GizmoMode::Select => "W: move · E: rotate · R: scale · Right button: menu · Del: delete · Esc: deselect".into(),
                     GizmoMode::Move => "Arrows and squares: move · Dots: resize · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
                     GizmoMode::Scale => "Cubes: along the shape's axes · Centre: all at once · W: move · E: rotate".into(),
