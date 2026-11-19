@@ -4908,26 +4908,46 @@ FShape* focc_sheet_grid(const double* fr, int nx, int nz, double x0, double z0, 
                 set_err("the scan under the outline could not be followed");
                 return nullptr;
             }
-            opencascade::handle<Geom_BSplineSurface> surf = ap.Surface();
-            BRepBuilderAPI_MakeWire mw;
-            int edges = 0;
+            // a flat grid (a surface on its plane): a plane, (u, v) = (x, z)
+            // too (a flat BSpline gave no mesh at all)
+            double hmin = h[0], hmax = h[0];
+            for (int k = 0; k < nx * nz; k++) hmin = std::min(hmin, h[k]), hmax = std::max(hmax, h[k]);
+            opencascade::handle<Geom_Surface> surf;
+            if (hmax - hmin < 1e-9)
+                surf = new Geom_Plane(gp_Ax3(gp_Pnt(0, 0, -hmin), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)));
+            else
+                surf = ap.Surface();
+            // the outline's corners (repeats dropped), one vertex each,
+            // shared by the two sides that meet there: the wire is closed
+            // by its topology, not by the points' match
+            std::vector<gp_Pnt2d> uv;
             for (int i = 0; i < n; i++) {
-                int j = (i + 1) % n;
-                gp_Pnt2d a(poly[2 * i], poly[2 * i + 1]), b(poly[2 * j], poly[2 * j + 1]);
-                if (a.Distance(b) < 1e-6) continue;
-                GCE2d_MakeSegment seg(a, b);
-                if (!seg.IsDone()) continue;
-                BRepBuilderAPI_MakeEdge me(seg.Value(), surf);
-                if (!me.IsDone()) continue;
-                mw.Add(me.Edge());
-                edges++;
+                gp_Pnt2d q(poly[2 * i], poly[2 * i + 1]);
+                if (uv.empty() || uv.back().Distance(q) > 1e-6) uv.push_back(q);
             }
-            if (edges < 3 || !mw.IsDone()) {
+            while (uv.size() > 1 && uv.front().Distance(uv.back()) <= 1e-6) uv.pop_back();
+            int m = (int)uv.size();
+            if (m < 3) {
                 set_err("the outline could not be laid on the scan");
                 return nullptr;
             }
-            TopoDS_Wire w = mw.Wire();
-            BRepLib::BuildCurves3d(w);
+            std::vector<TopoDS_Vertex> vs(m);
+            for (int i = 0; i < m; i++) vs[i] = BRepBuilderAPI_MakeVertex(surf->Value(uv[i].X(), uv[i].Y()));
+            BRep_Builder bb;
+            TopoDS_Wire w;
+            bb.MakeWire(w);
+            for (int i = 0; i < m; i++) {
+                int j = (i + 1) % m;
+                opencascade::handle<Geom2d_Line> ln = new Geom2d_Line(uv[i], gp_Dir2d(gp_Vec2d(uv[i], uv[j])));
+                double len = uv[i].Distance(uv[j]);
+                BRepBuilderAPI_MakeEdge me(ln, surf, vs[i], vs[j], 0.0, len);
+                if (!me.IsDone()) {
+                    set_err("the outline could not be laid on the scan");
+                    return nullptr;
+                }
+                bb.Add(w, me.Edge());
+            }
+            w.Closed(Standard_True);
             BRepBuilderAPI_MakeFace mf(surf, w, Standard_True);
             if (!mf.IsDone()) {
                 set_err("the outline could not be filled");

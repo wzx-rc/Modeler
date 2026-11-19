@@ -827,7 +827,8 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
                 let h: Vec<f64> = sh.inner.iter().map(|q| q.y).collect();
                 let (lo, hi) = (sh.inner[0], sh.inner[nx * nz - 1]);
                 let poly: Vec<[f64; 2]> = sh.pts.iter().map(|q| [q.x, q.z]).collect();
-                Shape::sheet_grid(&fr, nx, nz, [lo.x, lo.z], [hi.x, hi.z], &h, &poly)
+                // should it fail, the outline filled as before
+                Shape::sheet_grid(&fr, nx, nz, [lo.x, lo.z], [hi.x, hi.z], &h, &poly).or_else(|e| Shape::fill(&pts, &inner).map_err(|_| e))
             }
             _ => Shape::fill(&pts, &inner),
         };
@@ -1667,6 +1668,44 @@ mod tests {
         let t = std::time::Instant::now();
         let m = build(&d, true, false, &[], &mut Cache::default());
         eprintln!("{:.0} ms, {} faces, {} triangles, errors {:?}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.triangles.len(), m.errors);
+    }
+
+    #[test]
+    fn surface_l_outlines() {
+        // an L on its plane (a flat 4 × 4 grid), then the same L's 60
+        // points of a curve, then on a bump: each one face
+        let mut d = Doc::default();
+        let l = [[-20.0, -20.0], [20.0, -20.0], [20.0, -10.0], [-10.0, -10.0], [-10.0, 20.0], [-20.0, 20.0]];
+        let flat: Vec<DVec3> = (0..16).map(|k| DVec3::new(-21.0 + 42.0 * (k / 4) as f64 / 3.0, if std::env::var("FORME_BUMP").is_ok() { 0.01 * (k % 3) as f64 } else { 0.0 }, -21.0 + 42.0 * (k % 4) as f64 / 3.0)).collect();
+        let a = d.add(Op::Add, Prim::Path { x: 40.0, z: 40.0 }, DVec3::new(0.0, 5.0, 0.0), DQuat::from_rotation_z(0.3));
+        d.feature_mut(a).unwrap().sheet = Some(crate::doc::Sheet { pts: l.iter().map(|p| DVec3::new(p[0], 0.0, p[1])).collect(), inner: flat.clone(), grid: Some([4, 4]) });
+        // many points along the L's sides, some repeated, clockwise
+        let mut many = vec![];
+        for i in (0..6).rev() {
+            let (p, q) = (l[i], l[(i + 5) % 6]);
+            for k in 0..10 {
+                let t = k as f64 / 10.0;
+                many.push(DVec3::new(p[0] + (q[0] - p[0]) * t, 0.0, p[1] + (q[1] - p[1]) * t));
+            }
+            many.push(DVec3::new(q[0], 0.0, q[1]));
+        }
+        let b = d.add(Op::Add, Prim::Path { x: 40.0, z: 40.0 }, DVec3::new(60.0, 5.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(b).unwrap().sheet = Some(crate::doc::Sheet { pts: many, inner: flat, grid: Some([4, 4]) });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        for id in [a, b] {
+            assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(id)).count(), 1, "{id}");
+        }
+        for id in [a, b] {
+            let n = m.tri_face.iter().filter(|f| m.faces[**f as usize].tag.map(|t| t.feature) == Some(id)).count();
+            eprintln!("feature {id}: {n} triangles");
+        }
+        // its area: an L of 40 × 40 less 30 × 30
+        let area: f64 = m.triangles.iter().zip(&m.tri_face).filter(|(_, f)| m.faces[**f as usize].tag.map(|t| t.feature) == Some(a)).map(|(t, _)| {
+            let p = |i: u32| DVec3::new(m.positions[i as usize][0] as f64, m.positions[i as usize][1] as f64, m.positions[i as usize][2] as f64);
+            0.5 * (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).length()
+        }).sum();
+        assert!((area - 700.0).abs() < 5.0, "{area}");
     }
 
     #[test]

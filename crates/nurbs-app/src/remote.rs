@@ -351,7 +351,11 @@ pub fn spec_of(f: &Feature) -> Value {
             }
         }
         Prim::Path { x, z } => {
-            o["kind"] = json!("path");
+            o["kind"] = json!(if f.is_sheet() { "surface" } else { "path" });
+            if let Some(sh) = &f.sheet {
+                o["points"] = json!(sh.pts.len());
+                o["grid"] = json!(sh.grid);
+            }
             if let Some(pr) = &f.profile {
                 o["outline"] = json!(pr.scaled(x, z).iter().map(|q| [r(q[0]), r(q[1])]).collect::<Vec<_>>());
                 o["open"] = json!(pr.open);
