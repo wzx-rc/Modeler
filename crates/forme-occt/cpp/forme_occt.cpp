@@ -866,38 +866,6 @@ FShape* focc_inset_face(const FShape* s, int index, double d) {
                 return nullptr;
             }
             TopoDS_Face fw = TopoDS::Face(f.Oriented(TopAbs_FORWARD));
-            // the outline moved in (d = 0: the face's own wires)
-            TopoDS_Shape ws = fw;
-            if (d > 0) {
-                BRepOffsetAPI_MakeOffset mo(fw, GeomAbs_Intersection);
-                mo.Perform(-d);
-                if (!mo.IsDone() || mo.Shape().IsNull()) {
-                    set_err("the inset is wider than the face");
-                    return nullptr;
-                }
-                // 3D curves for the offset edges (they come as curves on the face)
-                ws = mo.Shape();
-                BRepLib::BuildCurves3d(ws);
-            }
-            // the wires: the biggest is the outline, the others holes
-            std::vector<TopoDS_Wire> wires;
-            for (TopExp_Explorer x(ws, TopAbs_WIRE); x.More(); x.Next()) wires.push_back(TopoDS::Wire(x.Current()));
-            if (wires.empty()) {
-                set_err("the inset is wider than the face");
-                return nullptr;
-            }
-            int outer = 0;
-            double best = -1;
-            for (size_t i = 0; i < wires.size(); i++) {
-                Bnd_Box b;
-                BRepBndLib::Add(wires[i], b);
-                if (b.IsVoid()) continue;
-                double size = b.SquareExtent();
-                if (size > best) {
-                    best = size;
-                    outer = (int)i;
-                }
-            }
             gp_Pln pl = as.Plane();
             // each wire rebuilt from fresh edges on their 3D curves, so the
             // face owns clean edges (the offset's carry the old face's pcurves)
@@ -926,6 +894,115 @@ FShape* focc_inset_face(const FShape* s, int index, double d) {
                 if (area(x) < 0) x = BRepBuilderAPI_MakeFace(pl, TopoDS::Wire(w.Reversed()), Standard_True);
                 return x;
             };
+            // facing like the face it comes from
+            gp_Dir want = pl.Axis().Direction();
+            if (f.Orientation() == TopAbs_REVERSED) want.Reverse();
+            auto facing = [&](TopoDS_Face r) {
+                BRepAdaptor_Surface rs(r);
+                gp_Dir got = rs.Plane().Axis().Direction();
+                if (r.Orientation() == TopAbs_REVERSED) got.Reverse();
+                if (got.Dot(want) < 0) r.Reverse();
+                return r;
+            };
+            if (d > 0) {
+                // Each loop on its own (Romain, 19 nov.: insets that failed
+                // where a hole comes near the border): the outline moved in
+                // (it may part into several pieces), each hole grown, then
+                // the outline's inside less the grown holes, a 2D boolean on
+                // the plane. One face, or several when it parts.
+                auto offset = [&](const TopoDS_Wire& w, double off, std::vector<TopoDS_Face>& out) -> bool {
+                    TopoDS_Wire cw = rebuild(w);
+                    if (cw.IsNull()) return false;
+                    TopoDS_Face base = disc(cw);
+                    BRepOffsetAPI_MakeOffset mo(base, GeomAbs_Intersection);
+                    mo.Perform(off);
+                    if (!mo.IsDone() || mo.Shape().IsNull()) return true; // nothing left
+                    TopoDS_Shape ws = mo.Shape();
+                    BRepLib::BuildCurves3d(ws);
+                    for (TopExp_Explorer x(ws, TopAbs_WIRE); x.More(); x.Next()) {
+                        TopoDS_Wire nw = rebuild(TopoDS::Wire(x.Current()));
+                        if (nw.IsNull()) return false;
+                        TopoDS_Face nf = disc(nw);
+                        if (area(nf) > 1e-6) out.push_back(nf);
+                    }
+                    return true;
+                };
+                TopoDS_Wire outer_w = BRepTools::OuterWire(fw);
+                std::vector<TopoDS_Face> inside, holes;
+                if (!offset(outer_w, -d, inside)) {
+                    set_err("the inset outline is not closed");
+                    return nullptr;
+                }
+                if (inside.empty()) {
+                    set_err("the inset is wider than the face");
+                    return nullptr;
+                }
+                for (TopExp_Explorer x(fw, TopAbs_WIRE); x.More(); x.Next()) {
+                    TopoDS_Wire w = TopoDS::Wire(x.Current());
+                    if (w.IsSame(outer_w)) continue;
+                    std::vector<TopoDS_Face> grown;
+                    if (!offset(w, d, grown) || grown.empty()) {
+                        set_err("a hole of the inset could not be made");
+                        return nullptr;
+                    }
+                    // the grown hole: its biggest piece
+                    size_t big = 0;
+                    for (size_t i = 1; i < grown.size(); i++)
+                        if (area(grown[i]) > area(grown[big])) big = i;
+                    holes.push_back(grown[big]);
+                }
+                std::vector<TopoDS_Face> parts;
+                if (holes.empty()) {
+                    parts = inside;
+                } else {
+                    TopTools_ListOfShape args, tools;
+                    for (auto& x : inside) args.Append(x);
+                    for (auto& x : holes) tools.Append(x);
+                    BRepAlgoAPI_Cut cut;
+                    cut.SetArguments(args);
+                    cut.SetTools(tools);
+                    cut.Build();
+                    if (!cut.IsDone()) {
+                        set_err("the inset's holes could not be made");
+                        return nullptr;
+                    }
+                    for (TopExp_Explorer x(cut.Shape(), TopAbs_FACE); x.More(); x.Next()) {
+                        TopoDS_Face pf = TopoDS::Face(x.Current());
+                        if (std::fabs(area(pf)) > 1e-6) parts.push_back(pf);
+                    }
+                }
+                if (parts.empty()) {
+                    set_err("the inset is wider than the face");
+                    return nullptr;
+                }
+                if (parts.size() == 1) return wrap(facing(parts[0]));
+                TopoDS_Compound c;
+                BRep_Builder cb;
+                cb.MakeCompound(c);
+                for (auto& x : parts) cb.Add(c, facing(x));
+                return wrap(c);
+            }
+            // d = 0: the face's own wires
+            TopoDS_Shape ws = fw;
+            // the wires: the biggest is the outline, the others holes
+            std::vector<TopoDS_Wire> wires;
+            for (TopExp_Explorer x(ws, TopAbs_WIRE); x.More(); x.Next()) wires.push_back(TopoDS::Wire(x.Current()));
+            if (wires.empty()) {
+                set_err("the inset is wider than the face");
+                return nullptr;
+            }
+            int outer = 0;
+            double best = -1;
+            for (size_t i = 0; i < wires.size(); i++) {
+                Bnd_Box b;
+                BRepBndLib::Add(wires[i], b);
+                if (b.IsVoid()) continue;
+                double size = b.SquareExtent();
+                if (size > best) {
+                    best = size;
+                    outer = (int)i;
+                }
+            }
             TopoDS_Wire ow = rebuild(wires[outer]);
             if (ow.IsNull()) {
                 set_err("the inset outline is not closed");
@@ -961,14 +1038,7 @@ FShape* focc_inset_face(const FShape* s, int index, double d) {
                     return nullptr;
                 }
             }
-            // facing like the face it comes from
-            gp_Dir want = pl.Axis().Direction();
-            if (f.Orientation() == TopAbs_REVERSED) want.Reverse();
-            BRepAdaptor_Surface rs(r);
-            gp_Dir got = rs.Plane().Axis().Direction();
-            if (r.Orientation() == TopAbs_REVERSED) got.Reverse();
-            if (got.Dot(want) < 0) r.Reverse();
-            return wrap(r);
+            return wrap(facing(r));
         },
         (FShape*)nullptr);
 }
@@ -984,6 +1054,16 @@ FShape* focc_extrude(const FShape* s, double dx, double dy, double dz) {
             }
             TopoDS_Shape r = op.Shape();
             if (!valid(r)) {
+                // an offset curve's edges may sit a little off their faces
+                // (an inset of a curved outline): mended, then checked again
+                ShapeFix_Shape fix(r);
+                fix.SetPrecision(1e-6);
+                fix.SetMaxTolerance(1e-3);
+                fix.Perform();
+                if (valid(fix.Shape())) r = fix.Shape();
+            }
+            if (!valid(r)) {
+                dump_check(r);
                 set_err("extrusion gave an invalid solid");
                 return nullptr;
             }

@@ -1638,6 +1638,12 @@ impl AppState {
                         said = Some(format!("{name}: {} mm is its largest size", crate::widgets::fmt_mm(*l as f32)));
                     }
                 }
+                if let Some(p) = f.push.as_mut() {
+                    if p.inset > l + 1e-6 {
+                        p.inset = *l;
+                        said = Some(format!("{name}: {} mm is its largest inset", crate::widgets::fmt_mm(*l as f32)));
+                    }
+                }
             }
         }
         if let Some(text) = said {

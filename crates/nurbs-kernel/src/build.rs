@@ -310,7 +310,7 @@ fn find_face(shape: &Shape, r: &FaceRef) -> Option<usize> {
 /// A face pushed or pulled on what is built so far (`doc::Push`): the new
 /// solid, None when it changes nothing. Its new faces are tagged with the
 /// step: 1 the inset (or the end of the extrusion), 2, 3… its sides.
-fn push(acc: &Shape, f: &Feature, p: &Push) -> Result<Option<Shape>, String> {
+fn push(acc: &Shape, f: &Feature, p: &Push, limit: &mut Option<f64>) -> Result<Option<Shape>, String> {
     let face = find_face(acc, &p.face).ok_or("its face is gone")?;
     let info = acc.face_info(face).ok_or("its face is gone")?;
     if info.kind != OccSurf::Plane {
@@ -322,10 +322,38 @@ fn push(acc: &Shape, f: &Feature, p: &Push) -> Result<Option<Shape>, String> {
     }
     let tag = |sub: u16| FaceTag { feature: f.id, sub }.pack();
     mark(&step("push", f));
-    let mut inner = acc.inset_face(face, inset)?;
+    let mut inner = match acc.inset_face(face, inset) {
+        Ok(x) => x,
+        Err(e) if inset > 0.0 => {
+            // too wide? the largest inset that works, by halves (Romain:
+            // "il bute et stop", as fillets do)
+            let (mut lo, mut hi) = (0.0, inset);
+            for _ in 0..14 {
+                let mid = (lo + hi) * 0.5;
+                if acc.inset_face(face, mid).is_ok() {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+                if hi - lo < 0.01 {
+                    break;
+                }
+            }
+            let q = if lo >= 1.0 { 0.1 } else { 0.01 };
+            let size = (lo / q).floor() * q;
+            match (size >= 0.01).then(|| acc.inset_face(face, size)) {
+                Some(Ok(x)) => {
+                    *limit = Some(size);
+                    x
+                }
+                _ => return Err(e),
+            }
+        }
+        Err(e) => return Err(e),
+    };
     // depth 0: the inset only drawn on the face
     if p.depth.abs() < 1e-6 {
-        inner.set_tags(&[tag(1)]);
+        inner.set_tags(&vec![tag(1); inner.face_count().max(1)]);
         return acc.imprint(&inner).map(Some);
     }
     let n = DVec3::from_array(info.normal);
@@ -494,7 +522,11 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         // an inset or extrusion of a face: on the solid built so far
         if let Some(p) = &f.push {
             if let Some(acc) = stage.shape.clone() {
-                let res = if skipped("push") { Err("skipped, it crashed the kernel".to_string()) } else { push(&acc, f, p) };
+                let mut limit = None;
+                let res = if skipped("push") { Err("skipped, it crashed the kernel".to_string()) } else { push(&acc, f, p, &mut limit) };
+                if let Some(l) = limit {
+                    stage.limits.push((f.id, l));
+                }
                 match res {
                     Ok(Some(s)) => {
                         model.booleans += 1;
@@ -1060,6 +1092,76 @@ mod tests {
         assert!(m.errors.is_empty(), "{:?}", m.errors);
     }
 
+    /// The test part of the app (block, hole, boss, slot).
+    fn test_part() -> (Doc, u32, u32) {
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-10.0, -5.0, 0.0), DQuat::IDENTITY);
+        let boss = d.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Box { x: 8.0, y: 8.0, z: 40.0 }, DVec3::new(0.0, 14.0, 0.0), DQuat::IDENTITY);
+        (d, b, boss)
+    }
+
+    #[test]
+    fn inset_battery() {
+        // Romain (19 nov.): "l'Inset ne fonctionne pas toujours et pas dans
+        // tous les cas". Many faces, several sizes, line only, raised, sunk.
+        let mut cases: Vec<(String, Doc, FaceRef)> = vec![];
+        let (d, b, boss) = test_part();
+        cases.push(("box top".into(), { let mut d = Doc::default(); d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY); d }, FaceRef { tag: tag(1, 2), at: DVec3::new(0.0, 20.0, 0.0) }));
+        cases.push(("top with hole".into(), d.clone(), FaceRef { tag: tag(b, 2), at: DVec3::new(-15.0, 20.0, 10.0) }));
+        cases.push(("top with boss".into(), d.clone(), FaceRef { tag: tag(b, 2), at: DVec3::new(15.0, 20.0, 10.0) }));
+        cases.push(("front, notched".into(), d.clone(), FaceRef { tag: tag(b, 4), at: DVec3::new(10.0, 8.0, 15.0) }));
+        cases.push(("bottom with hole".into(), d.clone(), FaceRef { tag: tag(b, 3), at: DVec3::new(10.0, 0.0, 10.0) }));
+        cases.push(("side".into(), d.clone(), FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 8.0, 0.0) }));
+        cases.push(("boss top (disc)".into(), d.clone(), FaceRef { tag: tag(boss, 1), at: DVec3::new(10.0, 30.0, 0.0) }));
+        cases.push(("slot floor".into(), d.clone(), FaceRef { tag: tag(4, 3), at: DVec3::new(0.0, 10.0, 0.0) }));
+        // a sketch: an L with a curve point, and a triangle (sharp corners)
+        let mut l = Doc::default();
+        let li = l.add(Op::Add, Prim::Profile { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        l.feature_mut(li).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false, false, false, true, false, false], corner: vec![], tension: vec![], open: false });
+        cases.push(("sketch L, curve".into(), l, FaceRef { tag: tag(li, 1), at: DVec3::new(-7.0, 10.0, -7.0) }));
+        let mut t = Doc::default();
+        let ti = t.add(Op::Add, Prim::Profile { x: 30.0, y: 6.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        t.feature_mut(ti).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false; 3], corner: vec![], tension: vec![], open: false });
+        cases.push(("sketch triangle".into(), t, FaceRef { tag: tag(ti, 1), at: DVec3::new(0.0, 6.0, -3.0) }));
+        let mut r = Doc::default();
+        let ri = r.add(Op::Add, Prim::Profile { x: 30.0, y: 6.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        r.feature_mut(ri).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![3.0, 3.0, -2.0, 6.0], tension: vec![], open: false });
+        cases.push(("sketch rounded corners".into(), r, FaceRef { tag: tag(ri, 1), at: DVec3::new(0.0, 6.0, 0.0) }));
+        // a top face after a fillet on its front edge
+        let mut f = Doc::default();
+        let fb = f.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        f.add_round(4.0, false, vec![EdgeRef { faces: [tag(fb, 2), tag(fb, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
+        cases.push(("top next to a fillet".into(), f, FaceRef { tag: tag(fb, 2), at: DVec3::new(0.0, 20.0, 0.0) }));
+        // a cylinder lying down: its end
+        let mut c = Doc::default();
+        let ci = c.add(Op::Add, Prim::Cylinder { radius: 8.0, height: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        cases.push(("cylinder end".into(), c, FaceRef { tag: tag(ci, 1), at: DVec3::new(0.0, 20.0, 0.0) }));
+
+        let mut bad = vec![];
+        for (name, doc, face) in &cases {
+            let only = std::env::var("INSET_ONLY").ok();
+            if only.as_ref().map(|o| !name.starts_with(o.as_str())).unwrap_or(false) {
+                continue;
+            }
+            for (inset, depth) in [(2.0, 0.0), (2.0, 3.0), (2.0, -2.0), (0.5, -1.0), (6.0, 0.0), (0.0, 2.0)] {
+                let mut d = doc.clone();
+                let base = build(&d, true, false, &[], &mut Cache::default());
+                let p = d.add_push(Push { face: face.clone(), inset, depth });
+                let m = build(&d, true, false, &[], &mut Cache::default());
+                let mine = m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(p)).count();
+                let ok = m.errors.is_empty() && mine > 0;
+                let limit = m.limits.iter().find(|l| l.0 == p).map(|l| l.1);
+                eprintln!("{:<24} inset {inset:>4} depth {depth:>5}: {} faces ({} before), its own {mine}, limit {limit:?}, errors {:?}", name, m.faces.len(), base.faces.len(), m.errors);
+                if !ok {
+                    bad.push(format!("{name} inset {inset} depth {depth}: {:?}", m.errors));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{} failed:\n{}", bad.len(), bad.join("\n"));
+    }
+
     #[test]
     fn faces_pushed_and_pulled() {
         // a block with a hole through it; its top inset by 3 mm
@@ -1116,12 +1218,13 @@ mod tests {
         let flat = m.faces.iter().filter(|f| f.kind == SurfKind::Plane && f.tag.map(|t| t.feature == p && t.sub >= 2).unwrap_or(false)).count();
         assert_eq!(flat, 0);
         assert!(m.faces.iter().any(|f| f.tag == Some(FaceTag { feature: b, sub: 4 })));
-        // wider than the face: an error, the part as before it
+        // wider than the face: it stops at the largest that works
         let pu = d.feature_mut(p).unwrap().push.as_mut().unwrap();
         pu.inset = 20.0;
         let m = build(&d, true, false, &[], &mut cache);
-        assert_eq!(m.errors.len(), 1, "{:?}", m.errors);
-        assert!((m.bounds().unwrap().1[1] - 20.0).abs() < 1e-3);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let l = m.limits.iter().find(|l| l.0 == p).map(|l| l.1).expect("a limit");
+        assert!(l > 0.0 && l < 20.0, "{l}");
         // a round face: not yet
         d.feature_mut(p).unwrap().push = Some(Push { face: FaceRef { tag: tag(2, 0), at: DVec3::new(5.0, 10.0, 0.0) }, inset: 0.0, depth: 1.0 });
         let m = build(&d, true, false, &[], &mut cache);

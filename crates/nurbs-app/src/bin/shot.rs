@@ -1151,6 +1151,26 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("inset") {
+        // insets that failed before 19 nov.: the top left of the hole (1 mm
+        // from the slot), the top round the boss (the boss crosses its
+        // border), a pocket; then one too wide that stops
+        let mut d = test_part();
+        let p1 = d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 2 }.pack(), at: DVec3::new(-15.0, 20.0, 10.0) }, inset: 2.0, depth: -2.0 });
+        let p2 = d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 2 }.pack(), at: DVec3::new(15.0, 20.0, 10.0) }, inset: 2.0, depth: 1.5 });
+        h.reset(d, "Insets");
+        h.settle();
+        eprintln!("  errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-inset-1-near-holes");
+        h.st.selection = vec![p2];
+        h.st.set_push(30.0, 1.5, true);
+        h.st.end_live();
+        h.settle();
+        h.settle();
+        eprintln!("  too wide: inset now {:?} (p1 {p1}) errors {:?}", h.st.doc.feature(p2).and_then(|f| f.push.as_ref()).map(|p| p.inset), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-inset-2-too-wide");
+    }
+
     if want("tension") {
         // the direct fillet's modifiers: Shift held during the drag sets
         // the tension (up fuller), Ctrl held makes a chamfer
