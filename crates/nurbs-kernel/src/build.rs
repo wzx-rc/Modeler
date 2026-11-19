@@ -1361,6 +1361,72 @@ mod tests {
     }
 
     #[test]
+    fn knife_on_curved_faces() {
+        // the boss's side and the hole's wall cut from their top circle to
+        // their bottom one, twice each: straight up, and turning round
+        // (a line straight in the face's (u, v), on the surface)
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let h = d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-10.0, -5.0, 0.0), DQuat::IDENTITY);
+        let s = d.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0), DQuat::IDENTITY);
+        let mut cache = Cache::default();
+        let m0 = build(&d, true, false, &[], &mut cache);
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        let part = cache.stages.values().filter_map(|s| s.shape.clone()).max_by_key(|s| s.face_count()).unwrap();
+        let on = |c: DVec3, r: f64, y: f64, a: f64| c + DVec3::new(r * a.to_radians().cos(), y, r * a.to_radians().sin());
+        // the point on the edge nearest `at`, by its fraction (as a click)
+        let kp = |faces: [i64; 2], at: DVec3| {
+            let edge = EdgeRef { faces, at };
+            let i = resolve(&part, std::slice::from_ref(&edge)).0[0];
+            let f = (0..=1000).map(|k| k as f64 / 1000.0).min_by(|a, b| {
+                let d = |f: f64| DVec3::from_array(part.edge_point(i, f).unwrap()).distance(at);
+                d(*a).total_cmp(&d(*b))
+            });
+            KnifePoint { edge, f: f.unwrap(), at }
+        };
+        // (side tag, top tag, bottom tag, centre, radius, top y, bottom y)
+        let cases = [
+            (tag(s, 0), tag(s, 1), tag(b, 2), DVec3::new(10.0, 0.0, 0.0), 7.0, 30.0, 20.0),
+            (tag(h, 0), tag(b, 2), tag(b, 3), DVec3::new(-10.0, 0.0, 0.0), 5.0, 20.0, 0.0),
+        ];
+        for (side, top, bottom, c, r, y1, y0) in cases {
+            // from a point off the seam, from the seam's own vertex (90°)
+            for (a0, turn) in [(60.0, 0.0), (60.0, 40.0), (60.0, -70.0), (90.0, 0.0), (90.0, 40.0)] {
+                let mut d = d.clone();
+                let pts = vec![
+                    kp([side, top], on(c, r, y1, a0)),
+                    kp([side, bottom], on(c, r, y0, a0 + turn)),
+                    kp([side, bottom], on(c, r, y0, a0 + 180.0)),
+                    kp([side, top], on(c, r, y1, a0 + 180.0 + turn)),
+                ];
+                d.add_knife(Knife { pts, segs: vec![[0, 1], [2, 3]] }, "Knife");
+                let m = build(&d, true, false, &[], &mut Cache::default());
+                assert!(m.errors.is_empty(), "{a0} turn {turn}: {:?}", m.errors);
+                // the side in two, both halves keep its tag
+                let n = |m: &Model| m.faces.iter().filter(|f| f.tag.map(|t| t.pack()) == Some(side)).count();
+                assert_eq!(n(&m), n(&m0) + 1, "{a0} turn {turn}");
+                assert_eq!(m.faces.len(), m0.faces.len() + 1, "{a0} turn {turn}");
+            }
+        }
+        // across a fillet's face, from its edge on the top to its edge on
+        // the front, slanted
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let r = d.add_round(4.0, false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        let kp = |faces: [i64; 2], at: DVec3, f: f64| KnifePoint { edge: EdgeRef { faces, at }, f, at };
+        // (a fillet on a box's edge runs it all, x -20 to 20)
+        d.add_knife(
+            Knife { pts: vec![kp([tag(b, 2), tag(r, 0)], DVec3::new(-5.0, 20.0, 11.0), 0.375), kp([tag(b, 4), tag(r, 0)], DVec3::new(5.0, 16.0, 15.0), 0.625)], segs: vec![[0, 1]] },
+            "Knife",
+        );
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.len(), m0.faces.len() + 1);
+    }
+
+    #[test]
     fn components_moved() {
         // a block with a hole through its top: its +X face moved out 5 mm,
         // then its top front edge raised, then a corner pulled

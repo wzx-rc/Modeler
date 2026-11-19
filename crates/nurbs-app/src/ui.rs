@@ -441,7 +441,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             }
             divider(ui);
             for (t, icon, name, key, tip) in [
-                (Tool::Knife, Icon::Knife, "KNIFE", "K", "Knife (K), like Maya's Multi-Cut: click points on the part's edges; each one after the first is joined to the one before across their flat face. Enter, Esc or a right click ends the cut"),
+                (Tool::Knife, Icon::Knife, "KNIFE", "K", "Knife (K), like Maya's Multi-Cut: click points on the part's edges; each one after the first is joined to the one before across their face (flat or curved). Enter, Esc or a right click ends the cut"),
                 (Tool::Point, Icon::EdgePoint, "POINT", "J", "Point on edge (J): click on an edge to cut a point into it (the middle catches the pointer)"),
             ] {
                 if card(ui, Some(icon), name, &format!("EDGE · {key}"), st.tool == t, EDGE_SEL, tip).clicked() {

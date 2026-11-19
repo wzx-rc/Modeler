@@ -1065,7 +1065,7 @@ pub fn hint(st: &AppState) -> String {
         (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => "Arrows: move it · Window: X, Y, Z · Del: delete it".into(),
         (None, Tool::Knife) => {
             if st.knife.is_some() {
-                "Click the next edge: a line across their face · Enter, Esc, right click: end the cut".into()
+                "Click the next edge: a line across their face (a round one: along it) · Enter, Esc, right click: end the cut".into()
             } else {
                 "Click an edge: the first point (its middle catches) · Then: the next edges".into()
             }

@@ -67,6 +67,10 @@
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Solid.hxx>
 #include <ShapeAnalysis_Surface.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <BRepTools_History.hxx>
+#include <TopTools_MapOfShape.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <GCPnts_TangentialDeflection.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom_BezierCurve.hxx>
@@ -1626,6 +1630,73 @@ int focc_edge_point(const FShape* s, int edge, double f, double* xyz) {
         -1);
 }
 
+// After the Knife: a closed face's seam (a cylinder's) that now runs
+// between two pieces of that face (a cut across it left the seam inside one
+// region, and the splitter made two faces of it) is made a seam again, the
+// pieces one face with the tag they share. Returns `res` itself when there
+// is nothing to mend or the mending fails.
+static FShape* knit_seams(BRepBuilderAPI_MakeShape& op, const FShape* s, FShape* res) {
+    TopTools_MapOfShape seams;
+    for (TopExp_Explorer fx(s->s, TopAbs_FACE); fx.More(); fx.Next()) {
+        TopoDS_Face f = TopoDS::Face(fx.Current());
+        for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+            TopoDS_Edge e = TopoDS::Edge(ex.Current());
+            if (!BRep_Tool::IsClosed(e, f)) continue;
+            const TopTools_ListOfShape& im = op.Modified(e);
+            if (im.IsEmpty()) seams.Add(e);
+            for (TopTools_ListIteratorOfListOfShape it(im); it.More(); it.Next()) seams.Add(it.Value());
+        }
+    }
+    if (seams.IsEmpty()) return res;
+    TopTools_IndexedDataMapOfShapeListOfShape ef;
+    TopExp::MapShapesAndAncestors(res->s, TopAbs_EDGE, TopAbs_FACE, ef);
+    TopTools_MapOfShape keep;
+    bool any = false;
+    for (int i = 1; i <= ef.Extent(); i++) {
+        const TopoDS_Shape& e = ef.FindKey(i);
+        bool apart = false;
+        if (seams.Contains(e)) {
+            const TopTools_ListOfShape& fs = ef(i);
+            for (TopTools_ListIteratorOfListOfShape a(fs); a.More(); a.Next())
+                if (!a.Value().IsSame(fs.First())) apart = true;
+        }
+        if (apart) any = true;
+        else keep.Add(e);
+    }
+    if (!any) return res;
+    ShapeUpgrade_UnifySameDomain u(res->s, Standard_False, Standard_True, Standard_False);
+    u.KeepShapes(keep);
+    u.Build();
+    TopoDS_Shape out = u.Shape();
+    if (out.IsNull() || !BRepCheck_Analyzer(out).IsValid()) return res;
+    FShape* r2 = wrap(out);
+    if (!r2) return res;
+    TopTools_IndexedMapOfShape fin, fout;
+    face_map(res->s, fin);
+    face_map(out, fout);
+    r2->tags.assign(fout.Extent(), -1);
+    opencascade::handle<BRepTools_History> h = u.History();
+    for (int i = 1; i <= fin.Extent(); i++) {
+        long long t = i - 1 < (int)res->tags.size() ? res->tags[i - 1] : -1;
+        const TopoDS_Shape& f = fin(i);
+        bool found = false;
+        if (!h.IsNull())
+            for (TopTools_ListIteratorOfListOfShape it(h->Modified(f)); it.More(); it.Next()) {
+                int j = fout.FindIndex(it.Value());
+                if (j > 0) {
+                    r2->tags[j - 1] = t;
+                    found = true;
+                }
+            }
+        if (!found) {
+            int j = fout.FindIndex(f);
+            if (j > 0) r2->tags[j - 1] = t;
+        }
+    }
+    delete res;
+    return r2;
+}
+
 // The Knife: points (n, 3 doubles each, on edges) cut into the edges
 // they lie on, and straight lines between pairs of them (segs, 2 ints
 // each, lying on faces) cut into those faces. Faces and edges keep their
@@ -1641,9 +1712,68 @@ FShape* focc_split(const FShape* s, const double* pts, int n, const int* segs, i
                 p.emplace_back(pts[3 * i], pts[3 * i + 1], pts[3 * i + 2]);
                 tools.Append(BRepBuilderAPI_MakeVertex(p.back()).Vertex());
             }
+            // the face both points lie on: a flat one takes a straight line;
+            // across a curved one the line follows the face's own grid
+            // (straight in its (u, v)), so it lies on it
+            TopTools_IndexedMapOfShape fm;
+            face_map(s->s, fm);
+            auto across = [&](const gp_Pnt& a, const gp_Pnt& b, TopoDS_Edge& out) -> bool {
+                bool curved = false;
+                for (int i = 1; i <= fm.Extent(); i++) {
+                    TopoDS_Face f = TopoDS::Face(fm(i));
+                    opencascade::handle<Geom_Surface> S = BRep_Tool::Surface(f);
+                    if (S.IsNull()) continue;
+                    ShapeAnalysis_Surface sas(S);
+                    gp_Pnt2d ua = sas.ValueOfUV(a, 1e-7);
+                    double ga = sas.Gap();
+                    gp_Pnt2d ub = sas.ValueOfUV(b, 1e-7);
+                    double gb = sas.Gap();
+                    if (ga > 1e-4 || gb > 1e-4) continue;
+                    double u0, u1, v0, v1;
+                    BRepTools::UVBounds(f, u0, u1, v0, v1);
+                    auto into = [](double x, double lo, double hi, bool per, double T) {
+                        if (!per) return x;
+                        while (x < lo - 1e-7) x += T;
+                        while (x > hi + 1e-7) x -= T;
+                        return x;
+                    };
+                    for (gp_Pnt2d* q : {&ua, &ub}) {
+                        q->SetX(into(q->X(), u0, u1, S->IsUPeriodic(), S->IsUPeriodic() ? S->UPeriod() : 0));
+                        q->SetY(into(q->Y(), v0, v1, S->IsVPeriodic(), S->IsVPeriodic() ? S->VPeriod() : 0));
+                    }
+                    BRepClass_FaceClassifier ca(f, ua, 1e-4), cb(f, ub, 1e-4);
+                    if (ca.State() == TopAbs_OUT || cb.State() == TopAbs_OUT) continue;
+                    if (BRepAdaptor_Surface(f, Standard_False).GetType() == GeomAbs_Plane) return false;
+                    if (curved) continue;
+                    // round a closed face the short way (over its seam)
+                    if (S->IsUPeriodic()) {
+                        double T = S->UPeriod();
+                        if (ub.X() - ua.X() > T / 2) ub.SetX(ub.X() - T);
+                        else if (ua.X() - ub.X() > T / 2) ub.SetX(ub.X() + T);
+                    }
+                    if (S->IsVPeriodic()) {
+                        double T = S->VPeriod();
+                        if (ub.Y() - ua.Y() > T / 2) ub.SetY(ub.Y() - T);
+                        else if (ua.Y() - ub.Y() > T / 2) ub.SetY(ub.Y() + T);
+                    }
+                    gp_Vec2d d(ua, ub);
+                    if (d.Magnitude() < 1e-9) continue;
+                    BRepBuilderAPI_MakeEdge me(new Geom2d_Line(ua, gp_Dir2d(d)), S, 0.0, d.Magnitude());
+                    if (!me.IsDone()) continue;
+                    out = me.Edge();
+                    BRepLib::BuildCurves3d(out);
+                    curved = true;
+                }
+                return curved;
+            };
             for (int k = 0; k < nseg; k++) {
                 int a = segs[2 * k], b = segs[2 * k + 1];
                 if (a < 0 || b < 0 || a >= n || b >= n || p[a].Distance(p[b]) < 1e-6) continue;
+                TopoDS_Edge on;
+                if (across(p[a], p[b], on)) {
+                    tools.Append(on);
+                    continue;
+                }
                 BRepBuilderAPI_MakeEdge e(p[a], p[b]);
                 if (e.IsDone()) tools.Append(e.Edge());
             }
@@ -1663,8 +1793,9 @@ FShape* focc_split(const FShape* s, const double* pts, int n, const int* segs, i
             TopoDS_Shape r = op.Shape();
             if (r.ShapeType() != TopAbs_COMPOUND) {
                 FShape* res = wrap(r);
-                if (res) carry_tags(op, s, res, -1);
-                return res;
+                if (!res) return res;
+                carry_tags(op, s, res, -1);
+                return knit_seams(op, s, res);
             }
             BRep_Builder bb;
             TopoDS_Compound c;
@@ -1696,7 +1827,7 @@ FShape* focc_split(const FShape* s, const double* pts, int n, const int* segs, i
             FShape* res = wrap(count == 1 ? one : TopoDS_Shape(c));
             if (!res) return nullptr;
             carry_tags(op, s, res, -1);
-            return res;
+            return knit_seams(op, s, res);
         },
         (FShape*)nullptr);
 }

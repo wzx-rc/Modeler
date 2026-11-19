@@ -1,7 +1,8 @@
 //! The Knife (K, Romain 19 nov.: "like the Maya Multicut tool") and Point
 //! on edge (J), from Forme Rectify: clicks on the part's edges put points
 //! in them; with the Knife, each point after the first is joined to the
-//! one before by a straight line cut into the flat face holding both. One
+//! one before by a line cut into the face holding both (straight on a flat
+//! face; across a curved one, straight in the face's own grid). One
 //! history step per cut (`Feature::cut`), ended by Enter, Esc, a right
 //! click or a click off the edges.
 
@@ -83,7 +84,8 @@ impl AppState {
 
     /// A click with the Knife or Point on edge: a point cut into the edge
     /// under the pointer; with the Knife, a line from the point before when
-    /// both lie on one flat face. Off the edges: the cut ends.
+    /// both lie on one face (across a curved one it follows the face). Off
+    /// the edges: the cut ends.
     pub fn knife_click(&mut self, p: [f32; 2]) {
         let Some((e, at, f)) = self.knife_pick(p) else {
             self.knife_end();
@@ -102,7 +104,7 @@ impl AppState {
             Some((id, last)) => {
                 let Some(k) = self.doc.feature(id).and_then(|f| f.cut.clone()) else { return };
                 let from = k.pts[last].at;
-                let line = lines && from.distance(at) > 1e-6 && self.on_one_flat_face(e, from, at);
+                let line = lines && from.distance(at) > 1e-6 && self.on_one_face(e, from, at);
                 let i = k.pts.len();
                 self.edit(if lines { "Knife" } else { "Point on edge" }, |d| {
                     if let Some(c) = d.feature_mut(id).and_then(|f| f.cut.as_mut()) {
@@ -113,22 +115,34 @@ impl AppState {
                     }
                 });
                 if lines && !line {
-                    self.toast("Not on one flat face with the point before: a point only", true);
+                    self.toast("Not on one face with the point before: a point only", true);
                 }
                 self.knife = Some((id, i));
             }
         }
     }
 
-    /// Both points lie on one flat face of edge `e`.
-    fn on_one_flat_face(&self, e: usize, a: DVec3, b: DVec3) -> bool {
+    /// Both points lie on one face of edge `e`: a flat one (anywhere on
+    /// its plane), or a curved one whose border passes through `a` (the
+    /// line then follows the face, straight in its own grid).
+    fn on_one_face(&self, e: usize, a: DVec3, b: DVec3) -> bool {
         let Some(m) = self.model.as_ref() else { return false };
         let size = m.bounds().map(|(lo, hi)| (Vec3::from(hi) - Vec3::from(lo)).length() as f64).unwrap_or(100.0);
         let tol = (size * 1e-4).max(1e-4) * 10.0;
+        // the faces round `a`: those of the edges passing through it
+        let near = |pts: &[[f32; 3]]| {
+            pts.windows(2).any(|w| {
+                let (p, q) = (DVec3::from(Vec3::from(w[0])), DVec3::from(Vec3::from(w[1])));
+                let d = q - p;
+                let t = if d.length_squared() > 0.0 { ((a - p).dot(d) / d.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                (p + d * t).distance(a) < tol
+            })
+        };
+        let round_a: Vec<i32> = m.edges.iter().filter(|g| near(&g.pts)).flat_map(|g| g.faces).filter(|&f| f >= 0).collect();
         m.edges[e].faces.iter().filter(|&&fi| fi >= 0).any(|&fi| {
             let fc = &m.faces[fi as usize];
             if fc.kind != SurfKind::Plane {
-                return false;
+                return round_a.contains(&fi);
             }
             let n = DVec3::from_array(fc.normal).normalize_or_zero();
             let o = DVec3::from_array(fc.point);

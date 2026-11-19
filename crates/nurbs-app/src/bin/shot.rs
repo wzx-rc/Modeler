@@ -1765,6 +1765,46 @@ fn main() {
         eprintln!("  edges {} errors {:?}", h.st.model.as_ref().map(|m| m.edges.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
     }
 
+    if want("knife-curved") {
+        // the Knife across the boss's round side: top circle to foot
+        // circle, twice (each its own cut); the line follows the side
+        h.reset(test_part(), "Test part");
+        h.key(egui::Key::K);
+        let on = |y: f32, a: f32| Vec3::new(10.0 + 7.0 * a.to_radians().cos(), y, 7.0 * a.to_radians().sin());
+        for (a, b) in [(150.0, 95.0), (75.0, 20.0)] {
+            let p = h.screen_of(on(30.0, a));
+            h.move_to(p);
+            h.steps(2);
+            h.click(p);
+            h.settle();
+            let q = h.screen_of(on(20.0, b));
+            h.move_to(q);
+            h.steps(2);
+            if a == 150.0 {
+                h.shot("zero-knife-curved-1-line");
+            }
+            h.click(q);
+            h.settle();
+            h.key(egui::Key::Enter);
+            h.settle();
+        }
+        eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        for f in h.st.doc.features.iter().filter(|f| f.cut.is_some()) {
+            let k = f.cut.as_ref().unwrap();
+            eprintln!("  {} {} points {:?} lines", f.name, k.pts.len(), k.segs);
+        }
+        h.key(egui::Key::Escape);
+        h.shot("zero-knife-curved-2-done");
+        // Face mode: the piece between the two lines picked
+        h.key(egui::Key::Num3);
+        let m = h.screen_of(on(25.0, 85.0));
+        h.move_to(m);
+        h.steps(2);
+        h.click(m);
+        h.settle();
+        h.shot("zero-knife-curved-3-piece");
+    }
+
     if want("snap") {
         // snapping to the part's points of interest, Plasticity style
         h.reset(test_part(), "Test part");
