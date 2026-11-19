@@ -902,86 +902,85 @@ fn status(p: &Painter, st: &AppState) {
     }
 }
 
-/// What the hint line says.
+/// What the help box says: "Key: what it does" parts joined by " · ".
 pub fn hint(st: &AppState) -> String {
     if let Some(g) = &st.push {
-        return if g.held { "Drag: out adds, in carves · release to finish · Esc cancels".into() } else { "Move: out adds, in carves · click to finish · Esc cancels".into() };
+        return if g.held { "Drag: out adds, in carves · Release: done · Esc: cancel".into() } else { "Move: out adds, in carves · Click: done · Esc: cancel".into() };
     }
     match (&st.creation, st.tool) {
         (Some(c), _) if c.phase == Phase::Base => match c.kind {
-            PrimKind::Box | PrimKind::Profile | PrimKind::Path => "Drag the base · Shift: a square · release, then the height".into(),
-            PrimKind::Cylinder => "Drag the radius · release, then the height".into(),
+            PrimKind::Box | PrimKind::Profile | PrimKind::Path => "Drag: the base · Shift: a square · Release: then the height".into(),
+            PrimKind::Cylinder => "Drag: the radius · Release: then the height".into(),
         },
-        (Some(_), _) => "Move for the height (up +, down −) · click to finish · Esc cancels".into(),
+        (Some(_), _) => "Move: the height (up +, down −) · Click: done · Esc: cancel".into(),
         (None, Tool::Create(PrimKind::Path)) => match &st.sketch {
-            None => "Path: click on a face or the ground for the first point".into(),
-            Some(k) if k.pts.len() < 2 => "Click: a corner · drag: a curve point · Backspace removes the last one · Esc drops it".into(),
-            Some(_) => "Enter: an open path · click the first point: a closed one · drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
+            None => "Click: the first point, on a face or the ground".into(),
+            Some(k) if k.pts.len() < 2 => "Click: a corner · Drag: a curve point · Backspace: the last point off · Esc: drop it".into(),
+            Some(_) => "Enter: an open path · First point: a closed one · Drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Create(PrimKind::Profile)) => match &st.sketch {
-            None => format!("Sketch · {}: click on a face or the ground for the first point", st.mode.label()),
-            Some(k) if k.pts.len() < 3 => "Click: a corner · drag: a curve point · Backspace removes the last one · Esc drops it".into(),
-            Some(_) => "Click the first point or Enter to close · drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
+            None => "Click: the first point, on a face or the ground".into(),
+            Some(k) if k.pts.len() < 3 => "Click: a corner · Drag: a curve point · Backspace: the last point off · Esc: drop it".into(),
+            Some(_) => "First point or Enter: close it · Drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
-        (None, Tool::Create(k)) => format!("{} · {}: press on the ground or a face and drag · a click places 20 mm · {} again: at once", k.label(), st.mode.label(), crate::ui::prim_key(k)),
+        (None, Tool::Create(k)) => format!("Drag: the base, on the ground or a face · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
         (None, Tool::Push(k)) => match k {
-            PushKind::Inset => "Inset: click a flat face (2 mm), then drag its dot · or press on the face and drag".into(),
-            PushKind::Extrude => "Extrude: press on a flat face and drag it out (adds) or in (carves)".into(),
+            PushKind::Inset => "Click a flat face: 2 mm, then drag its dot · Press and drag: sized at once".into(),
+            PushKind::Extrude => "Press on a flat face and drag: out adds, in carves".into(),
         },
-        (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => {
-            format!("{} · drag the arrows, or set X, Y, Z in its window · Del deletes", st.selected_tweak().map(|f| f.kind_label()).unwrap_or("Move"))
-        }
+        (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => "Arrows: move it · Window: X, Y, Z · Del: delete it".into(),
         (None, Tool::Knife) => {
             if st.knife.is_some() {
-                "Knife · click the next edge: a line across their flat face · Enter, Esc or right click ends the cut".into()
+                "Click the next edge: a line across their face · Enter, Esc, right click: end the cut".into()
             } else {
-                "Knife · click on an edge for the first point (its middle catches) · then the next edges".into()
+                "Click an edge: the first point (its middle catches) · Then: the next edges".into()
             }
         }
-        (None, Tool::Point) => "Point on edge · click on an edge: a point cut into it (its middle catches) · Esc: Select".into(),
-        (None, Tool::Select) if st.face_drag.is_some() => "Away from the press: bigger · release to keep it".into(),
+        (None, Tool::Point) => "Click an edge: a point cut into it (its middle catches) · Esc: Select".into(),
+        (None, Tool::Select) if st.face_drag.is_some() => "Away from the press: bigger · Release: keep it".into(),
         (None, Tool::Select) if st.round_drag.is_some() => "Away from the press: bigger · Ctrl held: chamfer · Shift held: tension (up fuller, down flatter)".into(),
         (None, Tool::Select) if st.sel_mode == SelMode::Vertex => {
             if st.vert_sel.is_empty() {
-                "Vertices: click one · drag a sketch corner: its fillet · Shift + click adds · the arrows move it".into()
+                "Click: a vertex · Drag on empty: a rectangle · Drag a sketch corner: its fillet · Shift + click: add".into()
+            } else if !st.picked_profile_corners().is_empty() {
+                "Drag the corner: its fillet · Ctrl held: chamfer · Shift held: tension · Arrows: move it · Esc: deselect".into()
             } else {
-                let what = if st.comp_pivot().is_some() { "drag an arrow to move" } else if !st.picked_profile_corners().is_empty() { "a fillet or a bevel in the window" } else { "Shift + click adds" };
-                format!("{} vert{} picked · {what} · Esc deselects", st.vert_sel.len(), if st.vert_sel.len() == 1 { "ex" } else { "ices" })
+                "Arrows: move it · Shift + click or rectangle: add · Ctrl + rectangle: take away · Esc: deselect".into()
             }
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Face => {
             if let Some(f) = st.selected_push() {
                 if f.push.as_ref().map(|p| p.inset > 0.0).unwrap_or(false) {
-                    "Inset · drag the dot: the outline · the arrow: out raises, in sinks · Del deletes".into()
+                    "Dot: the outline · Arrow: out raises, in sinks · Del: delete it".into()
                 } else {
-                    "Extrude · drag the arrow: out adds, in carves · Del deletes".into()
+                    "Arrow: out adds, in carves · Del: delete it".into()
                 }
             } else if st.face_sel.is_empty() {
-                "Faces: click a face of the part · Shift + click adds · then I inset, E extrude".into()
+                "Click: a face · Drag on empty: a rectangle · Shift + click: add · I: inset · E: extrude".into()
             } else {
-                "Arrows: move the face · I: inset · E: extrude · Shift + click adds a face · Esc deselects".into()
+                "Shift + drag the face: extrude · Ctrl + drag: inset · Arrows: move it · I: inset · E: extrude · Esc: deselect".into()
             }
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Edge => {
-            if let Some(f) = st.selected_round() {
-                format!("{} · drag on it or set its size in its window · Shift + click an edge to add it · Del deletes", f.kind_label())
+            if st.selected_round().is_some() {
+                "Drag on it: its size · Shift held: tension · Shift + click an edge: add it · Del: delete it".into()
             } else if st.edge_sel.is_empty() {
-                "Edges: click an edge · drag on one: a fillet (or chamfer, top bar) · Shift + click adds · Ctrl + B chamfers".into()
+                "Click: an edge · Drag on one: a fillet · Ctrl held: chamfer · Shift held: tension · Drag on empty: a rectangle · Ctrl + B: chamfer".into()
             } else {
-                "Arrows: move the edge · or a fillet / chamfer in the window · Shift + click adds an edge · Esc deselects".into()
+                "Drag an edge: a fillet · Shift + drag a picked edge: pull it · Arrows: move it · Ctrl + B: chamfer · Esc: deselect".into()
             }
         }
         (None, Tool::Select) => {
             if st.drag.is_some() {
-                "Moving · the kernel rebuilds the booleans live".into()
+                "Moving: the kernel rebuilds the booleans live".into()
             } else if st.selection.is_empty() {
                 if st.doc.features.is_empty() {
-                    "Pick a shape on the right (B cube, C cylinder), then drag in the view".into()
+                    "B: a cube · C: a cylinder · L: a sketch · Then: drag in the view".into()
                 } else {
-                    "Click a face to select its shape · drag for a rectangle · Alt + drag to orbit".into()
+                    "Click: a shape · Drag: a rectangle · Alt + drag: orbit · F9 F10 F11: vertex, edge, face".into()
                 }
             } else {
-                "Arrows and squares move · dots resize · Del deletes · Esc deselects".into()
+                "Arrows and squares: move · Dots: resize · Del: delete · Esc: deselect".into()
             }
         }
     }

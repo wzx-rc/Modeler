@@ -1171,6 +1171,28 @@ fn main() {
         h.shot("zero-inset-2-too-wide");
     }
 
+    if want("help") {
+        // the help box at the bottom right (Plasticity style), by context
+        h.reset(test_part(), "Test part");
+        h.shot("zero-help-1-object");
+        h.key(egui::Key::F10);
+        let e = h.screen_of(Vec3::new(-12.0, 20.0, 15.0));
+        h.click(e);
+        h.settle();
+        h.shot("zero-help-2-edge");
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::F8);
+        h.key(egui::Key::L);
+        h.steps(2);
+        h.shot("zero-help-3-sketch");
+        h.key(egui::Key::Escape);
+        h.st.settings.help = false;
+        h.steps(2);
+        h.shot("zero-help-4-folded");
+        h.st.settings.help = true;
+    }
+
     if want("tension") {
         // the direct fillet's modifiers: Shift held during the drag sets
         // the tension (up fuller), Ctrl held makes a chamfer

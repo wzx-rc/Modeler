@@ -19,11 +19,13 @@ pub struct Settings {
     pub points: bool,
     /// Scene list in the inspector.
     pub show_tree: bool,
+    /// The help box at the bottom right, open (else folded to its button).
+    pub help: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true }
     }
 }
 

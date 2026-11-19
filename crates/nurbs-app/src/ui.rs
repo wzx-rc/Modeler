@@ -117,7 +117,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     top_bar(ctx, st, screen);
     rail(ctx, st, screen);
     history_strip(ctx, st, screen);
-    hud(ctx, st);
+    help_box(ctx, st);
     if st.panel_visible {
         inspector(ctx, st, screen);
     }
@@ -521,8 +521,23 @@ fn history_chip(ui: &mut Ui, st: &AppState, f: &Feature) -> Response {
 
 // ------------------------------------------------------------------ hud
 
-fn hud(ctx: &egui::Context, st: &mut AppState) {
-    let cx = st.principal()[0];
+/// What the help box is about: the tool, or Select and its mode.
+fn help_title(st: &AppState) -> String {
+    match st.tool {
+        Tool::Create(k) if matches!(k, PrimKind::Path) => "Path".into(),
+        Tool::Create(k) => format!("{} · {}", k.label(), st.mode.label()),
+        Tool::Push(k) => k.label().into(),
+        Tool::Knife => "Knife".into(),
+        Tool::Point => "Point on edge".into(),
+        Tool::Select => format!("Select · {}", st.sel_mode.label()),
+    }
+}
+
+/// The help box (Romain, 19 nov.: "une petite pop-up discrète en bas à
+/// droite… façon Plasticity", instead of the panels' text): the tool, then
+/// what each key and gesture does now, one per line. Folded, a small
+/// button.
+fn help_box(ctx: &egui::Context, st: &mut AppState) {
     let text = crate::viewport::hint(st);
     let color = match st.tool {
         Tool::Create(_) => op_color(st.mode),
@@ -532,13 +547,64 @@ fn hud(ctx: &egui::Context, st: &mut AppState) {
         Tool::Select if st.sel_mode == SelMode::Face => FACE_SEL,
         Tool::Select => st.single().map(feature_color).unwrap_or(TEXT2()),
     };
-    egui::Area::new(Id::new("hud")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(pos2(cx, EDGE + ISLAND_H + 12.0)).interactable(false).show(ctx, |ui| {
-        let g = ui.painter().layout_no_wrap(text, regular(12.0), LABEL());
-        let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 40.0, 26.0), Sense::hover());
-        let p = ui.painter();
-        p.rect(r, 13.0, tint(PANEL(), 0.88), Stroke::new(1.0, PANEL_BORDER()), StrokeKind::Inside);
-        p.circle_filled(pos2(r.min.x + 18.0, r.center().y), 4.0, color);
-        p.galley(pos2(r.min.x + 30.0, r.center().y - g.size().y * 0.5), g, LABEL());
+    let vr = st.view_rect;
+    let at = pos2(vr[2] - 12.0, vr[3] - 4.0);
+    let open = st.settings.help;
+    egui::Area::new(Id::new("help-box")).order(Order::Middle).pivot(Align2::RIGHT_BOTTOM).fixed_pos(at).show(ctx, |ui| {
+        egui::Frame::new().fill(tint(PANEL(), 0.9)).stroke(Stroke::new(1.0, PANEL_BORDER())).corner_radius(egui::CornerRadius::same(10)).inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
+            if !open {
+                let (r, resp) = ui.allocate_exact_size(vec2(64.0, 18.0), Sense::click());
+                let p = ui.painter();
+                p.circle_filled(pos2(r.min.x + 5.0, r.center().y), 3.5, color);
+                p.text(pos2(r.min.x + 14.0, r.center().y), Align2::LEFT_CENTER, "Help", medium(11.5), LABEL());
+                p.text(pos2(r.max.x, r.center().y), Align2::RIGHT_CENTER, "?", semibold(12.0), TEXT2());
+                if resp.on_hover_text("Show what the keys do (the tool's help)").clicked() {
+                    st.settings.help = true;
+                    st.save_settings();
+                }
+                return;
+            }
+            ui.set_max_width(300.0);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().interact_size.y = 18.0;
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
+                ui.painter().circle_filled(r.center(), 3.5, color);
+                ui.label(egui::RichText::new(help_title(st)).font(semibold(12.0)).color(TEXT()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+                    let c = if resp.hovered() { TEXT() } else { TEXT2() };
+                    ui.painter().line_segment([r.center() + vec2(-4.0, 0.0), r.center() + vec2(4.0, 0.0)], Stroke::new(1.4, c));
+                    if resp.on_hover_text("Fold the help").clicked() {
+                        st.settings.help = false;
+                        st.save_settings();
+                    }
+                });
+            });
+            // one line per part of the hint; "Key: what it does" with the
+            // key in a small chip
+            for part in text.split(" · ") {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    match part.split_once(": ").filter(|(k, _)| k.len() <= 30) {
+                        Some((k, what)) => {
+                            let g = ui.painter().layout_no_wrap(k.to_string(), medium(11.0), LABEL());
+                            let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 10.0, 17.0), Sense::hover());
+                            ui.painter().rect(r, 4.0, RAISED(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+                            ui.painter().galley(r.center() - g.size() * 0.5, g, LABEL());
+                            ui.label(egui::RichText::new(what).font(regular(11.5)).color(TEXT2()));
+                        }
+                        None => {
+                            ui.label(egui::RichText::new(part).font(regular(11.5)).color(TEXT2()));
+                        }
+                    }
+                });
+            }
+        });
     });
 }
 
@@ -916,14 +982,6 @@ fn defaults(ui: &mut Ui, st: &mut AppState) {
         }
         ui.add_space(4.0);
     }
-    let help = if st.tool == Tool::Create(PrimKind::Path) {
-        "Click on a flat face or the ground: the path is drawn on it. A click puts a corner, a drag a curve point. Enter ends it open; a click on the first point closes it. It stays a curve, with no thickness."
-    } else if st.tool == Tool::Create(PrimKind::Profile) {
-        "Click on a flat face or the ground: the outline is drawn on it. A click puts a corner, a drag a curve point. Click the first point (or Enter) to close it, then move for the height and click."
-    } else {
-        "Press on the ground or on a flat face and drag the base, release, then move for the height. A click alone places a 20 mm shape; the tool's key again places one at once."
-    };
-    ui.label(egui::RichText::new(help).font(regular(12.0)).color(TEXT2()));
     if !path {
         let m = st.material;
         material_section(ui, st, m);
@@ -1101,7 +1159,6 @@ fn path_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
         if cut > 0 { format!(", {cut} corner{} cut", if cut > 1 { "s" } else { "" }) } else { String::new() }
     );
     ui.label(egui::RichText::new(what).font(regular(12.0)).color(TEXT()));
-    ui.label(egui::RichText::new("A curve with no thickness. Vertex mode (1): pick its corners for a fillet or a bevel").font(regular(12.0)).color(TEXT2()));
     let items = [(true, "Open", PATH), (false, "Closed", PATH)];
     if let Some(o) = segmented(ui, &items, pr.open, 40.0) {
         let closable = o || pr.points.len() >= 3;
@@ -1147,10 +1204,8 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
             let title = if n > 1 { format!("{n} edges picked") } else { "Edge picked".to_string() };
             ui.label(egui::RichText::new(title).font(semibold(14.0)).color(TEXT()));
         });
-        ui.label(egui::RichText::new("Give it a size: OpenCascade rounds the whole edge · Shift + click adds an edge").font(regular(12.0)).color(TEXT2()));
     } else {
         section(ui, &format!("{} edge{}", n, if n > 1 { "s" } else { "" }));
-        ui.label(egui::RichText::new("Shift + click an edge (Edges mode) to add it").font(regular(12.0)).color(TEXT2()));
     }
     ui.add_space(4.0);
     let kinds = [(false, "Fillet", EDGE_SEL), (true, "Chamfer", EDGE_SEL)];
@@ -1200,7 +1255,6 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
         if toggle_row(ui, "Blend corners", r.blend) {
             st.set_blend(!r.blend);
         }
-        ui.label(egui::RichText::new(if r.blend { "Made together with the fillets before it that it touches: one rounded corner" } else { "Made on its own: it ends where it meets another fillet" }).font(regular(12.0)).color(TEXT2()));
     }
     if existing.is_none() {
         ui.add_space(2.0);
@@ -1223,12 +1277,9 @@ fn face_card(ui: &mut Ui, st: &mut AppState) {
         ui.label(egui::RichText::new(title).font(semibold(14.0)).color(TEXT()));
     });
     let flat = st.picked_faces().first().and_then(|f| st.model.as_ref().map(|m| m.faces[*f].kind == nurbs_kernel::model::SurfKind::Plane)).unwrap_or(false);
-    let help = if flat {
-        "Inset (I): its outline moved in, then sized with the handles. Extrude (E): pulled out or pushed in, the pointer moves it, a click ends it."
-    } else {
-        "A round face: Inset and Extrude take flat faces only for now."
-    };
-    ui.label(egui::RichText::new(help).font(regular(12.0)).color(TEXT2()));
+    if !flat {
+        ui.label(egui::RichText::new("A round face: Inset and Extrude take flat faces only for now").font(regular(12.0)).color(TEXT2()));
+    }
     if n > 1 {
         ui.label(egui::RichText::new("Several faces: the tools work on the first one for now").font(regular(12.0)).color(TEXT2()));
     }
@@ -1254,7 +1305,6 @@ fn push_card(ui: &mut Ui, st: &mut AppState) {
     let any_down = ui.input(|i| i.pointer.any_down());
     let Some(p) = st.selected_push().and_then(|f| f.push.clone()) else { return };
     section(ui, "Face");
-    ui.label(egui::RichText::new("Inset: how far the outline moves in (0: the whole face). Depth: out adds, in carves, 0 leaves the line only.").font(regular(12.0)).color(TEXT2()));
     let span = st.round_max().max(p.inset.abs().ceil()).max(p.depth.abs().ceil()) as f32 * 2.0;
     let mut inset = p.inset as f32;
     let (ch, start) = slider_row(ui, "Inset", &mut inset, 0.0..=span, 0.1, "mm");
@@ -1281,10 +1331,6 @@ fn tension_rows(ui: &mut Ui, cur: f64, circle: f64) -> Option<(f64, bool)> {
     if ch {
         out = Some(((v as f64).clamp(0.05, 0.95), start));
     }
-    ui.horizontal(|ui| {
-        let txt = if cur > 0.0 { "Conic: higher is fuller, lower flatter · Shift + drag sets it" } else { "Circular · Shift + drag sets the tension" };
-        ui.label(egui::RichText::new(txt).font(regular(12.0)).color(TEXT2()));
-    });
     if cur > 0.0 && secondary_btn(ui, "Circular", ui.available_width()).clicked() {
         out = Some((0.0, true));
     }
@@ -1294,9 +1340,6 @@ fn tension_rows(ui: &mut Ui, cur: f64, circle: f64) -> Option<(f64, bool)> {
 /// Vertices picked: the arrows move them; at a corner of a thin plate, a
 /// radius rounds it in its plane (a fillet on the short edge there).
 fn vertex_card(ui: &mut Ui, st: &mut AppState) {
-    if st.comp_pivot().is_some() {
-        ui.label(egui::RichText::new("Drag the arrows to move it: the faces round it follow").font(regular(12.0)).color(TEXT2()));
-    }
     // a sketch's corner: cut in its outline (exact arc or chamfer), the
     // whole height follows
     if let Some((size, chamfer, max)) = st.profile_corner_state() {
@@ -1308,8 +1351,6 @@ fn vertex_card(ui: &mut Ui, st: &mut AppState) {
             (false, true) => "Sketch corners",
             (false, false) => "Sketch corner",
         });
-        let txt = if on_path { "Cut in the path: an exact arc or a straight bevel" } else { "Cut in the sketch's outline: an exact arc or a straight bevel, the whole height follows" };
-        ui.label(egui::RichText::new(txt).font(regular(12.0)).color(TEXT2()));
         let kinds = [(false, "Fillet", EDGE_SEL), (true, "Chamfer", EDGE_SEL)];
         if let Some(c) = segmented(ui, &kinds, chamfer, 36.0) {
             st.set_profile_corners(if size > 0.0 { size } else { 2.0f64.min(max) }, c, true);
@@ -1364,7 +1405,6 @@ fn tweak_card(ui: &mut Ui, st: &mut AppState, id: FeatureId) {
     let any_down = ui.input(|i| i.pointer.any_down());
     let Some(t) = st.doc.feature(id).and_then(|f| f.tweak.clone()) else { return };
     section(ui, "Move");
-    ui.label(egui::RichText::new("Drag the arrows, or set the move here. The faces round it follow: flat ones stay flat, a four-sided one may bend.").font(regular(12.0)).color(TEXT2()));
     let span = (t.delta.abs().max_element().ceil() as f32 * 2.0).max(20.0);
     for (k, label) in [(0usize, "X"), (1, "Y"), (2, "Z")] {
         let mut v = t.delta[k] as f32;
