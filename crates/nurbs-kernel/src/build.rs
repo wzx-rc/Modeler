@@ -1246,7 +1246,7 @@ mod tests {
         // a fillet with tension, then another on an edge meeting it at the
         // block's corner: the same size (blended into one mitre), a
         // smaller one (made on its own, on the conic faces): the first
-        // keeps its tension
+        // keeps its tension, the second takes its own
         let round = |m: &Model, id: u32| m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(id) && matches!(f.kind, SurfKind::Cylinder | SurfKind::Torus)).count();
         for (size, tension2) in [(4.0, 0.7), (4.0, 0.0), (3.0, 0.0), (3.0, 0.3)] {
             let mut d = Doc::default();
@@ -1264,12 +1264,12 @@ mod tests {
                 // the same size: one mitre, the second conic when it asks
                 assert!(m.errors.is_empty(), "{what}: {:?}", m.errors);
                 assert_eq!(round(&m, b) == 0, tension2 > 0.0, "{what}");
-            } else if tension2 > 0.0 {
-                // smaller: its end lies on the first one's conic face, so it
-                // stays round (and says so)
-                assert!(m.errors.len() == 1 && m.errors[0].starts_with("Fillet 2: tension"), "{what}: {:?}", m.errors);
             } else {
+                // smaller: made on its own, its end runs onto the first one's
+                // conic face (a face of its own between that face and the
+                // block's side, made conic between its two ends)
                 assert!(m.errors.is_empty(), "{what}: {:?}", m.errors);
+                assert_eq!(round(&m, b) == 0, tension2 > 0.0, "{what}");
             }
         }
     }
@@ -1318,8 +1318,8 @@ mod tests {
 
     #[test]
     fn tension_two_sizes() {
-        // a box's vertical edges rounded at 5 mm and its top edges at 3 mm,
-        // in both orders: each fillet keeps its own tension, the top one also
+        // a box's vertical edges rounded at 5 mm and its top edges at 3 mm
+        // (then 3 and 5), in both orders: each fillet keeps its own tension, the top one also
         // where it runs round the vertical one (made after it, along its
         // conic; made before it, the vertical one's corner follows it). The
         // vertical one's conic must stay rounder than 3 mm there (rho 0.365
@@ -1330,11 +1330,17 @@ mod tests {
         let mut circ = 0;
         // (vertical first, vertical's tension, top's tension)
         let cases = [(true, 0.0, 0.0), (true, 0.5, 0.7), (true, 0.0, 0.7), (true, 0.45, 0.0), (true, 0.45, 0.3), (false, 0.0, 0.0), (false, 0.0, 0.7), (false, 0.5, 0.0), (false, 0.5, 0.7), (false, 0.45, 0.3), (false, 0.38, 0.7)];
-        for (vfirst, tv, tt) in cases {
+        // the vertical one smaller than the top one (3 under 5): OpenCascade's
+        // corner between them (a face of the second, a spline) is remade
+        // with the tensions of the faces at its ends, and follows the top
+        // fillet's face it runs along when that one turns conic
+        let small = [(true, 0.0, 0.0), (true, 0.0, 0.7), (true, 0.5, 0.0), (true, 0.5, 0.7), (true, 0.3, 0.6), (false, 0.0, 0.0), (false, 0.0, 0.7), (false, 0.7, 0.0), (false, 0.5, 0.7), (false, 0.6, 0.3)];
+        let all = cases.iter().map(|c| (5.0, 3.0, *c)).chain(small.iter().map(|c| (3.0, 5.0, *c)));
+        for (rv, rt, (vfirst, tv, tt)) in all {
             let mut d = Doc::default();
             d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
             let m0 = build(&d, true, false, &[], &mut Cache::default());
-            let (first, r1, t1, second, r2, t2) = if vfirst { (vert, 5.0, tv, top, 3.0, tt) } else { (top, 3.0, tt, vert, 5.0, tv) };
+            let (first, r1, t1, second, r2, t2) = if vfirst { (vert, rv, tv, top, rt, tt) } else { (top, rt, tt, vert, rv, tv) };
             let a = d.add_round(r1, false, first.iter().map(|p| edge_near(&m0, *p)).collect());
             d.feature_mut(a).unwrap().round.as_mut().unwrap().tension = t1;
             let m1 = build(&d, true, false, &[], &mut Cache::default());
@@ -1342,21 +1348,22 @@ mod tests {
             let b = d.add_round(r2, false, second.iter().map(|p| edge_near(&m1, *p)).collect());
             d.feature_mut(b).unwrap().round.as_mut().unwrap().tension = t2;
             let m = build(&d, true, false, &[], &mut Cache::default());
-            assert!(m.errors.is_empty(), "vertical first {vfirst}, tensions {t1} {t2}: {:?}", m.errors);
+            let what = format!("vertical {rv} first {vfirst}, tensions {t1} {t2}");
+            assert!(m.errors.is_empty(), "{what}: {:?}", m.errors);
             if t1 == 0.0 && t2 == 0.0 {
                 circ = m.faces.len();
             }
-            assert_eq!(m.faces.len(), circ, "vertical first {vfirst}, tensions {t1} {t2}");
-            assert!(m.tension_limits.is_empty(), "vertical first {vfirst}, tensions {t1} {t2}: {:?}", m.tension_limits);
+            assert_eq!(m.faces.len(), circ, "{what}");
+            assert!(m.tension_limits.is_empty(), "{what}: {:?}", m.tension_limits);
             // a fillet with tension keeps no round face (made before the top
             // one, the vertical one's corners are the top one's section: round
             // when the top one has none)
             let round = |k: &SurfKind| matches!(k, SurfKind::Cylinder | SurfKind::Torus);
             if t1 > 0.0 {
-                assert!(!kinds(&m, a).iter().any(round), "vertical first {vfirst}, tensions {t1} {t2}: {:?}", kinds(&m, a));
+                assert!(!kinds(&m, a).iter().any(round), "{what}: {:?}", kinds(&m, a));
             }
-            if t2 > 0.0 && (vfirst || tt > 0.0) {
-                assert!(!kinds(&m, b).iter().any(round), "vertical first {vfirst}, tensions {t1} {t2}: {:?}", kinds(&m, b));
+            if t2 > 0.0 && (vfirst || tt > 0.0 || rv < rt) {
+                assert!(!kinds(&m, b).iter().any(round), "{what}: {:?}", kinds(&m, b));
             }
         }
         // the vertical one too full (0.7: its conic curves down to 1.5 mm,
@@ -1388,7 +1395,7 @@ mod tests {
         let kinds = |m: &Model, r: u32| m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).map(|f| f.kind).collect::<Vec<_>>();
         let vert = [DVec3::new(20.0, 10.0, 15.0), DVec3::new(-20.0, 10.0, 15.0), DVec3::new(20.0, 10.0, -15.0), DVec3::new(-20.0, 10.0, -15.0)];
         let top = [DVec3::new(0.0, 20.0, 15.0), DVec3::new(0.0, 20.0, -15.0), DVec3::new(20.0, 20.0, 0.0), DVec3::new(-20.0, 20.0, 0.0)];
-        for (name, first, second, r1, r2) in [("vertical 5 then top 3", vert, top, 5.0, 3.0), ("top 3 then vertical 5", top, vert, 3.0, 5.0), ("top 5 then vertical 3", top, vert, 5.0, 3.0)] {
+        for (name, first, second, r1, r2) in [("vertical 5 then top 3", vert, top, 5.0, 3.0), ("top 3 then vertical 5", top, vert, 3.0, 5.0), ("top 5 then vertical 3", top, vert, 5.0, 3.0), ("vertical 3 then top 5", vert, top, 3.0, 5.0)] {
             for (t1, t2) in [(0.7, 0.7), (0.0, 0.7), (0.7, 0.0), (0.3, 0.3)] {
                 let mut d = Doc::default();
                 d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
@@ -1415,10 +1422,13 @@ mod tests {
         let mut d = Doc::default();
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let m0 = build(&d, true, false, &[], &mut Cache::default());
-        let a = d.add_round(3.0, false, top.iter().map(|p| edge_near(&m0, *p)).collect());
+        let size = |k: &str, or: f64| Some(env(k)).filter(|v| *v > 0.0).unwrap_or(or);
+        // FORME_VFIRST=1: the vertical edges first (R1 / T1 still the top's)
+        let (first, second) = if env("FORME_VFIRST") > 0.0 { (vert, top) } else { (top, vert) };
+        let a = d.add_round(size("FORME_R1", 3.0), false, first.iter().map(|p| edge_near(&m0, *p)).collect());
         d.feature_mut(a).unwrap().round.as_mut().unwrap().tension = env("FORME_T1");
         let m1 = build(&d, true, false, &[], &mut Cache::default());
-        let b = d.add_round(5.0, false, vert.iter().map(|p| edge_near(&m1, *p)).collect());
+        let b = d.add_round(size("FORME_R2", 5.0), false, second.iter().map(|p| edge_near(&m1, *p)).collect());
         d.feature_mut(b).unwrap().round.as_mut().unwrap().tension = env("FORME_T2");
         let m = build(&d, true, false, &[], &mut Cache::default());
         eprintln!("fillets {a} {b}, errors {:?}, tension limits {:?}", m.errors, m.tension_limits);
