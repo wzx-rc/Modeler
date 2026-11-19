@@ -24,15 +24,25 @@
 //! Nothing read: the Slot makes nothing, the Cube goes on to its height as
 //! drawn.
 //!
+//! Step 6, a fillet's radius read on the scan: in Edge mode, Fit to scan
+//! (the operation window, the marking menu) on sharp edges of the part
+//! laid on the scan, or on a fillet between flat faces: the scan cut in
+//! slices across each edge (`rectify_core::fillet::read`: the scan's two
+//! faces and the arc tangent to both in each slice), the fillet made or
+//! sized at the slices' median radius, the arcs read shown while it is
+//! selected.
+//!
 //! Step 4, the plane under the pointer: Cube, Sketch and Path start on the
 //! scan's flat face under the pointer (`rectify_core::planes::plane_under`, as Forme Rectify's Pen),
 //! else its tangent plane there, when the part is not in front of it.
 
 use crate::render::MeshVertex;
 use crate::state::{AppState, BasePlane, Creation, Tool};
-use glam::{DQuat, DVec3};
+use glam::{DQuat, DVec3, Vec3};
 use nurbs_kernel::doc::Profile;
-use nurbs_kernel::{Model, Op, Prim};
+use nurbs_kernel::model::SurfKind;
+use nurbs_kernel::{FaceTag, FeatureId, Model, Op, Prim};
+use rectify_core::fillet::{EdgeSample, FilletRead};
 use rectify_core::planes::{dominant_normal, plane_under, tangent_under};
 use rectify_core::slot::Slot;
 
@@ -631,6 +641,195 @@ impl AppState {
     }
 }
 
+/// The arcs read on the scan for a fillet sized by Fit to scan.
+#[derive(Clone, Debug)]
+pub struct FilletShow {
+    pub id: FeatureId,
+    pub arcs: Vec<Vec<DVec3>>,
+}
+
+impl AppState {
+    /// A model face's way away from an edge at `p` (square to the edge's
+    /// direction `t` and to the face's normal `n`), and how far the face
+    /// runs that way.
+    fn face_away(&self, face: usize, p: DVec3, t: DVec3, n: DVec3) -> Option<(DVec3, f64)> {
+        let m = self.model.as_ref()?;
+        let side = t.cross(n).try_normalize()?;
+        let pos = |i: u32| Vec3::from(m.positions[i as usize]).as_dvec3();
+        let mut near = (f64::MAX, 0.0);
+        let (mut hi, mut lo) = (0.0f64, 0.0f64);
+        for (tri, fi) in m.triangles.iter().zip(&m.tri_face) {
+            if *fi as usize != face {
+                continue;
+            }
+            let c = (pos(tri[0]) + pos(tri[1]) + pos(tri[2])) / 3.0;
+            let d = c.distance_squared(p);
+            if d < near.0 {
+                near = (d, (c - p).dot(side));
+            }
+            for &v in tri {
+                let s = (pos(v) - p).dot(side);
+                hi = hi.max(s);
+                lo = lo.min(s);
+            }
+        }
+        if near.1.abs() < 1e-9 {
+            return None;
+        }
+        Some(if near.1 > 0.0 { (side, hi) } else { (-side, -lo) })
+    }
+
+    /// The edge sample at `p` along `t` between two model faces.
+    fn edge_sample(&self, fa: usize, fb: usize, p: DVec3, t: DVec3) -> Option<EdgeSample> {
+        let n = [self.normal_near(fa, p)?, self.normal_near(fb, p)?];
+        let (d0, r0) = self.face_away(fa, p, t, n[0])?;
+        let (d1, r1) = self.face_away(fb, p, t, n[1])?;
+        Some(EdgeSample { p, t, n, d: [d0, d1], reach: [r0, r1] })
+    }
+
+    /// Up to ten samples along a sharp model edge (its ends left out: other
+    /// faces meet there), at least 0.5 mm apart.
+    fn edge_samples(&self, edge: usize) -> Vec<EdgeSample> {
+        let Some(m) = self.model.as_ref() else { return vec![] };
+        let Some(e) = m.edges.get(edge) else { return vec![] };
+        let (fa, fb) = (e.faces[0], e.faces[1]);
+        if fa < 0 || fb < 0 || fa == fb || e.pts.len() < 2 {
+            return vec![];
+        }
+        let pts: Vec<DVec3> = e.pts.iter().map(|p| Vec3::from(*p).as_dvec3()).collect();
+        let mut cum = vec![0.0];
+        for w in pts.windows(2) {
+            cum.push(cum.last().unwrap() + (w[1] - w[0]).length());
+        }
+        let len = *cum.last().unwrap();
+        if len < 1e-6 {
+            return vec![];
+        }
+        let closed = pts[0].distance(pts[pts.len() - 1]) < 1e-4;
+        let k = ((len / 0.5).round() as usize).clamp(3, 10);
+        let mut out = vec![];
+        for i in 0..k {
+            let f = if closed { (i as f64 + 0.5) / k as f64 } else { 0.12 + 0.76 * i as f64 / (k - 1) as f64 };
+            let s = f * len;
+            let j = cum.windows(2).position(|c| s <= c[1]).unwrap_or(pts.len() - 2);
+            let seg = cum[j + 1] - cum[j];
+            let u = if seg > 0.0 { (s - cum[j]) / seg } else { 0.0 };
+            let p = pts[j].lerp(pts[j + 1], u);
+            let Some(t) = (pts[j + 1] - pts[j]).try_normalize() else { continue };
+            if let Some(es) = self.edge_sample(fa as usize, fb as usize, p, t) {
+                out.push(es);
+            }
+        }
+        out
+    }
+
+    /// Samples along each edge a fillet rounds, when both its faces are
+    /// flat: the line where their planes meet, over the fillet's own faces'
+    /// span along it.
+    fn fillet_samples(&self, id: FeatureId) -> Vec<Vec<EdgeSample>> {
+        let (Some(m), Some(f)) = (self.model.as_ref(), self.doc.feature(id)) else { return vec![] };
+        let Some(round) = &f.round else { return vec![] };
+        let own = FaceTag { feature: id, sub: 0 }.pack();
+        let pos = |i: u32| Vec3::from(m.positions[i as usize]).as_dvec3();
+        let mut out = vec![];
+        for e in &round.edges {
+            // the flat face of each tag whose plane passes nearest the edge
+            let plane = |tag: i64| {
+                m.faces
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, x)| x.kind == SurfKind::Plane && x.tag.map(|t| t.pack()) == Some(tag))
+                    .map(|(i, x)| (i, DVec3::from_array(x.point), DVec3::from_array(x.normal).normalize()))
+                    .min_by(|a, b| (e.at - a.1).dot(a.2).abs().total_cmp(&(e.at - b.1).dot(b.2).abs()))
+            };
+            let (Some((fa, pa, na)), Some((fb, pb, nb))) = (plane(e.faces[0]), plane(e.faces[1])) else { continue };
+            let Some(t) = na.cross(nb).try_normalize() else { continue };
+            // the point of both planes nearest the edge's middle
+            let g = na.dot(nb);
+            let (ha, hb) = (na.dot(pa - e.at), nb.dot(pb - e.at));
+            let den = 1.0 - g * g;
+            let o = e.at + na * ((ha - g * hb) / den) + nb * ((hb - g * ha) / den);
+            // the fillet's faces along that line, near it
+            let reach = round.size * 2.0 + 1.0;
+            let mut span: Option<(f64, f64)> = None;
+            for (tri, fi) in m.triangles.iter().zip(&m.tri_face) {
+                if m.faces[*fi as usize].tag.map(|t| t.pack()) != Some(own) {
+                    continue;
+                }
+                for &v in tri {
+                    let q = pos(v) - o;
+                    let s = q.dot(t);
+                    if (q - t * s).length() <= reach {
+                        span = Some(span.map(|(a, b)| (a.min(s), b.max(s))).unwrap_or((s, s)));
+                    }
+                }
+            }
+            let Some((a, b)) = span else { continue };
+            let len = b - a;
+            let k = ((len / 0.5).round() as usize).clamp(3, 10);
+            let v: Vec<EdgeSample> = (0..k).filter_map(|i| self.edge_sample(fa, fb, o + t * (a + len * (0.12 + 0.76 * i as f64 / (k - 1) as f64)), t)).collect();
+            if !v.is_empty() {
+                out.push(v);
+            }
+        }
+        out
+    }
+
+    /// Fit to scan: the picked sharp edges (or the selected fillet's) read
+    /// on the scan; the fillet made, or sized, at the radius read.
+    pub fn fit_round_to_scan(&mut self) {
+        let Some(r) = self.reference.clone() else {
+            self.toast("Fit to scan: import a reference mesh first", true);
+            return;
+        };
+        let existing = self.selected_round().filter(|f| f.round.as_ref().map(|r| !r.chamfer).unwrap_or(false)).map(|f| f.id);
+        let edges: Vec<Vec<EdgeSample>> = match existing {
+            Some(id) => self.fillet_samples(id),
+            None => self.edge_sel.clone().iter().filter_map(|e| self.model_edge_of(e)).map(|i| self.edge_samples(i)).filter(|v| !v.is_empty()).collect(),
+        };
+        if edges.is_empty() {
+            self.toast(if existing.is_some() { "Fit to scan: this fillet's faces must be flat" } else { "Fit to scan: pick sharp edges of the part laid on the scan" }, true);
+            return;
+        }
+        let t0 = std::time::Instant::now();
+        let reads: Vec<Result<FilletRead, String>> = edges.iter().map(|s| rectify_core::fillet::read(&r.mesh, &r.topo, &r.bvh, s, r.edge)).collect();
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let ok: Vec<&FilletRead> = reads.iter().filter_map(|x| x.as_ref().ok()).collect();
+        if ok.is_empty() {
+            let e = reads.iter().find_map(|x| x.as_ref().err()).cloned().unwrap_or_default();
+            self.toast(&format!("Fit to scan: {e}"), true);
+            return;
+        }
+        let mut rs: Vec<f64> = ok.iter().flat_map(|f| f.slices.iter().map(|s| s.r)).collect();
+        rs.sort_by(f64::total_cmp);
+        let size = (rs[rs.len() / 2] * 100.0).round() / 100.0;
+        if std::env::var_os("FORME_SCAN_DEBUG").is_some() {
+            for (i, x) in reads.iter().enumerate() {
+                match x {
+                    Ok(f) => eprintln!("fit to scan: edge {i}: r {:.3} ({:.3} to {:.3}), {} of {} slices, convex {}", f.r, f.lo, f.hi, f.slices.len(), f.tried, f.convex),
+                    Err(e) => eprintln!("fit to scan: edge {i}: {e}"),
+                }
+            }
+            eprintln!("fit to scan: {size} mm in {ms:.1} ms");
+        }
+        self.set_round(size, false, true);
+        self.end_live();
+        let Some(id) = self.selected_round().map(|f| f.id) else { return };
+        self.fillet_show = Some(FilletShow { id, arcs: ok.iter().flat_map(|f| f.slices.iter().map(|s| s.arc(16))).collect() });
+        let fmt = |v: f64| format!("{v:.2}").replace('.', ",");
+        let (lo, hi) = (rs[0], rs[rs.len() - 1]);
+        let tried: usize = edges.iter().map(|v| v.len()).sum();
+        let mut text = format!("Fillet read on the scan: {} mm ({} of {tried} slices, {} to {})", fmt(size), rs.len(), fmt(lo), fmt(hi));
+        if ok.len() < reads.len() {
+            text += &format!(" · {} of {} edges read", ok.len(), reads.len());
+        }
+        if hi - lo > (0.25 * size).max(0.1) {
+            text += " · it varies along the edges";
+        }
+        self.toast(&text, false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,6 +925,53 @@ mod tests {
         let b = DVec3::new(0.0, 7f64.to_radians().sin(), 7f64.to_radians().cos());
         assert_eq!(snap_axis(b), b);
     }
+
+    /// Prints the scan's vertices in a thin slab (ignored: the pistol).
+    /// `FORME_SLAB="axis,at,lo1,hi1,lo2,hi2"`: axis 0 x, 1 y, 2 z; the
+    /// other two coordinates' boxes in order.
+    #[test]
+    #[ignore]
+    fn slab_dump() {
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        let r = crate::reference::Reference::load(&path).expect("reference");
+        let v: Vec<f64> = std::env::var("FORME_SLAB").unwrap().split(',').map(|x| x.parse().unwrap()).collect();
+        let ax = v[0] as usize;
+        let (o1, o2) = ((ax + 1) % 3, (ax + 2) % 3);
+        let mut pts: Vec<(f64, f64)> = r.mesh.pos.iter().filter(|p| (p[ax] - v[1]).abs() < 0.08 && p[o1] >= v[2] && p[o1] <= v[3] && p[o2] >= v[4] && p[o2] <= v[5]).map(|p| (p[o1], p[o2])).collect();
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (a, b) in pts {
+            println!("{a:.3} {b:.3}");
+        }
+    }
+
+    /// Reads a few edges of the pistol with samples laid by hand (ignored:
+    /// the pistol; `FORME_SCAN_DEBUG=1` prints each slice).
+    #[test]
+    #[ignore]
+    fn fillet_probe() {
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        let r = crate::reference::Reference::load(&path).expect("reference");
+        let (x, y, z) = (DVec3::X, DVec3::Y, DVec3::Z);
+        // (name, edge start, end, normals, ways away, reaches)
+        let cases: Vec<(&str, DVec3, DVec3, [DVec3; 2], [DVec3; 2], [f64; 2])> = vec![
+            ("receiver top / side, x 3 to 13", DVec3::new(3.0, 99.45, 10.3), DVec3::new(13.0, 99.45, 10.3), [z, y], [-y, -z], [9.5, 16.0]),
+            ("receiver top / side, x -10 to -5", DVec3::new(-10.0, 102.0, 13.3), DVec3::new(-5.0, 102.0, 13.3), [z, y], [-y, -z], [20.0, 16.0]),
+            ("receiver top / side, x -9.5 to -4.5 (box)", DVec3::new(-9.5, 101.8, 13.6), DVec3::new(-4.5, 101.8, 13.6), [z, y], [-y, -z], [26.0, 20.0]),
+            ("button top / +X side", DVec3::new(-10.25, 76.5, 16.2), DVec3::new(-10.25, 80.0, 16.2), [z, x], [-x, -z], [5.0, 2.4]),
+            ("button top / +Y side", DVec3::new(-15.0, 80.75, 16.2), DVec3::new(-11.0, 80.75, 16.2), [z, y], [-y, -z], [4.5, 2.4]),
+            ("step top (y 84)", DVec3::new(2.0, 84.2, 13.5), DVec3::new(14.0, 84.2, 13.5), [z, y], [-y, -z], [9.0, 1.8]),
+            ("muzzle side / top", DVec3::new(38.0, 100.0, 13.0), DVec3::new(52.0, 100.0, 13.0), [z, y], [-y, -z], [25.0, 12.0]),
+        ];
+        for (name, a, b, n, d, reach) in cases {
+            let t = (b - a).normalize();
+            let s: Vec<EdgeSample> = (0..10).map(|i| EdgeSample { p: a.lerp(b, i as f64 / 9.0), t, n, d, reach }).collect();
+            match rectify_core::fillet::read(&r.mesh, &r.topo, &r.bvh, &s, r.edge) {
+                Ok(f) => println!("{name}: r {:.3} ({:.3} to {:.3}), {} of {} slices, convex {}, off {:.2?} turn {:.1?} rms {:.3}", f.r, f.lo, f.hi, f.slices.len(), f.tried, f.convex, f.slices[0].off, f.slices[0].turn, f.slices[0].rms),
+                Err(e) => println!("{name}: {e}"),
+            }
+        }
+    }
+
 }
 
 /// The scan's flat face found last under the pointer: a plane through `o`

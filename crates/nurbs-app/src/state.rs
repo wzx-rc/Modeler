@@ -478,6 +478,9 @@ pub struct AppState {
     /// The scan under the press of a Cube drawn on it: corner to corner
     /// across a block or a pocket, read on release (`scan_box_read`).
     pub scan_box_from: Option<(u32, DVec3)>,
+    /// The arcs read on the scan for the fillet sized last by Fit to scan
+    /// (shown while it is selected).
+    pub fillet_show: Option<crate::scan::FilletShow>,
     /// The scan's flat face found last under the pointer (`scan_plane_at`):
     /// kept while the pointer stays on its plane.
     pub scan_plane_memo: std::cell::Cell<Option<crate::scan::ScanPlaneMemo>>,
@@ -569,6 +572,7 @@ impl AppState {
             scan_round: None,
             scan_slot: None,
             scan_box_from: None,
+            fillet_show: None,
             scan_plane_memo: std::cell::Cell::new(None),
             scan_plane_search: std::cell::Cell::new(None),
             dev_on: false,

@@ -1996,6 +1996,14 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
             }
         }
     });
+    // the radius the reference mesh has along these edges (retopo)
+    if st.reference.is_some() && existing.as_ref().map(|r| !r.chamfer).unwrap_or(true) {
+        ui.add_space(2.0);
+        let w = ui.available_width();
+        if primary_btn(ui, Some(Icon::Scan), "Fit to scan", Some(w)).on_hover_text("The fillet at the radius the reference mesh has across these edges").clicked() {
+            st.fit_round_to_scan();
+        }
+    }
     // the fillet's tension (straight fillets between flat ends)
     if let (Some(r), Some(id)) = (existing.as_ref().filter(|r| !r.chamfer), st.selected_round().map(|f| f.id)) {
         ui.add_space(2.0);

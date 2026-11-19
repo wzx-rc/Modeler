@@ -168,6 +168,11 @@ impl Drawer {
             let lines = vec![sr.ring(96).iter().map(|p| p.as_vec3().to_array()).collect::<Vec<_>>(), vec![sr.a.as_vec3().to_array(), sr.b.as_vec3().to_array()]];
             line_vertices(&lines, [accent.r(), accent.g(), accent.b(), 235], 1.8, &mut over);
         }
+        // the arcs read on the scan for the selected fillet (Fit to scan)
+        if let Some(fs) = st.fillet_show.as_ref().filter(|fs| st.selection == [fs.id] && st.doc.feature(fs.id).is_some()) {
+            let lines: Vec<Vec<[f32; 3]>> = fs.arcs.iter().map(|a| a.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
+            line_vertices(&lines, [accent.r(), accent.g(), accent.b(), 235], 1.8, &mut over);
+        }
         for f in st.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()) {
             let creating = st.creation.as_ref().map(|c| c.id == f.id).unwrap_or(false);
             let selected = st.selection.contains(&f.id);

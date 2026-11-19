@@ -68,6 +68,8 @@ pub enum Act {
     Duplicate,
     Fillet,
     Chamfer,
+    /// The fillet at the radius read on the reference mesh.
+    FitScan,
     Extrude,
     Inset,
     Deselect,
@@ -113,12 +115,18 @@ pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
             it(4, "Delete", false, Act::Delete),
             it(6, "Object mode", false, Act::ObjectMode),
         ],
-        Ctx::Edge => vec![
-            it(0, "Fillet", false, Act::Fillet),
-            it(2, "Chamfer", false, Act::Chamfer),
-            it(4, "Deselect", false, Act::Deselect),
-            it(6, "Object mode", false, Act::ObjectMode),
-        ],
+        Ctx::Edge => {
+            let mut v = vec![
+                it(0, "Fillet", false, Act::Fillet),
+                it(2, "Chamfer", false, Act::Chamfer),
+                it(4, "Deselect", false, Act::Deselect),
+                it(6, "Object mode", false, Act::ObjectMode),
+            ];
+            if st.reference.is_some() {
+                v.push(it(1, "Fit to scan", false, Act::FitScan));
+            }
+            v
+        }
         Ctx::Face => vec![
             it(0, "Extrude", false, Act::Extrude),
             it(2, "Inset", false, Act::Inset),
@@ -163,6 +171,10 @@ fn run(st: &mut AppState, act: Act, ctx: Ctx, at: [f32; 2]) {
                 st.end_live();
                 st.edge_sel.clear();
             }
+        }
+        Act::FitScan => {
+            st.fit_round_to_scan();
+            st.edge_sel.clear();
         }
         Act::Extrude => st.arm_push(crate::state::PushKind::Extrude, Some(at)),
         Act::Inset => st.arm_push(crate::state::PushKind::Inset, Some(at)),

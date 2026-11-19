@@ -9,10 +9,13 @@
 //! - `planes`: the scan's flat faces near a point, the plane to draw on;
 //! - `circle`: a round part's wall, its profile;
 //! - `slot`: a slot, a box or a round part found under a drag, a NURBS
-//!   surface laid on its wall.
+//!   surface laid on its wall;
+//! - `fillet`: a fillet's radius read across a sharp edge of a part laid
+//!   on the scan (Forme NURBS).
 
 pub mod bvh;
 pub mod circle;
+pub mod fillet;
 pub mod mesh;
 pub mod nurbs;
 pub mod planes;

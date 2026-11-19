@@ -2135,6 +2135,134 @@ fn main() {
         }
     }
 
+    if want("scan-fillet") {
+        // retopology, step 6: a block laid on the receiver's back (its side
+        // and top on the scan's), the edge between them picked and Fit to
+        // scan: the scan read in slices across it, the fillet made at the
+        // radius read; the deviation before and after; then the square
+        // button's block (read as in step 5), its four top edges fitted
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        if std::path::Path::new(&path).exists() {
+            let mut d = Doc::default();
+            d.reference = Some(nurbs_kernel::RefMesh { path: path.clone() });
+            let f = d.add(Op::Add, Prim::Box { x: 5.5, y: 21.3, z: 26.4 }, DVec3::new(-7.25, 80.0, 0.0), DQuat::IDENTITY);
+            d.feature_mut(f).unwrap().name = "Receiver".into();
+            h.reset(d, "Retopo");
+            h.step();
+            let end = Instant::now() + Duration::from_secs(180);
+            while h.st.ref_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            h.settle();
+            h.st.toast = None;
+            let refm = h.st.reference.clone().expect("reference");
+            let side = |x: f64, y: f64| -> Vec3 { refm.hit(DVec3::new(x, y, 100.0), DVec3::new(0.0, 0.0, -1.0)).map(|q| q.0.as_vec3()).unwrap_or(Vec3::new(x as f32, y as f32, 12.0)) };
+            let toast = |h: &Harness| h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+            let wait_dev = |h: &mut Harness| {
+                let end = Instant::now() + Duration::from_secs(60);
+                h.step();
+                while h.st.dev_busy() && Instant::now() < end {
+                    h.step();
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                h.steps(2);
+            };
+            let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+            // 1. the receiver's back: side and top, a large blend between
+            h.st.camera.yaw = 0.55;
+            h.st.camera.pitch = 0.5;
+            h.st.camera.frame(Vec3::new(-16.0, 90.0, 2.0), Vec3::new(2.0, 106.0, 16.0));
+            h.steps(2);
+            h.shot("zero-scan-fillet-1-block");
+            h.st.set_deviation(true);
+            wait_dev(&mut h);
+            h.shot("zero-scan-fillet-2-dev-before");
+            h.st.set_deviation(false);
+            h.st.set_sel_mode(SelMode::Edge);
+            h.st.select(None, false);
+            h.st.edge_sel = vec![EdgeRef { faces: [tag(f, 2), tag(f, 4)], at: DVec3::new(-7.25, 101.3, 13.2) }];
+            h.steps(3);
+            h.settle();
+            h.steps(12);
+            h.shot("zero-scan-fillet-3-edge");
+            h.st.fit_round_to_scan();
+            h.settle();
+            eprintln!("  receiver: {}", toast(&h));
+            h.shot("zero-scan-fillet-4-fit");
+            // the deviation with nothing selected (the arcs read are shown
+            // while the fillet is)
+            let fillet = h.st.selection.clone();
+            h.st.select(None, false);
+            h.st.set_deviation(true);
+            wait_dev(&mut h);
+            if let Some(d) = &h.st.deviation {
+                eprintln!("  deviation after: {} near, {} within {} mm, median {:.3}, 95 % {:.3}", d.near, d.within, d.tol, d.p50, d.p95);
+            }
+            h.shot("zero-scan-fillet-5-dev-after");
+            h.st.set_deviation(false);
+            h.st.selection = fillet;
+            h.st.ref_shown = false;
+            h.steps(12);
+            h.shot("zero-scan-fillet-6-alone");
+            h.st.ref_shown = true;
+            // 2. the square button: its block read as in step 5, then its
+            // four straight top edges fitted
+            h.st.set_sel_mode(SelMode::Object);
+            h.st.select(None, false);
+            h.st.toast = None;
+            h.st.camera.yaw = 0.35;
+            h.st.camera.pitch = 0.3;
+            h.st.camera.frame(Vec3::new(-24.0, 68.0, 8.0), Vec3::new(-3.0, 88.0, 18.0));
+            h.steps(2);
+            h.st.tool = Tool::Create(PrimKind::Box);
+            let (a, b) = (h.screen_of(side(-16.25, 75.25)), h.screen_of(side(-9.75, 81.25)));
+            h.move_to(a);
+            h.steps(2);
+            h.drag(a, b, 10, false);
+            h.steps(2);
+            h.press(b, false);
+            h.step();
+            h.settle();
+            eprintln!("  button: {}", toast(&h));
+            let block = h.st.selection.first().copied().unwrap_or(0);
+            h.st.tool = Tool::Select;
+            h.st.set_sel_mode(SelMode::Edge);
+            h.st.select(None, false);
+            let top = tag(block, 1);
+            let m = h.st.model.clone().expect("model");
+            let flat = |t: i64| m.faces.iter().any(|x| x.tag.map(|g| g.pack()) == Some(t) && x.kind == nurbs_kernel::model::SurfKind::Plane);
+            let picks: Vec<EdgeRef> = (0..m.edges.len())
+                .filter_map(|i| {
+                    let r = h.st.edge_ref(i)?;
+                    let other = if r.faces[0] == top { r.faces[1] } else if r.faces[1] == top { r.faces[0] } else { return None };
+                    flat(other).then_some(r)
+                })
+                .collect();
+            eprintln!("  button: {} top edges picked", picks.len());
+            h.st.edge_sel = picks;
+            h.st.toast = None;
+            h.st.camera.yaw = 0.45;
+            h.st.camera.pitch = 0.55;
+            h.st.camera.frame(Vec3::new(-19.0, 72.0, 11.0), Vec3::new(-7.0, 84.0, 18.0));
+            h.steps(3);
+            h.settle();
+            h.steps(12);
+            h.shot("zero-scan-fillet-7-button-edges");
+            h.st.fit_round_to_scan();
+            h.settle();
+            eprintln!("  button edges: {}", toast(&h));
+            h.shot("zero-scan-fillet-8-button-fit");
+            h.st.ref_shown = false;
+            h.steps(2);
+            h.shot("zero-scan-fillet-9-button-alone");
+            h.st.ref_shown = true;
+            for f in &h.st.doc.features {
+                eprintln!("  {} {:?} {:?} round {:?}", f.name, f.op, f.prim, f.round.as_ref().map(|r| (r.size, r.edges.len())));
+            }
+        }
+    }
+
     if want("tension-point") {
         // the top front edge filleted at 2 mm, then the top -X edge at 3 mm:
         // OpenCascade carries the second round the first one's end and down
