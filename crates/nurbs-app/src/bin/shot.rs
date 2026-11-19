@@ -162,6 +162,19 @@ impl Harness {
         self.step();
     }
 
+    /// The middle button.
+    fn mpress(&mut self, p: Pos2, down: bool) {
+        self.pending.push(Event::PointerMoved(p));
+        self.pending.push(Event::PointerButton { pos: p, button: PointerButton::Middle, pressed: down, modifiers: self.mods });
+        self.step();
+    }
+
+    /// Text typed (into the focused field).
+    fn type_text(&mut self, t: &str) {
+        self.pending.push(Event::Text(t.to_string()));
+        self.step();
+    }
+
     /// The right button (the marking menu).
     fn rpress(&mut self, p: Pos2, down: bool) {
         self.pending.push(Event::PointerMoved(p));
@@ -1281,6 +1294,39 @@ fn main() {
         h.shot("zero-qwer-8-move");
         let names: Vec<String> = h.st.undo_labels();
         eprintln!("  undo steps: {names:?}");
+    }
+
+    if want("fields") {
+        // value fields: a middle-button drag across changes the value, a
+        // click types one (3 decimals at most); the thin sliders
+        h.reset(test_part(), "Test part");
+        h.st.select(Some(3), false);
+        h.steps(3);
+        let f = pos2(270.0, 406.0);
+        h.move_to(f);
+        h.steps(2);
+        h.mpress(f, true);
+        for i in 1..=12 {
+            h.move_to(f + vec2(5.0 * i as f32, 0.0));
+        }
+        h.steps(2);
+        h.shot("zero-fields-1-middle-drag");
+        h.mpress(f + vec2(60.0, 0.0), false);
+        h.settle();
+        eprintln!("  boss after middle drag {:?}", h.st.doc.features[2].prim);
+        h.click(f);
+        h.steps(2);
+        for _ in 0..8 {
+            h.key(egui::Key::Backspace);
+        }
+        h.type_text("8,12345");
+        h.steps(1);
+        h.shot("zero-fields-2-typing");
+        h.key(egui::Key::Enter);
+        h.settle();
+        h.shot("zero-fields-3-typed");
+        eprintln!("  boss after typing {:?}", h.st.doc.features[2].prim);
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
     if want("marking") {

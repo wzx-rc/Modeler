@@ -100,29 +100,28 @@ struct BgOut {
             let c2 = abs(fract(gp.xz / 50.0 + 0.5) - 0.5) * 50.0;
             let l2 = 1.0 - smoothstep(0.0, foot + 0.08, min(c2.x, c2.y));
             let fade = exp(-tg * 0.0016);
+            // Romain, 19 nov.: the grid lines barely there, white at about
+            // 10 % (the 50 mm ones a hair more), no tint
+            let l = max(l1 * 0.8, l2);
             if (light) {
-                gcol = gcol - vec3<f32>(0.035, 0.035, 0.034) * l1 * fade - vec3<f32>(0.075, 0.075, 0.072) * l2 * fade;
+                gcol = gcol - vec3<f32>(0.045, 0.045, 0.045) * l * fade;
             } else {
-                gcol = gcol + vec3<f32>(0.010, 0.011, 0.013) * l1 * fade + vec3<f32>(0.022, 0.024, 0.028) * l2 * fade;
+                gcol = gcol + vec3<f32>(0.0105, 0.0105, 0.0105) * l * fade;
             }
-            // world origin: X axis red, Z axis blue, a ring around it
+            // world origin: the main axes (X and Z) and a ring round it in a
+            // light, airy grey
             if (u.misc.x > 0.5) {
                 let w = foot * 1.3 + 0.12;
                 let ax = 1.0 - smoothstep(0.0, w, abs(gp.z));
                 let az = 1.0 - smoothstep(0.0, w, abs(gp.x));
                 let ring = 1.0 - smoothstep(0.0, w, abs(length(gp.xz) - 2.5));
-                var red = vec3<f32>(0.42, 0.075, 0.07);
-                var blue = vec3<f32>(0.07, 0.15, 0.45);
-                var white = vec3<f32>(0.55, 0.56, 0.58);
+                var grey = vec3<f32>(0.068, 0.069, 0.072);
                 if (light) {
-                    red = vec3<f32>(0.78, 0.2, 0.17);
-                    blue = vec3<f32>(0.17, 0.36, 0.82);
-                    white = vec3<f32>(0.1, 0.1, 0.11);
+                    grey = vec3<f32>(0.22, 0.225, 0.235);
                 }
                 let f = 0.35 + 0.65 * fade;
-                gcol = mix(gcol, red, ax * f);
-                gcol = mix(gcol, blue, az * f);
-                gcol = mix(gcol, white, ring);
+                gcol = mix(gcol, grey, max(ax, az) * f);
+                gcol = mix(gcol, grey, ring * 0.8);
             }
         }
         let fog = clamp(tg / 2600.0, 0.0, 1.0);

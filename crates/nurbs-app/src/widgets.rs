@@ -106,8 +106,27 @@ pub fn nice_ceil(x: f32) -> f32 {
     10.0 * e
 }
 
-/// Touch-friendly slider (44 pt tall hit area). Sizes use an adaptive range so the
-/// knob sits mid-track whatever the scale; the range is frozen while dragging.
+/// A value with at most 3 decimals (Romain, 19 nov.: "3 après la virgule
+/// suffit"), trailing zeros dropped, at least one decimal, French comma.
+pub fn fmt3(v: f64) -> String {
+    let r = (v * 1000.0).round() / 1000.0;
+    let mut s = format!("{:.3}", if r == 0.0 { 0.0 } else { r });
+    while s.ends_with('0') && !s.ends_with(".0") {
+        s.pop();
+    }
+    s.replace('.', ",")
+}
+
+/// Rounds a value to 3 decimals.
+pub fn round3(v: f32) -> f32 {
+    ((v as f64 * 1000.0).round() / 1000.0) as f32
+}
+
+/// Thin slider for the mouse (Romain, 19 nov.: "plus fin… gris très clair,
+/// blanc, avec des petits liserés", like the component modes' bar): a hair
+/// track, the part up to the value in light grey, a small pill for a knob.
+/// Sizes use an adaptive range so the knob sits mid-track whatever the
+/// scale; the range is frozen while dragging.
 pub fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adaptive: bool, step: f32, width: f32) -> (bool, bool) {
     let (rect, _) = ui.allocate_exact_size(vec2(width, if DESK { 22.0 } else { 34.0 }), Sense::click_and_drag());
     let resp = ui.interact(rect.expand2(vec2(0.0, 5.0)), id, Sense::click_and_drag());
@@ -120,7 +139,7 @@ pub fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adapti
     if resp.dragged() || resp.drag_stopped() {
         hi = ui.data(|d| d.get_temp::<f32>(key)).unwrap_or(soft);
     }
-    let rail = Rect::from_center_size(rect.center(), vec2(width - if DESK { 12.0 } else { 20.0 }, if DESK { 3.0 } else { 4.0 }));
+    let rail = Rect::from_center_size(rect.center(), vec2(width - if DESK { 10.0 } else { 20.0 }, if DESK { 1.5 } else { 4.0 }));
     let mut changed = false;
     let started = resp.drag_started() || resp.clicked();
     if resp.dragged() || resp.clicked() || resp.drag_started() {
@@ -130,6 +149,7 @@ pub fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adapti
             if step > 0.0 {
                 nv = (nv / step).round() * step;
             }
+            let nv = round3(nv);
             if (nv - *v).abs() > 1e-6 {
                 *v = nv;
                 changed = true;
@@ -139,43 +159,95 @@ pub fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adapti
     let t = ((*v - min) / (hi - min)).clamp(0.0, 1.0);
     let kx = rail.min.x + t * rail.width();
     let p = ui.painter();
-    p.rect_filled(rail, 2.0, pick(Color32::from_rgb(0x3A, 0x3D, 0x44), Color32::from_rgb(0xD3, 0xD7, 0xDD)));
-    let zero = if min < 0.0 { rail.min.x + (-min / (hi - min)) * rail.width() } else { rail.min.x };
-    p.rect_filled(Rect::from_x_y_ranges(zero.min(kx)..=zero.max(kx), rail.y_range()), 2.0, accent());
-    let k = pos2(kx, rail.center().y);
+    let hot = resp.hovered() || resp.dragged() || resp.is_pointer_button_down_on();
     let active = resp.dragged() || resp.is_pointer_button_down_on();
-    let (kr, ka) = if DESK { (6.5, 7.5) } else { (9.5, 11.0) };
-    p.circle_filled(k + vec2(0.0, 1.0), kr + 1.0, tint(Color32::BLACK, 0.35));
-    p.circle(k, if active { ka } else { kr }, Color32::from_rgb(0xF2, 0xF3, 0xF5), Stroke::new(if active { 2.5 } else { 0.0 }, accent()));
+    p.rect_filled(rail, 1.0, pick(Color32::from_rgb(0x3A, 0x3D, 0x44), Color32::from_rgb(0xCF, 0xD3, 0xD9)));
+    let zero = if min < 0.0 { rail.min.x + (-min / (hi - min)) * rail.width() } else { rail.min.x };
+    p.rect_filled(Rect::from_x_y_ranges(zero.min(kx)..=zero.max(kx), rail.y_range()), 1.0, pick(Color32::from_rgb(0xC8, 0xCC, 0xD2), Color32::from_rgb(0x5A, 0x60, 0x6A)));
+    if DESK {
+        // the knob: a small upright pill, light grey with a fine dark edge
+        // and a thin light ring round it when hovered or held
+        let k = Rect::from_center_size(pos2(kx, rail.center().y), vec2(6.0, 12.0));
+        let fill = if active { Color32::WHITE } else { pick(Color32::from_rgb(0xDD, 0xE0, 0xE4), Color32::from_rgb(0xFA, 0xFB, 0xFC)) };
+        p.rect(k, 3.0, fill, Stroke::new(1.0, pick(Color32::from_rgb(0x16, 0x18, 0x1C), Color32::from_rgb(0x9A, 0xA0, 0xA8))), StrokeKind::Outside);
+        if hot {
+            p.rect_stroke(k.expand(2.5), 4.5, Stroke::new(1.0, pick(Color32::from_rgba_unmultiplied(0xE8, 0xEA, 0xEE, 120), Color32::from_rgba_unmultiplied(0x30, 0x34, 0x3A, 110))), StrokeKind::Outside);
+        }
+    } else {
+        let k = pos2(kx, rail.center().y);
+        p.circle_filled(k + vec2(0.0, 1.0), 10.5, tint(Color32::BLACK, 0.35));
+        p.circle(k, if active { 11.0 } else { 9.5 }, Color32::from_rgb(0xF2, 0xF3, 0xF5), Stroke::new(if active { 2.5 } else { 0.0 }, accent()));
+    }
     (changed, started && changed || resp.drag_started())
 }
 
-/// Number field in mm / ° / ×, French decimals, typed or dragged, fixed width
-/// (the panel never changes width with the value).
+/// Number field in mm / ° / ×, at most 3 decimals, fixed width (the panel
+/// never changes width with the value). A click types a value (Enter or a
+/// click away keeps it, Esc drops it); a drag left / right with the left or
+/// the middle button changes it (Shift: ten times finer).
 pub fn value_field(ui: &mut Ui, v: &mut f32, range: std::ops::RangeInclusive<f32>, step: f64, suffix: &str, width: f32) -> egui::Response {
-    let sfx = if suffix.is_empty() { String::new() } else { format!(" {suffix}") };
-    let parse_sfx = suffix.to_string();
-    let field = egui::DragValue::new(v)
-        .speed(step)
-        .range(range)
-        .custom_formatter(move |x, _| if step < 0.1 { format!("{:.2}{}", x, sfx).replace('.', ",") } else { format!("{}{}", fmt_mm(x as f32), sfx) })
-        .custom_parser(move |s| s.trim().trim_end_matches(parse_sfx.as_str()).trim().replace(',', ".").parse::<f64>().ok());
-    ui.scope(|ui| {
-        let w = &mut ui.visuals_mut().widgets;
-        w.inactive.weak_bg_fill = WELL();
-        w.inactive.bg_stroke = Stroke::new(1.0, DIVIDER());
-        w.hovered.weak_bg_fill = RAISED();
-        w.inactive.fg_stroke.color = TEXT_STRONG();
-        w.inactive.corner_radius = CornerRadius::same(6);
-        w.hovered.corner_radius = CornerRadius::same(6);
-        w.active.corner_radius = CornerRadius::same(6);
-        ui.style_mut().override_font_id = Some(regular(12.5));
-        // a DragValue is as wide as its text, at least interact_size: pin both
-        ui.spacing_mut().interact_size = vec2(width, 22.0);
-        ui.spacing_mut().button_padding = vec2(4.0, 1.0);
-        ui.add(field)
-    })
-    .inner
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click_and_drag());
+    let edit_key = resp.id.with("edit");
+    let raw_key = resp.id.with("raw");
+    let (lo, hi) = (*range.start(), *range.end());
+    let text_of = |x: f32| if suffix.is_empty() { fmt3(x as f64) } else { format!("{} {suffix}", fmt3(x as f64)) };
+    let editing: Option<String> = ui.data(|d| d.get_temp(edit_key));
+    if let Some(mut text) = editing {
+        let tid = resp.id.with("text");
+        let te = ui.put(
+            rect,
+            egui::TextEdit::singleline(&mut text).id(tid).font(regular(12.5)).horizontal_align(egui::Align::RIGHT).margin(vec2(5.0, 2.0)),
+        );
+        if !te.has_focus() && !te.lost_focus() {
+            te.request_focus();
+        }
+        let (esc, enter) = ui.input(|i| (i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::Enter)));
+        if te.lost_focus() || enter {
+            ui.data_mut(|d| d.remove::<String>(edit_key));
+            if !esc {
+                let t = text.trim().trim_end_matches(suffix).trim().replace(',', ".");
+                if let Ok(x) = t.parse::<f64>() {
+                    let nv = round3((x as f32).clamp(lo, hi));
+                    if (nv - *v).abs() > 1e-7 {
+                        *v = nv;
+                        resp.mark_changed();
+                    }
+                }
+            }
+        } else {
+            ui.data_mut(|d| d.insert_temp(edit_key, text));
+        }
+        return resp;
+    }
+    // a drag (left or middle button): the value follows the pointer across
+    if resp.drag_started() {
+        ui.data_mut(|d| d.insert_temp(raw_key, *v as f64));
+    }
+    if resp.dragged() {
+        let (dx, fine) = ui.input(|i| (i.pointer.delta().x, i.modifiers.shift));
+        let raw = ui.data(|d| d.get_temp::<f64>(raw_key)).unwrap_or(*v as f64) + dx as f64 * step * if fine { 0.1 } else { 1.0 };
+        let raw = raw.clamp(lo as f64, hi as f64);
+        ui.data_mut(|d| d.insert_temp(raw_key, raw));
+        // on the field's own steps (Shift: a tenth of them), 3 decimals at most
+        let q = if fine { step * 0.1 } else { step };
+        let nv = round3(((raw / q).round() * q) as f32);
+        if (nv - *v).abs() > 1e-7 {
+            *v = nv;
+            resp.mark_changed();
+        }
+    }
+    if resp.clicked() {
+        ui.data_mut(|d| d.insert_temp(edit_key, fmt3(*v as f64)));
+        ui.ctx().request_repaint();
+    }
+    if resp.hovered() || resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    let p = ui.painter();
+    let hot = resp.hovered() || resp.dragged();
+    p.rect(rect, 6.0, if hot { RAISED() } else { WELL() }, Stroke::new(1.0, if resp.dragged() { TEXT2() } else { DIVIDER() }), StrokeKind::Inside);
+    p.text(rect.right_center() - vec2(6.0, 0.0), Align2::RIGHT_CENTER, text_of(*v), regular(12.5), TEXT_STRONG());
+    resp
 }
 
 /// label · slider · value. Returns (changed, gesture started).

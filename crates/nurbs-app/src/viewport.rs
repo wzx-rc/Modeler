@@ -612,7 +612,7 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
             arrow(p, c + (*t - c) * 0.18, *t, if on { HOT } else { colors[a] }, if on { 3.0 } else { 2.2 });
         }
     }
-    p.circle(c, 4.0, Color32::WHITE, Stroke::new(1.5, Color32::from_rgb(0x20, 0x22, 0x26)));
+    p.circle(c, 2.5, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
     // the move under way
     if let Some(d) = &st.drag {
         if matches!(d.handle, Handle::Axis(_) | Handle::Plane(_)) {
@@ -634,7 +634,7 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
         if dragging.is_some() && dragging != Some(h) {
             continue;
         }
-        p.circle(q, if on { 7.0 } else { 5.5 }, if on { HOT } else { Color32::WHITE }, Stroke::new(1.5, Color32::from_rgb(0x20, 0x22, 0x26)));
+        p.circle(q, if on { 4.0 } else { 3.0 }, if on { HOT } else { Color32::WHITE }, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
         if on {
             let (label, v) = match (h, f.prim) {
                 (Handle::Size(0), Prim::Box { x, .. } | Prim::Profile { x, .. } | Prim::Path { x, .. }) => ("W", x),
@@ -680,7 +680,7 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
         let on = hot == Some(Handle::ScaleAll);
         p.rect(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, if on { tint(HOT, 0.5) } else { tint(Color32::WHITE, 0.25) }, Stroke::new(1.5, if on { HOT } else { Color32::WHITE }), egui::StrokeKind::Middle);
     }
-    p.circle(c, 3.5, Color32::WHITE, Stroke::new(1.5, Color32::from_rgb(0x20, 0x22, 0x26)));
+    p.circle(c, 2.25, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
     if let Some(t) = &st.gizmo_readout {
         chip(p, c + vec2(14.0, 14.0), Align2::LEFT_TOP, t, HOT, HOT);
     }
@@ -728,7 +728,7 @@ fn draw_sketch(p: &Painter, st: &AppState) {
     for (i, q) in k.pts.iter().enumerate() {
         let Some(s) = screen(*q) else { continue };
         let first = i == 0 && k.pts.len() >= 3;
-        let r = if first && closing { 6.0 } else { 4.0 };
+        let r = if first && closing { 3.5 } else { 2.5 };
         let fill = if first && closing { HOT } else { chip_bg() };
         if k.smooth[i] {
             p.circle(s, r, fill, Stroke::new(1.5, col));
@@ -798,7 +798,7 @@ fn draw_acquired(p: &Painter, st: &AppState) {
     }
     for a in &st.acquired {
         if let Some(q) = world(st, a.pos) {
-            p.circle(q, 3.5, tint(HOT, 0.25), Stroke::new(1.2, tint(HOT, 0.9)));
+            p.circle(q, 2.0, tint(HOT, 0.25), Stroke::new(1.0, tint(HOT, 0.9)));
         }
     }
 }
@@ -819,7 +819,7 @@ pub fn draw_snap(p: &Painter, st: &AppState, s: &crate::snap::Snapped) {
     for (a, b) in &s.guides {
         dotted(*a, *b);
         if let Some(q) = world(st, *a) {
-            p.circle(q, 3.0, col, Stroke::new(1.0, dark));
+            p.circle(q, 2.0, col, Stroke::new(1.0, dark));
         }
     }
     if let Some(src) = s.source {
@@ -866,11 +866,11 @@ fn draw_vertices(p: &Painter, st: &AppState) {
         let picked = st.vert_sel.iter().any(|v| v.as_vec3().distance(q) < 1e-3);
         let hot = st.hover_vertex.map(|v| v.as_vec3().distance(q) < 1e-3).unwrap_or(false);
         if picked {
-            p.circle(s, 5.0, accent(), Stroke::new(1.5, chip_bg()));
+            p.circle(s, 2.75, accent(), Stroke::new(1.0, chip_bg()));
         } else if hot {
-            p.circle(s, 5.0, chip_bg(), Stroke::new(2.0, accent()));
+            p.circle(s, 2.75, chip_bg(), Stroke::new(1.2, accent()));
         } else {
-            p.circle(s, 3.0, chip_bg(), Stroke::new(1.3, tint(TEXT(), 0.8)));
+            p.circle(s, 1.75, chip_bg(), Stroke::new(1.0, tint(TEXT(), 0.8)));
         }
     }
 }
@@ -893,10 +893,10 @@ fn draw_knife(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
         }
     }
     if let Some(a) = st.knife_last().and_then(|q| world(st, q)) {
-        p.circle(a, 3.5, col, Stroke::new(1.2, chip_bg()));
+        p.circle(a, 2.0, col, Stroke::new(1.0, chip_bg()));
     }
     if let Some(c) = hot {
-        let r = 5.5;
+        let r = 3.5;
         let d = [c + vec2(0.0, -r), c + vec2(r, 0.0), c + vec2(0.0, r), c + vec2(-r, 0.0)];
         p.add(egui::Shape::convex_polygon(d.to_vec(), col, Stroke::new(1.2, chip_bg())));
     }
@@ -909,7 +909,7 @@ fn draw_push(p: &Painter, st: &AppState) {
     if let Some(g) = &st.push {
         if let (Some(a), Some(b)) = (world(st, g.origin), world(st, g.origin + g.n * g.depth)) {
             p.line_segment([a, b], Stroke::new(1.2, tint(col, 0.7)));
-            p.circle(a, 3.0, chip_bg(), Stroke::new(1.3, col));
+            p.circle(a, 2.0, chip_bg(), Stroke::new(1.0, col));
         }
         let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
         chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("Extrude {} mm", fmt_mm(g.depth as f32)), col, col);
@@ -924,8 +924,8 @@ fn draw_push(p: &Painter, st: &AppState) {
         if let (Some(a), Some(b)) = (world(st, q), world(st, k)) {
             let on = lit(Handle::PushInset);
             p.line_segment([a, b], Stroke::new(if on { 2.2 } else { 1.6 }, col));
-            p.circle(a, 2.5, col, Stroke::NONE);
-            p.circle(b, if on { 7.5 } else { 6.0 }, if on { HOT } else { chip_bg() }, Stroke::new(2.0, col));
+            p.circle(a, 1.5, col, Stroke::NONE);
+            p.circle(b, if on { 4.0 } else { 3.0 }, if on { HOT } else { chip_bg() }, Stroke::new(1.2, col));
             if on {
                 // on the far side of the dot from its line, clear of the arrow
                 let away = (b - a).normalized();
@@ -937,7 +937,7 @@ fn draw_push(p: &Painter, st: &AppState) {
     }
     if let (Some(a), Some(b)) = (world(st, hs.base), world(st, hs.tip)) {
         let on = lit(Handle::PushDepth);
-        p.circle(a, 3.0, chip_bg(), Stroke::new(1.3, col));
+        p.circle(a, 2.0, chip_bg(), Stroke::new(1.0, col));
         arrow(p, a, b, if on { HOT } else { col }, if on { 3.0 } else { 2.2 });
         if on {
             let d = pu.depth;
