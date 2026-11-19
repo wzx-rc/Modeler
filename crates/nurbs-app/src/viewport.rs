@@ -531,8 +531,12 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
             if resp.clicked_by(PointerButton::Primary) {
                 if let Some(p) = resp.interact_pointer_pos() {
-                    st.sketch_press(p2(p));
-                    st.sketch_release();
+                    // Surface in Curve mode: Shift + click on a point placed
+                    // breaks the curve there (or no longer)
+                    if !(shift && st.sketch_toggle_sharp(p2(p))) {
+                        st.sketch_press(p2(p));
+                        st.sketch_release();
+                    }
                 }
             }
         }
@@ -817,7 +821,7 @@ fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch) {
     }
     // the outline with its fillets, closed once it has 3 points
     let n = placed + next.is_some() as usize;
-    let line = k.outline3(next, n >= 3);
+    let line = st.surface_line(k, next, n >= 3);
     let sl: Vec<Option<Pos2>> = line.iter().map(|q| world(st, *q)).collect();
     let m = sl.len();
     for i in 0..m {
@@ -836,7 +840,14 @@ fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch) {
         let first = i == 0 && placed >= 3;
         let r = if first && closing { 3.5 } else { 2.5 };
         let fill = if first && closing { HOT } else { chip_bg() };
-        p.rect(Rect::from_center_size(*s, vec2(r * 2.0, r * 2.0)), 1.0, fill, Stroke::new(1.5, col), egui::StrokeKind::Middle);
+        // Curve mode: a point the curve goes round is a disc, a sharp one
+        // (a V) a square
+        let sharp = k.sharp.get(i).copied().unwrap_or(false);
+        if st.surface_curve && !sharp {
+            p.circle(*s, r + 0.5, fill, Stroke::new(1.5, col));
+        } else {
+            p.rect(Rect::from_center_size(*s, vec2(r * 2.0, r * 2.0)), 1.0, fill, Stroke::new(1.5, col), egui::StrokeKind::Middle);
+        }
     }
     if let Some(h) = hover {
         let on = if st.surface_on_scan { "on the scan" } else { k.plane.label() };
@@ -1195,6 +1206,7 @@ pub fn hint(st: &AppState) -> String {
             None if st.surface_on_scan => "On scan: click the first point on the scan · Tab: On plane / On scan".into(),
             None => "Click: the first point, on a face, the scan's face or the ground (its plane holds the others) · Tab: On plane / On scan".into(),
             Some(k) if k.pts.len() < 3 => "Click or drag: a point · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
+            Some(_) if st.surface_curve => "First point or Enter: close it, filled · Shift + click a point: sharp / smooth · Ctrl + Z: the last point off · Tab: the next points on the plane / on the scan".into(),
             Some(_) => "First point or Enter: close it, filled with a surface with no thickness · Ctrl + drag a point: its fillet · Ctrl + Z: the last point off · Tab: the next points on the plane / on the scan".into(),
         },
         (None, Tool::Create(PrimKind::Profile)) => match &st.sketch {

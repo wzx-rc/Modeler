@@ -206,6 +206,9 @@ pub struct Sketch {
     /// The Surface tool off its plane ("On scan"): each point where it was
     /// put on the reference (None: on the plane).
     pub free: Vec<Option<DVec3>>,
+    /// The Surface's Curve mode: the points where the curve breaks in a V
+    /// (Shift + click on a point placed).
+    pub sharp: Vec<bool>,
 }
 
 impl Sketch {
@@ -214,16 +217,86 @@ impl Sketch {
         self.free.get(i).copied().flatten().unwrap_or_else(|| self.plane.at(self.pts[i]))
     }
 
-    /// The outline in the world with its corners' fillets (the Surface).
-    pub fn outline3(&self, extra: Option<DVec3>, closed: bool) -> Vec<DVec3> {
+    /// The outline in the world (the Surface): straight sides with their
+    /// corners' fillets, or (`curve`) the Catmull-Rom curve through the
+    /// points, broken at the sharp ones (whose fillets still apply).
+    pub fn outline3(&self, extra: Option<DVec3>, closed: bool, curve: bool) -> Vec<DVec3> {
         let mut w: Vec<DVec3> = (0..self.pts.len()).map(|i| self.world(i)).collect();
         let mut c: Vec<f64> = (0..w.len()).map(|i| self.corner.get(i).copied().unwrap_or(0.0)).collect();
+        let mut sharp: Vec<bool> = (0..w.len()).map(|i| self.sharp.get(i).copied().unwrap_or(false)).collect();
         if let Some(e) = extra {
             w.push(e);
             c.push(0.0);
+            sharp.push(false);
         }
-        rounded(&w, &c, closed)
+        if curve && w.len() >= 3 {
+            catmull_rom(&w, &sharp, closed)
+        } else {
+            rounded(&w, &c, closed)
+        }
     }
+}
+
+/// SplitIt's curve (Romain 19 nov., 22 h 09, its spec): the uniform
+/// Catmull-Rom through the points, each span sampled adaptively (12 steps,
+/// then halved while the middle, quarter or three-quarter point is off the
+/// chord by more than 5e-4 of the points' box diagonal; at most 513 per
+/// span). An open curve's ends and a sharp point take the reflected
+/// control (2 P1 - P2), so the curve leaves them straight (a V at a sharp
+/// point). Exact at the points.
+pub fn catmull_rom(w: &[DVec3], sharp: &[bool], closed: bool) -> Vec<DVec3> {
+    let n = w.len();
+    if n < 3 {
+        return w.to_vec();
+    }
+    let (lo, hi) = w.iter().fold((DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)), |(a, b), q| (a.min(*q), b.max(*q)));
+    let tol = (hi - lo).length() * 5e-4;
+    let spans = if closed { n } else { n - 1 };
+    let mut out = vec![];
+    for i in 0..spans {
+        let (p1, p2) = (w[i], w[(i + 1) % n]);
+        let mut p0 = if closed { w[(i + n - 1) % n] } else { w[i.saturating_sub(1)] };
+        let mut p3 = if closed { w[(i + 2) % n] } else { w[(i + 2).min(n - 1)] };
+        if sharp.get(i).copied().unwrap_or(false) || (!closed && i == 0) {
+            p0 = 2.0 * p1 - p2;
+        }
+        if sharp.get((i + 1) % n).copied().unwrap_or(false) || (!closed && i == n - 2) {
+            p3 = 2.0 * p2 - p1;
+        }
+        let (c0, c1, c2, c3) = (2.0 * p1, p2 - p0, 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3, -p0 + 3.0 * p1 - 3.0 * p2 + p3);
+        let at = |u: f64| -> DVec3 {
+            if u <= 0.0 {
+                p1
+            } else if u >= 1.0 {
+                p2
+            } else {
+                0.5 * (c0 + c1 * u + c2 * u * u + c3 * u * u * u)
+            }
+        };
+        // adaptive: a stack of intervals, split while off the chord
+        let mut us: Vec<f64> = vec![];
+        let mut stack: Vec<(f64, f64)> = (0..12).rev().map(|k| (k as f64 / 12.0, (k + 1) as f64 / 12.0)).collect();
+        us.push(0.0);
+        while let Some((a, b)) = stack.pop() {
+            let (pa, pb) = (at(a), at(b));
+            let off = [0.25, 0.5, 0.75].iter().map(|f| at(a + (b - a) * f).distance(pa.lerp(pb, *f))).fold(0.0, f64::max);
+            if off > tol && b - a > 1e-8 && us.len() + stack.len() < 512 {
+                let m = 0.5 * (a + b);
+                stack.push((m, b));
+                stack.push((a, m));
+            } else {
+                us.push(b);
+            }
+        }
+        for (k, u) in us.iter().enumerate() {
+            // the span's end is the next span's start
+            if k + 1 == us.len() && (closed || i + 1 < spans) {
+                continue;
+            }
+            out.push(at(*u));
+        }
+    }
+    out
 }
 
 /// A polyline whose corners are cut by circular arcs (radius `corner[i]`,
@@ -435,6 +508,9 @@ pub struct AppState {
     /// The Surface tool's points: put on the reference under the pointer
     /// (true), else locked on the plane under its first point.
     pub surface_on_scan: bool,
+    /// The Surface's outline: straight sides (false) or SplitIt's curve
+    /// through the points.
+    pub surface_curve: bool,
     /// A fillet or chamfer being sized by a drag.
     pub round_drag: Option<RoundDrag>,
     /// Ctrl + drag on a picked face (an inset) or Shift + drag on a picked
@@ -579,6 +655,7 @@ impl AppState {
             hover_edge: None,
             round_chamfer: false,
             surface_on_scan: false,
+            surface_curve: false,
             round_drag: None,
             face_drag: None,
             knife: None,
@@ -1700,7 +1777,7 @@ impl AppState {
         if self.sketch.is_none() {
             let Some((plane, a, _)) = self.start_plane(p) else { return };
             let free = self.surface_free(p);
-            self.sketch = Some(Sketch { plane, pts: vec![a], smooth: vec![false], held: Some((0, p)), corner: vec![0.0], grab: None, free: vec![free] });
+            self.sketch = Some(Sketch { plane, pts: vec![a], smooth: vec![false], held: Some((0, p)), corner: vec![0.0], grab: None, free: vec![free], sharp: vec![false] });
             self.selection.clear();
             return;
         }
@@ -1720,7 +1797,41 @@ impl AppState {
         k.smooth.push(false);
         k.corner.push(0.0);
         k.free.push(free);
+        k.sharp.push(false);
         k.held = Some((k.pts.len() - 1, p));
+    }
+
+    /// The Surface's outline as drawn and made: in Curve mode on the scan,
+    /// each sample put back on the scan (its nearest point) where the span
+    /// joins two points put there.
+    pub fn surface_line(&self, k: &Sketch, extra: Option<DVec3>, closed: bool) -> Vec<DVec3> {
+        let line = k.outline3(extra, closed, self.surface_curve);
+        let on_scan = k.free.iter().any(|f| f.is_some()) || (extra.is_some() && self.surface_on_scan);
+        match self.reference.as_ref() {
+            Some(r) if self.surface_curve && on_scan => {
+                // near only: a farther surface is not this one's
+                let reach = (r.edge.max(0.05) * 12.0).max(1.0);
+                line.iter().map(|q| r.bvh.closest(&r.mesh, *q, reach).map(|c| c.1).unwrap_or(*q)).collect()
+            }
+            _ => line,
+        }
+    }
+
+    /// Shift + click on a point placed (Surface, Curve mode): it breaks the
+    /// curve in a V, or no longer. False when no point is there.
+    pub fn sketch_toggle_sharp(&mut self, p: [f32; 2]) -> bool {
+        if self.tool != Tool::Create(PrimKind::Surface) || !self.surface_curve {
+            return false;
+        }
+        let i = self.sketch_point_at(p);
+        if let (Some(k), Some(i)) = (self.sketch.as_mut(), i) {
+            if k.sharp.len() < k.pts.len() {
+                k.sharp.resize(k.pts.len(), false);
+            }
+            k.sharp[i] = !k.sharp[i];
+            return true;
+        }
+        false
     }
 
     /// The Surface tool "On scan": the reference under the pointer.
@@ -1756,6 +1867,7 @@ impl AppState {
             k.smooth.pop();
             k.corner.truncate(k.pts.len());
             k.free.truncate(k.pts.len());
+            k.sharp.truncate(k.pts.len());
             k.held = None;
             if k.pts.is_empty() {
                 self.sketch = None;
@@ -1818,7 +1930,7 @@ impl AppState {
             self.toast("A surface needs 3 points at least", true);
             return;
         }
-        let w: Vec<DVec3> = k.outline3(None, true);
+        let w: Vec<DVec3> = self.surface_line(&k, None, true);
         let c = w.iter().copied().sum::<DVec3>() / w.len() as f64;
         // its frame: the plane's axes (its normal from the outline when
         // the points are on the scan)
@@ -1846,6 +1958,18 @@ impl AppState {
         // outline; the kernel makes the surface through them and trims it
         let mut inner = vec![];
         let mut grid = None;
+        // on its plane: a flat grid (one surface trimmed by the outline,
+        // as fast with a curve's hundreds of sides as with four)
+        if !(self.surface_on_scan || k.free.iter().any(|f| f.is_some())) {
+            for i in 0..4 {
+                for j in 0..4 {
+                    let x = lo.x - 1.0 + (hi.x - lo.x + 2.0) * i as f64 / 3.0;
+                    let z = lo.z - 1.0 + (hi.z - lo.z + 2.0) * j as f64 / 3.0;
+                    inner.push(DVec3::new(x, 0.0, z));
+                }
+            }
+            grid = Some([4, 4]);
+        }
         // a point put on the scan (the mode may have changed while drawing):
         // the surface follows the scan
         if self.surface_on_scan || k.free.iter().any(|f| f.is_some()) {

@@ -1327,6 +1327,28 @@ fn surface_options(ui: &mut Ui, st: &mut AppState) {
             }
         }
     });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        // the outline: straight sides, or the curve through the points
+        // (SplitIt's), switched any time
+        let (well, _) = ui.allocate_exact_size(vec2(2.0 * 84.0 + 6.0, 28.0), Sense::hover());
+        ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+        for (i, (c, name)) in [(false, "LINEAR"), (true, "CURVE")].into_iter().enumerate() {
+            let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 84.0, 3.0), vec2(84.0, 22.0));
+            let resp = ui.interact(r, Id::new(("isl-curve", i)), Sense::click());
+            let on = st.surface_curve == c;
+            if on {
+                ui.painter().rect_filled(r, 11.0, PATH);
+            } else if resp.hovered() {
+                ui.painter().rect_filled(r, 11.0, RAISED());
+            }
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, name, mono(11.0), if on { on_accent() } else { TEXT2() });
+            let tip = if c { "A smooth curve through the points (Catmull-Rom); on the scan it stays on it · Shift + click a point: a sharp corner there" } else { "Straight sides between the points (Ctrl + drag a point: its fillet)" };
+            if resp.on_hover_text(tip).clicked() {
+                st.surface_curve = c;
+            }
+        }
+    });
 }
 
 /// In the left panel: the settings are in the window in the view.

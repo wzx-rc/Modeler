@@ -1139,6 +1139,28 @@ fn main() {
             h.steps(2);
             h.shot("zero-surface-scan-4-alone");
             h.st.ref_shown = true;
+            // Curve mode (SplitIt's): five points on the scan, one sharp
+            h.key(egui::Key::U);
+            h.st.surface_curve = true;
+            h.st.surface_on_scan = true;
+            h.key(egui::Key::Delete);
+            for (x, y) in [(-46.0, 16.0), (-37.0, 19.0), (-28.0, 15.0), (-30.0, 28.0), (-45.0, 29.0)] {
+                let p = h.screen_of(side(x, y));
+                h.move_to(p);
+                h.click(p);
+            }
+            h.hold(Modifiers::SHIFT);
+            let p = h.screen_of(side(-28.0, 15.0));
+            h.move_to(p);
+            h.click(p);
+            h.hold(Modifiers::NONE);
+            eprintln!("  curve: sharp {:?}", h.st.sketch.as_ref().map(|k| k.sharp.clone()));
+            h.shot("zero-surface-scan-5-curve");
+            let t = Instant::now();
+            h.key(egui::Key::Enter);
+            h.settle();
+            eprintln!("  curve built in {:.1} s, faces {:?}, errors {:?}", t.elapsed().as_secs_f64(), h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+            h.shot("zero-surface-scan-6-curve-done");
         }
     }
 
