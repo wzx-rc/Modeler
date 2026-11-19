@@ -139,6 +139,42 @@ pub fn round_step(s: &Slot) -> Option<RoundRead> {
     })
 }
 
+/// From the scan's round part to its cylinder steps: one, or one per step
+/// of a round part in steps (a button on its ring, a counterbore), from the
+/// outer one in, all round the outer one's centre when they are within a
+/// tenth of its radius of it (one part turned: its steps share an axis),
+/// each inner one begun a little inside the one before (no faces laid flush
+/// on each other).
+pub fn round_steps(s: &Slot) -> Vec<RoundRead> {
+    let Some(one) = round_step(s) else { return vec![] };
+    if s.tiers.len() < 2 {
+        return vec![one];
+    }
+    let axis = one.axis;
+    let c0 = s.tiers[0].centre;
+    let mut out = vec![];
+    for (k, t) in s.tiers.iter().enumerate() {
+        let h = t.to - t.from;
+        if !(h > 0.05) || !(t.r > 0.0) || t.to > (s.r * 20.0).max(30.0) {
+            return vec![one];
+        }
+        let off = t.centre - c0;
+        let c = if (off - axis * axis.dot(off)).length() < s.tiers[0].r * 0.1 { c0 } else { t.centre };
+        out.push(if k == 0 {
+            if s.inward {
+                let clear = (t.r * 0.1).clamp(0.1, CLEAR);
+                RoundRead { op: Op::Carve, radius: t.r, height: h + clear, origin: c - axis * clear, axis, depth: h }
+            } else {
+                RoundRead { op: Op::Add, radius: t.r, height: h, origin: c, axis, depth: h }
+            }
+        } else {
+            let into = ((s.tiers[k - 1].to - s.tiers[k - 1].from) * 0.2).min(0.1);
+            RoundRead { op: if s.inward { Op::Carve } else { Op::Add }, radius: t.r, height: h + into, origin: c + axis * (t.from - into), axis, depth: h }
+        });
+    }
+    out
+}
+
 /// A drag along a slot of the scan (the Slot tool): the triangle pressed,
 /// the scan under the press and under the pointer, and the way most of the
 /// scan faces round the press (towards the eye).
@@ -454,7 +490,8 @@ impl AppState {
             let off = off - s.axis * s.axis.dot(off);
             (s.r - rad).abs() <= rad * 0.5 && off.length() <= rad
         });
-        let Some(read) = found.as_ref().and_then(round_step) else {
+        let reads = found.as_ref().map(round_steps).unwrap_or_default();
+        let Some(read) = reads.first().copied() else {
             let why = if found.is_some() { "its depth could not be read" } else { "no wall goes round the circle drawn" };
             self.toast(&format!("Nothing round read there ({why}) · drag across it, rim to rim"), true);
             return;
@@ -462,19 +499,27 @@ impl AppState {
         let kind = if read.op == Op::Carve { "Hole" } else { "Boss" };
         let rot = DQuat::from_rotation_arc(DVec3::Y, read.axis);
         let mat = self.material;
-        let mut id = 0;
+        let mut ids = vec![];
         self.edit(&format!("{kind} from the scan"), |d| {
-            id = d.add(read.op, Prim::Cylinder { radius: read.radius, height: read.height }, read.origin, rot);
-            let name = d.fresh_name(kind);
-            if let Some(f) = d.feature_mut(id) {
-                f.name = name;
-                f.material = mat;
+            for r in &reads {
+                let id = d.add(r.op, Prim::Cylinder { radius: r.radius, height: r.height }, r.origin, rot);
+                let name = d.fresh_name(kind);
+                if let Some(f) = d.feature_mut(id) {
+                    f.name = name;
+                    f.material = mat;
+                }
+                ids.push(id);
             }
         });
-        self.selection = vec![id];
+        self.selection = ids;
         let fmt = |v: f64| crate::widgets::fmt_mm(v as f32);
         let way = if read.op == Op::Carve { "deep" } else { "high" };
-        self.toast(&format!("{kind} read on the scan: Ø {} mm, {} mm {way}", fmt(read.radius * 2.0), fmt(read.depth)), false);
+        if reads.len() > 1 {
+            let steps: Vec<String> = reads.iter().map(|r| format!("Ø {} × {}", fmt(r.radius * 2.0), fmt(r.depth))).collect();
+            self.toast(&format!("{kind} read on the scan in {} steps: {} mm", reads.len(), steps.join(", ")), false);
+        } else {
+            self.toast(&format!("{kind} read on the scan: Ø {} mm, {} mm {way}", fmt(read.radius * 2.0), fmt(read.depth)), false);
+        }
     }
 
     pub fn scan_round_cancel(&mut self) {

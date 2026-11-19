@@ -2203,6 +2203,73 @@ fn main() {
         }
     }
 
+    if want("scan-steps") {
+        // the round button in two steps (a ring, a cap on it) read in one
+        // drag across the ring, rim to rim: two cylinders round one axis;
+        // then the deviation
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        if std::path::Path::new(&path).exists() {
+            let mut d = Doc::default();
+            d.reference = Some(nurbs_kernel::RefMesh { path: path.clone() });
+            h.reset(d, "Retopo");
+            h.step();
+            let end = Instant::now() + Duration::from_secs(180);
+            while h.st.ref_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            h.settle();
+            h.st.toast = None;
+            let refm = h.st.reference.clone().expect("reference");
+            let side = |x: f64, y: f64| -> Vec3 { refm.hit(DVec3::new(x, y, 100.0), DVec3::new(0.0, 0.0, -1.0)).map(|q| q.0.as_vec3()).unwrap_or(Vec3::new(x as f32, y as f32, 12.0)) };
+            let toast = |h: &Harness| h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+            h.st.camera.yaw = 0.4;
+            h.st.camera.pitch = 0.45;
+            h.st.camera.frame(Vec3::new(-33.0, 72.0, 8.0), Vec3::new(-17.0, 89.0, 18.0));
+            h.steps(2);
+            h.st.tool = Tool::Create(PrimKind::Cylinder);
+            // across the ring, 1 mm off its middle (at -25.3, 80.5)
+            let (a, b) = (h.screen_of(side(-30.7, 79.5)), h.screen_of(side(-19.9, 79.5)));
+            h.move_to(a);
+            h.steps(2);
+            h.drag(a, b, 10, false);
+            h.steps(2);
+            h.shot("zero-scan-steps-1-drag");
+            h.press(b, false);
+            h.step();
+            h.settle();
+            eprintln!("  button: {}", toast(&h));
+            h.shot("zero-scan-steps-2-read");
+            h.st.tool = Tool::Select;
+            h.st.select(None, false);
+            h.st.toast = None;
+            h.st.ref_ghost = true;
+            h.steps(2);
+            h.shot("zero-scan-steps-3-ghost");
+            h.st.ref_ghost = false;
+            h.st.ref_shown = false;
+            h.steps(2);
+            h.shot("zero-scan-steps-4-alone");
+            h.st.ref_shown = true;
+            h.st.set_deviation(true);
+            let end = Instant::now() + Duration::from_secs(60);
+            h.step();
+            while h.st.dev_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            h.steps(2);
+            if let Some(d) = &h.st.deviation {
+                eprintln!("  deviation: {} points near, {} within {} mm, median {:.3}, 95 % {:.3} mm", d.near, d.within, d.tol, d.p50, d.p95);
+            }
+            h.shot("zero-scan-steps-5-deviation");
+            h.st.set_deviation(false);
+            for f in &h.st.doc.features {
+                eprintln!("  {} {:?} {:?} at {:.2?} axis {:.3?}", f.name, f.op, f.prim, f.origin, f.rot * DVec3::Y);
+            }
+        }
+    }
+
     if want("scan-fillet") {
         // retopology, step 6: a block laid on the receiver's back (its side
         // and top on the scan's), the edge between them picked and Fit to

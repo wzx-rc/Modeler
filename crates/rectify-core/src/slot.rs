@@ -88,10 +88,26 @@ pub struct Slot {
     pub inward: bool,
     /// Which tool found it.
     pub kind: Kind,
+    /// A round part in steps (a button on its ring, a counterbore), from
+    /// the outer one in: each round the same centre, smaller, from one level
+    /// to the next. Empty: one step (`depth` is then its own; else `depth`
+    /// runs to the innermost step's top or floor).
+    pub tiers: Vec<Tier>,
     /// The wall as read: (height along the axis from the base, distance
     /// from the inner rectangle) of its vertices.
     wall: Vec<(f64, f64)>,
     edge: f64,
+}
+
+/// One step of a round part in steps.
+#[derive(Clone, Debug)]
+pub struct Tier {
+    /// Its centre, on the outer step's base plane.
+    pub centre: DVec3,
+    pub r: f64,
+    /// From and to along the axis, from the outer step's base (mm).
+    pub from: f64,
+    pub to: f64,
 }
 
 /// The NURBS surface's settings, like the Circle's.
@@ -386,6 +402,134 @@ impl Scene {
         Some(sc)
     }
 
+    /// The centre the round walls near `c0` turn round: the point nearest
+    /// the lines along their normals (weighted by how much of a wall, less
+    /// and less when far), so a drag a little off the middle of a round
+    /// part, and the steps of a button, all give one centre.
+    fn centre_of_walls(&self, c0: DVec2, reach: f64, cut: bool, h: f64) -> Option<DVec2> {
+        let pts: Vec<(DVec2, DVec2, f64)> = (0..self.q.len())
+            .filter_map(|i| {
+                let d = self.q[i] - c0;
+                let nl = self.n2[i].length();
+                if self.wallness[i] <= 0.0 || d.length() > reach || nl < 1e-9 {
+                    return None;
+                }
+                let u = self.n2[i] / nl;
+                // facing the middle (cut in) or away from it
+                ((u.dot(d) < 0.0) == cut).then_some((self.q[i], u, self.wallness[i]))
+            })
+            .collect();
+        if pts.len() < 12 {
+            return None;
+        }
+        let mut c = c0;
+        for k in 0..12 {
+            let sigma = (reach * 0.3 * 0.7f64.powi(k)).max(h * 2.0);
+            let (mut a, mut b) = ([[0.0f64; 2]; 2], DVec2::ZERO);
+            for &(q, u, w) in &pts {
+                let off = (c - q).perp_dot(u);
+                let w = w / (1.0 + (off / sigma).powi(2));
+                // the projection across the line
+                let m = [[1.0 - u.x * u.x, -u.x * u.y], [-u.x * u.y, 1.0 - u.y * u.y]];
+                for i in 0..2 {
+                    for j in 0..2 {
+                        a[i][j] += w * m[i][j];
+                    }
+                }
+                b += DVec2::new(m[0][0] * q.x + m[0][1] * q.y, m[1][0] * q.x + m[1][1] * q.y) * w;
+            }
+            let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
+            if det.abs() < 1e-12 {
+                return None;
+            }
+            let next = DVec2::new(a[1][1] * b.x - a[0][1] * b.y, a[0][0] * b.y - a[1][0] * b.x) / det;
+            if (next - c0).length() > reach * 0.5 {
+                return None;
+            }
+            c = next;
+        }
+        Some(c)
+    }
+
+    /// In how many of 8 sectors round `c` the wall of radius `r` stands.
+    fn goes_round(&self, c: DVec2, r: f64, cut: bool, h: f64) -> usize {
+        let mut sectors = [0.0f64; 8];
+        for (i, _) in self.near(c, c, 0.0, r, r * 0.15 + h * 2.0, cut) {
+            let d = self.q[i] - c;
+            let s = ((d.y.atan2(d.x) / std::f64::consts::TAU + 1.0) * 8.0) as usize % 8;
+            sectors[s] += self.wallness[i];
+        }
+        sectors.iter().filter(|&&x| x >= 2.0).count()
+    }
+
+    /// The median height of the flat-ish points between `lo` and `hi` from
+    /// `c` (at least 8 of them).
+    fn ring_level(&self, c: DVec2, lo: f64, hi: f64) -> Option<f64> {
+        let hs: Vec<f64> = (0..self.q.len())
+            .filter(|&i| {
+                let d = (self.q[i] - c).length();
+                self.nz[i] > 0.9 && d >= lo && d <= hi
+            })
+            .map(|i| self.hh[i])
+            .collect();
+        if hs.len() < 8 {
+            return None;
+        }
+        median(hs)
+    }
+
+    /// The steps inside the round part `c`, `r`: walls facing the same way
+    /// round about the same centre, going round, each smaller, with a level
+    /// of their own between them (raised: each higher; cut in: each
+    /// deeper). For each: its centre, its radius, the level between it and
+    /// the step outside it (its base), then the innermost top or floor.
+    fn round_steps(&self, c: DVec2, r: f64, base: f64, cut: bool, h: f64) -> (Vec<(DVec2, f64, f64)>, f64) {
+        let way = if cut { -1.0 } else { 1.0 };
+        let gap = (r * 0.12).max(h * 3.0);
+        let vals: Vec<(f64, f64)> = (0..self.q.len())
+            .filter_map(|i| {
+                let d = self.q[i] - c;
+                let l = d.length();
+                let nn = self.n2[i];
+                if self.wallness[i] <= 0.0 || l < 1e-9 || l > r - gap {
+                    return None;
+                }
+                let k = nn.dot(d / l);
+                (k.abs() > 0.8 * nn.length() && (k < 0.0) == cut).then_some((l, self.wallness[i]))
+            })
+            .collect();
+        let (mut peaks, _) = self.peaks(&vals, 0.0, r, h);
+        peaks.sort_by(|a, b| b.total_cmp(a));
+        let band = |inner: f64, outer: f64| ((outer - inner) * 0.2).max(h * 2.0);
+        let (mut cur_c, mut cur_r, mut level) = (c, r, base);
+        let mut out = vec![];
+        for p in peaks {
+            if p > cur_r - gap || p < (h * 3.0).max(r * 0.12) {
+                continue;
+            }
+            let (ck, _, _, rk) = self.fit(cur_c, cur_c, 0.0, p, Kind::Round, cut, h);
+            if (ck - c).length() > r * 0.2 || rk > cur_r - gap || rk < (h * 3.0).max(r * 0.12) || self.goes_round(ck, rk, cut, h) < 6 {
+                continue;
+            }
+            let b = band(rk, cur_r);
+            let (Some(between), Some(inside)) = (self.ring_level(ck, rk + b, cur_r - b), self.ring_level(ck, 0.0, rk - b)) else { continue };
+            // a step: the level between above (raised) or below (cut in)
+            // the one outside it, the inside further on
+            if (between - level) * way < h * 2.0 || (inside - between) * way < h * 2.0 {
+                continue;
+            }
+            if debug() {
+                eprintln!("round: step r {rk:.3} at {:.3},{:.3}, level outside it {between:.3}, inside {inside:.3}", ck.x, ck.y);
+            }
+            out.push((ck, rk, between));
+            cur_c = ck;
+            cur_r = rk;
+            level = between;
+        }
+        let top = self.ring_level(cur_c, 0.0, cur_r - band(0.0, cur_r) * 0.5).unwrap_or(level);
+        (out, top)
+    }
+
     /// The vertices of the wall round the rounded rectangle (`a`, `b`, `w`,
     /// `r`) within `band` of it, facing its inside (cut in) or away: their
     /// position, their weight (how much of a wall), their distance from the
@@ -511,7 +655,15 @@ impl Scene {
         // across its narrow way
         let s = r + w.min((b2 - a2).length() * 0.5);
         let dist = |i: usize| rect_sd(self.q[i], a2, b2, w) - r;
-        let (h_out, h_in) = self.levels(a2, b2, w, r, h);
+        let (mut h_out, h_in) = self.levels(a2, b2, w, r, h);
+        if kind == Kind::Round {
+            // round a round part, the level just outside its wall: a cap
+            // stands on its ring, not on the face round the ring
+            let lo = r + (h * 2.0).max(r * 0.08);
+            if let Some(v) = self.ring_level(a2, lo, lo + (h * 4.0).max(r * 0.25)) {
+                h_out = Some(v);
+            }
+        }
         let wall_h: Vec<f64> = self.near(a2, b2, w, r, s * 0.2 + h * 2.0, cut).iter().map(|&(i, _)| self.hh[i]).collect();
         let (base, sign, depth) = match (h_out, h_in) {
             // the floor below the face for a wall facing in, the top above
@@ -557,7 +709,7 @@ impl Scene {
         if debug() {
             eprintln!("slot: A {:.3},{:.3} B {:.3},{:.3}, w {w:.3}, r {r:.3}, {:.3} × {:.3}, floor {h_in:?} face {h_out:?} → depth {depth:.3} ({}), {} wall points", a2.x, a2.y, b2.x, b2.y, (b2 - a2).length() + 2.0 * r, 2.0 * (w + r), if inward { "cut in" } else { "raised" }, wall.len());
         }
-        Ok(Slot { a: to3(a2), b: to3(b2), w, axis, r, depth, inward, kind, wall, edge: h })
+        Ok(Slot { a: to3(a2), b: to3(b2), w, axis, r, depth, inward, kind, tiers: vec![], wall, edge: h })
     }
 }
 
@@ -729,31 +881,37 @@ impl Slot {
         // it (a boss), the nearest strong peak of their distances to half
         // the drag; then the centre and the radius fitted on that wall
         let ring = |cut: bool| -> Option<(DVec2, f64, f64)> {
-            let vals: Vec<(f64, f64)> = (0..sc.q.len())
-                .filter_map(|i| {
-                    let l = sc.q[i].length();
-                    if sc.wallness[i] <= 0.0 || l < 1e-9 {
-                        return None;
-                    }
-                    let nn = sc.n2[i];
-                    let k = nn.dot(sc.q[i] / l);
-                    (k.abs() > 0.8 * nn.length() && (k < 0.0) == cut).then_some((l, sc.wallness[i]))
-                })
-                .collect();
-            let r0 = sc.peak_near(&vals, 0.0, hl * 1.6 + h * 8.0, hl, h)?;
-            let (c, _, _, r) = sc.fit(DVec2::ZERO, DVec2::ZERO, 0.0, r0, Kind::Round, cut, h);
-            // the wall must go round it: in at least 6 of 8 sectors
-            let mut sectors = [0.0f64; 8];
-            for (i, _) in sc.near(c, c, 0.0, r, r * 0.15 + h * 2.0, cut) {
-                let d = sc.q[i] - c;
-                let s = ((d.y.atan2(d.x) / std::f64::consts::TAU + 1.0) * 8.0) as usize % 8;
-                sectors[s] += sc.wallness[i];
+            // the distances from the centre the walls within the drag turn
+            // round (a drag a little off the middle smears them round the
+            // drag's middle), else from the drag's middle
+            let reach = hl * 1.6 + h * 8.0;
+            let est = sc.centre_of_walls(DVec2::ZERO, hl * 1.2 + h * 2.0, cut, h);
+            for c0 in est.into_iter().chain([DVec2::ZERO]) {
+                let vals: Vec<(f64, f64)> = (0..sc.q.len())
+                    .filter_map(|i| {
+                        let d = sc.q[i] - c0;
+                        let l = d.length();
+                        if sc.wallness[i] <= 0.0 || l < 1e-9 {
+                            return None;
+                        }
+                        let nn = sc.n2[i];
+                        let k = nn.dot(d / l);
+                        (k.abs() > 0.8 * nn.length() && (k < 0.0) == cut).then_some((l, sc.wallness[i]))
+                    })
+                    .collect();
+                let Some(r0) = sc.peak_near(&vals, 0.0, reach, hl, h) else { continue };
+                let (c, _, _, r) = sc.fit(c0, c0, 0.0, r0, Kind::Round, cut, h);
+                // the wall must go round it, in at least 6 of 8 sectors,
+                // round about the drag's middle
+                let round = sc.goes_round(c, r, cut, h);
+                if debug() {
+                    eprintln!("round: {}: from {:.3},{:.3}, peak {r0:.3} → centre {:.3},{:.3} r {r:.3}, wall in {round} of 8 sectors", if cut { "cut in" } else { "raised" }, c0.x, c0.y, c.x, c.y);
+                }
+                if round >= 6 && r > hl * 0.4 && r < hl * 2.0 && c.length() <= hl * 0.7 {
+                    return Some((c, r, (r - hl).abs()));
+                }
             }
-            let round = sectors.iter().filter(|&&x| x >= 2.0).count();
-            if debug() {
-                eprintln!("round: {}: peak {r0:.3} → centre {:.3},{:.3} r {r:.3}, wall in {round} of 8 sectors {sectors:.0?}", if cut { "cut in" } else { "raised" }, c.x, c.y);
-            }
-            (round >= 6 && r > hl * 0.4 && r < hl * 2.0).then_some((c, r, (r - hl).abs()))
+            None
         };
         if debug() {
             eprintln!("round: axis {:.3},{:.3},{:.3}, {} triangles, drag ±{hl:.3}", sc.n.x, sc.n.y, sc.n.z, sc.tris);
@@ -762,7 +920,25 @@ impl Slot {
         let Some((cut, (c, r, _))) = pick else {
             return Err("No round part there: drag across a hole or a boss, rim to rim".into());
         };
-        sc.finish(c, c, 0.0, r, cut, Kind::Round, h)
+        let mut s = sc.finish(c, c, 0.0, r, cut, Kind::Round, h)?;
+        // steps inside it (a button on its ring, a counterbore's hole)
+        let base = (s.a - sc.o).dot(sc.n);
+        let sign = s.axis.dot(sc.n).signum();
+        let (steps, top) = sc.round_steps(c, r, base, s.inward, h);
+        if !steps.is_empty() {
+            let to3 = |p: DVec2| sc.o + sc.e * p.x + sc.f * p.y + sc.n * base;
+            let along = |v: f64| (v - base) * sign;
+            let mut tiers = vec![Tier { centre: to3(c), r, from: 0.0, to: along(steps[0].2) }];
+            for (k, &(ck, rk, lv)) in steps.iter().enumerate() {
+                let to = steps.get(k + 1).map(|x| x.2).unwrap_or(top);
+                tiers.push(Tier { centre: to3(ck), r: rk, from: along(lv), to: along(to) });
+            }
+            if debug() {
+                eprintln!("round: {} steps: {:?}", tiers.len(), tiers.iter().map(|t| format!("Ø {:.3} from {:.3} to {:.3}", t.r * 2.0, t.from, t.to)).collect::<Vec<_>>());
+            }
+            s.tiers = tiers;
+        }
+        Ok(s)
     }
 
     /// Its length and width, end to end and side to side (mm).
@@ -990,22 +1166,66 @@ mod tests {
         }
     }
 
+    /// The Circle dragged across from `a` to `b`.
+    fn drag_round(m: &Mesh, a: DVec2, b: DVec2) -> Result<Slot, String> {
+        let topo = Topo::new(m);
+        let near = |p: DVec2| (0..m.tris.len()).min_by(|&x, &y| (m.tri_centre(x).truncate() - p).length().total_cmp(&(m.tri_centre(y).truncate() - p).length())).unwrap();
+        let (t0, t1) = (near(a), near(b));
+        Slot::detect_round(m, &topo, t0 as u32, m.tri_centre(t0), m.tri_centre(t1), 0.15)
+    }
+
+    #[test]
+    fn stepped_button() {
+        // a ring Ø 10, 1.3 high, and on it a cap Ø 7, 2.2 higher, both
+        // walls sloped (a fillet into a fillet)
+        let disc = |x: f64, y: f64, r: f64| DVec2::new(x, y).length() - r;
+        let m = height_field(9.0, 0.15, |x, y| 1.3 * inside(disc(x, y, 5.0), 0.6) + 2.2 * inside(disc(x, y, 3.5), 0.6));
+        // rim to rim of the ring, through the middle, then 1 mm off it
+        for (a, b) in [(DVec2::new(-5.3, 0.0), DVec2::new(5.3, 0.0)), (DVec2::new(-5.2, 1.0), DVec2::new(5.2, 1.0))] {
+            let s = drag_round(&m, a, b).unwrap();
+            assert_eq!(s.tiers.len(), 2, "{a} {b}: {:?}", s.tiers);
+            let (t0, t1) = (&s.tiers[0], &s.tiers[1]);
+            assert!((t0.r - 5.0).abs() < 0.1 && (t1.r - 3.5).abs() < 0.1, "{a} {b}: radii {:.3} {:.3}", t0.r, t1.r);
+            assert!(t0.from.abs() < 1e-9 && (t0.to - 1.3).abs() < 0.1 && (t1.from - 1.3).abs() < 0.1 && (t1.to - 3.5).abs() < 0.1, "{a} {b}: {:?}", s.tiers);
+            assert!(t1.centre.truncate().length() < 0.05, "{a} {b}: centre {:.3?}", t1.centre);
+        }
+        // across the cap only: the cap, standing on the ring
+        let s = drag_round(&m, DVec2::new(-3.8, 0.0), DVec2::new(3.8, 0.0)).unwrap();
+        assert!(s.tiers.is_empty() && (s.r - 3.5).abs() < 0.1 && (s.depth - 2.2).abs() < 0.1, "cap: r {:.3} depth {:.3} {:?}", s.r, s.depth, s.tiers);
+    }
+
+    #[test]
+    fn counterbore() {
+        // a hole Ø 8, 1 deep, then Ø 4, 3 deeper
+        let disc = |x: f64, y: f64, r: f64| DVec2::new(x, y).length() - r;
+        let m = height_field(8.0, 0.15, |x, y| -1.0 * inside(disc(x, y, 4.0), 0.4) - 3.0 * inside(disc(x, y, 2.0), 0.4));
+        let s = drag_round(&m, DVec2::new(-4.2, 0.3), DVec2::new(4.2, 0.3)).unwrap();
+        assert!(s.inward && s.tiers.len() == 2, "{:?}", s.tiers);
+        let (t0, t1) = (&s.tiers[0], &s.tiers[1]);
+        assert!((t0.r - 4.0).abs() < 0.1 && (t1.r - 2.0).abs() < 0.1, "radii {:.3} {:.3}", t0.r, t1.r);
+        assert!((t0.to - 1.0).abs() < 0.1 && (t1.from - 1.0).abs() < 0.1 && (t1.to - 4.0).abs() < 0.1, "{:?}", s.tiers);
+        // a plain hole: one step
+        let m = height_field(8.0, 0.15, |x, y| -3.0 * inside(disc(x, y, 3.0), 0.4));
+        let s = drag_round(&m, DVec2::new(-3.2, 0.0), DVec2::new(3.2, 0.0)).unwrap();
+        assert!(s.inward && s.tiers.is_empty() && (s.r - 3.0).abs() < 0.1 && (s.depth - 3.0).abs() < 0.1, "hole: r {:.3} depth {:.3} {:?}", s.r, s.depth, s.tiers);
+    }
+
     #[test]
     fn every_row_is_a_slot_outline() {
-        let s = Slot { a: DVec3::new(1.0, 2.0, 0.0), b: DVec3::new(7.0, 4.0, 0.0), w: 0.0, axis: DVec3::new(0.0, 0.0, -1.0), r: 2.0, depth: 3.0, inward: true, kind: Kind::Slot, wall: vec![], edge: 0.1 };
+        let s = Slot { a: DVec3::new(1.0, 2.0, 0.0), b: DVec3::new(7.0, 4.0, 0.0), w: 0.0, axis: DVec3::new(0.0, 0.0, -1.0), r: 2.0, depth: 3.0, inward: true, kind: Kind::Slot, tiers: vec![], wall: vec![], edge: 0.1 };
         rows_are_outlines(&s, 13);
     }
 
     #[test]
     fn every_row_is_a_box_outline() {
-        let s = Slot { a: DVec3::new(1.0, 2.0, 0.0), b: DVec3::new(7.0, 4.0, 0.0), w: 1.5, axis: DVec3::new(0.0, 0.0, 1.0), r: 0.8, depth: 3.0, inward: false, kind: Kind::Box, wall: vec![], edge: 0.1 };
+        let s = Slot { a: DVec3::new(1.0, 2.0, 0.0), b: DVec3::new(7.0, 4.0, 0.0), w: 1.5, axis: DVec3::new(0.0, 0.0, 1.0), r: 0.8, depth: 3.0, inward: false, kind: Kind::Box, tiers: vec![], wall: vec![], edge: 0.1 };
         rows_are_outlines(&s, 17);
     }
 
     #[test]
     fn every_row_is_a_circle() {
         let c = DVec3::new(3.0, -1.0, 0.0);
-        let s = Slot { a: c, b: c, w: 0.0, axis: DVec3::new(0.0, 0.0, 1.0), r: 1.3, depth: 2.0, inward: false, kind: Kind::Round, wall: vec![], edge: 0.1 };
+        let s = Slot { a: c, b: c, w: 0.0, axis: DVec3::new(0.0, 0.0, 1.0), r: 1.3, depth: 2.0, inward: false, kind: Kind::Round, tiers: vec![], wall: vec![], edge: 0.1 };
         rows_are_outlines(&s, 9);
     }
 }
