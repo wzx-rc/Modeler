@@ -953,9 +953,14 @@ mod tests {
         let v0 = block.volume();
         let b = block.move_vertices(&side).unwrap();
         assert!((b.volume() - (v0 + 5.0 * 20.0 * 20.0)).abs() < 1e-6, "{} vs {}", b.volume(), v0);
-        // the top face (with the hole) cannot tilt
+        // the top face (with the hole) tilts: its +X edge up 3, the hole's
+        // wall runs up to it (the wedge less the hole's column, 1.5 high
+        // on average)
         let top: Vec<(i32, [f64; 3])> = (1..=pts.len() as i32).filter(|i| { let p = pts[(*i - 1) as usize]; (p[1] - 10.0).abs() < 1e-6 && (p[0] - 20.0).abs() < 1e-6 }).map(|i| { let p = pts[(i - 1) as usize]; (i, [p[0], p[1] + 3.0, p[2]]) }).collect();
-        assert!(block.move_vertices(&top).is_err());
+        let t = block.move_vertices(&top).unwrap();
+        assert!(t.is_valid());
+        let want = v0 + 0.5 * 3.0 * 40.0 * 20.0 - std::f64::consts::PI * 16.0 * 1.5;
+        assert!((t.volume() - want).abs() < 1e-3, "{} vs {}", t.volume(), want);
     }
 
     #[test]

@@ -3175,20 +3175,330 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
             BRepBndLib::Add(src, box);
             double size = box.IsVoid() ? 1.0 : std::sqrt(box.SquareExtent());
             BRep_Builder bb;
+            // a face with holes or bosses that tilts (stays flat, leaves its
+            // plane; 19 nov.): each hole's or boss's wall runs straight along
+            // a direction d (a cylinder's axis, the line its flat walls
+            // share); its points on the face slide along d onto the new
+            // plane, its edges there are the old ones carried the same way,
+            // the walls keep their surfaces and only grow or shrink along d
+            struct Slide {
+                gp_Pnt c;
+                gp_Dir n;
+                gp_Vec d;
+            };
+            std::vector<Slide> slides;
+            TopTools_DataMapOfShapeInteger slide_of; // a slid vertex → its slide
+            TopTools_MapOfShape walls, tilted, slid_e;
+            auto slide_s = [&](const Slide& sl, const gp_Pnt& p) { return gp_Vec(p, sl.c).Dot(gp_Vec(sl.n)) / sl.d.Dot(gp_Vec(sl.n)); };
+            {
+                TopTools_IndexedDataMapOfShapeListOfShape e2f, v2e;
+                TopExp::MapShapesAndAncestors(src, TopAbs_EDGE, TopAbs_FACE, e2f);
+                TopExp::MapShapesAndAncestors(src, TopAbs_VERTEX, TopAbs_EDGE, v2e);
+                for (int i = 1; i <= fm.Extent(); i++) {
+                    TopoDS_Face f = TopoDS::Face(fm(i));
+                    BRepAdaptor_Surface as(f);
+                    if (as.GetType() != GeomAbs_Plane) continue;
+                    TopoDS_Face fw = TopoDS::Face(f.Oriented(TopAbs_FORWARD));
+                    TopoDS_Wire ow = BRepTools::OuterWire(fw);
+                    std::vector<TopoDS_Wire> inner;
+                    for (TopExp_Explorer x(fw, TopAbs_WIRE); x.More(); x.Next())
+                        if (!x.Current().IsSame(ow)) inner.push_back(TopoDS::Wire(x.Current()));
+                    if (inner.empty()) continue;
+                    bool moved = false, held = false;
+                    std::vector<gp_Pnt> pts;
+                    for (BRepTools_WireExplorer x(ow, fw); x.More(); x.Next()) {
+                        TopoDS_Vertex cv = x.CurrentVertex();
+                        moved = moved || vnew.IsBound(cv);
+                        pts.push_back(vnew.IsBound(cv) ? BRep_Tool::Pnt(TopoDS::Vertex(vnew(cv))) : BRep_Tool::Pnt(cv));
+                    }
+                    for (const TopoDS_Wire& w : inner)
+                        for (TopExp_Explorer x(w, TopAbs_VERTEX); x.More(); x.Next()) held = held || vnew.IsBound(x.Current());
+                    if (!moved || held || pts.size() < 3) continue;
+                    gp_XYZ nrm(0, 0, 0), cen(0, 0, 0);
+                    for (size_t k = 0; k < pts.size(); k++) {
+                        const gp_Pnt& p = pts[k];
+                        const gp_Pnt& q = pts[(k + 1) % pts.size()];
+                        nrm += gp_XYZ((p.Y() - q.Y()) * (p.Z() + q.Z()), (p.Z() - q.Z()) * (p.X() + q.X()), (p.X() - q.X()) * (p.Y() + q.Y()));
+                        cen += p.XYZ();
+                    }
+                    if (nrm.Modulus() < 1e-12) continue;
+                    cen /= (double)pts.size();
+                    gp_Dir nd(nrm);
+                    double off = 0;
+                    for (const gp_Pnt& p : pts) off = std::max(off, std::abs((p.XYZ() - cen).Dot(nd.XYZ())));
+                    if (off > 1e-6 * size + 1e-6) continue; // it bends: refused below
+                    gp_Pln old = as.Plane();
+                    if (std::abs(std::abs(old.Axis().Direction().Dot(nd)) - 1) < 1e-9 && old.Distance(gp_Pnt(cen)) < 1e-6 * size + 1e-7) continue;
+                    for (const TopoDS_Wire& w : inner) {
+                        // its walls and the way they run
+                        std::vector<TopoDS_Face> wf;
+                        gp_Vec d(0, 0, 0);
+                        std::vector<gp_Dir> pn;
+                        bool ok = true;
+                        for (TopExp_Explorer x(w, TopAbs_EDGE); x.More(); x.Next()) {
+                            const TopTools_ListOfShape& fl = e2f.FindFromKey(x.Current());
+                            for (TopTools_ListIteratorOfListOfShape it(fl); it.More(); it.Next()) {
+                                if (it.Value().IsSame(f)) continue;
+                                TopoDS_Face g = TopoDS::Face(it.Value());
+                                wf.push_back(g);
+                                BRepAdaptor_Surface ws(g);
+                                if (ws.GetType() == GeomAbs_Cylinder) {
+                                    if (d.Magnitude() == 0) d = gp_Vec(ws.Cylinder().Axis().Direction());
+                                } else if (ws.GetType() == GeomAbs_SurfaceOfExtrusion) {
+                                    if (d.Magnitude() == 0) d = gp_Vec(ws.Direction());
+                                } else if (ws.GetType() == GeomAbs_Plane) {
+                                    pn.push_back(ws.Plane().Axis().Direction());
+                                } else {
+                                    ok = false;
+                                }
+                            }
+                        }
+                        for (size_t a = 0; ok && d.Magnitude() == 0 && a < pn.size(); a++)
+                            for (size_t b = a + 1; b < pn.size(); b++) {
+                                gp_Vec c = gp_Vec(pn[a]).Crossed(gp_Vec(pn[b]));
+                                if (c.Magnitude() > 1e-3) {
+                                    d = c.Normalized();
+                                    break;
+                                }
+                            }
+                        if (d.Magnitude() == 0) ok = false;
+                        for (size_t k = 0; ok && k < wf.size(); k++) {
+                            BRepAdaptor_Surface ws(wf[k]);
+                            if (ws.GetType() == GeomAbs_Cylinder) ok = gp_Vec(ws.Cylinder().Axis().Direction()).Crossed(d).Magnitude() < 1e-6;
+                            else if (ws.GetType() == GeomAbs_SurfaceOfExtrusion) ok = gp_Vec(ws.Direction()).Crossed(d).Magnitude() < 1e-6;
+                            else ok = std::abs(gp_Vec(ws.Plane().Axis().Direction()).Dot(d)) < 1e-6;
+                        }
+                        // (and not along either plane)
+                        if (ok) ok = std::abs(d.Dot(gp_Vec(nd))) > 0.2 && std::abs(d.Dot(gp_Vec(old.Axis().Direction()))) > 0.2;
+                        if (!ok) {
+                            set_err("a face with a hole or a boss tilts only when their walls run straight (a rounded or slanted wall cannot follow yet)");
+                            return nullptr;
+                        }
+                        int si = (int)slides.size();
+                        slides.push_back(Slide{gp_Pnt(cen), nd, d});
+                        const Slide& sl = slides.back();
+                        for (TopExp_Explorer x(w, TopAbs_VERTEX); x.More(); x.Next()) {
+                            if (vnew.IsBound(x.Current())) continue;
+                            gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(x.Current()));
+                            vnew.Bind(x.Current(), BRepBuilderAPI_MakeVertex(p.Translated(d * slide_s(sl, p))).Vertex());
+                            slide_of.Bind(x.Current(), si);
+                        }
+                        // its edges on the face carried along d
+                        for (TopExp_Explorer x(w, TopAbs_EDGE); x.More(); x.Next()) {
+                            TopoDS_Edge ef = TopoDS::Edge(x.Current().Oriented(TopAbs_FORWARD));
+                            if (enew.IsBound(ef)) continue;
+                            TopoDS_Vertex a, b;
+                            TopExp::Vertices(ef, a, b);
+                            TopoDS_Vertex na = TopoDS::Vertex(vnew(a).Oriented(TopAbs_FORWARD)), nb = TopoDS::Vertex(vnew(b).Oriented(TopAbs_FORWARD));
+                            BRepAdaptor_Curve c(ef);
+                            TopoDS_Edge ne;
+                            if (c.GetType() == GeomAbs_Line) {
+                                BRepBuilderAPI_MakeEdge me(na, nb);
+                                if (me.IsDone()) ne = me.Edge();
+                            } else {
+                                // sampled at the old curve's parameters: the
+                                // new curve and its (u, v) on the wall share them
+                                const int N = 64;
+                                double t0 = c.FirstParameter(), t1 = c.LastParameter();
+                                opencascade::handle<TColgp_HArray1OfPnt> hp = new TColgp_HArray1OfPnt(1, N + 1);
+                                opencascade::handle<TColStd_HArray1OfReal> hk = new TColStd_HArray1OfReal(1, N + 1);
+                                for (int k = 0; k <= N; k++) {
+                                    double t = t0 + (t1 - t0) * k / N;
+                                    gp_Pnt p = c.Value(t);
+                                    hp->SetValue(k + 1, p.Translated(d * slide_s(sl, p)));
+                                    hk->SetValue(k + 1, t);
+                                }
+                                GeomAPI_Interpolate gi(hp, hk, Standard_False, 1e-9);
+                                gi.Perform();
+                                if (gi.IsDone()) {
+                                    BRepBuilderAPI_MakeEdge me(gi.Curve(), na, nb, t0, t1);
+                                    if (me.IsDone()) ne = me.Edge();
+                                }
+                            }
+                            if (ne.IsNull()) {
+                                set_err("a hole's or a boss's edge could not follow the tilt");
+                                return nullptr;
+                            }
+                            enew.Bind(ef, ne);
+                            slid_e.Add(ef);
+                        }
+                        // the edges running down its wall keep their way
+                        for (TopExp_Explorer x(w, TopAbs_VERTEX); x.More(); x.Next())
+                            for (TopTools_ListIteratorOfListOfShape it(v2e.FindFromKey(x.Current())); it.More(); it.Next()) {
+                                if (slid_e.Contains(it.Value())) continue;
+                                TopoDS_Vertex a, b;
+                                TopExp::Vertices(TopoDS::Edge(it.Value()), a, b);
+                                gp_Pnt pa = BRep_Tool::Pnt(a), pb = BRep_Tool::Pnt(b);
+                                gp_Pnt qa = vnew.IsBound(a) ? BRep_Tool::Pnt(TopoDS::Vertex(vnew(a))) : pa;
+                                gp_Pnt qb = vnew.IsBound(b) ? BRep_Tool::Pnt(TopoDS::Vertex(vnew(b))) : pb;
+                                if (qa.Distance(qb) < 1e-4 || gp_Vec(qa, qb).Dot(gp_Vec(pa, pb)) <= 0) {
+                                    set_err("the tilt goes past the end of a hole or a boss");
+                                    return nullptr;
+                                }
+                            }
+                        for (const TopoDS_Face& g : wf) walls.Add(g);
+                        tilted.Add(f);
+                    }
+                }
+            }
             TopoDS_Shell shell;
             bb.MakeShell(shell);
             std::vector<long long> tags;
             for (int i = 1; i <= fm.Extent(); i++) {
                 TopoDS_Face f = TopoDS::Face(fm(i));
                 long long tag = i - 1 < (int)s->tags.size() ? s->tags[i - 1] : -1;
-                bool touched = false;
-                for (TopExp_Explorer x(f, TopAbs_VERTEX); x.More() && !touched; x.Next()) touched = vnew.IsBound(x.Current());
+                bool touched = false, slides_here = false;
+                for (TopExp_Explorer x(f, TopAbs_VERTEX); x.More(); x.Next()) {
+                    touched = touched || vnew.IsBound(x.Current());
+                    slides_here = slides_here || slide_of.IsBound(x.Current());
+                }
                 if (!touched) {
                     bb.Add(shell, f);
                     tags.push_back(tag);
                     continue;
                 }
+                if (slides_here && !walls.Contains(f) && !tilted.Contains(f)) {
+                    set_err("a hole or a boss next to the moved element cannot follow yet");
+                    return nullptr;
+                }
                 BRepAdaptor_Surface as(f);
+                if (walls.Contains(f) && as.GetType() != GeomAbs_Plane) {
+                    // a curved wall of a hole or a boss on a tilted face:
+                    // its surface kept, its edges on the face and those
+                    // running along it remade, their (u, v) the old ones
+                    // moved along v as far as their points slid
+                    TopLoc_Location loc;
+                    opencascade::handle<Geom_Surface> gs = BRep_Tool::Surface(f, loc);
+                    gp_Trsf tr = loc.Transformation();
+                    TopoDS_Face fw = TopoDS::Face(f.Oriented(TopAbs_FORWARD));
+                    TopoDS_Face nf;
+                    bb.MakeFace(nf, gs, loc, BRep_Tool::Tolerance(f));
+                    auto lift = [&](const gp_Pnt2d& uv, const Slide& sl) {
+                        gp_Pnt p;
+                        gp_Vec du, dv;
+                        gs->D1(uv.X(), uv.Y(), p, du, dv);
+                        p.Transform(tr);
+                        dv.Transform(tr);
+                        return gp_Pnt2d(uv.X(), uv.Y() + slide_s(sl, p) * sl.d.Dot(dv) / dv.SquareMagnitude());
+                    };
+                    TopTools_MapOfShape done;
+                    for (TopoDS_Iterator wi(fw); wi.More(); wi.Next()) {
+                        TopoDS_Wire ow = TopoDS::Wire(wi.Value());
+                        TopoDS_Wire nw;
+                        bb.MakeWire(nw);
+                        for (TopoDS_Iterator ei(ow.Oriented(TopAbs_FORWARD)); ei.More(); ei.Next()) {
+                            TopoDS_Edge e = TopoDS::Edge(ei.Value());
+                            TopoDS_Edge ef = TopoDS::Edge(e.Oriented(TopAbs_FORWARD));
+                            TopoDS_Vertex a, b;
+                            TopExp::Vertices(ef, a, b);
+                            bool ma = vnew.IsBound(a), mb = vnew.IsBound(b);
+                            if (!ma && !mb) {
+                                bb.Add(nw, e);
+                                continue;
+                            }
+                            if ((ma && !slide_of.IsBound(a)) || (mb && !slide_of.IsBound(b))) {
+                                set_err("a hole or a boss next to the moved element cannot follow yet");
+                                return nullptr;
+                            }
+                            TopoDS_Edge ne;
+                            if (enew.IsBound(ef)) {
+                                ne = TopoDS::Edge(enew(ef));
+                            } else {
+                                BRepAdaptor_Curve c(ef);
+                                TopoDS_Vertex na = ma ? TopoDS::Vertex(vnew(a)) : a;
+                                TopoDS_Vertex nb = mb ? TopoDS::Vertex(vnew(b)) : b;
+                                if (c.GetType() != GeomAbs_Line || BRep_Tool::Pnt(na).Distance(BRep_Tool::Pnt(nb)) < 1e-4) {
+                                    set_err("a hole's or a boss's wall could not follow the tilt");
+                                    return nullptr;
+                                }
+                                BRepBuilderAPI_MakeEdge me(TopoDS::Vertex(na.Oriented(TopAbs_FORWARD)), TopoDS::Vertex(nb.Oriented(TopAbs_FORWARD)));
+                                if (!me.IsDone()) {
+                                    set_err("a hole's or a boss's wall could not follow the tilt");
+                                    return nullptr;
+                                }
+                                ne = me.Edge();
+                                enew.Bind(ef, ne);
+                            }
+                            bb.Add(nw, TopoDS::Edge(ne.Oriented(e.Orientation())));
+                            if (done.Contains(ne)) continue;
+                            done.Add(ne);
+                            // its curve(s) on the wall (a seam has two)
+                            double g0, g1, n0, n1;
+                            BRep_Tool::Range(ne, n0, n1);
+                            bool seam = BRep_Tool::IsClosed(ef, fw);
+                            bool line = BRepAdaptor_Curve(ne).GetType() == GeomAbs_Line;
+                            auto moved_pc = [&](const opencascade::handle<Geom2d_Curve>& pc) -> opencascade::handle<Geom2d_Curve> {
+                                if (pc.IsNull()) return nullptr;
+                                if (slid_e.Contains(ef) && !line) {
+                                    // sampled at the parameters the new edge shares
+                                    const int N = 64;
+                                    const Slide& sl = slides[slide_of(a)];
+                                    opencascade::handle<TColgp_HArray1OfPnt2d> hp = new TColgp_HArray1OfPnt2d(1, N + 1);
+                                    opencascade::handle<TColStd_HArray1OfReal> hk = new TColStd_HArray1OfReal(1, N + 1);
+                                    for (int k = 0; k <= N; k++) {
+                                        double t = n0 + (n1 - n0) * k / N;
+                                        hp->SetValue(k + 1, lift(pc->Value(t), sl));
+                                        hk->SetValue(k + 1, t);
+                                    }
+                                    Geom2dAPI_Interpolate gi(hp, hk, Standard_False, 1e-9);
+                                    gi.Perform();
+                                    if (!gi.IsDone()) return nullptr;
+                                    return opencascade::handle<Geom2d_Curve>(gi.Curve());
+                                }
+                                // a line: end to end
+                                gp_Pnt2d ua = pc->Value(BRep_Tool::Parameter(a, ef)), ub = pc->Value(BRep_Tool::Parameter(b, ef));
+                                if (ma) ua = lift(ua, slides[slide_of(a)]);
+                                if (mb) ub = lift(ub, slides[slide_of(b)]);
+                                TColgp_Array1OfPnt2d pp(1, 2);
+                                pp(1) = ua;
+                                pp(2) = ub;
+                                TColStd_Array1OfReal kn(1, 2);
+                                kn(1) = n0;
+                                kn(2) = n1;
+                                TColStd_Array1OfInteger mu(1, 2);
+                                mu(1) = 2;
+                                mu(2) = 2;
+                                return opencascade::handle<Geom2d_Curve>(new Geom2d_BSplineCurve(pp, kn, mu, 1));
+                            };
+                            opencascade::handle<Geom2d_Curve> c1 = moved_pc(BRep_Tool::CurveOnSurface(ef, fw, g0, g1));
+                            opencascade::handle<Geom2d_Curve> c2 = seam ? moved_pc(BRep_Tool::CurveOnSurface(TopoDS::Edge(ef.Reversed()), fw, g0, g1)) : nullptr;
+                            if (c1.IsNull() || (seam && c2.IsNull())) {
+                                set_err("a hole's or a boss's wall could not follow the tilt");
+                                return nullptr;
+                            }
+                            if (seam) bb.UpdateEdge(TopoDS::Edge(ne.Oriented(TopAbs_FORWARD)), c1, c2, nf, BRep_Tool::Tolerance(ne));
+                            else bb.UpdateEdge(ne, c1, nf, BRep_Tool::Tolerance(ne));
+                        }
+                        nw.Closed(Standard_True);
+                        nw.Orientation(ow.Orientation());
+                        bb.Add(nf, nw);
+                    }
+                    // the new edges' tolerance to cover their curves' gap
+                    BRepAdaptor_Surface an(nf);
+                    for (TopExp_Explorer x(nf, TopAbs_EDGE); x.More(); x.Next()) {
+                        TopoDS_Edge e = TopoDS::Edge(x.Current());
+                        if (!done.Contains(e)) continue;
+                        double g0, g1;
+                        opencascade::handle<Geom2d_Curve> pc = BRep_Tool::CurveOnSurface(e, nf, g0, g1);
+                        if (pc.IsNull()) continue;
+                        BRepAdaptor_Curve ec(e);
+                        double dmax = 0;
+                        for (int k = 0; k <= 160; k++) {
+                            double t = ec.FirstParameter() + (ec.LastParameter() - ec.FirstParameter()) * k / 160.0;
+                            gp_Pnt2d uv = pc->Value(g0 + (g1 - g0) * k / 160.0);
+                            dmax = std::max(dmax, an.Value(uv.X(), uv.Y()).Distance(ec.Value(t)));
+                        }
+                        if (dmax > 1e-2 * size) {
+                            set_err("a hole's or a boss's wall could not follow the tilt");
+                            return nullptr;
+                        }
+                        if (dmax > BRep_Tool::Tolerance(e)) bb.UpdateEdge(e, 1.5 * dmax);
+                    }
+                    nf.Orientation(f.Orientation());
+                    bb.Add(shell, nf);
+                    tags.push_back(tag);
+                    continue;
+                }
                 if (as.GetType() != GeomAbs_Plane) {
                     set_err("only flat faces can follow a move for now");
                     return nullptr;
@@ -3198,12 +3508,38 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                 std::vector<TopoDS_Wire> inner;
                 for (TopExp_Explorer x(fw, TopAbs_WIRE); x.More(); x.Next())
                     if (!x.Current().IsSame(ow)) inner.push_back(TopoDS::Wire(x.Current()));
-                for (const TopoDS_Wire& w : inner)
-                    for (TopExp_Explorer x(w, TopAbs_VERTEX); x.More(); x.Next())
-                        if (vnew.IsBound(x.Current())) {
+                // its holes and bosses: as they were, or slid onto its new
+                // plane (their edges remade before)
+                std::vector<TopoDS_Wire> ninner;
+                bool kept_inner = false;
+                for (const TopoDS_Wire& w : inner) {
+                    bool slid = false;
+                    for (TopExp_Explorer x(w, TopAbs_VERTEX); x.More(); x.Next()) {
+                        if (vnew.IsBound(x.Current()) && !slide_of.IsBound(x.Current())) {
                             set_err("a hole or a boss next to the moved element cannot follow yet");
                             return nullptr;
                         }
+                        slid = slid || slide_of.IsBound(x.Current());
+                    }
+                    if (!slid) {
+                        kept_inner = true;
+                        ninner.push_back(w);
+                        continue;
+                    }
+                    TopoDS_Wire sw;
+                    bb.MakeWire(sw);
+                    for (TopoDS_Iterator it(w.Oriented(TopAbs_FORWARD)); it.More(); it.Next()) {
+                        TopoDS_Edge e = TopoDS::Edge(it.Value());
+                        if (!enew.IsBound(e)) {
+                            set_err("a hole or a boss could not follow the tilt");
+                            return nullptr;
+                        }
+                        bb.Add(sw, TopoDS::Edge(enew(e).Oriented(e.Orientation())));
+                    }
+                    sw.Closed(Standard_True);
+                    sw.Orientation(w.Orientation());
+                    ninner.push_back(sw);
+                }
                 // the outline again, its moved edges remade (once, shared
                 // with the face on their other side)
                 BRepBuilderAPI_MakeWire mw;
@@ -3222,7 +3558,7 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                         continue;
                     }
                     BRepAdaptor_Curve c(e);
-                    if (c.GetType() != GeomAbs_Line) {
+                    if (c.GetType() != GeomAbs_Line && !enew.IsBound(e)) {
                         set_err("only straight edges can follow a move for now");
                         return nullptr;
                     }
@@ -3252,6 +3588,8 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                     return nullptr;
                 }
                 TopoDS_Wire nw = mw.Wire();
+                bool all_lines = true;
+                for (TopExp_Explorer x(nw, TopAbs_EDGE); x.More() && all_lines; x.Next()) all_lines = BRepAdaptor_Curve(TopoDS::Edge(x.Current())).GetType() == GeomAbs_Line;
                 // flat still? (Newell's normal, along the surface's own
                 // normal for an outline wound counter-clockwise)
                 gp_XYZ nrm(0, 0, 0), cen(0, 0, 0);
@@ -3274,19 +3612,34 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                     gp_Pln pl(gp_Pnt(cen), nd);
                     gp_Pln old = as.Plane();
                     bool same = std::abs(std::abs(old.Axis().Direction().Dot(nd)) - 1) < 1e-9 && old.Distance(gp_Pnt(cen)) < 1e-6 * size + 1e-7;
-                    if (!inner.empty() && !same) {
+                    if (kept_inner && !same) {
                         set_err("a face with a hole cannot tilt or move off its plane yet");
                         return nullptr;
                     }
                     if (same) pl = gp_Pln(old.Location(), old.Axis().Direction().Dot(nd) > 0 ? old.Axis().Direction() : old.Axis().Direction().Reversed());
+                    // a curved edge kept as it was must lie on the new plane
+                    // (an arc between two corners the tilt turns round)
+                    if (!same) {
+                        std::vector<TopoDS_Wire> all = ninner;
+                        all.push_back(nw);
+                        for (const TopoDS_Wire& w : all)
+                            for (TopExp_Explorer x(w, TopAbs_EDGE); x.More(); x.Next()) {
+                                BRepAdaptor_Curve c(TopoDS::Edge(x.Current()));
+                                for (int k = 1; k < 8; k++)
+                                    if (pl.Distance(c.Value(c.FirstParameter() + (c.LastParameter() - c.FirstParameter()) * k / 8.0)) > 1e-5 * size + 1e-6) {
+                                        set_err("a curved edge of the face cannot follow its tilt yet");
+                                        return nullptr;
+                                    }
+                            }
+                    }
                     BRepBuilderAPI_MakeFace mf(pl, nw, Standard_True);
-                    for (const TopoDS_Wire& w : inner) mf.Add(w);
+                    for (const TopoDS_Wire& w : ninner) mf.Add(w);
                     if (!mf.IsDone()) {
                         set_err("a face could not follow the move");
                         return nullptr;
                     }
                     nf = mf.Face();
-                } else if (pts.size() == 4 && inner.empty()) {
+                } else if (pts.size() == 4 && inner.empty() && all_lines) {
                     // a bent four-sided face: the bilinear patch on its corners
                     TColgp_Array2OfPnt poles(1, 2, 1, 2);
                     poles(1, 1) = pts[0];

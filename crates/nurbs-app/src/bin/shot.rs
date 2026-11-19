@@ -1913,6 +1913,69 @@ fn main() {
         h.settle();
         h.shot("zero-comp-bend-3-sketch-top");
     }
+    if want("comp-tilt") {
+        // a face with a hole, a boss or a pocket tilted by an edge move (19
+        // nov.): their walls run on to the new plane. The test part's top
+        // left (the hole) raised on its -X edge; a block with a boss and a
+        // square pocket raised on its +X edge, then lowered
+        let pull = |h: &mut Harness, axis: usize, mm: f32| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + Vec3::AXES[axis]) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let by = h.screen_of(c + Vec3::AXES[axis] * mm) - s0;
+            h.drag(grab, grab + by, 10, true);
+            h.settle();
+        };
+        let say = |h: &Harness| eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.reset(test_part(), "Test part");
+        h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num2);
+        let edge = h.screen_of(Vec3::new(-20.0, 20.0, 6.0));
+        h.click(edge);
+        h.steps(2);
+        h.shot("zero-comp-tilt-1-picked");
+        pull(&mut h, 1, 6.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-comp-tilt-2-hole");
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Cylinder { radius: 6.0, height: 8.0 }, DVec3::new(-9.0, 20.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Box { x: 10.0, y: 6.0, z: 12.0 }, DVec3::new(9.0, 14.0, 0.0), DQuat::IDENTITY);
+        let _ = b;
+        h.reset(d, "Boss and pocket");
+        h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num2);
+        let edge = h.screen_of(Vec3::new(20.0, 20.0, 6.0));
+        h.click(edge);
+        h.steps(2);
+        pull(&mut h, 1, 6.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-comp-tilt-3-boss-pocket");
+        h.st.undo();
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num2);
+        let edge = h.screen_of(Vec3::new(20.0, 20.0, 6.0));
+        h.click(edge);
+        h.steps(2);
+        pull(&mut h, 1, -3.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-comp-tilt-4-lowered");
+    }
     if want("comp-curved") {
         // a flat face moved along its normal with curved faces round it:
         // the boss's top up (its side follows), the block's top up and

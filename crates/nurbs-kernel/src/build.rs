@@ -1628,6 +1628,103 @@ mod tests {
     }
 
     #[test]
+    fn tilted_faces_with_holes() {
+        // a face with holes, bosses or pockets that tilts (an edge of it
+        // raised or lowered, the face moved along its normal): their walls
+        // run along to the new plane; what cannot is refused with a reason
+        let block = |d: &mut Doc| d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let left_edge = |b: u32, dy: f64| Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 1)], at: DVec3::new(-20.0, 20.0, 0.0) }), delta: DVec3::new(0.0, dy, 0.0) };
+        let right_edge = |b: u32, dy: f64| Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 0)], at: DVec3::new(20.0, 20.0, 0.0) }), delta: DVec3::new(0.0, dy, 0.0) };
+        let mut cases: Vec<(&str, Doc, Option<&str>)> = vec![];
+        // a boss on the top, the top's -X edge up then down
+        for dy in [3.0, -3.0] {
+            let mut d = Doc::default();
+            let b = block(&mut d);
+            d.add(Op::Add, Prim::Cylinder { radius: 6.0, height: 8.0 }, DVec3::new(8.0, 20.0, 0.0), DQuat::IDENTITY);
+            d.add_tweak(left_edge(b, dy));
+            cases.push((if dy > 0.0 { "boss, edge up" } else { "boss, edge down" }, d, None));
+        }
+        // a hole through, the top moved up along its normal
+        let mut d = Doc::default();
+        let b = block(&mut d);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 2), at: DVec3::new(10.0, 20.0, 10.0) }), delta: DVec3::new(0.0, 3.0, 0.0) });
+        cases.push(("hole, top moved up", d, None));
+        // a square pocket 6 deep: the top's +X edge up; its -X edge down
+        // 10 (the tilt would pass the pocket's floor)
+        for (name, dy, want) in [("pocket, edge up", 3.0, None), ("pocket, past its floor", -10.0, Some("past"))] {
+            let mut d = Doc::default();
+            let b = block(&mut d);
+            d.add(Op::Carve, Prim::Box { x: 10.0, y: 6.0, z: 8.0 }, DVec3::new(-8.0, 14.0, 0.0), DQuat::IDENTITY);
+            d.add_tweak(if dy > 0.0 { right_edge(b, dy) } else { left_edge(b, dy) });
+            cases.push((name, d, want));
+        }
+        // a sketch carved 10 deep, one side a curve
+        let mut d = Doc::default();
+        let b = block(&mut d);
+        let s = d.add(Op::Carve, Prim::Profile { x: 12.0, y: 20.0, z: 10.0 }, DVec3::new(-6.0, 10.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(s).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [0.0, 0.1], [-0.5, 0.5]], smooth: vec![false, false, false, true, false], corner: vec![], tension: vec![], open: false });
+        d.add_tweak(right_edge(b, 3.0));
+        cases.push(("sketch pocket, curved side", d, None));
+        // a hole whose mouth is chamfered: its slanted wall cannot follow
+        let mut d = Doc::default();
+        let b = block(&mut d);
+        let h = d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.add_round(1.0, true, vec![EdgeRef { faces: [tag(b, 2), tag(h, 0)], at: DVec3::new(0.0, 20.0, 0.0) }]);
+        d.add_tweak(right_edge(b, 3.0));
+        cases.push(("hole, chamfered mouth", d, Some("straight")));
+        // the test part: the top's left half (the hole) tilted round the
+        // slot's edge
+        let (mut d, b, _) = test_part();
+        d.add_tweak(left_edge(b, 3.0));
+        cases.push(("test part, hole side", d, None));
+        let (mut d, b, _) = test_part();
+        d.add_tweak(right_edge(b, 3.0));
+        // (the boss's foot, cut by the slot, has a point off the line the
+        // top turns round: the top bends round it, a smooth plate)
+        cases.push(("test part, boss side", d, None));
+        // a corner of a top with a hole raised: the top bends (not yet)
+        let mut d = Doc::default();
+        block(&mut d);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(20.0, 20.0, 15.0)), delta: DVec3::new(0.0, 3.0, 0.0) });
+        cases.push(("hole, corner up (bends)", d, Some("cannot bend")));
+
+        let mut bad = vec![];
+        for (name, d, want) in &cases {
+            let m = build(d, true, false, &[], &mut Cache::default());
+            eprintln!("{name:<28} {} faces, errors {:?}", m.faces.len(), m.errors);
+
+            match want {
+                None if !m.errors.is_empty() => bad.push(format!("{name}: {:?}", m.errors)),
+                Some(w) if !m.errors.iter().any(|e| e.contains(w)) => bad.push(format!("{name}: wanted \"{w}\", got {:?}", m.errors)),
+                _ => {}
+            }
+            if want.is_none() && m.errors.is_empty() {
+                // a fillet on every edge of the tilted top's holes and
+                // bosses still works (1 mm)
+                let tops: Vec<i32> = m.faces.iter().enumerate().filter(|(_, f)| f.tag == Some(FaceTag { feature: 1, sub: 2 })).map(|(i, _)| i as i32).collect();
+                let edges: Vec<EdgeRef> = m.edges.iter().filter(|e| !e.seam && (tops.contains(&e.faces[0]) || tops.contains(&e.faces[1]))).filter_map(|e| {
+                    let o = if tops.contains(&e.faces[0]) { e.faces[1] } else { e.faces[0] };
+                    let t = m.faces.get(usize::try_from(o).ok()?)?.tag?;
+                    (t.feature != 1).then(|| EdgeRef { faces: [tag(1, 2), tag(t.feature, t.sub)], at: { let p = e.pts[e.pts.len() / 2]; DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64) } })
+                }).collect();
+                if !edges.is_empty() {
+                    let mut d = d.clone();
+                    let n = edges.len();
+                    d.add_round(1.0, false, edges);
+                    let m = build(&d, true, false, &[], &mut Cache::default());
+                    eprintln!("{:<28} + fillet on {n} edges: errors {:?}", "", m.errors);
+                    if !m.errors.is_empty() {
+                        bad.push(format!("{name}, fillet after: {:?}", m.errors));
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{} failed:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    #[test]
     fn faces_moved_next_to_curved_faces() {
         // the test part: the boss's top up and down (its round side
         // follows), the block's top up and down (the hole's wall, the
@@ -1676,7 +1773,7 @@ mod tests {
         // then its top front edge raised, then a corner pulled
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
+        let h = d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
         let mv = d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 10.0, 0.0) }), delta: DVec3::new(5.0, 0.0, 0.0) });
         assert_eq!(d.feature(mv).unwrap().kind_label(), "Move face");
         let mut cache = Cache::default();
@@ -1687,8 +1784,19 @@ mod tests {
         // the front top edge (top, +Z) raised 4 mm: the top tilts
         d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(2.5, 20.0, 15.0) }), delta: DVec3::new(0.0, 4.0, 0.0) });
         let m = build(&d, true, false, &[], &mut cache);
-        // the top has the hole: it cannot tilt yet
-        assert!(m.errors.iter().any(|e| e.contains("hole")), "{:?}", m.errors);
+        // the top has the hole: it tilts, the hole's wall runs up to it
+        // (its top edge 22 mm high at z = 0, 22.67 at its front, z = 5)
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let top = m.faces.iter().find(|f| f.tag == Some(FaceTag { feature: b, sub: 2 })).unwrap();
+        assert!(matches!(top.kind, SurfKind::Plane) && top.normal[2] < -0.1, "the top leans: {:?}", top.normal);
+        let wall = m.faces.iter().position(|f| f.tag == Some(FaceTag { feature: h, sub: 0 })).unwrap();
+        let high = m.tri_face.iter().enumerate().filter(|(_, &f)| f as usize == wall).flat_map(|(t, _)| m.triangles[t].iter().map(|&i| m.positions[i as usize][1])).fold(0.0f32, f32::max);
+        assert!((high - 22.667).abs() < 0.01, "the wall's top: {high}");
+        // a fillet on the hole's new edge
+        d.add_round(1.0, false, vec![EdgeRef { faces: [tag(b, 2), tag(h, 0)], at: DVec3::new(0.0, 22.0, 0.0) }]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        d.features.pop();
         d.features.pop();
         // the front face's bottom edge pushed forward 4 mm: the front tilts
         d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 3), tag(b, 4)], at: DVec3::new(2.5, 0.0, 15.0) }), delta: DVec3::new(0.0, 0.0, 4.0) });
