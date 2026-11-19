@@ -523,6 +523,8 @@ pub struct AppState {
     /// The loop cut a click would make (the Knife; Ctrl: round the part):
     /// its points and whether it closes.
     pub knife_preview: Option<(Vec<DVec3>, bool)>,
+    /// The last tool armed (G calls it again).
+    pub last_tool: Option<Tool>,
     pub hover_feature: Option<FeatureId>,
     pub hover_hit: Option<Hit>,
     pub tool: Tool,
@@ -611,6 +613,8 @@ pub struct AppState {
     /// Shown, and see-through (Ghost).
     pub ref_shown: bool,
     pub ref_ghost: bool,
+    /// X-ray (Alt + X, Maya): the part drawn see-through, the scan behind it shown.
+    pub xray: bool,
     /// The Cylinder dragged across a round part of the reference (`scan.rs`).
     pub scan_round: Option<crate::scan::ScanRound>,
     /// The Slot tool's drag along a slot of the reference.
@@ -664,6 +668,7 @@ impl AppState {
             knife: None,
             knife_hover: None,
             knife_preview: None,
+            last_tool: None,
             hover_feature: None,
             hover_hit: None,
             tool: Tool::Select,
@@ -714,6 +719,7 @@ impl AppState {
             ref_frame: true,
             ref_shown: true,
             ref_ghost: false,
+            xray: false,
             scan_round: None,
             scan_slot: None,
             scan_box_from: None,
@@ -1670,6 +1676,23 @@ impl AppState {
         });
         self.end_live();
         self.selection = vec![id];
+        // one shape per tool, then Select (Romain, 19 nov. 23 h 18); G
+        // calls the tool again
+        self.tool = Tool::Select;
+    }
+
+    /// G: the last tool used again (Maya).
+    pub fn repeat_tool(&mut self, at: Option<[f32; 2]>) {
+        match self.last_tool {
+            Some(Tool::Create(k)) => {
+                self.abort_gestures();
+                self.tool = Tool::Create(k);
+            }
+            Some(Tool::Push(k)) => self.arm_push(k, at),
+            Some(t @ (Tool::Knife | Tool::Point)) => self.arm_knife(t),
+            Some(Tool::Slot) => self.arm_slot(),
+            _ => self.toast("No tool used yet", false),
+        }
     }
 
     pub fn cancel_creation(&mut self) {
@@ -2073,6 +2096,8 @@ impl AppState {
             }
         });
         self.selection = vec![id];
+        // one shape per tool (G calls it again)
+        self.tool = Tool::Select;
     }
 
     /// Ends the Path tool's curve: open (Enter) or closed (a click on its

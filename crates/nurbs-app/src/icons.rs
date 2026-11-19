@@ -68,6 +68,8 @@ pub enum Icon {
     Ghost,
     /// The deviation: a surface over a reference line, the gap marked.
     Deviation,
+    /// X-ray: a cube seen through, its hidden edges shown.
+    Xray,
 }
 
 struct Pen<'a> {
@@ -363,6 +365,16 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 }
                 _ => {}
             }
+        }
+        Icon::Xray => {
+            let hex = [(10.0, 2.5), (16.5, 6.0), (16.5, 14.0), (10.0, 17.5), (3.5, 14.0), (3.5, 6.0)];
+            pen.fill(&hex, 0.25);
+            pen.closed(&hex);
+            pen.line(&[(3.5, 6.0), (10.0, 9.5), (16.5, 6.0)]);
+            pen.line(&[(10.0, 9.5), (10.0, 17.5)]);
+            let thin = Pen { p, r: rect, s: Stroke::new(pen.s.width * 0.75, pen.s.color.gamma_multiply(0.55)) };
+            thin.line(&[(3.5, 14.0), (10.0, 10.5), (16.5, 14.0)]);
+            thin.line(&[(10.0, 10.5), (10.0, 2.5)]);
         }
         Icon::Inset => {
             pen.closed(&[(3.0, 3.0), (17.0, 3.0), (17.0, 17.0), (3.0, 17.0)]);

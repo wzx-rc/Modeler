@@ -226,6 +226,7 @@ impl Drawer {
                 _ => RefDraw::Hidden,
             },
             ref_color: REF_GREY,
+            xray: st.xray,
             deviation: st.deviation_shown().map(|_| (st.dev_range as f32, st.dev_tol as f32)),
             paint,
             textures,

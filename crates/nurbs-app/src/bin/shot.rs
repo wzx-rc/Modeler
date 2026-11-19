@@ -2829,7 +2829,7 @@ fn main() {
         h.settle();
         say(&h);
         h.key(egui::Key::K);
-        h.hold(Modifiers::CTRL);
+        h.hold(Modifiers::CTRL | Modifiers::SHIFT);
         let a = h.screen_of(Vec3::new(8.0, 20.0, -15.0));
         h.move_to(a);
         h.steps(2);
@@ -2837,10 +2837,10 @@ fn main() {
         h.shot("zero-knife-loop-1-preview");
         h.click(a);
         h.settle();
-        h.hold(Modifiers::NONE);
+        h.hold(Modifiers::CTRL);
         say(&h);
         h.shot("zero-knife-loop-2-done");
-        // a plain click on the +X side's bottom edge: across that face
+        // Ctrl + click on the +X side's bottom edge: across that face
         let b = h.screen_of(Vec3::new(20.0, 0.6, -5.0));
         h.move_to(b);
         h.steps(2);
@@ -2848,11 +2848,13 @@ fn main() {
         h.shot("zero-knife-loop-3-face");
         h.click(b);
         h.settle();
+        h.hold(Modifiers::NONE);
         say(&h);
         // the test part's front face (notched by the slot): square to its
         // bottom edge
         h.reset(test_part(), "Test part");
-        h.key(egui::Key::K);
+        h.key(egui::Key::S);
+        h.hold(Modifiers::CTRL);
         let c2 = h.screen_of(Vec3::new(-15.0, 0.6, 15.0));
         h.move_to(c2);
         h.steps(2);
@@ -2860,8 +2862,8 @@ fn main() {
         h.click(c2);
         h.settle();
         say(&h);
-        // Ctrl on the test part: the loop stops where faces are not four-sided
-        h.hold(Modifiers::CTRL);
+        // Ctrl + Shift on the test part: the loop goes on across flat faces
+        h.hold(Modifiers::CTRL | Modifiers::SHIFT);
         let d2 = h.screen_of(Vec3::new(15.0, 0.6, 15.0));
         h.move_to(d2);
         h.steps(2);
@@ -2872,6 +2874,12 @@ fn main() {
         h.hold(Modifiers::NONE);
         say(&h);
         h.shot("zero-knife-loop-5-front-loop");
+        // X-ray (Alt + X)
+        h.hold(Modifiers::ALT);
+        h.key(egui::Key::X);
+        h.hold(Modifiers::NONE);
+        eprintln!("  xray {}", h.st.xray);
+        h.shot("zero-knife-loop-6-xray");
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 

@@ -298,8 +298,8 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         st.hover_vertex = if verts { hover.and_then(|h| st.pick_vertex(p2(h))) } else { None };
         st.hover_face = if faces { st.hover_hit.map(|h| h.face) } else { None };
         st.knife_hover = if knife { hover.and_then(|h| st.knife_pick(p2(h))).map(|k| k.1) } else { None };
-        st.knife_preview = if st.tool == Tool::Knife && !shift && (ctrl || st.knife_last().is_none()) {
-            hover.and_then(|h| st.knife_loop_at(p2(h), ctrl)).map(|(v, closed)| (v.iter().map(|q| q.at).collect(), closed))
+        st.knife_preview = if st.tool == Tool::Knife && ctrl {
+            hover.and_then(|h| st.knife_loop_at(p2(h), shift)).map(|(v, closed)| (v.iter().map(|q| q.at).collect(), closed))
         } else {
             None
         };
@@ -1257,7 +1257,7 @@ pub fn hint(st: &AppState) -> String {
             if st.knife.is_some() {
                 "Click the next edge: a line across their face (a round one: along it) · Enter, Esc, right click: end the cut".into()
             } else {
-                "Click an edge: a cut across the face · Ctrl: a loop round the part · Shift + click: a free point, then the next edges".into()
+                "Click an edge: a point, then the next edges · Ctrl + click: a cut across the face · Ctrl + Shift + click: a loop round the part".into()
             }
         }
         (None, Tool::Point) => "Click an edge: a point cut into it (its middle catches) · Esc: Select".into(),

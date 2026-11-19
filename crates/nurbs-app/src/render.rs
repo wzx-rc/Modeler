@@ -233,6 +233,17 @@ fn shade(i: MOut) -> vec3<f32> {
     return vec4<f32>(shade(j), 1.0);
 }
 
+// X-ray: the part's nearest layer see-through, a little denser at its
+// outline, so the scan behind it shows
+@fragment fn fs_xray(i: MOut) -> @location(0) vec4<f32> {
+    var j = i;
+    if (dot(j.nrm, u.eye.xyz - j.wpos) < 0.0) { j.nrm = -j.nrm; }
+    let n = normalize(j.nrm);
+    let v = normalize(u.eye.xyz - j.wpos);
+    let edge = pow(1.0 - abs(dot(n, v)), 2.0);
+    return vec4<f32>(shade(j), mix(0.38, 0.7, edge));
+}
+
 // the reference seen through (Ghost): faint face on, denser at its outline
 @fragment fn fs_ref_ghost(i: MOut) -> @location(0) vec4<f32> {
     let n = normalize(i.nrm);
@@ -394,6 +405,8 @@ pub struct Frame<'a> {
     /// colour (sRGB 0..1).
     pub reference: RefDraw,
     pub ref_color: [f32; 3],
+    /// X-ray: the part see-through (its nearest layer), what is behind it shown.
+    pub xray: bool,
     /// The part coloured by its distance to the reference: the range and
     /// the tolerance (mm).
     pub deviation: Option<(f32, f32)>,
@@ -452,6 +465,9 @@ pub struct Renderer {
     ref_solid: wgpu::RenderPipeline,
     ref_depth: wgpu::RenderPipeline,
     ref_ghost: wgpu::RenderPipeline,
+    /// X-ray: the part's depth, then its colour see-through.
+    xray_depth: wgpu::RenderPipeline,
+    xray: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     faces: wgpu::Buffer,
     faces_cap: u64,
@@ -555,6 +571,8 @@ impl Renderer {
         let ref_solid = pipeline("reference", "vs_mesh", "fs_mesh", Some((&mesh_attrs, mstride)), None, pushed(true));
         let ref_depth = pipeline_mask("reference-depth", "vs_mesh", "fs_mesh", Some((&mesh_attrs, mstride)), None, pushed(true), wgpu::ColorWrites::empty());
         let ref_ghost = pipeline("reference-ghost", "vs_mesh", "fs_ref_ghost", Some((&mesh_attrs, mstride)), alpha, depth(false, wgpu::CompareFunction::LessEqual));
+        let xray_depth = pipeline_mask("xray-depth", "vs_mesh", "fs_mesh", Some((&mesh_attrs, mstride)), None, depth(true, wgpu::CompareFunction::Less), wgpu::ColorWrites::empty());
+        let xray = pipeline("xray", "vs_mesh", "fs_xray", Some((&mesh_attrs, mstride)), alpha, depth(false, wgpu::CompareFunction::LessEqual));
         Renderer {
             format,
             layout,
@@ -566,6 +584,8 @@ impl Renderer {
             ref_solid,
             ref_depth,
             ref_ghost,
+            xray_depth,
+            xray,
             uniforms,
             faces,
             faces_cap,
@@ -724,7 +744,13 @@ impl Renderer {
                 pass.draw(0..n, 0..1);
             }
             if let (Some(buf), n) = (&self.mesh_buf.buf, self.mesh_buf.count) {
-                if n > 0 {
+                if n > 0 && f.xray {
+                    pass.set_vertex_buffer(0, buf.slice(..));
+                    pass.set_pipeline(&self.xray_depth);
+                    pass.draw(0..n, 0..1);
+                    pass.set_pipeline(&self.xray);
+                    pass.draw(0..n, 0..1);
+                } else if n > 0 {
                     pass.set_pipeline(&self.mesh);
                     pass.set_vertex_buffer(0, buf.slice(..));
                     pass.draw(0..n, 0..1);

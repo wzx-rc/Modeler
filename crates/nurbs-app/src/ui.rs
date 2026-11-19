@@ -131,6 +131,9 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     files_dialog(ctx, st, screen);
     toast(ctx, st, screen);
     shortcuts(ctx, st);
+    if st.tool != Tool::Select {
+        st.last_tool = Some(st.tool);
+    }
 }
 
 // ------------------------------------------------------------- top bar
@@ -256,6 +259,9 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 island_sep(ui);
                 if icon_btn(ui, Icon::Frame, false, "Frame the whole part (F with nothing selected)", 28.0).clicked() {
                     st.frame_all();
+                }
+                if icon_btn(ui, Icon::Xray, st.xray, "X-ray (Alt + X): the part see-through, the scan behind it shown", 28.0).clicked() {
+                    st.xray = !st.xray;
                 }
                 if icon_btn(ui, Icon::Quads, st.quads, "Quads view, face by face: each B-rep face cut into quad patches, fillets in orange", 28.0).clicked() {
                     st.set_quads_view(!st.quads);
@@ -439,7 +445,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             }
             if st.doc.reference.is_some() {
                 let tip = "Slot (S): drag along a slot of the scan (or a raised pill), from one end to the other; let go, the scan is read there and a sketch made as read (Carve when cut in, Add when raised)";
-                if card(ui, Some(Icon::Scan), "SLOT", "SCAN · S", st.tool == Tool::Slot, accent(), tip).clicked() {
+                if card(ui, Some(Icon::Scan), "SLOT", "SCAN · Shift+S", st.tool == Tool::Slot, accent(), tip).clicked() {
                     st.arm_slot();
                 }
             }
@@ -455,7 +461,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             }
             divider(ui);
             for (t, icon, name, key, tip) in [
-                (Tool::Knife, Icon::Knife, "KNIFE", "K", "Knife (K), like Maya's Multi-Cut: click points on the part's edges; each one after the first is joined to the one before across their face (flat or curved). Enter, Esc or a right click ends the cut"),
+                (Tool::Knife, Icon::Knife, "KNIFE", "S", "Knife (S), like Maya's Multi-Cut: click points on the part's edges; each one after the first is joined to the one before across their face (flat or curved). Ctrl + click: a cut across the face; Ctrl + Shift + click: a loop round the part. Enter, Esc or a right click ends the cut"),
                 (Tool::Point, Icon::EdgePoint, "POINT", "J", "Point on edge (J): click on an edge to cut a point into it (the middle catches the pointer)"),
             ] {
                 if card(ui, Some(icon), name, &format!("EDGE · {key}"), st.tool == t, EDGE_SEL, tip).clicked() {
@@ -2491,12 +2497,13 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.set_sel_mode(m);
         }
     }
-    for (k, t) in [(Key::K, Tool::Knife), (Key::J, Tool::Point)] {
-        if pressed(k) {
+    // the Knife on S (Romain, 19 nov. 23 h 18), K too; the scan's Slot on Shift + S
+    for (k, t) in [(Key::S, Tool::Knife), (Key::K, Tool::Knife), (Key::J, Tool::Point)] {
+        if pressed(k) && !shift {
             st.arm_knife(t);
         }
     }
-    if pressed(Key::S) {
+    if shift && pressed(Key::S) {
         st.arm_slot();
     }
     // the Knife's cut under way: Enter ends it
@@ -2525,7 +2532,16 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             }
         }
     }
-    if pressed(Key::X) {
+    // G: the last tool again (Maya)
+    if pressed(Key::G) && !shift {
+        let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]);
+        st.repeat_tool(at);
+    }
+    let alt = ctx.input(|i| i.modifiers.alt);
+    if alt && pressed(Key::X) {
+        st.xray = !st.xray;
+        st.toast(if st.xray { "X-ray on" } else { "X-ray off" }, false);
+    } else if pressed(Key::X) {
         let op = shown_op(st).other();
         set_op_from_ui(st, op);
     }

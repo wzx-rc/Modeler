@@ -6,15 +6,14 @@
 //! history step per cut (`Feature::cut`), ended by Enter, Esc, a right
 //! click or a click off the edges.
 //!
-//! Loop cuts (Romain 19 nov., 23 h: "un loop total si on maintient
-//! control… en mode normal il doit faire un cut sur la face"): with the
-//! Knife and no cut under way, a click on an edge cuts straight across the
-//! face under the pointer (a four-sided face: to its opposite edge at the
-//! same fraction, as Maya's edge loop; a flat face: square to the edge, to
-//! the first border met); Ctrl held, the cut runs on from face to face
-//! the same way all round the part (it stops at a curved face that is not
-//! four-sided, or a closed edge). The pointer shows it
-//! before. Shift + click: a free point, as before.
+//! Loop cuts (Romain 19 nov., 23 h, then 23 h 18: "Click normal comme
+//! actuellement, CTRL coupe à travers face, CTRL + SHIFT : loop"): with the
+//! Knife, Ctrl + click on an edge cuts straight across the face under the
+//! pointer (a four-sided face: to its opposite edge at the same fraction,
+//! as Maya's edge loop; a flat face: square to the edge, to the first
+//! border met); Ctrl + Shift, the cut runs on from face to face the same
+//! way all round the part (it stops at a curved face that is not
+//! four-sided, or a closed edge). The pointer shows it before.
 
 use crate::state::*;
 use glam::{DVec3, Vec3};
@@ -24,7 +23,7 @@ use nurbs_kernel::{FeatureId, Knife, KnifePoint};
 impl AppState {
     /// The edge under the pointer for the Knife: its index, the point on it
     /// and how far along it (0 to 1, from its first point); its middle
-    /// catches the pointer within 8 points.
+    /// catches the pointer within 2.5 points.
     pub fn knife_pick(&self, p: [f32; 2]) -> Option<(usize, DVec3, f64)> {
         let e = self.pick_edge(p)?;
         let m = self.model.as_ref()?;
@@ -64,8 +63,10 @@ impl AppState {
             }
             half -= l;
         }
+        // the middle catches only when the pointer is right on it (Romain,
+        // 19 nov. 23 h: a point placed seemed to snap)
         if let Some(s) = self.view().project(mid.as_vec3()) {
-            if (s[0] - p[0]).hypot(s[1] - p[1]) <= 8.0 {
+            if (s[0] - p[0]).hypot(s[1] - p[1]) <= 2.5 {
                 return Some((e, mid, 0.5));
             }
         }
@@ -197,11 +198,14 @@ impl AppState {
         self.knife_click_with(p, false, false)
     }
 
-    /// A click with the Knife: Ctrl a loop round the part, a plain click
-    /// (no cut under way) a cut across the face, Shift (or a cut under way,
-    /// or nothing to cut across) a point as before.
+    /// A click with the Knife: a plain click a point (joined to the one
+    /// before), Ctrl a cut across the face, Ctrl + Shift a loop round the
+    /// part (Romain, 19 nov. 23 h 18).
     pub fn knife_click_with(&mut self, p: [f32; 2], shift: bool, ctrl: bool) {
-        if self.tool == Tool::Knife && !shift && (ctrl || self.knife_going().is_none()) && self.knife_cut_loop(p, ctrl) {
+        if self.tool == Tool::Knife && ctrl {
+            if !self.knife_cut_loop(p, shift) {
+                self.toast("Nothing to cut across there", true);
+            }
             return;
         }
         let Some((e, at, f)) = self.knife_pick(p) else {
