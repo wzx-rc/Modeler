@@ -2255,7 +2255,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         } else if st.push.is_some() {
             st.abort_gestures();
             st.select_tool();
-        } else if st.creation.is_some() || st.drag.is_some() || st.sketch.is_some() {
+        } else if st.creation.is_some() || st.drag.is_some() || st.sketch.is_some() || st.scan_round.is_some() {
             st.abort_gestures();
         } else if st.tool != Tool::Select {
             st.select_tool();

@@ -1760,6 +1760,115 @@ fn main() {
         }
     }
 
+    if want("scan") {
+        // retopology, step 2: the Cylinder dragged across the muzzle's
+        // holes on the scan reads each one (centre, Ø, axis, depth) and
+        // makes a Carve cylinder of it; a block stands for the muzzle
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        if std::path::Path::new(&path).exists() {
+            let mut d = Doc::default();
+            d.reference = Some(nurbs_kernel::RefMesh { path: path.clone() });
+            let b = d.add(Op::Add, Prim::Box { x: 30.0, y: 46.0, z: 26.0 }, DVec3::new(44.5, 55.0, 2.0), DQuat::IDENTITY);
+            d.feature_mut(b).unwrap().name = "Muzzle".into();
+            h.reset(d, "Retopo");
+            h.step();
+            let end = Instant::now() + Duration::from_secs(180);
+            while h.st.ref_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            h.settle();
+            h.st.toast = None;
+            h.st.select(None, false);
+            h.st.camera.yaw = 1.05;
+            h.st.camera.pitch = 0.22;
+            h.st.camera.frame(Vec3::new(40.0, 52.0, -14.0), Vec3::new(60.0, 104.0, 18.0));
+            h.steps(2);
+            let refm = h.st.reference.clone().expect("reference");
+            let rim = |y: f64, z: f64| -> Vec3 {
+                refm.hit(DVec3::new(100.0, y, z), DVec3::new(-1.0, 0.0, 0.0)).map(|q| q.0.as_vec3()).unwrap_or(Vec3::new(59.0, y as f32, z as f32))
+            };
+            h.st.tool = Tool::Create(PrimKind::Cylinder);
+            // from the hole's middle outwards: the first point on the face
+            // round it, a little past
+            let out = |y: f64, z: f64, way: f64| -> f64 {
+                let mut q = z + way * 4.0;
+                while (q - z).abs() < 12.0 && refm.hit(DVec3::new(100.0, y, q), DVec3::new(-1.0, 0.0, 0.0)).map(|p| p.0.x < 58.5).unwrap_or(true) {
+                    q += way * 0.25;
+                }
+                q + way * 0.75
+            };
+            for (k, (y, z)) in [(88.5, 0.2), (68.0, -0.3)].into_iter().enumerate() {
+                let (a, bq) = (h.screen_of(rim(y, out(y, z, -1.0))), h.screen_of(rim(y, out(y, z, 1.0))));
+                h.move_to(a);
+                h.steps(2);
+                if k == 0 {
+                    h.shot("zero-scan-1-armed");
+                }
+                h.drag(a, bq, 10, false);
+                h.steps(2);
+                if k == 0 {
+                    h.shot("zero-scan-2-drag");
+                }
+                h.press(bq, false);
+                h.step();
+                h.settle();
+                h.shot(&format!("zero-scan-{}-read", 3 + k));
+            }
+            h.st.tool = Tool::Select;
+            h.st.select(None, false);
+            h.st.toast = None;
+            h.st.ref_ghost = true;
+            h.steps(2);
+            h.shot("zero-scan-5-ghost");
+            h.st.ref_shown = false;
+            h.steps(2);
+            h.shot("zero-scan-6-part");
+            h.st.ref_shown = true;
+            h.st.ref_ghost = false;
+            // bosses on the side: the round button, the knob behind it
+            h.st.camera.yaw = 0.35;
+            h.st.camera.pitch = 0.25;
+            h.st.camera.frame(Vec3::new(-46.0, 70.0, 5.0), Vec3::new(-14.0, 90.0, 18.0));
+            h.steps(2);
+            let side = |x: f64, y: f64| -> Vec3 { refm.hit(DVec3::new(x, y, 100.0), DVec3::new(0.0, 0.0, -1.0)).map(|q| q.0.as_vec3()).unwrap_or(Vec3::new(x as f32, y as f32, 12.0)) };
+            h.st.tool = Tool::Create(PrimKind::Cylinder);
+            // two rivets, found on screen
+            let rivets: Vec<(f64, f64)> = [[630.0, 300.0], [535.0, 412.0]].iter().filter_map(|p| h.st.reference_at(*p)).map(|(q, _)| (q.x, q.y)).collect();
+            eprintln!("  rivets at {rivets:.2?}");
+            let mut drags = vec![(-24.25, 80.45, 3.9), (-24.25, 80.45, 5.6)];
+            drags.extend(rivets.iter().map(|&(x, y)| (x, y, 1.6)));
+            for (k, (x, y, half)) in drags.into_iter().enumerate() {
+                let (a, bq) = (h.screen_of(side(x - half, y)), h.screen_of(side(x + half, y)));
+                h.move_to(a);
+                h.steps(2);
+                h.drag(a, bq, 10, false);
+                h.steps(2);
+                if k == 0 {
+                    h.shot("zero-scan-7-boss-drag");
+                }
+                h.press(bq, false);
+                h.step();
+                h.settle();
+                h.shot(&format!("zero-scan-{}-boss", 8 + k));
+                if k == 0 {
+                    // undone: the outer step next, at the same place
+                    h.st.undo();
+                    h.settle();
+                }
+            }
+            h.st.tool = Tool::Select;
+            h.st.select(None, false);
+            h.st.toast = None;
+            h.st.ref_ghost = true;
+            h.steps(2);
+            h.shot("zero-scan-12-boss-ghost");
+            for f in &h.st.doc.features {
+                eprintln!("  {} {:?} {:?} at {:.2?} axis {:.3?}", f.name, f.op, f.prim, f.origin, f.rot * DVec3::Y);
+            }
+        }
+    }
+
     if want("tension-point") {
         // the top front edge filleted at 2 mm, then the top -X edge at 3 mm:
         // OpenCascade carries the second round the first one's end and down

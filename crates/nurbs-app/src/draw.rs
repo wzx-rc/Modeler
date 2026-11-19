@@ -144,6 +144,11 @@ impl Drawer {
             let lines: Vec<Vec<[f32; 3]>> = f.outline().iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
             line_vertices(&lines, [c.r(), c.g(), c.b(), 240], w, &mut over);
         }
+        // the Cylinder dragged across a round part of the reference
+        if let Some(sr) = &st.scan_round {
+            let lines = vec![sr.ring(96).iter().map(|p| p.as_vec3().to_array()).collect::<Vec<_>>(), vec![sr.a.as_vec3().to_array(), sr.b.as_vec3().to_array()]];
+            line_vertices(&lines, [accent.r(), accent.g(), accent.b(), 235], 1.8, &mut over);
+        }
         for f in st.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()) {
             let creating = st.creation.as_ref().map(|c| c.id == f.id).unwrap_or(false);
             let selected = st.selection.contains(&f.id);

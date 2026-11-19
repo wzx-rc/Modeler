@@ -16,6 +16,7 @@ pub mod materials;
 pub mod pick;
 pub mod reference;
 pub mod render;
+pub mod scan;
 pub mod settings;
 pub mod snap;
 pub mod state;

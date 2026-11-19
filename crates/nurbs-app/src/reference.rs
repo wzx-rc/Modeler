@@ -26,7 +26,11 @@ pub struct Reference {
     /// Its name without folder or extension.
     pub name: String,
     pub mesh: Mesh,
+    /// Its adjacency (the tools walk the scan from the triangle pressed).
+    pub topo: Topo,
     pub bvh: Bvh,
+    /// The median edge length (mm): the scan's grain.
+    pub edge: f64,
     pub lo: DVec3,
     pub hi: DVec3,
     /// The triangles' corners for the renderer (normals sharp past 40°).
@@ -50,7 +54,7 @@ impl Reference {
         if mesh.tris.is_empty() {
             return Err(format!("{}: no triangles", name_of(path)));
         }
-        let (bvh, verts) = std::thread::scope(|s| {
+        let (bvh, topo, verts) = std::thread::scope(|s| {
             let b = s.spawn(|| Bvh::new(&mesh));
             let topo = Topo::new(&mesh);
             let normals = crease_normals(&mesh, &topo, CREASE);
@@ -60,10 +64,11 @@ impl Reference {
                     verts.push(MeshVertex { pos: mesh.pos[tri[c] as usize].as_vec3().to_array(), nrm: normals[t][c].as_vec3().to_array(), face: REF_FACE });
                 }
             }
-            (b.join().expect("bvh"), verts)
+            (b.join().expect("bvh"), topo, verts)
         });
         let (lo, hi) = mesh.bounds();
-        Ok(Reference { path: path.to_string(), name: name_of(path), mesh, bvh, lo, hi, verts, secs: t0.elapsed().as_secs_f32() })
+        let edge = mesh.edge_median();
+        Ok(Reference { path: path.to_string(), name: name_of(path), mesh, topo, bvh, edge, lo, hi, verts, secs: t0.elapsed().as_secs_f32() })
     }
 
     /// Loads it in a thread.
@@ -79,7 +84,12 @@ impl Reference {
     /// The nearest point where a ray meets it, and its distance along `d`
     /// (a unit vector).
     pub fn hit(&self, o: DVec3, d: DVec3) -> Option<(DVec3, f64)> {
-        self.bvh.ray(&self.mesh, o, d).map(|(_, s)| (o + d * s, s))
+        self.hit_tri(o, d).map(|(_, p, s)| (p, s))
+    }
+
+    /// The same with the triangle met.
+    pub fn hit_tri(&self, o: DVec3, d: DVec3) -> Option<(u32, DVec3, f64)> {
+        self.bvh.ray(&self.mesh, o, d).map(|(t, s)| (t, o + d * s, s))
     }
 
     pub fn triangles(&self) -> usize {

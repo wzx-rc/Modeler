@@ -452,6 +452,8 @@ pub struct AppState {
     /// Shown, and see-through (Ghost).
     pub ref_shown: bool,
     pub ref_ghost: bool,
+    /// The Cylinder dragged across a round part of the reference (`scan.rs`).
+    pub scan_round: Option<crate::scan::ScanRound>,
 }
 
 impl AppState {
@@ -527,6 +529,7 @@ impl AppState {
             ref_frame: true,
             ref_shown: true,
             ref_ghost: false,
+            scan_round: None,
         }
     }
 
@@ -1184,6 +1187,7 @@ impl AppState {
             self.clean_selection_ids();
         }
         self.gizmo_readout = None;
+        self.scan_round = None;
         self.sketch = None;
         self.knife = None;
         self.knife_hover = None;

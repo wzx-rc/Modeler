@@ -223,7 +223,7 @@ fn scale_at(st: &AppState, p: Pos2) -> Option<Handle> {
 
 fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, rect: Rect) {
     let hover = ctx.input(|i| i.pointer.hover_pos());
-    st.interacting = st.drag.is_some() || st.creation.is_some();
+    st.interacting = st.drag.is_some() || st.creation.is_some() || st.scan_round.is_some();
 
     // Maya navigation: Alt + left = orbit, Alt + middle = pan, Alt + right =
     // zoom, whatever the tool
@@ -514,11 +514,28 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
         }
         Tool::Create(kind) => {
+            // the Cylinder dragged across a round part of the reference
+            // (`scan.rs`): read there when released
+            if st.scan_round.is_some() {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.scan_round_move(p2(p));
+                }
+                if resp.drag_stopped() || !l {
+                    st.scan_round_release();
+                }
+                return;
+            }
             let phase = st.creation.as_ref().map(|c| c.phase);
             match phase {
                 None => {
                     if resp.drag_started_by(PointerButton::Primary) {
                         let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                        if kind == PrimKind::Cylinder && st.scan_round_press(p2(origin)) {
+                            if let Some(p) = hover {
+                                st.scan_round_move(p2(p));
+                            }
+                            return;
+                        }
                         st.begin_creation(kind, p2(origin));
                     } else if resp.clicked_by(PointerButton::Primary) {
                         // a click without a drag: a 20 mm shape there
@@ -761,9 +778,21 @@ fn draw_creation(p: &Painter, st: &AppState) {
         draw_sketch(p, st);
         return;
     }
+    // the Cylinder across a round part of the reference: its diameter
+    if let Some(sr) = &st.scan_round {
+        let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("Ø {} mm · release: read the scan", fmt_mm(sr.radius() as f32 * 2.0)), accent(), accent());
+        return;
+    }
     let Some(c) = &st.creation else {
         // the tool armed: a small cross where the shape would start
-        if let (Tool::Create(_), Some(h)) = (st.tool, p.ctx().input(|i| i.pointer.hover_pos())) {
+        if let (Tool::Create(k), Some(h)) = (st.tool, p.ctx().input(|i| i.pointer.hover_pos())) {
+            // the Cylinder over the reference: it reads the scan
+            if k == PrimKind::Cylinder && st.scan_under(p2(h)).is_some() {
+                p.circle_stroke(h, 7.0, Stroke::new(1.5, accent()));
+                chip(p, h + vec2(12.0, 10.0), Align2::LEFT_TOP, "on the scan · drag across a round part, rim to rim", tint(accent(), 0.6), TEXT2());
+                return;
+            }
             if let Some((plane, a, snapped)) = st.start_plane(p2(h)) {
                 let q = plane.at(a);
                 if let Some(s) = &snapped {
@@ -1057,6 +1086,10 @@ pub fn hint(st: &AppState) -> String {
             Some(k) if k.pts.len() < 3 => "Click: a corner · Drag: a curve point · Backspace: the last point off · Esc: drop it".into(),
             Some(_) => "First point or Enter: close it · Drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
+        (None, Tool::Create(PrimKind::Cylinder)) if st.scan_round.is_some() => "Across the round part, to the other side of its rim · Release: the scan read there, a cylinder made as read · Esc: cancel".into(),
+        (None, Tool::Create(PrimKind::Cylinder)) if st.reference.is_some() && st.ref_shown => {
+            format!("Drag on the scan, rim to rim: a hole or a boss read there · Drag: the base, on the ground or a face · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(PrimKind::Cylinder))
+        }
         (None, Tool::Create(k)) => format!("Drag: the base, on the ground or a face · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
         (None, Tool::Push(k)) => match k {
             PushKind::Inset => "Click a flat face: 2 mm, then drag its dot · Press and drag: sized at once".into(),
