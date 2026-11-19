@@ -69,6 +69,8 @@ struct Shared {
 pub struct Kernel {
     shared: Arc<Shared>,
     exe: Option<PathBuf>,
+    /// Built in the app (`start_local`), no process.
+    local: bool,
 }
 
 impl Kernel {
@@ -80,11 +82,47 @@ impl Kernel {
             let s = shared.clone();
             std::thread::Builder::new().name("nurbs-kernel".into()).spawn(move || worker(s, exe)).ok();
         }
-        Kernel { shared, exe }
+        Kernel { shared, exe, local: false }
+    }
+
+    /// The kernel built in the app itself (iPad: iOS has no child
+    /// processes). Same `build`, on a worker thread with a big stack. A hard
+    /// crash inside OpenCascade then takes the app down: the step it was on
+    /// is in `dir/kernel-step.txt`, and the next start skips it (kept in
+    /// `dir/kernel-skip.txt`), as the process restart does on the PC.
+    #[cfg(feature = "occ")]
+    pub fn start_local(dir: &std::path::Path) -> Kernel {
+        let step_file = dir.join("kernel-step.txt");
+        let skip_file = dir.join("kernel-skip.txt");
+        let mut skip: Vec<String> = std::fs::read_to_string(&skip_file).unwrap_or_default().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        if let Ok(s) = std::fs::read_to_string(&step_file) {
+            let s = s.trim().to_string();
+            if !s.is_empty() && !s.starts_with("mesh:") && !skip.contains(&s) {
+                skip.push(s);
+            }
+        }
+        if skip.len() > MAX_SKIPS {
+            skip.drain(..skip.len() - MAX_SKIPS);
+        }
+        let _ = std::fs::write(&skip_file, skip.join("\n"));
+        let _ = std::fs::remove_file(&step_file);
+        let _ = crate::build::STEP_FILE.set(step_file.clone());
+        let shared = Arc::new(Shared { m: Mutex::new(Inner::default()), cv: Condvar::new() });
+        shared.m.lock().unwrap().status = Some(Status::Ready);
+        let s = shared.clone();
+        // OpenCascade recurses deeply: iOS gives secondary threads 512 KB
+        std::thread::Builder::new().name("nurbs-kernel".into()).stack_size(256 << 20).spawn(move || local_worker(s, skip, step_file)).ok();
+        Kernel { shared, exe: None, local: true }
     }
 
     pub fn exe(&self) -> Option<&PathBuf> {
         self.exe.as_ref()
+    }
+
+    /// There is a kernel to build with (the process found, or the one in
+    /// the app).
+    pub fn available(&self) -> bool {
+        self.local || self.exe.is_some()
     }
 
     /// Asks for this document (replaces a request not sent yet), and its
@@ -119,7 +157,7 @@ impl Kernel {
             if g.done.as_ref().map(|b| b.model.serial >= serial).unwrap_or(false) {
                 return g.done.take();
             }
-            if g.status.as_ref().map(|s| *s == Status::Missing).unwrap_or(false) {
+            if g.status.as_ref().map(|s| *s == Status::Missing).unwrap_or(false) && !self.local {
                 return None;
             }
             let now = Instant::now();
@@ -265,5 +303,47 @@ fn worker(shared: Arc<Shared>, exe: PathBuf) {
     }
     if let Some(p) = proc {
         let _ = p.bury();
+    }
+}
+
+/// The kernel in the app: the same loop as the process (`bin/kernel.rs`),
+/// latest request wins. A panic is caught and answered as an error (the
+/// caches are dropped then, they may be half made).
+#[cfg(feature = "occ")]
+fn local_worker(shared: Arc<Shared>, skip: Vec<String>, step_file: PathBuf) {
+    use crate::build::{build, Cache};
+    let mut cache = Cache::default();
+    loop {
+        let job = {
+            let mut g = shared.m.lock().unwrap();
+            while g.pending.is_none() && !g.quit {
+                g = shared.cv.wait(g).unwrap();
+            }
+            if g.quit {
+                break;
+            }
+            g.busy = true;
+            g.pending.take().unwrap()
+        };
+        let t0 = Instant::now();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&job.doc, job.fine, job.quads, &skip, &mut cache)));
+        // built to the end: no step to blame at the next start
+        let _ = std::fs::remove_file(&step_file);
+        let model = match res {
+            Ok(mut m) => {
+                m.serial = job.serial;
+                m
+            }
+            Err(e) => {
+                cache = Cache::default();
+                let why = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                Model { serial: job.serial, fine: job.fine, errors: vec![format!("the kernel failed ({why})")], ..Default::default() }
+            }
+        };
+        let mut g = shared.m.lock().unwrap();
+        g.busy = false;
+        g.status = Some(Status::Ready);
+        g.done = Some(Built { model, round_ms: t0.elapsed().as_secs_f32() * 1000.0 });
+        shared.cv.notify_all();
     }
 }

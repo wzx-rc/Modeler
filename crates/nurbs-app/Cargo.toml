@@ -31,3 +31,13 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 image.workspace = true
+
+# iPad: no child process on iOS, the OpenCascade kernel is linked in the app
+# (FORME_OCCT_ROOT = OpenCascade built for iOS, ios/build_occt_ios.sh)
+[target.'cfg(target_os = "ios")'.dependencies]
+nurbs-kernel = { path = "../nurbs-kernel", features = ["occ"] }
+
+[features]
+# the kernel linked in the app on the desktop too, as on the iPad (tests of
+# the iPad build; FORME_OCCT_ROOT or nurbs-kernel/builtin)
+local-kernel = ["nurbs-kernel/occ"]

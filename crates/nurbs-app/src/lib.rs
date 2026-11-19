@@ -19,6 +19,7 @@ pub mod settings;
 pub mod snap;
 pub mod state;
 pub mod theme;
+pub mod touch;
 pub mod ui;
 pub mod view;
 pub mod viewport;
@@ -42,4 +43,5 @@ pub fn run(ctx: &egui::Context, st: &mut AppState) {
     theme::set_light(ctx, st.settings.light);
     viewport::show(ctx, st);
     ui::show(ctx, st);
+    touch::show_bar(ctx, st);
 }

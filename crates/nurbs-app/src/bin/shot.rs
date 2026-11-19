@@ -123,7 +123,40 @@ impl Harness {
             ..Default::default()
         };
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(self.ppp);
+        // iPad: the touches, as main.rs hands them over
+        if self.st.touch.on {
+            nurbs_app::touch::tick(&mut self.st, self.t);
+            self.st.touch.apply(&mut raw);
+        }
         raw
+    }
+
+    /// A touch (iPad), in screen points; `pencil`: the Apple Pencil.
+    fn touch(&mut self, id: u64, phase: nurbs_app::touch::Phase, p: Pos2, pencil: bool) {
+        nurbs_app::touch::on_touch(&self.ctx, &mut self.st, id, phase, p, pencil, self.t);
+        self.step();
+    }
+
+    /// Touches moved together from `a` to `b` (one per start point).
+    fn touch_drag(&mut self, a: &[(u64, Pos2)], b: &[Pos2], n: usize, release: bool) {
+        use nurbs_app::touch::Phase;
+        for (id, p) in a {
+            nurbs_app::touch::on_touch(&self.ctx, &mut self.st, *id, Phase::Start, *p, false, self.t);
+        }
+        self.step();
+        for i in 1..=n {
+            let t = i as f32 / n as f32;
+            for (k, (id, p)) in a.iter().enumerate() {
+                nurbs_app::touch::on_touch(&self.ctx, &mut self.st, *id, Phase::Move, *p + (b[k] - *p) * t, false, self.t);
+            }
+            self.step();
+        }
+        if release {
+            for (k, (id, _)) in a.iter().enumerate() {
+                nurbs_app::touch::on_touch(&self.ctx, &mut self.st, *id, Phase::End, b[k], false, self.t);
+            }
+            self.steps(2);
+        }
     }
 
     fn step(&mut self) {
@@ -1230,6 +1263,69 @@ fn main() {
         for f in &h.st.doc.features {
             eprintln!("  {} {:?} owner {:?}", f.name, f.id, h.st.owner_of(f.id));
         }
+    }
+
+    if want("ipad") {
+        // iPad Pro 12.9" (1366 × 1024 points, 2 pixels each) with the app's
+        // iPad zoom 0.85: the layout as on the device
+        use nurbs_app::touch::Phase;
+        let (w, h0, ppp) = (h.size, h.ppp, 0.85f32);
+        h.size = [1366.0 / ppp, 1024.0 / ppp];
+        h.ppp = 2.0 * ppp;
+        h.reset(test_part(), "Test part");
+        h.st.touch.on = true;
+        h.steps(3);
+        h.shot("ipad/ipad-1-layout");
+        // a finger tap on the boss selects it
+        let boss = h.screen_of(Vec3::new(10.0, 30.0, 0.0));
+        h.touch(1, Phase::Start, boss, false);
+        h.touch(1, Phase::End, boss, false);
+        h.steps(3);
+        h.shot("ipad/ipad-2-tap-select");
+        // one finger orbits
+        let c = pos2(h.size[0] * 0.6, h.size[1] * 0.75);
+        h.touch_drag(&[(2, c)], &[c + vec2(-180.0, -60.0)], 12, true);
+        h.settle();
+        h.shot("ipad/ipad-3-orbit");
+        // two fingers: pinch out (zoom in) and pan
+        let (a, b) = (c + vec2(-60.0, 0.0), c + vec2(60.0, 0.0));
+        h.touch_drag(&[(3, a), (4, b)], &[a + vec2(-90.0, -40.0), b + vec2(90.0, -40.0)], 12, true);
+        h.settle();
+        h.shot("ipad/ipad-4-pinch");
+        // Shift held on the key bar by a finger, Ctrl latched by a tap
+        let key = |h: &Harness, k: nurbs_app::touch::BarKey| h.st.touch.keys.iter().find(|(_, x)| *x == k).map(|(r, _)| r.center()).unwrap();
+        let shift = key(&h, nurbs_app::touch::BarKey::Shift);
+        let ctrl = key(&h, nurbs_app::touch::BarKey::Ctrl);
+        h.touch(5, Phase::Start, ctrl, false);
+        h.touch(5, Phase::End, ctrl, false);
+        h.touch(6, Phase::Start, shift, false);
+        h.steps(2);
+        h.shot("ipad/ipad-5-keys");
+        h.touch(6, Phase::End, shift, false);
+        h.touch(5, Phase::Start, ctrl, false);
+        h.touch(5, Phase::End, ctrl, false);
+        // a finger held still on the block: the marking menu, then a flick
+        h.st.selection.clear();
+        let block = h.screen_of(Vec3::new(14.0, 6.0, 15.0));
+        h.touch(7, Phase::Start, block, false);
+        for _ in 0..40 {
+            h.step();
+        }
+        h.touch(7, Phase::Move, block + vec2(4.0, -70.0), false);
+        h.steps(20);
+        h.shot("ipad/ipad-6-marking");
+        h.touch(7, Phase::Cancel, block + vec2(0.0, 0.0), false);
+        h.steps(3);
+        // the Pencil on the left panel's slider and in the view
+        h.key(egui::Key::Escape);
+        let fillet = pos2(120.0, 200.0);
+        let _ = fillet;
+        // two-finger tap: undo
+        let before = h.st.doc.features.len();
+        h.touch_drag(&[(8, c), (9, c + vec2(80.0, 0.0))], &[c, c + vec2(80.0, 0.0)], 1, true);
+        eprintln!("ipad: two-finger tap, features {before} -> {}", h.st.doc.features.len());
+        h.size = w;
+        h.ppp = h0;
     }
 
     if want("history") {

@@ -1,0 +1,57 @@
+name: ipad-nurbs
+
+# Forme NURBS for iPad Pro: an unsigned .ipa (Sideloadly / AltStore with an
+# Apple ID), with OpenCascade built for iOS and linked in the app.
+on:
+  push:
+    branches: ["claude/project-thread-739pr7", "claude/ipad-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ipad-nurbs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      # OpenCascade for iOS: ~20 min the first time, then from the cache
+      - uses: actions/cache@v4
+        id: occt
+        with:
+          path: ~/occt-ios
+          key: occt-ios-7.8.1-${{ hashFiles('ios/build_occt_ios.sh') }}
+      - name: OpenCascade for iOS
+        if: steps.occt.outputs.cache-hit != 'true'
+        run: bash ios/build_occt_ios.sh "$HOME/occt-ios"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-nurbs
+      - name: Build FormeNURBS.ipa
+        run: bash ios/build_nurbs_ipa.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FormeNURBS-ipa
+          path: target/ipa-nurbs/FormeNURBS.ipa
+      # direct download link: Releases > « Forme NURBS — dernière build iPad »
+      - name: Publish the .ipa (release nurbs-ipa-latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nurbs-ipa-latest
+          target_commitish: ${{ github.sha }}
+          name: Forme NURBS — dernière build iPad
+          prerelease: true
+          make_latest: false
+          body: |
+            Build automatique du commit ${{ github.sha }} (branche ${{ github.ref_name }}).
+            FormeNURBS.ipa non signé : installe-le avec Sideloadly ou AltStore et ton Apple ID (à refaire tous les 7 jours avec un compte gratuit).
+          files: target/ipa-nurbs/FormeNURBS.ipa
+          overwrite_files: true

@@ -20,11 +20,20 @@ use std::time::Instant;
 const FINE: (f64, f64) = (0.02, 0.2);
 const COARSE: (f64, f64) = (0.08, 0.35);
 
-/// Writes the step on stderr before an operation that could crash the process.
+/// Where the kernel built in the app (iPad) writes the step it is on: after
+/// a crash the app reads it at its next start and skips that step
+/// (`client::Kernel::start_local`). The kernel process writes it on stderr.
+pub static STEP_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Writes the step on stderr (and in `STEP_FILE`) before an operation that
+/// could crash the process.
 fn mark(s: &str) {
     let mut e = std::io::stderr();
     let _ = writeln!(e, "STEP {s}");
     let _ = e.flush();
+    if let Some(p) = STEP_FILE.get() {
+        let _ = std::fs::write(p, s);
+    }
 }
 
 /// The result after a feature: the solid (None while nothing is built) and

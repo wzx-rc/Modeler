@@ -437,6 +437,8 @@ pub struct AppState {
     /// The points of interest the pointer passed over lately (at most 4):
     /// the guides line up with them, as in Plasticity / SketchUp.
     pub acquired: Vec<crate::snap::SnapPoint>,
+    /// iPad: fingers and Pencil, the key bar (`touch.rs`).
+    pub touch: crate::touch::TouchInput,
 }
 
 impl AppState {
@@ -505,6 +507,7 @@ impl AppState {
             snap_off: false,
             shift_held: false,
             acquired: vec![],
+            touch: Default::default(),
         }
     }
 

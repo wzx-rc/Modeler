@@ -1183,7 +1183,7 @@ fn pop_note(ui: &mut Ui) {
 fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     let top = EDGE + ISLAND_H + 10.0;
     let inner_w = LEFT_W - 24.0;
-    let total = screen.max.y - EDGE - top;
+    let total = screen.max.y - EDGE - top - st.touch.reserve();
     let rows = st.doc.features.len().max(1) as f32;
     let tree_h = if st.settings.show_tree { (rows * 28.0 + 34.0).clamp(96.0, (total * 0.36).max(120.0)) } else { 0.0 };
     let off = panel_offset(ctx, "props");
