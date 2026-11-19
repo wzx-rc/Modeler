@@ -25,6 +25,8 @@ const LEFT_W: f32 = 296.0;
 const CARDS_W: f32 = 150.0;
 /// The history strip's height from the bottom of the screen (with its margin).
 const HISTORY_H: f32 = 100.0;
+/// The fixed Sub Outliner's list height (about five rows).
+const SUB_FIXED_H: f32 = 140.0;
 
 pub fn op_color(op: Op) -> Color32 {
     match op {
@@ -561,84 +563,286 @@ fn drag_ball(ctx: &egui::Context, st: &AppState, at: egui::Pos2, m: &materials::
 
 // --------------------------------------------------------- history strip
 
+/// One icon of the history strip.
+struct Cell {
+    icon: Icon,
+    color: Color32,
+    name: String,
+    info: String,
+    /// The operation it is (its switch in the pop-up).
+    op: Option<FeatureId>,
+    on: bool,
+}
+
+/// The history strip's icons, square like the component modes' at the top.
+const CELL: f32 = 28.0;
+const CELL_GAP: f32 = 6.0;
+
+/// An undo step's icon and colour, from its name.
+fn step_icon(label: &str) -> (Icon, Color32) {
+    let l = label.to_lowercase();
+    let has = |w: &[&str]| w.iter().any(|x| l.contains(x));
+    if has(&["cube", "box"]) {
+        (Icon::Box, accent())
+    } else if has(&["cylinder"]) {
+        (Icon::Cylinder, accent())
+    } else if has(&["sketch"]) {
+        (Icon::Sketch, accent())
+    } else if has(&["path"]) {
+        (Icon::Path, PATH)
+    } else if has(&["fillet", "chamfer", "round", "tension", "bevel"]) {
+        (Icon::Fillet, EDGE_SEL)
+    } else if has(&["inset"]) {
+        (Icon::Inset, FACE_SEL)
+    } else if has(&["extrude"]) {
+        (Icon::Extrude, FACE_SEL)
+    } else if has(&["knife", "cut"]) {
+        (Icon::Knife, EDGE_SEL)
+    } else if has(&["point"]) {
+        (Icon::EdgePoint, EDGE_SEL)
+    } else if has(&["rotate"]) {
+        (Icon::Rotate, TEXT2())
+    } else if has(&["scale", "size"]) {
+        (Icon::Scale, TEXT2())
+    } else if has(&["move"]) {
+        (Icon::Move, TEXT2())
+    } else if has(&["delete"]) {
+        (Icon::Trash, carve())
+    } else if has(&["duplicate"]) {
+        (Icon::Duplicate, TEXT2())
+    } else if has(&["material"]) {
+        (Icon::Sphere, TEXT2())
+    } else if has(&["hide", "turn"]) {
+        (Icon::Eye, TEXT2())
+    } else if has(&["history"]) {
+        (Icon::Undo, TEXT2())
+    } else {
+        (Icon::Frame, TEXT2())
+    }
+}
+
+/// What the strip shows: the element's history (the shape, then its
+/// operations; the marker after the first `at` of them), else the scene's
+/// undo history (the start, then each step; `at` steps done).
+fn history_cells(st: &AppState) -> (Option<FeatureId>, Vec<Cell>, usize) {
+    if let Some(el) = st.history_element() {
+        let f = st.doc.feature(el).cloned().unwrap();
+        let info = if f.is_path() { "Path".to_string() } else { format!("{} · {}", f.prim.kind().label(), f.op.label()) };
+        let mut cells = vec![Cell { icon: feature_icon(&f), color: feature_color(&f), name: f.name.clone(), info, op: None, on: f.visible }];
+        for id in st.element_ops(el) {
+            let Some(g) = st.doc.feature(id) else { continue };
+            cells.push(Cell { icon: feature_icon(g), color: feature_color(g), name: g.name.clone(), info: format!("{} · {}", g.kind_label(), step_info(g)), op: Some(id), on: g.visible });
+        }
+        return (Some(el), cells, st.marker_of(el));
+    }
+    let (names, at) = st.scene_history();
+    let mut cells = vec![Cell { icon: Icon::Folder, color: TEXT2(), name: "Start".into(), info: "The document as opened".into(), op: None, on: true }];
+    for (i, n) in names.iter().enumerate() {
+        let (icon, color) = step_icon(n);
+        cells.push(Cell { icon, color, name: n.clone(), info: format!("Step {} of {}", i + 1, names.len()), op: None, on: true });
+    }
+    (None, cells, at)
+}
+
+/// Goes to cell `i` of the strip: an element's marker, or the scene's
+/// undo history.
+fn history_go(st: &mut AppState, el: Option<FeatureId>, i: usize) {
+    match el {
+        Some(el) => {
+            if st.marker_of(el) != i {
+                st.set_marker(el, i);
+            }
+        }
+        None => st.scene_go(i),
+    }
+}
+
+/// The history strip (Romain, 19 nov.: "de tout petits icônes… sans
+/// texte… les infos apparaissent" when hovered): the selected element's
+/// own history, else the scene's (Ctrl + Z). A click goes back to that
+/// step; held and dragged along the row, it goes back and forth live
+/// (as in ZBrush).
 fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     let cx = st.principal()[0];
     let max_w = (st.view_rect[2] - st.view_rect[0] - 24.0).max(320.0);
     let off = panel_offset(ctx, "history");
+    let (el, cells, at) = history_cells(st);
+    let mut hovered: Option<(usize, Rect)> = None;
     egui::Area::new(Id::new("history")).order(Order::Middle).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(cx, screen.max.y - 14.0) + off).show(ctx, |ui| {
-        panel().inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+        panel().inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
+            // as wide as its icons (the grip would take 400 points)
+            let n = cells.len() as f32;
+            let empty = el.is_none() && cells.len() == 1 && st.doc.features.is_empty();
+            let content = if empty { 420.0 } else { 78.0 + 8.0 + 1.0 + 8.0 + (max_w - 140.0).min(n * (CELL + CELL_GAP) + 4.0) };
+            ui.set_width(content.max(160.0));
             grip(ui, "history");
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(egui::RichText::new("History").font(semibold(13.0)).color(TEXT()));
-                    let n = st.doc.features.len();
-                    let sub = match n {
-                        0 => "empty".to_string(),
-                        1 => "1 operation".to_string(),
-                        _ => format!("{n} operations"),
-                    };
-                    ui.label(egui::RichText::new(sub).font(regular(11.5)).color(TEXT2()));
-                });
-                let (sep, _) = ui.allocate_exact_size(vec2(1.0, 36.0), Sense::hover());
+                let (tr, _) = ui.allocate_exact_size(vec2(78.0, CELL), Sense::hover());
+                let p = ui.painter();
+                p.text(pos2(tr.min.x, tr.center().y - 6.5), Align2::LEFT_CENTER, "HISTORY", mono(9.5), LABEL());
+                let sub = match el {
+                    Some(id) => st.doc.feature(id).map(|f| f.name.clone()).unwrap_or_default(),
+                    None => "Scene".into(),
+                };
+                let mut job = egui::text::LayoutJob::single_section(sub, egui::TextFormat::simple(medium(11.5), TEXT()));
+                job.wrap = egui::text::TextWrapping { max_width: tr.width(), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+                let g = p.layout_job(job);
+                p.galley(pos2(tr.min.x, tr.center().y + 7.0 - g.size().y * 0.5), g, TEXT());
+                let (sep, _) = ui.allocate_exact_size(vec2(1.0, CELL - 4.0), Sense::hover());
                 ui.painter().rect_filled(sep, 0.0, DIVIDER());
-                if st.doc.features.is_empty() {
-                    ui.label(egui::RichText::new("Pick a shape on the right, then drag in the view").font(regular(13.0)).color(TEXT2()));
+                if el.is_none() && cells.len() == 1 && st.doc.features.is_empty() {
+                    ui.label(egui::RichText::new("Pick a shape on the right, then drag in the view").font(regular(12.5)).color(TEXT2()));
                     return;
                 }
-                let feats = st.doc.features.clone();
-                egui::ScrollArea::horizontal().id_salt("history-scroll").max_width(max_w - 220.0).min_scrolled_width(max_w - 220.0).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        for (i, f) in feats.iter().enumerate() {
-                            if i > 0 {
-                                let (lr, _) = ui.allocate_exact_size(vec2(12.0, 44.0), Sense::hover());
-                                ui.painter().rect_filled(Rect::from_center_size(lr.center(), vec2(10.0, 2.0)), 1.0, DIVIDER());
-                            }
-                            if history_chip(ui, st, f).clicked() {
+                let n = cells.len();
+                let w = n as f32 * (CELL + CELL_GAP);
+                egui::ScrollArea::horizontal().id_salt("history-scroll").max_width((max_w - 140.0).min(w + 4.0)).show(ui, |ui| {
+                    let (row, resp) = ui.allocate_exact_size(vec2(w, CELL), Sense::click_and_drag());
+                    let cell = |i: usize| Rect::from_min_size(pos2(row.min.x + i as f32 * (CELL + CELL_GAP), row.min.y), vec2(CELL, CELL));
+                    let idx = |x: f32| ((x - row.min.x + CELL_GAP * 0.5) / (CELL + CELL_GAP)).floor().clamp(0.0, n as f32 - 1.0) as usize;
+                    let under = resp.interact_pointer_pos().or(resp.hover_pos()).map(|q| idx(q.x));
+                    if resp.drag_started() && el.is_some() {
+                        st.end_live();
+                        st.begin_live("History");
+                    }
+                    if resp.dragged() {
+                        if let Some(i) = under {
+                            history_go(st, el, i);
+                        }
+                    }
+                    if resp.drag_stopped() && el.is_some() {
+                        st.end_live();
+                    }
+                    if resp.clicked() {
+                        if let Some(i) = under {
+                            history_go(st, el, i);
+                            if let Some(e) = el {
+                                // the step gone back to is selected (its handles, its window)
+                                let id = if i == 0 { Some(e) } else { cells[i].op };
                                 st.select_tool();
-                                let add = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
-                                st.select(Some(f.id), add);
+                                st.select(id, false);
                             }
                         }
-                    });
+                    }
+                    let now_at = match el {
+                        Some(e) => st.marker_of(e),
+                        None => st.scene_history().1,
+                    };
+                    let _ = at;
+                    let p = ui.painter();
+                    for (i, c) in cells.iter().enumerate() {
+                        let r = cell(i);
+                        ui.ctx().data_mut(|d| d.insert_temp(Id::new(("hist-cell", i)), r.center()));
+                        let past = i > now_at;
+                        let sel = c.op.map(|id| st.is_selected(id)).unwrap_or(false) || (i == 0 && el.map(|e| st.is_selected(e)).unwrap_or(false));
+                        if i == now_at {
+                            p.rect(r, 7.0, tint(accent(), 0.12), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+                        } else if sel {
+                            p.rect(r, 7.0, RAISED(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+                        } else if under == Some(i) && (resp.hovered() || resp.dragged()) {
+                            p.rect_filled(r, 7.0, RAISED());
+                        }
+                        let dim = if past { 0.32 } else if !c.on { 0.45 } else { 1.0 };
+                        let ic = if i == now_at { accent() } else { tint(TEXT_ICON(), dim) };
+                        icons::paint(p, Rect::from_center_size(r.center(), vec2(15.0, 15.0)), c.icon, ic);
+                        let dot = r.right_bottom() - vec2(4.5, 4.5);
+                        p.circle_filled(dot, 4.0, PANEL());
+                        p.circle_filled(dot, 2.6, tint(c.color, dim));
+                        if !c.on {
+                            // turned off: struck through
+                            p.line_segment([r.left_bottom() + vec2(6.0, -6.0), r.right_top() + vec2(-6.0, 6.0)], Stroke::new(1.4, tint(carve(), 0.9)));
+                        }
+                    }
+                    // the marker: a white bar after the current step
+                    let m = cell(now_at);
+                    p.rect_filled(Rect::from_center_size(pos2(m.max.x + CELL_GAP * 0.5, m.center().y), vec2(2.0, CELL - 6.0)), 1.0, TEXT_STRONG());
+                    if resp.hovered() || resp.dragged() {
+                        hovered = under.map(|i| (i, cell(i)));
+                    }
                 });
-                let (er, _) = ui.allocate_exact_size(vec2(40.0, 44.0), Sense::hover());
-                let p = ui.painter();
-                p.rect_filled(Rect::from_center_size(pos2(er.min.x + 4.0, er.center().y), vec2(3.0, 30.0)), 2.0, accent());
-                p.text(pos2(er.min.x + 12.0, er.center().y), Align2::LEFT_CENTER, "End", regular(12.0), TEXT2());
             });
         });
     });
+    history_pop(ctx, st, &cells, el, hovered);
 }
 
-fn history_chip(ui: &mut Ui, st: &AppState, f: &Feature) -> Response {
-    let sub = if f.is_path() {
-        let n = f.profile.as_ref().map(|p| p.points.len()).unwrap_or(0);
-        format!("Path · {} · {n} points", if f.profile.as_ref().map(|p| p.open).unwrap_or(false) { "open" } else { "closed" })
-    } else if f.is_solid() { format!("{} · {}", f.prim.kind().label(), f.op.label()) } else { format!("{} · {}", f.kind_label(), step_info(f)) };
-    let tg = ui.painter().layout_no_wrap(f.name.clone(), semibold(12.5), TEXT());
-    let sg = ui.painter().layout_no_wrap(sub, regular(11.0), TEXT2());
-    let w = 8.0 + 28.0 + 8.0 + tg.size().x.max(sg.size().x) + 12.0;
-    let (r, resp) = ui.allocate_exact_size(vec2(w, 44.0), Sense::click());
-    let selected = st.is_selected(f.id);
+/// A small tick box and its label; true when clicked.
+fn tick_row(ui: &mut Ui, label: &str, on: bool) -> bool {
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width().clamp(120.0, 200.0), 20.0), Sense::click());
     let p = ui.painter();
-    if selected {
-        p.rect(r, 10.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
-    } else if resp.hovered() {
-        p.rect_filled(r, 10.0, RAISED());
+    let b = Rect::from_center_size(pos2(r.min.x + 7.0, r.center().y), vec2(13.0, 13.0));
+    if on {
+        p.rect_filled(b, 3.0, accent());
+        p.line_segment([b.min + vec2(3.0, 6.8), b.min + vec2(5.6, 9.4)], Stroke::new(1.6, on_accent()));
+        p.line_segment([b.min + vec2(5.6, 9.4), b.min + vec2(10.2, 3.8)], Stroke::new(1.6, on_accent()));
+    } else {
+        p.rect(b, 3.0, Color32::TRANSPARENT, Stroke::new(1.2, if resp.hovered() { LABEL() } else { DIVIDER() }), StrokeKind::Inside);
     }
-    let dim = if f.visible { 1.0 } else { 0.45 };
-    let ir = Rect::from_min_size(pos2(r.min.x + 8.0, r.center().y - 13.0), vec2(26.0, 26.0));
-    p.rect_filled(ir, 7.0, RAISED());
-    icons::paint(p, ir.shrink(5.0), feature_icon(f), tint(TEXT_ICON(), dim));
-    p.circle_filled(ir.right_bottom() - vec2(1.0, 1.0), 5.5, PANEL());
-    p.circle_filled(ir.right_bottom() - vec2(1.0, 1.0), 4.0, feature_color(f));
-    let tx = ir.max.x + 8.0;
-    p.galley(pos2(tx, r.center().y - tg.size().y - 0.5), tg, if selected { accent_text() } else { tint(TEXT(), dim) });
-    p.galley(pos2(tx, r.center().y + 1.5), sg, TEXT2());
-    resp.on_hover_text("Select this operation")
+    p.text(pos2(b.max.x + 7.0, r.center().y), Align2::LEFT_CENTER, label, regular(12.0), if resp.hovered() { TEXT() } else { LABEL() });
+    resp.clicked()
+}
+
+/// The pop-up over the hovered history icon: its name and what it does,
+/// and for an operation its switch (Romain: "une petite coche"). It stays
+/// while the pointer goes up into it.
+fn history_pop(ctx: &egui::Context, st: &mut AppState, cells: &[Cell], el: Option<FeatureId>, hovered: Option<(usize, Rect)>) {
+    let key = Id::new("history-pop");
+    let mut cur: Option<(usize, Rect)> = ctx.data(|d| d.get_temp(key));
+    let pop: Option<Rect> = ctx.data(|d| d.get_temp(key.with("rect")));
+    let ptr = ctx.input(|i| i.pointer.hover_pos());
+    if hovered.is_some() {
+        cur = hovered;
+    } else if let (Some((_, cr)), Some(q)) = (cur, ptr) {
+        let bridge = pop.map(|r| Rect::from_min_max(pos2(cr.min.x - 4.0, r.max.y - 2.0), pos2(cr.max.x + 4.0, cr.min.y + 2.0)));
+        let keep = pop.map(|r| r.expand(4.0).contains(q)).unwrap_or(false) || bridge.map(|b| b.contains(q)).unwrap_or(false);
+        if !keep {
+            cur = None;
+        }
+    } else {
+        cur = None;
+    }
+    if st.marking.is_open() || st.mat_drag.is_some() {
+        cur = None;
+    }
+    ctx.data_mut(|d| match cur {
+        Some(c) => {
+            d.insert_temp(key, c);
+        }
+        None => d.remove::<(usize, Rect)>(key),
+    });
+    let Some((i, cr)) = cur else { return };
+    let Some(c) = cells.get(i) else { return };
+    let area = egui::Area::new(key.with("area")).order(Order::Foreground).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(cr.center().x, cr.min.y - 10.0)).show(ctx, |ui| {
+        egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, PANEL_BORDER())).corner_radius(egui::CornerRadius::same(9)).inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
+            ui.set_min_width(170.0);
+            ui.set_max_width(230.0);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.horizontal(|ui| {
+                let (dr, _) = ui.allocate_exact_size(vec2(8.0, 16.0), Sense::hover());
+                ui.painter().circle_filled(dr.center(), 3.5, c.color);
+                ui.label(egui::RichText::new(&c.name).font(semibold(12.5)).color(TEXT()));
+            });
+            ui.label(egui::RichText::new(&c.info).font(regular(11.5)).color(TEXT2()));
+            if let Some(id) = c.op {
+                ui.add_space(3.0);
+                let at = ui.cursor().min + vec2(7.0, 10.0);
+                ui.ctx().data_mut(|d| d.insert_temp(Id::new("history-tick"), at));
+                if tick_row(ui, if c.on { "On" } else { "Off: left out of the build" }, c.on) {
+                    st.toggle_op(id);
+                }
+            }
+            ui.add_space(2.0);
+            let tip = match (el, i) {
+                (Some(_), 0) => "Click: the shape alone, before its operations",
+                (Some(_), _) => "Click: back to here · Hold and drag: go back and forth",
+                (None, 0) => "Click: back to the start (undo all)",
+                (None, _) => "Click: back to here (undo / redo) · Hold and drag: go back and forth",
+            };
+            ui.label(egui::RichText::new(tip).font(regular(11.0)).color(LABEL()));
+        });
+    });
+    ctx.data_mut(|d| d.insert_temp(key.with("rect"), area.response.rect));
 }
 
 // ------------------------------------------------------------------ hud
@@ -740,7 +944,12 @@ fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     let Some(t) = &st.toast else { return };
     let (text, warn) = (t.text.clone(), t.warn);
     let cx = st.principal()[0];
-    egui::Area::new(Id::new("toast")).order(Order::Tooltip).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(cx, screen.max.y - 92.0)).interactable(false).show(ctx, |ui| {
+    // above the history pop-up while it is open
+    let key = Id::new("history-pop");
+    let open = ctx.data(|d| d.get_temp::<(usize, Rect)>(key)).is_some();
+    let pop = if open { ctx.data(|d| d.get_temp::<Rect>(key.with("rect"))) } else { None };
+    let y = pop.map(|r| r.min.y - 8.0).unwrap_or(screen.max.y - 92.0).min(screen.max.y - 92.0);
+    egui::Area::new(Id::new("toast")).order(Order::Tooltip).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(cx, y)).interactable(false).show(ctx, |ui| {
         let g = ui.painter().layout_no_wrap(text, medium(13.0), TEXT());
         let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 32.0, 36.0), Sense::hover());
         ui.painter().rect(r, 18.0, pick(Color32::from_rgb(0x2A, 0x2D, 0x33), Color32::WHITE), Stroke::new(1.0, if warn { carve() } else { accent_border() }), StrokeKind::Inside);
@@ -987,8 +1196,17 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 ui.add_space(4.0);
                 divider(ui);
                 ui.add_space(6.0);
+                if st.settings.sub_fixed {
+                    // the fixed Sub Outliner: always there, the clicked
+                    // element's operations load into it
+                    let el = st.outline_element();
+                    sub_outliner_body(ui, st, el, SUB_FIXED_H, true);
+                    ui.add_space(4.0);
+                    divider(ui);
+                    ui.add_space(6.0);
+                }
             }
-            let props_max = (total - tree_h - 40.0).max(160.0);
+            let props_max = (total - tree_h - 40.0 - if st.settings.show_tree && st.settings.sub_fixed { SUB_FIXED_H + 50.0 } else { 0.0 }).max(160.0);
             // an Area's Ui starts at last frame's size: without a minimum the scroll area never grows
             egui::ScrollArea::vertical().id_salt("props-scroll").max_height(props_max).min_scrolled_height(props_max).auto_shrink([false, true]).show(ui, |ui| {
                 ui.set_width(inner_w);
@@ -1017,7 +1235,7 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             });
         });
     });
-    if st.settings.show_tree && !st.doc.features.is_empty() {
+    if st.settings.show_tree && !st.settings.sub_fixed && !st.doc.features.is_empty() {
         components_column(ctx, st, pos2(screen.min.x + EDGE + LEFT_W + 8.0, top) + off, tree_h);
     }
 }
@@ -1092,6 +1310,7 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
 fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bool) {
     let w = ui.available_width();
     let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
+    ui.ctx().data_mut(|d| d.insert_temp(Id::new(("row", f.id)), r.center()));
     let selected = st.is_selected(f.id);
     let hovered_3d = st.hover_feature == Some(f.id);
     let p = ui.painter();
@@ -1103,7 +1322,8 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
         p.rect_filled(r, 6.0, RAISED());
     }
     let x0 = r.min.x + 6.0;
-    let dim = if f.visible { 1.0 } else { 0.4 };
+    let is_op = !f.is_solid() && !f.is_path();
+    let dim = if f.visible && !f.suspended { 1.0 } else { 0.4 };
     let c = feature_color(f);
     let br = Rect::from_min_size(pos2(x0, r.center().y - 8.0), vec2(16.0, 16.0));
     p.rect_filled(br, 4.0, tint(c, 0.16 * dim));
@@ -1113,7 +1333,13 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
         icons::paint(p, br.shrink(2.0), feature_icon(f), tint(c, dim));
     }
     let name_color = if selected { TEXT_STRONG() } else { tint(TEXT(), dim) };
-    let info = if ops > 0 { format!("{} · {ops} op{}", step_info(f), if ops > 1 { "s" } else { "" }) } else { step_info(f) };
+    let info = if ops > 0 {
+        format!("{} · {ops} op{}", step_info(f), if ops > 1 { "s" } else { "" })
+    } else if f.suspended {
+        "past the marker".to_string()
+    } else {
+        step_info(f)
+    };
     let info_g = p.layout_no_wrap(info, regular(12.0), tint(TEXT2(), dim));
     let info_x = r.max.x - 40.0 - info_g.size().x;
     p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
@@ -1123,10 +1349,30 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
     let name_g = ui.painter().layout_job(job);
     ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
     let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
-    icons::paint(ui.painter(), er, if f.visible { Icon::Eye } else { Icon::EyeOff }, tint(TEXT2(), 0.8));
     let eresp = ui.interact(er.expand(6.0), Id::new(("eye", f.id)), Sense::click());
+    if is_op {
+        // an operation: on or off (Romain, 19 nov.: "activer ou désactiver
+        // chacune des opérations… sans casser la chaîne")
+        let b = Rect::from_center_size(er.center(), vec2(13.0, 13.0));
+        let p = ui.painter();
+        if f.visible {
+            p.rect_filled(b, 3.0, tint(accent(), if f.suspended { 0.45 } else { 1.0 }));
+            p.line_segment([b.min + vec2(3.0, 6.8), b.min + vec2(5.6, 9.4)], Stroke::new(1.6, on_accent()));
+            p.line_segment([b.min + vec2(5.6, 9.4), b.min + vec2(10.2, 3.8)], Stroke::new(1.6, on_accent()));
+        } else {
+            p.rect(b, 3.0, Color32::TRANSPARENT, Stroke::new(1.2, if eresp.hovered() { LABEL() } else { DIVIDER() }), StrokeKind::Inside);
+        }
+    } else {
+        icons::paint(ui.painter(), er, if f.visible { Icon::Eye } else { Icon::EyeOff }, tint(TEXT2(), 0.8));
+    }
+    let eresp = eresp.on_hover_text(if is_op { "On / off: left out of the build, the operations after it kept" } else { "Show / hide" });
+    resp.context_menu(|ui| row_menu(ui, st, f));
     if eresp.clicked() {
-        st.toggle_visible(f.id);
+        if is_op {
+            st.toggle_op(f.id);
+        } else {
+            st.toggle_visible(f.id);
+        }
     } else if resp.clicked() {
         if f.is_solid() {
             st.set_sel_mode(SelMode::Object);
@@ -1150,28 +1396,105 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
 
 /// The outliner's second column, beside the panel: the operations made on
 /// the element clicked (fillets, insets, moves, cuts), in history order.
+/// A row's right-click menu (Romain: "un petit clic droit"): an
+/// operation turned off or on, the marker put after it, deleted; a shape
+/// hidden or shown, deleted.
+fn row_menu(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    ui.set_min_width(160.0);
+    ui.spacing_mut().button_padding = vec2(8.0, 3.0);
+    ui.spacing_mut().interact_size.y = 24.0;
+    ui.style_mut().override_font_id = Some(regular(12.5));
+    let is_op = !f.is_solid() && !f.is_path();
+    if is_op {
+        if ui.button(if f.visible { "Turn off" } else { "Turn on" }).clicked() {
+            st.toggle_op(f.id);
+            ui.close();
+        }
+        if let Some(el) = st.owner_of(f.id) {
+            if ui.button("Back to here").clicked() {
+                let n = st.element_ops(el).iter().position(|x| *x == f.id).map(|i| i + 1).unwrap_or(0);
+                st.set_marker(el, n);
+                ui.close();
+            }
+            if st.marker_of(el) < st.element_ops(el).len() && ui.button("All operations back").clicked() {
+                let n = st.element_ops(el).len();
+                st.set_marker(el, n);
+                ui.close();
+            }
+        }
+    } else if ui.button(if f.visible { "Hide" } else { "Show" }).clicked() {
+        st.toggle_visible(f.id);
+        ui.close();
+    }
+    if ui.button("Delete").clicked() {
+        st.select(Some(f.id), false);
+        st.delete_selected();
+        ui.close();
+    }
+}
+
+/// The Sub Outliner's content: the element's name, then its operations in
+/// history order, the marker (a white line) before those left out.
+fn sub_outliner_body(ui: &mut Ui, st: &mut AppState, el: Option<FeatureId>, max_h: f32, fixed: bool) {
+    ui.horizontal(|ui| {
+        ui.set_height(24.0);
+        ui.label(egui::RichText::new("SUB OUTLINER").font(semibold(10.5)).color(TEXT2()));
+        if let Some(f) = el.and_then(|id| st.doc.feature(id)) {
+            ui.label(egui::RichText::new(&f.name).font(semibold(12.5)).color(TEXT()));
+        }
+    });
+    let Some(id) = el else {
+        ui.label(egui::RichText::new("Click an element: its operations load here").font(regular(11.5)).color(TEXT2()));
+        if fixed {
+            ui.add_space((max_h - 46.0).max(0.0));
+        }
+        return;
+    };
+    let ops: Vec<Feature> = st.element_ops(id).iter().filter_map(|x| st.doc.feature(*x).cloned()).collect();
+    if ops.is_empty() {
+        ui.label(egui::RichText::new("No operations yet: its fillets, insets and moves show here").font(regular(11.5)).color(TEXT2()));
+        if fixed {
+            ui.add_space((max_h - 46.0).max(0.0));
+        }
+        return;
+    }
+    let marker = st.marker_of(id);
+    let mut sa = egui::ScrollArea::vertical().id_salt(if fixed { "sub-fixed-scroll" } else { "components-scroll" }).max_height(max_h).auto_shrink([false, !fixed]);
+    if fixed {
+        // a fixed container: the same height whatever it holds
+        sa = sa.min_scrolled_height(max_h);
+    }
+    sa.show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        for (k, g) in ops.iter().enumerate() {
+            if k == marker {
+                history_marker_line(ui);
+            }
+            tree_row(ui, st, g, 0, false);
+        }
+        if marker >= ops.len() {
+            history_marker_line(ui);
+        }
+    });
+}
+
+/// The history marker in a list: a short white line.
+fn history_marker_line(ui: &mut Ui) {
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 7.0), Sense::hover());
+    ui.painter().rect_filled(Rect::from_center_size(pos2(r.min.x + 22.0, r.center().y), vec2(32.0, 2.0)), 1.0, TEXT_STRONG());
+}
+
+/// The floating Sub Outliner (Settings: Floating): an island right of the
+/// panel, as tall as the list, while an element is clicked.
 fn components_column(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2, height: f32) {
     let Some(id) = st.outline_element() else { return };
-    let Some(el) = st.doc.feature(id).cloned() else { return };
-    let ops: Vec<Feature> = st.doc.features.iter().filter(|g| !g.is_solid() && !g.is_path() && st.owner_of(g.id) == Some(id)).cloned().collect();
+    if st.doc.feature(id).is_none() {
+        return;
+    }
     egui::Area::new(Id::new("components")).order(Order::Middle).fixed_pos(at).show(ctx, |ui| {
         island().inner_margin(Margin::same(10)).show(ui, |ui| {
             ui.set_width(220.0);
-            ui.horizontal(|ui| {
-                ui.set_height(26.0);
-                ui.label(egui::RichText::new(&el.name).font(semibold(13.0)).color(TEXT()));
-                ui.label(egui::RichText::new(format!("{} op{}", ops.len(), if ops.len() == 1 { "" } else { "s" })).font(regular(11.5)).color(TEXT2()));
-            });
-            if ops.is_empty() {
-                ui.label(egui::RichText::new("No operations yet: its fillets, insets and moves show here").font(regular(11.5)).color(TEXT2()));
-                return;
-            }
-            egui::ScrollArea::vertical().id_salt("components-scroll").max_height((height - 40.0).max(60.0)).auto_shrink([false, true]).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 1.0;
-                for g in &ops {
-                    tree_row(ui, st, g, 0, false);
-                }
-            });
+            sub_outliner_body(ui, st, Some(id), (height - 40.0).max(60.0), false);
         });
     });
 }
@@ -1195,6 +1518,15 @@ fn defaults(ui: &mut Ui, st: &mut AppState) {
     if toggle_row(ui, "Shape list", st.settings.show_tree) {
         st.settings.show_tree = !st.settings.show_tree;
         st.save_settings();
+    }
+    if st.settings.show_tree {
+        ui.label(egui::RichText::new("Sub Outliner").font(regular(12.5)).color(LABEL()));
+        let items = [(false, "Floating", accent()), (true, "Fixed", accent())];
+        if let Some(v) = segmented(ui, &items, st.settings.sub_fixed, 28.0) {
+            st.settings.sub_fixed = v;
+            st.save_settings();
+        }
+        ui.add_space(2.0);
     }
     if toggle_row(ui, "World origin", st.settings.origin) {
         st.settings.origin = !st.settings.origin;

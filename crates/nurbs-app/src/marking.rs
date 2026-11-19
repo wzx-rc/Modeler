@@ -74,6 +74,10 @@ pub enum Act {
     ObjectMode,
     Place(PrimKind),
     Snap,
+    /// An operation turned off (its element's history keeps it).
+    TurnOff,
+    /// The element's history marker put just after this operation.
+    Marker,
 }
 
 pub struct Item {
@@ -102,7 +106,13 @@ pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
                 it(7, "Hide", false, Act::Hide),
             ]
         }
-        Ctx::Step(_) => vec![it(2, "Frame", false, Act::Frame), it(4, "Delete", false, Act::Delete), it(6, "Object mode", false, Act::ObjectMode)],
+        Ctx::Step(_) => vec![
+            it(0, "Turn off", false, Act::TurnOff),
+            it(1, "Back to here", false, Act::Marker),
+            it(2, "Frame", false, Act::Frame),
+            it(4, "Delete", false, Act::Delete),
+            it(6, "Object mode", false, Act::ObjectMode),
+        ],
         Ctx::Edge => vec![
             it(0, "Fillet", false, Act::Fillet),
             it(2, "Chamfer", false, Act::Chamfer),
@@ -164,6 +174,19 @@ fn run(st: &mut AppState, act: Act, ctx: Ctx, at: [f32; 2]) {
         Act::ObjectMode => st.set_sel_mode(SelMode::Object),
         Act::Place(k) => st.arm(k),
         Act::Snap => st.settings.snap = !st.settings.snap,
+        Act::TurnOff => {
+            if let Ctx::Step(id) = ctx {
+                st.toggle_op(id);
+            }
+        }
+        Act::Marker => {
+            if let Ctx::Step(id) = ctx {
+                if let Some(el) = st.owner_of(id) {
+                    let n = st.element_ops(el).iter().position(|x| *x == id).map(|i| i + 1).unwrap_or(0);
+                    st.set_marker(el, n);
+                }
+            }
+        }
     }
 }
 

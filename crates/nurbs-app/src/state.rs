@@ -331,8 +331,8 @@ pub struct AppState {
     pub doc_name: String,
     /// Bumped on every change of the document.
     pub version: u64,
-    undo: Vec<(String, Doc)>,
-    redo: Vec<(String, Doc)>,
+    pub(crate) undo: Vec<(String, Doc)>,
+    pub(crate) redo: Vec<(String, Doc)>,
     /// The document before the gesture under way (drag, creation).
     live_before: Option<(String, Doc)>,
 
@@ -544,6 +544,7 @@ impl AppState {
     // ------------------------------------------------------------- history
 
     fn touched(&mut self) {
+        self.keep_markers();
         self.version += 1;
     }
 

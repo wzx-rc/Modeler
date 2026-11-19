@@ -553,9 +553,10 @@ pub struct Feature {
     pub visible: bool,
     #[serde(default)]
     pub material: u32,
-    /// Left out of the build for now (an operation turned off, or past its
-    /// element's history marker), kept in the document: the chain is not
-    /// broken, it comes back when turned on.
+    /// Past its element's history marker (the history strip went back
+    /// before it): left out of the build, kept in the document, back when
+    /// the marker moves past it again. (An operation turned off by hand is
+    /// `visible: false`.)
     #[serde(default, skip_serializing_if = "is_false")]
     pub suspended: bool,
     /// A fillet or chamfer step: `op`, `prim` and `rot` are not used (a box

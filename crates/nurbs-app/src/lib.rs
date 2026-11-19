@@ -10,6 +10,7 @@ pub mod faces;
 pub mod files;
 pub mod icons;
 pub mod knife;
+pub mod history;
 pub mod marking;
 pub mod materials;
 pub mod pick;

@@ -21,11 +21,14 @@ pub struct Settings {
     pub show_tree: bool,
     /// The help box at the bottom right, open (else folded to its button).
     pub help: bool,
+    /// The Sub Outliner (the clicked element's operations): a fixed
+    /// container in the left panel, else a floating column beside it.
+    pub sub_fixed: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false }
     }
 }
 

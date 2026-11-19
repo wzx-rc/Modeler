@@ -1232,6 +1232,82 @@ fn main() {
         }
     }
 
+    if want("history") {
+        // the history strip: the Block's own history (its fillet and
+        // inset), back to the fillet, scrubbed, the fillet turned off in
+        // the pop-up; the fixed Sub Outliner; the scene's undo history
+        let mut d = test_part();
+        d.add_round(2.0, false, vec![EdgeRef { faces: [FaceTag { feature: 1, sub: 2 }.pack(), FaceTag { feature: 1, sub: 4 }.pack()], at: DVec3::new(12.0, 20.0, 15.0) }]);
+        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 4 }.pack(), at: DVec3::new(-12.0, 8.0, 15.0) }, inset: 2.0, depth: -1.0 });
+        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 3, sub: 1 }.pack(), at: DVec3::new(10.0, 30.0, 0.0) }, inset: 2.0, depth: 2.0 });
+        h.reset(d, "Test part");
+        let cell = |h: &Harness, i: usize| h.ctx.data(|d| d.get_temp::<Pos2>(egui::Id::new(("hist-cell", i)))).expect("cell drawn");
+        let row = |h: &Harness, id: u64| h.ctx.data(|d| d.get_temp::<Pos2>(egui::Id::new(("row", id)))).expect("row drawn");
+        h.st.select(Some(1), false);
+        h.steps(3);
+        h.move_to(cell(&h, 1));
+        h.steps(3);
+        h.shot("zero-history-1-block");
+        h.click(cell(&h, 1));
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-history-2-back");
+        eprintln!("  marker {} suspended {:?}", h.st.marker_of(1), h.st.doc.features.iter().filter(|f| f.suspended).map(|f| f.name.clone()).collect::<Vec<_>>());
+        // held on the last icon and dragged to the first: the shape alone
+        let (a, b) = (cell(&h, 2), cell(&h, 0));
+        h.drag(a, b, 10, false);
+        h.settle();
+        h.shot("zero-history-3-scrub");
+        eprintln!("  scrubbed to {}", h.st.marker_of(1));
+        h.drag(b, a, 6, false);
+        h.press(a, false);
+        h.settle();
+        eprintln!("  released at {} · undo {:?}", h.st.marker_of(1), h.st.undo_labels());
+        // the fillet's pop-up and its tick: turned off, the inset still built
+        h.move_to(cell(&h, 1));
+        h.steps(3);
+        let c = cell(&h, 1);
+        h.move_to(c + vec2(0.0, -30.0));
+        h.steps(2);
+        let tick = h.ctx.data(|d| d.get_temp::<Pos2>(egui::Id::new("history-tick"))).expect("pop-up tick");
+        h.move_to(tick);
+        h.steps(2);
+        h.click(tick);
+        h.settle();
+        h.move_to(tick);
+        h.steps(3);
+        h.shot("zero-history-4-off");
+        eprintln!("  fillet visible {} errors {:?}", h.st.doc.features[4].visible, h.st.model.as_ref().map(|m| m.errors.clone()));
+        // the fixed Sub Outliner, a right click on the inset's row
+        h.st.settings.sub_fixed = true;
+        h.steps(3);
+        let r = row(&h, 6);
+        h.rpress(r, true);
+        h.rpress(r, false);
+        h.steps(3);
+        h.shot("zero-history-5-fixed-menu");
+        h.key(egui::Key::Escape);
+        // a new operation while the marker is back goes in at the marker
+        h.st.set_marker(1, 1);
+        h.settle();
+        h.st.edit("Inset", |d| {
+            d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 0 }.pack(), at: DVec3::new(20.0, 10.0, 0.0) }, inset: 3.0, depth: -1.0 });
+        });
+        h.settle();
+        eprintln!("  order {:?}", h.st.doc.features.iter().map(|f| format!("{}{}", f.name, if f.suspended { " (out)" } else { "" })).collect::<Vec<_>>());
+        h.st.select(Some(1), false);
+        h.steps(3);
+        h.shot("zero-history-6-inserted");
+        // nothing selected: the scene's undo history
+        h.st.select(None, false);
+        h.st.settings.sub_fixed = false;
+        h.steps(3);
+        h.move_to(cell(&h, 2));
+        h.steps(3);
+        h.shot("zero-history-7-scene");
+    }
+
     if want("qwer") {
         // Maya's Q W E R: E rings turn the slot, R cubes scale the boss, the
         // centre scales all, Q hides the gizmo, W brings the arrows back
