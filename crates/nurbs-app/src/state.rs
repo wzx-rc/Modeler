@@ -7,7 +7,7 @@ use crate::camera::OrbitCamera;
 use crate::pick::{Hit, Picker};
 use crate::settings::Settings;
 use crate::view::View;
-use glam::{DQuat, DVec3, Vec3};
+use glam::{DQuat, DVec2, DVec3, Vec3};
 use nurbs_kernel::client::{Kernel, Status};
 use nurbs_kernel::doc::PrimKind;
 use nurbs_kernel::{Doc, EdgeRef, FaceRef, FaceTag, Feature, FeatureId, Model, Op, Prim, Profile};
@@ -203,6 +203,16 @@ pub struct Sketch {
     /// Rectify's Pen), and the point whose fillet is being dragged.
     pub corner: Vec<f64>,
     pub grab: Option<usize>,
+    /// The Surface tool off its plane ("On scan"): each point where it was
+    /// put on the reference (None: on the plane).
+    pub free: Vec<Option<DVec3>>,
+}
+
+impl Sketch {
+    /// Point `i` in the world: on the scan where put there, else on the plane.
+    pub fn world(&self, i: usize) -> DVec3 {
+        self.free.get(i).copied().flatten().unwrap_or_else(|| self.plane.at(self.pts[i]))
+    }
 }
 
 /// What a gizmo handle moves.
@@ -374,6 +384,9 @@ pub struct AppState {
     /// Fillet or chamfer for the picked edges and sharp corners (the
     /// top island's option, Ctrl + B).
     pub round_chamfer: bool,
+    /// The Surface tool's points: put on the reference under the pointer
+    /// (true), else locked on the plane under its first point.
+    pub surface_on_scan: bool,
     /// A fillet or chamfer being sized by a drag.
     pub round_drag: Option<RoundDrag>,
     /// Ctrl + drag on a picked face (an inset) or Shift + drag on a picked
@@ -517,6 +530,7 @@ impl AppState {
             edge_sel: vec![],
             hover_edge: None,
             round_chamfer: false,
+            surface_on_scan: false,
             round_drag: None,
             face_drag: None,
             knife: None,
@@ -820,7 +834,7 @@ impl AppState {
     /// Arms a creation tool; the armed tool again places a shape at once
     /// (`quick_add`).
     pub fn arm(&mut self, kind: PrimKind) {
-        if matches!(kind, PrimKind::Profile | PrimKind::Path) && self.tool == Tool::Create(kind) {
+        if matches!(kind, PrimKind::Profile | PrimKind::Path | PrimKind::Surface) && self.tool == Tool::Create(kind) {
             return;
         }
         self.abort_gestures();
@@ -836,7 +850,7 @@ impl AppState {
     /// shape's top along its axis (at the world origin with nothing
     /// selected). Carve: drilled through the selected shape, from its top.
     pub fn quick_add(&mut self, kind: PrimKind) {
-        if matches!(kind, PrimKind::Profile | PrimKind::Path) {
+        if matches!(kind, PrimKind::Profile | PrimKind::Path | PrimKind::Surface) {
             self.arm(kind);
             return;
         }
@@ -851,7 +865,7 @@ impl AppState {
                 // a quarter of the base's smaller side, at most 5 mm
                 let r = (hx.min(hz) * 0.5).clamp(0.2, 5.0);
                 let prim = match kind {
-                    PrimKind::Box | PrimKind::Profile | PrimKind::Path => Prim::Box { x: 2.0 * r, y: h + 2.0, z: 2.0 * r },
+                    PrimKind::Box | PrimKind::Profile | PrimKind::Path | PrimKind::Surface => Prim::Box { x: 2.0 * r, y: h + 2.0, z: 2.0 * r },
                     PrimKind::Cylinder => Prim::Cylinder { radius: r, height: h + 2.0 },
                 };
                 // from 1 mm above the top, down through the base
@@ -1350,7 +1364,7 @@ impl AppState {
 
     /// Starts a creation at `p` (screen).
     pub fn begin_creation(&mut self, kind: PrimKind, p: [f32; 2]) {
-        if matches!(kind, PrimKind::Profile | PrimKind::Path) {
+        if matches!(kind, PrimKind::Profile | PrimKind::Path | PrimKind::Surface) {
             return;
         }
         let Some((plane, a, snapped)) = self.start_plane(p) else { return };
@@ -1363,7 +1377,7 @@ impl AppState {
         let rot = basis_rotation(plane.u, plane.n);
         // a tiny shape at first: it grows with the drag
         let prim = match kind {
-            PrimKind::Box | PrimKind::Profile | PrimKind::Path => Prim::Box { x: 0.01, y: 0.01, z: 0.01 },
+            PrimKind::Box | PrimKind::Profile | PrimKind::Path | PrimKind::Surface => Prim::Box { x: 0.01, y: 0.01, z: 0.01 },
             PrimKind::Cylinder => Prim::Cylinder { radius: 0.01, height: 0.01 },
         };
         let mut id = 0;
@@ -1425,7 +1439,7 @@ impl AppState {
 
     fn creation_base_centre(&self, c: &Creation) -> DVec3 {
         match c.kind {
-            PrimKind::Box | PrimKind::Profile | PrimKind::Path => c.plane.at([(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5]),
+            PrimKind::Box | PrimKind::Profile | PrimKind::Path | PrimKind::Surface => c.plane.at([(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5]),
             PrimKind::Cylinder => c.plane.at(c.a),
         }
     }
@@ -1437,7 +1451,7 @@ impl AppState {
         let (w, dpt) = (tidy((c.b[0] - c.a[0]).abs()), tidy((c.b[1] - c.a[1]).abs()));
         let r = tidy(((c.b[0] - c.a[0]).powi(2) + (c.b[1] - c.a[1]).powi(2)).sqrt());
         let base_ok = match c.kind {
-            PrimKind::Box | PrimKind::Profile | PrimKind::Path => w > 1e-6 && dpt > 1e-6,
+            PrimKind::Box | PrimKind::Profile | PrimKind::Path | PrimKind::Surface => w > 1e-6 && dpt > 1e-6,
             PrimKind::Cylinder => r > 1e-6,
         };
         let h = match c.phase {
@@ -1458,7 +1472,7 @@ impl AppState {
                     PrimKind::Box => Prim::Box { x: w.max(0.01), y: shown_h, z: dpt.max(0.01) },
                     PrimKind::Cylinder => Prim::Cylinder { radius: r.max(0.01), height: shown_h },
                     PrimKind::Profile => Prim::Profile { x: w.max(0.01), y: shown_h, z: dpt.max(0.01) },
-                    PrimKind::Path => Prim::Path { x: w.max(0.01), z: dpt.max(0.01) },
+                    PrimKind::Path | PrimKind::Surface => Prim::Path { x: w.max(0.01), z: dpt.max(0.01) },
                 };
                 // turned over to grow down: the outline mirrored stays in place
                 if let Some(pr) = &c.profile {
@@ -1474,14 +1488,14 @@ impl AppState {
     pub fn base_released(&mut self, p: [f32; 2]) {
         let Some(mut c) = self.creation.clone() else { return };
         let tiny = match c.kind {
-            PrimKind::Box | PrimKind::Profile | PrimKind::Path => (c.b[0] - c.a[0]).abs() < 0.5 || (c.b[1] - c.a[1]).abs() < 0.5,
+            PrimKind::Box | PrimKind::Profile | PrimKind::Path | PrimKind::Surface => (c.b[0] - c.a[0]).abs() < 0.5 || (c.b[1] - c.a[1]).abs() < 0.5,
             PrimKind::Cylinder => ((c.b[0] - c.a[0]).powi(2) + (c.b[1] - c.a[1]).powi(2)).sqrt() < 0.5,
         };
         if tiny {
             // direct: a default shape, centred on the click
             let s = 10.0;
             match c.kind {
-                PrimKind::Box | PrimKind::Profile | PrimKind::Path => {
+                PrimKind::Box | PrimKind::Profile | PrimKind::Path | PrimKind::Surface => {
                     c.b = [c.a[0] + s, c.a[1] + s];
                     c.a = [c.a[0] - s, c.a[1] - s];
                 }
@@ -1622,7 +1636,7 @@ impl AppState {
         if k.pts.len() < 3 {
             return false;
         }
-        let Some(s) = self.view().project(k.plane.at(k.pts[0]).as_vec3()) else { return false };
+        let Some(s) = self.view().project(k.world(0).as_vec3()) else { return false };
         (s[0] - p[0]).hypot(s[1] - p[1]) < 10.0
     }
 
@@ -1632,7 +1646,8 @@ impl AppState {
     pub fn sketch_press(&mut self, p: [f32; 2]) {
         if self.sketch.is_none() {
             let Some((plane, a, _)) = self.start_plane(p) else { return };
-            self.sketch = Some(Sketch { plane, pts: vec![a], smooth: vec![false], held: Some((0, p)), corner: vec![0.0], grab: None });
+            let free = self.surface_free(p);
+            self.sketch = Some(Sketch { plane, pts: vec![a], smooth: vec![false], held: Some((0, p)), corner: vec![0.0], grab: None, free: vec![free] });
             self.selection.clear();
             return;
         }
@@ -1641,6 +1656,7 @@ impl AppState {
             return;
         }
         let Some(q) = self.sketch_point(p) else { return };
+        let free = self.surface_free(p);
         let k = self.sketch.as_mut().unwrap();
         // the same point twice: nothing
         if k.pts.last().map(|l| (l[0] - q[0]).abs() + (l[1] - q[1]).abs() < 1e-9).unwrap_or(false) {
@@ -1650,17 +1666,27 @@ impl AppState {
         k.pts.push(q);
         k.smooth.push(false);
         k.corner.push(0.0);
+        k.free.push(free);
         k.held = Some((k.pts.len() - 1, p));
+    }
+
+    /// The Surface tool "On scan": the reference under the pointer.
+    pub fn surface_free(&self, p: [f32; 2]) -> Option<DVec3> {
+        (self.tool == Tool::Create(PrimKind::Surface) && self.surface_on_scan).then(|| self.reference_at(p).map(|h| h.0)).flatten()
     }
 
     /// Dragging the press: the point follows, still a corner (Romain, 19
     /// nov., 21 h 28: a drag no longer bends it into a curve point).
     pub fn sketch_drag(&mut self, p: [f32; 2]) {
         let q = self.sketch_point(p);
+        let free = self.surface_free(p);
         let Some(k) = self.sketch.as_mut() else { return };
         let (Some((i, from)), Some(q)) = (k.held, q) else { return };
         if (p[0] - from[0]).hypot(p[1] - from[1]) > 4.0 {
             k.pts[i] = q;
+            if let Some(f) = k.free.get_mut(i) {
+                *f = free;
+            }
         }
     }
 
@@ -1676,6 +1702,7 @@ impl AppState {
             k.pts.pop();
             k.smooth.pop();
             k.corner.truncate(k.pts.len());
+            k.free.truncate(k.pts.len());
             k.held = None;
             if k.pts.is_empty() {
                 self.sketch = None;
@@ -1688,6 +1715,10 @@ impl AppState {
     pub fn sketch_close(&mut self, p: [f32; 2]) {
         if self.tool == Tool::Create(PrimKind::Path) {
             self.path_finish(true);
+            return;
+        }
+        if self.tool == Tool::Create(PrimKind::Surface) {
+            self.surface_finish();
             return;
         }
         let Some(k) = self.sketch.clone() else { return };
@@ -1722,6 +1753,97 @@ impl AppState {
         self.creation = Some(cr.clone());
         self.selection = vec![id];
         self.apply_creation(&cr);
+    }
+
+    /// Ends the Surface tool's outline: filled with a surface with no
+    /// thickness, through its points (on the plane, or where they were put
+    /// on the scan), smooth inside; "On scan", passing near the scan inside
+    /// the outline too.
+    pub fn surface_finish(&mut self) {
+        let Some(k) = self.sketch.clone() else { return };
+        if k.pts.len() < 3 {
+            self.toast("A surface needs 3 points at least", true);
+            return;
+        }
+        let w: Vec<DVec3> = (0..k.pts.len()).map(|i| k.world(i)).collect();
+        let c = w.iter().copied().sum::<DVec3>() / w.len() as f64;
+        // its frame: the plane's axes (its normal from the outline when
+        // the points are on the scan)
+        let mut n = DVec3::ZERO;
+        for i in 0..w.len() {
+            n += (w[i] - c).cross(w[(i + 1) % w.len()] - c);
+        }
+        let n = if k.free.iter().any(|f| f.is_some()) && n.length() > 1e-9 { n.normalize() } else { k.plane.n };
+        let n = if n.dot(k.plane.n) < 0.0 { -n } else { n };
+        let u = k.plane.u - n * k.plane.u.dot(n);
+        let u = if u.length() > 1e-6 { u.normalize() } else { n.any_orthonormal_vector() };
+        let rot = basis_rotation(u, n);
+        let inv = rot.inverse();
+        let local: Vec<DVec3> = w.iter().map(|q| inv * (*q - c)).collect();
+        let (lo, hi) = local.iter().fold((DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)), |(a, b), q| (a.min(*q), b.max(*q)));
+        let size = (hi - lo).max_element();
+        if size < 0.5 {
+            self.toast("The outline is too small: draw it wider", true);
+            return;
+        }
+        // on the scan: the scan's points inside the outline (a grid of
+        // about 8 × 8 over its box, each found along the normal)
+        let mut inner = vec![];
+        if self.surface_on_scan {
+            if let Some(r) = self.reference.as_ref() {
+                let poly: Vec<[f64; 2]> = local.iter().map(|q| [q.x, q.z]).collect();
+                let step = size / 8.0;
+                let reach = size * 0.6;
+                let inside = |x: f64, z: f64| {
+                    let mut c = false;
+                    let m = poly.len();
+                    for i in 0..m {
+                        let (a, b) = (poly[i], poly[(i + 1) % m]);
+                        if (a[1] > z) != (b[1] > z) && x < a[0] + (z - a[1]) / (b[1] - a[1]) * (b[0] - a[0]) {
+                            c = !c;
+                        }
+                    }
+                    c
+                };
+                // the points' own heights, to keep the scan's near side
+                let mut x = lo.x + step * 0.5;
+                while x < hi.x {
+                    let mut z = lo.z + step * 0.5;
+                    while z < hi.z {
+                        // not too near the outline: it holds the edges
+                        let near_edge = (0..poly.len()).any(|i| {
+                            let (a, b) = (DVec2::from(poly[i]), DVec2::from(poly[(i + 1) % poly.len()]));
+                            let q = DVec2::new(x, z);
+                            let t = ((q - a).dot(b - a) / (b - a).length_squared().max(1e-12)).clamp(0.0, 1.0);
+                            q.distance(a + (b - a) * t) < step * 0.5
+                        });
+                        if inside(x, z) && !near_edge {
+                            let o = c + rot * DVec3::new(x, reach, z);
+                            if let Some((h, _)) = r.hit(o, -n) {
+                                let l = inv * (h - c);
+                                if l.y.abs() < reach {
+                                    inner.push(l);
+                                }
+                            }
+                        }
+                        z += step;
+                    }
+                    x += step;
+                }
+            }
+        }
+        self.sketch = None;
+        let mut id = 0;
+        let mat = self.material;
+        self.edit("New Surface", |d| {
+            id = d.add(Op::Add, Prim::Path { x: (hi.x - lo.x).max(0.01), z: (hi.z - lo.z).max(0.01) }, c, rot);
+            if let Some(f) = d.feature_mut(id) {
+                f.name = f.name.replace("Path", "Surface");
+                f.material = mat;
+                f.sheet = Some(nurbs_kernel::Sheet { pts: local, inner });
+            }
+        });
+        self.selection = vec![id];
     }
 
     /// Ends the Path tool's curve: open (Enter) or closed (a click on its
@@ -2471,7 +2593,7 @@ pub fn size_handle_pos(f: &Feature, h: Handle) -> Option<DVec3> {
 
 /// The size handles of a shape.
 pub fn size_handles(f: &Feature) -> Vec<Handle> {
-    if !f.is_solid() {
+    if !f.is_solid() || f.is_sheet() {
         return vec![];
     }
     match f.prim {

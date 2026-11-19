@@ -503,7 +503,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 st.select(id, shift || ctrl);
             }
         }
-        Tool::Create(PrimKind::Profile | PrimKind::Path) if st.creation.is_none() => {
+        Tool::Create(PrimKind::Profile | PrimKind::Path | PrimKind::Surface) if st.creation.is_none() => {
             // the outline: a click or a drag puts a corner;
             // Ctrl + drag from a point placed: its fillet
             let grabbed = st.sketch.as_ref().map(|k| k.grab.is_some()).unwrap_or(false);
@@ -730,6 +730,10 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
 /// the pointer as the next point, the side back to the first point dimmed.
 fn draw_sketch(p: &Painter, st: &AppState) {
     let Some(k) = &st.sketch else { return };
+    if st.tool == Tool::Create(PrimKind::Surface) {
+        draw_surface_outline(p, st, k);
+        return;
+    }
     let path = st.tool == Tool::Create(PrimKind::Path);
     let col = if path { PATH } else if st.mode == Op::Carve { carve() } else { accent() };
     let hover = p.ctx().input(|i| i.pointer.hover_pos());
@@ -792,6 +796,49 @@ fn draw_sketch(p: &Painter, st: &AppState) {
     if let Some(h) = hover {
         let on = k.plane.label();
         let txt = if closing { "close".to_string() } else if path && k.pts.len() >= 2 { format!("{} points · Enter: an open path", k.pts.len()) } else { format!("{} point{} · {on}", k.pts.len(), if k.pts.len() == 1 { "" } else { "s" }) };
+        chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, tint(col, 0.6), if closing { HOT } else { TEXT2() });
+    }
+}
+
+/// The Surface tool's outline: straight sides through the points (on the
+/// plane, or on the scan "On scan"), the pointer as the next point, the side
+/// back to the first point dimmed.
+fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch) {
+    let col = PATH;
+    let hover = p.ctx().input(|i| i.pointer.hover_pos());
+    let closing = hover.map(|h| st.sketch_on_first(p2(h))).unwrap_or(false);
+    let mut pts: Vec<DVec3> = (0..k.pts.len()).map(|i| k.world(i)).collect();
+    let placed = pts.len();
+    if k.held.is_none() && !closing {
+        if let Some(h) = hover {
+            let next = if st.surface_on_scan { st.reference_at(p2(h)).map(|x| x.0) } else { st.sketch_snap(p2(h)).map(|(q, _)| k.plane.at(q)) };
+            if let Some(q) = next {
+                pts.push(q);
+            }
+        }
+    }
+    let n = pts.len();
+    let sp: Vec<Option<Pos2>> = pts.iter().map(|q| world(st, *q)).collect();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        if j == 0 && n < 3 {
+            continue;
+        }
+        let (Some(a), Some(b)) = (sp[i], sp[j]) else { continue };
+        let back = j == 0;
+        let stroke = if back && !closing { Stroke::new(1.2, tint(col, 0.35)) } else { Stroke::new(2.0, col) };
+        p.line_segment([a, b], stroke);
+    }
+    for (i, s) in sp.iter().enumerate().take(placed) {
+        let Some(s) = s else { continue };
+        let first = i == 0 && placed >= 3;
+        let r = if first && closing { 3.5 } else { 2.5 };
+        let fill = if first && closing { HOT } else { chip_bg() };
+        p.rect(Rect::from_center_size(*s, vec2(r * 2.0, r * 2.0)), 1.0, fill, Stroke::new(1.5, col), egui::StrokeKind::Middle);
+    }
+    if let Some(h) = hover {
+        let on = if st.surface_on_scan { "on the scan" } else { k.plane.label() };
+        let txt = if closing { "close: fill it".to_string() } else { format!("{} point{} · {on}", placed, if placed == 1 { "" } else { "s" }) };
         chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, tint(col, 0.6), if closing { HOT } else { TEXT2() });
     }
 }
@@ -1132,7 +1179,7 @@ pub fn hint(st: &AppState) -> String {
     let on_scan = st.reference.is_some() && st.ref_shown;
     match (&st.creation, st.tool) {
         (Some(c), _) if c.phase == Phase::Base => match c.kind {
-            PrimKind::Box | PrimKind::Profile | PrimKind::Path => "Drag: the base · Shift: a square · Release: then the height".into(),
+            PrimKind::Box | PrimKind::Profile | PrimKind::Path | PrimKind::Surface => "Drag: the base · Shift: a square · Release: then the height".into(),
             PrimKind::Cylinder => "Drag: the radius · Release: then the height".into(),
         },
         (Some(_), _) => "Move: the height (up +, down −) · Click: done · Esc: cancel".into(),
@@ -1141,6 +1188,12 @@ pub fn hint(st: &AppState) -> String {
             None => "Click: the first point, on a face or the ground".into(),
             Some(k) if k.pts.len() < 2 => "Click or drag: a corner · Backspace: the last point off · Esc: drop it".into(),
             Some(_) => "Enter: an open path · First point: a closed one · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
+        },
+        (None, Tool::Create(PrimKind::Surface)) => match &st.sketch {
+            None if st.surface_on_scan => "On scan: click the first point on the scan · Top bar: On plane / On scan".into(),
+            None => "Click: the first point, on a face, the scan's face or the ground (its plane holds the others) · Top bar: On plane / On scan".into(),
+            Some(k) if k.pts.len() < 3 => "Click or drag: a point · Backspace: the last point off · Esc: drop it".into(),
+            Some(_) => "First point or Enter: close it, filled with a surface with no thickness · Backspace: the last point off".into(),
         },
         (None, Tool::Create(PrimKind::Profile)) => match &st.sketch {
             None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),

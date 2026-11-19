@@ -65,6 +65,8 @@ pub enum PrimKind {
     Profile,
     /// The Path tool's curves.
     Path,
+    /// The Surface tool's sheets (a closed outline filled, no thickness).
+    Surface,
 }
 
 impl PrimKind {
@@ -74,6 +76,7 @@ impl PrimKind {
             PrimKind::Cylinder => "Cylinder",
             PrimKind::Profile => "Sketch",
             PrimKind::Path => "Path",
+            PrimKind::Surface => "Surface",
         }
     }
     /// Default primitive: 20 mm.
@@ -82,7 +85,7 @@ impl PrimKind {
             PrimKind::Box => Prim::Box { x: 20.0, y: 20.0, z: 20.0 },
             PrimKind::Cylinder => Prim::Cylinder { radius: 10.0, height: 20.0 },
             PrimKind::Profile => Prim::Profile { x: 20.0, y: 20.0, z: 20.0 },
-            PrimKind::Path => Prim::Path { x: 20.0, z: 20.0 },
+            PrimKind::Path | PrimKind::Surface => Prim::Path { x: 20.0, z: 20.0 },
         }
     }
 }
@@ -581,6 +584,20 @@ pub struct Feature {
     /// step on what is built before it (`origin` is its first point).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cut: Option<Knife>,
+    /// A surface with no thickness (the Surface tool, Romain 19 nov.,
+    /// 21 h 29: "tracer tout un contour comme avec le Sketch et ensuite ça
+    /// remplit une surface"): `prim` is a `Path` of its box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<Sheet>,
+}
+
+/// A surface's closed outline (straight sides) and the scan points it
+/// passes near inside (none: on its plane), both local to the feature.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Sheet {
+    pub pts: Vec<DVec3>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inner: Vec<DVec3>,
 }
 
 impl Feature {
@@ -591,12 +608,19 @@ impl Feature {
     }
     /// A path: a curve with no thickness, nothing for the kernel.
     pub fn is_path(&self) -> bool {
-        matches!(self.prim, Prim::Path { .. })
+        matches!(self.prim, Prim::Path { .. }) && self.sheet.is_none()
+    }
+    /// A surface with no thickness (built apart, next to the part).
+    pub fn is_sheet(&self) -> bool {
+        self.sheet.is_some()
     }
     /// What it is: "Cube", "Cylinder", "Fillet", "Chamfer", "Inset", "Extrude".
     pub fn kind_label(&self) -> &'static str {
         if let Some(k) = &self.cut {
             return k.label();
+        }
+        if self.sheet.is_some() {
+            return "Surface";
         }
         match (&self.round, &self.push, &self.tweak) {
             (Some(r), _, _) => r.label(),
@@ -642,6 +666,14 @@ impl Feature {
         let m = self.matrix();
         let h = self.prim.height();
         match self.prim {
+            Prim::Path { .. } if self.sheet.is_some() => {
+                let sh = self.sheet.as_ref().unwrap();
+                let mut l: Vec<DVec3> = sh.pts.iter().map(|q| m.transform_point3(*q)).collect();
+                if let Some(f) = l.first().copied() {
+                    l.push(f);
+                }
+                vec![l]
+            }
             Prim::Path { x, z } => {
                 let Some(pr) = &self.profile else { return vec![] };
                 vec![pr.polyline(x, z).iter().map(|q| m.transform_point3(DVec3::new(q[0], 0.0, q[1]))).collect()]
@@ -754,7 +786,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, suspended: false });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, suspended: false });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -764,7 +796,7 @@ impl Doc {
         let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0 };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, suspended: false });
         id
     }
     /// Adds an inset or extrusion of a face at the end.
@@ -773,7 +805,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(push.label());
         let origin = push.face.at;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, suspended: false });
         id
     }
     /// Adds a move of a face, edge or vertex at the end.
@@ -782,7 +814,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(tweak.label());
         let origin = tweak.at();
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, suspended: false });
         id
     }
     /// Adds a Knife step (its first point) at the end.
@@ -791,7 +823,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(name);
         let origin = cut.pts.first().map(|p| p.at).unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, suspended: false });
         id
     }
     /// "Cube", then "Cube 2", "Cube 3"…

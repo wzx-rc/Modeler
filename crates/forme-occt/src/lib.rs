@@ -38,6 +38,8 @@ extern "C" {
     fn focc_prism_cut(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int, h: c_double) -> *mut FShape;
     fn focc_outline(o: *const c_double, n: *const c_double, xyz: *const c_double, count: c_int, closed: c_int, cut: *const c_int, abm: *const c_double) -> *mut FShape;
     fn focc_disc(o: *const c_double, n: *const c_double, r: c_double) -> *mut FShape;
+    fn focc_fill(xyz: *const c_double, n: c_int, inner: *const c_double, m: c_int) -> *mut FShape;
+    fn focc_compound(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_extrude_edge(s: *const FShape, index: c_int, v: *const c_double, tag: i64) -> *mut FShape;
     fn focc_thicken(s: *const FShape, t: c_double, salt: i64) -> *mut FShape;
     fn focc_round(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
@@ -494,6 +496,19 @@ impl Shape {
         shape(unsafe { focc_transform(self.0, m.as_ptr()) })
     }
 
+    /// A surface with no thickness through a closed outline of straight
+    /// sides, smooth inside and passing near `inner` (a flat outline: a
+    /// plane).
+    pub fn fill(pts: &[[f64; 3]], inner: &[[f64; 3]]) -> Result<Shape, String> {
+        let xyz: Vec<f64> = pts.iter().flatten().copied().collect();
+        let iv: Vec<f64> = inner.iter().flatten().copied().collect();
+        shape(unsafe { focc_fill(xyz.as_ptr(), pts.len() as c_int, iv.as_ptr(), inner.len() as c_int) })
+    }
+    /// This shape and `other` side by side, no boolean (a sheet next to the
+    /// part), the faces' tags kept.
+    pub fn compound(&self, other: &Shape) -> Result<Shape, String> {
+        shape(unsafe { focc_compound(self.0, other.0) })
+    }
     pub fn fuse(&self, other: &Shape) -> Result<Shape, String> {
         shape(unsafe { focc_fuse(self.0, other.0) })
     }

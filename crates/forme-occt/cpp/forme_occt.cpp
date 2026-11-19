@@ -57,6 +57,7 @@
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRep_Tool.hxx>
 #include <BRep_Builder.hxx>
+#include <BRepFill_Filling.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <GC_MakeArcOfCircle.hxx>
@@ -4822,5 +4823,81 @@ int focc_face_project(const FShape* s, int face, int n, const double* xyz, doubl
 int focc_buf_len(const FBuf* b) { return (int)b->b.size(); }
 const uint8_t* focc_buf_data(const FBuf* b) { return b->b.data(); }
 void focc_buf_free(FBuf* b) { delete b; }
+
+
+
+// A surface with no thickness through a closed outline of straight sides
+// (`xyz`, n points), smooth inside, passing near `inner` (m points: the
+// scan under it); a flat outline gives a plane.
+FShape* focc_fill(const double* xyz, int n, const double* inner, int m) {
+    return guard(
+        [&]() -> FShape* {
+            if (n < 3) {
+                set_err("a surface needs three points at least");
+                return nullptr;
+            }
+            auto P = [](const double* a) { return gp_Pnt(a[0], a[1], a[2]); };
+            std::vector<TopoDS_Vertex> v(n);
+            for (int i = 0; i < n; i++) v[i] = BRepBuilderAPI_MakeVertex(P(xyz + 3 * i));
+            BRepFill_Filling fill(3, 15, 2, Standard_False, 1e-5, 1e-4, 1e-2, 0.1, 8, 9);
+            int edges = 0;
+            gp_Vec nw(0, 0, 0);
+            for (int i = 0; i < n; i++) {
+                int j = (i + 1) % n;
+                gp_Pnt a = P(xyz + 3 * i), b = P(xyz + 3 * j);
+                nw += gp_Vec(a.XYZ()).Crossed(gp_Vec(b.XYZ()));
+                if (a.Distance(b) < 1e-6) continue;
+                fill.Add(BRepBuilderAPI_MakeEdge(v[i], v[j]).Edge(), GeomAbs_C0, Standard_True);
+                edges++;
+            }
+            if (edges < 3) {
+                set_err("the outline has no area");
+                return nullptr;
+            }
+            for (int k = 0; k < m; k++) fill.Add(P(inner + 3 * k));
+            fill.Build();
+            if (!fill.IsDone()) {
+                set_err("the outline could not be filled");
+                return nullptr;
+            }
+            TopoDS_Face f = fill.Face();
+            if (f.IsNull()) {
+                set_err("the outline could not be filled");
+                return nullptr;
+            }
+            // facing the outline's way (Newell's normal)
+            BRepAdaptor_Surface sa(f);
+            double u = 0.5 * (sa.FirstUParameter() + sa.LastUParameter()), w = 0.5 * (sa.FirstVParameter() + sa.LastVParameter());
+            gp_Pnt q;
+            gp_Vec du, dv;
+            sa.D1(u, w, q, du, dv);
+            gp_Vec sn = du.Crossed(dv);
+            if (f.Orientation() == TopAbs_REVERSED) sn.Reverse();
+            if (sn.Dot(nw) < 0) f.Reverse();
+            return wrap(f);
+        },
+        (FShape*)nullptr);
+}
+
+// `a` and `b` side by side in one compound (no boolean), their tags kept.
+FShape* focc_compound(const FShape* a, const FShape* b) {
+    return guard(
+        [&]() -> FShape* {
+            BRep_Builder bb;
+            TopoDS_Compound c;
+            bb.MakeCompound(c);
+            bb.Add(c, a->s);
+            bb.Add(c, b->s);
+            FShape* r = wrap(c);
+            if (!r) return nullptr;
+            for (const FShape* x : {a, b}) {
+                TopTools_IndexedMapOfShape fm;
+                face_map(x->s, fm);
+                for (int i = 0; i < fm.Extent(); i++) r->tags.push_back(i < (int)x->tags.size() ? x->tags[i] : -1);
+            }
+            return r;
+        },
+        (FShape*)nullptr);
+}
 
 }  // extern "C"

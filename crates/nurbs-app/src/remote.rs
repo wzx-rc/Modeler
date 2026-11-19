@@ -525,6 +525,7 @@ fn primary_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
             push: None,
             tweak: None,
             cut: None,
+            sheet: None,
         };
         let mut v = spec_of(&f);
         if let Some(o) = v.as_object_mut() {

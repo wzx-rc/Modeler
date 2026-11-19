@@ -99,7 +99,7 @@ pub fn prim_icon(k: PrimKind) -> Icon {
         PrimKind::Box => Icon::Box,
         PrimKind::Cylinder => Icon::Cylinder,
         PrimKind::Profile => Icon::Sketch,
-        PrimKind::Path => Icon::Path,
+        PrimKind::Path | PrimKind::Surface => Icon::Path,
     }
 }
 
@@ -109,6 +109,7 @@ pub fn prim_key(k: PrimKind) -> &'static str {
         PrimKind::Cylinder => "C",
         PrimKind::Profile => "L",
         PrimKind::Path => "P",
+        PrimKind::Surface => "U",
     }
 }
 
@@ -225,6 +226,29 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                         let tip = if c { "A drag on an edge or a sharp corner chamfers it (Ctrl + B: chamfer what is picked)" } else { "A drag on an edge or a sharp corner rounds it" };
                         if resp.on_hover_text(tip).clicked() {
                             st.round_chamfer = c;
+                        }
+                    }
+                }
+                // the Surface tool: its points locked on the plane under the
+                // first one, or put on the scan
+                if st.tool == Tool::Create(PrimKind::Surface) {
+                    island_sep(ui);
+                    let (well, _) = ui.allocate_exact_size(vec2(2.0 * 84.0 + 6.0, 28.0), Sense::hover());
+                    ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+                    for (i, (c, name)) in [(false, "ON PLANE"), (true, "ON SCAN")].into_iter().enumerate() {
+                        let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 84.0, 3.0), vec2(84.0, 22.0));
+                        let resp = ui.interact(r, Id::new(("isl-surf", i)), Sense::click());
+                        let on = st.surface_on_scan == c;
+                        if on {
+                            ui.painter().rect_filled(r, 11.0, PATH);
+                        } else if resp.hovered() {
+                            ui.painter().rect_filled(r, 11.0, RAISED());
+                        }
+                        ui.painter().text(r.center(), Align2::CENTER_CENTER, name, mono(11.0), if on { on_accent() } else { TEXT2() });
+                        let tip = if c { "Each point is put on the scan under the pointer; the surface follows the scan inside the outline" } else { "The points are locked on the plane under the first one (a face, the scan's face or the ground): a flat surface" };
+                        if resp.on_hover_text(tip).clicked() && st.surface_on_scan != c {
+                            st.surface_on_scan = c;
+                            st.sketch = None;
                         }
                     }
                 }
@@ -430,6 +454,11 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             let tip = "Path (P): a curve with no thickness, on a face or the ground. Click the corners; Enter ends it open, a click on the first point closes it. Its corners take a fillet or a bevel in Vertex mode (1)";
             if card(ui, Some(Icon::Path), "PATH", "CURVE · P", st.tool == Tool::Create(pk), PATH, tip).clicked() {
                 st.arm(pk);
+            }
+            let uk = PrimKind::Surface;
+            let tip = "Surface (U): a surface with no thickness. Click the outline's points (on a plane, or on the scan with ON SCAN in the top bar); a click on the first point (or Enter) fills it";
+            if card(ui, Some(Icon::Path), "SURFACE", "SHEET · U", st.tool == Tool::Create(uk), PATH, tip).clicked() {
+                st.arm(uk);
             }
             if st.doc.reference.is_some() {
                 let tip = "Slot (S): drag along a slot of the scan (or a raised pill), from one end to the other; let go, the scan is read there and a sketch made as read (Carve when cut in, Add when raised)";
@@ -865,6 +894,7 @@ fn help_title(st: &AppState) -> String {
     }
     match st.tool {
         Tool::Create(k) if matches!(k, PrimKind::Path) => "Path".into(),
+        Tool::Create(k) if matches!(k, PrimKind::Surface) => if st.surface_on_scan { "Surface · on scan".into() } else { "Surface · on plane".into() },
         Tool::Create(k) => format!("{} · {}", k.label(), st.mode.label()),
         Tool::Push(k) => k.label().into(),
         Tool::Knife => "Knife".into(),
@@ -2422,7 +2452,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.arm_push(kind, at);
         }
     }
-    for (k, kind) in [(Key::B, PrimKind::Box), (Key::C, PrimKind::Cylinder), (Key::L, PrimKind::Profile), (Key::P, PrimKind::Path)] {
+    for (k, kind) in [(Key::B, PrimKind::Box), (Key::C, PrimKind::Cylinder), (Key::L, PrimKind::Profile), (Key::P, PrimKind::Path), (Key::U, PrimKind::Surface)] {
         if pressed(k) {
             if shift {
                 st.quick_add(kind);

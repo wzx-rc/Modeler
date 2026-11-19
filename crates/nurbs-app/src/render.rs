@@ -221,7 +221,10 @@ fn shade(i: MOut) -> vec3<f32> {
 }
 
 @fragment fn fs_mesh(i: MOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(shade(i), 1.0);
+    // a surface with no thickness is seen from both sides: light the side facing the eye
+    var j = i;
+    if (dot(j.nrm, u.eye.xyz - j.wpos) < 0.0) { j.nrm = -j.nrm; }
+    return vec4<f32>(shade(j), 1.0);
 }
 
 // the reference seen through (Ghost): faint face on, denser at its outline

@@ -810,8 +810,27 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let mut model = Model { fine, ..Default::default() };
     let mut used_tools = vec![];
     let mut used_stages = vec![];
-    let feats: Vec<&Feature> = doc.features.iter().filter(|f| f.visible && !f.suspended && !f.is_path()).collect();
-    let stage = run(doc, &feats, skip, cache, &mut model, &mut used_tools, &mut used_stages);
+    let feats: Vec<&Feature> = doc.features.iter().filter(|f| f.visible && !f.suspended && !f.is_path() && !f.is_sheet()).collect();
+    let mut stage = run(doc, &feats, skip, cache, &mut model, &mut used_tools, &mut used_stages);
+    // the surfaces, beside the part (no boolean)
+    for f in doc.features.iter().filter(|f| f.visible && !f.suspended && f.is_sheet()) {
+        let sh = f.sheet.as_ref().unwrap();
+        let m = f.matrix();
+        let pts: Vec<[f64; 3]> = sh.pts.iter().map(|q| m.transform_point3(*q).to_array()).collect();
+        let inner: Vec<[f64; 3]> = sh.inner.iter().map(|q| m.transform_point3(*q).to_array()).collect();
+        mark(&format!("sheet:{}:0", f.id));
+        let made = Shape::fill(&pts, &inner).and_then(|mut s| {
+            s.set_tags(&vec![FaceTag { feature: f.id, sub: 0 }.pack(); s.face_count().max(1)]);
+            match &stage.shape {
+                Some(acc) => acc.compound(&s),
+                None => Ok(s),
+            }
+        });
+        match made {
+            Ok(s) => stage.shape = Some(Rc::new(s)),
+            Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
+        }
+    }
     // keep what this document uses (the next request is most often the same
     // document with one feature changed)
     cache.stages.retain(|k, _| used_stages.contains(k));
@@ -1596,6 +1615,34 @@ mod tests {
             let near = m.positions.iter().map(|p| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64).distance(mid)).fold(f64::MAX, f64::min);
             assert!(near < 0.6, "tension {t}: {near}");
         }
+    }
+
+    #[test]
+    fn surfaces_beside_the_part() {
+        // a block, a flat surface above it and a bent one (its outline off
+        // a plane, a point inside pulling it up): both kept beside the part
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        let flat = d.add(Op::Add, Prim::Path { x: 20.0, z: 20.0 }, DVec3::new(0.0, 30.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(flat).unwrap().sheet = Some(crate::doc::Sheet { pts: vec![DVec3::new(-10.0, 0.0, -10.0), DVec3::new(10.0, 0.0, -10.0), DVec3::new(10.0, 0.0, 10.0), DVec3::new(-5.0, 0.0, 12.0), DVec3::new(-10.0, 0.0, 0.0)], inner: vec![] });
+        let bent = d.add(Op::Add, Prim::Path { x: 20.0, z: 20.0 }, DVec3::new(40.0, 30.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(bent).unwrap().sheet = Some(crate::doc::Sheet {
+            pts: vec![DVec3::new(-10.0, 0.0, -10.0), DVec3::new(10.0, 2.0, -10.0), DVec3::new(10.0, 0.0, 10.0), DVec3::new(-10.0, 2.0, 10.0)],
+            inner: vec![DVec3::new(0.0, 5.0, 0.0)],
+        });
+        let t = std::time::Instant::now();
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        eprintln!("{:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.len(), m0.faces.len() + 2);
+        for id in [flat, bent] {
+            assert!(m.faces.iter().any(|f| f.tag.map(|t| t.feature) == Some(id)), "{id}");
+        }
+        // the bent one passes near its inner point
+        let top = DVec3::new(40.0, 35.0, 0.0);
+        let near = m.positions.iter().map(|p| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64).distance(top)).fold(f64::MAX, f64::min);
+        assert!(near < 1.0, "{near}");
     }
 
     #[test]
