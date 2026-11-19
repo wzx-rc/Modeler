@@ -1653,14 +1653,14 @@ impl AppState {
         k.held = Some((k.pts.len() - 1, p));
     }
 
-    /// Dragging the press: the point follows and becomes a curve point.
+    /// Dragging the press: the point follows, still a corner (Romain, 19
+    /// nov., 21 h 28: a drag no longer bends it into a curve point).
     pub fn sketch_drag(&mut self, p: [f32; 2]) {
         let q = self.sketch_point(p);
         let Some(k) = self.sketch.as_mut() else { return };
         let (Some((i, from)), Some(q)) = (k.held, q) else { return };
         if (p[0] - from[0]).hypot(p[1] - from[1]) > 4.0 {
             k.pts[i] = q;
-            k.smooth[i] = true;
         }
     }
 

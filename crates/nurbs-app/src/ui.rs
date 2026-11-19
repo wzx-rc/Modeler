@@ -422,12 +422,12 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 }
             }
             let sk = PrimKind::Profile;
-            let tip = "Sketch (L): on a face or the ground, click the corners, drag for curve points, click the first point (or Enter) to close, then pull it up or down";
+            let tip = "Sketch (L): on a face or the ground, click the corners, click the first point (or Enter) to close, then pull it up or down";
             if card(ui, Some(Icon::Sketch), "SKETCH", &format!("{m} · L"), st.tool == Tool::Create(sk), op_color(mode), tip).clicked() {
                 st.arm(sk);
             }
             let pk = PrimKind::Path;
-            let tip = "Path (P): a curve with no thickness, on a face or the ground. Click the corners, drag for curve points; Enter ends it open, a click on the first point closes it. Its corners take a fillet or a bevel in Vertex mode (1)";
+            let tip = "Path (P): a curve with no thickness, on a face or the ground. Click the corners; Enter ends it open, a click on the first point closes it. Its corners take a fillet or a bevel in Vertex mode (1)";
             if card(ui, Some(Icon::Path), "PATH", "CURVE · P", st.tool == Tool::Create(pk), PATH, tip).clicked() {
                 st.arm(pk);
             }

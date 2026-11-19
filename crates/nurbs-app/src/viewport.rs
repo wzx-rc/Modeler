@@ -504,7 +504,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
         }
         Tool::Create(PrimKind::Profile | PrimKind::Path) if st.creation.is_none() => {
-            // the outline: a click puts a corner, a drag a curve point;
+            // the outline: a click or a drag puts a corner;
             // Ctrl + drag from a point placed: its fillet
             let grabbed = st.sketch.as_ref().map(|k| k.grab.is_some()).unwrap_or(false);
             if resp.drag_started_by(PointerButton::Primary) {
@@ -1139,14 +1139,14 @@ pub fn hint(st: &AppState) -> String {
         (None, Tool::Create(PrimKind::Path)) => match &st.sketch {
             None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),
             None => "Click: the first point, on a face or the ground".into(),
-            Some(k) if k.pts.len() < 2 => "Click: a corner · Drag: a curve point · Backspace: the last point off · Esc: drop it".into(),
-            Some(_) => "Enter: an open path · First point: a closed one · Drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
+            Some(k) if k.pts.len() < 2 => "Click or drag: a corner · Backspace: the last point off · Esc: drop it".into(),
+            Some(_) => "Enter: an open path · First point: a closed one · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Create(PrimKind::Profile)) => match &st.sketch {
             None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),
             None => "Click: the first point, on a face or the ground".into(),
-            Some(k) if k.pts.len() < 3 => "Click: a corner · Drag: a curve point · Backspace: the last point off · Esc: drop it".into(),
-            Some(_) => "First point or Enter: close it · Drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
+            Some(k) if k.pts.len() < 3 => "Click or drag: a corner · Backspace: the last point off · Esc: drop it".into(),
+            Some(_) => "First point or Enter: close it · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Slot) if st.scan_slot.is_some() => "Along the slot, to its other end · Release: the scan read there, a sketch made as read · Esc: cancel".into(),
         (None, Tool::Slot) => "Drag along a slot of the scan (or a raised pill), from one end to the other · Release: read there, a Carve sketch (cut in) or an Add (raised) with round ends".into(),
