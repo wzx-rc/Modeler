@@ -161,7 +161,7 @@ fn waits_for(method: &str) -> (bool, bool, bool) {
         "capture" | "pick" => (true, true, true),
         "deviation" => (true, true, true),
         "measure" | "primary_candidates" => (false, true, false),
-        "edge_candidates" => (true, true, false),
+        "edge_candidates" | "level_candidates" => (true, true, false),
         // its edges are found on the part as built from the document
         "add_fillets" => (true, false, false),
         "list_features" => (true, false, false),
@@ -209,6 +209,7 @@ fn handle(st: &mut AppState, r: Request) {
         "undo" => Ok(undo(st, &p)),
         "measure" => measure(st, &p),
         "edge_candidates" => edge_candidates(st, &p),
+        "level_candidates" => level_candidates(st, &p),
         "add_fillets" => add_fillets(st, &p),
         "deviation" => deviation(st, &p),
         "show" => show(st, &p).map(|_| status(st)),
@@ -774,6 +775,132 @@ fn edge_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
         "sharp_on_scan": sharp.into_iter().take(limit).collect::<Vec<_>>(),
         "not_read": none,
         "note": "radius: the median of the slices kept (lo..hi their spread; varies: more than a quarter of it); faces_off: where the scan's two faces lie from the part's two faces there, along their normals (mm, + the scan's face further out: the part is short; − the part's face sticks out): a fillet stays off the scan by about as much, a face off by more than ~0.5 mm is the block's to fix (a primary), not the fillet's; give fillets of one radius to edges that belong together (add_fillets), the biggest first; edges not read: no scan along them, a face far from the scan, a hose",
+    }))
+}
+
+/// A level read on a face as a spec: a Cylinder for a round, else a
+/// Sketch of its outline (its corners cut), pulled along the face's normal
+/// from its base to its level; a plate begins 0.1 mm inside the face, a
+/// pocket 0.1 mm outside it.
+fn level_spec(l: &rectify_core::levels::Level, name: &str, round_to: f64) -> Value {
+    use rectify_core::levels::Outline;
+    let q = |x: f64| if round_to > 0.0 { (x / round_to).round() * round_to } else { x };
+    let (base, level) = (q(l.base), q(l.level));
+    const EPS: f64 = 0.1;
+    let raised = level > base;
+    // from the part's face when the base is past it (a plate on a level the
+    // face does not have yet): never a shape floating off the part
+    let fl = q(l.face_level);
+    let (d0, h) = if raised {
+        let from = base.min(fl) - EPS;
+        (from, level - from)
+    } else {
+        let from = base.max(fl) + EPS;
+        (level, from - level)
+    };
+    let op = if raised { "add" } else { "carve" };
+    match &l.outline {
+        Outline::Round { c, r: rad } => json!({
+            "name": name, "op": op, "kind": "cylinder",
+            "origin": r3(l.point(*c, d0)), "x_axis": r3(l.u), "up": r3(l.axis),
+            "radius": r(q(*rad)), "height": r(h),
+        }),
+        o => {
+            let (pts, cuts) = o.polygon().unwrap_or_default();
+            let (lo, hi) = pts.iter().fold((glam::DVec2::splat(f64::INFINITY), glam::DVec2::splat(f64::NEG_INFINITY)), |(a, b), p| (a.min(*p), b.max(*p)));
+            let c = (lo + hi) * 0.5;
+            // the sketch's z runs along x_axis × up: ±v
+            let flip = l.v.dot(l.u.cross(l.axis)).signum();
+            let outline: Vec<Value> = pts.iter().map(|p| json!([r(p.x - c.x), r(flip * (p.y - c.y))])).collect();
+            let corners: Vec<Value> = cuts.iter().map(|k| json!(r(*k))).collect();
+            json!({
+                "name": name, "op": op, "kind": "sketch",
+                "origin": r3(l.point(c, d0)), "x_axis": r3(l.u), "up": r3(l.axis),
+                "outline": outline, "corners": corners, "height": r(h),
+            })
+        }
+    }
+}
+
+/// The detail: the scan's levels on the part's flat faces (recessed
+/// panels, raised plates, pockets, bosses) as specs; `apply`: true for all
+/// (but faces that are off as a whole), or the indices to add, in one undo
+/// step.
+fn level_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
+    if st.reference.is_none() {
+        return Err("no reference loaded".into());
+    }
+    if st.model.is_none() {
+        return Err("no part built".into());
+    }
+    let axes: Vec<DVec3> = match p.get("axes").and_then(|v| v.as_array()) {
+        Some(a) => a.iter().map(|v| axis_named(v).ok_or(format!("axes: \"+X\", \"-Z\"…, got {v}"))).collect::<Result<_, _>>()?,
+        None => vec![DVec3::X, -DVec3::X, DVec3::Y, -DVec3::Y, DVec3::Z, -DVec3::Z],
+    };
+    let only: Option<Vec<u32>> = p.get("features").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_u64()).map(|v| v as u32).collect());
+    let mut opts = rectify_core::levels::Opts::default();
+    if let Some(a) = p.get("min_area").and_then(|v| v.as_f64()) {
+        opts.min_area = a.max(0.5);
+    }
+    if let Some(s) = p.get("min_step").and_then(|v| v.as_f64()) {
+        opts.min_step = s.max(0.1);
+    }
+    let round_to = p.get("round_to").and_then(|v| v.as_f64()).unwrap_or(0.05).max(0.0);
+    let t0 = Instant::now();
+    let mut reads = st.read_levels(&axes, &opts, only.as_deref());
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    reads.sort_by(|a, b| (b.0.area * b.0.height()).total_cmp(&(a.0.area * a.0.height())));
+    let name = |f: Option<u32>| f.and_then(|i| st.doc.feature(i)).map(|g| g.name.clone());
+    let axis_name = |a: DVec3| {
+        let s = if a.x + a.y + a.z > 0.0 { "+" } else { "-" };
+        format!("{s}{}", if a.x.abs() > 0.5 { "X" } else if a.y.abs() > 0.5 { "Y" } else { "Z" })
+    };
+    let mut list = vec![];
+    for (k, (l, f)) in reads.iter().enumerate() {
+        let kind = if l.raised() { "Plate" } else { "Pocket" };
+        let shape = l.outline.kind();
+        let nm = match shape {
+            "round" => if l.raised() { "Boss" } else { "Hole" },
+            "slot" => if l.raised() { "Pill" } else { "Slot" },
+            _ => kind,
+        };
+        list.push(json!({
+            "index": k,
+            "axis": axis_name(l.axis),
+            "kind": if l.raised() { "raised" } else { "recessed" },
+            "shape": shape,
+            "on": { "feature": f, "name": name(*f), "face_level": r(l.face_level) },
+            "base": r(l.base), "level": r(l.level), "height": r(l.height()),
+            "depth": l.depth, "area_mm2": r(l.area), "cover": r(l.cover), "flat_share": r(l.flat), "on_level": r(l.near), "spread": if l.spread.is_finite() { json!(r(l.spread)) } else { Value::Null },
+            "at": r3(l.at),
+            "face_off": l.cover > 0.5,
+            "spec": level_spec(l, nm, round_to),
+        }));
+    }
+    let pick: Option<Vec<usize>> = match p.get("apply") {
+        Some(Value::Bool(true)) => Some(list.iter().enumerate().filter(|(_, v)| v["face_off"] != json!(true)).map(|(k, _)| k).collect()),
+        Some(Value::Array(a)) => Some(a.iter().filter_map(|v| v.as_u64()).map(|v| v as usize).filter(|&k| k < list.len()).collect()),
+        _ => None,
+    };
+    if let Some(pick) = pick {
+        if pick.is_empty() {
+            return Ok(json!({ "made": [], "candidates": list.len(), "ms": r(ms) }));
+        }
+        // the steps on the face first, those in another step after it
+        let mut pick = pick;
+        pick.sort_by_key(|&k| (reads[k].0.depth, k));
+        let specs: Vec<Value> = pick.iter().map(|&k| list[k]["spec"].clone()).collect();
+        let label = p.get("label").and_then(|v| v.as_str()).unwrap_or("Levels from the scan");
+        let out = add_features(st, &json!({ "features": specs, "label": label }))?;
+        return Ok(json!({ "made": out["ids"], "from": pick, "candidates": list.len(), "ms": r(ms), "note": "one undo step; check with deviation" }));
+    }
+    let limit = p.get("limit").and_then(|v| v.as_u64()).unwrap_or(40) as usize;
+    let total = list.len();
+    Ok(json!({
+        "ms": r(ms),
+        "levels": list.into_iter().take(limit).collect::<Vec<_>>(),
+        "total": total,
+        "note": "each level is a step on a flat face of the part square to a world axis, read on the scan: its base (the face's level, or the step it lies in) and its level along the axis (mm), its shape (round, slot, rounded rectangle, rectangle, outline), and a spec add_features takes as it is (a plate begins 0.1 mm inside the face, a pocket 0.1 mm outside it; values rounded to round_to). Biggest first (area × height). face_off: it (with the steps of its level beside it) covers most of its face, the face itself is off: move the block's face (edit_feature) instead. Idealise before adding: one height for steps that belong together, the same size for a series, symmetric across the part's middle. Cables and hoses are not modelled.",
     }))
 }
 

@@ -73,7 +73,7 @@ impl Primaries {
 /// The depth maps' size: about this many steps along the longer side.
 const STEPS: f64 = 480.0;
 /// A flank's slope (depth per mm) under this is flat (4.6°).
-const FLAT_SLOPE: f64 = 0.08;
+pub(crate) const FLAT_SLOPE: f64 = 0.08;
 /// Two neighbouring flat steps of one plateau differ by less than this
 /// (mm); the plateau stays within `PLATEAU_SPAN` of its first step.
 const PLATEAU_STEP: f64 = 0.06;
@@ -116,7 +116,7 @@ pub fn side_axis(m: &Mesh) -> DVec3 {
 }
 
 /// The plane's two axes for a side axis (u × v = w).
-fn plane_axes(w: DVec3) -> (DVec3, DVec3) {
+pub(crate) fn plane_axes(w: DVec3) -> (DVec3, DVec3) {
     if w.x.abs() > 0.5 {
         (DVec3::Y * w.x.signum(), DVec3::Z)
     } else if w.y.abs() > 0.5 {
@@ -129,20 +129,20 @@ fn plane_axes(w: DVec3) -> (DVec3, DVec3) {
 /// A grid over the side plane: step `px`, the corner of cell (0, 0) at
 /// (`u0`, `v0`).
 #[derive(Clone, Copy)]
-struct Grid {
-    w: usize,
-    h: usize,
-    px: f64,
-    u0: f64,
-    v0: f64,
+pub(crate) struct Grid {
+    pub(crate) w: usize,
+    pub(crate) h: usize,
+    pub(crate) px: f64,
+    pub(crate) u0: f64,
+    pub(crate) v0: f64,
 }
 
 impl Grid {
-    fn corner(&self, x: f64, y: f64) -> DVec2 {
+    pub(crate) fn corner(&self, x: f64, y: f64) -> DVec2 {
         DVec2::new(self.u0 + x * self.px, self.v0 + y * self.px)
     }
     /// The 4 neighbours of cell `i` inside the grid.
-    fn around(&self, i: usize) -> impl Iterator<Item = usize> {
+    pub(crate) fn around(&self, i: usize) -> impl Iterator<Item = usize> {
         let (x, y, w, h) = (i % self.w, i / self.w, self.w, self.h);
         [(x > 0).then(|| i - 1), (x + 1 < w).then(|| i + 1), (y > 0).then(|| i - w), (y + 1 < h).then(|| i + w)].into_iter().flatten()
     }
@@ -150,10 +150,20 @@ impl Grid {
 
 /// The nearest surface along +w (`front`, the largest depth) and along −w
 /// (`back`, the smallest), per cell; ±∞ where the scan does not cover it.
-fn depth_maps(m: &Mesh, g: &Grid, u: DVec3, v: DVec3, w: DVec3) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn depth_maps(m: &Mesh, g: &Grid, u: DVec3, v: DVec3, w: DVec3) -> (Vec<f64>, Vec<f64>) {
     let mut front = vec![f64::NEG_INFINITY; g.w * g.h];
     let mut back = vec![f64::INFINITY; g.w * g.h];
-    for t in &m.tris {
+    raster(m, g, u, v, w, |i, z, _| {
+        front[i] = front[i].max(z);
+        back[i] = back[i].min(z);
+    });
+    (front, back)
+}
+
+/// Each triangle drawn on the grid: `put(cell, depth along w, triangle)`
+/// for every cell whose centre it covers.
+pub(crate) fn raster(m: &Mesh, g: &Grid, u: DVec3, v: DVec3, w: DVec3, mut put: impl FnMut(usize, f64, usize)) {
+    for (k, t) in m.tris.iter().enumerate() {
         let p = t.map(|i| {
             let q = m.pos[i as usize];
             DVec3::new((q.dot(u) - g.u0) / g.px - 0.5, (q.dot(v) - g.v0) / g.px - 0.5, q.dot(w))
@@ -178,19 +188,15 @@ fn depth_maps(m: &Mesh, g: &Grid, u: DVec3, v: DVec3, w: DVec3) -> (Vec<f64>, Ve
                 if l1 < -1e-9 || l2 < -1e-9 || l3 < -1e-9 {
                     continue;
                 }
-                let z = l1 * p[0].z + l2 * p[1].z + l3 * p[2].z;
-                let i = y * g.w + x;
-                front[i] = front[i].max(z);
-                back[i] = back[i].min(z);
+                put(y * g.w + x, l1 * p[0].z + l2 * p[1].z + l3 * p[2].z, k);
             }
         }
     }
-    (front, back)
 }
 
 /// The map with each covered cell set to the median of the covered cells
 /// round it (3 × 3): a stray triangle does not make a step.
-fn smooth(d: &[f64], g: &Grid) -> Vec<f64> {
+pub(crate) fn smooth(d: &[f64], g: &Grid) -> Vec<f64> {
     let mut out = d.to_vec();
     let mut vals = Vec::with_capacity(9);
     for y in 0..g.h {
@@ -220,7 +226,7 @@ fn smooth(d: &[f64], g: &Grid) -> Vec<f64> {
 
 /// Each covered cell's slope (depth per mm) and whether it is flat; a cell
 /// next to an uncovered one is steep (the silhouette).
-fn slopes(d: &[f64], g: &Grid) -> (Vec<f64>, Vec<bool>) {
+pub(crate) fn slopes(d: &[f64], g: &Grid) -> (Vec<f64>, Vec<bool>) {
     let mut s = vec![f64::INFINITY; d.len()];
     let mut flat = vec![false; d.len()];
     for y in 0..g.h {
@@ -262,7 +268,7 @@ fn slopes(d: &[f64], g: &Grid) -> (Vec<f64>, Vec<bool>) {
 /// The flat plateaus of a map: each a run of flat cells, neighbours within
 /// `PLATEAU_STEP`, all within `PLATEAU_SPAN` of the first. Labels (0: none)
 /// and each plateau's cells.
-fn plateaus(d: &[f64], flat: &[bool], g: &Grid) -> (Vec<u32>, Vec<Vec<usize>>) {
+pub(crate) fn plateaus(d: &[f64], flat: &[bool], g: &Grid) -> (Vec<u32>, Vec<Vec<usize>>) {
     let mut lab = vec![0u32; d.len()];
     let mut list: Vec<Vec<usize>> = vec![vec![]];
     let mut stack = vec![];
@@ -289,7 +295,7 @@ fn plateaus(d: &[f64], flat: &[bool], g: &Grid) -> (Vec<u32>, Vec<Vec<usize>>) {
     (lab, list)
 }
 
-fn median(mut v: Vec<f64>) -> f64 {
+pub(crate) fn median(mut v: Vec<f64>) -> f64 {
     if v.is_empty() {
         return f64::NAN;
     }
@@ -299,7 +305,7 @@ fn median(mut v: Vec<f64>) -> f64 {
 
 /// Every covered cell given the label of the seed it is reached from by the
 /// lowest slopes (a watershed from the seeds: regions meet on the walls).
-fn flood(slope: &[f64], seeds: &[u32], g: &Grid) -> Vec<u32> {
+pub(crate) fn flood(slope: &[f64], seeds: &[u32], g: &Grid) -> Vec<u32> {
     let mut lab = seeds.to_vec();
     let mut heap = BinaryHeap::new();
     let mut n = 0u64;
@@ -334,7 +340,7 @@ struct Region {
 
 /// The squared distance (in cells) from each cell to the nearest cell set
 /// in `mask` (Felzenszwalb and Huttenlocher's exact transform).
-fn distance2(mask: &[bool], g: &Grid) -> Vec<f64> {
+pub(crate) fn distance2(mask: &[bool], g: &Grid) -> Vec<f64> {
     const BIG: f64 = 1e20;
     fn pass(f: &[f64], out: &mut [f64]) {
         let n = f.len();
@@ -395,7 +401,7 @@ fn distance2(mask: &[bool], g: &Grid) -> Vec<f64> {
 
 /// The cells grown by a disc of radius `k` then shrunk by it (a closing):
 /// the gaps narrower than 2 `k` filled, a V-groove too.
-fn closing(mask: &mut Vec<bool>, g: &Grid, k: usize) {
+pub(crate) fn closing(mask: &mut Vec<bool>, g: &Grid, k: usize) {
     let r2 = (k * k) as f64;
     let grown: Vec<bool> = distance2(mask, g).iter().map(|&d| d <= r2).collect();
     let out: Vec<bool> = grown.iter().map(|&m| !m).collect();
@@ -404,7 +410,7 @@ fn closing(mask: &mut Vec<bool>, g: &Grid, k: usize) {
 
 /// The outer boundary of a set of cells, counter-clockwise, through cell
 /// corners (in cell units).
-fn trace(mask: &[bool], g: &Grid) -> Vec<DVec2> {
+pub(crate) fn trace(mask: &[bool], g: &Grid) -> Vec<DVec2> {
     let at = |x: i64, y: i64| x >= 0 && y >= 0 && (x as usize) < g.w && (y as usize) < g.h && mask[y as usize * g.w + x as usize];
     // directed sides, inside on the left
     let mut edges: Vec<((i64, i64), (i64, i64))> = vec![];
@@ -468,7 +474,7 @@ fn trace(mask: &[bool], g: &Grid) -> Vec<DVec2> {
     best
 }
 
-fn signed_area(p: &[DVec2]) -> f64 {
+pub(crate) fn signed_area(p: &[DVec2]) -> f64 {
     let n = p.len();
     (0..n).map(|i| p[i].perp_dot(p[(i + 1) % n])).sum::<f64>() * 0.5
 }
@@ -494,7 +500,7 @@ fn simplify_run(p: &[DVec2], tol: f64, out: &mut Vec<DVec2>) {
 }
 
 /// Douglas-Peucker on a closed outline.
-fn simplify(p: &[DVec2], tol: f64) -> Vec<DVec2> {
+pub(crate) fn simplify(p: &[DVec2], tol: f64) -> Vec<DVec2> {
     if p.len() < 4 {
         return p.to_vec();
     }
@@ -511,7 +517,7 @@ fn simplify(p: &[DVec2], tol: f64) -> Vec<DVec2> {
 /// The outline's sides made straight lines: a side within `AXIS_SNAP_DEG`
 /// of an axis made square to it (through its middle), each corner where
 /// its two sides meet; sides shorter than `short` and turns under 8° gone.
-fn square_up(p: Vec<DVec2>, short: f64) -> Vec<DVec2> {
+pub(crate) fn square_up(p: Vec<DVec2>, short: f64) -> Vec<DVec2> {
     let mut p = p;
     let snap = AXIS_SNAP_DEG.to_radians().sin();
     for _ in 0..3 {
@@ -691,7 +697,7 @@ fn turn(a: DVec2, b: DVec2) -> f64 {
 /// arc tangent to both (its radius searched) or a straight chamfer,
 /// whichever fits; a concave one stays sharp (the closing rounded it).
 /// None when fewer than three sides.
-fn fit_outline(raw: &[DVec2], px: f64, size: f64) -> Option<(Vec<DVec2>, Vec<f64>)> {
+pub(crate) fn fit_outline(raw: &[DVec2], px: f64, size: f64) -> Option<(Vec<DVec2>, Vec<f64>)> {
     let n = raw.len();
     if n < 8 {
         return None;
@@ -960,7 +966,7 @@ fn fit_outline(raw: &[DVec2], px: f64, size: f64) -> Option<(Vec<DVec2>, Vec<f64
 }
 
 /// Whether an outline is a rectangle: four corners, each within 3° of square.
-fn is_rect(p: &[DVec2]) -> bool {
+pub(crate) fn is_rect(p: &[DVec2]) -> bool {
     if p.len() != 4 {
         return false;
     }

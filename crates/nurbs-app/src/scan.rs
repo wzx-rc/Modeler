@@ -1353,3 +1353,40 @@ impl AppState {
         plane.hit(ro, rd).map(|q| (plane, q))
     }
 }
+
+impl AppState {
+    /// The scan's levels on the part's flat faces square to `axes` (the
+    /// detail: recessed panels, raised plates, pockets, bosses;
+    /// `rectify_core::levels`), each with the feature its face belongs to;
+    /// `only`: on these features' faces.
+    pub(crate) fn read_levels(&self, axes: &[DVec3], opts: &rectify_core::levels::Opts, only: Option<&[FeatureId]>) -> Vec<(rectify_core::levels::Level, Option<FeatureId>)> {
+        let (Some(m), Some(r)) = (self.model.clone(), self.reference.clone()) else { return vec![] };
+        let part = rectify_core::Mesh {
+            pos: m.positions.iter().map(|p| Vec3::from(*p).as_dvec3()).collect(),
+            tris: m.triangles.clone(),
+            uv: vec![],
+            tri_uv: vec![],
+            unit_mm: 1.0,
+        };
+        let feat = |f: u32| m.faces.get(f as usize).and_then(|x| x.tag).map(|t| t.feature);
+        if let Some(dir) = std::env::var_os("FORME_LEVELS_DUMP") {
+            // the part as read, for `levels_probe`
+            let mut t = String::new();
+            for p in &part.pos {
+                t += &format!("v {} {} {}\n", p.x, p.y, p.z);
+            }
+            for (k, tr) in part.tris.iter().enumerate() {
+                t += &format!("f {} {} {} {}\n", tr[0], tr[1], tr[2], m.tri_face[k]);
+            }
+            let _ = std::fs::write(std::path::Path::new(&dir).join("part.txt"), t);
+        }
+        rectify_core::levels::read(&r.mesh, &part, &m.tri_face, axes, r.edge, opts)
+            .into_iter()
+            .map(|l| {
+                let f = feat(l.face);
+                (l, f)
+            })
+            .filter(|(_, f)| only.map_or(true, |o| f.is_some_and(|f| o.contains(&f))))
+            .collect()
+    }
+}
