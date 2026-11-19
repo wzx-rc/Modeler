@@ -9,7 +9,8 @@
 //! - **Fingers in the 3D view** = the camera: one finger orbits, two pan and
 //!   pinch to zoom. A quick tap clicks where it is (picks). Held still
 //!   0.45 s it is the right button: the marking menu opens there, the
-//!   finger flicks to an item and lets go. Two-finger tap: Undo; three-finger
+//!   finger flicks to an item and lets go (the Knife's cut ends); while a
+//!   Sketch or Path is drawn it is Enter (closes it, a path ends open). Two-finger tap: Undo; three-finger
 //!   tap: Redo.
 //! - **Shift and Ctrl** (`show_bar`, Romain 19 nov.: two round floating
 //!   buttons, upright on the left, no Alt: the fingers turn the view): held
@@ -353,6 +354,15 @@ pub fn tick(st: &mut AppState, now: f64) {
     }
     t.cam_ids.clear();
     t.cam = Cam::Idle;
+    // a sketch or path under way: Enter (closes it, or ends a path open),
+    // there is no key for it on the iPad
+    if st.sketch.is_some() {
+        t.press_key(Key::Enter, Modifiers::NONE);
+        if let Some(f) = t.fingers.get_mut(&id) {
+            f.role = Role::Ignored;
+        }
+        return;
+    }
     t.pointer = Some(id);
     pointer_down(t, f.pos, PointerButton::Secondary);
     if let Some(f) = t.fingers.get_mut(&id) {
