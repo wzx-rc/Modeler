@@ -85,6 +85,21 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             return;
         }
     }
+    // the Knife and the Point tool: clicks on the edges of the shapes
+    if matches!(st.tool, Tool::Knife | Tool::Point) && !alt {
+        if let Some(a) = at {
+            if resp.hovered() {
+                if pressed {
+                    st.knife_click(a);
+                } else if !l {
+                    st.knife_hover_at(a);
+                }
+            }
+        }
+        if r && st.knife.is_some() {
+            st.knife_end();
+        }
+    }
     // the Circle: drawn freely, rim to rim; released, found on the scan
     if st.tool == Tool::Circle && !alt {
         if pressed && resp.hovered() {
@@ -259,6 +274,26 @@ fn marks(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Res
     if st.tool == Tool::Select && label.is_none() {
         label = st.hover.as_ref().map(|h| hover_label(st, h));
     }
+    if matches!(st.tool, Tool::Knife | Tool::Point) {
+        if let Some((obj, k, _)) = st.knife {
+            if let Some(crate::body::Step::Cut { pts, .. }) = st.body(obj).and_then(|b| b.steps.get(k)) {
+                for kp in pts {
+                    if let Some(c) = scr(kp.at) {
+                        p.circle_filled(c, 3.0, orange);
+                    }
+                }
+            }
+        }
+        if let Some(c) = st.knife_hover.and_then(scr) {
+            p.circle_filled(c, 3.5, Color32::WHITE);
+            p.circle_stroke(c, 3.5, Stroke::new(1.2, orange));
+        }
+        label = Some(match (st.knife_hover, st.knife) {
+            (None, _) => format!("{} · on an edge", st.tool.label()),
+            (Some(_), Some(_)) if st.tool == Tool::Knife => "Knife · cut to here".into(),
+            (Some(_), _) => format!("{} · a point here", st.tool.label()),
+        });
+    }
     if st.tool == Tool::Circle {
         label = Some(match &st.circle {
             Some(cd) => format!("Circle · Ø {} mm", fmt((cd.b - cd.a).length(), 2)),
@@ -362,6 +397,11 @@ pub fn hint(st: &AppState) -> String {
             (None, Some(se)) => format!("A NURBS surface, {} × {} mm, {} rows: depth, profile and levels on the left, live · Enter keeps it · Esc removes · H hides the scan", fmt(se.slot.length(), 2), fmt(se.slot.width(), 2), se.params.levels + 1),
             (None, None) => "Slot: press at one end of a slot with round ends and drag along it to the other end".into(),
         },
+        Tool::Knife => match st.knife {
+            Some(_) => "Knife · click the next edge: a line across the flat face to it · Enter, Esc or right click ends the cut".into(),
+            None => "Knife: click an edge to start (a point there, its middle caught), then the next ones: lines across the flat faces (Multi-Cut)".into(),
+        },
+        Tool::Point => "Point on edge: click an edge, a point is cut into it (its middle caught) · Enter ends".into(),
         Tool::Box => match (&st.slot_drag, &st.slot) {
             (Some(_), _) => "Across the block to its far corner, then release".into(),
             (None, Some(se)) => format!("A NURBS surface, {} × {} mm, {} rows: height, profile and levels on the left, live · Enter keeps it · Esc removes · H hides the scan", fmt(se.slot.length(), 2), fmt(se.slot.width(), 2), se.params.levels + 1),

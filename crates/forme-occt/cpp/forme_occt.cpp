@@ -796,6 +796,102 @@ FShape* focc_imprint(const FShape* s, const FShape* tool) {
         (FShape*)nullptr);
 }
 
+// Edge `edge` (1-based) at fraction `f` of its parameter range: its point
+// (3 doubles). Returns 0, or -1.
+int focc_edge_point(const FShape* s, int edge, double f, double* xyz) {
+    return guard(
+        [&] {
+            TopTools_IndexedMapOfShape m;
+            edge_map(s->s, m);
+            if (edge < 1 || edge > m.Extent()) {
+                set_err("no such edge");
+                return -1;
+            }
+            BRepAdaptor_Curve c(TopoDS::Edge(m(edge)));
+            gp_Pnt p = c.Value(c.FirstParameter() + f * (c.LastParameter() - c.FirstParameter()));
+            xyz[0] = p.X();
+            xyz[1] = p.Y();
+            xyz[2] = p.Z();
+            return 0;
+        },
+        -1);
+}
+
+// The Knife: points (n, 3 doubles each, on edges) cut into the edges
+// they lie on, and straight lines between pairs of them (segs, 2 ints
+// each, lying on faces) cut into those faces. Faces and edges keep their
+// tags (both halves of a face cut in two keep its tag).
+FShape* focc_split(const FShape* s, const double* pts, int n, const int* segs, int nseg) {
+    return guard(
+        [&]() -> FShape* {
+            BRepAlgoAPI_Splitter op;
+            TopTools_ListOfShape args, tools;
+            args.Append(s->s);
+            std::vector<gp_Pnt> p;
+            for (int i = 0; i < n; i++) {
+                p.emplace_back(pts[3 * i], pts[3 * i + 1], pts[3 * i + 2]);
+                tools.Append(BRepBuilderAPI_MakeVertex(p.back()).Vertex());
+            }
+            for (int k = 0; k < nseg; k++) {
+                int a = segs[2 * k], b = segs[2 * k + 1];
+                if (a < 0 || b < 0 || a >= n || b >= n || p[a].Distance(p[b]) < 1e-6) continue;
+                BRepBuilderAPI_MakeEdge e(p[a], p[b]);
+                if (e.IsDone()) tools.Append(e.Edge());
+            }
+            if (tools.IsEmpty()) {
+                set_err("nothing to cut");
+                return nullptr;
+            }
+            op.SetArguments(args);
+            op.SetTools(tools);
+            op.SetFuzzyValue(1e-5);
+            op.Build();
+            if (!op.IsDone() || op.HasErrors()) {
+                set_err("the cut failed");
+                return nullptr;
+            }
+            // the part alone: what the splitter made of the argument
+            TopoDS_Shape r = op.Shape();
+            if (r.ShapeType() != TopAbs_COMPOUND) {
+                FShape* res = wrap(r);
+                if (res) carry_tags(op, s, res, -1);
+                return res;
+            }
+            BRep_Builder bb;
+            TopoDS_Compound c;
+            bb.MakeCompound(c);
+            int count = 0;
+            TopoDS_Shape one;
+            for (TopoDS_Iterator it(r); it.More(); it.Next()) {
+                // a tool left on its own (a line off every face, a point
+                // off every edge) is dropped
+                TopAbs_ShapeEnum t = it.Value().ShapeType();
+                if (t == TopAbs_VERTEX) continue;
+                if (t == TopAbs_EDGE) {
+                    bool tool = false;
+                    for (TopTools_ListIteratorOfListOfShape tl(tools); tl.More(); tl.Next())
+                        for (TopTools_ListIteratorOfListOfShape im(op.Modified(tl.Value())); im.More(); im.Next())
+                            if (im.Value().IsSame(it.Value())) tool = true;
+                    for (TopTools_ListIteratorOfListOfShape tl(tools); tl.More(); tl.Next())
+                        if (tl.Value().IsSame(it.Value())) tool = true;
+                    if (tool) continue;
+                }
+                bb.Add(c, it.Value());
+                count++;
+                one = it.Value();
+            }
+            if (count == 0) {
+                set_err("the cut left nothing");
+                return nullptr;
+            }
+            FShape* res = wrap(count == 1 ? one : TopoDS_Shape(c));
+            if (!res) return nullptr;
+            carry_tags(op, s, res, -1);
+            return res;
+        },
+        (FShape*)nullptr);
+}
+
 // ------------------------------------------------------- component moves
 
 // The points of the shape's vertices (vertex map order, 1-based index i at

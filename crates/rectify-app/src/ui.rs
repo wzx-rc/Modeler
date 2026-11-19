@@ -74,6 +74,8 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     (Tool::Pen, Icon::Sketch, "Pen: click points; the plane found under the first one is the one you draw on; click the first point to close and fill it, Enter for a line (P)", "P"),
                     (Tool::Circle, Icon::Cylinder, "Circle: drag across a round part, rim to rim, freely; released, it is found on the scan and made a cylinder, else a flat disc as drawn (C)", "C"),
                     (Tool::Slot, Icon::Capsule, "Slot: drag along a slot with round ends, a NURBS surface is laid on its wall, every row an exact slot outline (S)", "S"),
+                    (Tool::Knife, Icon::Knife, "Knife: click on edges, a point is cut into each, and a line from one to the next across a flat face (Maya's Multi-Cut); Enter or a click off the edges ends it (K)", "K"),
+                    (Tool::Point, Icon::EdgePoint, "Point on edge: each click on an edge cuts a point into it (J)", "J"),
                     (Tool::Box, Icon::Box, "Box: drag across a block with rounded corners, raised or cut in, corner to corner: a NURBS surface on its wall, every row an exact rounded rectangle (B)", "B"),
                 ];
                 for (t, icon, tip, key) in tools {
@@ -247,6 +249,8 @@ fn tool_card(ui: &mut Ui, st: &mut AppState) {
         Tool::Pen => pen_card(ui, st),
         Tool::Circle => circle_card(ui, st),
         Tool::Slot | Tool::Box => slot_card(ui, st),
+        Tool::Knife => title(ui, "Knife", ""),
+        Tool::Point => title(ui, "Point on edge", ""),
     }
     ui.add_space(4.0);
     let w = ui.available_width();
@@ -547,6 +551,7 @@ fn step_slider(ui: &mut Ui, st: &mut AppState, obj: usize, k: usize, s: &Step, b
         Step::Bevel { d, .. } => ("Size", *d, 0.0, (d * 3.0).max(5.0)),
         Step::Thick { t } => ("Thickness", *t, -(t.abs() * 3.0).max(5.0), (t.abs() * 3.0).max(5.0)),
         Step::Extrude { v, .. } => ("Length", v.length(), 0.01, (v.length() * 3.0).max(5.0)),
+        Step::Cut { .. } => return,
     };
     let mut f = v as f32;
     let (changed, start) = slider_row(ui, label, &mut f, lo as f32..=hi as f32, 0.01, "mm");
@@ -587,6 +592,7 @@ fn steps_list(ui: &mut Ui, st: &mut AppState, obj: usize) {
             Step::Fillet { r, .. } | Step::Bevel { d: r, .. } => format!("{} mm", fmt(*r, 2)),
             Step::Thick { t } => format!("{} mm", fmt(*t, 2)),
             Step::Extrude { v, .. } => format!("{} mm", fmt(v.length(), 2)),
+            Step::Cut { pts, .. } => format!("{} points", pts.len()),
         };
         let failed = b.built.failed.as_ref().map(|f| f.0 <= k && f.0 != usize::MAX).unwrap_or(false);
         ui.horizontal(|ui| {
@@ -698,7 +704,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.settings.zebra = !st.settings.zebra;
     }
     if !cmd {
-        for (k, t) in [(Key::Q, Tool::Select), (Key::P, Tool::Pen), (Key::C, Tool::Circle), (Key::S, Tool::Slot), (Key::B, Tool::Box)] {
+        for (k, t) in [(Key::Q, Tool::Select), (Key::P, Tool::Pen), (Key::C, Tool::Circle), (Key::S, Tool::Slot), (Key::B, Tool::Box), (Key::K, Tool::Knife), (Key::J, Tool::Point)] {
             if key(k) {
                 st.set_tool(t);
             }
@@ -721,7 +727,9 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     } else if del {
         st.delete_selected();
     }
-    if enter {
+    if enter && st.knife.is_some() {
+        st.knife_end();
+    } else if enter {
         if st.pen.is_some() {
             st.pen_finish();
         } else if st.slot.is_some() {
@@ -741,6 +749,8 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.gesture = None;
             st.press = None;
             st.cancel_live();
+        } else if st.knife.is_some() {
+            st.knife_end();
         } else if st.pen.is_some() {
             st.pen_cancel();
         } else if st.circle.is_some() || st.slot_drag.is_some() {

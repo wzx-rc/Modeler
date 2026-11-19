@@ -63,6 +63,10 @@ pub enum Icon {
     FacePick,
     /// Bevel: a corner cut straight.
     Bevel,
+    /// Knife: a blade.
+    Knife,
+    /// Point on edge: an edge and a point on it.
+    EdgePoint,
 }
 
 struct Pen<'a> {
@@ -302,6 +306,14 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.arc(10.0, 10.0, 6.5, 6.5, PI, 1.5 * PI);
             pen.line(&[(3.5, 10.0), (3.5, 17.0)]);
             pen.line(&[(10.0, 3.5), (17.0, 3.5)]);
+        }
+        Icon::Knife => {
+            pen.line(&[(3.0, 17.0), (15.5, 4.5), (17.0, 6.5), (7.5, 16.0), (3.0, 17.0)]);
+            pen.line(&[(11.0, 9.0), (13.0, 11.0)]);
+        }
+        Icon::EdgePoint => {
+            pen.line(&[(3.0, 15.0), (17.0, 5.0)]);
+            pen.fill(&[(8.4, 11.1), (10.0, 9.1), (12.0, 10.7), (10.4, 12.7)], 1.0);
         }
         Icon::Bevel => {
             pen.line(&[(3.5, 17.0), (3.5, 9.0), (9.0, 3.5), (17.0, 3.5)]);

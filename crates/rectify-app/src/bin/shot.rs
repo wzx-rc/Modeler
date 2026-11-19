@@ -8,7 +8,7 @@
 //! RECTIFY_DO="cmd args | cmd args | …": a script, screen points of the
 //! view with the interface (a capture's pixels / 2):
 //! `look fx,fy,fz,dist,yaw,pitch` (the camera: a point of the mesh's box in
-//! fractions; `cam x,y,z,dist,yaw,pitch`: a point in mm), `tool q|p|c|s|b`, `mode 1|2|3|4`, `click x,y …` (`sclick`
+//! fractions; `cam x,y,z,dist,yaw,pitch`: a point in mm), `tool q|p|c|s|b|k|j`, `mode 1|2|3|4`, `click x,y …` (`sclick`
 //! with Shift, `cclick` with Ctrl), `drag x,y x,y …` (`sdrag`, `cdrag`;
 //! `hold`, `shold`: not released, `release`),
 //! `hover x,y` (`shover`), `key enter|esc|back|del`, `corner r`, `fillet
@@ -424,6 +424,8 @@ fn script(h: &mut Harness, s: &str) {
                     "c" => Tool::Circle,
                     "s" => Tool::Slot,
                     "b" => Tool::Box,
+                    "k" => Tool::Knife,
+                    "j" => Tool::Point,
                     _ => Tool::Select,
                 };
                 h.st.set_tool(t);

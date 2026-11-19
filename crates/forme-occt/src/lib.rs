@@ -56,6 +56,8 @@ extern "C" {
     fn focc_inset_face(s: *const FShape, face: c_int, d: c_double) -> *mut FShape;
     fn focc_extrude(s: *const FShape, dx: c_double, dy: c_double, dz: c_double) -> *mut FShape;
     fn focc_imprint(s: *const FShape, tool: *const FShape) -> *mut FShape;
+    fn focc_edge_point(s: *const FShape, edge: c_int, f: f64, xyz: *mut f64) -> c_int;
+    fn focc_split(s: *const FShape, pts: *const f64, n: c_int, segs: *const c_int, nseg: c_int) -> *mut FShape;
     fn focc_face_distance(s: *const FShape, face: c_int, p: *const c_double) -> c_double;
     fn focc_vertex_points(s: *const FShape, xyz: *mut c_double, cap: c_int) -> c_int;
     fn focc_sub_vertices(s: *const FShape, kind: c_int, index: c_int, out: *mut c_int, cap: c_int) -> c_int;
@@ -538,6 +540,18 @@ impl Shape {
     /// part under the tool takes the tool's tag.
     pub fn imprint(&self, tool: &Shape) -> Result<Shape, String> {
         shape(unsafe { focc_imprint(self.0, tool.0) })
+    }
+    /// Edge `edge` (1-based) at fraction `f` of its parameter range.
+    pub fn edge_point(&self, edge: i32, f: f64) -> Option<[f64; 3]> {
+        let mut p = [0.0; 3];
+        (unsafe { focc_edge_point(self.0, edge, f, p.as_mut_ptr()) } == 0).then_some(p)
+    }
+    /// The Knife: points cut into the edges they lie on, and straight
+    /// lines between pairs of them (indices) cut into the faces they lie on.
+    pub fn split(&self, pts: &[[f64; 3]], segs: &[[i32; 2]]) -> Result<Shape, String> {
+        let flat: Vec<f64> = pts.iter().flatten().copied().collect();
+        let s: Vec<c_int> = segs.iter().flatten().map(|&i| i as c_int).collect();
+        shape(unsafe { focc_split(self.0, flat.as_ptr(), pts.len() as c_int, s.as_ptr(), segs.len() as c_int) })
     }
     /// Distance from a point to a face (None when it cannot be measured).
     pub fn face_distance(&self, face: usize, p: [f64; 3]) -> Option<f64> {

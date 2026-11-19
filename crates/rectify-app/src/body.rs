@@ -93,6 +93,18 @@ pub enum Step {
     Fillet { edges: Vec<EdgeRef>, r: f64 },
     /// Edges between two faces cut flat, `d` along each face.
     Bevel { edges: Vec<EdgeRef>, d: f64 },
+    /// The Knife: points cut into edges, and straight lines between pairs
+    /// of them (indices into `pts`) cut into the flat faces they cross.
+    Cut { pts: Vec<KnifePoint>, segs: Vec<[usize; 2]> },
+}
+
+/// A point of the Knife: on an edge, at a fraction of its curve; `at`
+/// where it was (which end the fraction counts from).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KnifePoint {
+    pub edge: EdgeRef,
+    pub f: f64,
+    pub at: DVec3,
 }
 
 impl Step {
@@ -102,6 +114,8 @@ impl Step {
             Step::Thick { .. } => "Thickness",
             Step::Fillet { .. } => "Fillet",
             Step::Bevel { .. } => "Bevel",
+            Step::Cut { segs, .. } if segs.is_empty() => "Points",
+            Step::Cut { .. } => "Knife",
         }
     }
 }
@@ -369,6 +383,7 @@ impl Body {
                 Step::Thick { t } => format!("{} mm thick", fmt(t.abs(), 2)),
                 Step::Fillet { edges, r } => format!("fillet {} mm on {} edge{}", fmt(*r, 2), edges.len(), if edges.len() == 1 { "" } else { "s" }),
                 Step::Bevel { edges, d } => format!("bevel {} mm on {} edge{}", fmt(*d, 2), edges.len(), if edges.len() == 1 { "" } else { "s" }),
+                Step::Cut { pts, segs } => format!("knife {} points, {} lines", pts.len(), segs.len()),
             });
         }
         if let Some((k, e)) = &self.built.failed {
@@ -560,6 +575,34 @@ fn build(b: &Body, coarse: bool) -> Built {
                 }
                 shape.thicken(*t, k as i64 + 1)
             }
+            Step::Cut { pts, segs } => {
+                let mut p3 = vec![];
+                for kp in pts {
+                    let Some(i) = find(&shape, &kp.edge, size) else { break };
+                    // the fraction from the end nearer where it was put
+                    let (a, b) = (shape.edge_point(i, kp.f), shape.edge_point(i, 1.0 - kp.f));
+                    let p = match (a, b) {
+                        (Some(a), Some(b)) => {
+                            if (DVec3::from_array(a) - kp.at).length() <= (DVec3::from_array(b) - kp.at).length() {
+                                a
+                            } else {
+                                b
+                            }
+                        }
+                        (Some(a), None) | (None, Some(a)) => a,
+                        _ => break,
+                    };
+                    p3.push(p);
+                }
+                if p3.len() < pts.len() {
+                    Err("its edges are gone".into())
+                } else if p3.is_empty() {
+                    continue;
+                } else {
+                    let sg: Vec<[i32; 2]> = segs.iter().map(|s| [s[0] as i32, s[1] as i32]).collect();
+                    shape.split(&p3, &sg)
+                }
+            }
             Step::Fillet { edges, r } | Step::Bevel { edges, d: r } => {
                 let bevel = matches!(st, Step::Bevel { .. });
                 let idx: Vec<i32> = edges.iter().filter_map(|e| find(&shape, e, size)).collect();
@@ -707,6 +750,47 @@ mod tests {
         b.rebuild();
         assert!(b.built.failed.is_none(), "{:?}", b.built.failed);
         assert_eq!(b.built.limits.len(), 1);
+    }
+
+    #[test]
+    fn knife() {
+        // the front and back sides' middles: a line across, two faces
+        let mut b = square(10.0);
+        // the two sides along x
+        let sides = |b: &Body, y: Option<f64>| -> Vec<usize> {
+            (0..b.built.topo.edges.len())
+                .filter(|&e| {
+                    let (m, d) = b.built.edge_mid(e);
+                    d.x.abs() > 0.99 && y.map(|y| (m.y - y).abs() < 1e-6).unwrap_or(true)
+                })
+                .collect()
+        };
+        let v = sides(&b, None);
+        assert_eq!(v.len(), 2);
+        let (e0, e1) = (v[0], v[1]);
+        let kp = |b: &Body, e: usize| KnifePoint { edge: b.built.edge_ref(e), f: 0.5, at: b.built.edge_mid(e).0 };
+        let (a, c) = (kp(&b, e0), kp(&b, e1));
+        b.steps.push(Step::Cut { pts: vec![a], segs: vec![] });
+        b.rebuild();
+        assert!(b.built.failed.is_none(), "{:?}", b.built.failed);
+        assert_eq!(b.built.topo.edges.len(), 5, "a point splits its edge");
+        assert_eq!(b.built.topo.faces.len(), 1);
+        b.steps[0] = Step::Cut { pts: vec![a, c], segs: vec![[0, 1]] };
+        b.rebuild();
+        assert!(b.built.failed.is_none(), "{:?}", b.built.failed);
+        assert_eq!(b.built.topo.faces.len(), 2, "the line cuts the face in two");
+        // on a solid's top face: the same, the solid kept
+        let mut s = square(10.0);
+        s.steps.push(Step::Thick { t: 3.0 });
+        s.rebuild();
+        let v = sides(&s, Some(3.0));
+        assert_eq!(v.len(), 2);
+        let (a, c) = (kp(&s, v[0]), kp(&s, v[1]));
+        s.steps.push(Step::Cut { pts: vec![a, c], segs: vec![[0, 1]] });
+        s.rebuild();
+        assert!(s.built.failed.is_none(), "{:?}", s.built.failed);
+        assert!(s.built.solid());
+        assert_eq!(s.built.topo.faces.len(), 7);
     }
 
     #[test]

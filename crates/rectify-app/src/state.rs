@@ -3,7 +3,7 @@
 //! Box's NURBS surfaces), undo / redo by copies, the tool in hand, the
 //! selection by mode (Vertex, Edge, Face, Object), the view.
 
-use crate::body::{self, Base, Body, EdgeRef, Frame, Step};
+use crate::body::{self, Base, Body, EdgeRef, Frame, KnifePoint, Step};
 use crate::camera::OrbitCamera;
 use crate::view::View;
 use glam::{DVec2, DVec3, Vec3};
@@ -45,6 +45,11 @@ pub enum Tool {
     Slot,
     /// Drag across a block with rounded corners: the same.
     Box,
+    /// Click on edges (Maya's Multi-Cut): a point cut into the edge, and
+    /// from the second one a line across the flat face (K).
+    Knife,
+    /// Click on edges: points cut into them, nothing more (J).
+    Point,
 }
 
 impl Tool {
@@ -55,6 +60,8 @@ impl Tool {
             Tool::Circle => "Circle",
             Tool::Slot => "Slot",
             Tool::Box => "Box",
+            Tool::Knife => "Knife",
+            Tool::Point => "Point on edge",
         }
     }
 }
@@ -328,6 +335,10 @@ pub struct AppState {
     /// The option on the top island: a drag on a corner or an edge cuts it
     /// straight (Bevel) rather than round (Fillet).
     pub cut_bevel: bool,
+    /// The Knife's cut going on: the object, its step, the last point.
+    pub knife: Option<(usize, usize, usize)>,
+    /// The point on an edge under the pointer (Knife, Point).
+    pub knife_hover: Option<DVec3>,
     /// Bumped when the objects or what is picked change.
     pub objects_gen: u64,
     /// The scan not drawn: the shapes alone (H).
@@ -384,6 +395,8 @@ impl AppState {
             live: false,
             coarse: vec![],
             cut_bevel: false,
+            knife: None,
+            knife_hover: None,
             objects_gen: 1,
             hide_scan: false,
             sel: vec![],
@@ -551,6 +564,8 @@ impl AppState {
         self.slot_apply();
         self.slot_drag = None;
         self.circle = None;
+        self.knife = None;
+        self.knife_hover = None;
         self.end_live();
         self.fresh = None;
         self.pen_plane = None;
@@ -1185,7 +1200,7 @@ impl AppState {
                     *e *= v.max(0.01) / l;
                 }
             }
-            None => {}
+            _ => {}
         });
     }
 
@@ -1904,6 +1919,122 @@ impl AppState {
         self.mode = SelMode::Object;
         self.sel = vec![Comp::Object(i)];
         self.toast(msg, false);
+    }
+}
+
+impl AppState {
+    // ------------------------------------------------------------ Knife
+
+    /// The point of a body's edge under the pointer: the object, the edge,
+    /// the point (its middle when within 8 points of it) and its fraction
+    /// along the edge.
+    fn knife_pick(&self, at: [f32; 2]) -> Option<(usize, usize, DVec3, f64)> {
+        let (obj, e, p) = self.pick_edge(at)?;
+        let b = self.body(obj)?;
+        let pts: Vec<DVec3> = b.built.topo.edges[e].pts.iter().map(|q| DVec3::from_array(*q)).collect();
+        if pts.len() < 2 {
+            return None;
+        }
+        let len: f64 = pts.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+        if len < 1e-9 {
+            return None;
+        }
+        // how far along it the point is
+        let mut best = (f64::MAX, 0.0);
+        let mut run = 0.0;
+        for w in pts.windows(2) {
+            let d = w[1] - w[0];
+            let l = d.length();
+            let t = if l > 1e-12 { ((p - w[0]).dot(d) / (l * l)).clamp(0.0, 1.0) } else { 0.0 };
+            let dist = (w[0] + d * t - p).length();
+            if dist < best.0 {
+                best = (dist, (run + l * t) / len);
+            }
+            run += l;
+        }
+        let mut f = best.1;
+        let mut p = p;
+        let mid = b.built.edge_mid(e).0;
+        if let (Some(a), Some(c)) = (self.project(mid), Some(at)) {
+            if (a[0] - c[0]).hypot(a[1] - c[1]) <= 8.0 {
+                f = 0.5;
+                p = mid;
+            }
+        }
+        Some((obj, e, p, f))
+    }
+
+    pub fn knife_hover_at(&mut self, at: [f32; 2]) {
+        let h = self.knife_pick(at).map(|k| k.2);
+        if h != self.knife_hover {
+            self.knife_hover = h;
+            self.overlay_gen += 1;
+        }
+    }
+
+    /// A click with the Knife or the Point tool on an edge: a point cut
+    /// into it; with the Knife, a line from the point before when both lie
+    /// on one flat face.
+    pub fn knife_click(&mut self, at: [f32; 2]) {
+        let Some((obj, e, p, f)) = self.knife_pick(at) else {
+            self.knife_end();
+            return;
+        };
+        let Some(b) = self.body(obj).cloned() else { return };
+        let kp = KnifePoint { edge: b.built.edge_ref(e), f, at: p };
+        let going = self.knife.filter(|(o, k, _)| *o == obj && *k + 1 == b.steps.len() && matches!(b.steps.get(*k), Some(Step::Cut { .. })));
+        match going {
+            None => {
+                self.end_live();
+                let k = b.steps.len();
+                self.edit_body(obj, if self.tool == Tool::Knife { "Knife" } else { "Point on edge" }, true, |b| b.steps.push(Step::Cut { pts: vec![kp], segs: vec![] }));
+                self.knife = Some((obj, k, 0));
+            }
+            Some((_, k, last)) => {
+                let Some(Step::Cut { pts, .. }) = b.steps.get(k) else { return };
+                let from = pts[last].at;
+                // a line only on one flat face holding both points
+                let line = self.tool == Tool::Knife && (from - p).length() > 1e-6 && {
+                    let t = &b.built.topo;
+                    t.edges[e].faces.iter().filter(|&&fi| fi >= 0).any(|&fi| {
+                        let fc = &t.faces[fi as usize];
+                        if fc.info.kind != forme_occt::SurfKind::Plane {
+                            return false;
+                        }
+                        let n = DVec3::from_array(fc.info.normal).normalize_or_zero();
+                        let o = DVec3::from_array(fc.info.point);
+                        let tol = (b.built.size * 1e-4).max(1e-4) * 10.0;
+                        (from - o).dot(n).abs() < tol && (p - o).dot(n).abs() < tol
+                    })
+                };
+                let i = pts.len();
+                self.edit_body(obj, "Knife", true, |b| {
+                    if let Some(Step::Cut { pts, segs }) = b.steps.get_mut(k) {
+                        pts.push(kp);
+                        if line {
+                            segs.push([last, i]);
+                        }
+                    }
+                });
+                if self.tool == Tool::Knife && !line {
+                    self.toast("Not on one flat face with the point before: a point only", true);
+                }
+                if let Some(e) = self.body(obj).and_then(|b| b.built.failed.clone()).map(|f| f.1) {
+                    self.toast(format!("Not cut: {e}"), true);
+                }
+                self.knife = Some((obj, k, i));
+            }
+        }
+        self.fine_again();
+    }
+
+    /// The cut ends (Enter, Esc, a click off the edges): the next click
+    /// starts another.
+    pub fn knife_end(&mut self) {
+        if self.knife.take().is_some() {
+            self.end_live();
+            self.overlay_gen += 1;
+        }
     }
 }
 

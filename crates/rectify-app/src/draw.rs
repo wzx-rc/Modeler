@@ -252,6 +252,16 @@ impl Drawer {
                 plane_grid(f, h.p, size, if pe.flat { [70, 160, 255, 90] } else { [200, 200, 200, 70] }, &mut out);
             }
         }
+        // the Knife: the cut's points, and the line to the pointer
+        if let Some((obj, k, last)) = st.knife {
+            if let Some(crate::body::Step::Cut { pts, .. }) = st.body(obj).and_then(|b| b.steps.get(k)) {
+                if let Some(lp) = pts.get(last) {
+                    if let (Some(h), Tool::Knife) = (st.knife_hover, st.tool) {
+                        line_vertices(&[vec![p(lp.at), p(h)]], [255, 255, 255, 230], 1.4, &mut out);
+                    }
+                }
+            }
+        }
         // the Circle being drawn: its diameter and its ring on the plane
         if let Some(cd) = &st.circle {
             let n = cd.ring_normal();
