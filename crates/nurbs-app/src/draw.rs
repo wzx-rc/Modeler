@@ -151,6 +151,18 @@ impl Drawer {
             let lines: Vec<Vec<[f32; 3]>> = f.outline().iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
             line_vertices(&lines, [c.r(), c.g(), c.b(), 240], w, &mut over);
         }
+        // the Slot dragged along a slot of the reference: the drag, and a
+        // tick across each end on the scan's face
+        if let Some(ss) = &st.scan_slot {
+            let e = ss.b - ss.a;
+            let across = ss.n.cross(e).normalize_or_zero() * (e.length() * 0.12).max(0.3);
+            let lines = vec![
+                vec![ss.a.as_vec3().to_array(), ss.b.as_vec3().to_array()],
+                vec![(ss.a - across).as_vec3().to_array(), (ss.a + across).as_vec3().to_array()],
+                vec![(ss.b - across).as_vec3().to_array(), (ss.b + across).as_vec3().to_array()],
+            ];
+            line_vertices(&lines, [accent.r(), accent.g(), accent.b(), 235], 1.8, &mut over);
+        }
         // the Cylinder dragged across a round part of the reference
         if let Some(sr) = &st.scan_round {
             let lines = vec![sr.ring(96).iter().map(|p| p.as_vec3().to_array()).collect::<Vec<_>>(), vec![sr.a.as_vec3().to_array(), sr.b.as_vec3().to_array()]];

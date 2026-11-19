@@ -211,7 +211,10 @@ pub fn corner_cut(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], i: usize) -> 
     if theta < 1e-3 || std::f64::consts::PI - theta < 1e-3 {
         return None;
     }
-    let tmax = 0.5 * lu.min(lw) * 0.999;
+    // at most half of each side: two corners at their most on one side
+    // meet at its middle (a slot's round end), the side between them gone
+    // (`pieces_t` and `focc_prism_cut` join the two cuts there)
+    let tmax = 0.5 * lu.min(lw);
     let at = |t: f64| ([q[0] + du[0] * t, q[1] + du[1] * t], [q[0] + dw[0] * t, q[1] + dw[1] * t]);
     if c < 0.0 {
         let t = (-c).min(tmax);

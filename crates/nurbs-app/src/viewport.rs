@@ -223,7 +223,7 @@ fn scale_at(st: &AppState, p: Pos2) -> Option<Handle> {
 
 fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, rect: Rect) {
     let hover = ctx.input(|i| i.pointer.hover_pos());
-    st.interacting = st.drag.is_some() || st.creation.is_some() || st.scan_round.is_some();
+    st.interacting = st.drag.is_some() || st.creation.is_some() || st.scan_round.is_some() || st.scan_slot.is_some();
 
     // Maya navigation: Alt + left = orbit, Alt + middle = pan, Alt + right =
     // zoom, whatever the tool
@@ -407,6 +407,29 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 let at = resp.interact_pointer_pos().or(hover).map(p2);
                 let v = at.and_then(|p| st.pick_vertex(p));
                 st.click_vertex(v, shift || ctrl);
+            }
+        }
+        Tool::Slot => {
+            // a drag along a slot of the reference (`scan.rs`): read there
+            // when released
+            if st.scan_slot.is_some() {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.scan_slot_move(p2(p));
+                }
+                if resp.drag_stopped() || !l {
+                    st.scan_slot_release();
+                }
+                return;
+            }
+            if resp.drag_started_by(PointerButton::Primary) {
+                let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                if st.scan_slot_press(p2(origin)) {
+                    if let Some(p) = hover {
+                        st.scan_slot_move(p2(p));
+                    }
+                }
+            } else if resp.clicked_by(PointerButton::Primary) {
+                st.toast("Slot: drag along a slot of the scan, from one end to the other", false);
             }
         }
         Tool::Knife | Tool::Point => {
@@ -778,6 +801,20 @@ fn draw_creation(p: &Painter, st: &AppState) {
         draw_sketch(p, st);
         return;
     }
+    // the Slot along a slot of the reference: its length
+    if let Some(ss) = &st.scan_slot {
+        let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("{} mm · release: read the scan", fmt_mm((ss.b - ss.a).length() as f32)), accent(), accent());
+        return;
+    }
+    if st.tool == Tool::Slot {
+        if let Some(h) = p.ctx().input(|i| i.pointer.hover_pos()) {
+            let (txt, col) = if st.scan_under(p2(h)).is_some() { ("on the scan · drag along a slot, end to end", accent()) } else { ("the Slot reads the scan", TEXT2()) };
+            p.circle_stroke(h, 7.0, Stroke::new(1.5, col));
+            chip(p, h + vec2(12.0, 10.0), Align2::LEFT_TOP, txt, tint(col, 0.6), TEXT2());
+        }
+        return;
+    }
     // the Cylinder across a round part of the reference: its diameter
     if let Some(sr) = &st.scan_round {
         let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
@@ -1107,10 +1144,13 @@ pub fn hint(st: &AppState) -> String {
             Some(k) if k.pts.len() < 3 => "Click: a corner · Drag: a curve point · Backspace: the last point off · Esc: drop it".into(),
             Some(_) => "First point or Enter: close it · Drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
+        (None, Tool::Slot) if st.scan_slot.is_some() => "Along the slot, to its other end · Release: the scan read there, a sketch made as read · Esc: cancel".into(),
+        (None, Tool::Slot) => "Drag along a slot of the scan (or a raised pill), from one end to the other · Release: read there, a Carve sketch (cut in) or an Add (raised) with round ends".into(),
         (None, Tool::Create(PrimKind::Cylinder)) if st.scan_round.is_some() => "Across the round part, to the other side of its rim · Release: the scan read there, a cylinder made as read · Esc: cancel".into(),
         (None, Tool::Create(PrimKind::Cylinder)) if st.reference.is_some() && st.ref_shown => {
             format!("Drag on the scan, rim to rim: a hole or a boss read there · Drag off the scan: the base, on the ground or a face · Click: 20 mm, on the scan too · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(PrimKind::Cylinder))
         }
+        (None, Tool::Create(PrimKind::Box)) if on_scan => "Drag: the base, on a face, the scan or the ground · On the scan, corner to corner across a block or a pocket: read when let go (else on to the height) · Click: 20 mm · B: one at once · Top bar: Add or Carve".into(),
         (None, Tool::Create(k)) if on_scan => format!("Drag: the base, on a face, the scan's face under the pointer or the ground · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
         (None, Tool::Create(k)) => format!("Drag: the base, on the ground or a face · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
         (None, Tool::Push(k)) => match k {

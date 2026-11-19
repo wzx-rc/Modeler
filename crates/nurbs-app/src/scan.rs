@@ -15,13 +15,23 @@
 //! inside), measured in a thread for each finished model (the BVH's closest
 //! point within `DEV_REACH`, signed by the scan triangle's normal there).
 //!
+//! Step 5, Slot and Box read from the scan: the Slot tool (S), a drag along
+//! a slot (or a raised pill) of the scan, end to end, and the Cube's base
+//! drawn on the scan corner to corner across a block (or a pocket), read on
+//! release (`Slot::detect`, `Slot::detect_box`, as Rectify's Slot and Box):
+//! a Sketch step, a rectangle whose corners are rounded as read (a slot's
+//! at half its width: round ends), a Carve when cut in, an Add when raised.
+//! Nothing read: the Slot makes nothing, the Cube goes on to its height as
+//! drawn.
+//!
 //! Step 4, the plane under the pointer: Cube, Sketch and Path start on the
 //! scan's flat face under the pointer (`rectify_core::planes::plane_under`, as Forme Rectify's Pen),
 //! else its tangent plane there, when the part is not in front of it.
 
 use crate::render::MeshVertex;
-use crate::state::{AppState, BasePlane};
+use crate::state::{AppState, BasePlane, Creation, Tool};
 use glam::{DQuat, DVec3};
+use nurbs_kernel::doc::Profile;
 use nurbs_kernel::{Model, Op, Prim};
 use rectify_core::planes::{dominant_normal, plane_under, tangent_under};
 use rectify_core::slot::Slot;
@@ -116,6 +126,68 @@ pub fn round_step(s: &Slot) -> Option<RoundRead> {
         RoundRead { op: Op::Carve, radius: s.r, height: s.depth + clear, origin: s.a - axis * clear, axis, depth: s.depth }
     } else {
         RoundRead { op: Op::Add, radius: s.r, height: s.depth, origin: s.a, axis, depth: s.depth }
+    })
+}
+
+/// A drag along a slot of the scan (the Slot tool): the triangle pressed,
+/// the scan under the press and under the pointer, and the way most of the
+/// scan faces round the press (towards the eye).
+#[derive(Clone, Debug)]
+pub struct ScanSlot {
+    pub tri: u32,
+    pub a: DVec3,
+    pub b: DVec3,
+    pub n: DVec3,
+}
+
+/// A slot or a box read on the scan, as a Sketch step: a rectangle (`x`
+/// along the centre line, `z` across) whose corners are rounded at `r` (a
+/// slot's at half its width: round ends), from `origin` along `rot`'s Y.
+#[derive(Clone, Debug)]
+pub struct OutlineRead {
+    pub op: Op,
+    pub x: f64,
+    pub z: f64,
+    pub r: f64,
+    pub height: f64,
+    pub origin: DVec3,
+    pub rot: DQuat,
+    /// How deep the slot or high the block was read (mm).
+    pub depth: f64,
+}
+
+impl OutlineRead {
+    pub fn profile(&self) -> Profile {
+        Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![self.r; 4], tension: vec![], open: false }
+    }
+}
+
+/// From the scan's slot or box to a sketch step: its axis and its length's
+/// direction each taken as a world axis within 5°; a cut-in one begun a
+/// little outside its rim (as a hole).
+pub fn outline_step(s: &Slot) -> Option<OutlineRead> {
+    let axis = snap_axis(s.axis.normalize_or_zero());
+    if axis == DVec3::ZERO || !(s.r > 0.0) || !(s.w >= 0.0) {
+        return None;
+    }
+    let flat = |v: DVec3| v - axis * axis.dot(v);
+    let d = flat(s.b - s.a);
+    let size = d.length() + 2.0 * (s.r + s.w);
+    if !s.depth.is_finite() || s.depth > (size * 10.0).max(30.0) || s.depth < 0.05 {
+        return None;
+    }
+    let e = if d.length() > 1e-9 { d.normalize() } else { BasePlane::new(DVec3::ZERO, axis, None).u };
+    let k = flat(snap_axis(e));
+    let e = if k.length() > 0.9 { k.normalize() } else { e };
+    let len = d.dot(e).abs();
+    let mid = (s.a + s.b) * 0.5;
+    let rot = crate::state::basis_rotation(e, axis);
+    let (x, z) = (len + 2.0 * s.r, 2.0 * (s.w + s.r));
+    Some(if s.inward {
+        let clear = (s.r * 0.1).clamp(0.1, CLEAR);
+        OutlineRead { op: Op::Carve, x, z, r: s.r, height: s.depth + clear, origin: mid - axis * clear, rot, depth: s.depth }
+    } else {
+        OutlineRead { op: Op::Add, x, z, r: s.r, height: s.depth, origin: mid, rot, depth: s.depth }
     })
 }
 
@@ -398,6 +470,165 @@ impl AppState {
     pub fn scan_round_cancel(&mut self) {
         self.scan_round = None;
     }
+
+    /// The scan under the pointer while a drag on it goes on: on it, else
+    /// on the plane through `a` facing `n`.
+    fn scan_drag_point(&self, a: DVec3, n: DVec3, p: [f32; 2]) -> Option<DVec3> {
+        let (o, d) = self.ray(p);
+        let d = d.normalize();
+        let on_scan = self.reference.as_ref().and_then(|r| r.hit(o, d)).map(|h| h.0);
+        let den = d.dot(n);
+        let on_plane = (den.abs() > 1e-9).then(|| o + d * ((a - o).dot(n) / den)).filter(|q| (*q - o).dot(d) > 0.0);
+        on_scan.or(on_plane)
+    }
+
+    /// The Slot tool (S): reads the scan only.
+    pub fn arm_slot(&mut self) {
+        self.abort_gestures();
+        self.tool = Tool::Slot;
+        self.edge_sel.clear();
+        self.face_sel.clear();
+        self.vert_sel.clear();
+    }
+
+    /// A press with the Slot tool: on the scan, the drag along a slot
+    /// begins (true); elsewhere a toast says what it wants.
+    pub fn scan_slot_press(&mut self, p: [f32; 2]) -> bool {
+        let Some((t, x)) = self.scan_under(p) else {
+            self.toast("The Slot reads the scan: drag along a slot on it, from one end to the other", true);
+            return false;
+        };
+        let Some(r) = self.reference.clone() else { return false };
+        let reach = (self.mm_per_point(x) * 60.0).clamp(1.0, 20.0);
+        let mut n = dominant_normal(&r.mesh, &r.topo, t, x, reach);
+        if n.dot(self.ray(p).1) > 0.0 {
+            n = -n;
+        }
+        self.scan_slot = Some(ScanSlot { tri: t, a: x, b: x, n });
+        true
+    }
+
+    pub fn scan_slot_move(&mut self, p: [f32; 2]) {
+        let Some(ss) = &self.scan_slot else { return };
+        if let Some(b) = self.scan_drag_point(ss.a, ss.n, p) {
+            if let Some(ss) = &mut self.scan_slot {
+                ss.b = b;
+            }
+        }
+    }
+
+    /// Released: the scan read once along the drag; a sketch step made as
+    /// read (a Carve "Slot" cut in, an Add "Pill" raised).
+    pub fn scan_slot_release(&mut self) {
+        let Some(ss) = self.scan_slot.take() else { return };
+        let Some(r) = self.reference.clone() else { return };
+        let len = (ss.b - ss.a).length();
+        if len < self.mm_per_point(ss.a) * 6.0 {
+            return;
+        }
+        let c = (ss.a + ss.b) * 0.5;
+        let found = Slot::detect(&r.mesh, &r.topo, ss.tri, ss.a, ss.b, r.edge);
+        if std::env::var_os("FORME_SCAN_DEBUG").is_some() {
+            match &found {
+                Ok(s) => eprintln!("scan slot: drawn {len:.2} at {c:.2?}; found {:.2} × {:.2} r {:.2} at {:.2?} axis {:.3?} depth {:.2} inward {}", (s.b - s.a).length() + 2.0 * s.r, 2.0 * (s.w + s.r), s.r, (s.a + s.b) * 0.5, s.axis, s.depth, s.inward),
+                Err(e) => eprintln!("scan slot: drawn {len:.2} at {c:.2?}: {e}"),
+            }
+        }
+        // about the length drawn, about where it was drawn
+        let found = found.ok().filter(|s| {
+            let off = (s.a + s.b) * 0.5 - c;
+            let off = off - s.axis * s.axis.dot(off);
+            let l = (s.b - s.a).length() + 2.0 * s.r;
+            l >= len * 0.4 && l <= len * 2.5 && off.length() <= len * 0.5
+        });
+        let Some(read) = found.as_ref().and_then(outline_step) else {
+            let why = if found.is_some() { "its depth could not be read" } else { "no slot along the drag" };
+            self.toast(&format!("No slot read there ({why}) · drag along it, from one end to the other"), true);
+            return;
+        };
+        let kind = if read.op == Op::Carve { "Slot" } else { "Pill" };
+        let id = self.make_outline(&read, kind, None);
+        self.selection = vec![id];
+        let fmt = |v: f64| crate::widgets::fmt_mm(v as f32);
+        let way = if read.op == Op::Carve { "deep" } else { "high" };
+        self.toast(&format!("{kind} read on the scan: {} × {} mm, {} mm {way}", fmt(read.x), fmt(read.z), fmt(read.depth)), false);
+    }
+
+    /// The step read, made: a new feature (one undo step), or the feature
+    /// being created turned into it (its live edit ended).
+    fn make_outline(&mut self, read: &OutlineRead, kind: &str, live: Option<u32>) -> u32 {
+        let mat = self.material;
+        let prim = Prim::Profile { x: read.x, y: read.height, z: read.z };
+        let pr = read.profile();
+        let fill = |d: &mut nurbs_kernel::Doc, id: u32| {
+            let name = d.fresh_name(kind);
+            if let Some(f) = d.feature_mut(id) {
+                f.name = name;
+                f.op = read.op;
+                f.prim = prim;
+                f.origin = read.origin;
+                f.rot = read.rot;
+                f.profile = Some(pr.clone());
+                f.material = mat;
+                f.visible = true;
+            }
+        };
+        match live {
+            Some(id) => {
+                self.live(|d| fill(d, id));
+                self.end_live();
+                id
+            }
+            None => {
+                let mut id = 0;
+                self.edit(&format!("{kind} from the scan"), |d| {
+                    id = d.add(read.op, prim, read.origin, read.rot);
+                    fill(d, id);
+                });
+                id
+            }
+        }
+    }
+
+    /// The Cube's base let go on the scan, corner to corner: the block or
+    /// pocket there read (`Slot::detect_box`); when one is found about where
+    /// and as big as drawn, the shape becomes it at once (true). `from`: the
+    /// scan under the press.
+    pub fn scan_box_read(&mut self, c: &Creation, from: (u32, DVec3), p: [f32; 2]) -> bool {
+        let Some(r) = self.reference.clone() else { return false };
+        let (o, d) = self.ray(p);
+        let Some((_, to, _)) = r.hit_tri(o, d.normalize()) else { return false };
+        let drawn = c.plane.at([(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5]);
+        let diag = ((c.b[0] - c.a[0]).powi(2) + (c.b[1] - c.a[1]).powi(2)).sqrt();
+        let found = Slot::detect_box(&r.mesh, &r.topo, from.0, from.1, to, r.edge);
+        if std::env::var_os("FORME_SCAN_DEBUG").is_some() {
+            match &found {
+                Ok(s) => eprintln!("scan box: drawn {diag:.2} at {drawn:.2?}; found {:.2} × {:.2} r {:.2} at {:.2?} axis {:.3?} depth {:.2} inward {}", (s.b - s.a).length() + 2.0 * s.r, 2.0 * (s.w + s.r), s.r, (s.a + s.b) * 0.5, s.axis, s.depth, s.inward),
+                Err(e) => eprintln!("scan box: drawn {diag:.2} at {drawn:.2?}: {e}"),
+            }
+        }
+        let Some(read) = found.ok().and_then(|s| outline_step(&s)) else { return false };
+        // about as big as drawn, about where it was drawn
+        let size = read.x.hypot(read.z);
+        let centre = read.origin + read.rot * DVec3::Y * if read.op == Op::Carve { read.height - read.depth } else { 0.0 };
+        let off = centre - drawn;
+        let off = off - c.plane.n * c.plane.n.dot(off);
+        if size < diag * 0.4 || size > diag * 2.0 || off.length() > diag * 0.4 {
+            if std::env::var_os("FORME_SCAN_DEBUG").is_some() {
+                eprintln!("scan box: not taken (size {size:.2} for {diag:.2} drawn, {:.2} off)", off.length());
+            }
+            return false;
+        }
+        let kind = if read.op == Op::Carve { "Pocket" } else { "Block" };
+        self.creation = None;
+        self.snap_shown = None;
+        let id = self.make_outline(&read, kind, Some(c.id));
+        self.selection = vec![id];
+        let fmt = |v: f64| crate::widgets::fmt_mm(v as f32);
+        let way = if read.op == Op::Carve { "deep" } else { "high" };
+        self.toast(&format!("{kind} read on the scan: {} × {} mm, corners {} mm, {} mm {way}", fmt(read.x), fmt(read.z), fmt(read.r), fmt(read.depth)), false);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -427,6 +658,58 @@ mod tests {
                     if flat {
                         println!("{name} at {x:.1?}: n {:.3?} rms {:.3} area {:.0} ({ms:.1} ms)", pl.n, pl.rms, pl.area);
                     }
+                }
+            }
+        }
+    }
+
+    /// Writes the scan's height seen from +Z and from -Z as PGM images
+    /// (`FORME_HMAP` = a folder), 4 pixels per mm (ignored: the pistol).
+    #[test]
+    #[ignore]
+    fn scan_height_map() {
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        let out = std::env::var("FORME_HMAP").unwrap_or_else(|_| "/tmp".into());
+        let r = crate::reference::Reference::load(&path).expect("reference");
+        for (name, sign) in [("pz", 1.0), ("nz", -1.0)] {
+            let (w, h) = (((r.hi.x - r.lo.x) * 4.0) as usize, ((r.hi.y - r.lo.y) * 4.0) as usize);
+            let mut img = vec![0u8; w * h];
+            for j in 0..h {
+                for i in 0..w {
+                    let x = r.lo.x + (i as f64 + 0.5) / 4.0;
+                    let y = r.hi.y - (j as f64 + 0.5) / 4.0;
+                    if let Some((q, _)) = r.hit(DVec3::new(x, y, sign * 100.0), DVec3::new(0.0, 0.0, -sign)) {
+                        let z = (q.z * sign - (r.lo.z.min(-r.hi.z)).abs() * 0.0).clamp(-20.0, 20.0);
+                        img[j * w + i] = (((z + 20.0) / 40.0) * 255.0) as u8;
+                    }
+                }
+            }
+            let mut f = format!("P5\n{w} {h}\n255\n").into_bytes();
+            f.extend(img);
+            std::fs::write(format!("{out}/hmap-{name}.pgm"), f).unwrap();
+            println!("{name}: {w} × {h}, x from {:.1}, y from {:.1} (top) at 4 px / mm", r.lo.x, r.hi.y);
+        }
+    }
+
+    /// Reads the square button and the small pocket of the pistol's +Z side
+    /// with Cube drags of a few sizes (ignored: the pistol).
+    #[test]
+    #[ignore]
+    fn scan_box_probe() {
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        let r = crate::reference::Reference::load(&path).expect("reference");
+        let side = |x: f64, y: f64| r.hit_tri(DVec3::new(x, y, 100.0), DVec3::new(0.0, 0.0, -1.0)).unwrap();
+        // (name, its corners, then margins outside them)
+        for (name, lo, hi) in [("button", (-15.75, 75.75), (-10.25, 80.75)), ("pocket", (30.25, 74.25), (33.75, 78.25))] {
+            for m in [-0.5, 0.0, 0.4, 0.8, 1.2, 1.8] {
+                let (t0, p0, _) = side(lo.0 - m, lo.1 - m);
+                let (_, p1, _) = side(hi.0 + m, hi.1 + m);
+                match Slot::detect_box(&r.mesh, &r.topo, t0, p0, p1, r.edge) {
+                    Ok(s) => {
+                        let st = outline_step(&s);
+                        println!("{name} margin {m}: {:?} centre {:.2?} depth {:.2} inward {}", st.map(|o| format!("{:.2} × {:.2} r {:.2}", o.x, o.z, o.r)), (s.a + s.b) * 0.5, s.depth, s.inward)
+                    }
+                    Err(e) => println!("{name} margin {m}: {e}"),
                 }
             }
         }

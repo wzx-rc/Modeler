@@ -182,6 +182,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     Tool::Push(k) => k.label().to_uppercase(),
                     Tool::Knife => "KNIFE".into(),
                     Tool::Point => "POINT ON EDGE".into(),
+                    Tool::Slot => "SLOT · ON THE SCAN".into(),
                     Tool::Select => format!("SELECTION · {}", st.sel_mode.label().to_uppercase()),
                 };
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
@@ -429,6 +430,12 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             let tip = "Path (P): a curve with no thickness, on a face or the ground. Click the corners, drag for curve points; Enter ends it open, a click on the first point closes it. Its corners take a fillet or a bevel in Vertex mode (1)";
             if card(ui, Some(Icon::Path), "PATH", "CURVE · P", st.tool == Tool::Create(pk), PATH, tip).clicked() {
                 st.arm(pk);
+            }
+            if st.doc.reference.is_some() {
+                let tip = "Slot (S): drag along a slot of the scan (or a raised pill), from one end to the other; let go, the scan is read there and a sketch made as read (Carve when cut in, Add when raised)";
+                if card(ui, Some(Icon::Scan), "SLOT", "SCAN · S", st.tool == Tool::Slot, accent(), tip).clicked() {
+                    st.arm_slot();
+                }
             }
             divider(ui);
             for (k, icon, tip) in [
@@ -862,6 +869,7 @@ fn help_title(st: &AppState) -> String {
         Tool::Push(k) => k.label().into(),
         Tool::Knife => "Knife".into(),
         Tool::Point => "Point on edge".into(),
+        Tool::Slot => "Slot · on the scan".into(),
         Tool::Select => format!("{} · {}", st.gizmo.label(), st.sel_mode.label()),
     }
 }
@@ -954,6 +962,7 @@ fn help_box(ctx: &egui::Context, st: &mut AppState) {
         Tool::Create(_) => op_color(st.mode),
         Tool::Push(_) => FACE_SEL,
         Tool::Knife | Tool::Point => EDGE_SEL,
+        Tool::Slot => accent(),
         Tool::Select if st.sel_mode == SelMode::Edge => EDGE_SEL,
         Tool::Select if st.sel_mode == SelMode::Face => FACE_SEL,
         Tool::Select => st.single().map(feature_color).unwrap_or(TEXT2()),
@@ -2346,7 +2355,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         } else if st.push.is_some() {
             st.abort_gestures();
             st.select_tool();
-        } else if st.creation.is_some() || st.drag.is_some() || st.sketch.is_some() || st.scan_round.is_some() {
+        } else if st.creation.is_some() || st.drag.is_some() || st.sketch.is_some() || st.scan_round.is_some() || st.scan_slot.is_some() {
             st.abort_gestures();
         } else if st.tool != Tool::Select {
             st.select_tool();
@@ -2367,6 +2376,9 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         if pressed(k) {
             st.arm_knife(t);
         }
+    }
+    if pressed(Key::S) {
+        st.arm_slot();
     }
     // the Knife's cut under way: Enter ends it
     if matches!(st.tool, Tool::Knife | Tool::Point) && pressed(Key::Enter) {

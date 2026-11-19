@@ -1082,7 +1082,7 @@ mod tests {
         let cyl: Vec<f64> = m.faces.iter().filter(|f| f.kind == SurfKind::Cylinder).map(|f| f.radius).collect();
         assert_eq!(cyl.len(), 2, "two rounded corners: {cyl:?}");
         assert!(cyl.iter().any(|r| (r - 4.0).abs() < 1e-6), "{cyl:?}");
-        assert!(cyl.iter().any(|r| (r - 10.0 * 0.999).abs() < 1e-3), "the big one stops at half a side: {cyl:?}");
+        assert!(cyl.iter().any(|r| (r - 10.0).abs() < 1e-6), "the big one stops at half a side: {cyl:?}");
         // the faces: top, bottom, 4 sides (one is gone: two cuts take half
         // of it each), 2 arcs, 1 chamfer
         assert_eq!(m.faces.len(), 2 + 4 + 2 + 1, "{}", m.faces.len());
@@ -1091,6 +1091,30 @@ mod tests {
         assert_eq!(pr.cuts(20.0, 20.0).iter().filter(|c| c.is_some()).count(), 3);
         let tags: Vec<u16> = m.faces.iter().filter(|f| f.kind == SurfKind::Cylinder).filter_map(|f| f.tag.map(|t| t.sub)).collect();
         assert!(tags.contains(&3) && tags.contains(&(3 + 4)), "{tags:?}");
+    }
+
+    #[test]
+    fn slot_outline() {
+        // a slot 20 × 6 mm, 4 high: a rectangle whose four corners are cut
+        // at half its width, so each end is a half circle (two arcs, no
+        // straight piece between them)
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Profile { x: 20.0, y: 4.0, z: 6.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![3.0; 4], tension: vec![], open: false });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let cyl: Vec<f64> = m.faces.iter().filter(|f| f.kind == SurfKind::Cylinder).map(|f| f.radius).collect();
+        assert_eq!(cyl.len(), 4, "four quarter arcs: {cyl:?}");
+        assert!(cyl.iter().all(|r| (r - 3.0).abs() < 1e-6), "{cyl:?}");
+        // top, bottom, the two long sides, the four arcs
+        assert_eq!(m.faces.len(), 2 + 2 + 4, "{}", m.faces.len());
+        // a hole of that shape cut in a block
+        let b = d.add(Op::Add, Prim::Box { x: 30.0, y: 10.0, z: 20.0 }, DVec3::new(0.0, -8.0, 0.0), DQuat::IDENTITY);
+        let _ = b;
+        d.features.swap(0, 1);
+        d.feature_mut(c).unwrap().op = Op::Carve;
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
     }
 
     #[test]

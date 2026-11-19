@@ -23,6 +23,9 @@ pub enum Tool {
     Knife,
     /// Point on edge (J): points only.
     Point,
+    /// The Slot (S): a drag along a slot (or a raised pill) of the
+    /// reference, read there on release (`scan.rs`).
+    Slot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -470,6 +473,11 @@ pub struct AppState {
     pub ref_ghost: bool,
     /// The Cylinder dragged across a round part of the reference (`scan.rs`).
     pub scan_round: Option<crate::scan::ScanRound>,
+    /// The Slot tool's drag along a slot of the reference.
+    pub scan_slot: Option<crate::scan::ScanSlot>,
+    /// The scan under the press of a Cube drawn on it: corner to corner
+    /// across a block or a pocket, read on release (`scan_box_read`).
+    pub scan_box_from: Option<(u32, DVec3)>,
     /// The scan's flat face found last under the pointer (`scan_plane_at`):
     /// kept while the pointer stays on its plane.
     pub scan_plane_memo: std::cell::Cell<Option<crate::scan::ScanPlaneMemo>>,
@@ -559,6 +567,8 @@ impl AppState {
             ref_shown: true,
             ref_ghost: false,
             scan_round: None,
+            scan_slot: None,
+            scan_box_from: None,
             scan_plane_memo: std::cell::Cell::new(None),
             scan_plane_search: std::cell::Cell::new(None),
             dev_on: false,
@@ -1224,6 +1234,8 @@ impl AppState {
         }
         self.gizmo_readout = None;
         self.scan_round = None;
+        self.scan_slot = None;
+        self.scan_box_from = None;
         self.sketch = None;
         self.knife = None;
         self.knife_hover = None;
@@ -1336,6 +1348,8 @@ impl AppState {
         }
         let Some((plane, a, snapped)) = self.start_plane(p) else { return };
         self.snap_shown = snapped;
+        // a Cube drawn on the scan reads it when let go
+        self.scan_box_from = if kind == PrimKind::Box && plane.scan.is_some() { self.scan_under(p) } else { None };
         self.begin_live(&format!("New {}", kind.label()));
         let op = self.mode;
         let origin = plane.at(a);
@@ -1472,6 +1486,13 @@ impl AppState {
             self.apply_creation(&c);
             self.finish_creation();
             return;
+        }
+        // drawn on the scan corner to corner: the block or pocket there,
+        // made at once when one is read (else on to the height as drawn)
+        if let Some(from) = self.scan_box_from.take() {
+            if c.kind == PrimKind::Box && self.scan_box_read(&c, from, p) {
+                return;
+            }
         }
         c.phase = Phase::Height;
         c.height_from = p;

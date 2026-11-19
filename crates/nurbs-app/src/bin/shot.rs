@@ -2029,6 +2029,112 @@ fn main() {
         }
     }
 
+    if want("scan-slot") {
+        // retopology, step 5: the Slot (S) dragged along the vents of the
+        // scan, end to end (a block stands for the front part, so the slots
+        // cut it), then the Cube drawn on the scan corner to corner across
+        // the square button (a block): each read when let go; on a plain
+        // face the Cube goes on to its height
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        if std::path::Path::new(&path).exists() {
+            let mut d = Doc::default();
+            d.reference = Some(nurbs_kernel::RefMesh { path: path.clone() });
+            let f = d.add(Op::Add, Prim::Box { x: 18.0, y: 37.0, z: 25.6 }, DVec3::new(47.0, 63.0, 0.0), DQuat::IDENTITY);
+            d.feature_mut(f).unwrap().name = "Front".into();
+            h.reset(d, "Retopo");
+            h.step();
+            let end = Instant::now() + Duration::from_secs(180);
+            while h.st.ref_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            h.settle();
+            h.st.toast = None;
+            let refm = h.st.reference.clone().expect("reference");
+            let side = |x: f64, y: f64| -> Vec3 { refm.hit(DVec3::new(x, y, 100.0), DVec3::new(0.0, 0.0, -1.0)).map(|q| q.0.as_vec3()).unwrap_or(Vec3::new(x as f32, y as f32, 12.0)) };
+            let toast = |h: &Harness| h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+            // 1. the four vents
+            h.st.camera.yaw = 0.3;
+            h.st.camera.pitch = 0.2;
+            h.st.camera.frame(Vec3::new(34.0, 62.0, 4.0), Vec3::new(56.0, 100.0, 16.0));
+            h.steps(2);
+            h.key(egui::Key::S);
+            for (k, yc) in [70.0, 77.6, 85.6, 93.4].into_iter().enumerate() {
+                let (a, b) = (h.screen_of(side(40.6, yc)), h.screen_of(side(49.6, yc)));
+                h.move_to(a);
+                h.steps(2);
+                if k == 0 {
+                    h.shot("zero-scan-slot-1-armed");
+                }
+                h.drag(a, b, 10, false);
+                h.steps(2);
+                if k == 0 {
+                    h.shot("zero-scan-slot-2-drag");
+                }
+                h.press(b, false);
+                h.step();
+                h.settle();
+                eprintln!("  vent {k}: {}", toast(&h));
+                if k == 0 {
+                    h.shot("zero-scan-slot-3-read");
+                }
+            }
+            h.st.tool = Tool::Select;
+            h.st.select(None, false);
+            h.st.toast = None;
+            h.steps(2);
+            h.shot("zero-scan-slot-4-vents");
+            h.st.ref_ghost = true;
+            h.steps(2);
+            h.shot("zero-scan-slot-5-ghost");
+            h.st.ref_ghost = false;
+            h.st.ref_shown = false;
+            h.steps(2);
+            h.shot("zero-scan-slot-6-part");
+            h.st.ref_shown = true;
+            // 2. the square button: the Cube drawn across it, corner to corner
+            h.st.camera.yaw = 0.35;
+            h.st.camera.pitch = 0.3;
+            h.st.camera.frame(Vec3::new(-24.0, 68.0, 8.0), Vec3::new(-3.0, 88.0, 18.0));
+            h.steps(2);
+            h.st.tool = Tool::Create(PrimKind::Box);
+            // from just outside a corner to just outside the other (from
+            // 1.2 mm outside, an outer step is read: 7.9 × 7.4)
+            let (a, b) = (h.screen_of(side(-16.25, 75.25)), h.screen_of(side(-9.75, 81.25)));
+            h.move_to(a);
+            h.steps(2);
+            h.drag(a, b, 10, false);
+            h.steps(2);
+            h.shot("zero-scan-slot-7-box-drag");
+            h.press(b, false);
+            h.step();
+            h.settle();
+            eprintln!("  button: {}", toast(&h));
+            h.shot("zero-scan-slot-8-block");
+            // 3. a plain face: nothing read, the Cube goes on to its height
+            h.st.toast = None;
+            h.st.tool = Tool::Create(PrimKind::Box);
+            let (a, b) = (h.screen_of(side(-5.0, 76.0)), h.screen_of(side(1.0, 84.0)));
+            h.move_to(a);
+            h.steps(2);
+            h.drag(a, b, 10, true);
+            h.settle();
+            eprintln!("  plain face: phase {:?}, toast {:?}", h.st.creation.as_ref().map(|c| c.phase), toast(&h));
+            h.shot("zero-scan-slot-9-plain");
+            h.key(egui::Key::Escape);
+            h.st.tool = Tool::Select;
+            h.st.select(None, false);
+            h.st.toast = None;
+            h.st.ref_shown = false;
+            h.steps(2);
+            h.shot("zero-scan-slot-10-block-alone");
+            h.st.ref_shown = true;
+            for f in &h.st.doc.features {
+                eprintln!("  {} {:?} {:?} at {:.2?} up {:.3?} corner {:?}", f.name, f.op, f.prim, f.origin, f.rot * DVec3::Y, f.profile.as_ref().map(|p| p.corner.clone()));
+            }
+        }
+    }
+
     if want("tension-point") {
         // the top front edge filleted at 2 mm, then the top -X edge at 3 mm:
         // OpenCascade carries the second round the first one's end and down
