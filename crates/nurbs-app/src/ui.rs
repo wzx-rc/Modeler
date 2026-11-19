@@ -895,7 +895,8 @@ fn deviation_legend(ctx: &egui::Context, st: &mut AppState) {
                 let txt = match &st.deviation {
                     _ if st.dev_busy() => "measuring…".to_string(),
                     Some(d) if d.near == 0 => "the part is not on the scan".to_string(),
-                    Some(d) => format!("{:.0} % within ±{} mm · half within {} · 95 % within {} mm", 100.0 * d.within as f64 / d.near as f64, fmt(d.tol), fmt(d.p50), fmt(d.p95)),
+                    // by area: a fillet's many small triangles count as their area
+                    Some(d) => format!("{:.0} % within ±{} mm · half within {} · 95 % within {} mm", 100.0 * d.area.within, fmt(d.tol), fmt(d.area.p50), fmt(d.area.p95)),
                     None => String::new(),
                 };
                 ui.label(egui::RichText::new(txt).font(regular(12.0)).color(LABEL()));

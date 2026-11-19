@@ -300,7 +300,72 @@ pub struct Deviation {
     pub tol: f64,
     pub p50: f64,
     pub p95: f64,
+    /// The same weighted by area (`dev_stats` on `verts`): the kernel's
+    /// small triangles (a fillet's) would count more than their area.
+    pub area: DevStats,
     pub ms: f32,
+}
+
+/// Distances weighted by area: of the area given, the share measured
+/// (within `DEV_REACH`), and of that the shares within the tolerance,
+/// outside the scan and inside it, the median and the 95th percentile
+/// (mm).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DevStats {
+    pub area: f64,
+    pub reach: f64,
+    pub within: f64,
+    pub outside: f64,
+    pub inside: f64,
+    pub p50: f64,
+    pub p95: f64,
+    /// The mean distance over the whole area, a point past the reach
+    /// counted at the reach: one number that falls as the part comes
+    /// closer (a sharp corner far out filleted counts, unmeasured before).
+    pub mean: f64,
+}
+
+/// `DevStats` of (distance, area) pairs (`NO_DEV` past the reach).
+pub fn dev_stats(items: &mut [(f32, f64)], tol: f64) -> DevStats {
+    let area: f64 = items.iter().map(|x| x.1).sum();
+    let mean = items.iter().map(|x| (x.0.abs() as f64).min(DEV_REACH) * x.1).sum::<f64>() / area.max(1e-12);
+    let mut s = DevStats { area, mean, ..Default::default() };
+    let mut near: Vec<(f64, f64)> = items.iter().filter(|x| x.0.abs() < 1e8).map(|x| (x.0 as f64, x.1)).collect();
+    let a: f64 = near.iter().map(|x| x.1).sum();
+    if a <= 0.0 {
+        return s;
+    }
+    s.reach = a / area.max(1e-12);
+    s.within = near.iter().filter(|x| x.0.abs() <= tol).map(|x| x.1).sum::<f64>() / a;
+    s.outside = near.iter().filter(|x| x.0 > tol).map(|x| x.1).sum::<f64>() / a;
+    s.inside = near.iter().filter(|x| x.0 < -tol).map(|x| x.1).sum::<f64>() / a;
+    near.sort_by(|x, y| x.0.abs().total_cmp(&y.0.abs()));
+    let (mut acc, mut p50, mut p95) = (0.0, None, None);
+    for (d, w) in &near {
+        acc += w;
+        if p50.is_none() && acc >= 0.5 * a {
+            p50 = Some(d.abs());
+        }
+        if p95.is_none() && acc >= 0.95 * a {
+            p95 = Some(d.abs());
+            break;
+        }
+    }
+    s.p50 = p50.unwrap_or(0.0);
+    s.p95 = p95.or(near.last().map(|x| x.0.abs())).unwrap_or(0.0);
+    s
+}
+
+/// The (distance, area) of each of a deviation's vertices (a third of its
+/// triangle's area), for `dev_stats`.
+pub fn dev_weights(verts: &[MeshVertex]) -> Vec<f64> {
+    let mut w = vec![0.0; verts.len()];
+    for (t, tri) in verts.chunks_exact(3).enumerate() {
+        let p = |v: &MeshVertex| DVec3::from(v.pos.map(|c| c as f64));
+        let a = (p(&tri[1]) - p(&tri[0])).cross(p(&tri[2]) - p(&tri[0])).length() / 6.0;
+        w[3 * t..3 * t + 3].fill(a);
+    }
+    w
 }
 
 /// Each point's signed distance to the scan (in 4 threads): the values
@@ -398,7 +463,10 @@ pub fn refine_measure(r: &crate::reference::Reference, m: &Model, tol: f64) -> D
             }
         }
     }
-    Deviation { serial: m.serial, ref_gen: 0, verts, near, within, tol, p50, p95, ms: t0.elapsed().as_secs_f32() * 1000.0 }
+    let w = dev_weights(&verts);
+    let mut items: Vec<(f32, f64)> = verts.iter().zip(&w).map(|(v, w)| (v.dev, *w)).collect();
+    let area = dev_stats(&mut items, tol);
+    Deviation { serial: m.serial, ref_gen: 0, verts, near, within, tol, p50, p95, area, ms: t0.elapsed().as_secs_f32() * 1000.0 }
 }
 
 impl AppState {
@@ -970,6 +1038,71 @@ impl AppState {
             text += " · it varies along the edges";
         }
         self.toast(&text, false);
+    }
+}
+
+/// A sharp edge of the part read on the scan (stage 2 of the button,
+/// secondary: the big fillets): which edge, how long, its two faces'
+/// features, and the fillet read across it (or why none).
+pub struct EdgeRead {
+    pub edge: usize,
+    pub len: f64,
+    /// The angle between its two faces' normals (degrees: 90 for a square
+    /// corner).
+    pub turn: f64,
+    pub features: [Option<FeatureId>; 2],
+    pub read: Result<FilletRead, String>,
+}
+
+impl AppState {
+    /// Every sharp edge of the part (at least `min_len` mm, its faces
+    /// turning by 20° at least) read on the scan (`fillet::read`, as Fit to
+    /// scan), in 4 threads; `only`: the edges touching these features.
+    pub(crate) fn read_edges(&self, only: Option<&[FeatureId]>, min_len: f64) -> Vec<EdgeRead> {
+        let (Some(m), Some(r)) = (self.model.clone(), self.reference.clone()) else { return vec![] };
+        let feat = |f: i32| m.faces.get(f as usize).and_then(|x| x.tag).map(|t| t.feature);
+        let mut jobs: Vec<(usize, f64, f64, [Option<FeatureId>; 2], Vec<EdgeSample>)> = vec![];
+        for (i, e) in m.edges.iter().enumerate() {
+            if e.seam || e.faces[0] < 0 || e.faces[1] < 0 || e.faces[0] == e.faces[1] || e.pts.len() < 2 {
+                continue;
+            }
+            let fs = [feat(e.faces[0]), feat(e.faces[1])];
+            if let Some(o) = only {
+                if !fs.iter().any(|f| f.map(|f| o.contains(&f)).unwrap_or(false)) {
+                    continue;
+                }
+            }
+            let len: f64 = e.pts.windows(2).map(|w| Vec3::from(w[0]).distance(Vec3::from(w[1])) as f64).sum();
+            if len < min_len {
+                continue;
+            }
+            let samples = self.edge_samples(i);
+            let Some(s0) = samples.first() else { continue };
+            let turn = s0.n[0].dot(s0.n[1]).clamp(-1.0, 1.0).acos().to_degrees();
+            if turn < 20.0 {
+                continue;
+            }
+            jobs.push((i, len, turn, fs, samples));
+        }
+        let mut out: Vec<EdgeRead> = Vec::with_capacity(jobs.len());
+        let chunk = jobs.len().div_ceil(4).max(1);
+        std::thread::scope(|sc| {
+            let hs: Vec<_> = jobs
+                .chunks(chunk)
+                .map(|part| {
+                    let r = &r;
+                    sc.spawn(move || {
+                        part.iter()
+                            .map(|(i, len, turn, fs, samples)| EdgeRead { edge: *i, len: *len, turn: *turn, features: *fs, read: rectify_core::fillet::read(&r.mesh, &r.topo, &r.bvh, samples, r.edge) })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            for h in hs {
+                out.extend(h.join().unwrap_or_default());
+            }
+        });
+        out
     }
 }
 

@@ -822,7 +822,10 @@ fn fit_outline(raw: &[DVec2], px: f64, size: f64) -> Option<(Vec<DVec2>, Vec<f64
         let phi = turn(a.d, b.d);
         let gap = a.b.distance(b.a);
         let den = a.d.perp_dot(b.d);
-        let x = if phi.abs() > 10f64.to_radians() && phi.abs() < 170f64.to_radians() {
+        // two sides turning only a little (2° to 10°, not one side) meet
+        // too: left as two ends they would make a jog a fillet cannot
+        // cross (0.2 mm on the grip's front)
+        let x = if phi.abs() > 2f64.to_radians() && phi.abs() < 170f64.to_radians() {
             let x = a.c + a.d * (b.c - a.c).perp_dot(b.d) / den;
             (x.distance(a.b) < gap * 3.0 + 4.0 && x.distance(b.a) < gap * 3.0 + 4.0).then_some(x)
         } else {
@@ -838,7 +841,7 @@ fn fit_outline(raw: &[DVec2], px: f64, size: f64) -> Option<(Vec<DVec2>, Vec<f64
         };
         let mut cut = 0.0;
         let sharp = (3.0 * px).max(0.8);
-        if phi > 0.0 {
+        if phi > 10f64.to_radians() {
             // the outline's points near the corner, off both sides
             let reach = (0.45 * a.len().min(b.len())).min(10.0).max(gap * 1.5);
             let dl = |l: &Side, q: DVec2| (q - l.c).perp_dot(l.d).abs();
@@ -902,6 +905,38 @@ fn fit_outline(raw: &[DVec2], px: f64, size: f64) -> Option<(Vec<DVec2>, Vec<f64
         }
         pts.push(x);
         cuts.push(cut);
+    }
+    // a side of a few cells (a jog left between two runs): its two
+    // corners made one, where the sides round it meet
+    let tiny = (3.0 * px).max(1.0);
+    loop {
+        let k = pts.len();
+        if k <= 3 {
+            break;
+        }
+        let Some(i) = (0..k).filter(|&i| pts[i].distance(pts[(i + 1) % k]) < tiny).min_by(|&i, &j| pts[i].distance(pts[(i + 1) % k]).total_cmp(&pts[j].distance(pts[(j + 1) % k]))) else {
+            break;
+        };
+        let j = (i + 1) % k;
+        let (a, b) = (pts[(i + k - 1) % k], pts[(j + 1) % k]);
+        let (d1, d2) = ((pts[i] - a).normalize_or_zero(), (b - pts[j]).normalize_or_zero());
+        let mid = (pts[i] + pts[j]) * 0.5;
+        let den = d1.perp_dot(d2);
+        let x = if den.abs() > 1e-3 {
+            let x = a + d1 * (pts[j] - a).perp_dot(d2) / den;
+            if x.distance(mid) < 2.0 * tiny {
+                x
+            } else {
+                mid
+            }
+        } else {
+            mid
+        };
+        let cut = if cuts[i].abs() >= cuts[j].abs() { cuts[i] } else { cuts[j] };
+        pts[i] = x;
+        cuts[i] = cut;
+        pts.remove(j);
+        cuts.remove(j);
     }
     if pts.len() < 3 {
         return None;

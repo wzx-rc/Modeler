@@ -22,7 +22,7 @@ const INSTRUCTIONS: &str = "Forme NURBS is a hard-surface modeller (OpenCascade 
 Here it rebuilds an AI-made mesh (the reference, a scan) as clean shapes. THE RULE (Romain): interpret, do not match. Every shape is ideal and machinable: a straight cylinder has one radius, a block stays a block (at most slightly tapered), a fillet has one constant radius (the median of what is read, never a variable radius). The scan's waves and warps are noise: say when a read varies, never follow it. Prefer round values, symmetry (the part's flanks), series (equal vents, equal rivets), shared axes and planes. \
 Work from the general to the detail: 1 primary (the big volumes: receiver, barrel block, grip; they give the part's axes and symmetry), 2 secondary (the big fillets and bevels along them, the big cuts, the double barrel), 3 tertiary (buttons, rivets, vents, small pockets laid on the primaries' faces). After each stage, the deviation says what is left: read again, finer, there. \
 Do not model the cables and hoses (Romain places them by hand): leave those zones unexplained. \
-The loop: the app measures and proposes (primary_candidates, measure), you choose, merge, idealise and add the shapes (add_features: one undo step per call), then check with deviation and capture. Units are millimetres, Y is up. A shape spec: {op: add|carve, kind: cube|cylinder|sketch, origin: the base's centre [x,y,z], x_axis: local X, up: the way it rises (local Y), cube: size [x,y,z]; cylinder: radius, height; sketch: outline [[x,z],...] in mm in its plane (x along x_axis, z along x_axis × up), corners (per point: a fillet radius > 0, a chamfer < 0, 0 sharp), height}. \
+The loop: the app measures and proposes (primary_candidates, measure), you choose, merge, idealise and add the shapes (add_features: one undo step per call), then check with deviation and capture. Secondary fillets: edge_candidates reads the scan across the part's sharp edges, add_fillets makes them by groups (one radius for edges that belong together, the biggest first; it says the size made), deviation's elements compare a block with its fillets (all by area). Units are millimetres, Y is up. A shape spec: {op: add|carve, kind: cube|cylinder|sketch, origin: the base's centre [x,y,z], x_axis: local X, up: the way it rises (local Y), cube: size [x,y,z]; cylinder: radius, height; sketch: outline [[x,z],...] in mm in its plane (x along x_axis, z along x_axis × up), corners (per point: a fillet radius > 0, a chamfer < 0, 0 sharp), height}. \
 Look before deciding: capture (view front/back/left/right/top/3d, reference solid/ghost/hidden, deviation true), then pick on the picture to know what is where. Show the user what you did with show (it moves their view). Everything can be undone (undo).";
 
 fn tools() -> Value {
@@ -57,7 +57,9 @@ fn tools() -> Value {
         { "name": "delete_features", "description": "Removes features (one undo step).", "inputSchema": { "type": "object", "properties": { "ids": { "type": "array", "items": { "type": "integer" } } }, "required": ["ids"] } },
         { "name": "undo", "description": "Undoes (or redoes) steps of the document's history.", "inputSchema": { "type": "object", "properties": { "steps": { "type": "integer" }, "redo": { "type": "boolean" } } } },
         { "name": "measure", "description": "Reads the scan at a place, as the app's tools do: kind round (a and b: rim to rim across a hole or a boss; stepped parts give tiers), slot (end to end along a slot or a raised pill), box (corner to corner across a block or a pocket), plane (a only: the flat face there, else the tangent plane). Points within 10 mm of the scan (they are moved onto it). Returns the read values and specs ready for add_features.", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["round", "slot", "box", "plane"] }, "a": v3, "b": v3, "reach": { "type": "number" } }, "required": ["kind", "a"] } },
-        { "name": "deviation", "description": "Turns the deviation on and measures the part against the scan (waits for the part): overall (share within the tolerance, median, 95th percentile), per feature, and the zones still far from it (points past zone_min mm (0.5) on one face of the part, joined over zone_cell mm cells (3), largest first, with the face and its feature: outside = the part sticks out of the scan there (a face too far out, or a band along an edge the scan rounds off: a fillet or bevel to read), inside = the part is short of the scan (a face too far in, or a detail missing: a button, a boss, a hose). range: 0.1 to 2 mm (tolerance a fifth of it, at most 0.1).", "inputSchema": { "type": "object", "properties": { "range": { "type": "number" }, "zone_min": { "type": "number" }, "zone_cell": { "type": "number" }, "limit": { "type": "integer" } } } },
+        { "name": "edge_candidates", "description": "Stage 2 (secondary): every sharp edge of the part (at least min_length mm, 3) read on the scan as Fit to scan does: the fillet radius the scan shows across it (the median of its slices, their spread lo..hi, varies), convex or concave, its point (at), ends, length and the features of its two faces; the edges the scan keeps sharp; how many could not be read. features: only the edges touching these. Takes a few seconds.", "inputSchema": { "type": "object", "properties": { "features": { "type": "array", "items": { "type": "integer" } }, "min_length": { "type": "number" }, "limit": { "type": "integer" } } } },
+        { "name": "add_fillets", "description": "Fillet (or chamfer) steps on the part's edges, named by points on them (an edge candidate's at, within 1.5 mm): one step per group (one radius, idealised: round values, one radius for edges that belong together), all in one undo step. Waits for the build and says the size made of each (made, stopped: a fillet too big for its edges stops at the largest that works, often at a short side or a small chamfer of the outline next to it).", "inputSchema": { "type": "object", "properties": { "groups": { "type": "array", "items": { "type": "object", "properties": { "at": { "type": "array", "items": v3 }, "radius": { "type": "number" }, "chamfer": { "type": "boolean" }, "name": { "type": "string" } }, "required": ["at", "radius"] } }, "label": { "type": "string" } }, "required": ["groups"] } },
+        { "name": "deviation", "description": "Turns the deviation on and measures the part against the scan (waits for the part): all by area: overall (the share of the area measured, i.e. within 5 mm of the scan: a sharp corner far out of it is not; of that the shares within the tolerance, outside and inside, the median and 95th percentile), per feature, per element with operations (a block and its fillets together: compare it with the block before them; a fillet's own faces stay outside the scan by as much as the faces it joins), in a box when one is given (box: [[x,y,z],[x,y,z]], as region), and the zones still far from it (points past zone_min mm (0.5) on one face of the part, joined over zone_cell mm cells (3), largest first, with the face and its feature: outside = the part sticks out of the scan there (a face too far out, or a band along an edge the scan rounds off: a fillet or bevel to read), inside = the part is short of the scan (a face too far in, or a detail missing: a button, a boss, a hose). range: 0.1 to 2 mm (tolerance a fifth of it, at most 0.1).", "inputSchema": { "type": "object", "properties": { "range": { "type": "number" }, "zone_min": { "type": "number" }, "zone_cell": { "type": "number" }, "limit": { "type": "integer" }, "box": { "type": "array", "items": { "type": "array", "items": { "type": "number" } } } } } },
         { "name": "capture", "description": "A picture of the 3D view alone (no interface), waits for the part (and the deviation when asked). Without view options: the user's camera.", "inputSchema": { "type": "object", "properties": cap } },
         { "name": "pick", "description": "What lies under a spot of the last capture (x, y as fractions of the picture from its top left): the part's face, its feature and point; the scan's point.", "inputSchema": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["x", "y"] } },
         { "name": "show", "description": "Changes what the user sees in the app (camera, reference solid / ghost / hidden, deviation, selection), no picture.", "inputSchema": { "type": "object", "properties": sh } }
@@ -70,9 +72,16 @@ fn port() -> u16 {
 
 /// Starts the app next to this program (once).
 fn launch(mesh: Option<&str>) -> Result<(), String> {
-    let me = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = me.parent().ok_or("no folder")?;
-    let exe = dir.join(if cfg!(windows) { "forme-nurbs.exe" } else { "forme-nurbs" });
+    // FORME_NURBS_APP: the app's path (this server copied out of the build
+    // folder, so that Claude Desktop holding it open does not stop a build),
+    // else the app next to it
+    let exe = match std::env::var_os("FORME_NURBS_APP") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            let me = std::env::current_exe().map_err(|e| e.to_string())?;
+            me.parent().ok_or("no folder")?.join(if cfg!(windows) { "forme-nurbs.exe" } else { "forme-nurbs" })
+        }
+    };
     if !exe.exists() {
         return Err(format!("the app is not running and {} was not found", exe.display()));
     }
@@ -156,13 +165,35 @@ fn call_app_waiting(method: &str, params: Value, progress: Option<&Value>) -> Re
     }
 }
 
-const TOOLS: &[&str] = &["status", "open_reference", "primary_candidates", "list_features", "add_features", "edit_feature", "delete_features", "undo", "measure", "deviation", "capture", "pick", "show"];
+const TOOLS: &[&str] = &["status", "open_reference", "primary_candidates", "list_features", "add_features", "edit_feature", "delete_features", "undo", "measure", "edge_candidates", "add_fillets", "deviation", "capture", "pick", "show"];
 
 fn call_tool(name: &str, args: Value, progress: Option<&Value>) -> Result<Vec<Value>, String> {
     if !TOOLS.contains(&name) {
         return Err(format!("unknown tool {name}"));
     }
+    let asked = (name == "add_fillets").then(|| args.get("groups").cloned()).flatten();
     let mut v = call_app_waiting(name, args, progress)?;
+    if let (Some(groups), Some(ids)) = (asked, v.get("ids").and_then(|v| v.as_array()).cloned()) {
+        // the sizes made, once built: a fillet too big for its edges stops
+        // at the largest that works
+        if let Ok(list) = call_app_waiting("list_features", json!({}), progress) {
+            let feats = list.get("features").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+            let mut made = vec![];
+            for (k, id) in ids.iter().enumerate() {
+                let Some(f) = feats.iter().find(|f| f.get("id") == Some(id)) else { continue };
+                let want = groups.get(k).and_then(|g| g.get("radius").or(g.get("size"))).and_then(|r| r.as_f64()).unwrap_or(0.0);
+                let size = f.get("size").and_then(|s| s.as_f64()).unwrap_or(0.0);
+                made.push(json!({ "id": id, "name": f.get("name"), "asked": want, "made": size, "stopped": size < want - 1e-3 }));
+            }
+            if made.iter().any(|m| m["stopped"] == json!(true)) {
+                v["stopped_note"] = json!("stopped: the largest that works on those edges. Usual causes: a short side or a small chamfer of the outline next to the edge (the fillet cannot turn round it: take the edges of the whole chain in one group, or edit the outline), the fillets of one group meeting, a face too thin for that radius.");
+            }
+            v["made"] = json!(made);
+            if let Some(e) = list.get("errors").filter(|e| e.as_array().is_some_and(|a| !a.is_empty())) {
+                v["model_errors"] = e.clone();
+            }
+        }
+    }
     if name == "capture" && v.get("png_base64").is_some() {
         let data = v["png_base64"].as_str().unwrap_or("").to_string();
         if let Some(o) = v.as_object_mut() {

@@ -161,7 +161,9 @@ fn waits_for(method: &str) -> (bool, bool, bool) {
         "capture" | "pick" => (true, true, true),
         "deviation" => (true, true, true),
         "measure" | "primary_candidates" => (false, true, false),
-        "list_features" | "status" => (false, false, false),
+        "edge_candidates" => (true, true, false),
+        "list_features" => (true, false, false),
+        "status" => (false, false, false),
         _ => (false, false, false),
     }
 }
@@ -204,6 +206,8 @@ fn handle(st: &mut AppState, r: Request) {
         "delete_features" => delete_features(st, &p),
         "undo" => Ok(undo(st, &p)),
         "measure" => measure(st, &p),
+        "edge_candidates" => edge_candidates(st, &p),
+        "add_fillets" => add_fillets(st, &p),
         "deviation" => deviation(st, &p),
         "show" => show(st, &p).map(|_| status(st)),
         "pick" => pick(st, &p),
@@ -721,6 +725,114 @@ fn measure(st: &mut AppState, p: &Value) -> Result<Value, String> {
     Ok(out)
 }
 
+/// Stage 2 (secondary): the part's sharp edges read on the scan, a fillet
+/// radius each (or why none), longest first.
+fn edge_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
+    if st.reference.is_none() {
+        return Err("no reference loaded".into());
+    }
+    let m = st.model.clone().ok_or("no part built")?;
+    let only: Option<Vec<u32>> = p.get("features").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_u64()).map(|v| v as u32).collect());
+    let min_len = p.get("min_length").and_then(|v| v.as_f64()).unwrap_or(3.0);
+    let t0 = Instant::now();
+    let mut reads = st.read_edges(only.as_deref(), min_len);
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    reads.sort_by(|a, b| b.len.total_cmp(&a.len));
+    let name = |f: Option<u32>| f.and_then(|i| st.doc.feature(i)).map(|g| g.name.clone());
+    let mut found = vec![];
+    let mut sharp = vec![];
+    let mut none = 0;
+    for e in &reads {
+        let pts = &m.edges[e.edge].pts;
+        let (a, b) = (Vec3::from(pts[0]).as_dvec3(), Vec3::from(pts[pts.len() - 1]).as_dvec3());
+        let at = crate::state::polyline_middle(pts).unwrap_or((a + b) * 0.5);
+        // where the scan's two faces lie from the part's (the slices'
+        // median): a fillet sits off the scan by as much as its faces
+        let off = |k: usize, f: &rectify_core::fillet::FilletRead| {
+            let mut o: Vec<f64> = f.slices.iter().map(|s| s.off[k]).collect();
+            o.sort_by(|x, y| x.total_cmp(y));
+            o.get(o.len() / 2).copied().unwrap_or(0.0)
+        };
+        match &e.read {
+            Ok(f) => found.push(json!({
+                "at": r3(at), "from": r3(a), "to": r3(b), "length": r(e.len), "turn_deg": r(e.turn),
+                "convex": f.convex, "radius": r(f.r), "lo": r(f.lo), "hi": r(f.hi), "slices": f.slices.len(), "tried": f.tried, "varies": f.varies(),
+                "faces_off": [r(off(0, f)), r(off(1, f))],
+                "features": [e.features[0], e.features[1]], "names": [name(e.features[0]), name(e.features[1])],
+            })),
+            Err(why) if why.contains("sharp") => sharp.push(json!({ "at": r3(at), "length": r(e.len), "features": [e.features[0], e.features[1]] })),
+            Err(_) => none += 1,
+        }
+    }
+    let limit = p.get("limit").and_then(|v| v.as_u64()).unwrap_or(60) as usize;
+    let total = found.len();
+    Ok(json!({
+        "edges_read": reads.len(), "ms": r(ms),
+        "fillets": found.into_iter().take(limit).collect::<Vec<_>>(), "fillets_total": total,
+        "sharp_on_scan": sharp.into_iter().take(limit).collect::<Vec<_>>(),
+        "not_read": none,
+        "note": "radius: the median of the slices kept (lo..hi their spread; varies: more than a quarter of it); faces_off: where the scan's two faces lie from the part's two faces there, along their normals (mm, + the scan's face further out: the part is short; − the part's face sticks out): a fillet stays off the scan by about as much, a face off by more than ~0.5 mm is the block's to fix (a primary), not the fillet's; give fillets of one radius to edges that belong together (add_fillets), the biggest first; edges not read: no scan along them, a face far from the scan, a hose",
+    }))
+}
+
+/// The model edge whose line passes nearest `p` (within `tol` mm).
+fn edge_near(st: &AppState, p: DVec3, tol: f64) -> Option<usize> {
+    let m = st.model.as_ref()?;
+    let mut best = (tol, None);
+    for (i, e) in m.edges.iter().enumerate() {
+        if e.seam || e.faces[0] < 0 || e.faces[1] < 0 {
+            continue;
+        }
+        for w in e.pts.windows(2) {
+            let (a, b) = (Vec3::from(w[0]).as_dvec3(), Vec3::from(w[1]).as_dvec3());
+            let ab = b - a;
+            let t = if ab.length_squared() > 1e-12 { ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+            let d = p.distance(a + ab * t);
+            if d < best.0 {
+                best = (d, Some(i));
+            }
+        }
+    }
+    best.1
+}
+
+/// Fillet (or chamfer) steps on edges named by points on them (an edge
+/// candidate's `at`), one step per group, all in one undo step.
+fn add_fillets(st: &mut AppState, p: &Value) -> Result<Value, String> {
+    let groups = p.get("groups").and_then(|v| v.as_array()).ok_or("groups: [{at: [[x,y,z], …], radius, chamfer?}, …]")?;
+    let mut made = vec![];
+    for (k, g) in groups.iter().enumerate() {
+        let size = g.get("radius").or(g.get("size")).and_then(|v| v.as_f64()).ok_or(format!("group {k}: radius is missing"))?;
+        if !(size > 0.0) {
+            return Err(format!("group {k}: radius must be > 0"));
+        }
+        let chamfer = g.get("chamfer").and_then(|v| v.as_bool()).unwrap_or(false);
+        let pts = g.get("at").and_then(|v| v.as_array()).ok_or(format!("group {k}: at: [[x,y,z], …]"))?;
+        let mut edges = vec![];
+        for q in pts {
+            let q = v3(q).ok_or(format!("group {k}: a point is not [x,y,z]"))?;
+            let i = edge_near(st, q, 1.5).ok_or(format!("group {k}: no edge of the part within 1.5 mm of {}", r3(q)))?;
+            let e = st.edge_ref(i).ok_or(format!("group {k}: the edge at {} has no tagged faces", r3(q)))?;
+            if !edges.contains(&e) {
+                edges.push(e);
+            }
+        }
+        made.push((size, chamfer, edges, g.get("name").and_then(|v| v.as_str()).map(|s| s.to_string())));
+    }
+    let label = p.get("label").and_then(|v| v.as_str()).unwrap_or("Fillets by Claude").to_string();
+    let mut ids = vec![];
+    st.edit(&label, |d| {
+        for (size, chamfer, edges, name) in &made {
+            let id = d.add_round(*size, *chamfer, edges.clone());
+            if let (Some(n), Some(f)) = (name, d.feature_mut(id)) {
+                f.name = n.clone();
+            }
+            ids.push(id);
+        }
+    });
+    Ok(json!({ "ids": ids, "note": "one undo step; a fillet too big for its edges stops at the largest that works (list_features gives the size made)" }))
+}
+
 /// The deviation: on, its numbers overall and per feature, and the zones
 /// still far from the scan (the next stage's work).
 fn deviation(st: &mut AppState, p: &Value) -> Result<Value, String> {
@@ -742,41 +854,66 @@ fn deviation(st: &mut AppState, p: &Value) -> Result<Value, String> {
     };
     let tol = d.tol;
     let feat_of = |face: u32| m.faces.get(face as usize).and_then(|f| f.tag).map(|t| t.feature);
-    // per feature
-    let mut per: std::collections::BTreeMap<u32, Vec<f32>> = Default::default();
+    // every statistic is weighted by area (the kernel cuts a fillet in many
+    // small triangles: counted by point it would weigh more than a face)
+    let w = crate::scan::dev_weights(&d.verts);
+    let bx = p.get("box").and_then(|v| v.as_array()).and_then(|a| Some((v3(a.first()?)?, v3(a.get(1)?)?)));
+    let mut per: std::collections::BTreeMap<u32, Vec<(f32, f64)>> = Default::default();
+    let mut elem: std::collections::BTreeMap<u32, Vec<(f32, f64)>> = Default::default();
+    let mut region: Vec<(f32, f64)> = vec![];
     let mut far: Vec<(DVec3, f32, u32)> = vec![];
     let mut on_face: std::collections::HashMap<u32, usize> = Default::default();
     let zone_min = p.get("zone_min").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
-    for v in &d.verts {
+    let mut element: std::collections::HashMap<u32, u32> = Default::default();
+    for (v, w) in d.verts.iter().zip(&w) {
+        let q = Vec3::from(v.pos).as_dvec3();
+        if let Some((lo, hi)) = bx {
+            if q.cmplt(lo.min(hi)).any() || q.cmpgt(lo.max(hi)).any() {
+                continue;
+            }
+            region.push((v.dev, *w));
+        }
+        if let Some(f) = feat_of(v.face) {
+            per.entry(f).or_default().push((v.dev, *w));
+            let e = *element.entry(f).or_insert_with(|| st.element_of(f));
+            elem.entry(e).or_default().push((v.dev, *w));
+        }
         if v.dev == crate::render::NO_DEV {
             continue;
         }
-        let f = feat_of(v.face);
-        if let Some(f) = f {
-            per.entry(f).or_default().push(v.dev);
-        }
         *on_face.entry(v.face).or_default() += 1;
         if v.dev.abs() > zone_min {
-            far.push((Vec3::from(v.pos).as_dvec3(), v.dev, v.face));
+            far.push((q, v.dev, v.face));
         }
     }
-    let stats = |ds: &[f32]| {
-        let n = ds.len();
-        let within = ds.iter().filter(|x| (x.abs() as f64) <= tol).count();
-        let outside = ds.iter().filter(|x| (**x as f64) > tol).count();
-        let inside = ds.iter().filter(|x| (**x as f64) < -tol).count();
-        let mut a: Vec<f32> = ds.iter().map(|x| x.abs()).collect();
-        a.sort_by(|x, y| x.total_cmp(y));
-        let q = |t: f64| a.get(((n.max(1) - 1) as f64 * t).round() as usize).copied().unwrap_or(0.0) as f64;
-        json!({ "points": n, "within": r(within as f64 / n.max(1) as f64), "outside": r(outside as f64 / n.max(1) as f64), "inside": r(inside as f64 / n.max(1) as f64), "median": r(q(0.5)), "p95": r(q(0.95)) })
+    let stats = |ds: &mut Vec<(f32, f64)>| {
+        let s = crate::scan::dev_stats(ds, tol);
+        json!({ "area": r(s.area), "measured": r(s.reach), "within": r(s.within), "outside": r(s.outside), "inside": r(s.inside), "median": r(s.p50), "p95": r(s.p95), "mean": r(s.mean) })
     };
     let mut features = vec![];
-    for (id, ds) in per.iter() {
+    for (id, ds) in per.iter_mut() {
         let name = st.doc.feature(*id).map(|f| f.name.clone()).unwrap_or_default();
         let mut s = stats(ds);
         s["id"] = json!(id);
         s["name"] = json!(name);
+        if element.get(id).is_some_and(|e| e != id) {
+            s["element"] = json!(element[id]);
+        }
         features.push(s);
+    }
+    // an element with operations: its faces and theirs together (a block
+    // and its fillets: compare with the block before them)
+    let mut elements = vec![];
+    for (id, ds) in elem.iter_mut() {
+        let ops: Vec<u32> = element.iter().filter(|(f, e)| *e == id && *f != id).map(|(f, _)| *f).collect();
+        if ops.is_empty() {
+            continue;
+        }
+        let mut s = stats(ds);
+        s["id"] = json!(id);
+        s["name"] = json!(st.doc.feature(*id).map(|f| f.name.clone()).unwrap_or_default());
+        s["operations"] = json!(ops);
+        elements.push(s);
     }
     // the zones: far points of one face of the part, one side, joined
     // over 3 mm cells (a face too far out, a band along an edge the scan
@@ -839,13 +976,19 @@ fn deviation(st: &mut AppState, p: &Value) -> Result<Value, String> {
     }
     zones.sort_by(|a, b| b.0.cmp(&a.0));
     let limit = p.get("limit").and_then(|v| v.as_u64()).unwrap_or(15) as usize;
-    Ok(json!({
+    let a = d.area;
+    let mut out = json!({
         "tolerance": r(tol), "range": r(st.dev_range),
-        "points": d.near, "within": r(d.within as f64 / d.near.max(1) as f64), "median": r(d.p50), "p95": r(d.p95),
+        "area": r(a.area), "measured": r(a.reach), "within": r(a.within), "outside": r(a.outside), "inside": r(a.inside), "median": r(a.p50), "p95": r(a.p95), "mean": r(a.mean),
         "features": features,
+        "elements": elements,
         "zones": zones.into_iter().take(limit).map(|z| z.1).collect::<Vec<_>>(),
-        "note": "distances in mm, + outside the scan; past 5 mm a point is not measured (faces inside the scan, parts beside it)",
-    }))
+        "note": "by area (mm²); mean: over the whole area, a point past 5 mm counted at 5 (falls as the part comes closer); distances in mm, + outside the scan; past 5 mm a point is not measured (measured: the share of the area within 5 mm; a sharp corner far out of the scan, faces inside it, parts beside it are not)",
+    });
+    if bx.is_some() {
+        out["region"] = stats(&mut region);
+    }
+    Ok(out)
 }
 
 /// The camera a request names (or the user's), framed on what it asks.
