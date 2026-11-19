@@ -7,7 +7,7 @@ use crate::camera::OrbitCamera;
 use crate::pick::{Hit, Picker};
 use crate::settings::Settings;
 use crate::view::View;
-use glam::{DQuat, DVec2, DVec3, Vec3};
+use glam::{DQuat, DVec3, Vec3};
 use nurbs_kernel::client::{Kernel, Status};
 use nurbs_kernel::doc::PrimKind;
 use nurbs_kernel::{Doc, EdgeRef, FaceRef, FaceTag, Feature, FeatureId, Model, Op, Prim, Profile};
@@ -1841,47 +1841,94 @@ impl AppState {
         }
         // on the scan: the scan's points inside the outline (a grid of
         // about 8 × 8 over its box, each found along the normal)
+        // on the scan: its heights on a grid over the outline's box (a
+        // little past it), each found along the normal from above the
+        // outline; the kernel makes the surface through them and trims it
         let mut inner = vec![];
-        if self.surface_on_scan {
+        let mut grid = None;
+        // a point put on the scan (the mode may have changed while drawing):
+        // the surface follows the scan
+        if self.surface_on_scan || k.free.iter().any(|f| f.is_some()) {
             if let Some(r) = self.reference.as_ref() {
-                let poly: Vec<[f64; 2]> = local.iter().map(|q| [q.x, q.z]).collect();
-                let step = size / 8.0;
+                let cells = |len: f64| ((len / size * 24.0).round() as usize).clamp(6, 40);
+                let (nx, nz) = (cells(hi.x - lo.x), cells(hi.z - lo.z));
+                let pad = size * 0.04;
+                let (x0, x1, z0, z1) = (lo.x - pad, hi.x + pad, lo.z - pad, hi.z + pad);
+                let top = hi.y + size * 0.25;
                 let reach = size * 0.6;
-                let inside = |x: f64, z: f64| {
-                    let mut c = false;
-                    let m = poly.len();
-                    for i in 0..m {
-                        let (a, b) = (poly[i], poly[(i + 1) % m]);
-                        if (a[1] > z) != (b[1] > z) && x < a[0] + (z - a[1]) / (b[1] - a[1]) * (b[0] - a[0]) {
-                            c = !c;
+                let mut hs: Vec<Option<f64>> = vec![None; nx * nz];
+                for i in 0..nx {
+                    for k in 0..nz {
+                        let x = x0 + (x1 - x0) * i as f64 / (nx - 1) as f64;
+                        let z = z0 + (z1 - z0) * k as f64 / (nz - 1) as f64;
+                        let o = c + rot * DVec3::new(x, top, z);
+                        if let Some((h, _)) = r.hit(o, -n) {
+                            let l = inv * (h - c);
+                            if l.y.abs() < reach {
+                                hs[i * nz + k] = Some(l.y);
+                            }
                         }
                     }
-                    c
-                };
-                // the points' own heights, to keep the scan's near side
-                let mut x = lo.x + step * 0.5;
-                while x < hi.x {
-                    let mut z = lo.z + step * 0.5;
-                    while z < hi.z {
-                        // not too near the outline: it holds the edges
-                        let near_edge = (0..poly.len()).any(|i| {
-                            let (a, b) = (DVec2::from(poly[i]), DVec2::from(poly[(i + 1) % poly.len()]));
-                            let q = DVec2::new(x, z);
-                            let t = ((q - a).dot(b - a) / (b - a).length_squared().max(1e-12)).clamp(0.0, 1.0);
-                            q.distance(a + (b - a) * t) < step * 0.5
-                        });
-                        if inside(x, z) && !near_edge {
-                            let o = c + rot * DVec3::new(x, reach, z);
-                            if let Some((h, _)) = r.hit(o, -n) {
-                                let l = inv * (h - c);
-                                if l.y.abs() < reach {
-                                    inner.push(l);
+                }
+                // the cells the scan missed: their neighbours' mean, spread
+                if hs.iter().any(|h| h.is_some()) {
+                    for _ in 0..(nx + nz) {
+                        if hs.iter().all(|h| h.is_some()) {
+                            break;
+                        }
+                        let was = hs.clone();
+                        for i in 0..nx {
+                            for k in 0..nz {
+                                if was[i * nz + k].is_some() {
+                                    continue;
+                                }
+                                let mut sum = 0.0;
+                                let mut cnt = 0.0;
+                                for (di, dk) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                                    let (a, b) = (i as i64 + di, k as i64 + dk);
+                                    if a >= 0 && b >= 0 && (a as usize) < nx && (b as usize) < nz {
+                                        if let Some(v) = was[a as usize * nz + b as usize] {
+                                            sum += v;
+                                            cnt += 1.0;
+                                        }
+                                    }
+                                }
+                                if cnt > 0.0 {
+                                    hs[i * nz + k] = Some(sum / cnt);
                                 }
                             }
                         }
-                        z += step;
                     }
-                    x += step;
+                    // smoothed a little: the scan's noise and small steps
+                    // are not the surface's
+                    let mut hv: Vec<f64> = hs.iter().map(|h| h.unwrap_or(0.0)).collect();
+                    for _ in 0..2 {
+                        let was = hv.clone();
+                        for i in 0..nx {
+                            for k in 0..nz {
+                                let (mut sum, mut cnt) = (0.0, 0.0);
+                                for di in -1i64..=1 {
+                                    for dk in -1i64..=1 {
+                                        let (a, b) = (i as i64 + di, k as i64 + dk);
+                                        if a >= 0 && b >= 0 && (a as usize) < nx && (b as usize) < nz {
+                                            let w = if di == 0 && dk == 0 { 4.0 } else if di == 0 || dk == 0 { 2.0 } else { 1.0 };
+                                            sum += was[a as usize * nz + b as usize] * w;
+                                            cnt += w;
+                                        }
+                                    }
+                                }
+                                hv[i * nz + k] = sum / cnt;
+                            }
+                        }
+                    }
+                    for i in 0..nx {
+                        for k in 0..nz {
+                            let x = x0 + (x1 - x0) * i as f64 / (nx - 1) as f64;
+                            let z = z0 + (z1 - z0) * k as f64 / (nz - 1) as f64;
+                            inner.push(DVec3::new(x, hv[i * nz + k], z));
+                        }
+                    }
+                    grid = Some([nx, nz]);
                 }
             }
         }
@@ -1893,7 +1940,7 @@ impl AppState {
             if let Some(f) = d.feature_mut(id) {
                 f.name = f.name.replace("Path", "Surface");
                 f.material = mat;
-                f.sheet = Some(nurbs_kernel::Sheet { pts: local, inner });
+                f.sheet = Some(nurbs_kernel::Sheet { pts: local, inner, grid });
             }
         });
         self.selection = vec![id];

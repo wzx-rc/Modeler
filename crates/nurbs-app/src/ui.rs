@@ -1320,9 +1320,10 @@ fn surface_options(ui: &mut Ui, st: &mut AppState) {
             }
             ui.painter().text(r.center(), Align2::CENTER_CENTER, name, mono(11.0), if on { on_accent() } else { TEXT2() });
             let tip = if c { "Each point is put on the scan under the pointer; the surface follows the scan inside the outline" } else { "The points are locked on the plane under the first one (a face, the scan's face or the ground): a flat surface" };
-            if resp.on_hover_text(tip).clicked() && st.surface_on_scan != c {
+            // switched while drawing: the points placed stay, the next
+            // ones are put the new way (Romain 19 nov., 22 h 03)
+            if resp.on_hover_text(&format!("{tip} · Tab: switch, even while drawing")).clicked() && st.surface_on_scan != c {
                 st.surface_on_scan = c;
-                st.sketch = None;
             }
         }
     });
@@ -1428,10 +1429,11 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     // the second column, beside the panel
     let feats = st.doc.features.clone();
     let ops_of = |st: &AppState, id: FeatureId| feats.iter().filter(|g| !g.is_solid() && !g.is_path() && st.owner_of(g.id) == Some(id)).count();
-    let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 4] = [
+    let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 5] = [
         ("PRIMITIVES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }))),
         ("SHAPES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Profile { .. }))),
         ("PATHS", Box::new(|f: &Feature| f.is_path())),
+        ("SURFACES", Box::new(|f: &Feature| f.is_sheet())),
         ("OPERATIONS", Box::new(|_: &Feature| false)),
     ];
     let focus = st.outline_element();
@@ -1443,7 +1445,7 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
         reference_rows(ui, st);
         for (gi, (title, keep)) in groups.iter().enumerate() {
             // the last group: operations whose shape cannot be told
-            let members: Vec<&Feature> = if gi == 3 { feats.iter().filter(|f| !f.is_solid() && !f.is_path() && st.owner_of(f.id).is_none()).collect() } else { feats.iter().filter(|f| keep(f)).collect() };
+            let members: Vec<&Feature> = if gi == 4 { feats.iter().filter(|f| !f.is_solid() && !f.is_path() && st.owner_of(f.id).is_none()).collect() } else { feats.iter().filter(|f| keep(f)).collect() };
             if members.is_empty() {
                 continue;
             }
@@ -2380,6 +2382,19 @@ fn files_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 // ----------------------------------------------------------- shortcuts
 
 fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
+    // the Surface's On plane / On scan, even in the middle of an outline
+    // (Tab: egui's focus moving to a field is undone)
+    if st.tool == Tool::Create(PrimKind::Surface) && st.creation.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Tab) && !i.modifiers.any()) {
+        ctx.memory_mut(|m| {
+            if let Some(id) = m.focused() {
+                m.surrender_focus(id);
+            }
+        });
+        st.surface_on_scan = !st.surface_on_scan;
+        let on = if st.surface_on_scan { "Next points: on the scan" } else { "Next points: on the plane" };
+        st.toast(on, false);
+        return;
+    }
     if ctx.egui_wants_keyboard_input() {
         return;
     }

@@ -598,6 +598,10 @@ pub struct Sheet {
     pub pts: Vec<DVec3>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inner: Vec<DVec3>,
+    /// On the scan: `inner` is a grid of nx × nz points (x major) over the
+    /// outline's box, the surface follows its heights.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<[usize; 2]>,
 }
 
 impl Feature {

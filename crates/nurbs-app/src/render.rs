@@ -150,6 +150,12 @@ struct MOut {
 @vertex fn vs_mesh(i: MIn) -> MOut {
     var o: MOut;
     o.clip = project(i.pos);
+    // a surface with no thickness laid on the scan: pulled a little
+    // towards the eye so the scan under it does not hide it
+    if (i.face != 0xFFFFFFFFu && (faces[i.face].flags & 4u) != 0u) {
+        let d = u.eye.xyz - i.pos;
+        o.clip = project(i.pos + d * 0.02);
+    }
     o.nrm = i.nrm;
     o.wpos = i.pos;
     o.face = i.face;
@@ -348,6 +354,8 @@ struct Uniforms {
 /// Face flags read by the shader.
 pub const FACE_SELECTED: u32 = 1;
 pub const FACE_HOVERED: u32 = 2;
+/// A surface with no thickness (drawn a little towards the eye).
+pub const FACE_SHEET: u32 = 4;
 
 /// One face as the shader reads it: its material (linear colour) and flags.
 #[repr(C)]
@@ -492,7 +500,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
                 },

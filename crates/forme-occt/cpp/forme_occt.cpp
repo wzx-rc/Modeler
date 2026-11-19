@@ -58,6 +58,10 @@
 #include <BRep_Tool.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepFill_Filling.hxx>
+#include <GeomAPI_PointsToBSplineSurface.hxx>
+#include <GCE2d_MakeSegment.hxx>
+#include <TColStd_Array2OfReal.hxx>
+#include <ShapeFix_Face.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <GC_MakeArcOfCircle.hxx>
@@ -4875,6 +4879,73 @@ FShape* focc_fill(const double* xyz, int n, const double* inner, int m) {
             if (f.Orientation() == TopAbs_REVERSED) sn.Reverse();
             if (sn.Dot(nw) < 0) f.Reverse();
             return wrap(f);
+        },
+        (FShape*)nullptr);
+}
+
+// A surface following a height field (the scan under an outline): in the
+// frame `fr` (origin, x, y = up, z; 12 numbers), heights `h` (y) on an
+// nx × nz grid from (x0, z0) to (x1, z1), approximated by a BSpline whose
+// (u, v) are x and z; trimmed by the outline `poly` (n points: x, z), its
+// sides straight in (x, z). Faces up (+y).
+FShape* focc_sheet_grid(const double* fr, int nx, int nz, double x0, double z0, double x1, double z1, const double* h, const double* poly, int n) {
+    return guard(
+        [&]() -> FShape* {
+            if (nx < 2 || nz < 2 || n < 3) {
+                set_err("a surface needs a grid and three points");
+                return nullptr;
+            }
+            // in the local frame (X = x, Y = z, Z = x × z = -y), u = x, v = z
+            TColStd_Array2OfReal zs(1, nx, 1, nz);
+            for (int i = 0; i < nx; i++)
+                for (int k = 0; k < nz; k++) zs(i + 1, k + 1) = -h[i * nz + k];
+            GeomAPI_PointsToBSplineSurface ap;
+            // through the grid itself: a plain bicubic, one span per cell
+            // (an approximation to a tolerance added knots without end on
+            // the scan's noise, and the mesh went to a million triangles)
+            ap.Interpolate(zs, x0, (x1 - x0) / (nx - 1), z0, (z1 - z0) / (nz - 1));
+            if (!ap.IsDone()) {
+                set_err("the scan under the outline could not be followed");
+                return nullptr;
+            }
+            opencascade::handle<Geom_BSplineSurface> surf = ap.Surface();
+            BRepBuilderAPI_MakeWire mw;
+            int edges = 0;
+            for (int i = 0; i < n; i++) {
+                int j = (i + 1) % n;
+                gp_Pnt2d a(poly[2 * i], poly[2 * i + 1]), b(poly[2 * j], poly[2 * j + 1]);
+                if (a.Distance(b) < 1e-6) continue;
+                GCE2d_MakeSegment seg(a, b);
+                if (!seg.IsDone()) continue;
+                BRepBuilderAPI_MakeEdge me(seg.Value(), surf);
+                if (!me.IsDone()) continue;
+                mw.Add(me.Edge());
+                edges++;
+            }
+            if (edges < 3 || !mw.IsDone()) {
+                set_err("the outline could not be laid on the scan");
+                return nullptr;
+            }
+            TopoDS_Wire w = mw.Wire();
+            BRepLib::BuildCurves3d(w);
+            BRepBuilderAPI_MakeFace mf(surf, w, Standard_True);
+            if (!mf.IsDone()) {
+                set_err("the outline could not be filled");
+                return nullptr;
+            }
+            ShapeFix_Face fix(mf.Face());
+            fix.Perform();
+            TopoDS_Face f = fix.Face();
+            // its normal: x × z = -y here: turned to face +y
+            f.Reverse();
+            gp_Pnt o(fr[0], fr[1], fr[2]);
+            gp_Dir dx(fr[3], fr[4], fr[5]), dz(fr[9], fr[10], fr[11]);
+            gp_Dir dn = dx.Crossed(dz);
+            gp_Trsf t;
+            t.SetTransformation(gp_Ax3(o, dn, dx));
+            t.Invert();
+            BRepBuilderAPI_Transform tr(f, t, Standard_True);
+            return wrap(tr.Shape());
         },
         (FShape*)nullptr);
 }

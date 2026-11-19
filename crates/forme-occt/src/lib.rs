@@ -40,6 +40,7 @@ extern "C" {
     fn focc_disc(o: *const c_double, n: *const c_double, r: c_double) -> *mut FShape;
     fn focc_fill(xyz: *const c_double, n: c_int, inner: *const c_double, m: c_int) -> *mut FShape;
     fn focc_compound(a: *const FShape, b: *const FShape) -> *mut FShape;
+    fn focc_sheet_grid(fr: *const c_double, nx: c_int, nz: c_int, x0: c_double, z0: c_double, x1: c_double, z1: c_double, h: *const c_double, poly: *const c_double, n: c_int) -> *mut FShape;
     fn focc_extrude_edge(s: *const FShape, index: c_int, v: *const c_double, tag: i64) -> *mut FShape;
     fn focc_thicken(s: *const FShape, t: c_double, salt: i64) -> *mut FShape;
     fn focc_round(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
@@ -503,6 +504,17 @@ impl Shape {
         let xyz: Vec<f64> = pts.iter().flatten().copied().collect();
         let iv: Vec<f64> = inner.iter().flatten().copied().collect();
         shape(unsafe { focc_fill(xyz.as_ptr(), pts.len() as c_int, iv.as_ptr(), inner.len() as c_int) })
+    }
+    /// A surface following heights `h` (nx × nz, x major) over the box
+    /// (x0, z0)-(x1, z1) of the frame `fr` (origin, x, y up, z), trimmed by
+    /// the outline `poly` (x, z in that frame).
+    #[allow(clippy::too_many_arguments)]
+    pub fn sheet_grid(fr: &[f64; 12], nx: usize, nz: usize, lo: [f64; 2], hi: [f64; 2], h: &[f64], poly: &[[f64; 2]]) -> Result<Shape, String> {
+        if h.len() != nx * nz {
+            return Err("the grid's heights do not match it".into());
+        }
+        let pv: Vec<f64> = poly.iter().flatten().copied().collect();
+        shape(unsafe { focc_sheet_grid(fr.as_ptr(), nx as c_int, nz as c_int, lo[0], lo[1], hi[0], hi[1], h.as_ptr(), pv.as_ptr(), poly.len() as c_int) })
     }
     /// This shape and `other` side by side, no boolean (a sheet next to the
     /// part), the faces' tags kept.

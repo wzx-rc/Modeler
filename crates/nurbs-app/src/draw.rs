@@ -122,6 +122,8 @@ impl Drawer {
                             _ => 0,
                         }
                     };
+                    let sheet = f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| x.is_sheet()).unwrap_or(false);
+                    let flags = if sheet { flags | crate::render::FACE_SHEET } else { flags };
                     let mat = materials::get(st.face_material(i));
                     // Quads view: the fillet and chamfer bands in orange
                     let band = self.quads_shown && f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| x.round.is_some()).unwrap_or(false);

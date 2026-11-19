@@ -1192,10 +1192,10 @@ pub fn hint(st: &AppState) -> String {
             Some(_) => "Enter: an open path · First point: a closed one · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Create(PrimKind::Surface)) => match &st.sketch {
-            None if st.surface_on_scan => "On scan: click the first point on the scan · Options window: On plane / On scan".into(),
-            None => "Click: the first point, on a face, the scan's face or the ground (its plane holds the others) · Options window: On plane / On scan".into(),
+            None if st.surface_on_scan => "On scan: click the first point on the scan · Tab: On plane / On scan".into(),
+            None => "Click: the first point, on a face, the scan's face or the ground (its plane holds the others) · Tab: On plane / On scan".into(),
             Some(k) if k.pts.len() < 3 => "Click or drag: a point · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
-            Some(_) => "First point or Enter: close it, filled with a surface with no thickness · Ctrl + drag a point: its fillet · Ctrl + Z: the last point off".into(),
+            Some(_) => "First point or Enter: close it, filled with a surface with no thickness · Ctrl + drag a point: its fillet · Ctrl + Z: the last point off · Tab: the next points on the plane / on the scan".into(),
         },
         (None, Tool::Create(PrimKind::Profile)) => match &st.sketch {
             None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),

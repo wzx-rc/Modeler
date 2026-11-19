@@ -377,6 +377,7 @@ fn apply_spec(spec: &Value, base: Option<&Feature>) -> Result<(Op, Prim, DVec3, 
             Prim::Box { .. } => "cube".to_string(),
             Prim::Cylinder { .. } => "cylinder".to_string(),
             Prim::Profile { .. } => "sketch".to_string(),
+            Prim::Path { .. } if f.is_sheet() => "surface".to_string(),
             Prim::Path { .. } => "path".to_string(),
         })
     });

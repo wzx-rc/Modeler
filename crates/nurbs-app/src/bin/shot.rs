@@ -1072,6 +1072,76 @@ fn main() {
         eprintln!("  model errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
     }
 
+    if want("surface-scan") {
+        // on the gun's grip, on the scan (Tab switches in the middle of
+        // the outline: two points on the plane), one corner filleted
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        if std::path::Path::new(&path).exists() {
+            let mut d = Doc::default();
+            d.reference = Some(nurbs_kernel::RefMesh { path: path.clone() });
+            h.reset(d, "Gun scan");
+            h.step();
+            let end = Instant::now() + Duration::from_secs(180);
+            while h.st.ref_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            h.settle();
+            h.st.toast = None;
+            let refm = h.st.reference.clone().expect("reference");
+            let side = |x: f64, y: f64| -> Vec3 { refm.hit(DVec3::new(x, y, 100.0), DVec3::new(0.0, 0.0, -1.0)).map(|q| q.0.as_vec3()).unwrap_or(Vec3::new(x as f32, y as f32, 12.0)) };
+            h.st.camera.yaw = 0.35;
+            h.st.camera.pitch = 0.25;
+            h.st.camera.frame(Vec3::new(-60.0, 5.0, 0.0), Vec3::new(-15.0, 40.0, 20.0));
+            h.steps(2);
+            h.key(egui::Key::U);
+            h.key(egui::Key::Tab);
+            eprintln!("  on scan: {}", h.st.surface_on_scan);
+            for (x, y) in [(-48.0, 14.0), (-27.0, 14.0), (-27.0, 30.0)] {
+                let p = h.screen_of(side(x, y));
+                h.move_to(p);
+                h.click(p);
+            }
+            h.key(egui::Key::Tab);
+            let p = h.screen_of(side(-48.0, 30.0));
+            h.move_to(p);
+            h.click(p);
+            eprintln!("  points {:?} free {:?}", h.st.sketch.as_ref().map(|k| k.pts.len()), h.st.sketch.as_ref().map(|k| k.free.iter().map(|f| f.is_some()).collect::<Vec<_>>()));
+            h.hold(Modifiers::CTRL);
+            let a = h.screen_of(side(-27.0, 14.0));
+            let b = h.screen_of(side(-27.0, 19.0));
+            h.drag(a, b, 8, false);
+            h.steps(2);
+            h.press(b, false);
+            h.hold(Modifiers::NONE);
+            h.steps(2);
+            h.shot("zero-surface-scan-1-drawing");
+            let t = Instant::now();
+            h.key(egui::Key::Enter);
+            h.settle();
+            eprintln!("  built in {:.1} s", t.elapsed().as_secs_f64());
+            h.shot("zero-surface-scan-2-done");
+            let f = h.st.doc.features.iter().find(|f| f.is_sheet()).cloned();
+            eprintln!("  sheet {:?} grid {:?}", f.as_ref().map(|f| f.name.clone()), f.as_ref().and_then(|f| f.sheet.as_ref().map(|s| s.grid)));
+            if let Ok(dir) = std::env::var("FORME_SHEET_DUMP") {
+                let _ = std::fs::write(format!("{dir}/sheet-doc.json"), serde_json::to_string(&h.st.doc).unwrap_or_default());
+            }
+            eprintln!("  faces {:?} tris {:?} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.triangles.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+            // selectable in Object mode
+            h.key(egui::Key::Q);
+            h.st.selection.clear();
+            let c = h.screen_of(side(-37.0, 22.0));
+            h.click(c);
+            h.steps(2);
+            eprintln!("  selected {:?}", h.st.selection);
+            h.shot("zero-surface-scan-3-selected");
+            h.st.ref_shown = false;
+            h.steps(2);
+            h.shot("zero-surface-scan-4-alone");
+            h.st.ref_shown = true;
+        }
+    }
+
     if want("rdrag") {
         // from Forme Rectify: a drag on an edge makes its fillet, the top
         // bar's option a chamfer, Ctrl + B, a drag on a sketch corner

@@ -819,7 +819,19 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         let pts: Vec<[f64; 3]> = sh.pts.iter().map(|q| m.transform_point3(*q).to_array()).collect();
         let inner: Vec<[f64; 3]> = sh.inner.iter().map(|q| m.transform_point3(*q).to_array()).collect();
         mark(&format!("sheet:{}:0", f.id));
-        let made = Shape::fill(&pts, &inner).and_then(|mut s| {
+        let filled = match sh.grid {
+            // on the scan: a surface through the grid's heights, trimmed
+            Some([nx, nz]) if sh.inner.len() == nx * nz && nx >= 2 && nz >= 2 => {
+                let (a, y, z, o) = (m.x_axis.truncate(), m.y_axis.truncate(), m.z_axis.truncate(), m.w_axis.truncate());
+                let fr = [o.x, o.y, o.z, a.x, a.y, a.z, y.x, y.y, y.z, z.x, z.y, z.z];
+                let h: Vec<f64> = sh.inner.iter().map(|q| q.y).collect();
+                let (lo, hi) = (sh.inner[0], sh.inner[nx * nz - 1]);
+                let poly: Vec<[f64; 2]> = sh.pts.iter().map(|q| [q.x, q.z]).collect();
+                Shape::sheet_grid(&fr, nx, nz, [lo.x, lo.z], [hi.x, hi.z], &h, &poly)
+            }
+            _ => Shape::fill(&pts, &inner),
+        };
+        let made = filled.and_then(|mut s| {
             s.set_tags(&vec![FaceTag { feature: f.id, sub: 0 }.pack(); s.face_count().max(1)]);
             match &stage.shape {
                 Some(acc) => acc.compound(&s),
@@ -1625,11 +1637,12 @@ mod tests {
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let m0 = build(&d, true, false, &[], &mut Cache::default());
         let flat = d.add(Op::Add, Prim::Path { x: 20.0, z: 20.0 }, DVec3::new(0.0, 30.0, 0.0), DQuat::IDENTITY);
-        d.feature_mut(flat).unwrap().sheet = Some(crate::doc::Sheet { pts: vec![DVec3::new(-10.0, 0.0, -10.0), DVec3::new(10.0, 0.0, -10.0), DVec3::new(10.0, 0.0, 10.0), DVec3::new(-5.0, 0.0, 12.0), DVec3::new(-10.0, 0.0, 0.0)], inner: vec![] });
+        d.feature_mut(flat).unwrap().sheet = Some(crate::doc::Sheet { pts: vec![DVec3::new(-10.0, 0.0, -10.0), DVec3::new(10.0, 0.0, -10.0), DVec3::new(10.0, 0.0, 10.0), DVec3::new(-5.0, 0.0, 12.0), DVec3::new(-10.0, 0.0, 0.0)], inner: vec![], grid: None });
         let bent = d.add(Op::Add, Prim::Path { x: 20.0, z: 20.0 }, DVec3::new(40.0, 30.0, 0.0), DQuat::IDENTITY);
         d.feature_mut(bent).unwrap().sheet = Some(crate::doc::Sheet {
             pts: vec![DVec3::new(-10.0, 0.0, -10.0), DVec3::new(10.0, 2.0, -10.0), DVec3::new(10.0, 0.0, 10.0), DVec3::new(-10.0, 2.0, 10.0)],
             inner: vec![DVec3::new(0.0, 5.0, 0.0)],
+            grid: None,
         });
         let t = std::time::Instant::now();
         let m = build(&d, true, false, &[], &mut Cache::default());
@@ -1643,6 +1656,54 @@ mod tests {
         let top = DVec3::new(40.0, 35.0, 0.0);
         let near = m.positions.iter().map(|p| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64).distance(top)).fold(f64::MAX, f64::min);
         assert!(near < 1.0, "{near}");
+    }
+
+    #[test]
+    #[ignore]
+    fn sheet_probe() {
+        // FORME_SHEET_DOC = a document saved by the harness (surface-scan)
+        let Ok(p) = std::env::var("FORME_SHEET_DOC") else { return };
+        let d: Doc = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+        let t = std::time::Instant::now();
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        eprintln!("{:.0} ms, {} faces, {} triangles, errors {:?}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.triangles.len(), m.errors);
+    }
+
+    #[test]
+    fn surface_on_a_height_field() {
+        // a surface laid on a bump (heights on a 20 × 20 grid), its outline
+        // a pentagon, its frame turned: one face, its points on the bump
+        let mut d = Doc::default();
+        let rot = DQuat::from_rotation_x(0.4);
+        let id = d.add(Op::Add, Prim::Path { x: 40.0, z: 40.0 }, DVec3::new(5.0, 10.0, 0.0), rot);
+        let hf = |x: f64, z: f64| 6.0 * (-(x * x + z * z) / 300.0).exp();
+        let (nx, nz) = (20, 20);
+        let mut inner = vec![];
+        for i in 0..nx {
+            for k in 0..nz {
+                let (x, z) = (-22.0 + 44.0 * i as f64 / 19.0, -22.0 + 44.0 * k as f64 / 19.0);
+                inner.push(DVec3::new(x, hf(x, z), z));
+            }
+        }
+        let pts: Vec<DVec3> = (0..5).map(|k| {
+            let a = k as f64 * std::f64::consts::TAU / 5.0;
+            let (x, z) = (18.0 * a.cos(), 18.0 * a.sin());
+            DVec3::new(x, hf(x, z), z)
+        }).collect();
+        d.feature_mut(id).unwrap().sheet = Some(crate::doc::Sheet { pts, inner, grid: Some([nx, nz]) });
+        let t = std::time::Instant::now();
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        eprintln!("{:.0} ms, {} triangles", t.elapsed().as_secs_f64() * 1e3, m.triangles.len());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.len(), 1);
+        assert!(m.triangles.len() > 20);
+        let f = d.feature(id).unwrap();
+        let inv = f.matrix().inverse();
+        let worst = m.positions.iter().map(|p| {
+            let l = inv.transform_point3(DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64));
+            (l.y - hf(l.x, l.z)).abs()
+        }).fold(0.0, f64::max);
+        assert!(worst < 0.1, "{worst}");
     }
 
     #[test]
