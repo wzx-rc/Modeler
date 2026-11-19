@@ -913,6 +913,41 @@ fn main() {
         eprintln!("  selected {:?}, model errors {:?}", h.st.selection, h.st.model.as_ref().map(|m| m.errors.clone()));
     }
 
+    if want("pen") {
+        // from Forme Rectify's Pen: Shift locks a side to 0°, 45°, 90°,
+        // Ctrl + drag from a point placed sets its fillet
+        h.reset(test_part(), "Test part");
+        h.st.camera.frame(Vec3::new(-60.0, 0.0, 10.0), Vec3::new(20.0, 0.0, 50.0));
+        h.steps(2);
+        h.key(egui::Key::P);
+        let g = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 0.0, z));
+        h.click(g(&h, -50.0, 20.0));
+        h.click(g(&h, -20.0, 20.0));
+        // a side drawn a little off the diagonal, Shift held: 45°
+        h.hold(Modifiers::SHIFT);
+        h.move_to(g(&h, -5.0, 37.0));
+        h.click(g(&h, -5.0, 37.0));
+        h.hold(Modifiers::NONE);
+        h.click(g(&h, 15.0, 37.0));
+        // Ctrl + drag from the second point: a 6 mm fillet
+        h.hold(Modifiers::CTRL);
+        h.drag(g(&h, -20.0, 20.0), g(&h, -20.0, 26.0), 8, false);
+        h.steps(2);
+        h.shot("zero-pen-1-fillet-drag");
+        h.press(g(&h, -20.0, 26.0), false);
+        h.hold(Modifiers::NONE);
+        h.steps(2);
+        if let Some(k) = &h.st.sketch {
+            eprintln!("  pen points {:?} corners {:?}", k.pts, k.corner);
+        }
+        h.key(egui::Key::Enter);
+        h.settle();
+        h.shot("zero-pen-2-done");
+        for f in h.st.doc.features.iter().filter(|f| f.is_path()) {
+            eprintln!("  {} corners {:?}", f.name, f.profile.as_ref().map(|p| p.corner.clone()));
+        }
+    }
+
     if want("snap") {
         // snapping to the part's points of interest, Plasticity style
         h.reset(test_part(), "Test part");

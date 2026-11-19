@@ -184,6 +184,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     let (shift, ctrl) = ctx.input(|i| (i.modifiers.shift, i.modifiers.ctrl || i.modifiers.mac_cmd));
     // Ctrl held: no snapping to the part's points
     st.snap_off = ctrl;
+    st.shift_held = shift;
     // the points of interest the pointer passes over: the guides line up
     // with them
     let placing = matches!(st.tool, Tool::Create(_)) || st.drag.as_ref().map(|d| matches!(d.handle, Handle::Axis(_) | Handle::Plane(_) | Handle::Size(_))).unwrap_or(false);
@@ -347,18 +348,30 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
         }
         Tool::Create(PrimKind::Profile | PrimKind::Path) if st.creation.is_none() => {
-            // the outline: a click puts a corner, a drag a curve point
+            // the outline: a click puts a corner, a drag a curve point;
+            // Ctrl + drag from a point placed: its fillet
+            let grabbed = st.sketch.as_ref().map(|k| k.grab.is_some()).unwrap_or(false);
             if resp.drag_started_by(PointerButton::Primary) {
                 let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
-                st.sketch_press(p2(origin));
+                if !(ctrl && st.sketch_grab(p2(origin))) {
+                    st.sketch_press(p2(origin));
+                }
             }
             if resp.dragged_by(PointerButton::Primary) {
                 if let Some(p) = hover.or(resp.interact_pointer_pos()) {
-                    st.sketch_drag(p2(p));
+                    if st.sketch.as_ref().map(|k| k.grab.is_some()).unwrap_or(false) {
+                        st.sketch_fillet_drag(p2(p));
+                    } else {
+                        st.sketch_drag(p2(p));
+                    }
                 }
             }
             if resp.drag_stopped() {
-                st.sketch_release();
+                if grabbed {
+                    st.sketch_grab_end();
+                } else {
+                    st.sketch_release();
+                }
             }
             if resp.clicked_by(PointerButton::Primary) {
                 if let Some(p) = resp.interact_pointer_pos() {
@@ -502,23 +515,30 @@ fn draw_sketch(p: &Painter, st: &AppState) {
     let col = if path { PATH } else if st.mode == Op::Carve { carve() } else { accent() };
     let hover = p.ctx().input(|i| i.pointer.hover_pos());
     let closing = hover.map(|h| st.sketch_on_first(p2(h))).unwrap_or(false);
+    let ctrl = p.ctx().input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
+    let grabbing = k.grab.is_some() || ctrl;
     let mut pts = k.pts.clone();
     let mut smooth = k.smooth.clone();
+    let mut corner = k.corner.clone();
+    corner.resize(pts.len(), 0.0);
     // the pointer: the next point (unless a point is being dragged or the
     // outline is about to close)
-    let next = if k.held.is_none() && !closing { hover.and_then(|h| st.sketch_snap(p2(h))) } else { None };
+    // (Ctrl: no next point, the points placed can be grabbed)
+    let next = if k.held.is_none() && !closing && !grabbing { hover.and_then(|h| st.sketch_snap(p2(h))) } else { None };
     if let Some((q, _)) = next {
         if pts.last().map(|l| (l[0] - q[0]).abs() + (l[1] - q[1]).abs() > 1e-9).unwrap_or(true) {
             pts.push(q);
             smooth.push(false);
+            corner.push(0.0);
         }
     }
     let n = pts.len();
     let screen = |q: [f64; 2]| world(st, k.plane.at(q));
-    for piece in nurbs_kernel::doc::pieces(&pts, &smooth) {
+    let open = path && !closing;
+    for piece in nurbs_kernel::doc::pieces_open(&pts, &smooth, &corner, open) {
         // the side from the last point back to the first one closes it
-        let back = piece.id == 2 * (n - 1) + 1;
-        if (n < 3 || path && !closing) && back {
+        let back = !open && piece.id == 2 * (n - 1) + 1;
+        if n < 3 && back {
             continue;
         }
         let line: Vec<Pos2> = piece.pts.iter().filter_map(|q| screen(*q)).collect();
@@ -539,6 +559,16 @@ fn draw_sketch(p: &Painter, st: &AppState) {
     }
     if let Some(s) = next.and_then(|n| n.1) {
         draw_snap(p, st, &s);
+    }
+    // Ctrl: the point that a drag would round, or the one being rounded
+    let ring = k.grab.or_else(|| if ctrl { hover.and_then(|h| st.sketch_point_at(p2(h))) } else { None });
+    if let Some(s) = ring.and_then(|i| screen(k.pts[i])) {
+        p.circle_stroke(s, 9.0, Stroke::new(1.5, HOT));
+    }
+    if let (Some(i), Some(h)) = (k.grab, hover) {
+        let r = k.corner.get(i).copied().unwrap_or(0.0);
+        chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("Fillet {} mm", fmt_mm(r as f32)), HOT, HOT);
+        return;
     }
     if let Some(h) = hover {
         let on = if k.plane.face.is_some() { "on the face" } else { "on the ground" };
@@ -789,12 +819,12 @@ pub fn hint(st: &AppState) -> String {
         (None, Tool::Create(PrimKind::Path)) => match &st.sketch {
             None => "Path: click on a face or the ground for the first point".into(),
             Some(k) if k.pts.len() < 2 => "Click: a corner · drag: a curve point · Backspace removes the last one · Esc drops it".into(),
-            Some(_) => "Enter: an open path · click the first point: a closed one · drag: a curve point · Backspace: the last one".into(),
+            Some(_) => "Enter: an open path · click the first point: a closed one · drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Create(PrimKind::Profile)) => match &st.sketch {
             None => format!("Sketch · {}: click on a face or the ground for the first point", st.mode.label()),
             Some(k) if k.pts.len() < 3 => "Click: a corner · drag: a curve point · Backspace removes the last one · Esc drops it".into(),
-            Some(_) => "Click the first point or press Enter to close · drag: a curve point · Backspace: the last one".into(),
+            Some(_) => "Click the first point or Enter to close · drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Create(k)) => format!("{} · {}: press on the ground or a face and drag · a click places 20 mm · {} again: at once", k.label(), st.mode.label(), crate::ui::prim_key(k)),
         (None, Tool::Push(k)) => match k {

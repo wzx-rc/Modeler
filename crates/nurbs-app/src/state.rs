@@ -176,6 +176,10 @@ pub struct Sketch {
     pub smooth: Vec<bool>,
     /// The point the press under way placed, and where it began (screen).
     pub held: Option<(usize, [f32; 2])>,
+    /// Each point's fillet (mm, Ctrl + drag on a point placed, from Forme
+    /// Rectify's Pen), and the point whose fillet is being dragged.
+    pub corner: Vec<f64>,
+    pub grab: Option<usize>,
 }
 
 /// What a gizmo handle moves.
@@ -284,6 +288,8 @@ pub struct AppState {
     pub snap_shown: Option<crate::snap::Snapped>,
     /// Ctrl held: no snapping to points.
     pub snap_off: bool,
+    /// Shift held (the Sketch and Path lock their sides to 0°, 45°, 90°).
+    pub shift_held: bool,
     /// The points of interest the pointer passed over lately (at most 4):
     /// the guides line up with them, as in Plasticity / SketchUp.
     pub acquired: Vec<crate::snap::SnapPoint>,
@@ -340,6 +346,7 @@ impl AppState {
             snaps_gen: 0,
             snap_shown: None,
             snap_off: false,
+            shift_held: false,
             acquired: vec![],
         }
     }
@@ -1091,7 +1098,74 @@ impl AppState {
     /// The same, with what it snapped to.
     pub fn sketch_snap(&self, p: [f32; 2]) -> Option<([f64; 2], Option<crate::snap::Snapped>)> {
         let k = self.sketch.as_ref()?;
-        self.snap_on_plane(&k.plane, p, &[])
+        let (q, snapped) = self.snap_on_plane(&k.plane, p, &[])?;
+        // Shift: the side from the last point locked level, upright or at
+        // 45° on the plane, its length on the grid step
+        let n = k.pts.len() - k.held.map(|_| 1).unwrap_or(0);
+        if self.shift_held && n >= 1 {
+            let last = k.pts[n - 1];
+            let w = [q[0] - last[0], q[1] - last[1]];
+            if w[0].hypot(w[1]) > 1e-9 {
+                let step = std::f64::consts::FRAC_PI_4;
+                let a = (w[1].atan2(w[0]) / step).round() * step;
+                let u = [a.cos(), a.sin()];
+                let len = self.snap((w[0] * u[0] + w[1] * u[1]).max(0.0));
+                return Some(([last[0] + u[0] * len, last[1] + u[1] * len], None));
+            }
+        }
+        Some((q, snapped))
+    }
+
+    /// The point placed under the pointer (within 10 points): Ctrl + drag
+    /// from it sets its fillet.
+    pub fn sketch_point_at(&self, p: [f32; 2]) -> Option<usize> {
+        let k = self.sketch.as_ref()?;
+        let v = self.view();
+        let mut best: Option<(f32, usize)> = None;
+        for (i, q) in k.pts.iter().enumerate() {
+            let Some(s) = v.project(k.plane.at(*q).as_vec3()) else { continue };
+            let d = (s[0] - p[0]).hypot(s[1] - p[1]);
+            if d <= 10.0 && !k.smooth[i] && best.map(|b| d < b.0).unwrap_or(true) {
+                best = Some((d, i));
+            }
+        }
+        best.map(|b| b.1)
+    }
+
+    /// Ctrl + press on a point placed: it is grabbed (its fillet follows
+    /// the drag). False when no point is there.
+    pub fn sketch_grab(&mut self, p: [f32; 2]) -> bool {
+        let i = self.sketch_point_at(p);
+        if let (Some(k), Some(i)) = (self.sketch.as_mut(), i) {
+            k.grab = Some(i);
+            k.held = None;
+            return true;
+        }
+        false
+    }
+
+    /// The grabbed point's fillet: the pointer's distance from it on the
+    /// plane, on the grid step.
+    pub fn sketch_fillet_drag(&mut self, p: [f32; 2]) {
+        let (ro, rd) = self.ray(p);
+        let step = self.settings.step;
+        let snap = self.settings.snap;
+        let Some(k) = self.sketch.as_mut() else { return };
+        let Some(i) = k.grab else { return };
+        let Some(x) = k.plane.hit(ro, rd) else { return };
+        let q = k.plane.to_plane(x);
+        let d = (q[0] - k.pts[i][0]).hypot(q[1] - k.pts[i][1]);
+        let r = if snap && step > 0.0 { (d / step).round() * step } else { d };
+        if k.corner.len() < k.pts.len() {
+            k.corner.resize(k.pts.len(), 0.0);
+        }
+        k.corner[i] = r;
+    }
+
+    pub fn sketch_grab_end(&mut self) {
+        if let Some(k) = self.sketch.as_mut() {
+            k.grab = None;
+        }
     }
 
     /// Whether the pointer is on the sketch's first point (it closes it).
@@ -1110,7 +1184,7 @@ impl AppState {
     pub fn sketch_press(&mut self, p: [f32; 2]) {
         if self.sketch.is_none() {
             let Some((plane, a, _)) = self.start_plane(p) else { return };
-            self.sketch = Some(Sketch { plane, pts: vec![a], smooth: vec![false], held: Some((0, p)) });
+            self.sketch = Some(Sketch { plane, pts: vec![a], smooth: vec![false], held: Some((0, p)), corner: vec![0.0], grab: None });
             self.selection.clear();
             return;
         }
@@ -1127,6 +1201,7 @@ impl AppState {
         }
         k.pts.push(q);
         k.smooth.push(false);
+        k.corner.push(0.0);
         k.held = Some((k.pts.len() - 1, p));
     }
 
@@ -1152,6 +1227,7 @@ impl AppState {
         if let Some(k) = self.sketch.as_mut() {
             k.pts.pop();
             k.smooth.pop();
+            k.corner.truncate(k.pts.len());
             k.held = None;
             if k.pts.is_empty() {
                 self.sketch = None;
@@ -1179,7 +1255,7 @@ impl AppState {
             return;
         }
         let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
-        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: vec![], open: false };
+        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: k.corner.clone(), open: false };
         self.sketch = None;
         self.begin_live("New Sketch");
         let op = self.mode;
@@ -1219,7 +1295,7 @@ impl AppState {
         // a straight path along X or Z: its box is 0.01 mm across
         let (w, dp) = (w.max(0.01), dp.max(0.01));
         let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
-        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: vec![], open: !closed };
+        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: k.corner.clone(), open: !closed };
         self.sketch = None;
         let (origin, rot) = (k.plane.at(c), basis_rotation(k.plane.u, k.plane.n));
         let mut id = 0;
