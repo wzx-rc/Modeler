@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 struct Gfx {
@@ -28,10 +28,11 @@ struct App {
     egui_state: Option<egui_winit::State>,
     t0: Instant,
     redraw_until: f64,
+    _proxy: EventLoopProxy<()>,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(proxy: EventLoopProxy<()>) -> Self {
         let ctx = egui::Context::default();
         theme::install(&ctx);
         let kernel = Kernel::start(kernel_exe());
@@ -53,7 +54,14 @@ impl App {
         if st.kernel.exe().is_none() {
             st.toast("Kernel not found: build forme-nurbs-kernel next to the app", true);
         }
-        App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0 }
+        // the link with Claude (the MCP server forme-nurbs-mcp connects here)
+        let px = proxy.clone();
+        if let Err(e) = nurbs_app::remote::start(&mut st, Arc::new(move || {
+            let _ = px.send_event(());
+        })) {
+            eprintln!("Claude link off: {e}");
+        }
+        App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0, _proxy: proxy }
     }
 
     fn now(&self) -> f64 {
@@ -67,6 +75,7 @@ impl App {
         let raw = es.take_egui_input(&window);
         let now = self.t0.elapsed().as_secs_f64();
         self.st.tick(now);
+        nurbs_app::remote::poll(&mut self.st);
         let st = &mut self.st;
         let mut out = self.ctx.run_pass(raw, |ctx| nurbs_app::run(ctx, st));
         es.handle_platform_output(&window, std::mem::take(&mut out.platform_output));
@@ -84,8 +93,19 @@ impl App {
         gfx.drawer.render(&gfx.device, &gfx.queue, &view, [gfx.config.width, gfx.config.height], ppp, &self.st, &paint, &mut out.textures_delta);
         window.pre_present_notify();
         gfx.queue.present(frame);
+        // pictures asked by Claude: the view alone, offscreen
+        if !self.st.link.captures.is_empty() {
+            let (device, queue, format, drawer) = (&gfx.device, &gfx.queue, gfx.config.format, &mut gfx.drawer);
+            nurbs_app::remote::render_captures(&mut self.st, |st, w, h| {
+                let tex = nurbs_app::remote::target(device, format, w, h);
+                let view = tex.create_view(&Default::default());
+                drawer.render(device, queue, &view, [w, h], 1.0, st, &[], &mut egui::TexturesDelta::default());
+                nurbs_app::remote::read_rgba(device, queue, &tex)
+            });
+            window.request_redraw();
+        }
         // the kernel is working: keep looking for its answer
-        let busy = self.st.interacting || self.st.toast.is_some() || self.st.building() || self.st.ref_busy() || self.st.dev_busy();
+        let busy = self.st.interacting || self.st.toast.is_some() || self.st.building() || self.st.ref_busy() || self.st.dev_busy() || self.st.link.busy();
         let egui_wants = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay.as_secs_f32() < 0.05).unwrap_or(false);
         if busy || egui_wants || now < self.redraw_until {
             window.request_redraw();
@@ -93,7 +113,14 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<()> for App {
+    /// Claude sent a request: a frame reads it.
+    fn user_event(&mut self, _el: &ActiveEventLoop, _e: ()) {
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -170,6 +197,6 @@ fn install_crash_log() {
 fn main() {
     install_crash_log();
     let event_loop = EventLoop::new().expect("event loop");
-    let mut app = App::new();
+    let mut app = App::new(event_loop.create_proxy());
     event_loop.run_app(&mut app).expect("run");
 }

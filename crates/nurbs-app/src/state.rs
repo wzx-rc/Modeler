@@ -494,6 +494,8 @@ pub struct AppState {
     pub dev_tol: f64,
     pub deviation: Option<crate::scan::Deviation>,
     pub dev_job: Option<std::sync::mpsc::Receiver<crate::scan::Deviation>>,
+    /// The link with Claude (`remote.rs`, the MCP server's requests).
+    pub link: crate::remote::Link,
 }
 
 impl AppState {
@@ -580,6 +582,7 @@ impl AppState {
             dev_tol: 0.1,
             deviation: None,
             dev_job: None,
+            link: Default::default(),
         }
     }
 

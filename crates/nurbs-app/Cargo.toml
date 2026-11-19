@@ -17,6 +17,10 @@ path = "src/main.rs"
 name = "forme-nurbs-shot"
 path = "src/bin/shot.rs"
 
+[[bin]]
+name = "forme-nurbs-mcp"
+path = "src/bin/mcp.rs"
+
 [dependencies]
 nurbs-kernel = { path = "../nurbs-kernel" }
 rectify-core = { path = "../rectify-core" }

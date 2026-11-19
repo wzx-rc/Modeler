@@ -262,8 +262,44 @@ fn test_part() -> Doc {
     d
 }
 
+/// `--serve [mesh.obj]`: the app headless, its link with Claude open
+/// (`remote.rs`, port FORME_NURBS_PORT or 47830), until killed: the MCP
+/// server `forme-nurbs-mcp` can drive it (tests without a screen).
+fn serve(mesh: Option<&str>) {
+    let mut h = Harness::new("/tmp");
+    h.reset(Doc::default(), "Untitled");
+    if let Some(m) = mesh {
+        h.st.import_reference(m);
+    }
+    match nurbs_app::remote::start(&mut h.st, std::sync::Arc::new(|| {})) {
+        Ok(p) => eprintln!("serving on 127.0.0.1:{p}"),
+        Err(e) => {
+            eprintln!("no link: {e}");
+            return;
+        }
+    }
+    loop {
+        h.step();
+        nurbs_app::remote::poll(&mut h.st);
+        if !h.st.link.captures.is_empty() {
+            let (gpu, drawer) = (&h.gpu, &mut h.drawer);
+            nurbs_app::remote::render_captures(&mut h.st, |st, w, hh| {
+                let tex = gpu.target(w, hh);
+                let view = tex.create_view(&Default::default());
+                drawer.render(&gpu.device, &gpu.queue, &view, [w, hh], 1.0, st, &[], &mut egui::TexturesDelta::default());
+                gpu.read_rgba(&tex)
+            });
+        }
+        std::thread::sleep(Duration::from_millis(8));
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(|a| a == "--serve").unwrap_or(false) {
+        serve(args.get(1).map(|s| s.as_str()));
+        return;
+    }
     let out = args.first().cloned().unwrap_or_else(|| "shots".into());
     let only: Vec<String> = args.iter().skip(1).cloned().collect();
     let want = |name: &str| only.is_empty() || only.iter().any(|o| name.starts_with(o.as_str()));

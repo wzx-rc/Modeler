@@ -1082,6 +1082,10 @@ fn status(p: &Painter, st: &AppState) {
             }
         }
     }
+    // Claude drives the app through its link (`remote.rs`)
+    if st.link.served > 0 {
+        parts.push(format!("Claude · {} request{}", st.link.served, if st.link.served == 1 { "" } else { "s" }));
+    }
     // just above the history strip
     let at = pos2(st.view_rect[0] + 12.0, st.view_rect[3] - 4.0);
     let r = chip(p, at, Align2::LEFT_BOTTOM, &parts.join(" · "), PANEL_BORDER(), color);

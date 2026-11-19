@@ -15,6 +15,7 @@ pub mod marking;
 pub mod materials;
 pub mod pick;
 pub mod reference;
+pub mod remote;
 pub mod render;
 pub mod scan;
 pub mod settings;
