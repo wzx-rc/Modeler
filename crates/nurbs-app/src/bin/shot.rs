@@ -2810,6 +2810,71 @@ fn main() {
         eprintln!("  edges {} errors {:?}", h.st.model.as_ref().map(|m| m.edges.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
     }
 
+    if want("knife-loop") {
+        // loop cuts (19 nov., 23 h): Ctrl over the top back edge of a box
+        // whose top front edge is filleted: the loop round it, across the
+        // fillet; then a plain click: a cut across one face only
+        let say = |h: &Harness| {
+            for f in h.st.doc.features.iter().filter(|f| f.cut.is_some()) {
+                let k = f.cut.as_ref().unwrap();
+                eprintln!("  {} {} points {:?} lines", f.name, k.pts.len(), k.segs);
+            }
+            eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        };
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let t = |sub: u16| FaceTag { feature: c, sub }.pack();
+        d.add_round(5.0, false, vec![EdgeRef { faces: [t(2), t(4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
+        h.reset(d, "Filleted box");
+        h.settle();
+        say(&h);
+        h.key(egui::Key::K);
+        h.hold(Modifiers::CTRL);
+        let a = h.screen_of(Vec3::new(8.0, 20.0, -15.0));
+        h.move_to(a);
+        h.steps(2);
+        eprintln!("  loop preview {:?}", h.st.knife_preview.as_ref().map(|(v, c)| (v.len(), *c)));
+        h.shot("zero-knife-loop-1-preview");
+        h.click(a);
+        h.settle();
+        h.hold(Modifiers::NONE);
+        say(&h);
+        h.shot("zero-knife-loop-2-done");
+        // a plain click on the +X side's bottom edge: across that face
+        let b = h.screen_of(Vec3::new(20.0, 0.6, -5.0));
+        h.move_to(b);
+        h.steps(2);
+        eprintln!("  face preview {:?}", h.st.knife_preview.as_ref().map(|(v, c)| (v.clone(), *c)));
+        h.shot("zero-knife-loop-3-face");
+        h.click(b);
+        h.settle();
+        say(&h);
+        // the test part's front face (notched by the slot): square to its
+        // bottom edge
+        h.reset(test_part(), "Test part");
+        h.key(egui::Key::K);
+        let c2 = h.screen_of(Vec3::new(-15.0, 0.6, 15.0));
+        h.move_to(c2);
+        h.steps(2);
+        eprintln!("  front preview {:?}", h.st.knife_preview.as_ref().map(|(v, c)| (v.clone(), *c)));
+        h.click(c2);
+        h.settle();
+        say(&h);
+        // Ctrl on the test part: the loop stops where faces are not four-sided
+        h.hold(Modifiers::CTRL);
+        let d2 = h.screen_of(Vec3::new(15.0, 0.6, 15.0));
+        h.move_to(d2);
+        h.steps(2);
+        eprintln!("  test part loop {:?}", h.st.knife_preview.as_ref().map(|(v, c)| (v.len(), *c)));
+        h.shot("zero-knife-loop-4-front");
+        h.click(d2);
+        h.settle();
+        h.hold(Modifiers::NONE);
+        say(&h);
+        h.shot("zero-knife-loop-5-front-loop");
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
     if want("comp-bend") {
         // a face of more than four sides bent by a vertex move (19 nov.): a
         // cube's top front edge chamfered (its +X side a pentagon), the

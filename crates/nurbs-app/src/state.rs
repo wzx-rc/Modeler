@@ -520,6 +520,9 @@ pub struct AppState {
     /// under the pointer.
     pub knife: Option<(FeatureId, usize)>,
     pub knife_hover: Option<DVec3>,
+    /// The loop cut a click would make (the Knife; Ctrl: round the part):
+    /// its points and whether it closes.
+    pub knife_preview: Option<(Vec<DVec3>, bool)>,
     pub hover_feature: Option<FeatureId>,
     pub hover_hit: Option<Hit>,
     pub tool: Tool,
@@ -660,6 +663,7 @@ impl AppState {
             face_drag: None,
             knife: None,
             knife_hover: None,
+            knife_preview: None,
             hover_feature: None,
             hover_hit: None,
             tool: Tool::Select,
@@ -1385,6 +1389,7 @@ impl AppState {
         self.sketch = None;
         self.knife = None;
         self.knife_hover = None;
+        self.knife_preview = None;
         self.marquee = None;
         self.acquired.clear();
         self.snap_shown = None;

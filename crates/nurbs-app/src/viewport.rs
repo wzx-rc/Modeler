@@ -298,6 +298,11 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         st.hover_vertex = if verts { hover.and_then(|h| st.pick_vertex(p2(h))) } else { None };
         st.hover_face = if faces { st.hover_hit.map(|h| h.face) } else { None };
         st.knife_hover = if knife { hover.and_then(|h| st.knife_pick(p2(h))).map(|k| k.1) } else { None };
+        st.knife_preview = if st.tool == Tool::Knife && !shift && (ctrl || st.knife_last().is_none()) {
+            hover.and_then(|h| st.knife_loop_at(p2(h), ctrl)).map(|(v, closed)| (v.iter().map(|q| q.at).collect(), closed))
+        } else {
+            None
+        };
         let by_feature = select && matches!(st.sel_mode, SelMode::Object | SelMode::Edge);
         st.hover_feature = if st.hot_handle.is_none() && by_feature { hover.and_then(|h| st.pick_path(p2(h))).or_else(|| st.hover_hit.and_then(|h| st.feature_of_face(h.face))) } else { None };
         // edges: only a fillet's faces light up (a click there selects it)
@@ -435,7 +440,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         Tool::Knife | Tool::Point => {
             if resp.clicked_by(PointerButton::Primary) {
                 if let Some(p) = resp.interact_pointer_pos().or(hover) {
-                    st.knife_click(p2(p));
+                    st.knife_click_with(p2(p), shift, ctrl);
                 }
             } else if resp.clicked_by(PointerButton::Secondary) {
                 st.knife_end();
@@ -1026,6 +1031,25 @@ fn draw_knife(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
     }
     let col = EDGE_SEL;
     let hot = st.knife_hover.and_then(|q| world(st, q));
+    // the loop cut a click would make
+    if let Some((pts, closed)) = &st.knife_preview {
+        let mut v: Vec<Pos2> = pts.iter().filter_map(|q| world(st, *q)).collect();
+        if *closed && v.len() > 2 {
+            v.push(v[0]);
+        }
+        if v.len() >= 2 {
+            p.add(egui::Shape::line(v.clone(), Stroke::new(1.6, col)));
+            for c in &v {
+                p.circle(*c, 1.6, col, Stroke::NONE);
+            }
+        }
+        if let Some(c) = hot {
+            let r = 3.5;
+            let d = [c + vec2(0.0, -r), c + vec2(r, 0.0), c + vec2(0.0, r), c + vec2(-r, 0.0)];
+            p.add(egui::Shape::convex_polygon(d.to_vec(), col, Stroke::new(1.2, chip_bg())));
+        }
+        return;
+    }
     if st.tool == Tool::Knife {
         if let (Some(a), Some(b)) = (st.knife_last().and_then(|q| world(st, q)), hot.or(pointer)) {
             if hot.is_some() {
@@ -1233,7 +1257,7 @@ pub fn hint(st: &AppState) -> String {
             if st.knife.is_some() {
                 "Click the next edge: a line across their face (a round one: along it) · Enter, Esc, right click: end the cut".into()
             } else {
-                "Click an edge: the first point (its middle catches) · Then: the next edges".into()
+                "Click an edge: a cut across the face · Ctrl: a loop round the part · Shift + click: a free point, then the next edges".into()
             }
         }
         (None, Tool::Point) => "Click an edge: a point cut into it (its middle catches) · Esc: Select".into(),
