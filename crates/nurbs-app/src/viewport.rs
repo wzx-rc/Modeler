@@ -118,6 +118,13 @@ fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
     if st.tool != Tool::Select || st.creation.is_some() {
         return None;
     }
+    // Q: no gizmo; E and R: rings and scale handles (shapes only)
+    match st.gizmo {
+        GizmoMode::Select => return None,
+        GizmoMode::Rotate if st.sel_mode == SelMode::Object => return ring_at(st, p),
+        GizmoMode::Scale if st.sel_mode == SelMode::Object => return scale_at(st, p),
+        _ => {}
+    }
     if let Some(f) = st.single().filter(|_| st.sel_mode == SelMode::Object) {
         for h in size_handles(f) {
             if let Some(q) = size_handle_pos(f, h).and_then(|w| world(st, w)) {
@@ -148,6 +155,69 @@ fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
         }
     }
     None
+}
+
+/// The rotate gizmo's rings: per world axis, its points on screen and
+/// whether each faces the eye.
+fn rings(st: &AppState) -> Option<[Vec<(Pos2, bool)>; 3]> {
+    let pivot = st.pivot()?;
+    let v = st.view();
+    let k = v.pixel_size_at((pivot.as_vec3() - v.eye).length()) as f64 * ARROW as f64 * 0.9;
+    let eye = v.eye.as_dvec3() - pivot;
+    Some([0usize, 1, 2].map(|a| {
+        let n = DVec3::AXES[a];
+        let (u, w) = (DVec3::AXES[(a + 1) % 3], DVec3::AXES[(a + 2) % 3]);
+        let _ = n;
+        (0..=72)
+            .filter_map(|i| {
+                let t = i as f64 / 72.0 * std::f64::consts::TAU;
+                let q = u * t.cos() + w * t.sin();
+                world(st, pivot + q * k).map(|s| (s, q.dot(eye) >= 0.0))
+            })
+            .collect()
+    }))
+}
+
+fn ring_at(st: &AppState, p: Pos2) -> Option<Handle> {
+    let rs = rings(st)?;
+    let mut best: Option<(f32, usize)> = None;
+    for (a, pts) in rs.iter().enumerate() {
+        for w in pts.windows(2) {
+            // the front half first (the back is dimmed)
+            let d = dist_seg(p, w[0].0, w[1].0) + if w[0].1 { 0.0 } else { 3.0 };
+            if d < 8.0 && best.map(|b| d < b.0).unwrap_or(true) {
+                best = Some((d, a));
+            }
+        }
+    }
+    best.map(|(_, a)| Handle::Rot(a))
+}
+
+/// The scale gizmo: the pivot, the tips along the shape's own axes.
+fn scale_points(st: &AppState) -> Option<(Pos2, [Option<Pos2>; 3])> {
+    let pivot = st.pivot()?;
+    let frame = st.scale_frame()?;
+    let c = world(st, pivot)?;
+    let v = st.view();
+    let k = v.pixel_size_at((pivot.as_vec3() - v.eye).length()) as f64 * ARROW as f64;
+    Some((c, [0, 1, 2].map(|a| world(st, pivot + frame * DVec3::AXES[a] * k))))
+}
+
+fn scale_at(st: &AppState, p: Pos2) -> Option<Handle> {
+    let (c, tips) = scale_points(st)?;
+    if (p - c).length() < 10.0 {
+        return Some(Handle::ScaleAll);
+    }
+    let mut best: Option<(f32, usize)> = None;
+    for (a, t) in tips.iter().enumerate() {
+        if let Some(t) = t {
+            let d = dist_seg(p, c + (*t - c) * 0.2, *t).min((p - *t).length() - 3.0);
+            if d < 8.0 && best.map(|b| d < b.0).unwrap_or(true) {
+                best = Some((d, a));
+            }
+        }
+    }
+    best.map(|(_, a)| Handle::Scale(a))
 }
 
 fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, rect: Rect) {
@@ -507,6 +577,13 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
     }
     let hot = st.hot_handle;
     let dragging = st.drag.as_ref().map(|d| d.handle);
+    if st.gizmo == GizmoMode::Select {
+        return;
+    }
+    if st.sel_mode == SelMode::Object && matches!(st.gizmo, GizmoMode::Rotate | GizmoMode::Scale) {
+        draw_rot_scale(p, st, hot, dragging);
+        return;
+    }
     let Some((c, tips)) = gizmo_points(st) else { return };
     let colors = [AXIS_X, AXIS_Y, AXIS_Z];
     // plane squares
@@ -562,6 +639,45 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
             };
             chip(p, q + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, &format!("{label} {} mm", fmt_mm(v as f32)), HOT, HOT);
         }
+    }
+}
+
+/// E: three rings round the world axes; R: three axes with cubes and a
+/// square in the middle (all at once). The value under way by the pivot.
+fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Option<Handle>) {
+    let colors = [AXIS_X, AXIS_Y, AXIS_Z];
+    let Some(c) = st.pivot().and_then(|q| world(st, q)) else { return };
+    if st.gizmo == GizmoMode::Rotate {
+        let Some(rs) = rings(st) else { return };
+        for (a, pts) in rs.iter().enumerate() {
+            if dragging.is_some() && dragging != Some(Handle::Rot(a)) {
+                continue;
+            }
+            let on = hot == Some(Handle::Rot(a));
+            let col = if on { HOT } else { colors[a] };
+            for w in pts.windows(2) {
+                let front = w[0].1 && w[1].1;
+                p.line_segment([w[0].0, w[1].0], Stroke::new(if front { if on { 3.0 } else { 2.2 } } else { 1.2 }, if front { col } else { tint(col, 0.35) }));
+            }
+        }
+    } else {
+        let Some((_, tips)) = scale_points(st) else { return };
+        for (a, t) in tips.iter().enumerate() {
+            if dragging.is_some() && dragging != Some(Handle::Scale(a)) && dragging != Some(Handle::ScaleAll) {
+                continue;
+            }
+            let Some(t) = t else { continue };
+            let on = hot == Some(Handle::Scale(a)) || hot == Some(Handle::ScaleAll);
+            let col = if on { HOT } else { colors[a] };
+            p.line_segment([c + (*t - c) * 0.18, *t], Stroke::new(if on { 3.0 } else { 2.2 }, col));
+            p.rect_filled(Rect::from_center_size(*t, vec2(10.0, 10.0)), 2.0, col);
+        }
+        let on = hot == Some(Handle::ScaleAll);
+        p.rect(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, if on { tint(HOT, 0.5) } else { tint(Color32::WHITE, 0.25) }, Stroke::new(1.5, if on { HOT } else { Color32::WHITE }), egui::StrokeKind::Middle);
+    }
+    p.circle(c, 3.5, Color32::WHITE, Stroke::new(1.5, Color32::from_rgb(0x20, 0x22, 0x26)));
+    if let Some(t) = &st.gizmo_readout {
+        chip(p, c + vec2(14.0, 14.0), Align2::LEFT_TOP, t, HOT, HOT);
     }
 }
 
@@ -956,9 +1072,9 @@ pub fn hint(st: &AppState) -> String {
                     "Arrow: out adds, in carves · Del: delete it".into()
                 }
             } else if st.face_sel.is_empty() {
-                "Click: a face · Drag on empty: a rectangle · Shift + click: add · I: inset · E: extrude".into()
+                "Click: a face · Drag on empty: a rectangle · Shift + click: add · I: inset · Ctrl + E: extrude".into()
             } else {
-                "Shift + drag the face: extrude · Ctrl + drag: inset · Arrows: move it · I: inset · E: extrude · Esc: deselect".into()
+                "Shift + drag the face: extrude · Ctrl + drag: inset · Arrows: move it · I: inset · Ctrl + E: extrude · Esc: deselect".into()
             }
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Edge => {
@@ -971,8 +1087,13 @@ pub fn hint(st: &AppState) -> String {
             }
         }
         (None, Tool::Select) => {
-            if st.drag.is_some() {
-                "Moving: the kernel rebuilds the booleans live".into()
+            if let Some(d) = &st.drag {
+                match d.handle {
+                    Handle::Rot(_) => "Round the ring: turn · 15° steps while Snap is on · Release: keep it".into(),
+                    Handle::Scale(_) => "Away from the centre: bigger · Release: keep it".into(),
+                    Handle::ScaleAll => "To the right: bigger · To the left: smaller · Release: keep it".into(),
+                    _ => "Moving: the kernel rebuilds the booleans live".into(),
+                }
             } else if st.selection.is_empty() {
                 if st.doc.features.is_empty() {
                     "B: a cube · C: a cylinder · L: a sketch · Then: drag in the view".into()
@@ -980,7 +1101,12 @@ pub fn hint(st: &AppState) -> String {
                     "Click: a shape · Drag: a rectangle · Alt + drag: orbit · F9 F10 F11: vertex, edge, face".into()
                 }
             } else {
-                "Arrows and squares: move · Dots: resize · Del: delete · Esc: deselect".into()
+                match st.gizmo {
+                    GizmoMode::Select => "W: move · E: rotate · R: scale · Del: delete · Esc: deselect".into(),
+                    GizmoMode::Move => "Arrows and squares: move · Dots: resize · E: rotate · R: scale · Del: delete".into(),
+                    GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
+                    GizmoMode::Scale => "Cubes: along the shape's axes · Centre: all at once · W: move · E: rotate".into(),
+                }
             }
         }
     }

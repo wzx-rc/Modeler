@@ -312,7 +312,7 @@ fn mode_pill(ui: &mut Ui, st: &mut AppState) {
         let tip = match m {
             SelMode::Vertex => "Vertex (1 or F9): pick the part's corners · drag a rectangle to pick several",
             SelMode::Edge => "Edge (2 or F10): pick edges to fillet or chamfer · drag a rectangle to pick several",
-            SelMode::Face => "Face (3 or F11): pick faces to inset (I) or extrude (E) · drag a rectangle to pick several",
+            SelMode::Face => "Face (3 or F11): pick faces to inset (I) or extrude (Ctrl + E) · drag a rectangle to pick several",
             SelMode::Object => "Object (4, Q or F8): pick and move whole shapes",
         };
         if resp.on_hover_text(tip).clicked() {
@@ -385,9 +385,26 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 SelMode::Object => (Icon::Select, TEXT2()),
             };
             let sub = format!("{} · {}", m.label().to_uppercase(), m.key());
-            if card(ui, Some(icon), "SELECTION", &sub, select, color, "Select (Esc): what a click picks is set by the modes at the top (1 or F9 vertex, 2 or F10 edge, 3 or F11 face, 4, Q or F8 object)").clicked() {
+            if card(ui, Some(icon), "SELECTION", &sub, select, color, "Select (Esc): what a click picks is set by the modes at the top (1 or F9 vertex, 2 or F10 edge, 3 or F11 face, 4 or F8 object)").clicked() {
                 st.select_tool();
             }
+            // Maya's Q W E R: the gizmo on what is picked
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let w = ((CARDS_W - 12.0 - 3.0 * 4.0) / 4.0).floor();
+                for (g, icon, key, tip) in [
+                    (GizmoMode::Select, Icon::Select, "Q", "Select (Q): no gizmo, clicks and rectangles only"),
+                    (GizmoMode::Move, Icon::Move, "W", "Move (W): arrows and squares move what is picked, dots resize a shape"),
+                    (GizmoMode::Rotate, Icon::Rotate, "E", "Rotate (E): three rings turn the picked shapes round X, Y, Z (15° steps while Snap is on)"),
+                    (GizmoMode::Scale, Icon::Scale, "R", "Scale (R): a cube per axis scales along the shape's own axes, the centre scales all (drag right: bigger, left: smaller)"),
+                ] {
+                    let r = icon_btn(ui, icon, st.gizmo == g, tip, w);
+                    key_hint(ui, &r, key);
+                    if r.clicked() {
+                        st.set_gizmo(g);
+                    }
+                }
+            });
             divider(ui);
             let mode = st.mode;
             let m = if mode == Op::Add { "ADD" } else { "CARVE" };
@@ -412,7 +429,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             divider(ui);
             for (k, icon, tip) in [
                 (PushKind::Inset, Icon::Inset, "Inset (I): a flat face's outline moved in (2 mm), sized with its dot; its arrow raises or sinks it. Click a face, or pick a face (3) and press I"),
-                (PushKind::Extrude, Icon::Extrude, "Extrude (E): a flat face pulled out (adds) or pushed in (carves). Press on a face and drag, or pick a face (3) and press E"),
+                (PushKind::Extrude, Icon::Extrude, "Extrude (Ctrl + E): a flat face pulled out (adds) or pushed in (carves). Press on a face and drag, or pick a face (3) and press Ctrl + E"),
             ] {
                 let on = st.tool == Tool::Push(k);
                 if card(ui, Some(icon), &k.label().to_uppercase(), &format!("FACE · {}", k.key()), on, FACE_SEL, tip).clicked() {
@@ -529,7 +546,7 @@ fn help_title(st: &AppState) -> String {
         Tool::Push(k) => k.label().into(),
         Tool::Knife => "Knife".into(),
         Tool::Point => "Point on edge".into(),
-        Tool::Select => format!("Select · {}", st.sel_mode.label()),
+        Tool::Select => format!("{} · {}", st.gizmo.label(), st.sel_mode.label()),
     }
 }
 
@@ -1679,6 +1696,11 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         if pressed(Key::B) {
             st.make_bevel();
         }
+        // Maya: Ctrl + E extrudes (E is the rotate gizmo)
+        if pressed(Key::E) && st.push.is_none() {
+            let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]);
+            st.arm_push(PushKind::Extrude, at);
+        }
         return;
     }
     // the sketch under way: Enter closes it, Backspace removes its last point
@@ -1714,7 +1736,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.selection.clear();
         }
     }
-    for (k, m) in [(Key::Num1, SelMode::Vertex), (Key::Num2, SelMode::Edge), (Key::Num3, SelMode::Face), (Key::Num4, SelMode::Object), (Key::Q, SelMode::Object), (Key::F8, SelMode::Object), (Key::F9, SelMode::Vertex), (Key::F10, SelMode::Edge), (Key::F11, SelMode::Face)] {
+    for (k, m) in [(Key::Num1, SelMode::Vertex), (Key::Num2, SelMode::Edge), (Key::Num3, SelMode::Face), (Key::Num4, SelMode::Object), (Key::F8, SelMode::Object), (Key::F9, SelMode::Vertex), (Key::F10, SelMode::Edge), (Key::F11, SelMode::Face)] {
         if pressed(k) {
             st.set_sel_mode(m);
         }
@@ -1728,7 +1750,14 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if matches!(st.tool, Tool::Knife | Tool::Point) && pressed(Key::Enter) {
         st.knife_end();
     }
-    for (k, kind) in [(Key::I, PushKind::Inset), (Key::E, PushKind::Extrude)] {
+    // Maya: Q select (no gizmo), W move, E rotate, R scale (rotate and
+    // scale work on whole shapes: back to Object mode)
+    for (k, g) in [(Key::Q, GizmoMode::Select), (Key::W, GizmoMode::Move), (Key::E, GizmoMode::Rotate), (Key::R, GizmoMode::Scale)] {
+        if pressed(k) {
+            st.set_gizmo(g);
+        }
+    }
+    for (k, kind) in [(Key::I, PushKind::Inset)] {
         if pressed(k) && st.push.is_none() {
             let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]);
             st.arm_push(kind, at);

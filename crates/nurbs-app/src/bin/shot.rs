@@ -6,7 +6,7 @@
 //! cargo run --release -p nurbs-app --bin forme-nurbs-shot -- OUT_DIR [scenario prefix…]
 //! (FORME_NURBS_KERNEL=path/to/forme-nurbs-kernel when it is not next to it)
 
-use egui::{pos2, Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
+use egui::{pos2, vec2, Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use glam::{DQuat, DVec3, Vec3};
 use nurbs_app::draw::Drawer;
 use nurbs_app::state::{AppState, SelMode, Tool};
@@ -1210,6 +1210,70 @@ fn main() {
         for f in &h.st.doc.features {
             eprintln!("  {} {:?} owner {:?}", f.name, f.id, h.st.owner_of(f.id));
         }
+    }
+
+    if want("qwer") {
+        // Maya's Q W E R: E rings turn the slot, R cubes scale the boss, the
+        // centre scales all, Q hides the gizmo, W brings the arrows back
+        h.reset(test_part(), "Test part");
+        h.st.select(Some(4), false);
+        h.key(egui::Key::E);
+        h.settle();
+        h.shot("zero-qwer-1-rotate");
+        let pivot = h.st.pivot().unwrap().as_vec3();
+        let v = h.st.view();
+        let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0 * 0.9;
+        let eye = v.eye - pivot;
+        // the Y ring (in X Z): its front point between two axes
+        let ring = |t: f32| pivot + (Vec3::Z * t.cos() + Vec3::X * t.sin()) * k;
+        let t0 = [45f32, 135.0, 225.0, 315.0].into_iter().map(f32::to_radians).max_by(|a, b| (ring(*a) - pivot).dot(eye).total_cmp(&(ring(*b) - pivot).dot(eye))).unwrap();
+        let (a, b) = (h.screen_of(ring(t0)), h.screen_of(ring(t0 + 33f32.to_radians())));
+        h.move_to(a);
+        h.steps(2);
+        h.drag(a, b, 12, false);
+        h.settle();
+        h.shot("zero-qwer-2-rotating");
+        eprintln!("  rotate readout {:?}", h.st.gizmo_readout);
+        h.press(b, false);
+        h.settle();
+        h.shot("zero-qwer-3-rotated");
+        eprintln!("  slot rot {:?}", h.st.doc.features[3].rot);
+        // R on the boss: its Y cube pulled up half as much again
+        h.st.select(Some(3), false);
+        h.key(egui::Key::R);
+        h.settle();
+        h.shot("zero-qwer-4-scale");
+        let pivot = h.st.pivot().unwrap().as_vec3();
+        let v = h.st.view();
+        let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0;
+        let (a, b) = (h.screen_of(pivot + Vec3::Y * k), h.screen_of(pivot + Vec3::Y * k * 1.5));
+        h.move_to(a);
+        h.steps(2);
+        h.drag(a, b, 12, false);
+        h.settle();
+        h.shot("zero-qwer-5-scaling");
+        eprintln!("  scale readout {:?}", h.st.gizmo_readout);
+        h.press(b, false);
+        h.settle();
+        // the centre: dragged to the right, bigger all round
+        let c = h.screen_of(h.st.pivot().unwrap().as_vec3());
+        h.move_to(c);
+        h.steps(2);
+        h.drag(c, c + vec2(40.0, 0.0), 8, false);
+        h.settle();
+        eprintln!("  scale all readout {:?}", h.st.gizmo_readout);
+        h.press(c + vec2(40.0, 0.0), false);
+        h.settle();
+        h.shot("zero-qwer-6-scaled");
+        eprintln!("  boss {:?}", h.st.doc.features[2].prim);
+        h.key(egui::Key::Q);
+        h.steps(2);
+        h.shot("zero-qwer-7-select");
+        h.key(egui::Key::W);
+        h.steps(2);
+        h.shot("zero-qwer-8-move");
+        let names: Vec<String> = h.st.undo_labels();
+        eprintln!("  undo steps: {names:?}");
     }
 
     if want("tension") {

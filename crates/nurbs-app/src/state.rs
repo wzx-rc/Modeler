@@ -41,7 +41,7 @@ impl PushKind {
     pub fn key(self) -> &'static str {
         match self {
             PushKind::Inset => "I",
-            PushKind::Extrude => "E",
+            PushKind::Extrude => "Ctrl+E",
         }
     }
 }
@@ -199,6 +199,35 @@ pub enum Handle {
     PushInset,
     /// The selected inset or extrusion's arrow: along the face's normal.
     PushDepth,
+    /// Rotate gizmo (E): the ring round a world axis.
+    Rot(usize),
+    /// Scale gizmo (R): along the shape's own X, Y, Z, or all at once.
+    Scale(usize),
+    ScaleAll,
+}
+
+/// What the gizmo of the selection does (Maya: Q select, W move, E rotate,
+/// R scale; Romain 19 nov. "Réintroduire Move, Scale, Rotate, Select sur
+/// QWER").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GizmoMode {
+    /// No gizmo: clicks and rectangles pick.
+    Select,
+    #[default]
+    Move,
+    Rotate,
+    Scale,
+}
+
+impl GizmoMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            GizmoMode::Select => "Select",
+            GizmoMode::Move => "Move",
+            GizmoMode::Rotate => "Rotate",
+            GizmoMode::Scale => "Scale",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -333,6 +362,10 @@ pub struct AppState {
     pub sketch: Option<Sketch>,
     pub drag: Option<Drag>,
     pub hot_handle: Option<Handle>,
+    /// Q W E R: what the gizmo does.
+    pub gizmo: GizmoMode,
+    /// The rotation or scale under way, as shown by the gizmo.
+    pub gizmo_readout: Option<String>,
     /// Selection rectangle (screen).
     pub marquee: Option<([f32; 2], [f32; 2])>,
 
@@ -418,6 +451,8 @@ impl AppState {
             creation: None,
             sketch: None,
             drag: None,
+            gizmo: GizmoMode::Move,
+            gizmo_readout: None,
             hot_handle: None,
             marquee: None,
             camera: OrbitCamera { target: Vec3::new(0.0, 10.0, 0.0), yaw: 0.62, pitch: 0.42, dist: 160.0, ..Default::default() },
@@ -778,6 +813,18 @@ impl AppState {
         self.tool = Tool::Select;
     }
 
+    /// Maya's Q W E R: back to Select with that gizmo. Rotate and Scale
+    /// work on whole shapes, so they go back to Object mode.
+    pub fn set_gizmo(&mut self, g: GizmoMode) {
+        if self.tool != Tool::Select || self.sketch.is_some() || self.creation.is_some() || self.drag.is_some() {
+            self.select_tool();
+        }
+        if matches!(g, GizmoMode::Rotate | GizmoMode::Scale) && self.sel_mode != SelMode::Object {
+            self.set_sel_mode(SelMode::Object);
+        }
+        self.gizmo = g;
+    }
+
     /// What the Select tool picks: vertices, edges, faces or shapes.
     pub fn set_sel_mode(&mut self, m: SelMode) {
         self.abort_gestures();
@@ -986,6 +1033,7 @@ impl AppState {
             self.cancel_live();
             self.clean_selection_ids();
         }
+        self.gizmo_readout = None;
         self.sketch = None;
         self.knife = None;
         self.knife_hover = None;
@@ -1522,6 +1570,13 @@ impl AppState {
             }
             Handle::Plane(a) => BasePlane::new(pivot, DVec3::AXES[a], None).hit(ro, rd),
             Handle::PushInset | Handle::PushDepth => None,
+            Handle::Rot(a) => BasePlane::new(pivot, DVec3::AXES[a], None).hit(ro, rd),
+            Handle::Scale(a) => {
+                let axis = self.scale_frame()? * DVec3::AXES[a];
+                closest_on_line(pivot, axis, ro, rd).map(|t| pivot + axis * t)
+            }
+            // all at once: by the distance on screen from the pivot
+            Handle::ScaleAll => Some(DVec3::new(p[0] as f64, p[1] as f64, 0.0)),
             Handle::Size(_) => {
                 let f = self.single()?;
                 let axis = size_axis(f, h)?;
@@ -1542,7 +1597,12 @@ impl AppState {
         let Some(pivot) = self.handle_pivot(h) else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
         let start: Vec<Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).cloned().collect();
-        self.begin_live(if matches!(h, Handle::Size(_)) { "Resize" } else { "Move" });
+        self.begin_live(match h {
+            Handle::Size(_) => "Resize",
+            Handle::Rot(_) => "Rotate",
+            Handle::Scale(_) | Handle::ScaleAll => "Scale",
+            _ => "Move",
+        });
         self.drag = Some(Drag { handle: h, grab, start, line: None });
     }
 
@@ -1605,6 +1665,65 @@ impl AppState {
                 });
             }
             Handle::PushInset | Handle::PushDepth => {}
+            Handle::Rot(a) => {
+                let axis = DVec3::AXES[a];
+                let flat = |v: DVec3| v - axis * v.dot(axis);
+                let (v0, v1) = (flat(d.grab - pivot0), flat(now - pivot0));
+                if v0.length() < 1e-9 || v1.length() < 1e-9 {
+                    return;
+                }
+                let mut ang = v0.cross(v1).dot(axis).atan2(v0.dot(v1));
+                if self.settings.snap {
+                    let step = 15f64.to_radians();
+                    ang = (ang / step).round() * step;
+                }
+                self.gizmo_readout = Some(format!("{} {:.0}°", ["X", "Y", "Z"][a], ang.to_degrees()));
+                let dq = DQuat::from_axis_angle(axis, ang);
+                let start = d.start.clone();
+                self.live(|doc| {
+                    for s in &start {
+                        if let Some(f) = doc.feature_mut(s.id) {
+                            f.rot = (dq * s.rot).normalize();
+                            // turned round the pivot: its centre too
+                            let c = pivot0 + dq * (s.centre() - pivot0);
+                            f.origin = c - f.rot * DVec3::Y * s.prim.height() * 0.5;
+                        }
+                    }
+                });
+            }
+            Handle::Scale(_) | Handle::ScaleAll => {
+                let Some(frame) = self.scale_frame_of(&d.start) else { return };
+                let k = match d.handle {
+                    Handle::Scale(a) => {
+                        let axis = frame * DVec3::AXES[a];
+                        let (t0, t) = ((d.grab - pivot0).dot(axis), (now - pivot0).dot(axis));
+                        if t0.abs() < 1e-9 {
+                            return;
+                        }
+                        let mut v = DVec3::ONE;
+                        v[a] = t / t0;
+                        v
+                    }
+                    // all at once (Maya's centre): to the right bigger, to
+                    // the left smaller, twice per 120 points
+                    _ => DVec3::splat(2f64.powf((now.x - d.grab.x) / 120.0)),
+                };
+                // two decimals (snap on), never flat
+                let snap = self.settings.snap;
+                let k = k.map(|x| if snap { (x * 100.0).round() / 100.0 } else { x }.clamp(0.02, 100.0));
+                self.gizmo_readout = Some(match d.handle {
+                    Handle::Scale(a) => format!("{} × {:.2}", ["X", "Y", "Z"][a], k[a]),
+                    _ => format!("× {:.2}", k.x),
+                });
+                let start = d.start.clone();
+                self.live(|doc| {
+                    for s in &start {
+                        if let Some(f) = doc.feature_mut(s.id) {
+                            *f = scaled(s, pivot0, frame, k);
+                        }
+                    }
+                });
+            }
             Handle::Size(k) => {
                 let Some(s) = d.start.first().cloned() else { return };
                 let Some(axis) = size_axis(&s, d.handle) else { return };
@@ -1643,8 +1762,20 @@ impl AppState {
         }
     }
 
+    /// The frame the scale gizmo works in: the active shape's own axes.
+    pub fn scale_frame(&self) -> Option<DQuat> {
+        let fs: Vec<Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).cloned().collect();
+        self.scale_frame_of(&fs)
+    }
+
+    fn scale_frame_of(&self, fs: &[Feature]) -> Option<DQuat> {
+        let last = self.selection.last().copied();
+        fs.iter().find(|f| Some(f.id) == last).or(fs.first()).map(|f| f.rot)
+    }
+
     pub fn end_drag(&mut self) {
         self.snap_shown = None;
+        self.gizmo_readout = None;
         if self.drag.take().is_some() {
             self.end_live();
         }
@@ -1922,6 +2053,34 @@ pub fn closest_on_line(o: DVec3, d: DVec3, ro: DVec3, rd: DVec3) -> Option<f64> 
         return None;
     }
     Some((b * e - c * dd) / den)
+}
+
+/// A shape scaled round `pivot` by `k` along the axes of `frame`: its
+/// centre moves, its sizes grow along its own axes (a cylinder's radius by
+/// its X and Z).
+pub fn scaled(s: &Feature, pivot: DVec3, frame: DQuat, k: DVec3) -> Feature {
+    let mut f = s.clone();
+    let c = s.centre();
+    let local = frame.inverse() * (c - pivot);
+    let c2 = pivot + frame * (local * k);
+    match &mut f.prim {
+        Prim::Box { x, y, z } | Prim::Profile { x, y, z } => {
+            *x = (*x * k.x).max(0.1);
+            *y = (*y * k.y).max(0.1);
+            *z = (*z * k.z).max(0.1);
+        }
+        Prim::Cylinder { radius, height } => {
+            let r = if (k.x - 1.0).abs() > 1e-9 { k.x } else { k.z };
+            *radius = (*radius * r).max(0.05);
+            *height = (*height * k.y).max(0.1);
+        }
+        Prim::Path { x, z } => {
+            *x = (*x * k.x).max(0.1);
+            *z = (*z * k.z).max(0.1);
+        }
+    }
+    f.origin = c2 - f.axis() * f.prim.height() * 0.5;
+    f
 }
 
 /// The world direction a size handle pulls along.
