@@ -24,7 +24,8 @@ jobs:
         with:
           targets: aarch64-apple-ios
       # OpenCascade for iOS: ~20 min the first time, then from the cache
-      - uses: actions/cache@v4
+      # (saved right after it is built, even if the app fails later)
+      - uses: actions/cache/restore@v4
         id: occt
         with:
           path: ~/occt-ios
@@ -32,6 +33,11 @@ jobs:
       - name: OpenCascade for iOS
         if: steps.occt.outputs.cache-hit != 'true'
         run: bash ios/build_occt_ios.sh "$HOME/occt-ios"
+      - uses: actions/cache/save@v4
+        if: steps.occt.outputs.cache-hit != 'true'
+        with:
+          path: ~/occt-ios
+          key: occt-ios-7.8.1-${{ hashFiles('ios/build_occt_ios.sh') }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: ios-nurbs

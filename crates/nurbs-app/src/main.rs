@@ -155,7 +155,15 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title(nurbs_app::version_title()).with_inner_size(winit::dpi::LogicalSize::new(1600.0, 900.0)).with_window_icon(theme::window_icon());
+        #[allow(unused_mut)]
+        let mut attrs = Window::default_attributes().with_title(nurbs_app::version_title()).with_inner_size(winit::dpi::LogicalSize::new(1600.0, 900.0)).with_window_icon(theme::window_icon());
+        #[cfg(target_os = "ios")]
+        {
+            // the bottom edge is the key bar's: a swipe there must not send
+            // the app home at once (iPadOS asks for a second swipe)
+            use winit::platform::ios::{ScreenEdge, WindowAttributesExtIOS};
+            attrs = attrs.with_preferred_screen_edges_deferring_system_gestures(ScreenEdge::BOTTOM).with_prefers_home_indicator_hidden(true).with_prefers_status_bar_hidden(true);
+        }
         let window = Arc::new(el.create_window(attrs).expect("window"));
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance.create_surface(window.clone()).expect("surface");
