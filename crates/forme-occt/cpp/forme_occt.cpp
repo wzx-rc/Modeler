@@ -4991,4 +4991,78 @@ FShape* focc_compound(const FShape* a, const FShape* b) {
         (FShape*)nullptr);
 }
 
+
+// Delete faces (Face mode + Del, Romain 19 nov. 23 h 22): the faces at
+// these indices (0-based) taken out, the part left open where they were.
+// The others keep their tags.
+FShape* focc_remove_faces(const FShape* s, const int* idx, int n) {
+    return guard(
+        [&]() -> FShape* {
+            TopTools_IndexedMapOfShape fm;
+            face_map(s->s, fm);
+            opencascade::handle<BRepTools_ReShape> rs = new BRepTools_ReShape();
+            int k = 0;
+            for (int i = 0; i < n; i++)
+                if (idx[i] >= 0 && idx[i] < fm.Extent()) {
+                    rs->Remove(fm(idx[i] + 1));
+                    k++;
+                }
+            if (k == 0) {
+                set_err("no face to delete");
+                return nullptr;
+            }
+            TopoDS_Shape out = rs->Apply(s->s);
+            FShape* r = wrap(out);
+            if (!r) return nullptr;
+            TopTools_IndexedMapOfShape fo;
+            face_map(out, fo);
+            r->tags.assign(fo.Extent(), -1);
+            for (int j = 1; j <= fo.Extent(); j++) {
+                int q = fm.FindIndex(fo(j));
+                if (q > 0 && q - 1 < (int)s->tags.size()) r->tags[j - 1] = s->tags[q - 1];
+            }
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
+// Delete edges (Edge mode + Del): the two faces each edge (1-based index)
+// parts made one again, the edges running on through its ends joined too
+// (a Knife's line taken out). Only faces lying on one surface can be one.
+FShape* focc_remove_edges(const FShape* s, const int* idx, int n) {
+    return guard(
+        [&]() -> FShape* {
+            TopTools_IndexedMapOfShape em;
+            edge_map(s->s, em);
+            TopTools_MapOfShape across, ends;
+            for (int i = 0; i < n; i++)
+                if (idx[i] >= 1 && idx[i] <= em.Extent()) {
+                    across.Add(em(idx[i]));
+                    for (TopExp_Explorer vx(em(idx[i]), TopAbs_VERTEX); vx.More(); vx.Next()) ends.Add(vx.Current());
+                }
+            if (across.IsEmpty()) {
+                set_err("no edge to delete");
+                return nullptr;
+            }
+            FShape* res = wrap(s->s);
+            if (!res) return nullptr;
+            res->tags = s->tags;
+            TopTools_IndexedMapOfShape before;
+            edge_map(res->s, before);
+            FShape* out = unify_across(res, across, &ends);
+            TopTools_IndexedMapOfShape after;
+            edge_map(out->s, after);
+            bool gone = true;
+            for (TopTools_MapIteratorOfMapOfShape it(across); it.More(); it.Next())
+                if (after.Contains(it.Key())) gone = false;
+            if (!gone) {
+                delete out;
+                set_err("its two faces are not on one surface: only a cut across a face (the Knife's) can be taken out");
+                return nullptr;
+            }
+            return out;
+        },
+        (FShape*)nullptr);
+}
+
 }  // extern "C"

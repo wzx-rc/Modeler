@@ -10,7 +10,7 @@ use crate::view::View;
 use glam::{DQuat, DVec3, Vec3};
 use nurbs_kernel::client::{Kernel, Status};
 use nurbs_kernel::doc::PrimKind;
-use nurbs_kernel::{Doc, EdgeRef, FaceRef, FaceTag, Feature, FeatureId, Model, Op, Prim, Profile};
+use nurbs_kernel::{Doc, EdgeRef, FaceRef, FaceTag, Feature, FeatureId, Knife, Model, Op, Prim, Profile};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +99,9 @@ pub struct PushGesture {
     pub moved: bool,
     pub inset: f64,
     pub depth: f64,
+    /// The other picked faces extruded with it, each along its own normal
+    /// by the same depth (19 nov. 23 h 21).
+    pub others: Vec<FeatureId>,
 }
 
 /// The primitives the app creates (step 1: cube and cylinder).
@@ -388,6 +391,10 @@ pub struct Drag {
     pub start: Vec<Feature>,
     /// The line a push handle slides on (point, direction).
     pub line: Option<(DVec3, DVec3)>,
+    /// The operations of the shapes moved, as they were, and their shape:
+    /// their points go with it (19 nov.: a vertex moved, then the cube
+    /// scaled, lost its vertex).
+    pub ops: Vec<(Feature, FeatureId)>,
 }
 
 /// A fillet or chamfer sized by a drag on screen (Rectify's Radius
@@ -909,6 +916,30 @@ impl AppState {
     }
 
     pub fn delete_selected(&mut self) {
+        // picked faces or edges: a Delete step (faces: a hole is left;
+        // edges: their two faces made one)
+        if self.sel_mode == SelMode::Face && !self.face_sel.is_empty() {
+            let faces = std::mem::take(&mut self.face_sel);
+            let n = faces.len();
+            let mut id = 0;
+            self.edit("Delete faces", |d| {
+                id = d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: faces, remove_edges: vec![] }, "Delete faces");
+            });
+            self.selection = vec![id];
+            self.toast(&format!("{n} face{} deleted: the part is open there", if n > 1 { "s" } else { "" }), false);
+            return;
+        }
+        if self.sel_mode == SelMode::Edge && !self.edge_sel.is_empty() {
+            let edges = std::mem::take(&mut self.edge_sel);
+            let n = edges.len();
+            let mut id = 0;
+            self.edit("Delete edges", |d| {
+                id = d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: edges }, "Delete edges");
+            });
+            self.selection = vec![id];
+            self.toast(&format!("{n} edge{} deleted", if n > 1 { "s" } else { "" }), false);
+            return;
+        }
         if self.selection.is_empty() {
             self.edge_sel.clear();
             self.face_sel.clear();
@@ -1174,7 +1205,8 @@ impl AppState {
         if self.tool != Tool::Select || self.sketch.is_some() || self.creation.is_some() || self.drag.is_some() {
             self.select_tool();
         }
-        if matches!(g, GizmoMode::Rotate | GizmoMode::Scale) && self.sel_mode != SelMode::Object {
+        // rotate works on whole shapes; scale on components too
+        if g == GizmoMode::Rotate && self.sel_mode != SelMode::Object {
             self.set_sel_mode(SelMode::Object);
         }
         self.gizmo = g;
@@ -1454,7 +1486,7 @@ impl AppState {
                     }
                 }
             } else if let Some(k) = &f.cut {
-                k.pts.first().map(|p| p.edge.faces[0])
+                k.pts.first().map(|p| p.edge.faces[0]).or(k.remove_faces.first().map(|r| r.tag)).or(k.remove_edges.first().map(|e| e.faces[0]))
             } else {
                 return None;
             };
@@ -2214,7 +2246,11 @@ impl AppState {
             Handle::Scale(_) | Handle::ScaleAll => "Scale",
             _ => "Move",
         });
-        self.drag = Some(Drag { handle: h, grab, start, line: None });
+        let ops: Vec<(Feature, FeatureId)> = start
+            .iter()
+            .flat_map(|s| self.element_ops(s.id).into_iter().filter_map(|o| self.doc.feature(o).cloned()).map(move |o| (o, s.id)).collect::<Vec<_>>())
+            .collect();
+        self.drag = Some(Drag { handle: h, grab, start, line: None, ops });
     }
 
     /// The point a handle sits on.
@@ -2229,6 +2265,34 @@ impl AppState {
     }
 
     pub fn update_drag(&mut self, p: [f32; 2]) {
+        self.update_drag_shapes(p);
+        if let Some(d) = self.drag.clone() {
+            if !d.ops.is_empty() {
+                self.carry_ops(&d);
+            }
+        }
+    }
+
+    /// The operations of the shapes being moved, turned or sized follow
+    /// them: their points (edges', faces', vertices', knife points) mapped
+    /// from the shape's frame and sizes before to those now.
+    fn carry_ops(&mut self, d: &Drag) {
+        let mut out: Vec<Feature> = vec![];
+        for (op, owner) in &d.ops {
+            let (Some(old), Some(new)) = (d.start.iter().find(|s| s.id == *owner), self.doc.feature(*owner)) else { continue };
+            let m = |p: DVec3| from_norm(new, to_norm(old, p));
+            out.push(carried(op, &m));
+        }
+        self.live(|doc| {
+            for o in &out {
+                if let Some(f) = doc.feature_mut(o.id) {
+                    *f = o.clone();
+                }
+            }
+        });
+    }
+
+    fn update_drag_shapes(&mut self, p: [f32; 2]) {
         let Some(d) = self.drag.clone() else { return };
         if d.line.is_some() {
             self.update_push_drag(&d, p);
@@ -2375,6 +2439,9 @@ impl AppState {
 
     /// The frame the scale gizmo works in: the active shape's own axes.
     pub fn scale_frame(&self) -> Option<DQuat> {
+        if self.sel_mode != SelMode::Object {
+            return self.comp_pivot().map(|_| DQuat::IDENTITY);
+        }
         let fs: Vec<Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).cloned().collect();
         self.scale_frame_of(&fs)
     }
@@ -2792,6 +2859,57 @@ pub fn closest_on_line(o: DVec3, d: DVec3, ro: DVec3, rd: DVec3) -> Option<f64> 
 /// A shape scaled round `pivot` by `k` along the axes of `frame`: its
 /// centre moves, its sizes grow along its own axes (a cylinder's radius by
 /// its X and Z).
+/// A shape's sizes along its own X, Y, Z.
+fn size3(f: &Feature) -> DVec3 {
+    match f.prim {
+        Prim::Box { x, y, z } | Prim::Profile { x, y, z } => DVec3::new(x, y, z),
+        Prim::Cylinder { radius, height } => DVec3::new(radius * 2.0, height, radius * 2.0),
+        Prim::Path { x, z } => DVec3::new(x, 1.0, z),
+    }
+    .max(DVec3::splat(1e-6))
+}
+
+/// A point in a shape's own frame, divided by its sizes.
+fn to_norm(f: &Feature, p: DVec3) -> DVec3 {
+    (f.rot.inverse() * (p - f.origin)) / size3(f)
+}
+
+fn from_norm(f: &Feature, q: DVec3) -> DVec3 {
+    f.origin + f.rot * (q * size3(f))
+}
+
+/// An operation with its points mapped by `m` (an affine map): its edges',
+/// face's, components' and knife points; a move's delta as a vector.
+pub fn carried(op: &Feature, m: &dyn Fn(DVec3) -> DVec3) -> Feature {
+    let mut f = op.clone();
+    let lin = |v: DVec3| m(v) - m(DVec3::ZERO);
+    if let Some(r) = f.round.as_mut() {
+        for e in &mut r.edges {
+            e.at = m(e.at);
+        }
+    }
+    if let Some(p) = f.push.as_mut() {
+        p.face.at = m(p.face.at);
+    }
+    if let Some(t) = f.tweak.as_mut() {
+        let c = |c: &mut nurbs_kernel::Comp| match c {
+            nurbs_kernel::Comp::Face(r) => r.at = m(r.at),
+            nurbs_kernel::Comp::Edge(e) => e.at = m(e.at),
+            nurbs_kernel::Comp::Vertex(v) => *v = m(*v),
+        };
+        c(&mut t.comp);
+        t.more.iter_mut().for_each(c);
+        t.delta = lin(t.delta);
+    }
+    if let Some(k) = f.cut.as_mut() {
+        for p in &mut k.pts {
+            p.at = m(p.at);
+            p.edge.at = m(p.edge.at);
+        }
+    }
+    f
+}
+
 pub fn scaled(s: &Feature, pivot: DVec3, frame: DQuat, k: DVec3) -> Feature {
     let mut f = s.clone();
     let c = s.centre();

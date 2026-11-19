@@ -64,6 +64,8 @@ extern "C" {
     fn focc_imprint(s: *const FShape, tool: *const FShape) -> *mut FShape;
     fn focc_edge_point(s: *const FShape, edge: c_int, f: f64, xyz: *mut f64) -> c_int;
     fn focc_split(s: *const FShape, pts: *const f64, n: c_int, segs: *const c_int, nseg: c_int) -> *mut FShape;
+    fn focc_remove_faces(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
+    fn focc_remove_edges(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
     fn focc_face_distance(s: *const FShape, face: c_int, p: *const c_double) -> c_double;
     fn focc_vertex_points(s: *const FShape, xyz: *mut c_double, cap: c_int) -> c_int;
     fn focc_sub_vertices(s: *const FShape, kind: c_int, index: c_int, out: *mut c_int, cap: c_int) -> c_int;
@@ -653,6 +655,17 @@ impl Shape {
         let flat: Vec<f64> = pts.iter().flatten().copied().collect();
         let s: Vec<c_int> = segs.iter().flatten().map(|&i| i as c_int).collect();
         shape(unsafe { focc_split(self.0, flat.as_ptr(), pts.len() as c_int, s.as_ptr(), segs.len() as c_int) })
+    }
+    /// Faces (0-based) taken out: the part left open there.
+    pub fn remove_faces(&self, faces: &[usize]) -> Result<Shape, String> {
+        let idx: Vec<c_int> = faces.iter().map(|&i| i as c_int).collect();
+        shape(unsafe { focc_remove_faces(self.0, idx.as_ptr(), idx.len() as c_int) })
+    }
+    /// Edges (1-based) taken out: the two faces each parts made one (they
+    /// must lie on one surface).
+    pub fn remove_edges(&self, edges: &[i32]) -> Result<Shape, String> {
+        let idx: Vec<c_int> = edges.iter().map(|&i| i as c_int).collect();
+        shape(unsafe { focc_remove_edges(self.0, idx.as_ptr(), idx.len() as c_int) })
     }
     /// Distance from a point to a face (None when it cannot be measured).
     pub fn face_distance(&self, face: usize, p: [f64; 3]) -> Option<f64> {

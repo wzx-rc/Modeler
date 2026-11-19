@@ -2883,6 +2883,155 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("comp-flow") {
+        // Romain's flow (19 nov. 23 h 18): a cube, the marking menu to
+        // Vertex mode, two vertices moved with W, the menu back to Object
+        // mode, the cube scaled; then an edge and a face moved and scaled
+        let pull = |h: &mut Harness, axis: usize, mm: f32| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + Vec3::AXES[axis]) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let by = h.screen_of(c + Vec3::AXES[axis] * mm) - s0;
+            let t = Instant::now();
+            h.drag(grab, grab + by, 10, true);
+            let live = t.elapsed();
+            h.settle();
+            eprintln!("  drag {:?}, built {:?}", live, t.elapsed());
+        };
+        let say = |h: &Harness, what: &str| {
+            let steps: Vec<String> = h.st.doc.features.iter().map(|f| f.name.clone()).collect();
+            eprintln!("  {what}: mode {:?} tool {:?} steps {:?} faces {} errors {:?}", h.st.sel_mode, h.st.tool, steps, h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        };
+        let flick = |h: &mut Harness, at: Pos2, d: egui::Vec2| {
+            h.rpress(at, true);
+            h.move_to(at + d * 0.5);
+            h.move_to(at + d);
+            h.rpress(at + d, false);
+            h.steps(3);
+            h.settle();
+        };
+        h.reset(Doc::default(), "Untitled");
+        h.hold(Modifiers::SHIFT);
+        h.key(egui::Key::B);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.st.camera.frame(Vec3::new(-15.0, 0.0, -15.0), Vec3::new(15.0, 25.0, 15.0));
+        h.steps(2);
+        say(&h, "cube");
+        let mid = h.screen_of(Vec3::new(0.0, 10.0, 10.0));
+        flick(&mut h, mid, vec2(-80.0, 0.0));
+        say(&h, "menu west");
+        h.click(h.screen_of(Vec3::new(-10.0, 20.0, 10.0)));
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(10.0, 20.0, 10.0)));
+        h.hold(Modifiers::NONE);
+        h.steps(2);
+        eprintln!("  vertices picked {:?}", h.st.vert_sel);
+        h.key(egui::Key::W);
+        pull(&mut h, 1, 5.0);
+        say(&h, "two vertices up 5");
+        h.shot("zero-comp-flow-1-vertices");
+        flick(&mut h, mid, vec2(57.0, -57.0));
+        say(&h, "menu NE");
+        h.key(egui::Key::R);
+        let c = h.screen_of(h.st.pivot().expect("pivot").as_vec3());
+        let t = Instant::now();
+        h.drag(c, c + vec2(60.0, 0.0), 10, true);
+        h.settle();
+        eprintln!("  scale {:?} prim {:?}", t.elapsed(), h.st.doc.features[0].prim);
+        say(&h, "scaled");
+        h.shot("zero-comp-flow-2-scaled");
+        // an edge: W then R
+        h.st.undo();
+        h.settle();
+        h.key(egui::Key::F10);
+        h.click(h.screen_of(Vec3::new(0.0, 0.0, 10.0)));
+        h.steps(2);
+        eprintln!("  edges picked {}", h.st.edge_sel.len());
+        h.key(egui::Key::W);
+        pull(&mut h, 2, 4.0);
+        say(&h, "edge out 4");
+        h.st.select(None, false);
+        h.key(egui::Key::Escape);
+        // a face: W then R
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(10.0, 8.0, 0.0)));
+        h.steps(2);
+        eprintln!("  faces picked {}", h.st.face_sel.len());
+        h.key(egui::Key::W);
+        pull(&mut h, 0, 3.0);
+        say(&h, "face +X 3");
+        h.st.select(None, false);
+        h.click(h.screen_of(Vec3::new(0.0, 8.0, 10.0)));
+        h.key(egui::Key::R);
+        h.steps(2);
+        let c = h.screen_of(h.st.pivot().expect("pivot").as_vec3());
+        h.drag(c, c - vec2(40.0, 0.0), 10, true);
+        h.settle();
+        say(&h, "face scaled");
+        h.shot("zero-comp-flow-3-face");
+        // Shift + drag on a picked face: extrude; two faces picked
+        h.st.select(None, false);
+        h.key(egui::Key::W);
+        h.key(egui::Key::Escape);
+        h.click(h.screen_of(Vec3::new(0.0, 10.0, 10.0)));
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(10.0, 10.0, 0.0)));
+        eprintln!("  faces picked {}", h.st.face_sel.len());
+        let a = h.screen_of(Vec3::new(0.0, 10.0, 10.0));
+        let b = h.screen_of(Vec3::new(0.0, 10.0, 16.0));
+        h.drag(a, b, 10, true);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        say(&h, "shift drag on two faces");
+        h.shot("zero-comp-flow-4-extrude");
+    }
+
+    if want("comp-delete") {
+        // Del on picked components (19 nov. 23 h 22): a knife line taken
+        // out (its two faces one again), a face taken out (a hole)
+        let say = |h: &Harness, what: &str| {
+            let steps: Vec<String> = h.st.doc.features.iter().map(|f| f.name.clone()).collect();
+            eprintln!("  {what}: steps {:?} faces {} errors {:?}", steps, h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        };
+        h.reset(test_part(), "Test part");
+        h.settle();
+        say(&h, "part");
+        h.key(egui::Key::S);
+        h.hold(Modifiers::CTRL);
+        let c2 = h.screen_of(Vec3::new(-15.0, 0.6, 15.0));
+        h.move_to(c2);
+        h.steps(2);
+        h.click(c2);
+        h.settle();
+        h.hold(Modifiers::NONE);
+        say(&h, "face cut");
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::F10);
+        h.click(h.screen_of(Vec3::new(-15.0, 10.0, 15.0)));
+        h.steps(2);
+        eprintln!("  edges picked {}", h.st.edge_sel.len());
+        h.key(egui::Key::Delete);
+        h.settle();
+        say(&h, "edge deleted");
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(10.0, 10.0, 15.0)));
+        h.steps(2);
+        eprintln!("  faces picked {}", h.st.face_sel.len());
+        h.key(egui::Key::Delete);
+        h.settle();
+        say(&h, "face deleted");
+        h.shot("zero-comp-delete");
+        // a cube's edge: its faces are not on one surface
+        h.key(egui::Key::F10);
+        h.click(h.screen_of(Vec3::new(20.0, 10.0, -15.0)));
+        h.steps(2);
+        h.key(egui::Key::Delete);
+        h.settle();
+        say(&h, "corner edge");
+    }
+
     if want("comp-bend") {
         // a face of more than four sides bent by a vertex move (19 nov.): a
         // cube's top front edge chamfered (its +X side a pentagon), the

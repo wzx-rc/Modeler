@@ -504,6 +504,13 @@ pub struct Knife {
     pub pts: Vec<KnifePoint>,
     #[serde(default)]
     pub segs: Vec<[usize; 2]>,
+    /// Delete (Del in Face or Edge mode, Romain 19 nov. 23 h 22): faces
+    /// taken out (the part left open), edges taken out (their two faces made
+    /// one). A step of its own, with no points.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_faces: Vec<FaceRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_edges: Vec<EdgeRef>,
 }
 
 /// A point of the Knife: on an edge, at a fraction of its curve counted
@@ -517,7 +524,19 @@ pub struct KnifePoint {
 
 impl Knife {
     pub fn label(&self) -> &'static str {
-        if self.segs.is_empty() { "Points" } else { "Knife" }
+        if !self.remove_faces.is_empty() {
+            "Delete faces"
+        } else if !self.remove_edges.is_empty() {
+            "Delete edges"
+        } else if self.segs.is_empty() {
+            "Points"
+        } else {
+            "Knife"
+        }
+    }
+    /// A Delete step.
+    pub fn is_delete(&self) -> bool {
+        !self.remove_faces.is_empty() || !self.remove_edges.is_empty()
     }
 }
 
@@ -525,23 +544,56 @@ impl Knife {
 pub struct Tweak {
     pub comp: Comp,
     pub delta: DVec3,
+    /// More components moved with it (a multiple selection, 19 nov.).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more: Vec<Comp>,
+    /// Scaled along X, Y, Z round their vertices' centre (the R gizmo in
+    /// a component mode), before the move.
+    #[serde(default = "one3", skip_serializing_if = "is_one3")]
+    pub scale: DVec3,
+}
+
+fn one3() -> DVec3 {
+    DVec3::ONE
+}
+fn is_one3(v: &DVec3) -> bool {
+    *v == DVec3::ONE
 }
 
 impl Tweak {
     pub fn label(&self) -> &'static str {
+        if self.scale != DVec3::ONE {
+            return match self.comp {
+                Comp::Face(_) => "Scale faces",
+                Comp::Edge(_) => "Scale edges",
+                Comp::Vertex(_) => "Scale vertices",
+            };
+        }
         match self.comp {
             Comp::Face(_) => "Move face",
             Comp::Edge(_) => "Move edge",
             Comp::Vertex(_) => "Move vertex",
         }
     }
-    /// Where the component was before the move.
+    /// A move of these components (the first one, then the others).
+    pub fn new(comps: Vec<Comp>) -> Option<Tweak> {
+        let mut it = comps.into_iter();
+        let comp = it.next()?;
+        Some(Tweak { comp, delta: DVec3::ZERO, more: it.collect(), scale: DVec3::ONE })
+    }
+    /// All its components.
+    pub fn comps(&self) -> impl Iterator<Item = &Comp> {
+        std::iter::once(&self.comp).chain(self.more.iter())
+    }
+    /// Where the components were before the move (their points' mean).
     pub fn at(&self) -> DVec3 {
-        match &self.comp {
+        let pt = |c: &Comp| match c {
             Comp::Face(f) => f.at,
             Comp::Edge(e) => e.at,
             Comp::Vertex(p) => *p,
-        }
+        };
+        let n = 1 + self.more.len();
+        self.comps().map(pt).sum::<DVec3>() / n as f64
     }
 }
 
@@ -826,7 +878,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(name);
-        let origin = cut.pts.first().map(|p| p.at).unwrap_or(DVec3::ZERO);
+        let origin = cut.pts.first().map(|p| p.at).or(cut.remove_faces.first().map(|r| r.at)).or(cut.remove_edges.first().map(|e| e.at)).unwrap_or(DVec3::ZERO);
         self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, suspended: false });
         id
     }

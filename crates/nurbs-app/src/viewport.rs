@@ -123,7 +123,7 @@ fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
     match st.gizmo {
         GizmoMode::Select => return None,
         GizmoMode::Rotate if st.sel_mode == SelMode::Object => return ring_at(st, p),
-        GizmoMode::Scale if st.sel_mode == SelMode::Object => return scale_at(st, p),
+        GizmoMode::Scale => return scale_at(st, p),
         _ => {}
     }
     if let Some(f) = st.single().filter(|_| st.sel_mode == SelMode::Object) {
@@ -634,7 +634,7 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
     if st.gizmo == GizmoMode::Select {
         return;
     }
-    if st.sel_mode == SelMode::Object && matches!(st.gizmo, GizmoMode::Rotate | GizmoMode::Scale) {
+    if (st.sel_mode == SelMode::Object && st.gizmo == GizmoMode::Rotate) || st.gizmo == GizmoMode::Scale {
         draw_rot_scale(p, st, hot, dragging);
         return;
     }

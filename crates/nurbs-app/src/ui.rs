@@ -48,6 +48,9 @@ pub fn paint_op_glyph(p: &egui::Painter, c: egui::Pos2, op: Op, color: Color32, 
 /// A feature's icon: its primitive, or the fillet's.
 pub fn feature_icon(f: &Feature) -> Icon {
     if let Some(k) = &f.cut {
+        if k.is_delete() {
+            return Icon::Trash;
+        }
         return if k.segs.is_empty() { Icon::EdgePoint } else { Icon::Knife };
     }
     if f.tweak.is_some() {
@@ -64,6 +67,12 @@ pub fn feature_icon(f: &Feature) -> Icon {
 /// What a step does, in a few words: "Fillet · 2 mm", "Inset · 2 mm · −3 mm".
 pub fn step_info(f: &Feature) -> String {
     if let Some(k) = &f.cut {
+        if !k.remove_faces.is_empty() {
+            return format!("{} face{}", k.remove_faces.len(), if k.remove_faces.len() > 1 { "s" } else { "" });
+        }
+        if !k.remove_edges.is_empty() {
+            return format!("{} edge{}", k.remove_edges.len(), if k.remove_edges.len() > 1 { "s" } else { "" });
+        }
         let (n, l) = (k.pts.len(), k.segs.len());
         return if l > 0 { format!("{l} line{}", if l > 1 { "s" } else { "" }) } else { format!("{n} point{}", if n > 1 { "s" } else { "" }) };
     }
@@ -1429,7 +1438,10 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         });
     });
     if st.settings.show_tree && !st.settings.sub_fixed && !st.doc.features.is_empty() {
-        components_column(ctx, st, pos2(screen.min.x + EDGE + LEFT_W + 8.0, top) + off, tree_h);
+        // as tall as its operations need (it hid those past the shape
+        // list's height: "La Sub Outliner ne se rafraîchit pas")
+        let room = (screen.max.y - top - off.y - 140.0).max(tree_h);
+        components_column(ctx, st, pos2(screen.min.x + EDGE + LEFT_W + 8.0, top) + off, room);
     }
 }
 
@@ -1768,6 +1780,10 @@ fn sub_outliner_body(ui: &mut Ui, st: &mut AppState, el: Option<FeatureId>, max_
     if fixed {
         // a fixed container: the same height whatever it holds
         sa = sa.min_scrolled_height(max_h);
+    } else {
+        // floating: as tall as its rows (egui kept it at its first height,
+        // hiding the operations added after)
+        sa = sa.min_scrolled_height((ops.len() as f32 * 29.0 + 8.0).min(max_h));
     }
     sa.show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;

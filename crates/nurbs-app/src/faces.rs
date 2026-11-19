@@ -363,15 +363,32 @@ impl AppState {
 
     fn push_start(&mut self, face: usize, at: DVec3, p: [f32; 2], held: bool) {
         let Some((r, origin, n)) = self.face_plane(face, at, "Extrude") else { return };
+        // the other picked faces go with it
+        let mut more: Vec<FaceRef> = vec![];
+        for q in self.face_sel.clone() {
+            let Some(fi) = self.model_face_of(&q) else { continue };
+            if fi == face {
+                continue;
+            }
+            if let Some((r2, o2, _)) = self.face_plane(fi, q.at, "Extrude") {
+                more.push(FaceRef { tag: r2.tag, at: o2 });
+            }
+        }
         self.begin_live("Extrude");
         let mut id = 0;
-        self.live(|d| id = d.add_push(Push { face: FaceRef { tag: r.tag, at: origin }, inset: 0.0, depth: 0.0 }));
+        let mut others = vec![];
+        self.live(|d| {
+            id = d.add_push(Push { face: FaceRef { tag: r.tag, at: origin }, inset: 0.0, depth: 0.0 });
+            for m in &more {
+                others.push(d.add_push(Push { face: m.clone(), inset: 0.0, depth: 0.0 }));
+            }
+        });
         let (ro, rd) = self.ray(p);
         let t0 = closest_on_line(origin, n, ro, rd).unwrap_or(0.0);
-        self.push = Some(PushGesture { kind: PushKind::Extrude, id, origin, n, held, from: p, t0, moved: false, inset: 0.0, depth: 0.0 });
+        self.push = Some(PushGesture { kind: PushKind::Extrude, id, origin, n, held, from: p, t0, moved: false, inset: 0.0, depth: 0.0, others: others.clone() });
         self.tool = Tool::Push(PushKind::Extrude);
         self.face_sel.clear();
-        self.selection = vec![id];
+        self.selection = std::iter::once(id).chain(others).collect();
     }
 
     /// The pointer moves: the extrusion's depth follows, along the normal.
@@ -389,9 +406,12 @@ impl AppState {
         }
         self.push = Some(g.clone());
         let (id, depth) = (g.id, g.depth);
+        let others = g.others.clone();
         self.live(|d| {
-            if let Some(pu) = d.feature_mut(id).and_then(|f| f.push.as_mut()) {
-                pu.depth = depth;
+            for i in std::iter::once(id).chain(others.iter().copied()) {
+                if let Some(pu) = d.feature_mut(i).and_then(|f| f.push.as_mut()) {
+                    pu.depth = depth;
+                }
             }
         });
     }
@@ -418,6 +438,7 @@ impl AppState {
         }
         self.end_live();
         self.clean_selection_after_push(Some(g.id));
+        self.selection.extend(g.others.iter().copied().filter(|i| self.doc.feature(*i).is_some()));
         self.toast(&format!("Extrude {} mm · drag the arrow to change it", crate::widgets::fmt_mm(g.depth as f32)), false);
     }
 
@@ -512,7 +533,7 @@ impl AppState {
         let (ro, rd) = self.ray(p);
         let Some(t) = closest_on_line(line.0, line.1, ro, rd) else { return };
         self.begin_live(f.kind_label());
-        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line) });
+        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![] });
     }
 
     pub(crate) fn update_push_drag(&mut self, d: &Drag, p: [f32; 2]) {
@@ -732,14 +753,14 @@ impl AppState {
         self.single().filter(|f| f.tweak.is_some())
     }
 
-    /// The component the gizmo moves in Vertex, Edge and Face modes: the
-    /// selected move step's, else the first one picked.
-    pub fn picked_comp(&self) -> Option<Comp> {
+    /// The components the gizmo moves in Vertex, Edge and Face modes: all
+    /// those picked (19 nov.: two vertices moved with W).
+    pub fn picked_comps(&self) -> Vec<Comp> {
         match self.sel_mode {
-            SelMode::Face => self.face_sel.first().cloned().map(Comp::Face),
-            SelMode::Edge => self.edge_sel.first().cloned().map(Comp::Edge),
-            SelMode::Vertex => self.vert_sel.first().copied().map(Comp::Vertex),
-            SelMode::Object => None,
+            SelMode::Face => self.face_sel.iter().cloned().map(Comp::Face).collect(),
+            SelMode::Edge => self.edge_sel.iter().cloned().map(Comp::Edge).collect(),
+            SelMode::Vertex => self.vert_sel.iter().copied().map(Comp::Vertex).collect(),
+            SelMode::Object => vec![],
         }
     }
 
@@ -751,18 +772,20 @@ impl AppState {
         if let Some(t) = self.selected_tweak().and_then(|f| f.tweak.as_ref()) {
             return Some(t.at() + t.delta);
         }
-        match self.picked_comp()? {
-            Comp::Face(f) => Some(f.at),
-            Comp::Edge(e) => Some(e.at),
-            // a vertex that is gone (a sketch corner just cut): no gizmo
-            Comp::Vertex(v) => self.part_vertices().iter().any(|q| q.as_dvec3().distance(v) < 1e-3).then_some(v),
+        let comps = self.picked_comps();
+        // a vertex that is gone (a sketch corner just cut): no gizmo
+        if let [Comp::Vertex(v)] = comps.as_slice() {
+            if !self.part_vertices().iter().any(|q| q.as_dvec3().distance(*v) < 1e-3) {
+                return None;
+            }
         }
+        Tweak::new(comps).map(|t| t.at())
     }
 
     /// A drag on the gizmo in Vertex, Edge or Face mode: the selected move
     /// step changes, or a new one starts on the picked component.
     pub(crate) fn begin_tweak_drag(&mut self, h: Handle, p: [f32; 2]) {
-        if !matches!(h, Handle::Axis(_) | Handle::Plane(_)) {
+        if !matches!(h, Handle::Axis(_) | Handle::Plane(_) | Handle::Scale(_) | Handle::ScaleAll) {
             return;
         }
         let Some(pivot) = self.comp_pivot() else { return };
@@ -774,8 +797,7 @@ impl AppState {
                 id
             }
             None => {
-                let Some(comp) = self.picked_comp() else { return };
-                let t = Tweak { comp, delta: DVec3::ZERO };
+                let Some(t) = Tweak::new(self.picked_comps()) else { return };
                 self.begin_live(t.label());
                 let mut id = 0;
                 self.live(|d| id = d.add_tweak(t));
@@ -784,7 +806,7 @@ impl AppState {
             }
         };
         let Some(f) = self.doc.feature(id).cloned() else { return };
-        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None });
+        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![] });
     }
 
     pub(crate) fn update_tweak_drag(&mut self, d: &Drag, p: [f32; 2]) {
@@ -795,6 +817,33 @@ impl AppState {
         let raw = now - d.grab;
         let mut delta = DVec3::new(self.snap(raw.x), self.snap(raw.y), self.snap(raw.z));
         self.snap_shown = None;
+        // R in a component mode: scaled round their centre, along X, Y, Z
+        if matches!(d.handle, Handle::Scale(_) | Handle::ScaleAll) {
+            let k = match d.handle {
+                Handle::Scale(a) => {
+                    let (s0, s1) = ((d.grab - pivot0)[a], (now - pivot0)[a]);
+                    if s0.abs() < 1e-9 {
+                        return;
+                    }
+                    let mut v = DVec3::ONE;
+                    v[a] = s1 / s0;
+                    v
+                }
+                _ => DVec3::splat(2f64.powf((now.x - d.grab.x) / 120.0)),
+            };
+            let snap = self.settings.snap;
+            let k = k.map(|x| if snap { (x * 100.0).round() / 100.0 } else { x }.clamp(0.0, 100.0));
+            self.gizmo_readout = Some(match d.handle {
+                Handle::Scale(a) => format!("{} × {:.2}", ["X", "Y", "Z"][a], k[a]),
+                _ => format!("× {:.2}", k.x),
+            });
+            self.live(|doc| {
+                if let Some(tw) = doc.feature_mut(id).and_then(|f| f.tweak.as_mut()) {
+                    tw.scale = t0.scale * k;
+                }
+            });
+            return;
+        }
         let a = match d.handle {
             Handle::Axis(a) | Handle::Plane(a) => a,
             _ => return,
@@ -859,7 +908,7 @@ impl AppState {
                 };
                 let (ro, rd) = self.ray(p);
                 let t0 = closest_on_line(r.at, n, ro, rd).unwrap_or(0.0);
-                let t = Tweak { comp: Comp::Edge(r.clone()), delta: DVec3::ZERO };
+                let Some(t) = Tweak::new(vec![Comp::Edge(r.clone())]) else { return true };
                 self.begin_live(t.label());
                 let mut id = 0;
                 self.live(|d| id = d.add_tweak(t));

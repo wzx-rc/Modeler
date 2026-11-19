@@ -74,6 +74,8 @@ pub enum Act {
     Inset,
     Deselect,
     ObjectMode,
+    /// A component mode (Vertex, Edge, Face, Object).
+    Mode(SelMode),
     Place(PrimKind),
     Snap,
     /// An operation turned off (its element's history keeps it).
@@ -99,13 +101,18 @@ pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
     match ctx {
         Ctx::Shape(id) => {
             let carve = st.doc.feature(id).map(|f| f.op == Op::Carve).unwrap_or(false);
+            // the component modes round it, as in Maya (Romain, 19 nov.
+            // 23 h 18): Vertex west, Edge east, Face south, Object NE
+            let m = st.sel_mode;
             vec![
                 it(0, "Material ›", false, Act::Material),
-                it(1, "Frame", false, Act::Frame),
-                it(2, if carve { "Make it Add" } else { "Make it Carve" }, false, Act::ToggleCarve),
-                it(4, "Delete", false, Act::Delete),
-                it(6, "Duplicate", false, Act::Duplicate),
-                it(7, "Hide", false, Act::Hide),
+                it(1, "Object mode", m == SelMode::Object, Act::Mode(SelMode::Object)),
+                it(2, "Edge", m == SelMode::Edge, Act::Mode(SelMode::Edge)),
+                it(3, "Duplicate", false, Act::Duplicate),
+                it(4, "Face", m == SelMode::Face, Act::Mode(SelMode::Face)),
+                it(5, if carve { "Make it Add" } else { "Make it Carve" }, false, Act::ToggleCarve),
+                it(6, "Vertex", m == SelMode::Vertex, Act::Mode(SelMode::Vertex)),
+                it(7, "Frame", false, Act::Frame),
             ]
         }
         Ctx::Step(_) => vec![
@@ -121,6 +128,8 @@ pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
                 it(2, "Chamfer", false, Act::Chamfer),
                 it(4, "Deselect", false, Act::Deselect),
                 it(6, "Object mode", false, Act::ObjectMode),
+                it(5, "Vertex", false, Act::Mode(SelMode::Vertex)),
+                it(7, "Face", false, Act::Mode(SelMode::Face)),
             ];
             if st.reference.is_some() {
                 v.push(it(1, "Fit to scan", false, Act::FitScan));
@@ -132,6 +141,8 @@ pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
             it(2, "Inset", false, Act::Inset),
             it(4, "Deselect", false, Act::Deselect),
             it(6, "Object mode", false, Act::ObjectMode),
+            it(5, "Vertex", false, Act::Mode(SelMode::Vertex)),
+            it(7, "Edge", false, Act::Mode(SelMode::Edge)),
         ],
         Ctx::Empty => vec![
             it(0, "Cube", st.tool == Tool::Create(PrimKind::Box), Act::Place(PrimKind::Box)),
@@ -184,6 +195,7 @@ fn run(st: &mut AppState, act: Act, ctx: Ctx, at: [f32; 2]) {
             st.vert_sel.clear();
         }
         Act::ObjectMode => st.set_sel_mode(SelMode::Object),
+        Act::Mode(m) => st.set_sel_mode(m),
         Act::Place(k) => st.arm(k),
         Act::Snap => st.settings.snap = !st.settings.snap,
         Act::TurnOff => {
