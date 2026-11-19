@@ -20,7 +20,7 @@ struct U {
     sel: vec4<f32>,      // selection colour (linear), mix
     hover: vec4<f32>,    // pre-selection colour (linear), mix
     base: vec4<f32>,     // part colour (linear), w = grid
-    misc: vec4<f32>,     // x = world origin shown
+    misc: vec4<f32>,     // x = world origin shown, y = deviation shown, z = its range (mm), w = its tolerance (mm)
     refc: vec4<f32>,     // reference mesh colour (linear), w = ghost opacity
 };
 @group(0) @binding(0) var<uniform> u: U;
@@ -137,12 +137,14 @@ struct MIn {
     @location(0) pos: vec3<f32>,
     @location(1) nrm: vec3<f32>,
     @location(2) face: u32,
+    @location(3) dev: f32,
 };
 struct MOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) nrm: vec3<f32>,
     @location(1) wpos: vec3<f32>,
     @location(2) @interpolate(flat) face: u32,
+    @location(3) dev: f32,
 };
 
 @vertex fn vs_mesh(i: MIn) -> MOut {
@@ -151,7 +153,28 @@ struct MOut {
     o.nrm = i.nrm;
     o.wpos = i.pos;
     o.face = i.face;
+    o.dev = i.dev;
     return o;
+}
+
+// the part's distance to the reference (mm, + outside it): green within
+// the tolerance, then yellow to red outside, cyan to blue inside (linear)
+fn deviation_color(d: f32) -> vec3<f32> {
+    let range = max(u.misc.z, 1e-4);
+    let tol = u.misc.w;
+    let green = vec3<f32>(0.05, 0.45, 0.10);
+    if (abs(d) <= tol) {
+        return green;
+    }
+    let t = clamp((abs(d) - tol) / max(range - tol, 1e-4), 0.0, 1.0);
+    if (d > 0.0) {
+        let yellow = vec3<f32>(0.80, 0.62, 0.02);
+        let red = vec3<f32>(0.75, 0.04, 0.03);
+        return select(mix(yellow, red, (t - 0.5) * 2.0), mix(green, yellow, t * 2.0), t < 0.5);
+    }
+    let cyan = vec3<f32>(0.03, 0.50, 0.70);
+    let blue = vec3<f32>(0.04, 0.08, 0.75);
+    return select(mix(cyan, blue, (t - 0.5) * 2.0), mix(green, cyan, t * 2.0), t < 0.5);
 }
 
 // the part's faces, or the reference mesh (face 0xFFFFFFFF: its colour,
@@ -168,6 +191,9 @@ fn shade(i: MOut) -> vec3<f32> {
     if (i.face != 0xFFFFFFFFu) {
         let fc = faces[i.face];
         base = fc.color;
+        if (u.misc.y > 0.5 && abs(i.dev) < 1e8) {
+            base = deviation_color(i.dev);
+        }
         let flags = fc.flags;
         if ((flags & 1u) != 0u) {
             base = mix(base, u.sel.rgb, u.sel.a);
@@ -269,7 +295,13 @@ pub struct MeshVertex {
     pub pos: [f32; 3],
     pub nrm: [f32; 3],
     pub face: u32,
+    /// The distance to the reference mesh (mm, + outside it), `NO_DEV`
+    /// when none.
+    pub dev: f32,
 }
+
+/// A vertex with no distance to the reference (not coloured).
+pub const NO_DEV: f32 = 1e9;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -351,6 +383,9 @@ pub struct Frame<'a> {
     /// colour (sRGB 0..1).
     pub reference: RefDraw,
     pub ref_color: [f32; 3],
+    /// The part coloured by its distance to the reference: the range and
+    /// the tolerance (mm).
+    pub deviation: Option<(f32, f32)>,
     pub paint: &'a [egui::ClippedPrimitive],
     pub textures: &'a mut egui::TexturesDelta,
 }
@@ -478,7 +513,7 @@ impl Renderer {
                 bias: wgpu::DepthBiasState { constant: 8, slope_scale: 1.5, clamp: 0.0 },
             })
         };
-        let mesh_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Uint32];
+        let mesh_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Uint32, 3 => Float32];
         let line_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4, 3 => Unorm8x4];
         let pipeline_mask = |label: &str, vs: &str, fs: &str, attrs: Option<(&[wgpu::VertexAttribute], u64)>, blend: Option<wgpu::BlendState>, ds: Option<wgpu::DepthStencilState>, write_mask: wgpu::ColorWrites| {
             let layouts: Vec<Option<wgpu::VertexBufferLayout>> = match attrs {
@@ -634,7 +669,10 @@ impl Renderer {
             sel: [s[0], s[1], s[2], sa],
             hover: [h[0], h[1], h[2], ha],
             base: [b[0], b[1], b[2], f.grid as u32 as f32],
-            misc: [f.origin as u32 as f32, 0.0, 0.0, 0.0],
+            misc: match f.deviation {
+                Some((range, tol)) => [f.origin as u32 as f32, 1.0, range, tol],
+                None => [f.origin as u32 as f32, 0.0, 1.0, 0.0],
+            },
             refc: {
                 let c = l3(f.ref_color);
                 [c[0], c[1], c[2], 0.22]

@@ -66,6 +66,8 @@ pub enum Icon {
     Scan,
     /// The reference seen through: a square seen through another.
     Ghost,
+    /// The deviation: a surface over a reference line, the gap marked.
+    Deviation,
 }
 
 struct Pen<'a> {
@@ -251,6 +253,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(5.0, 5.0), (10.0, 10.0), (17.0, 6.5)]);
             pen.line(&[(3.0, 12.0), (10.0, 10.0), (11.0, 17.0)]);
             pen.line(&[(11.0, 3.0), (10.0, 10.0), (17.0, 13.0)]);
+        }
+        Icon::Deviation => {
+            pen.line(&[(2.5, 14.0), (17.5, 14.0)]);
+            pen.line(&[(2.5, 10.0), (6.0, 10.0), (10.0, 5.5), (14.0, 8.5), (17.5, 8.5)]);
+            pen.line(&[(10.0, 8.0), (10.0, 12.0)]);
         }
         Icon::Ghost => {
             pen.closed(&[(3.0, 3.0), (12.0, 3.0), (12.0, 12.0), (3.0, 12.0)]);

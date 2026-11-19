@@ -3,7 +3,7 @@
 //! the outlines over the part.
 
 use crate::materials;
-use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, RefDraw, Renderer, FACE_HOVERED, FACE_SELECTED};
+use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, RefDraw, Renderer, FACE_HOVERED, FACE_SELECTED, NO_DEV};
 use crate::state::{AppState, SelMode, Tool};
 use crate::theme;
 use nurbs_kernel::Op;
@@ -53,14 +53,21 @@ impl Drawer {
                     Some(q) => q.skipped.iter().map(|(f, _)| *f).collect(),
                     None => (0..m.faces.len() as u32).collect(),
                 };
-                verts.reserve(m.triangles.len() * 3);
-                for (t, tri) in m.triangles.iter().enumerate() {
-                    let face = m.tri_face[t];
-                    if !left.contains(&face) {
-                        continue;
-                    }
-                    for &v in tri {
-                        verts.push(MeshVertex { pos: m.positions[v as usize], nrm: m.normals[v as usize], face });
+                // the distance to the reference, when shown and measured on
+                // this model: its finer triangles instead
+                let dev = st.deviation_shown().filter(|_| quads.is_none());
+                if let Some(d) = dev {
+                    verts.extend_from_slice(d);
+                } else {
+                    verts.reserve(m.triangles.len() * 3);
+                    for (t, tri) in m.triangles.iter().enumerate() {
+                        let face = m.tri_face[t];
+                        if !left.contains(&face) {
+                            continue;
+                        }
+                        for &v in tri {
+                            verts.push(MeshVertex { pos: m.positions[v as usize], nrm: m.normals[v as usize], face, dev: NO_DEV });
+                        }
                     }
                 }
                 if let Some(q) = quads {
@@ -200,6 +207,7 @@ impl Drawer {
                 _ => RefDraw::Hidden,
             },
             ref_color: REF_GREY,
+            deviation: st.deviation_shown().map(|_| (st.dev_range as f32, st.dev_tol as f32)),
             paint,
             textures,
         };
@@ -230,7 +238,7 @@ fn quad_vertices(q: &nurbs_kernel::Quads, out: &mut Vec<MeshVertex>) {
         for i in [0, 1, 2, 0, 2, 3] {
             let v = k[i];
             let n = sums[&(*f, v)].normalize_or_zero();
-            out.push(MeshVertex { pos: q.positions[v as usize], nrm: n.to_array(), face: *f });
+            out.push(MeshVertex { pos: q.positions[v as usize], nrm: n.to_array(), face: *f, dev: NO_DEV });
         }
     }
 }

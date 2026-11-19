@@ -121,6 +121,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     materials_island(ctx, st);
     history_strip(ctx, st, screen);
     help_box(ctx, st);
+    deviation_legend(ctx, st);
     if st.panel_visible {
         inspector(ctx, st, screen);
     }
@@ -869,6 +870,84 @@ fn help_title(st: &AppState) -> String {
 /// droite… façon Plasticity", instead of the panels' text): the tool, then
 /// what each key and gesture does now, one per line. Folded, a small
 /// button.
+/// The deviation's legend, under the top bar: the colours from inside to
+/// outside the scan, the range (a click picks another), what was measured.
+fn deviation_legend(ctx: &egui::Context, st: &mut AppState) {
+    if !st.dev_on || st.reference.is_none() {
+        return;
+    }
+    let vr = st.view_rect;
+    let at = pos2((vr[0] + vr[2]) * 0.5, vr[1] + 10.0);
+    egui::Area::new(Id::new("dev-legend")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(at).show(ctx, |ui| {
+        egui::Frame::new().fill(tint(PANEL(), 0.92)).stroke(Stroke::new(1.0, PANEL_BORDER())).corner_radius(egui::CornerRadius::same(10)).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+            let fmt = |v: f64| crate::widgets::fmt_mm(v as f32);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("DEVIATION").font(semibold(10.5)).color(TEXT2()));
+                let txt = match &st.deviation {
+                    _ if st.dev_busy() => "measuring…".to_string(),
+                    Some(d) if d.near == 0 => "the part is not on the scan".to_string(),
+                    Some(d) => format!("{:.0} % within ±{} mm · half within {} · 95 % within {} mm", 100.0 * d.within as f64 / d.near as f64, fmt(d.tol), fmt(d.p50), fmt(d.p95)),
+                    None => String::new(),
+                };
+                ui.label(egui::RichText::new(txt).font(regular(12.0)).color(LABEL()));
+                if icon_btn(ui, Icon::EyeOff, false, "Deviation off", 22.0).clicked() {
+                    st.set_deviation(false);
+                }
+            });
+            // the colours: inside (blue) to outside (red), the tolerance green
+            let w = 320.0;
+            let (r, _) = ui.allocate_exact_size(vec2(w, 12.0), Sense::hover());
+            let p = ui.painter();
+            let range = st.dev_range as f32;
+            let tol = st.dev_tol as f32;
+            let col = |d: f32| -> Color32 {
+                let t = ((d.abs() - tol) / (range - tol).max(1e-4)).clamp(0.0, 1.0);
+                let mix = |a: [f32; 3], b: [f32; 3], k: f32| [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+                let green = [0.05, 0.45, 0.10];
+                let c = if d.abs() <= tol {
+                    green
+                } else if d > 0.0 {
+                    if t < 0.5 { mix(green, [0.80, 0.62, 0.02], t * 2.0) } else { mix([0.80, 0.62, 0.02], [0.75, 0.04, 0.03], (t - 0.5) * 2.0) }
+                } else if t < 0.5 {
+                    mix(green, [0.03, 0.50, 0.70], t * 2.0)
+                } else {
+                    mix([0.03, 0.50, 0.70], [0.04, 0.08, 0.75], (t - 0.5) * 2.0)
+                };
+                // (the shader's colours are linear)
+                let s = |v: f32| (v.max(0.0).powf(1.0 / 2.2) * 255.0).round() as u8;
+                Color32::from_rgb(s(c[0]), s(c[1]), s(c[2]))
+            };
+            let n = 64;
+            for i in 0..n {
+                let x0 = r.min.x + w * i as f32 / n as f32;
+                let d = -range + 2.0 * range * (i as f32 + 0.5) / n as f32;
+                p.rect_filled(Rect::from_min_max(pos2(x0, r.min.y), pos2(x0 + w / n as f32 + 0.5, r.max.y)), 0.0, col(d));
+            }
+            let (lr, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
+            let p = ui.painter();
+            p.text(lr.left_center(), Align2::LEFT_CENTER, format!("−{} inside", fmt(st.dev_range)), regular(11.0), TEXT2());
+            p.text(lr.center(), Align2::CENTER_CENTER, "0", regular(11.0), TEXT2());
+            p.text(lr.right_center(), Align2::RIGHT_CENTER, format!("outside +{} mm", fmt(st.dev_range)), regular(11.0), TEXT2());
+            // the range: a click picks another
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.label(egui::RichText::new("Range").font(regular(11.0)).color(TEXT2()));
+                for (v, label) in [(0.1, "0,1"), (0.25, "0,25"), (0.5, "0,5"), (1.0, "1"), (2.0, "2")] {
+                    let on = (st.dev_range - v).abs() < 1e-9;
+                    let g = egui::RichText::new(label).font(if on { semibold(11.5) } else { regular(11.5) }).color(if on { TEXT_STRONG() } else { TEXT2() });
+                    if ui.add(egui::Label::new(g).sense(Sense::click())).on_hover_text("The range the colours span (mm); green within a fifth of it, at most 0,1").clicked() {
+                        st.dev_range = v;
+                        st.dev_tol = (v * 0.2).min(0.1);
+                        st.model_gen += 1;
+                    }
+                }
+                ui.label(egui::RichText::new("mm").font(regular(11.0)).color(TEXT2()));
+            });
+        });
+    });
+}
+
 fn help_box(ctx: &egui::Context, st: &mut AppState) {
     let text = crate::viewport::hint(st);
     let color = match st.tool {
@@ -1361,7 +1440,7 @@ fn reference_rows(ui: &mut Ui, st: &mut AppState) {
         _ => String::new(),
     };
     let info_g = p.layout_no_wrap(info, regular(12.0), tint(TEXT2(), dim));
-    let info_x = r.max.x - 62.0 - info_g.size().x;
+    let info_x = r.max.x - 86.0 - info_g.size().x;
     p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
     let name = crate::reference::name_of(&rm.path);
     let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
@@ -1369,7 +1448,13 @@ fn reference_rows(ui: &mut Ui, st: &mut AppState) {
     job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
     let name_g = ui.painter().layout_job(job);
     ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, TEXT());
-    // Ghost, then the eye
+    // Deviation, Ghost, then the eye
+    let dr = Rect::from_center_size(pos2(r.max.x - 66.0, r.center().y), vec2(16.0, 16.0));
+    let dresp = ui.interact(dr.expand(4.0), Id::new("ref-dev"), Sense::click()).on_hover_text("Deviation: the part coloured by its distance to the scan");
+    if st.dev_on {
+        ui.painter().rect_filled(dr.expand(3.0), 4.0, accent_bg());
+    }
+    icons::paint(ui.painter(), dr, Icon::Deviation, if st.dev_on { accent() } else { tint(TEXT2(), 0.8) });
     let gr = Rect::from_center_size(pos2(r.max.x - 42.0, r.center().y), vec2(16.0, 16.0));
     let gresp = ui.interact(gr.expand(4.0), Id::new("ref-ghost"), Sense::click()).on_hover_text("Ghost: seen through, the part inside it shows");
     if st.ref_ghost {
@@ -1393,6 +1478,10 @@ fn reference_rows(ui: &mut Ui, st: &mut AppState) {
             st.ref_ghost = !st.ref_ghost;
             ui.close();
         }
+        if ui.button(if st.dev_on { "Deviation off" } else { "Deviation" }).clicked() {
+            st.set_deviation(!st.dev_on);
+            ui.close();
+        }
         if ui.button("Frame").clicked() {
             if let Some(m) = &st.reference {
                 let (lo, hi) = (m.lo.as_vec3(), m.hi.as_vec3());
@@ -1405,7 +1494,9 @@ fn reference_rows(ui: &mut Ui, st: &mut AppState) {
             ui.close();
         }
     });
-    if gresp.clicked() {
+    if dresp.clicked() {
+        st.set_deviation(!st.dev_on);
+    } else if gresp.clicked() {
         st.ref_ghost = !st.ref_ghost;
     } else if eresp.clicked() {
         st.ref_shown = !st.ref_shown;

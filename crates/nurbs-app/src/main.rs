@@ -85,7 +85,7 @@ impl App {
         window.pre_present_notify();
         gfx.queue.present(frame);
         // the kernel is working: keep looking for its answer
-        let busy = self.st.interacting || self.st.toast.is_some() || self.st.building() || self.st.ref_busy();
+        let busy = self.st.interacting || self.st.toast.is_some() || self.st.building() || self.st.ref_busy() || self.st.dev_busy();
         let egui_wants = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay.as_secs_f32() < 0.05).unwrap_or(false);
         if busy || egui_wants || now < self.redraw_until {
             window.request_redraw();

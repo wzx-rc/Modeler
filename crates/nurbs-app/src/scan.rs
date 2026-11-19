@@ -9,10 +9,16 @@
 //! a hole (begun a little outside its rim, so it cuts cleanly), an Add for a
 //! boss, a button, a rivet. Nothing round there: nothing made, and a toast
 //! says so.
+//!
+//! Step 3, the deviation: the part's mesh coloured by its distance to the
+//! scan (green within the tolerance, yellow to red outside it, cyan to blue
+//! inside), measured in a thread for each finished model (the BVH's closest
+//! point within `DEV_REACH`, signed by the scan triangle's normal there).
 
+use crate::render::MeshVertex;
 use crate::state::AppState;
 use glam::{DQuat, DVec3};
-use nurbs_kernel::{Op, Prim};
+use nurbs_kernel::{Model, Op, Prim};
 use rectify_core::planes::dominant_normal;
 use rectify_core::slot::Slot;
 
@@ -108,7 +114,184 @@ pub fn round_step(s: &Slot) -> Option<RoundRead> {
     })
 }
 
+/// Past this distance from the scan (mm), a point of the part is not
+/// coloured (a face inside the scan, a part modelled beside it).
+pub const DEV_REACH: f64 = 5.0;
+
+/// The part's distance to the reference, for one model.
+#[derive(Clone)]
+pub struct Deviation {
+    /// The model's serial and the reference's load it was measured on.
+    pub serial: u64,
+    pub ref_gen: u64,
+    /// The part's triangles cut finer (`refine`), each corner with its
+    /// distance (mm, + outside the scan; `NO_DEV` past the reach).
+    pub verts: Vec<MeshVertex>,
+    /// Of the points measured within reach: how many, how many within the
+    /// tolerance it was asked with, the median and the 95th percentile of
+    /// their distance (mm).
+    pub near: usize,
+    pub within: usize,
+    pub tol: f64,
+    pub p50: f64,
+    pub p95: f64,
+    pub ms: f32,
+}
+
+/// Each point's signed distance to the scan (in 4 threads): the values
+/// (`NO_DEV` past `DEV_REACH`), how many within reach, how many of those
+/// within `tol`, the median and 95th percentile of their distance.
+pub fn measure(r: &crate::reference::Reference, pts: &[[f32; 3]], tol: f64) -> (Vec<f32>, usize, usize, f64, f64) {
+    let n = pts.len();
+    let mut values = vec![crate::render::NO_DEV; n];
+    let chunk = n.div_ceil(4).max(1);
+    std::thread::scope(|s| {
+        for (k, out) in values.chunks_mut(chunk).enumerate() {
+            s.spawn(move || {
+                for (i, o) in out.iter_mut().enumerate() {
+                    let p = DVec3::from(pts[k * chunk + i].map(|c| c as f64));
+                    if let Some((t, q)) = r.bvh.closest(&r.mesh, p, DEV_REACH) {
+                        let d = (p - q).length();
+                        let side = (p - q).dot(r.mesh.tri_normal(t as usize));
+                        *o = if side < 0.0 { -d } else { d } as f32;
+                    }
+                }
+            });
+        }
+    });
+    let near: Vec<f64> = values.iter().filter(|v| v.abs() < 1e8).map(|v| *v as f64).collect();
+    let within = near.iter().filter(|v| v.abs() <= tol).count();
+    let mut abs: Vec<f64> = near.iter().map(|v| v.abs()).collect();
+    abs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p95 = abs.get(((abs.len() as f64 * 0.95) as usize).min(abs.len().saturating_sub(1))).copied().unwrap_or(0.0);
+    let p50 = abs.get(abs.len() / 2).copied().unwrap_or(0.0);
+    (values, near.len(), within, p50, p95)
+}
+
+/// The kernel's triangles are long (a cylinder's side runs rim to rim):
+/// measured at their corners only, a hole would be coloured by its rims.
+/// Each triangle is cut in k × k (its longest side / k near `target`, at
+/// most 64), the points shared inside it, and each point measured.
+pub fn refine_measure(r: &crate::reference::Reference, m: &Model, tol: f64) -> Deviation {
+    let t0 = std::time::Instant::now();
+    let p = |v: u32| DVec3::from(m.positions[v as usize].map(|c| c as f64));
+    let nv = |v: u32| DVec3::from(m.normals[v as usize].map(|c| c as f64));
+    // the cut: about 0.3 mm on a 120 mm part, at most ~300 k triangles
+    let diag = m.bounds().map(|(lo, hi)| (DVec3::from(hi.map(|c| c as f64)) - DVec3::from(lo.map(|c| c as f64))).length()).unwrap_or(10.0);
+    let mut target = (diag / 400.0).max(0.2);
+    let cuts = |target: f64| -> Vec<usize> {
+        m.triangles
+            .iter()
+            .map(|t| {
+                let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+                let l = (a - b).length().max((b - c).length()).max((c - a).length());
+                ((l / target).ceil() as usize).clamp(1, 64)
+            })
+            .collect()
+    };
+    let mut ks = cuts(target);
+    while ks.iter().map(|k| k * k).sum::<usize>() > 300_000 && target < diag {
+        target *= 1.4;
+        ks = cuts(target);
+    }
+    // each triangle's grid of points (barycentric), then all measured
+    let mut pts: Vec<[f32; 3]> = vec![];
+    let mut nrm: Vec<[f32; 3]> = vec![];
+    let mut first: Vec<usize> = Vec::with_capacity(ks.len());
+    for (t, tri) in m.triangles.iter().enumerate() {
+        let k = ks[t];
+        first.push(pts.len());
+        let (a, b, c) = (p(tri[0]), p(tri[1]), p(tri[2]));
+        let (na, nb, nc) = (nv(tri[0]), nv(tri[1]), nv(tri[2]));
+        for i in 0..=k {
+            for j in 0..=(k - i) {
+                let (u, v) = (i as f64 / k as f64, j as f64 / k as f64);
+                let w = 1.0 - u - v;
+                pts.push((a * w + b * u + c * v).as_vec3().to_array());
+                nrm.push((na * w + nb * u + nc * v).normalize_or_zero().as_vec3().to_array());
+            }
+        }
+    }
+    let (values, near, within, p50, p95) = measure(r, &pts, tol);
+    // the grid's triangles
+    let mut verts = Vec::with_capacity(ks.iter().map(|k| k * k * 3).sum());
+    for (t, &k) in ks.iter().enumerate() {
+        let face = m.tri_face[t];
+        let base = first[t];
+        // row i (its points j = 0 ..= k - i) starts after the rows before it
+        let row = |i: usize| base + (0..i).map(|q| k + 1 - q).sum::<usize>();
+        let vx = |q: usize| MeshVertex { pos: pts[q], nrm: nrm[q], face, dev: values[q] };
+        for i in 0..k {
+            let (r0, r1) = (row(i), row(i + 1));
+            for j in 0..(k - i) {
+                // (i, j), (i + 1, j), (i, j + 1)
+                verts.extend_from_slice(&[vx(r0 + j), vx(r1 + j), vx(r0 + j + 1)]);
+                if j + 1 < k - i {
+                    // (i + 1, j), (i + 1, j + 1), (i, j + 1)
+                    verts.extend_from_slice(&[vx(r1 + j), vx(r1 + j + 1), vx(r0 + j + 1)]);
+                }
+            }
+        }
+    }
+    Deviation { serial: m.serial, ref_gen: 0, verts, near, within, tol, p50, p95, ms: t0.elapsed().as_secs_f32() * 1000.0 }
+}
+
 impl AppState {
+    /// The deviation of the model shown, when it is on and measured.
+    pub fn deviation_shown(&self) -> Option<&[MeshVertex]> {
+        if !self.dev_on {
+            return None;
+        }
+        let m = self.model.as_ref()?;
+        let d = self.deviation.as_ref()?;
+        (d.serial == m.serial && d.ref_gen == self.ref_gen && self.reference.is_some()).then_some(d.verts.as_slice())
+    }
+
+    /// The deviation on or off (the part is uploaded again).
+    pub fn set_deviation(&mut self, on: bool) {
+        self.dev_on = on;
+        self.model_gen += 1;
+    }
+
+    /// Being measured.
+    pub fn dev_busy(&self) -> bool {
+        self.dev_on && self.reference.is_some() && (self.dev_job.is_some() || self.deviation_shown().is_none())
+    }
+
+    /// Once per frame: takes the measure made, starts one for a new
+    /// finished model.
+    pub(crate) fn deviation_tick(&mut self) {
+        if let Some(rx) = &self.dev_job {
+            match rx.try_recv() {
+                Ok(d) => {
+                    self.dev_job = None;
+                    self.deviation = Some(d);
+                    self.model_gen += 1;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(_) => self.dev_job = None,
+            }
+        }
+        if !self.dev_on {
+            return;
+        }
+        let (Some(m), Some(r)) = (self.model.clone(), self.reference.clone()) else { return };
+        if !m.fine || self.is_live() || m.serial / 4 != self.version {
+            return;
+        }
+        if self.deviation.as_ref().map(|d| d.serial == m.serial && d.ref_gen == self.ref_gen && d.tol == self.dev_tol).unwrap_or(false) {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (ref_gen, tol) = (self.ref_gen, self.dev_tol);
+        std::thread::spawn(move || {
+            let mut d = refine_measure(&r, &m, tol);
+            d.ref_gen = ref_gen;
+            let _ = tx.send(d);
+        });
+        self.dev_job = Some(rx);
+    }
+
     /// The reference under a point of the screen when it is shown: the
     /// triangle and the point. The part modelled on it lies on it or a
     /// little off it: the scan counts unless the part is clearly in front

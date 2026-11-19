@@ -1863,6 +1863,39 @@ fn main() {
             h.st.ref_ghost = true;
             h.steps(2);
             h.shot("zero-scan-12-boss-ghost");
+            // step 3: the part coloured by its distance to the scan
+            h.st.ref_ghost = false;
+            h.st.set_deviation(true);
+            let end = Instant::now() + Duration::from_secs(60);
+            h.step();
+            while h.st.dev_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            h.steps(2);
+            if let Some(d) = &h.st.deviation {
+                eprintln!("  deviation: {} points near, {} within {} mm, median {:.3}, 95 % {:.3} mm, {} triangles, {:.0} ms", d.near, d.within, d.tol, d.p50, d.p95, d.verts.len() / 3, d.ms);
+            }
+            h.shot("zero-scan-13-dev-bosses");
+            h.st.ref_shown = false;
+            h.steps(2);
+            h.shot("zero-scan-14-dev-bosses-alone");
+            h.st.ref_shown = true;
+            h.st.camera.yaw = 1.05;
+            h.st.camera.pitch = 0.22;
+            h.st.camera.frame(Vec3::new(40.0, 52.0, -14.0), Vec3::new(60.0, 104.0, 18.0));
+            h.steps(2);
+            h.shot("zero-scan-15-dev-muzzle");
+            h.st.dev_range = 2.0;
+            h.st.dev_tol = 0.1;
+            h.st.model_gen += 1;
+            h.step();
+            while h.st.dev_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            h.steps(2);
+            h.shot("zero-scan-16-dev-muzzle-2mm");
             for f in &h.st.doc.features {
                 eprintln!("  {} {:?} {:?} at {:.2?} axis {:.3?}", f.name, f.op, f.prim, f.origin, f.rot * DVec3::Y);
             }

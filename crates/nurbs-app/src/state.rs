@@ -454,6 +454,14 @@ pub struct AppState {
     pub ref_ghost: bool,
     /// The Cylinder dragged across a round part of the reference (`scan.rs`).
     pub scan_round: Option<crate::scan::ScanRound>,
+    /// The part coloured by its distance to the reference (`scan.rs`):
+    /// shown, its range and tolerance (mm), the last one measured and the
+    /// one being measured (in a thread).
+    pub dev_on: bool,
+    pub dev_range: f64,
+    pub dev_tol: f64,
+    pub deviation: Option<crate::scan::Deviation>,
+    pub dev_job: Option<std::sync::mpsc::Receiver<crate::scan::Deviation>>,
 }
 
 impl AppState {
@@ -530,6 +538,11 @@ impl AppState {
             ref_shown: true,
             ref_ghost: false,
             scan_round: None,
+            dev_on: false,
+            dev_range: 0.5,
+            dev_tol: 0.1,
+            deviation: None,
+            dev_job: None,
         }
     }
 
@@ -1956,6 +1969,7 @@ impl AppState {
         self.refresh_snaps();
         self.remesh_tick();
         self.reference_tick();
+        self.deviation_tick();
         let fine = !self.is_live();
         // quads only for a finished state (not while a gesture is live)
         let quads = self.quads && fine;

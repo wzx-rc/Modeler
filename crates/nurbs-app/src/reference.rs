@@ -61,7 +61,7 @@ impl Reference {
             let mut verts = Vec::with_capacity(mesh.tris.len() * 3);
             for (t, tri) in mesh.tris.iter().enumerate() {
                 for c in 0..3 {
-                    verts.push(MeshVertex { pos: mesh.pos[tri[c] as usize].as_vec3().to_array(), nrm: normals[t][c].as_vec3().to_array(), face: REF_FACE });
+                    verts.push(MeshVertex { pos: mesh.pos[tri[c] as usize].as_vec3().to_array(), nrm: normals[t][c].as_vec3().to_array(), face: REF_FACE, dev: crate::render::NO_DEV });
                 }
             }
             (b.join().expect("bvh"), topo, verts)
