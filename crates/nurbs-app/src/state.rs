@@ -1387,7 +1387,12 @@ impl AppState {
                     c.height = self.snap(t);
                     self.snap_shown = None;
                 } else {
-                    let t = closest_on_line(centre, c.plane.n, ro, rd).unwrap_or(0.0);
+                    // from where the pointer was when the height phase
+                    // began: the shape starts flat there, not at the height
+                    // the corner's ray passes the line at
+                    let (fo, fd) = self.ray(c.height_from);
+                    let t0 = closest_on_line(centre, c.plane.n, fo, fd).unwrap_or(0.0);
+                    let t = closest_on_line(centre, c.plane.n, ro, rd).map(|t| t - t0).unwrap_or(0.0);
                     c.height = self.snap(t);
                     self.snap_shown = None;
                 }

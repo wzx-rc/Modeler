@@ -1950,11 +1950,11 @@ fn main() {
                 let c = h.st.creation.as_ref().expect("creation");
                 let m = c.plane.at([(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5]);
                 let eye = h.st.view().eye.as_dvec3();
+                let f = pos2(c.height_from[0], c.height_from[1]);
                 if c.plane.n.dot((m - eye).normalize()).abs() > 0.94 {
-                    let f = c.height_from;
-                    return pos2(f[0], f[1] - (by / h.st.mm_per_point(m)) as f32);
+                    return pos2(f.x, f.y - (by / h.st.mm_per_point(m)) as f32);
                 }
-                h.screen_of((m + c.plane.n * by).as_vec3())
+                f + (h.screen_of((m + c.plane.n * by).as_vec3()) - h.screen_of(m.as_vec3()))
             };
             let up = raised(&h, 5.0);
             h.move_to(up);
