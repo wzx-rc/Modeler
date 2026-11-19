@@ -44,6 +44,7 @@ use nurbs_kernel::model::SurfKind;
 use nurbs_kernel::{FaceTag, FeatureId, Model, Op, Prim};
 use rectify_core::fillet::{EdgeSample, FilletRead};
 use rectify_core::planes::{dominant_normal, plane_under, tangent_under};
+use rectify_core::primary::{Primaries, Primary};
 use rectify_core::slot::Slot;
 
 /// A drag across a round part of the scan.
@@ -235,6 +236,45 @@ pub fn outline_step(s: &Slot) -> Option<OutlineRead> {
     } else {
         OutlineRead { op: Op::Add, x, z, r: s.r, height: s.depth, origin: mid, rot, depth: s.depth }
     })
+}
+
+/// A primary shape read on the scan (the "scan → shapes" button's first
+/// stage), as a step: a Cube when its outline is a rectangle, else a Sketch
+/// of its outline, pulled along the side axis from its back to its front.
+#[derive(Clone, Debug)]
+pub struct PrimaryRead {
+    pub prim: Prim,
+    pub profile: Option<Profile>,
+    pub origin: DVec3,
+    pub rot: DQuat,
+}
+
+pub fn primary_step(p: &Primaries, s: &Primary) -> Option<PrimaryRead> {
+    let h = s.thickness();
+    if !(h > 0.05) || s.outline.len() < 3 {
+        return None;
+    }
+    let to3 = |q: glam::DVec2| p.u * q.x + p.v * q.y;
+    if s.rect {
+        let c = &s.outline;
+        let (a, b) = (c[1] - c[0], c[3] - c[0]);
+        let centre = (c[0] + c[2]) * 0.5;
+        let rot = crate::state::basis_rotation(to3(a), p.w);
+        return Some(PrimaryRead { prim: Prim::Box { x: a.length(), y: h, z: b.length() }, profile: None, origin: p.at(centre, s.back), rot });
+    }
+    let (lo, hi) = s.outline.iter().fold((glam::DVec2::splat(f64::INFINITY), glam::DVec2::splat(f64::NEG_INFINITY)), |(a, b), q| (a.min(*q), b.max(*q)));
+    let size = hi - lo;
+    if !(size.x > 0.1 && size.y > 0.1) {
+        return None;
+    }
+    let centre = (lo + hi) * 0.5;
+    let rot = crate::state::basis_rotation(p.u, p.w);
+    // the sketch's local Z is X × Y: along ±v
+    let flip = p.u.cross(p.w).dot(p.v).signum();
+    let points: Vec<[f64; 2]> = s.outline.iter().map(|q| [(q.x - centre.x) / size.x, flip * (q.y - centre.y) / size.y]).collect();
+    let n = points.len();
+    let profile = Profile { points, smooth: vec![false; n], corner: vec![], tension: vec![], open: false };
+    Some(PrimaryRead { prim: Prim::Profile { x: size.x, y: h, z: size.y }, profile: Some(profile), origin: p.at(centre, s.back), rot })
 }
 
 /// Past this distance from the scan (mm), a point of the part is not
@@ -821,6 +861,53 @@ impl AppState {
             }
         }
         out
+    }
+
+    /// The scan's primary shapes (the "scan → shapes" button's first stage,
+    /// Romain 19 nov., 18 h 09: the big volumes first): its big blocks read
+    /// as slabs seen from its side (`rectify_core::primary`), made as Cube
+    /// and Sketch steps in one undo step, the biggest first; the deviation
+    /// is turned on to show what later stages have to read.
+    pub fn read_primaries(&mut self) {
+        let Some(r) = self.reference.clone() else {
+            self.toast("Import a reference mesh first (drop an .obj on the window)", true);
+            return;
+        };
+        let t0 = std::time::Instant::now();
+        let pr = rectify_core::primary::read(&r.mesh, r.edge);
+        let reads: Vec<(PrimaryRead, f64)> = pr.parts.iter().filter_map(|s| primary_step(&pr, s).map(|x| (x, s.flat))).collect();
+        if std::env::var_os("FORME_SCAN_DEBUG").is_some() {
+            eprintln!("primary: side {:?}, step {:.3} mm, {} parts, {:.0} ms", pr.w, pr.px, pr.parts.len(), t0.elapsed().as_secs_f64() * 1e3);
+            for s in &pr.parts {
+                eprintln!("  {:>2} corners, {:.2} .. {:.2}, area {:.0} mm², flat {:.2}, rect {}", s.outline.len(), s.back, s.front, s.area, s.flat, s.rect);
+            }
+        }
+        if reads.is_empty() {
+            self.toast("No primary shape read on the scan", true);
+            return;
+        }
+        let mat = self.material;
+        let mut ids = vec![];
+        self.edit("Primary shapes from the scan", |d| {
+            for (x, _) in &reads {
+                let id = d.add(Op::Add, x.prim, x.origin, x.rot);
+                let name = d.fresh_name("Block");
+                if let Some(f) = d.feature_mut(id) {
+                    f.name = name;
+                    f.profile = x.profile.clone();
+                    f.material = mat;
+                }
+                ids.push(id);
+            }
+        });
+        self.selection = vec![];
+        let cubes = reads.iter().filter(|(x, _)| matches!(x.prim, Prim::Box { .. })).count();
+        let axis = if pr.w.x.abs() > 0.5 { "X" } else if pr.w.y.abs() > 0.5 { "Y" } else { "Z" };
+        self.toast(
+            &format!("{} primary shapes read on the scan, seen along {axis}: {cubes} cubes, {} outlines · the deviation shows what is left", reads.len(), reads.len() - cubes),
+            false,
+        );
+        self.set_deviation(true);
     }
 
     /// Fit to scan: the picked sharp edges (or the selected fillet's) read

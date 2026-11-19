@@ -2270,6 +2270,78 @@ fn main() {
         }
     }
 
+    if want("scan-primary") {
+        // the "scan → shapes" button's first stage: the primary shapes (the
+        // big blocks) read as slabs seen from the scan's side, made as Cube
+        // and Sketch steps; through the ghost, alone, then the deviation
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        if std::path::Path::new(&path).exists() {
+            let mut d = Doc::default();
+            d.reference = Some(nurbs_kernel::RefMesh { path: path.clone() });
+            h.reset(d, "Retopo");
+            h.step();
+            let end = Instant::now() + Duration::from_secs(180);
+            while h.st.ref_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            h.settle();
+            h.st.toast = None;
+            let toast = |h: &Harness| h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+            let wait_dev = |h: &mut Harness| {
+                let end = Instant::now() + Duration::from_secs(90);
+                h.step();
+                while h.st.dev_busy() && Instant::now() < end {
+                    h.step();
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                h.steps(2);
+            };
+            h.st.camera.yaw = 0.55;
+            h.st.camera.pitch = 0.3;
+            if let Some(m) = &h.st.reference {
+                let (lo, hi) = (m.lo.as_vec3(), m.hi.as_vec3());
+                h.st.camera.frame(lo, hi);
+            }
+            h.steps(2);
+            h.shot("zero-scan-primary-0-scan");
+            h.st.read_primaries();
+            h.step();
+            h.settle();
+            eprintln!("  primary: {}", toast(&h));
+            wait_dev(&mut h);
+            h.st.set_deviation(false);
+            h.st.ref_ghost = true;
+            h.steps(2);
+            h.shot("zero-scan-primary-1-ghost");
+            h.st.ref_ghost = false;
+            h.st.ref_shown = false;
+            h.st.toast = None;
+            h.steps(2);
+            h.shot("zero-scan-primary-2-alone");
+            h.st.set_deviation(true);
+            wait_dev(&mut h);
+            if let Some(d) = &h.st.deviation {
+                eprintln!("  deviation: {} points near, {} within {} mm, median {:.3}, 95 % {:.3} mm", d.near, d.within, d.tol, d.p50, d.p95);
+            }
+            h.shot("zero-scan-primary-3-deviation");
+            h.st.camera.yaw = 0.0;
+            h.st.camera.pitch = 0.0;
+            h.steps(2);
+            h.shot("zero-scan-primary-4-side");
+            h.st.camera.yaw = std::f32::consts::PI;
+            h.steps(2);
+            h.shot("zero-scan-primary-5-other-side");
+            h.st.set_deviation(false);
+            for f in &h.st.doc.features {
+                eprintln!("  {} {:?} {:?} at {:.2?}", f.name, f.op, f.prim, f.origin);
+            }
+            if let Some(m) = &h.st.model {
+                eprintln!("  model: {} errors {:?}", m.faces.len(), m.errors);
+            }
+        }
+    }
+
     if want("scan-fillet") {
         // retopology, step 6: a block laid on the receiver's back (its side
         // and top on the scan's), the edge between them picked and Fit to

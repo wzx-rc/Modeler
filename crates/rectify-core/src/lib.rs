@@ -19,6 +19,7 @@ pub mod fillet;
 pub mod mesh;
 pub mod nurbs;
 pub mod planes;
+pub mod primary;
 pub mod slot;
 
 pub use mesh::{Mesh, Surface, Topo, NONE};

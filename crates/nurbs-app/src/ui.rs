@@ -1491,6 +1491,10 @@ fn reference_rows(ui: &mut Ui, st: &mut AppState) {
             st.set_deviation(!st.dev_on);
             ui.close();
         }
+        if ui.button("Primary shapes").clicked() {
+            st.read_primaries();
+            ui.close();
+        }
         if ui.button("Frame").clicked() {
             if let Some(m) = &st.reference {
                 let (lo, hi) = (m.lo.as_vec3(), m.hi.as_vec3());
@@ -1509,6 +1513,13 @@ fn reference_rows(ui: &mut Ui, st: &mut AppState) {
         st.ref_ghost = !st.ref_ghost;
     } else if eresp.clicked() {
         st.ref_shown = !st.ref_shown;
+    }
+    if st.reference.is_some() {
+        ui.add_space(4.0);
+        let w = ui.available_width();
+        if secondary_btn(ui, "Primary shapes", w).on_hover_text("Scan → shapes, stage 1: the big blocks read on the scan, as slabs seen from its side").clicked() {
+            st.read_primaries();
+        }
     }
     ui.add_space(3.0);
 }
