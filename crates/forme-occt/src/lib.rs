@@ -57,6 +57,7 @@ extern "C" {
     fn focc_inset_face(s: *const FShape, face: c_int, d: c_double) -> *mut FShape;
     fn focc_extrude(s: *const FShape, dx: c_double, dy: c_double, dz: c_double) -> *mut FShape;
     fn focc_thicken_face(s: *const FShape, index: c_int, t: c_double, base: i64, top: i64, side: i64) -> *mut FShape;
+    fn focc_move_face(s: *const FShape, index: c_int, d: c_double) -> *mut FShape;
     fn focc_imprint(s: *const FShape, tool: *const FShape) -> *mut FShape;
     fn focc_edge_point(s: *const FShape, edge: c_int, f: f64, xyz: *mut f64) -> c_int;
     fn focc_split(s: *const FShape, pts: *const f64, n: c_int, segs: *const c_int, nseg: c_int) -> *mut FShape;
@@ -570,6 +571,12 @@ impl Shape {
     /// `[base, top, side]` (the sides `side`, `side` + 1…).
     pub fn thicken_face(&self, face: usize, t: f64, tags: [i64; 3]) -> Result<Shape, String> {
         shape(unsafe { focc_thicken_face(self.0, face as c_int, t, tags[0], tags[1], tags[2]) })
+    }
+    /// Flat face `face` moved `d` along its outward normal, the faces round
+    /// it (flat or curved, running along the move) made longer or
+    /// shorter; tags kept.
+    pub fn move_face(&self, face: usize, d: f64) -> Result<Shape, String> {
+        shape(unsafe { focc_move_face(self.0, face as c_int, d) })
     }
     /// The solid with `tool` (a face lying on it) drawn into its faces; the
     /// part under the tool takes the tool's tag.
