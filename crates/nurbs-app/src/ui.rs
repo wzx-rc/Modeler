@@ -2291,6 +2291,11 @@ fn files_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 st.files_open = false;
             }
             ui.add_space(6.0);
+            if secondary_btn(ui, "New scene: gun scan only", 348.0).on_hover_text("A blank document with the gun scan alone as the reference").clicked() {
+                st.new_gun_scene();
+                st.files_open = false;
+            }
+            ui.add_space(6.0);
             section(ui, "Open");
             let list = files::list();
             if list.is_empty() {

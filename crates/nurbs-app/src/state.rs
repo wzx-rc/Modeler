@@ -2319,6 +2319,38 @@ impl AppState {
         self.touched();
     }
 
+    /// The gun scan used for the retopo tests: `FORME_GUN`, else where it
+    /// lies on Romain's PC, else in the project files.
+    pub fn gun_scan() -> Option<String> {
+        let list = [
+            std::env::var("FORME_GUN").unwrap_or_default(),
+            r"C:\Users\wzx\Dropbox\WZX\WORKS\TOOLS RD\RESHAPEIT\GUN_A_ORIGIN.obj".to_string(),
+            "/mnt/project-files/GUN_A_ORIGIN.obj".to_string(),
+        ];
+        list.into_iter().find(|p| !p.is_empty() && std::path::Path::new(p).is_file())
+    }
+
+    /// A blank document with the gun scan alone as its reference (one undo
+    /// step).
+    pub fn new_gun_scene(&mut self) {
+        let Some(path) = Self::gun_scan() else {
+            self.toast("Gun scan not found (set FORME_GUN to its .obj)", true);
+            return;
+        };
+        self.abort_gestures();
+        let before = std::mem::take(&mut self.doc);
+        self.undo.push(("New gun scene".into(), before));
+        self.redo.clear();
+        self.selection.clear();
+        self.doc.reference = Some(nurbs_kernel::RefMesh { path });
+        self.ref_failed = None;
+        self.ref_frame = true;
+        self.ref_shown = true;
+        self.doc_name = "Gun scan".into();
+        self.save_name = self.doc_name.clone();
+        self.touched();
+    }
+
     pub fn open(&mut self, name: &str, doc: Doc) {
         self.abort_gestures();
         let before = std::mem::replace(&mut self.doc, doc);
