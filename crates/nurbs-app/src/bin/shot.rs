@@ -1976,6 +1976,66 @@ fn main() {
         h.steps(2);
         h.shot("zero-comp-tilt-4-lowered");
     }
+    if want("comp-fillet") {
+        // a face moved where fillets made before run along it (19 nov.):
+        // moved before them, they made again. A block with its top edges
+        // filleted (tension 0.7): the top pulled up; then a block with a
+        // hole whose mouth is chamfered, its top tilted by an edge
+        let pull = |h: &mut Harness, axis: usize, mm: f32| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + Vec3::AXES[axis]) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let by = h.screen_of(c + Vec3::AXES[axis] * mm) - s0;
+            h.drag(grab, grab + by, 10, true);
+            h.settle();
+        };
+        let say = |h: &Harness| eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let t = |sub: u16| FaceTag { feature: b, sub }.pack();
+        let r = d.add_round(5.0, false, vec![
+            EdgeRef { faces: [t(2), t(0)], at: DVec3::new(20.0, 20.0, 0.0) },
+            EdgeRef { faces: [t(2), t(1)], at: DVec3::new(-20.0, 20.0, 0.0) },
+            EdgeRef { faces: [t(2), t(4)], at: DVec3::new(0.0, 20.0, 15.0) },
+            EdgeRef { faces: [t(2), t(5)], at: DVec3::new(0.0, 20.0, -15.0) },
+        ]);
+        d.feature_mut(r).unwrap().round.as_mut().unwrap().tension = 0.7;
+        h.reset(d, "Filleted block");
+        h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num3);
+        let top = h.screen_of(Vec3::new(2.0, 20.0, 2.0));
+        h.click(top);
+        h.steps(2);
+        h.shot("zero-comp-fillet-1-picked");
+        pull(&mut h, 1, 8.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-comp-fillet-2-top-up");
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let hole = d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
+        let t = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        d.add_round(1.5, true, vec![EdgeRef { faces: [t(b, 2), t(hole, 0)], at: DVec3::new(0.0, 20.0, 0.0) }]);
+        h.reset(d, "Chamfered hole");
+        h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num2);
+        let edge = h.screen_of(Vec3::new(6.0, 20.0, 15.0));
+        h.click(edge);
+        h.steps(2);
+        pull(&mut h, 1, 6.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-comp-fillet-3-chamfered-hole");
+    }
     if want("comp-curved") {
         // a flat face moved along its normal with curved faces round it:
         // the boss's top up (its side follows), the block's top up and

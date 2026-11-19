@@ -3309,6 +3309,15 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                                     hk->SetValue(k + 1, t);
                                 }
                                 GeomAPI_Interpolate gi(hp, hk, Standard_False, 1e-9);
+                                // its ends' tangents the old ones slid (a closed
+                                // edge stays smooth where it closes)
+                                auto slid_tan = [&](double t) {
+                                    gp_Pnt p;
+                                    gp_Vec v;
+                                    c.D1(t, p, v);
+                                    return v - d * (v.Dot(gp_Vec(sl.n)) / d.Dot(gp_Vec(sl.n)));
+                                };
+                                gi.Load(slid_tan(t0), slid_tan(t1), Standard_False);
                                 gi.Perform();
                                 if (gi.IsDone()) {
                                     BRepBuilderAPI_MakeEdge me(gi.Curve(), na, nb, t0, t1);
@@ -3441,6 +3450,22 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                                         hk->SetValue(k + 1, t);
                                     }
                                     Geom2dAPI_Interpolate gi(hp, hk, Standard_False, 1e-9);
+                                    // the ends' tangents: the old curve's, v moved
+                                    // as fast as the slide changes along it
+                                    BRepAdaptor_Curve oc(ef);
+                                    auto tan2 = [&](double t) {
+                                        gp_Pnt2d uv;
+                                        gp_Vec2d w;
+                                        pc->D1(t, uv, w);
+                                        gp_Pnt p, q;
+                                        gp_Vec c1, du, dv;
+                                        oc.D1(t, p, c1);
+                                        gs->D1(uv.X(), uv.Y(), q, du, dv);
+                                        dv.Transform(tr);
+                                        double ds = -c1.Dot(gp_Vec(sl.n)) / sl.d.Dot(gp_Vec(sl.n));
+                                        return gp_Vec2d(w.X(), w.Y() + ds * sl.d.Dot(dv) / dv.SquareMagnitude());
+                                    };
+                                    gi.Load(tan2(n0), tan2(n1), Standard_False);
                                     gi.Perform();
                                     if (!gi.IsDone()) return nullptr;
                                     return opencascade::handle<Geom2d_Curve>(gi.Curve());

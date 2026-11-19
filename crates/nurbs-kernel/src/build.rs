@@ -570,16 +570,14 @@ fn hash2(a: u64, b: u64) -> u64 {
 
 /// Builds the document. Never fails: what cannot be made is listed in
 /// `Model::errors` and left out.
-pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Cache) -> Model {
-    let t0 = Instant::now();
-    let mut model = Model { fine, ..Default::default() };
+/// Builds the features `feats` in this order: the stage after the last
+/// (the stages on the way cached by the hash of what comes before).
+fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Stage {
     let mut stage = Stage { shape: None, errors: vec![], limits: vec![], conic: vec![], tension_limits: vec![] };
     let mut key = 0u64;
-    let mut used_tools = vec![];
-    let mut used_stages = vec![];
     // the stage before each feature (blended fillets start again from there)
     let mut befores: Vec<(&Feature, Stage)> = vec![];
-    for f in doc.features.iter().filter(|f| f.visible && !f.suspended && !f.is_path()) {
+    for (i, &f) in feats.iter().enumerate() {
         befores.push((f, stage.clone()));
         let fh = f.hash();
         key = hash2(key, fh);
@@ -714,7 +712,10 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
                         stage.shape = Some(Rc::new(s));
                     }
                     Ok(None) => {}
-                    Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
+                    Err(e) => match replay(doc, &feats[..i], f, t, &stage, skip, cache, model, used_tools, used_stages) {
+                        Some(s) => stage = s,
+                        None => stage.errors.push(format!("{}: {e}", f.name)),
+                    },
                 }
             }
             cache.stages.insert(key, stage.clone());
@@ -776,6 +777,41 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         }
         cache.stages.insert(key, stage.clone());
     }
+    stage
+}
+
+/// A face or edge moved (`Tweak`) that cannot be made where fillets or
+/// chamfers made just before it run along it: made before them instead,
+/// they made again on what it gives (as if it had come first; their edges
+/// are found again by their faces' tags). The stage, when that adds no
+/// error.
+#[allow(clippy::too_many_arguments)]
+fn replay<'a>(doc: &'a Doc, before: &[&'a Feature], f: &'a Feature, t: &Tweak, stage: &Stage, skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Option<Stage> {
+    let tags: Vec<i64> = match &t.comp {
+        Comp::Face(r) => vec![r.tag],
+        Comp::Edge(e) => e.faces.to_vec(),
+        Comp::Vertex(_) => return None,
+    };
+    let mut j = before.len();
+    while j > 0 && before[j - 1].round.is_some() {
+        j -= 1;
+    }
+    let touches = before[j..].iter().any(|g| g.round.as_ref().is_some_and(|r| r.edges.iter().any(|e| e.faces.iter().any(|x| tags.contains(x)))));
+    if !touches {
+        return None;
+    }
+    let order: Vec<&Feature> = before[..j].iter().copied().chain(std::iter::once(f)).chain(before[j..].iter().copied()).collect();
+    let s = run(doc, &order, skip, cache, model, used_tools, used_stages);
+    (s.shape.is_some() && s.errors.len() <= stage.errors.len()).then_some(s)
+}
+
+pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Cache) -> Model {
+    let t0 = Instant::now();
+    let mut model = Model { fine, ..Default::default() };
+    let mut used_tools = vec![];
+    let mut used_stages = vec![];
+    let feats: Vec<&Feature> = doc.features.iter().filter(|f| f.visible && !f.suspended && !f.is_path()).collect();
+    let stage = run(doc, &feats, skip, cache, &mut model, &mut used_tools, &mut used_stages);
     // keep what this document uses (the next request is most often the same
     // document with one feature changed)
     cache.stages.retain(|k, _| used_stages.contains(k));
@@ -1666,13 +1702,22 @@ mod tests {
         d.feature_mut(s).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [0.0, 0.1], [-0.5, 0.5]], smooth: vec![false, false, false, true, false], corner: vec![], tension: vec![], open: false });
         d.add_tweak(right_edge(b, 3.0));
         cases.push(("sketch pocket, curved side", d, None));
-        // a hole whose mouth is chamfered: its slanted wall cannot follow
+        // a hole whose mouth is chamfered: its slanted wall cannot slide,
+        // the top is tilted before the chamfer, the chamfer made again
         let mut d = Doc::default();
         let b = block(&mut d);
         let h = d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
         d.add_round(1.0, true, vec![EdgeRef { faces: [tag(b, 2), tag(h, 0)], at: DVec3::new(0.0, 20.0, 0.0) }]);
         d.add_tweak(right_edge(b, 3.0));
-        cases.push(("hole, chamfered mouth", d, Some("straight")));
+        cases.push(("hole, chamfered mouth", d, None));
+        // a hole tilted, then its mouth chamfered 1.5 mm (its new edge
+        // smooth where it closes: a kink there held the chamfer to 0.9)
+        let mut d = Doc::default();
+        let b = block(&mut d);
+        let h = d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(6.0, 20.0, 15.0) }), delta: DVec3::new(0.0, 6.0, 0.0) });
+        d.add_round(1.5, true, vec![EdgeRef { faces: [tag(b, 2), tag(h, 0)], at: DVec3::new(0.0, 23.0, 0.0) }]);
+        cases.push(("hole tilted, then chamfered", d, None));
         // the test part: the top's left half (the hole) tilted round the
         // slot's edge
         let (mut d, b, _) = test_part();
@@ -1696,7 +1741,7 @@ mod tests {
             eprintln!("{name:<28} {} faces, errors {:?}", m.faces.len(), m.errors);
 
             match want {
-                None if !m.errors.is_empty() => bad.push(format!("{name}: {:?}", m.errors)),
+                None if !m.errors.is_empty() || !m.limits.is_empty() => bad.push(format!("{name}: {:?}, limits {:?}", m.errors, m.limits)),
                 Some(w) if !m.errors.iter().any(|e| e.contains(w)) => bad.push(format!("{name}: wanted \"{w}\", got {:?}", m.errors)),
                 _ => {}
             }
@@ -1707,7 +1752,8 @@ mod tests {
                 let edges: Vec<EdgeRef> = m.edges.iter().filter(|e| !e.seam && (tops.contains(&e.faces[0]) || tops.contains(&e.faces[1]))).filter_map(|e| {
                     let o = if tops.contains(&e.faces[0]) { e.faces[1] } else { e.faces[0] };
                     let t = m.faces.get(usize::try_from(o).ok()?)?.tag?;
-                    (t.feature != 1).then(|| EdgeRef { faces: [tag(1, 2), tag(t.feature, t.sub)], at: { let p = e.pts[e.pts.len() / 2]; DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64) } })
+                    // (to the walls: not to a chamfer made after)
+                    (t.feature != 1 && d.feature(t.feature).is_some_and(|g| g.round.is_none())).then(|| EdgeRef { faces: [tag(1, 2), tag(t.feature, t.sub)], at: { let p = e.pts[e.pts.len() / 2]; DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64) } })
                 }).collect();
                 if !edges.is_empty() {
                     let mut d = d.clone();
@@ -1719,6 +1765,62 @@ mod tests {
                         bad.push(format!("{name}, fillet after: {:?}", m.errors));
                     }
                 }
+            }
+        }
+        assert!(bad.is_empty(), "{} failed:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    #[test]
+    fn moves_next_to_fillets() {
+        // a face moved where a fillet or chamfer made before runs along it:
+        // made as if moved before them, they made again on it
+        let top_edges = |b: u32| {
+            vec![
+                EdgeRef { faces: [tag(b, 2), tag(b, 0)], at: DVec3::new(20.0, 20.0, 0.0) },
+                EdgeRef { faces: [tag(b, 2), tag(b, 1)], at: DVec3::new(-20.0, 20.0, 0.0) },
+                EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) },
+                EdgeRef { faces: [tag(b, 2), tag(b, 5)], at: DVec3::new(0.0, 20.0, -15.0) },
+            ]
+        };
+        let top = |b: u32, dy: f64| Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 2), at: DVec3::new(0.0, 20.0, 0.0) }), delta: DVec3::new(0.0, dy, 0.0) };
+        let mut cases: Vec<(&str, Doc, f64, u32)> = vec![];
+        for (name, chamfer, tension, dy) in [("top up, filleted", false, 0.0, 5.0), ("top down, filleted", false, 0.0, -4.0), ("top up, chamfered", true, 0.0, 5.0), ("top up, fillet with tension", false, 0.7, 5.0)] {
+            let mut d = Doc::default();
+            let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            let r = d.add_round(3.0, chamfer, top_edges(b));
+            d.feature_mut(r).unwrap().round.as_mut().unwrap().tension = tension;
+            d.add_tweak(top(b, dy));
+            cases.push((name, d, 20.0 + dy, r));
+        }
+        // a vertical edge filleted, the +X side moved out
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let r = d.add_round(4.0, false, vec![EdgeRef { faces: [tag(b, 0), tag(b, 4)], at: DVec3::new(20.0, 10.0, 15.0) }]);
+        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 10.0, 0.0) }), delta: DVec3::new(5.0, 0.0, 0.0) });
+        cases.push(("side out, vertical fillet", d, 20.0, r));
+        // the same, the top front edge raised (the front tilts)
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let r = d.add_round(4.0, false, vec![EdgeRef { faces: [tag(b, 0), tag(b, 4)], at: DVec3::new(20.0, 10.0, 15.0) }]);
+        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }), delta: DVec3::new(0.0, 3.0, 0.0) });
+        cases.push(("top front edge up, vertical fillet", d, 23.0, r));
+        // the test part, its outer vertical edges filleted, its top moved
+        // up (the hole, the boss, the slot follow)
+        let (mut d, b, _) = test_part();
+        let r = d.add_round(3.0, false, [(20.0, 15.0, 0, 4), (20.0, -15.0, 0, 5), (-20.0, 15.0, 1, 4), (-20.0, -15.0, 1, 5)].iter().map(|&(x, z, a, c)| EdgeRef { faces: [tag(b, a), tag(b, c)], at: DVec3::new(x, 10.0, z) }).collect());
+        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 10.0, 0.0) }), delta: DVec3::new(4.0, 0.0, 0.0) });
+        cases.push(("test part, side out, filleted", d, 30.0, r));
+        let mut bad = vec![];
+        for (name, d, high, r) in &cases {
+            let m = build(d, true, false, &[], &mut Cache::default());
+            let rounds = m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(*r)).count();
+            let (_, hi) = m.bounds().unwrap_or(([0.0; 3], [0.0; 3]));
+            eprintln!("{name:<36} errors {:?}, {rounds} round faces, top {:.3}, +x {:.3}", m.errors, hi[1], hi[0]);
+            if d.feature(*r).and_then(|g| g.round.as_ref()).is_some_and(|g| g.tension > 0.0) && m.faces.iter().any(|f| f.tag.map(|t| t.feature) == Some(*r) && matches!(f.kind, SurfKind::Cylinder)) {
+                bad.push(format!("{name}: the tension is lost"));
+            }
+            if !m.errors.is_empty() || rounds == 0 || (hi[1] as f64 - high).abs() > 1e-3 {
+                bad.push(format!("{name}: {:?}, {rounds} round faces, top {}", m.errors, hi[1]));
             }
         }
         assert!(bad.is_empty(), "{} failed:\n{}", bad.len(), bad.join("\n"));
@@ -1759,12 +1861,17 @@ mod tests {
             let top = m.positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
             assert!((top - if t == tag(s, 1) { y as f32 } else { 30.0 }).abs() < 1e-3, "{dy}: top {top}");
         }
-        // a fillet round the boss's top: it does not run along the move
+        // a fillet round the boss's top: it does not run along the move,
+        // the top is moved before it and the fillet made again
         let mut d = d.clone();
-        d.add_round(1.0, false, vec![EdgeRef { faces: [tag(s, 0), tag(s, 1)], at: DVec3::new(17.0, 30.0, 0.0) }]);
+        let r = d.add_round(1.0, false, vec![EdgeRef { faces: [tag(s, 0), tag(s, 1)], at: DVec3::new(17.0, 30.0, 0.0) }]);
+        let before = build(&d, true, false, &[], &mut Cache::default()).positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
         d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(s, 1), at: DVec3::new(10.0, 30.0, 0.0) }), delta: DVec3::new(0.0, 2.0, 0.0) });
         let m = build(&d, true, false, &[], &mut Cache::default());
-        assert!(m.errors.iter().any(|e| e.contains("run along")), "{:?}", m.errors);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let top = m.positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+        assert!((top - before - 2.0).abs() < 1e-3, "top {top}, before {before}");
+        assert!(m.faces.iter().any(|f| f.tag.map(|t| t.feature) == Some(r)), "the fillet is there");
     }
 
     #[test]
