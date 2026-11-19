@@ -2265,16 +2265,16 @@ fn vertex_card(ui: &mut Ui, st: &mut AppState) {
         }
         return;
     }
-    let corners = st.vert_sel.iter().filter(|v| st.corner_edge(**v).is_some()).count();
+    let corners = st.vert_sel.iter().filter(|v| !st.vertex_edges(**v).is_empty()).count();
     section(ui, "Round corner");
     if corners == 0 {
-        ui.label(egui::RichText::new("Pick a corner of a thin plate to round it").font(regular(12.0)).color(TEXT2()));
+        ui.label(egui::RichText::new("Pick a corner of the part to round it").font(regular(12.0)).color(TEXT2()));
         return;
     }
-    ui.label(egui::RichText::new(if corners > 1 { format!("{corners} thin corners: round them, then set the radius") } else { "A thin corner: round it, then set the radius".to_string() }).font(regular(12.0)).color(TEXT2()));
+    ui.label(egui::RichText::new(if corners > 1 { format!("{corners} corners: their edges rounded together, then set the radius") } else { "A corner: its edges rounded together, then set the radius".to_string() }).font(regular(12.0)).color(TEXT2()));
     ui.horizontal_wrapped(|ui| {
         for q in [1.0, 2.0, 5.0] {
-            if chip(ui, Some(Icon::Fillet), &format!("{} mm", fmt_mm(q as f32)), false, "Round the corner (a fillet on its short edge; it stops at the largest that works)").clicked() {
+            if chip(ui, Some(Icon::Fillet), &format!("{} mm", fmt_mm(q as f32)), false, "Round the corner: a fillet on its edges, meeting in a rounded corner (it stops at the largest that works)").clicked() {
                 st.round_corners(q);
                 st.end_live();
             }

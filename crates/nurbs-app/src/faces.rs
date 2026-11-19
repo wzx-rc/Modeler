@@ -726,12 +726,29 @@ impl AppState {
         }
     }
 
-    /// Rounds the corners at the picked vertices (their short edges) at
-    /// `size`: one fillet step, selected after.
+    /// The edges a vertex fillet rounds: a thin plate's corner, its short
+    /// edge; any other corner (a cube's, Romain 19 nov. 23 h 18, "Fillet de
+    /// vertex"), every edge leaving it, made in one fillet so they meet in a
+    /// rounded corner.
+    pub fn vertex_edges(&self, v: DVec3) -> Vec<EdgeRef> {
+        if let Some(r) = self.corner_edge(v) {
+            return vec![r];
+        }
+        let Some(m) = self.model.as_ref() else { return vec![] };
+        let at = v.as_vec3();
+        let near = |p: Option<&[f32; 3]>| p.map(|p| Vec3::from_array(*p).distance(at) < 1e-3).unwrap_or(false);
+        (0..m.edges.len())
+            .filter(|&i| !m.edges[i].seam && m.edges[i].pts.len() >= 2 && (near(m.edges[i].pts.first()) || near(m.edges[i].pts.last())))
+            .filter_map(|i| self.edge_ref(i))
+            .collect()
+    }
+
+    /// Rounds the corners at the picked vertices (their edges, see
+    /// `vertex_edges`) at `size`: one fillet step, selected after.
     pub fn round_corners(&mut self, size: f64) {
         let mut edges: Vec<EdgeRef> = vec![];
         for v in self.vert_sel.clone() {
-            if let Some(r) = self.corner_edge(v) {
+            for r in self.vertex_edges(v) {
                 if !edges.iter().any(|e| e.key() == r.key() && e.at.distance(r.at) < 1e-3) {
                     edges.push(r);
                 }
@@ -1037,8 +1054,9 @@ impl AppState {
                     self.round_drag = Some(RoundDrag { what: RoundWhat::Corners { corners, id, bis, per, y }, press: p, r0: size, px, chamfer, size, chamfer0: chamfer, tension_from: None, tension: self.corner_tension(id, i) });
                     return true;
                 }
-                if let Some(r) = self.corner_edge(v) {
-                    self.edge_sel = vec![r];
+                let es = self.vertex_edges(v);
+                if !es.is_empty() {
+                    self.edge_sel = es;
                     self.vert_sel.clear();
                     self.hover_vertex = None;
                     self.selection.clear();

@@ -2986,6 +2986,39 @@ fn main() {
         h.settle();
         say(&h, "shift drag on two faces");
         h.shot("zero-comp-flow-4-extrude");
+        // a vertex fillet on a fresh cube: a drag from its corner
+        h.reset(Doc::default(), "Untitled");
+        h.hold(Modifiers::SHIFT);
+        h.key(egui::Key::B);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.key(egui::Key::F9);
+        h.key(egui::Key::Q);
+        let v = h.screen_of(Vec3::new(10.0, 20.0, 10.0));
+        h.move_to(v);
+        h.steps(2);
+        h.drag(v, v + vec2(0.0, -40.0), 10, true);
+        h.settle();
+        say(&h, "vertex fillet");
+        eprintln!("  fillet edges {:?}", h.st.doc.features.iter().filter_map(|f| f.round.as_ref().map(|r| (r.size, r.edges.len()))).collect::<Vec<_>>());
+        h.shot("zero-comp-flow-5-vertex-fillet");
+        // the corner's faces picked, Ctrl + D: the cube and its fillet copied in place, moved
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(0.0, 10.0, 10.0)));
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        say(&h, "duplicated");
+        let c = h.st.pivot().expect("a gizmo").as_vec3();
+        let s0 = h.screen_of(c);
+        let dir = (h.screen_of(c + Vec3::Z) - s0).normalized();
+        let grab = s0 + dir * 55.0;
+        let by = h.screen_of(c + Vec3::Z * 30.0) - s0;
+        h.drag(grab, grab + by, 10, true);
+        h.settle();
+        say(&h, "copy moved");
+        h.shot("zero-comp-flow-6-duplicate");
     }
 
     if want("comp-delete") {

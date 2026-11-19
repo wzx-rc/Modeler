@@ -958,13 +958,77 @@ impl AppState {
     }
 
     pub fn duplicate_selected(&mut self) {
-        if self.selection.is_empty() {
+        // picked faces, edges or vertices (Romain 19 nov. 23 h 18: "dupliquer
+        // ce morceau pour le déplacer devant, toujours mergé à l'entité"):
+        // the elements they belong to, copied in place with their
+        // operations, then moved with the gizmo; an Add copy stays fused
+        let comps = self.sel_mode != SelMode::Object;
+        let ids: Vec<FeatureId> = if comps {
+            let mut tags: Vec<i64> = self.face_sel.iter().map(|r| r.tag).collect();
+            tags.extend(self.edge_sel.iter().map(|e| e.faces[0]));
+            if let Some(m) = self.model.as_ref() {
+                for v in &self.vert_sel {
+                    let at = v.as_vec3();
+                    if let Some(e) = m.edges.iter().find(|e| e.pts.first().map(|p| Vec3::from_array(*p).distance(at) < 1e-3).unwrap_or(false) || e.pts.last().map(|p| Vec3::from_array(*p).distance(at) < 1e-3).unwrap_or(false)) {
+                        if let Some(t) = e.faces.iter().find(|f| **f >= 0).and_then(|f| m.faces.get(*f as usize)).and_then(|f| f.tag) {
+                            tags.push(t.pack());
+                        }
+                    }
+                }
+            }
+            let mut out: Vec<FeatureId> = vec![];
+            for t in tags {
+                let Some(ft) = FaceTag::unpack(t) else { continue };
+                let el = self.element_of(ft.feature);
+                if self.doc.feature(el).map(|f| f.is_solid()).unwrap_or(false) && !out.contains(&el) {
+                    out.push(el);
+                }
+            }
+            out
+        } else {
+            self.selection.iter().map(|id| self.element_of(*id)).collect()
+        };
+        if ids.is_empty() {
             return;
         }
-        let ids = self.selection.clone();
+        let offset = if comps { DVec3::ZERO } else { DVec3::new(10.0, 0.0, 10.0) };
+        // each element with its operations, their faces' tags moved onto the copies
+        let mut plan: Vec<(FeatureId, Vec<FeatureId>)> = vec![];
+        for id in ids {
+            if !plan.iter().any(|p| p.0 == id) {
+                plan.push((id, self.element_ops(id)));
+            }
+        }
         let mut new = vec![];
-        self.edit("Duplicate", |d| new = d.duplicate(&ids, DVec3::new(10.0, 0.0, 10.0)));
+        self.edit("Duplicate", |d| {
+            let mut map: std::collections::HashMap<FeatureId, FeatureId> = Default::default();
+            for (el, ops) in &plan {
+                let Some(id) = d.duplicate(&[*el], offset).first().copied() else { continue };
+                map.insert(*el, id);
+                new.push(id);
+                for o in ops {
+                    let Some(mut f) = d.feature(*o).cloned() else { continue };
+                    let nid = d.next_id;
+                    d.next_id += 1;
+                    map.insert(*o, nid);
+                    f.id = nid;
+                    f.name = d.fresh_name(f.kind_label());
+                    let m = |p: DVec3| p + offset;
+                    let mut f = carried(&f, &m);
+                    retag(&mut f, &map);
+                    d.features.push(f);
+                }
+            }
+        });
         self.selection = new;
+        if comps {
+            self.face_sel.clear();
+            self.edge_sel.clear();
+            self.vert_sel.clear();
+            self.sel_mode = SelMode::Object;
+            self.gizmo = GizmoMode::Move;
+            self.toast("Duplicated in place: drag the arrows to move the copy", false);
+        }
     }
 
     pub fn toggle_visible(&mut self, id: FeatureId) {
@@ -2859,6 +2923,44 @@ pub fn closest_on_line(o: DVec3, d: DVec3, ro: DVec3, rd: DVec3) -> Option<f64> 
 /// A shape scaled round `pivot` by `k` along the axes of `frame`: its
 /// centre moves, its sizes grow along its own axes (a cylinder's radius by
 /// its X and Z).
+/// An operation's face tags moved onto copied features (`map`: old id →
+/// new id).
+fn retag(f: &mut Feature, map: &std::collections::HashMap<FeatureId, FeatureId>) {
+    let t = |tag: &mut i64| {
+        if let Some(ft) = FaceTag::unpack(*tag) {
+            if let Some(n) = map.get(&ft.feature) {
+                *tag = FaceTag { feature: *n, sub: ft.sub }.pack();
+            }
+        }
+    };
+    if let Some(r) = f.round.as_mut() {
+        for e in &mut r.edges {
+            e.faces.iter_mut().for_each(t);
+        }
+    }
+    if let Some(p) = f.push.as_mut() {
+        t(&mut p.face.tag);
+    }
+    if let Some(tw) = f.tweak.as_mut() {
+        let c = |c: &mut nurbs_kernel::Comp| match c {
+            nurbs_kernel::Comp::Face(r) => t(&mut r.tag),
+            nurbs_kernel::Comp::Edge(e) => e.faces.iter_mut().for_each(t),
+            nurbs_kernel::Comp::Vertex(_) => {}
+        };
+        c(&mut tw.comp);
+        tw.more.iter_mut().for_each(c);
+    }
+    if let Some(k) = f.cut.as_mut() {
+        for p in &mut k.pts {
+            p.edge.faces.iter_mut().for_each(t);
+        }
+        k.remove_faces.iter_mut().for_each(|r| t(&mut r.tag));
+        for e in &mut k.remove_edges {
+            e.faces.iter_mut().for_each(t);
+        }
+    }
+}
+
 /// A shape's sizes along its own X, Y, Z.
 fn size3(f: &Feature) -> DVec3 {
     match f.prim {
