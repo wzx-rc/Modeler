@@ -101,8 +101,8 @@ pub struct PushGesture {
 /// The primitives the app creates (step 1: cube and cylinder).
 pub const PRIMS: [PrimKind; 2] = [PrimKind::Box, PrimKind::Cylinder];
 
-/// A plane the base of a new shape is drawn on: the ground, or a flat face
-/// of the part.
+/// A plane the base of a new shape is drawn on: the ground, a flat face of
+/// the part, or the reference's (the scan's) face under the pointer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BasePlane {
     pub origin: DVec3,
@@ -111,11 +111,27 @@ pub struct BasePlane {
     pub v: DVec3,
     /// The face it lies on (index in the model), None for the ground.
     pub face: Option<usize>,
+    /// On the reference: Some(true) its flat face, Some(false) its tangent
+    /// plane (no flat face there).
+    pub scan: Option<bool>,
 }
 
 impl BasePlane {
     pub fn ground() -> BasePlane {
-        BasePlane { origin: DVec3::ZERO, u: DVec3::X, n: DVec3::Y, v: DVec3::Z, face: None }
+        BasePlane { origin: DVec3::ZERO, u: DVec3::X, n: DVec3::Y, v: DVec3::Z, face: None, scan: None }
+    }
+    /// Where it lies, for the pointer's chip.
+    pub fn label(&self) -> &'static str {
+        match (self.face, self.scan) {
+            (Some(_), _) => "on the face",
+            (None, Some(true)) => "on the scan's face",
+            (None, Some(false)) => "tangent to the scan",
+            (None, None) => "on the ground",
+        }
+    }
+    /// On a face of the part or of the scan (a Carve goes into it).
+    pub fn on_face(&self) -> bool {
+        self.face.is_some() || self.scan.is_some()
     }
     /// A plane through `origin` with normal `n`, its u axis as close to the
     /// world X (else Z) as it can.
@@ -124,7 +140,7 @@ impl BasePlane {
         let pick = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Z };
         let u = (pick - n * pick.dot(n)).normalize();
         // (u, n, v) right-handed like (X, Y, Z)
-        BasePlane { origin, u, n, v: u.cross(n), face }
+        BasePlane { origin, u, n, v: u.cross(n), face, scan: None }
     }
     pub fn to_plane(&self, p: DVec3) -> [f64; 2] {
         let d = p - self.origin;
@@ -454,6 +470,11 @@ pub struct AppState {
     pub ref_ghost: bool,
     /// The Cylinder dragged across a round part of the reference (`scan.rs`).
     pub scan_round: Option<crate::scan::ScanRound>,
+    /// The scan's flat face found last under the pointer (`scan_plane_at`):
+    /// kept while the pointer stays on its plane.
+    pub scan_plane_memo: std::cell::Cell<Option<crate::scan::ScanPlaneMemo>>,
+    /// When the scan's flat faces were last searched.
+    pub scan_plane_search: std::cell::Cell<Option<std::time::Instant>>,
     /// The part coloured by its distance to the reference (`scan.rs`):
     /// shown, its range and tolerance (mm), the last one measured and the
     /// one being measured (in a thread).
@@ -538,6 +559,8 @@ impl AppState {
             ref_shown: true,
             ref_ghost: false,
             scan_round: None,
+            scan_plane_memo: std::cell::Cell::new(None),
+            scan_plane_search: std::cell::Cell::new(None),
             dev_on: false,
             dev_range: 0.5,
             dev_tol: 0.1,
@@ -1209,8 +1232,13 @@ impl AppState {
         self.snap_shown = None;
     }
 
-    /// The base plane under the pointer: the flat face hit, else the ground.
-    pub fn base_plane_at(&self, p: [f32; 2]) -> Option<(BasePlane, DVec3)> {
+    /// The base plane under the pointer: the flat face hit, else the scan's
+    /// plane there (when the part is not in front of it), else the ground.
+    /// `hover`: the pointer only passes (`scan_plane_at`).
+    pub fn base_plane_at(&self, p: [f32; 2], hover: bool) -> Option<(BasePlane, DVec3)> {
+        if let Some(r) = self.scan_plane_at(p, hover) {
+            return Some(r);
+        }
         let (ro, rd) = self.ray(p);
         if let (Some(m), Some(h)) = (&self.model, self.pick_at(p)) {
             let f = &m.faces[h.face];
@@ -1351,6 +1379,13 @@ impl AppState {
                 if let Some((t, snapped)) = self.snap_height(centre, c.plane.n, p, &[c.id]).filter(|(t, _)| t.abs() > 1e-3) {
                     c.height = t;
                     self.snap_shown = Some(snapped);
+                } else if c.plane.n.dot(rd).abs() > HEAD_ON {
+                    // the face seen nearly head-on (often on the scan): the
+                    // line along its normal runs almost along the ray, so
+                    // the height follows the pointer's travel up the screen
+                    let t = (c.height_from[1] - p[1]) as f64 * self.mm_per_point(centre);
+                    c.height = self.snap(t);
+                    self.snap_shown = None;
                 } else {
                     let t = closest_on_line(centre, c.plane.n, ro, rd).unwrap_or(0.0);
                     c.height = self.snap(t);
@@ -1427,7 +1462,7 @@ impl AppState {
                 PrimKind::Cylinder => c.b = [c.a[0] + s, c.a[1]],
             }
             c.phase = Phase::Height;
-            c.height = if self.mode == Op::Carve && c.plane.face.is_some() { -20.0 } else { 20.0 };
+            c.height = if self.mode == Op::Carve && c.plane.on_face() { -20.0 } else { 20.0 };
             self.creation = Some(c.clone());
             self.apply_creation(&c);
             self.finish_creation();
@@ -2295,6 +2330,10 @@ pub fn polyline_middle(pts: &[[f32; 3]]) -> Option<DVec3> {
 }
 
 /// Parameter t of the point of the line (o + t d) closest to the ray.
+/// A creation's height phase on a plane whose normal is within 20° of the
+/// view's ray takes the pointer's travel on screen (cos 20°).
+const HEAD_ON: f64 = 0.94;
+
 pub fn closest_on_line(o: DVec3, d: DVec3, ro: DVec3, rd: DVec3) -> Option<f64> {
     let w = o - ro;
     let a = d.dot(d);

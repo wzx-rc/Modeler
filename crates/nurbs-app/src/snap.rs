@@ -376,7 +376,17 @@ impl AppState {
     /// starts on the top face, not on the side the ray hit). Plane
     /// coordinates of the start, and what caught it.
     pub fn start_plane(&self, p: [f32; 2]) -> Option<(BasePlane, [f64; 2], Option<Snapped>)> {
-        let (mut plane, _) = self.base_plane_at(p)?;
+        self.start_plane_in(p, false)
+    }
+
+    /// The same while the pointer only hovers (the scan's flat faces are
+    /// searched less often).
+    pub fn start_plane_hover(&self, p: [f32; 2]) -> Option<(BasePlane, [f64; 2], Option<Snapped>)> {
+        self.start_plane_in(p, true)
+    }
+
+    fn start_plane_in(&self, p: [f32; 2], hover: bool) -> Option<(BasePlane, [f64; 2], Option<Snapped>)> {
+        let (mut plane, _) = self.base_plane_at(p, hover)?;
         if let (Some(s), Some(m)) = (self.pick_snap(p, &[]), self.model.as_ref()) {
             let on = |pl: &BasePlane| (s.pos - pl.origin).dot(pl.n).abs() < 1e-3;
             if !on(&plane) {

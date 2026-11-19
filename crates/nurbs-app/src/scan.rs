@@ -14,12 +14,16 @@
 //! scan (green within the tolerance, yellow to red outside it, cyan to blue
 //! inside), measured in a thread for each finished model (the BVH's closest
 //! point within `DEV_REACH`, signed by the scan triangle's normal there).
+//!
+//! Step 4, the plane under the pointer: Cube, Sketch and Path start on the
+//! scan's flat face under the pointer (`rectify_core::planes::plane_under`, as Forme Rectify's Pen),
+//! else its tangent plane there, when the part is not in front of it.
 
 use crate::render::MeshVertex;
-use crate::state::AppState;
+use crate::state::{AppState, BasePlane};
 use glam::{DQuat, DVec3};
 use nurbs_kernel::{Model, Op, Prim};
-use rectify_core::planes::dominant_normal;
+use rectify_core::planes::{dominant_normal, plane_under, tangent_under};
 use rectify_core::slot::Slot;
 
 /// A drag across a round part of the scan.
@@ -80,9 +84,10 @@ pub struct RoundRead {
 /// A hole's cylinder begins this far outside its rim (mm, at most).
 const CLEAR: f64 = 0.5;
 
-/// An axis read within this of a world axis is taken as that axis (an
-/// AI-made mesh is a little off: the pistol's holes read 1.4° off X).
-const AXIS_SNAP_DEG: f64 = 3.0;
+/// An axis or a face's normal read within this of a world axis is taken as
+/// that axis (an AI-made mesh is a little off: the pistol's holes read 1.4°
+/// off X, its side's flat faces 1.5° to 3.7° off Z).
+const AXIS_SNAP_DEG: f64 = 5.0;
 
 /// The world axis near `a` (within `AXIS_SNAP_DEG`), else `a`.
 pub fn snap_axis(a: DVec3) -> DVec3 {
@@ -399,13 +404,122 @@ impl AppState {
 mod tests {
     use super::*;
 
+    /// Prints the scan's planes found from a few directions over a grid
+    /// (`FORME_REF` = an .obj; ignored: it needs the pistol).
+    #[test]
+    #[ignore]
+    fn scan_planes_probe() {
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        let r = crate::reference::Reference::load(&path).expect("reference");
+        println!("edge {:.3}, box {:.1?} {:.1?}", r.edge, r.lo, r.hi);
+        for (name, d) in [("+Z", DVec3::new(0.0, 0.0, -1.0)), ("top", DVec3::new(0.0, -1.0, 0.0)), ("oblique", DVec3::new(-0.3, -0.5, -0.8).normalize())] {
+            let (u, v) = if d.y.abs() > 0.9 { (DVec3::X, DVec3::Z) } else { (DVec3::X, DVec3::Y) };
+            for i in 0..12 {
+                for j in 0..8 {
+                    let c = (r.lo + r.hi) * 0.5;
+                    let size = r.hi - r.lo;
+                    let off = u * ((i as f64 + 0.5) / 12.0 - 0.5) * size.dot(u) + v * ((j as f64 + 0.5) / 8.0 - 0.5) * size.dot(v);
+                    let o = c + off - d * 200.0;
+                    let Some((t, x, _)) = r.hit_tri(o, d) else { continue };
+                    let t0 = std::time::Instant::now();
+                    let (pl, flat) = plane_under(&r.mesh, &r.topo, t, x, 12.0, r.edge);
+                    let ms = t0.elapsed().as_secs_f64() * 1e3;
+                    if flat {
+                        println!("{name} at {x:.1?}: n {:.3?} rms {:.3} area {:.0} ({ms:.1} ms)", pl.n, pl.rms, pl.area);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn axis_snaps_near_world_axes() {
         // the pistol's muzzle hole read 1.4° off -X: taken as -X
         let a = DVec3::new(-1.0, 0.005, 0.024).normalize();
         assert_eq!(snap_axis(a), -DVec3::X);
-        // 5° off Z: kept as read
-        let b = DVec3::new(0.0, 5f64.to_radians().sin(), 5f64.to_radians().cos());
+        // 4° off: taken as Z; 7° off: kept as read
+        let a4 = DVec3::new(0.0, 4f64.to_radians().sin(), 4f64.to_radians().cos());
+        assert_eq!(snap_axis(a4), DVec3::Z);
+        let b = DVec3::new(0.0, 7f64.to_radians().sin(), 7f64.to_radians().cos());
         assert_eq!(snap_axis(b), b);
+    }
+}
+
+/// The scan's flat face found last under the pointer: a plane through `o`
+/// facing `n` (towards the eye), the reference it was found on.
+#[derive(Clone, Copy, Debug)]
+pub struct ScanPlaneMemo {
+    pub o: DVec3,
+    pub n: DVec3,
+    pub tol: f64,
+    pub gen: u64,
+}
+
+/// While the pointer only hovers, the scan's flat faces are searched at
+/// most this often (s): a search takes 15 to 55 ms on the pistol; in
+/// between, its tangent plane.
+const HOVER_SEARCH: f64 = 0.08;
+
+impl AppState {
+    /// The scan's plane under a point of the screen (retopology, step 4):
+    /// its flat face there (`plane_under`, within 90 points of the
+    /// pointer, as Rectify's Pen), else its tangent plane, facing the eye;
+    /// a normal within 5° of a world axis is taken as that axis. A flat face
+    /// found stays while the pointer is on its plane (it does not tilt at
+    /// its border, where the scan rounds off). `hover`: the pointer only
+    /// passes (the search for a flat face is not made at every frame).
+    /// None when the reference is hidden, not under the pointer, or the
+    /// part is in front of it (then the part's face or the ground, as
+    /// before).
+    pub fn scan_plane_at(&self, p: [f32; 2], hover: bool) -> Option<(BasePlane, DVec3)> {
+        let r = self.reference.as_ref().filter(|_| self.ref_shown)?;
+        let (ro, rd) = self.ray(p);
+        let (t, x, s) = r.hit_tri(ro, rd)?;
+        let px = self.mm_per_point(x);
+        if let Some(h) = self.pick_at(p) {
+            if (h.t as f64) <= s + px * 4.0 {
+                return None;
+            }
+        }
+        let reach = (px * 90.0).clamp(1.5, 25.0);
+        let memo = self.scan_plane_memo.get().filter(|m| m.gen == self.ref_gen && m.n.dot(rd) < 0.0 && m.n.dot(x - m.o).abs() <= m.tol + px);
+        let recent = self.scan_plane_search.get().map(|t| t.elapsed().as_secs_f64() < HOVER_SEARCH).unwrap_or(false);
+        let (o, n, flat) = match memo {
+            Some(m) => (m.o, m.n, true),
+            None if hover && recent => (x, tangent_under(&r.mesh, &r.topo, t, x, reach, r.edge), false),
+            None => {
+                let t0 = std::time::Instant::now();
+                let (pl, flat) = plane_under(&r.mesh, &r.topo, t, x, reach, r.edge);
+                self.scan_plane_search.set(Some(std::time::Instant::now()));
+                let o = pl.onto(x);
+                let n = pl.n;
+                self.scan_plane_memo.set(None);
+                if flat {
+                    let mut f = n.normalize_or_zero();
+                    if f.dot(rd) > 0.0 {
+                        f = -f;
+                    }
+                    self.scan_plane_memo.set(Some(ScanPlaneMemo { o, n: snap_axis(f), tol: (r.edge * 1.5).max(0.08) + pl.rms * 3.0, gen: self.ref_gen }));
+                }
+                if std::env::var_os("FORME_SCAN_DEBUG").is_some() {
+                    eprintln!("scan plane at {x:.2?}: flat {flat}, n {n:.3?}, rms {:.3}, area {:.1}, reach {reach:.1}, {:.1} ms", pl.rms, pl.area, t0.elapsed().as_secs_f64() * 1e3);
+                }
+                (o, n, flat)
+            }
+        };
+        let mut n = n.normalize_or_zero();
+        if n == DVec3::ZERO {
+            return None;
+        }
+        if n.dot(rd) > 0.0 {
+            n = -n;
+        }
+        // its origin where it passes nearest the world origin: the grid
+        // lines up with the world's (on a face square to an axis, the
+        // world grid itself)
+        let n = snap_axis(n);
+        let mut plane = BasePlane::new(n * n.dot(o), n, None);
+        plane.scan = Some(flat);
+        plane.hit(ro, rd).map(|q| (plane, q))
     }
 }

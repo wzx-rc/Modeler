@@ -767,7 +767,7 @@ fn draw_sketch(p: &Painter, st: &AppState) {
         return;
     }
     if let Some(h) = hover {
-        let on = if k.plane.face.is_some() { "on the face" } else { "on the ground" };
+        let on = k.plane.label();
         let txt = if closing { "close".to_string() } else if path && k.pts.len() >= 2 { format!("{} points · Enter: an open path", k.pts.len()) } else { format!("{} point{} · {on}", k.pts.len(), if k.pts.len() == 1 { "" } else { "s" }) };
         chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, tint(col, 0.6), if closing { HOT } else { TEXT2() });
     }
@@ -793,16 +793,33 @@ fn draw_creation(p: &Painter, st: &AppState) {
                 chip(p, h + vec2(12.0, 10.0), Align2::LEFT_TOP, "on the scan · drag across a round part, rim to rim", tint(accent(), 0.6), TEXT2());
                 return;
             }
-            if let Some((plane, a, snapped)) = st.start_plane(p2(h)) {
+            if let Some((plane, a, snapped)) = st.start_plane_hover(p2(h)) {
                 let q = plane.at(a);
                 if let Some(s) = &snapped {
                     draw_snap(p, st, s);
                 }
                 if let Some(s) = world(st, q) {
                     let col = if st.mode == Op::Carve { carve() } else { accent() };
+                    if plane.scan.is_some() {
+                        // the scan's plane there: a square on it, about 60
+                        // points wide, and its normal, so its tilt shows
+                        // (dimmer for a tangent plane)
+                        let h = st.mm_per_point(q) * 30.0;
+                        let c: Vec<Pos2> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().filter_map(|&(i, j)| world(st, q + plane.u * (i * h) + plane.v * (j * h))).collect();
+                        let dim = if plane.scan == Some(true) { 0.9 } else { 0.5 };
+                        if c.len() == 4 {
+                            p.add(egui::Shape::convex_polygon(c.clone(), tint(col, 0.08), Stroke::NONE));
+                            p.add(egui::Shape::closed_line(c.clone(), Stroke::new(3.0, Color32::from_black_alpha(70))));
+                            p.add(egui::Shape::closed_line(c, Stroke::new(1.2, tint(col, dim))));
+                        }
+                        if let Some(t) = world(st, q + plane.n * h) {
+                            p.line_segment([s, t], Stroke::new(3.0, Color32::from_black_alpha(70)));
+                            p.line_segment([s, t], Stroke::new(1.2, tint(col, dim)));
+                        }
+                    }
                     p.line_segment([s - vec2(6.0, 0.0), s + vec2(6.0, 0.0)], Stroke::new(1.5, col));
                     p.line_segment([s - vec2(0.0, 6.0), s + vec2(0.0, 6.0)], Stroke::new(1.5, col));
-                    let on = if plane.face.is_some() { "on the face" } else { "on the ground" };
+                    let on = plane.label();
                     chip(p, s + vec2(12.0, 10.0), Align2::LEFT_TOP, on, tint(col, 0.6), TEXT2());
                 }
             }
@@ -1070,6 +1087,8 @@ pub fn hint(st: &AppState) -> String {
     if let Some(g) = &st.push {
         return if g.held { "Drag: out adds, in carves · Release: done · Esc: cancel".into() } else { "Move: out adds, in carves · Click: done · Esc: cancel".into() };
     }
+    // shapes start on the scan's faces too
+    let on_scan = st.reference.is_some() && st.ref_shown;
     match (&st.creation, st.tool) {
         (Some(c), _) if c.phase == Phase::Base => match c.kind {
             PrimKind::Box | PrimKind::Profile | PrimKind::Path => "Drag: the base · Shift: a square · Release: then the height".into(),
@@ -1077,19 +1096,22 @@ pub fn hint(st: &AppState) -> String {
         },
         (Some(_), _) => "Move: the height (up +, down −) · Click: done · Esc: cancel".into(),
         (None, Tool::Create(PrimKind::Path)) => match &st.sketch {
+            None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),
             None => "Click: the first point, on a face or the ground".into(),
             Some(k) if k.pts.len() < 2 => "Click: a corner · Drag: a curve point · Backspace: the last point off · Esc: drop it".into(),
             Some(_) => "Enter: an open path · First point: a closed one · Drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Create(PrimKind::Profile)) => match &st.sketch {
+            None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),
             None => "Click: the first point, on a face or the ground".into(),
             Some(k) if k.pts.len() < 3 => "Click: a corner · Drag: a curve point · Backspace: the last point off · Esc: drop it".into(),
             Some(_) => "First point or Enter: close it · Drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Create(PrimKind::Cylinder)) if st.scan_round.is_some() => "Across the round part, to the other side of its rim · Release: the scan read there, a cylinder made as read · Esc: cancel".into(),
         (None, Tool::Create(PrimKind::Cylinder)) if st.reference.is_some() && st.ref_shown => {
-            format!("Drag on the scan, rim to rim: a hole or a boss read there · Drag: the base, on the ground or a face · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(PrimKind::Cylinder))
+            format!("Drag on the scan, rim to rim: a hole or a boss read there · Drag off the scan: the base, on the ground or a face · Click: 20 mm, on the scan too · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(PrimKind::Cylinder))
         }
+        (None, Tool::Create(k)) if on_scan => format!("Drag: the base, on a face, the scan's face under the pointer or the ground · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
         (None, Tool::Create(k)) => format!("Drag: the base, on the ground or a face · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
         (None, Tool::Push(k)) => match k {
             PushKind::Inset => "Click a flat face: 2 mm, then drag its dot · Press and drag: sized at once".into(),

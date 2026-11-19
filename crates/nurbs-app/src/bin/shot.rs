@@ -1902,6 +1902,133 @@ fn main() {
         }
     }
 
+    if want("scan-plane") {
+        // retopology, step 4: the Cube and the Sketch start on the scan's
+        // flat face under the pointer (else its tangent plane): the side's
+        // large face, a slanted face of the grip, the top's slope
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        if std::path::Path::new(&path).exists() {
+            let mut d = Doc::default();
+            d.reference = Some(nurbs_kernel::RefMesh { path: path.clone() });
+            h.reset(d, "Retopo");
+            h.step();
+            let end = Instant::now() + Duration::from_secs(180);
+            while h.st.ref_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            h.settle();
+            h.st.toast = None;
+            let refm = h.st.reference.clone().expect("reference");
+            let side = |x: f64, y: f64| -> Vec3 { refm.hit(DVec3::new(x, y, 100.0), DVec3::new(0.0, 0.0, -1.0)).map(|q| q.0.as_vec3()).unwrap_or(Vec3::new(x as f32, y as f32, 12.0)) };
+            let top = |x: f64, z: f64| -> Vec3 { refm.hit(DVec3::new(x, 200.0, z), DVec3::new(0.0, -1.0, 0.0)).map(|q| q.0.as_vec3()).unwrap_or(Vec3::new(x as f32, 100.0, z as f32)) };
+            // the pointer rests: the flat face is searched
+            let rest = |h: &mut Harness, p: egui::Pos2| {
+                std::thread::sleep(Duration::from_millis(100));
+                h.move_to(p);
+                h.steps(2);
+            };
+            let plane = |h: &Harness, p: egui::Pos2| h.st.start_plane([p.x, p.y]).map(|(pl, _, _)| format!("{} n {:.3?}", pl.label(), pl.n));
+            // 1. the side's large flat face: a Cube
+            h.st.camera.yaw = 0.45;
+            h.st.camera.pitch = 0.3;
+            h.st.camera.frame(Vec3::new(-30.0, 66.0, 0.0), Vec3::new(18.0, 100.0, 18.0));
+            h.steps(2);
+            h.st.tool = Tool::Create(PrimKind::Box);
+            let a = h.screen_of(side(-9.0, 79.0));
+            rest(&mut h, a);
+            eprintln!("  side: {:?}", plane(&h, a));
+            h.shot("zero-scan-plane-1-hover");
+            let b = h.screen_of(side(3.0, 89.0));
+            h.drag(a, b, 10, true);
+            h.settle();
+            h.shot("zero-scan-plane-2-base");
+            // the height: the pointer over the base's centre, raised along
+            // its normal
+            // (seen head-on, the pointer goes up the screen)
+            let raised = |h: &Harness, by: f64| -> egui::Pos2 {
+                let c = h.st.creation.as_ref().expect("creation");
+                let m = c.plane.at([(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5]);
+                let eye = h.st.view().eye.as_dvec3();
+                if c.plane.n.dot((m - eye).normalize()).abs() > 0.94 {
+                    let f = c.height_from;
+                    return pos2(f[0], f[1] - (by / h.st.mm_per_point(m)) as f32);
+                }
+                h.screen_of((m + c.plane.n * by).as_vec3())
+            };
+            let up = raised(&h, 5.0);
+            h.move_to(up);
+            h.settle();
+            h.click(up);
+            h.settle();
+            h.st.tool = Tool::Select;
+            h.st.select(None, false);
+            h.steps(2);
+            h.shot("zero-scan-plane-3-cube");
+            // 2. where the scan is round (the button's rim): its tangent plane
+            h.st.tool = Tool::Create(PrimKind::Box);
+            let rim = h.screen_of(side(-24.25 + 4.4, 80.45));
+            rest(&mut h, rim);
+            eprintln!("  button's rim: {:?}", plane(&h, rim));
+            h.shot("zero-scan-plane-4-tangent");
+            // 3. a slanted face of the grip (14° off the side): a Cube on it
+            h.st.camera.yaw = 0.2;
+            h.st.camera.pitch = 0.15;
+            h.st.camera.frame(Vec3::new(-40.0, 15.0, -2.0), Vec3::new(-12.0, 48.0, 14.0));
+            h.steps(2);
+            let a = h.screen_of(side(-27.0, 29.0));
+            rest(&mut h, a);
+            eprintln!("  grip: {:?}", plane(&h, a));
+            h.shot("zero-scan-plane-5-slant-hover");
+            let b = h.screen_of(side(-23.0, 37.0));
+            h.drag(a, b, 10, true);
+            h.settle();
+            let up = raised(&h, 3.0);
+            h.move_to(up);
+            h.settle();
+            h.click(up);
+            h.settle();
+            h.st.tool = Tool::Select;
+            h.st.select(None, false);
+            h.steps(2);
+            h.shot("zero-scan-plane-6-slant-cube");
+            // 4. a Sketch on the top's slope (8.5° off level)
+            h.st.camera.yaw = 0.5;
+            h.st.camera.pitch = 0.75;
+            h.st.camera.frame(Vec3::new(-24.0, 92.0, -8.0), Vec3::new(8.0, 106.0, 14.0));
+            h.steps(2);
+            h.key(egui::Key::L);
+            let pts = [top(-14.0, 4.5), top(-6.0, 4.5), top(-6.0, 8.0), top(-14.0, 8.0)].map(|w| h.screen_of(w));
+            rest(&mut h, pts[0]);
+            eprintln!("  top: {:?}", plane(&h, pts[0]));
+            h.shot("zero-scan-plane-7-top-hover");
+            for p in pts {
+                h.click(p);
+            }
+            // closed on its first point (as placed, on the grid)
+            let first = h.st.sketch.as_ref().map(|k| h.screen_of(k.plane.at(k.pts[0]).as_vec3())).unwrap_or(pts[0]);
+            h.move_to(first);
+            h.steps(2);
+            h.click(first);
+            let up = raised(&h, 2.5);
+            h.move_to(up);
+            h.settle();
+            h.click(up);
+            h.settle();
+            h.st.tool = Tool::Select;
+            h.st.select(None, false);
+            h.steps(2);
+            h.shot("zero-scan-plane-8-top-sketch");
+            h.st.ref_shown = false;
+            h.steps(2);
+            h.shot("zero-scan-plane-9-part");
+            h.st.ref_shown = true;
+            for f in &h.st.doc.features {
+                eprintln!("  {} {:?} {:?} at {:.2?} up {:.3?}", f.name, f.op, f.prim, f.origin, f.rot * DVec3::Y);
+            }
+        }
+    }
+
     if want("tension-point") {
         // the top front edge filleted at 2 mm, then the top -X edge at 3 mm:
         // OpenCascade carries the second round the first one's end and down
