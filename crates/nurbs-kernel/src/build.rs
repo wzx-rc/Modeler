@@ -1710,6 +1710,31 @@ mod tests {
         d.add_round(1.0, false, vec![EdgeRef { faces: [tag(c, 1), tag(c, 5)], at: DVec3::new(-10.0, 10.0, -10.0) }]);
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
+        // a face of five sides that bends: a cube's top front edge
+        // chamfered (its +X side a pentagon), then the bottom front corner
+        // of that side pushed out 3 mm; a fillet after it
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add_round(3.0, true, vec![EdgeRef { faces: [tag(c, 2), tag(c, 4)], at: DVec3::new(0.0, 20.0, 10.0) }]);
+        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(10.0, 0.0, 10.0)), delta: DVec3::new(3.0, 0.0, 0.0) });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(m.positions.iter().any(|p| (p[0] - 13.0).abs() < 1e-3), "the corner is out");
+        let side = m.faces.iter().find(|f| f.tag == Some(FaceTag { feature: c, sub: 0 })).unwrap();
+        assert!(!matches!(side.kind, SurfKind::Plane), "the side bends: {:?}", side.kind);
+        d.add_round(1.0, false, vec![EdgeRef { faces: [tag(c, 0), tag(c, 3)], at: DVec3::new(11.5, 0.0, 0.0) }]);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        // an L sketch's top (six sides) bent: an outer corner raised 3 mm
+        let mut d = Doc::default();
+        let l = d.add(Op::Add, Prim::Profile { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(l).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false });
+        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(10.0, 10.0, -10.0)), delta: DVec3::new(0.0, 3.0, 0.0) });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(m.positions.iter().any(|p| (p[1] - 13.0).abs() < 1e-3), "the corner is up");
+        let top = m.faces.iter().find(|f| f.tag == Some(FaceTag { feature: l, sub: 1 })).unwrap();
+        assert!(!matches!(top.kind, SurfKind::Plane), "the top bends: {:?}", top.kind);
     }
 
     /// The test part of the app (block, hole, boss, slot).

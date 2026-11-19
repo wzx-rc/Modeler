@@ -1852,6 +1852,67 @@ fn main() {
         eprintln!("  edges {} errors {:?}", h.st.model.as_ref().map(|m| m.edges.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
     }
 
+    if want("comp-bend") {
+        // a face of more than four sides bent by a vertex move (19 nov.): a
+        // cube's top front edge chamfered (its +X side a pentagon), the
+        // bottom front corner of that side pulled out with the gizmo; then
+        // an L sketch's outer top corner raised (its top: six sides)
+        let pull = |h: &mut Harness, axis: usize, mm: f32| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + Vec3::AXES[axis]) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let by = h.screen_of(c + Vec3::AXES[axis] * mm) - s0;
+            h.drag(grab, grab + by, 10, true);
+            h.settle();
+        };
+        let say = |h: &Harness| eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let t = |sub: u16| FaceTag { feature: c, sub }.pack();
+        d.add_round(4.0, true, vec![EdgeRef { faces: [t(2), t(4)], at: DVec3::new(0.0, 20.0, 10.0) }]);
+        h.reset(d, "Chamfered cube");
+        h.st.camera.frame(Vec3::new(-12.0, 0.0, -12.0), Vec3::new(16.0, 22.0, 14.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num1);
+        let corner = h.screen_of(Vec3::new(10.0, 0.0, 10.0));
+        h.click(corner);
+        h.steps(2);
+        h.shot("zero-comp-bend-1-picked");
+        pull(&mut h, 0, 5.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-comp-bend-2-pentagon");
+        // from its side: the bent face
+        h.st.camera.orbit(-260.0, 40.0);
+        h.st.camera.frame(Vec3::new(-12.0, 0.0, -12.0), Vec3::new(16.0, 22.0, 14.0));
+        h.steps(2);
+        h.settle();
+        h.shot("zero-comp-bend-2b-pentagon-side");
+        let mut d = Doc::default();
+        let l = d.add(Op::Add, Prim::Profile { x: 30.0, y: 10.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(l).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false });
+        h.reset(d, "L sketch");
+        h.st.camera.frame(Vec3::new(-16.0, 0.0, -16.0), Vec3::new(16.0, 16.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num1);
+        let corner = h.screen_of(Vec3::new(15.0, 10.0, -15.0));
+        h.click(corner);
+        h.steps(2);
+        pull(&mut h, 1, 6.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.st.camera.orbit(0.0, -120.0);
+        h.st.camera.frame(Vec3::new(-16.0, 0.0, -16.0), Vec3::new(16.0, 16.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.shot("zero-comp-bend-3-sketch-top");
+    }
     if want("comp-curved") {
         // a flat face moved along its normal with curved faces round it:
         // the boss's top up (its side follows), the block's top up and

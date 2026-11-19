@@ -41,6 +41,9 @@
 #include <GeomLProp_SLProps.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomPlate_BuildPlateSurface.hxx>
+#include <GeomPlate_CurveConstraint.hxx>
+#include <GeomPlate_MakeApprox.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
@@ -3328,8 +3331,61 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                     set_err("a face with a hole cannot bend yet");
                     return nullptr;
                 } else {
-                    set_err("a face with more than four sides would bend; move it along its plane");
-                    return nullptr;
+                    // a bent face of more sides (a block's side after a
+                    // chamfer, a sketch's top): a smooth surface through its
+                    // edges (a plate, made a spline), each edge put on it
+                    GeomPlate_BuildPlateSurface bp(3, 15, 2);
+                    for (TopExp_Explorer x(nw, TopAbs_EDGE); x.More(); x.Next()) {
+                        opencascade::handle<BRepAdaptor_Curve> c = new BRepAdaptor_Curve(TopoDS::Edge(x.Current()));
+                        bp.Add(new GeomPlate_CurveConstraint(c, 0, 24));
+                    }
+                    bp.Perform();
+                    if (!bp.IsDone()) {
+                        set_err("a bent face could not follow the move");
+                        return nullptr;
+                    }
+                    GeomPlate_MakeApprox ap(bp.Surface(), 1e-6, 1, 8, std::max(1e-5, 2.0 * bp.G0Error()), 0);
+                    opencascade::handle<Geom_BSplineSurface> ps = ap.Surface();
+                    if (ps.IsNull()) {
+                        set_err("a bent face could not follow the move");
+                        return nullptr;
+                    }
+                    // its normal the outline's way (Newell's)
+                    GeomAPI_ProjectPointOnSurf pj(gp_Pnt(cen), ps);
+                    if (pj.NbPoints() > 0) {
+                        double pu, pv;
+                        pj.LowerDistanceParameters(pu, pv);
+                        gp_Pnt q;
+                        gp_Vec du, dv;
+                        ps->D1(pu, pv, q, du, dv);
+                        if (du.Crossed(dv).Dot(gp_Vec(nd)) < 0) ps->UReverse();
+                    }
+                    bb.MakeFace(nf, ps, Precision::Confusion());
+                    bb.Add(nf, nw);
+                    for (TopExp_Explorer x(nf, TopAbs_EDGE); x.More(); x.Next()) {
+                        TopoDS_Edge e = TopoDS::Edge(x.Current());
+                        ShapeFix_Edge sfe;
+                        sfe.FixAddPCurve(e, nf, Standard_False, 1e-6);
+                        // its tolerance to cover how far the plate passes
+                        double g0, g1;
+                        opencascade::handle<Geom2d_Curve> pc = BRep_Tool::CurveOnSurface(e, nf, g0, g1);
+                        if (pc.IsNull()) {
+                            set_err("a bent face could not follow the move");
+                            return nullptr;
+                        }
+                        BRepAdaptor_Curve ec(e);
+                        double dmax = 0;
+                        for (int k = 0; k <= 160; k++) {
+                            double t = ec.FirstParameter() + (ec.LastParameter() - ec.FirstParameter()) * k / 160.0;
+                            gp_Pnt2d uv = pc->Value(g0 + (g1 - g0) * k / 160.0);
+                            dmax = std::max(dmax, ps->Value(uv.X(), uv.Y()).Distance(ec.Value(t)));
+                        }
+                        if (dmax > 1e-2 * size) {
+                            set_err("a bent face could not follow the move");
+                            return nullptr;
+                        }
+                        if (dmax > BRep_Tool::Tolerance(e)) bb.UpdateEdge(e, 1.5 * dmax);
+                    }
                 }
                 nf.Orientation(f.Orientation());
                 bb.Add(shell, nf);
