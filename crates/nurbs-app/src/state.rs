@@ -17,7 +17,7 @@ use std::sync::Arc;
 pub enum Tool {
     Select,
     Create(PrimKind),
-    /// Inset or Extrude a flat face.
+    /// Inset a flat face, or Extrude a face (a curved one along its normals).
     Push(PushKind),
     /// The Knife (K): points in edges joined by lines across flat faces.
     Knife,

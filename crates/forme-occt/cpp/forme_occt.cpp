@@ -1511,6 +1511,65 @@ FShape* focc_extrude(const FShape* s, double dx, double dy, double dz) {
         (FShape*)nullptr);
 }
 
+// Face `index` (0-based) of a solid copied and made a solid `t` thick
+// along its outward normal (< 0: inwards): the tool an extrusion of a
+// curved face fuses (or cuts). Tags: the face it starts from `base`, its
+// offset `top`, the sides `side`, `side` + 1…
+FShape* focc_thicken_face(const FShape* s, int index, double t, long long base, long long top, long long side) {
+    return guard(
+        [&]() -> FShape* {
+            TopTools_IndexedMapOfShape fm;
+            face_map(s->s, fm);
+            if (index < 0 || index >= fm.Extent()) {
+                set_err("no such face");
+                return nullptr;
+            }
+            if (std::fabs(t) < 1e-6) {
+                set_err("no depth");
+                return nullptr;
+            }
+            TopoDS_Shape c = BRepBuilderAPI_Copy(fm(index + 1)).Shape();
+            BRepOffset_MakeOffset mo;
+            mo.Initialize(c, t, 1e-5, BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Intersection, Standard_True, Standard_False);
+            mo.MakeOffsetShape();
+            if (!mo.IsDone() || mo.Shape().IsNull()) {
+                set_err(t < 0 ? "the face cannot be pushed in that far (its curve is tighter)" : "the face could not be pulled out");
+                return nullptr;
+            }
+            TopoDS_Shape r = mo.Shape();
+            if (!valid(r)) {
+                ShapeFix_Shape fix(r);
+                fix.SetPrecision(1e-6);
+                fix.SetMaxTolerance(1e-3);
+                fix.Perform();
+                if (valid(fix.Shape())) r = fix.Shape();
+            }
+            if (!valid(r)) {
+                dump_check(r);
+                set_err("the extrusion gave an invalid solid");
+                return nullptr;
+            }
+            FShape* res = wrap(r);
+            if (!res) return res;
+            TopTools_IndexedMapOfShape fout;
+            face_map(res->s, fout);
+            res->tags.assign(fout.Extent(), base);
+            auto put = [&](const TopTools_ListOfShape& g, long long tg) {
+                for (TopTools_ListOfShape::Iterator it(g); it.More(); it.Next())
+                    for (TopExp_Explorer ex(it.Value(), TopAbs_FACE); ex.More(); ex.Next()) {
+                        int j = fout.FindIndex(ex.Current());
+                        if (j > 0) res->tags[j - 1] = tg;
+                    }
+            };
+            for (TopExp_Explorer ex(c, TopAbs_FACE); ex.More(); ex.Next()) put(mo.Generated(ex.Current()), top);
+            TopTools_IndexedMapOfShape ce;
+            edge_map(c, ce);
+            for (int k = 1; k <= ce.Extent(); k++) put(mo.Generated(ce(k)), side + k - 1);
+            return res;
+        },
+        (FShape*)nullptr);
+}
+
 // The solid with the tool (a face on its boundary) drawn into its faces:
 // the face under the tool is cut along the tool's outline, its inside
 // takes the tool's tag.

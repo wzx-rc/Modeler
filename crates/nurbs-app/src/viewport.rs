@@ -1060,7 +1060,7 @@ pub fn hint(st: &AppState) -> String {
         (None, Tool::Create(k)) => format!("Drag: the base, on the ground or a face · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
         (None, Tool::Push(k)) => match k {
             PushKind::Inset => "Click a flat face: 2 mm, then drag its dot · Press and drag: sized at once".into(),
-            PushKind::Extrude => "Press on a flat face and drag: out adds, in carves".into(),
+            PushKind::Extrude => "Press on a face and drag: out adds, in carves · A round face goes along its normals".into(),
         },
         (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => "Arrows: move it · Window: X, Y, Z · Del: delete it".into(),
         (None, Tool::Knife) => {

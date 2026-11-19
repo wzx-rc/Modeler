@@ -362,14 +362,21 @@ fn find_face(shape: &Shape, r: &FaceRef) -> Option<usize> {
 fn push(acc: &Shape, f: &Feature, p: &Push, limit: &mut Option<f64>) -> Result<Option<Shape>, String> {
     let face = find_face(acc, &p.face).ok_or("its face is gone")?;
     let info = acc.face_info(face).ok_or("its face is gone")?;
-    if info.kind != OccSurf::Plane {
-        return Err("only a flat face can be pushed or pulled for now".into());
-    }
     let inset = p.inset.max(0.0);
     if p.depth.abs() < 1e-6 && inset < 1e-6 {
         return Ok(None);
     }
     let tag = |sub: u16| FaceTag { feature: f.id, sub }.pack();
+    if info.kind != OccSurf::Plane {
+        // a curved face: the whole face pulled out along its normals (an
+        // offset), or pushed in; no inset on it
+        if inset > 0.0 {
+            return Err("an inset needs a flat face (a curved face can only be extruded)".into());
+        }
+        mark(&step("push", f));
+        let tool = acc.thicken_face(face, p.depth, [tag(0), tag(1), tag(2)])?;
+        return if p.depth > 0.0 { acc.fuse(&tool) } else { acc.cut(&tool) }.map(Some);
+    }
     mark(&step("push", f));
     let mut inner = match acc.inset_face(face, inset) {
         Ok(x) => x,
@@ -1466,6 +1473,42 @@ mod tests {
     }
 
     #[test]
+    fn curved_faces_extruded() {
+        // a cylinder's side pulled out 3 mm (a thicker cylinder), pushed in
+        // 2 mm; a fillet's face pulled out 1 mm; an inset on a curved face
+        // is refused
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Cylinder { radius: 10.0, height: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let side = FaceRef { tag: tag(c, 0), at: DVec3::new(10.0, 10.0, 0.0) };
+        let p = d.add_push(Push { face: side, inset: 0.0, depth: 3.0 });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, hi) = m.bounds().unwrap();
+        // (the bounds are the mesh's: a little inside on round faces)
+        assert!((hi[0] - 13.0).abs() < 0.02 && (lo[2] + 13.0).abs() < 0.02 && (hi[1] - 20.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        let mine = |m: &Model, sub: u16| m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: p, sub })).count();
+        assert!(mine(&m, 1) >= 1, "{:?}", m.faces.iter().map(|f| f.tag).collect::<Vec<_>>());
+        d.feature_mut(p).unwrap().push.as_mut().unwrap().depth = -2.0;
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((hi[0] - 8.0).abs() < 0.02 && (lo[0] + 8.0).abs() < 0.02, "{lo:?} {hi:?}");
+        d.feature_mut(p).unwrap().push.as_mut().unwrap().inset = 1.0;
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.iter().any(|e| e.contains("inset needs a flat face")), "{:?}", m.errors);
+        // a block's fillet face pulled out
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let r = d.add_round(5.0, false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
+        let m1 = build(&d, true, false, &[], &mut Cache::default());
+        let fl = m1.faces.iter().find(|f| f.tag.map(|t| t.feature) == Some(r)).unwrap();
+        let p = d.add_push(Push { face: FaceRef { tag: tag(r, 0), at: DVec3::from_array(fl.point) }, inset: 0.0, depth: 1.0 });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(m.faces.iter().any(|f| f.tag == Some(FaceTag { feature: p, sub: 1 }) && f.kind == SurfKind::Cylinder), "{:?}", m.faces.iter().map(|f| (f.tag, f.kind)).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn faces_pushed_and_pulled() {
         // a block with a hole through it; its top inset by 3 mm
         let mut d = Doc::default();
@@ -1528,8 +1571,11 @@ mod tests {
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let l = m.limits.iter().find(|l| l.0 == p).map(|l| l.1).expect("a limit");
         assert!(l > 0.0 && l < 20.0, "{l}");
-        // a round face: not yet
+        // a round face (the hole's wall): moved along its normals; no inset on it
         d.feature_mut(p).unwrap().push = Some(Push { face: FaceRef { tag: tag(2, 0), at: DVec3::new(5.0, 10.0, 0.0) }, inset: 0.0, depth: 1.0 });
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        d.feature_mut(p).unwrap().push.as_mut().unwrap().inset = 1.0;
         let m = build(&d, true, false, &[], &mut cache);
         assert!(m.errors.len() == 1 && m.errors[0].contains("flat"), "{:?}", m.errors);
     }

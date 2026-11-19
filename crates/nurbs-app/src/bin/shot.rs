@@ -9,7 +9,7 @@
 use egui::{pos2, vec2, Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 use glam::{DQuat, DVec3, Vec3};
 use nurbs_app::draw::Drawer;
-use nurbs_app::state::{AppState, SelMode, Tool};
+use nurbs_app::state::{AppState, PushKind, SelMode, Tool};
 use nurbs_app::theme;
 use nurbs_kernel::client::{kernel_exe, Kernel};
 use nurbs_kernel::doc::PrimKind;
@@ -1508,6 +1508,62 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("extrude-curved") {
+        // Extrude on a curved face: the Boss's side pulled out along its
+        // normals (a thicker boss), the Hole's wall pushed in (a bigger
+        // hole), a fillet's face pulled out
+        h.reset(test_part(), "Test part");
+        h.key(egui::Key::Num3);
+        h.st.camera.frame(Vec3::new(-20.0, 0.0, -15.0), Vec3::new(20.0, 30.0, 15.0));
+        h.steps(2);
+        h.st.arm_push(PushKind::Extrude, None);
+        let side = Vec3::new(10.0, 25.0, 7.0);
+        let a = h.screen_of(side);
+        let b = h.screen_of(side + Vec3::Z * 4.0);
+        h.move_to(a);
+        h.steps(2);
+        h.drag(a, b, 8, false);
+        h.settle();
+        h.shot("zero-extrude-curved-1-drag");
+        h.press(b, false);
+        h.steps(2);
+        h.settle();
+        let ex = |h: &Harness| h.st.doc.features.iter().filter_map(|f| f.push.as_ref().map(|p| (f.name.clone(), p.inset, p.depth))).collect::<Vec<_>>();
+        eprintln!("  extrusions {:?} errors {:?}", ex(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.move_to(h.screen_of(Vec3::new(0.0, -10.0, 40.0)));
+        h.steps(2);
+        h.shot("zero-extrude-curved-2-out");
+        // the Hole's wall pushed in 2 mm (into the block): a bigger hole
+        let hole = h.st.doc.features.iter().find(|f| f.name == "Hole").map(|f| f.id).unwrap();
+        let mut q = 0;
+        h.st.edit("Extrude", |d| q = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: hole, sub: 0 }.pack(), at: DVec3::new(-10.0, 10.0, 5.0) }, inset: 0.0, depth: -2.0 }));
+        h.st.selection = vec![q];
+        h.settle();
+        eprintln!("  hole wall pushed {:?} errors {:?}", ex(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-extrude-curved-3-hole");
+        // a fillet on the block's front top edge, its face pulled out 1.5 mm
+        let e = {
+            let m = h.st.model.as_ref().unwrap();
+            let p = Vec3::new(14.0, 20.0, 15.0);
+            let near = |i: usize| m.edges[i].pts.windows(2).map(|w| {
+                let (u, v) = (Vec3::from_array(w[0]), Vec3::from_array(w[1]));
+                let d = v - u;
+                let t = ((p - u).dot(d) / d.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                (u + d * t).distance(p)
+            }).fold(f32::MAX, f32::min);
+            (0..m.edges.len()).min_by(|a, b| near(*a).total_cmp(&near(*b))).and_then(|i| h.st.edge_ref(i))
+        };
+        let mut r = 0;
+        h.st.edit("Fillet", |d| r = d.add_round(4.0, false, e.into_iter().collect()));
+        h.settle();
+        let at = h.st.model.as_ref().unwrap().faces.iter().find(|f| f.tag.map(|t| t.feature) == Some(r)).map(|f| DVec3::from_array(f.point)).unwrap();
+        let mut p = 0;
+        h.st.edit("Extrude", |d| p = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: r, sub: 0 }.pack(), at }, inset: 0.0, depth: 1.5 }));
+        h.st.selection = vec![p];
+        h.settle();
+        eprintln!("  fillet face pulled {:?} errors {:?}", ex(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-extrude-curved-4-fillet-face");
+    }
     if want("tension-box") {
         // a block with its 12 edges filleted (8 sphere corners), then the
         // fillet's tension: fuller, flatter; the corners remade to fit

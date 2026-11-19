@@ -283,17 +283,47 @@ impl AppState {
         }
     }
 
-    /// The face's plane through a point: the point on it, the outward normal.
+    /// The face's plane through a point: the point on it, the outward
+    /// normal. A curved face (for an extrusion): the point, the normal there.
     fn face_plane(&mut self, face: usize, at: DVec3, what: &str) -> Option<(FaceRef, DVec3, DVec3)> {
         let f = self.model.as_ref().and_then(|m| m.faces.get(face)).cloned()?;
         if f.kind != SurfKind::Plane {
-            self.toast(&format!("{what}: only flat faces for now"), true);
-            return None;
+            if what == "Inset" {
+                self.toast("Inset: only flat faces (a curved face can be extruded: Ctrl + E)", true);
+                return None;
+            }
+            let r = self.face_ref(face, at)?;
+            let n = self.normal_near(face, at)?;
+            return Some((r, at, n));
         }
         let r = self.face_ref(face, at)?;
         let n = DVec3::from_array(f.normal).normalize();
         let o = DVec3::from_array(f.point);
         Some((r, at - n * (at - o).dot(n), n))
+    }
+
+    /// The outward normal of a model face near a point: a plane's, else
+    /// the mesh's there (its triangle nearest the point, its vertices'
+    /// normals).
+    pub(crate) fn normal_near(&self, face: usize, at: DVec3) -> Option<DVec3> {
+        let m = self.model.as_ref()?;
+        let f = m.faces.get(face)?;
+        if f.kind == SurfKind::Plane {
+            return Some(DVec3::from_array(f.normal).normalize());
+        }
+        let p = |i: u32| Vec3::from(m.positions[i as usize]).as_dvec3();
+        let t = m
+            .triangles
+            .iter()
+            .zip(&m.tri_face)
+            .filter(|(_, fi)| **fi as usize == face)
+            .map(|(t, _)| t)
+            .min_by(|a, b| {
+                let d = |t: &&[u32; 3]| ((p(t[0]) + p(t[1]) + p(t[2])) / 3.0).distance_squared(at);
+                d(a).total_cmp(&d(b))
+            })?;
+        let n: Vec3 = t.iter().map(|i| Vec3::from(m.normals[*i as usize])).sum();
+        Some(n.as_dvec3().try_normalize().unwrap_or(DVec3::from_array(f.normal)))
     }
 
     /// An inset of a face, 2 mm, the line only (no depth): selected, its
@@ -320,7 +350,7 @@ impl AppState {
     /// A click with the Inset tool, or a press with the Extrude tool.
     pub fn push_press(&mut self, kind: PushKind, p: [f32; 2], held: bool) {
         let Some(h) = self.pick_at(p) else {
-            self.toast(&format!("{}: click a flat face of the part", kind.label()), true);
+            self.toast(&format!("{}: click a {}face of the part", kind.label(), if kind == PushKind::Inset { "flat " } else { "" }), true);
             return;
         };
         match kind {
@@ -417,10 +447,13 @@ impl AppState {
         let mine = |i: i32| i >= 0 && m.faces.get(i as usize).and_then(|x| x.tag).map(|t| t.feature == f.id).unwrap_or(false);
         let theirs = |i: i32| i >= 0 && m.faces.get(i as usize).and_then(|x| x.tag).map(|t| t.pack() == p.face.tag).unwrap_or(false);
         // the normal: the step's own face (the inset, or the end), else the face it starts from
-        let own = m.faces.iter().find(|x| x.tag.map(|t| t.feature == f.id && t.sub == 1).unwrap_or(false));
-        let from = m.faces.iter().find(|x| x.tag.map(|t| t.pack() == p.face.tag).unwrap_or(false));
-        let n = DVec3::from_array(own.or(from)?.normal).normalize();
+        let own_i = m.faces.iter().position(|x| x.tag.map(|t| t.feature == f.id && t.sub == 1).unwrap_or(false));
+        let from_i = m.faces.iter().position(|x| x.tag.map(|t| t.pack() == p.face.tag).unwrap_or(false));
+        let own = own_i.map(|i| &m.faces[i]);
         let at = p.face.at;
+        // a curved face's: the normal at the step's point (its own face is
+        // the face moved along its normals: nearest the point there too)
+        let n = self.normal_near(own_i.or(from_i)?, at)?;
         // the inset: the border of the face it starts from (its edges not
         // shared with the step's faces), the point nearest the step's point
         let mut inset = None;
