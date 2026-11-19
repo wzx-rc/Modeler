@@ -62,6 +62,10 @@ pub enum Icon {
     Knife,
     /// Point on edge: an edge and a point on it.
     EdgePoint,
+    /// The reference mesh: a lumpy outline, triangulated.
+    Scan,
+    /// The reference seen through: a square seen through another.
+    Ghost,
 }
 
 struct Pen<'a> {
@@ -241,6 +245,19 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(7.1, 7.1), (10.3, 10.3)]);
             pen.line(&[(4.1, 11.6), (8.3, 13.4)]);
             pen.line(&[(11.6, 4.1), (13.4, 8.3)]);
+        }
+        Icon::Scan => {
+            pen.closed(&[(3.0, 12.0), (5.0, 5.0), (11.0, 3.0), (17.0, 6.5), (17.0, 13.0), (11.0, 17.0), (5.0, 16.0)]);
+            pen.line(&[(5.0, 5.0), (10.0, 10.0), (17.0, 6.5)]);
+            pen.line(&[(3.0, 12.0), (10.0, 10.0), (11.0, 17.0)]);
+            pen.line(&[(11.0, 3.0), (10.0, 10.0), (17.0, 13.0)]);
+        }
+        Icon::Ghost => {
+            pen.closed(&[(3.0, 3.0), (12.0, 3.0), (12.0, 12.0), (3.0, 12.0)]);
+            pen.line(&[(8.0, 8.0), (8.0, 17.0)]);
+            pen.line(&[(8.0, 17.0), (17.0, 17.0)]);
+            pen.line(&[(17.0, 17.0), (17.0, 8.0)]);
+            pen.line(&[(17.0, 8.0), (8.0, 8.0)]);
         }
         Icon::Grid => {
             pen.closed(&[(3.0, 3.0), (17.0, 3.0), (17.0, 17.0), (3.0, 17.0)]);

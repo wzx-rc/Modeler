@@ -11,6 +11,7 @@
 //! - `slot`: a slot, a box or a round part found under a drag, a NURBS
 //!   surface laid on its wall.
 
+pub mod bvh;
 pub mod circle;
 pub mod mesh;
 pub mod nurbs;

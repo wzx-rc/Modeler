@@ -14,6 +14,7 @@ pub mod history;
 pub mod marking;
 pub mod materials;
 pub mod pick;
+pub mod reference;
 pub mod render;
 pub mod settings;
 pub mod snap;
@@ -40,6 +41,11 @@ pub fn version_title() -> String {
 /// The whole UI for one frame.
 pub fn run(ctx: &egui::Context, st: &mut AppState) {
     theme::set_light(ctx, st.settings.light);
+    // an .obj dropped on the window: the reference mesh to model on
+    let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+    if let Some(p) = dropped.iter().find(|p| p.extension().map(|e| e.eq_ignore_ascii_case("obj")).unwrap_or(false)) {
+        st.import_reference(&p.to_string_lossy());
+    }
     viewport::show(ctx, st);
     ui::show(ctx, st);
 }

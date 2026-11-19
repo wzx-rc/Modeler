@@ -3,19 +3,22 @@
 //! the outlines over the part.
 
 use crate::materials;
-use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, Renderer, FACE_HOVERED, FACE_SELECTED};
+use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, RefDraw, Renderer, FACE_HOVERED, FACE_SELECTED};
 use crate::state::{AppState, SelMode, Tool};
 use crate::theme;
 use nurbs_kernel::Op;
 
 /// The part's colour: grey clay (sRGB).
 pub const CLAY: [f32; 3] = [0.50, 0.50, 0.49];
+/// The reference mesh: a cooler, darker grey than the part (sRGB).
+pub const REF_GREY: [f32; 3] = [0.30, 0.315, 0.345];
 /// Quads view: the fillet and chamfer bands (sRGB).
 pub const BAND: [f32; 3] = [0.92, 0.47, 0.15];
 
 pub struct Drawer {
     pub r: Renderer,
     model_gen: u64,
+    ref_gen: u64,
     /// The part was uploaded as quads.
     quads_shown: bool,
     flags: Vec<FaceGpu>,
@@ -28,10 +31,15 @@ fn rgb(c: egui::Color32) -> [f32; 3] {
 
 impl Drawer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Drawer {
-        Drawer { r: Renderer::new(device, format), model_gen: u64::MAX, quads_shown: false, flags: vec![], overlay: vec![] }
+        Drawer { r: Renderer::new(device, format), model_gen: u64::MAX, ref_gen: u64::MAX, quads_shown: false, flags: vec![], overlay: vec![] }
     }
 
     fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, st: &AppState) {
+        // the reference mesh
+        if self.ref_gen != st.ref_gen {
+            self.ref_gen = st.ref_gen;
+            self.r.upload_reference(device, queue, st.reference.as_ref().map(|r| r.verts.as_slice()).unwrap_or(&[]));
+        }
         // the part
         let quads = st.quad_mesh();
         if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() {
@@ -181,6 +189,12 @@ impl Drawer {
             base: CLAY,
             sel: (sel, 0.45),
             hover: (sel, 0.2),
+            reference: match (st.reference.is_some(), st.ref_shown, st.ref_ghost) {
+                (true, true, false) => RefDraw::Solid,
+                (true, true, true) => RefDraw::Ghost,
+                _ => RefDraw::Hidden,
+            },
+            ref_color: REF_GREY,
             paint,
             textures,
         };

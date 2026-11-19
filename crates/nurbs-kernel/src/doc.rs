@@ -710,6 +710,17 @@ pub struct Doc {
     /// face), by their packed tag. The kernel does not use it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paint: Vec<Paint>,
+    /// A mesh shown in the view as a reference (a scan, an AI-made mesh) to
+    /// model on, in its own coordinates (millimetres, Y up). The kernel does
+    /// not use it; the app loads it and its tools read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<RefMesh>,
+}
+
+/// The reference mesh: its file (.obj).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RefMesh {
+    pub path: String,
 }
 
 /// A face's own material.
@@ -721,7 +732,7 @@ pub struct Paint {
 
 impl Default for Doc {
     fn default() -> Self {
-        Doc { version: VERSION, features: vec![], next_id: 1, paint: vec![] }
+        Doc { version: VERSION, features: vec![], next_id: 1, paint: vec![], reference: None }
     }
 }
 

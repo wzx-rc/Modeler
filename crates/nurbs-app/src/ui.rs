@@ -1197,7 +1197,16 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     let inner_w = LEFT_W - 24.0;
     let total = screen.max.y - EDGE - top;
     let rows = st.doc.features.len().max(1) as f32;
-    let tree_h = if st.settings.show_tree { (rows * 28.0 + 34.0).clamp(96.0, (total * 0.36).max(120.0)) } else { 0.0 };
+    // the groups' headers, and the reference's group (header and row)
+    let fs = &st.doc.features;
+    let groups = [
+        fs.iter().any(|f| f.is_solid() && !f.is_path() && !matches!(f.prim, Prim::Profile { .. })),
+        fs.iter().any(|f| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Profile { .. })),
+        fs.iter().any(|f| f.is_path()),
+        fs.iter().any(|f| !f.is_solid() && !f.is_path()),
+    ];
+    let extra = groups.iter().filter(|g| **g).count() as f32 * 25.0 + if st.doc.reference.is_some() { 53.0 } else { 0.0 };
+    let tree_h = if st.settings.show_tree { (rows * 28.0 + 34.0 + extra).clamp(96.0, (total * 0.36).max(120.0)) } else { 0.0 };
     let off = panel_offset(ctx, "props");
     egui::Area::new(Id::new("props")).order(Order::Middle).fixed_pos(pos2(screen.min.x + EDGE, top) + off).show(ctx, |ui| {
         island().inner_margin(Margin::same(12)).show(ui, |ui| {
@@ -1285,9 +1294,10 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     let focus = st.outline_element();
     egui::ScrollArea::vertical().id_salt("tree-scroll").max_height(height - 32.0).min_scrolled_height(height - 32.0).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
-        if feats.is_empty() {
-            ui.label(egui::RichText::new("Empty · pick a shape on the right (B, C)").font(regular(12.0)).color(TEXT2()));
+        if feats.is_empty() && st.doc.reference.is_none() {
+            ui.label(egui::RichText::new("Empty · pick a shape on the right (B, C), or drop an .obj here").font(regular(12.0)).color(TEXT2()));
         }
+        reference_rows(ui, st);
         for (gi, (title, keep)) in groups.iter().enumerate() {
             // the last group: operations whose shape cannot be told
             let members: Vec<&Feature> = if gi == 3 { feats.iter().filter(|f| !f.is_solid() && !f.is_path() && st.owner_of(f.id).is_none()).collect() } else { feats.iter().filter(|f| keep(f)).collect() };
@@ -1314,6 +1324,93 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             ui.add_space(3.0);
         }
     });
+}
+
+/// The outliner's REFERENCE group: the mesh to model on (dropped on the
+/// window), shown or hidden, solid or seen through (Ghost), removed.
+fn reference_rows(ui: &mut Ui, st: &mut AppState) {
+    let Some(rm) = st.doc.reference.clone() else { return };
+    let fid = Id::new("tree-group-ref");
+    let folded = ui.data(|d| d.get_temp::<bool>(fid)).unwrap_or(false);
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+    let p = ui.painter();
+    icons::paint(p, Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(10.0, 10.0)), if folded { Icon::ChevronRight } else { Icon::Chevron }, TEXT2());
+    p.text(pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, "REFERENCE", semibold(10.0), if resp.hovered() { TEXT() } else { TEXT2() });
+    p.text(pos2(r.max.x - 6.0, r.center().y), Align2::RIGHT_CENTER, "1", regular(11.0), TEXT2());
+    if resp.clicked() {
+        ui.data_mut(|d| d.insert_temp(fid, !folded));
+    }
+    if folded {
+        return;
+    }
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(r, 6.0, RAISED());
+    }
+    let dim = if st.ref_shown { 1.0 } else { 0.4 };
+    let x0 = r.min.x + 6.0;
+    let c = Color32::from_rgb(0x9A, 0xA1, 0xAB);
+    let br = Rect::from_min_size(pos2(x0, r.center().y - 8.0), vec2(16.0, 16.0));
+    p.rect_filled(br, 4.0, tint(c, 0.16 * dim));
+    icons::paint(p, br.shrink(2.0), Icon::Scan, tint(c, dim));
+    let info = match (&st.reference, st.ref_busy(), st.ref_failed.as_ref() == Some(&rm.path)) {
+        (Some(m), _, _) => format!("{} tris", crate::reference::short_count(m.triangles())),
+        (None, true, _) => "loading…".to_string(),
+        (None, _, true) => "not loaded".to_string(),
+        _ => String::new(),
+    };
+    let info_g = p.layout_no_wrap(info, regular(12.0), tint(TEXT2(), dim));
+    let info_x = r.max.x - 62.0 - info_g.size().x;
+    p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
+    let name = crate::reference::name_of(&rm.path);
+    let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
+    let mut job = egui::text::LayoutJob::single_section(name, egui::TextFormat::simple(regular(13.0), tint(TEXT(), dim)));
+    job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let name_g = ui.painter().layout_job(job);
+    ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, TEXT());
+    // Ghost, then the eye
+    let gr = Rect::from_center_size(pos2(r.max.x - 42.0, r.center().y), vec2(16.0, 16.0));
+    let gresp = ui.interact(gr.expand(4.0), Id::new("ref-ghost"), Sense::click()).on_hover_text("Ghost: seen through, the part inside it shows");
+    if st.ref_ghost {
+        ui.painter().rect_filled(gr.expand(3.0), 4.0, accent_bg());
+    }
+    icons::paint(ui.painter(), gr, Icon::Ghost, if st.ref_ghost { accent() } else { tint(TEXT2(), 0.8) });
+    let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
+    let eresp = ui.interact(er.expand(6.0), Id::new("ref-eye"), Sense::click()).on_hover_text("Show / hide");
+    icons::paint(ui.painter(), er, if st.ref_shown { Icon::Eye } else { Icon::EyeOff }, tint(TEXT2(), 0.8));
+    let resp = resp.on_hover_text(rm.path.clone());
+    resp.context_menu(|ui| {
+        ui.set_min_width(160.0);
+        ui.spacing_mut().button_padding = vec2(8.0, 3.0);
+        ui.spacing_mut().interact_size.y = 24.0;
+        ui.style_mut().override_font_id = Some(regular(12.5));
+        if ui.button(if st.ref_shown { "Hide" } else { "Show" }).clicked() {
+            st.ref_shown = !st.ref_shown;
+            ui.close();
+        }
+        if ui.button(if st.ref_ghost { "Solid" } else { "Ghost" }).clicked() {
+            st.ref_ghost = !st.ref_ghost;
+            ui.close();
+        }
+        if ui.button("Frame").clicked() {
+            if let Some(m) = &st.reference {
+                let (lo, hi) = (m.lo.as_vec3(), m.hi.as_vec3());
+                st.camera.frame(lo, hi);
+            }
+            ui.close();
+        }
+        if ui.button("Remove reference").clicked() {
+            st.remove_reference();
+            ui.close();
+        }
+    });
+    if gresp.clicked() {
+        st.ref_ghost = !st.ref_ghost;
+    } else if eresp.clicked() {
+        st.ref_shown = !st.ref_shown;
+    }
+    ui.add_space(3.0);
 }
 
 /// One row of the outliner: a shape, a path or an operation. `ops`: how

@@ -45,6 +45,11 @@ impl App {
         if !st.doc.features.is_empty() {
             st.frame_all();
         }
+        // a mesh named on the command line: the reference to model on
+        if let Some(p) = std::env::args().nth(1).filter(|a| a.to_lowercase().ends_with(".obj")) {
+            let p = std::path::absolute(&p).map(|a| a.to_string_lossy().into_owned()).unwrap_or(p);
+            st.import_reference(&p);
+        }
         if st.kernel.exe().is_none() {
             st.toast("Kernel not found: build forme-nurbs-kernel next to the app", true);
         }
@@ -80,7 +85,7 @@ impl App {
         window.pre_present_notify();
         gfx.queue.present(frame);
         // the kernel is working: keep looking for its answer
-        let busy = self.st.interacting || self.st.toast.is_some() || self.st.building();
+        let busy = self.st.interacting || self.st.toast.is_some() || self.st.building() || self.st.ref_busy();
         let egui_wants = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay.as_secs_f32() < 0.05).unwrap_or(false);
         if busy || egui_wants || now < self.redraw_until {
             window.request_redraw();

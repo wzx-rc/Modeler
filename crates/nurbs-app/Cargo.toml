@@ -19,6 +19,7 @@ path = "src/bin/shot.rs"
 
 [dependencies]
 nurbs-kernel = { path = "../nurbs-kernel" }
+rectify-core = { path = "../rectify-core" }
 glam.workspace = true
 bytemuck.workspace = true
 egui.workspace = true

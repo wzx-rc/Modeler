@@ -437,6 +437,21 @@ pub struct AppState {
     /// The points of interest the pointer passed over lately (at most 4):
     /// the guides line up with them, as in Plasticity / SketchUp.
     pub acquired: Vec<crate::snap::SnapPoint>,
+    /// The reference mesh (`reference.rs`; its file is `Doc.reference`),
+    /// once loaded, and its load under way.
+    pub reference: Option<Arc<crate::reference::Reference>>,
+    pub ref_loading: Option<crate::reference::Loading>,
+    /// Bumped when the reference is loaded or dropped (the renderer
+    /// uploads it).
+    pub ref_gen: u64,
+    /// A file that could not be loaded (not tried again until imported
+    /// again).
+    pub ref_failed: Option<String>,
+    /// Frame the view on it once loaded (imported, or a document opened).
+    pub ref_frame: bool,
+    /// Shown, and see-through (Ghost).
+    pub ref_shown: bool,
+    pub ref_ghost: bool,
 }
 
 impl AppState {
@@ -505,6 +520,13 @@ impl AppState {
             snap_off: false,
             shift_held: false,
             acquired: vec![],
+            reference: None,
+            ref_loading: None,
+            ref_gen: 0,
+            ref_failed: None,
+            ref_frame: true,
+            ref_shown: true,
+            ref_ghost: false,
         }
     }
 
@@ -526,7 +548,11 @@ impl AppState {
     }
 
     pub fn frame_all(&mut self) {
-        let b = self.model.as_ref().and_then(|m| m.bounds()).map(|(lo, hi)| (Vec3::from(lo), Vec3::from(hi))).or_else(|| self.doc.bounds().map(|(lo, hi)| (lo.as_vec3(), hi.as_vec3())));
+        let mut b = self.model.as_ref().and_then(|m| m.bounds()).map(|(lo, hi)| (Vec3::from(lo), Vec3::from(hi))).or_else(|| self.doc.bounds().map(|(lo, hi)| (lo.as_vec3(), hi.as_vec3())));
+        if let Some(r) = self.reference.as_ref().filter(|_| self.ref_shown) {
+            let (lo, hi) = (r.lo.as_vec3(), r.hi.as_vec3());
+            b = Some(b.map(|(a, c)| (a.min(lo), c.max(hi))).unwrap_or((lo, hi)));
+        }
         match b {
             Some((lo, hi)) => self.camera.frame(lo, hi),
             None => self.camera.frame(Vec3::new(-20.0, 0.0, -20.0), Vec3::new(20.0, 20.0, 20.0)),
@@ -1925,6 +1951,7 @@ impl AppState {
         }
         self.refresh_snaps();
         self.remesh_tick();
+        self.reference_tick();
         let fine = !self.is_live();
         // quads only for a finished state (not while a gesture is live)
         let quads = self.quads && fine;
@@ -1977,6 +2004,77 @@ impl AppState {
         if let Some(text) = said {
             self.touched();
             self.toast(&text, false);
+        }
+    }
+
+    // ------------------------------------------------------ the reference
+
+    /// Shows a mesh (.obj) as the reference to model on (one undo step; it
+    /// replaces the one there was).
+    pub fn import_reference(&mut self, path: &str) {
+        self.ref_failed = None;
+        self.ref_frame = true;
+        self.ref_shown = true;
+        let r = nurbs_kernel::RefMesh { path: path.to_string() };
+        self.edit("Import reference", |d| d.reference = Some(r));
+    }
+
+    pub fn remove_reference(&mut self) {
+        self.edit("Remove reference", |d| d.reference = None);
+    }
+
+    /// The reference is being read (the frames go on until it is there).
+    pub fn ref_busy(&self) -> bool {
+        self.ref_loading.is_some()
+    }
+
+    /// The reference under a point of the screen, when shown: the point
+    /// and its distance from the eye.
+    pub fn reference_at(&self, p: [f32; 2]) -> Option<(DVec3, f64)> {
+        let r = self.reference.as_ref().filter(|_| self.ref_shown)?;
+        let (o, d) = self.ray(p);
+        r.hit(o, d.normalize())
+    }
+
+    /// Keeps the loaded reference in step with the document's (imported,
+    /// removed, undone, another document opened).
+    fn reference_tick(&mut self) {
+        if let Some(l) = &self.ref_loading {
+            match l.rx.try_recv() {
+                Ok(res) => {
+                    let path = l.path.clone();
+                    self.ref_loading = None;
+                    if self.doc.reference.as_ref().map(|r| r.path == path).unwrap_or(false) {
+                        match res {
+                            Ok(r) => {
+                                let text = format!("{}: {} triangles ({:.1} s)", r.name, crate::reference::short_count(r.triangles()), r.secs);
+                                self.reference = Some(Arc::new(r));
+                                self.ref_gen += 1;
+                                if std::mem::take(&mut self.ref_frame) {
+                                    self.frame_all();
+                                }
+                                self.toast(&text, false);
+                            }
+                            Err(e) => {
+                                self.ref_failed = Some(path);
+                                self.toast(&format!("Reference not loaded: {e}"), true);
+                            }
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(_) => self.ref_loading = None,
+            }
+        }
+        let want = self.doc.reference.as_ref().map(|r| r.path.clone());
+        if self.reference.as_ref().map(|r| Some(&r.path) != want.as_ref()).unwrap_or(false) {
+            self.reference = None;
+            self.ref_gen += 1;
+        }
+        if let Some(p) = want {
+            if self.reference.is_none() && self.ref_failed.as_ref() != Some(&p) {
+                self.ref_loading = Some(crate::reference::Reference::start(&p));
+            }
         }
     }
 
@@ -2144,6 +2242,7 @@ impl AppState {
         self.doc_name = name.to_string();
         self.save_name = name.to_string();
         self.touched();
+        self.ref_frame = true;
         self.frame_all();
     }
 

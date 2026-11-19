@@ -1714,6 +1714,52 @@ fn main() {
             }
         }
     }
+    if want("reference") {
+        // retopology on a mesh, step 1: the pistol (an AI-made mesh, 1.95 M
+        // triangles, in cm) shown as the reference, solid then seen through
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        if std::path::Path::new(&path).exists() {
+            h.reset(Doc::default(), "Retopo");
+            h.st.import_reference(&path);
+            h.step();
+            let end = Instant::now() + Duration::from_secs(180);
+            while h.st.ref_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            h.steps(2);
+            if let Some(r) = &h.st.reference {
+                eprintln!("  reference {}: {} triangles, {:.1} s, box {:?} {:?}", r.name, r.triangles(), r.secs, r.lo, r.hi);
+            }
+            h.shot("zero-ref-0-loaded");
+            // the pointer's ray against it (the BVH)
+            let c = h.st.principal();
+            let t0 = Instant::now();
+            let hit = h.st.reference_at(c);
+            eprintln!("  ray from the view's centre: {hit:?} in {:?}", t0.elapsed());
+            h.st.toast = None;
+            // a block and a hole in the grip, seen through the ghost
+            let mut d = Doc::default();
+            d.reference = h.st.doc.reference.clone();
+            let b = d.add(Op::Add, Prim::Box { x: 30.0, y: 40.0, z: 20.0 }, DVec3::new(-20.0, 20.0, 0.0), DQuat::IDENTITY);
+            d.feature_mut(b).unwrap().name = "Block".into();
+            h.st.edit("Part", |doc| *doc = d);
+            h.settle();
+            h.shot("zero-ref-1-solid");
+            h.st.ref_ghost = true;
+            h.steps(2);
+            h.shot("zero-ref-2-ghost");
+            h.st.select(None, false);
+            h.st.ref_ghost = false;
+            h.st.ref_shown = false;
+            h.steps(2);
+            h.shot("zero-ref-3-hidden");
+            h.st.ref_shown = true;
+        } else {
+            eprintln!("reference: {path} not found (FORME_REF)");
+        }
+    }
+
     if want("tension-point") {
         // the top front edge filleted at 2 mm, then the top -X edge at 3 mm:
         // OpenCascade carries the second round the first one's end and down

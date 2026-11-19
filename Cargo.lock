@@ -1429,6 +1429,7 @@ dependencies = [
  "log",
  "nurbs-kernel",
  "pollster",
+ "rectify-core",
  "serde",
  "serde_json",
  "wgpu",
