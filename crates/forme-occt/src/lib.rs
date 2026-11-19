@@ -36,6 +36,12 @@ extern "C" {
     fn focc_torus(big: c_double, small: c_double) -> *mut FShape;
     fn focc_prism(xy: *const c_double, smooth: *const c_int, n: c_int, h: c_double) -> *mut FShape;
     fn focc_prism_cut(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int, h: c_double) -> *mut FShape;
+    fn focc_outline(o: *const c_double, n: *const c_double, xyz: *const c_double, count: c_int, closed: c_int, cut: *const c_int, abm: *const c_double) -> *mut FShape;
+    fn focc_disc(o: *const c_double, n: *const c_double, r: c_double) -> *mut FShape;
+    fn focc_extrude_edge(s: *const FShape, index: c_int, v: *const c_double, tag: i64) -> *mut FShape;
+    fn focc_thicken(s: *const FShape, t: c_double, salt: i64) -> *mut FShape;
+    fn focc_round(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
+    fn focc_bevel(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
     fn focc_transform(s: *const FShape, m: *const c_double) -> *mut FShape;
     fn focc_fuse(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_cut(a: *const FShape, b: *const FShape) -> *mut FShape;
@@ -50,6 +56,8 @@ extern "C" {
     fn focc_inset_face(s: *const FShape, face: c_int, d: c_double) -> *mut FShape;
     fn focc_extrude(s: *const FShape, dx: c_double, dy: c_double, dz: c_double) -> *mut FShape;
     fn focc_imprint(s: *const FShape, tool: *const FShape) -> *mut FShape;
+    fn focc_edge_point(s: *const FShape, edge: c_int, f: f64, xyz: *mut f64) -> c_int;
+    fn focc_split(s: *const FShape, pts: *const f64, n: c_int, segs: *const c_int, nseg: c_int) -> *mut FShape;
     fn focc_face_distance(s: *const FShape, face: c_int, p: *const c_double) -> c_double;
     fn focc_vertex_points(s: *const FShape, xyz: *mut c_double, cap: c_int) -> c_int;
     fn focc_sub_vertices(s: *const FShape, kind: c_int, index: c_int, out: *mut c_int, cap: c_int) -> c_int;
@@ -398,6 +406,47 @@ impl Shape {
         shape(unsafe { focc_prism_cut(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int, h) })
     }
 
+    /// A flat outline (Forme Rectify's Pen) through `pts` on the plane
+    /// through `o` facing `n`: closed, a face facing `n`; open, a line (its
+    /// edges free). Corner i cut by an arc through `cuts[i]` (its start,
+    /// middle and end); an open line's ends are never cut.
+    pub fn outline(o: [f64; 3], n: [f64; 3], pts: &[[f64; 3]], closed: bool, cuts: &[Option<[[f64; 3]; 3]>]) -> Result<Shape, String> {
+        Shape::outline_bevel(o, n, pts, closed, cuts, &[])
+    }
+    /// The same, corner i cut straight from its start to its end where
+    /// `bevel[i]` (a bevel) instead of by an arc.
+    pub fn outline_bevel(o: [f64; 3], n: [f64; 3], pts: &[[f64; 3]], closed: bool, cuts: &[Option<[[f64; 3]; 3]>], bevel: &[bool]) -> Result<Shape, String> {
+        let xyz: Vec<f64> = pts.iter().flatten().copied().collect();
+        let ck: Vec<c_int> = (0..pts.len()).map(|i| if cuts.get(i).copied().flatten().is_none() { 0 } else if bevel.get(i).copied().unwrap_or(false) { 2 } else { 1 }).collect();
+        let abm: Vec<f64> = (0..pts.len()).flat_map(|i| cuts.get(i).copied().flatten().map(|c| [c[0], c[1], c[2]]).unwrap_or([[0.0; 3]; 3]).into_iter().flatten()).collect();
+        shape(unsafe { focc_outline(o.as_ptr(), n.as_ptr(), xyz.as_ptr(), pts.len() as c_int, closed as c_int, ck.as_ptr(), abm.as_ptr()) })
+    }
+    /// A disc of radius `r` round `o`, facing `n`.
+    pub fn disc(o: [f64; 3], n: [f64; 3], r: f64) -> Result<Shape, String> {
+        shape(unsafe { focc_disc(o.as_ptr(), n.as_ptr(), r) })
+    }
+    /// Edge `edge` (1-based) pulled along `v` into a new face (tag `tag`),
+    /// sewn to the faces along it; a free edge (a line's) becomes its side.
+    pub fn extrude_edge(&self, edge: i32, v: [f64; 3], tag: i64) -> Result<Shape, String> {
+        shape(unsafe { focc_extrude_edge(self.0, edge, v.as_ptr(), tag) })
+    }
+    /// The faces made a solid `t` thick along their normals (< 0: the
+    /// other way); the tops and sides get tags mixed from their face's and
+    /// `salt`.
+    pub fn thicken(&self, t: f64, salt: i64) -> Result<Shape, String> {
+        shape(unsafe { focc_thicken(self.0, t, salt) })
+    }
+    /// Edges rounded with radius `r` on the shape's faces (a solid or a
+    /// sheet), free edges kept; the new faces get `fresh`.
+    pub fn round(&self, edges: &[i32], r: f64, fresh: i64) -> Result<Shape, String> {
+        shape(unsafe { focc_round(self.0, edges.as_ptr(), edges.len() as c_int, r, fresh) })
+    }
+    /// Edges cut flat, `d` along each face (a bevel), on the shape's faces
+    /// (a solid or a sheet), free edges kept; the new faces get `fresh`.
+    pub fn bevel(&self, edges: &[i32], d: f64, fresh: i64) -> Result<Shape, String> {
+        shape(unsafe { focc_bevel(self.0, edges.as_ptr(), edges.len() as c_int, d, fresh) })
+    }
+
     /// Copy moved by an affine map: 3 rows of 4 (rotation × uniform scale,
     /// a mirror allowed, then translation).
     pub fn transformed(&self, rows: [[f64; 4]; 3]) -> Result<Shape, String> {
@@ -491,6 +540,18 @@ impl Shape {
     /// part under the tool takes the tool's tag.
     pub fn imprint(&self, tool: &Shape) -> Result<Shape, String> {
         shape(unsafe { focc_imprint(self.0, tool.0) })
+    }
+    /// Edge `edge` (1-based) at fraction `f` of its parameter range.
+    pub fn edge_point(&self, edge: i32, f: f64) -> Option<[f64; 3]> {
+        let mut p = [0.0; 3];
+        (unsafe { focc_edge_point(self.0, edge, f, p.as_mut_ptr()) } == 0).then_some(p)
+    }
+    /// The Knife: points cut into the edges they lie on, and straight
+    /// lines between pairs of them (indices) cut into the faces they lie on.
+    pub fn split(&self, pts: &[[f64; 3]], segs: &[[i32; 2]]) -> Result<Shape, String> {
+        let flat: Vec<f64> = pts.iter().flatten().copied().collect();
+        let s: Vec<c_int> = segs.iter().flatten().map(|&i| i as c_int).collect();
+        shape(unsafe { focc_split(self.0, flat.as_ptr(), pts.len() as c_int, s.as_ptr(), segs.len() as c_int) })
     }
     /// Distance from a point to a face (None when it cannot be measured).
     pub fn face_distance(&self, face: usize, p: [f64; 3]) -> Option<f64> {

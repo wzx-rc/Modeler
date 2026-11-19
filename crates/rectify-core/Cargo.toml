@@ -1,0 +1,9 @@
+[package]
+name = "rectify-core"
+edition.workspace = true
+version.workspace = true
+description = "Forme Rectify: the scan, and the NURBS tools laid on it"
+
+[dependencies]
+glam.workspace = true
+rayon = "1"

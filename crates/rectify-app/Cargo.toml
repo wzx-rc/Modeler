@@ -1,0 +1,35 @@
+[package]
+name = "rectify-app"
+edition.workspace = true
+version.workspace = true
+description = "Forme Rectify: the app (egui + wgpu). Opens a scan and lays NURBS on it with rectify-core"
+build = "build.rs"
+
+[lib]
+name = "rectify_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "forme-rectify"
+path = "src/main.rs"
+
+[[bin]]
+name = "forme-rectify-shot"
+path = "src/bin/shot.rs"
+
+[dependencies]
+rectify-core = { path = "../rectify-core" }
+# OpenCascade (the shapes drawn on the scan): built from source the first
+# time (feature `builtin`, cached in target/OCCT), or FORME_OCCT_ROOT
+forme-occt = { path = "../forme-occt" }
+glam.workspace = true
+bytemuck.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+log.workspace = true
+image.workspace = true
+rayon = "1"
