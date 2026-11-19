@@ -90,8 +90,41 @@ fn launch(mesh: Option<&str>) -> Result<(), String> {
         cmd.arg(m);
     }
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // its own process, no console: it outlives this server
+        const DETACHED_PROCESS: u32 = 0x8;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
+        no_inherit_stdio();
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
     cmd.spawn().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Windows passes every inheritable handle to a child: this server's own
+/// stdin / stdout (Claude Desktop's pipes) would stay open in the app, so
+/// the pipes would not close when the server ends. They are made not
+/// inheritable before the app is started.
+#[cfg(windows)]
+fn no_inherit_stdio() {
+    type Handle = *mut std::ffi::c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(which: u32) -> Handle;
+        fn SetHandleInformation(h: Handle, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 1;
+    // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+    for which in [-10i32, -11, -12] {
+        unsafe {
+            let h = GetStdHandle(which as u32);
+            if !h.is_null() && h as isize != -1 {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
 }
 
 fn connect(start_with: Option<&str>) -> Result<(TcpStream, bool), String> {
