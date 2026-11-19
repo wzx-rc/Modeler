@@ -948,6 +948,81 @@ fn main() {
         }
     }
 
+    if want("rdrag") {
+        // from Forme Rectify: a drag on an edge makes its fillet, the top
+        // bar's option a chamfer, Ctrl + B, a drag on a sketch corner
+        h.reset(test_part(), "Test part");
+        h.key(egui::Key::Num2);
+        let a = h.screen_of(Vec3::new(12.0, 20.0, 15.0));
+        h.drag(a, a + egui::vec2(0.0, -40.0), 10, true);
+        h.settle();
+        h.shot("zero-rdrag-1-edge");
+        for f in h.st.doc.features.iter().filter(|f| f.round.is_some()) {
+            eprintln!("  {} size {:.3} chamfer {}", f.name, f.round.as_ref().unwrap().size, f.round.as_ref().unwrap().chamfer);
+        }
+        // a drag on the fillet's face: bigger
+        let face = h.screen_of(Vec3::new(14.0, 19.6, 14.6));
+        h.drag(face, face + egui::vec2(30.0, 0.0), 10, true);
+        h.settle();
+        for f in h.st.doc.features.iter().filter(|f| f.round.is_some()) {
+            eprintln!("  after face drag: {} size {:.3}", f.name, f.round.as_ref().unwrap().size);
+        }
+        // the option on Chamfer: another edge
+        h.st.round_chamfer = true;
+        let b = h.screen_of(Vec3::new(20.0, 8.0, 15.0));
+        h.drag(b, b + egui::vec2(30.0, 0.0), 10, true);
+        h.settle();
+        h.shot("zero-rdrag-2-chamfer");
+        // Ctrl + B on a picked edge
+        h.st.round_chamfer = false;
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::Escape);
+        let c = h.screen_of(Vec3::new(-20.0, 20.0, 0.0));
+        h.click(c);
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::B);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        for f in h.st.doc.features.iter().filter(|f| f.round.is_some()) {
+            eprintln!("  {} size {:.3} chamfer {}", f.name, f.round.as_ref().unwrap().size, f.round.as_ref().unwrap().chamfer);
+        }
+        h.shot("zero-rdrag-3-ctrl-b");
+        // a sketch: its corner rounded by a drag in Vertex mode
+        h.key(egui::Key::Num4);
+        h.st.camera.frame(Vec3::new(-60.0, 0.0, 10.0), Vec3::new(20.0, 0.0, 50.0));
+        h.steps(2);
+        h.key(egui::Key::L);
+        let g = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 0.0, z));
+        for (x, z) in [(-50.0, 20.0), (-20.0, 20.0), (-20.0, 45.0), (-50.0, 45.0), (-50.0, 20.0)] {
+            h.click(g(&h, x, z));
+        }
+        h.click(g(&h, -30.0, 30.0) + egui::vec2(0.0, -40.0));
+        h.settle();
+        let sk = h.st.doc.features.iter().find(|f| f.profile.is_some() && !f.is_path()).map(|f| f.id);
+        eprintln!("  sketch {:?}", sk);
+        h.st.round_chamfer = false;
+        h.key(egui::Key::Num1);
+        h.steps(2);
+        if let Some(id) = sk {
+            let top = h.st.doc.feature(id).map(|f| f.prim.height()).unwrap_or(0.0);
+            if let Some(v) = h.st.corner_vertex(id, 1, top) {
+                let s = h.screen_of(v.as_vec3());
+                h.drag(s, s + egui::vec2(-25.0, 25.0), 10, true);
+                h.settle();
+                eprintln!("  corners {:?} vert_sel {}", h.st.doc.feature(id).and_then(|f| f.profile.as_ref()).map(|p| p.corner.clone()), h.st.vert_sel.len());
+                // the same corner dragged again, back towards its point: smaller
+                if let Some(v) = h.st.vert_sel.first().copied() {
+                    let s = h.screen_of(v.as_vec3());
+                    h.drag(s, s + egui::vec2(10.0, -10.0), 10, true);
+                    h.settle();
+                    eprintln!("  smaller {:?}", h.st.doc.feature(id).and_then(|f| f.profile.as_ref()).map(|p| p.corner.clone()));
+                }
+            }
+        }
+        h.shot("zero-rdrag-4-corner");
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
     if want("snap") {
         // snapping to the part's points of interest, Plasticity style
         h.reset(test_part(), "Test part");

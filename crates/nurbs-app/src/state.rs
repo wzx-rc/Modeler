@@ -207,6 +207,35 @@ pub struct Drag {
     pub line: Option<(DVec3, DVec3)>,
 }
 
+/// A fillet or chamfer sized by a drag on screen (Rectify's Radius
+/// gesture): on an edge (a new step), on a fillet's faces (its size), on a
+/// sketch or path corner (its cut, the dot follows the pointer).
+#[derive(Clone, Debug)]
+pub struct RoundDrag {
+    pub what: RoundWhat,
+    /// Where the press was (screen points) and the size then.
+    pub press: [f32; 2],
+    pub r0: f64,
+    /// mm per screen point where the press was.
+    pub px: f64,
+    /// A chamfer (else a fillet).
+    pub chamfer: bool,
+    /// The size now (shown by the pointer).
+    pub size: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RoundWhat {
+    /// The edges in `edge_sel`, made one step at the first size.
+    Edges,
+    /// A fillet or chamfer step.
+    Step(FeatureId),
+    /// The picked sketch corners; the dragged one's dot: the way its cut's
+    /// middle moves and how far per mm (frame of the sketch `id`), the
+    /// level of its plane (local y).
+    Corners { corners: Vec<(FeatureId, usize)>, id: FeatureId, bis: [f64; 2], per: f64, y: f64 },
+}
+
 pub struct Toast {
     pub text: String,
     pub until: f64,
@@ -239,8 +268,11 @@ pub struct AppState {
     pub edge_sel: Vec<EdgeRef>,
     /// The edge under the pointer (index in the model's edges).
     pub hover_edge: Option<usize>,
-    /// Fillet or chamfer for the picked edges.
+    /// Fillet or chamfer for the picked edges and sharp corners (the
+    /// top island's option, Ctrl + B).
     pub round_chamfer: bool,
+    /// A fillet or chamfer being sized by a drag.
+    pub round_drag: Option<RoundDrag>,
     pub hover_feature: Option<FeatureId>,
     pub hover_hit: Option<Hit>,
     pub tool: Tool,
@@ -314,6 +346,7 @@ impl AppState {
             edge_sel: vec![],
             hover_edge: None,
             round_chamfer: false,
+            round_drag: None,
             hover_feature: None,
             hover_hit: None,
             tool: Tool::Select,
@@ -435,6 +468,11 @@ impl AppState {
             self.doc = before;
             self.touched();
         }
+    }
+
+    /// The undo steps' names, oldest first.
+    pub fn undo_labels(&self) -> Vec<String> {
+        self.undo.iter().map(|u| u.0.clone()).collect()
     }
 
     pub fn is_live(&self) -> bool {
@@ -876,7 +914,7 @@ impl AppState {
 
     /// Cancels what is under way (creation, sketch, drag, inset).
     pub fn abort_gestures(&mut self) {
-        if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() {
+        if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() || self.round_drag.take().is_some() {
             self.cancel_live();
             self.clean_selection_ids();
         }

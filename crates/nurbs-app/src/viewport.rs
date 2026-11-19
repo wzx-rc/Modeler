@@ -29,6 +29,12 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_gizmo(p, st);
         draw_vertices(p, st);
         draw_push(p, st);
+        if let (Some(g), Some(h)) = (&st.round_drag, ctx.input(|i| i.pointer.latest_pos())) {
+            if g.size > 1e-9 {
+                let label = if g.chamfer { "Chamfer" } else { "Fillet" };
+                chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("{label} {} mm", fmt_mm(g.size as f32)), HOT, HOT);
+            }
+        }
         draw_creation(p, st);
         draw_acquired(p, st);
         if let Some(s) = &st.snap_shown {
@@ -201,7 +207,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     let edges = select && st.sel_mode == SelMode::Edge;
     let faces = (select && st.sel_mode == SelMode::Face) || matches!(st.tool, Tool::Push(_));
     let verts = select && st.sel_mode == SelMode::Vertex;
-    if st.drag.is_none() && st.creation.is_none() && st.marquee.is_none() && st.push.is_none() && !over_ui {
+    if st.drag.is_none() && st.round_drag.is_none() && st.creation.is_none() && st.marquee.is_none() && st.push.is_none() && !over_ui {
         st.hover_hit = hover.and_then(|h| st.pick_at(p2(h)));
         st.hover_edge = if edges { hover.and_then(|h| st.pick_edge(p2(h))) } else { None };
         st.hover_vertex = if verts { hover.and_then(|h| st.pick_vertex(p2(h))) } else { None };
@@ -245,15 +251,28 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
             if let Some(h) = handle_at(st, origin) {
                 st.begin_drag(h, p2(origin));
+            } else {
+                // Rectify: a drag on an edge, a fillet or a sketch corner
+                // sizes its fillet or chamfer
+                st.begin_round_drag(p2(origin));
             }
         }
-        if resp.dragged_by(PointerButton::Primary) && st.drag.is_some() {
+        if resp.dragged_by(PointerButton::Primary) {
             if let Some(p) = hover.or(resp.interact_pointer_pos()) {
-                st.update_drag(p2(p));
+                if st.drag.is_some() {
+                    st.update_drag(p2(p));
+                } else if st.round_drag.is_some() {
+                    st.update_round_drag(p2(p), ctrl);
+                    st.interacting = true;
+                }
             }
         }
-        if resp.drag_stopped() && st.drag.is_some() {
-            st.end_drag();
+        if resp.drag_stopped() {
+            if st.drag.is_some() {
+                st.end_drag();
+            } else if st.round_drag.is_some() {
+                st.end_round_drag();
+            }
         }
     }
 
@@ -834,9 +853,10 @@ pub fn hint(st: &AppState) -> String {
         (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => {
             format!("{} · drag the arrows, or set X, Y, Z in its window · Del deletes", st.selected_tweak().map(|f| f.kind_label()).unwrap_or("Move"))
         }
+        (None, Tool::Select) if st.round_drag.is_some() => "Away from the press: bigger · Ctrl: free size · the kernel stops at the largest that works".into(),
         (None, Tool::Select) if st.sel_mode == SelMode::Vertex => {
             if st.vert_sel.is_empty() {
-                "Vertices: click one · Shift + click adds · the arrows move it".into()
+                "Vertices: click one · drag a sketch corner: its fillet · Shift + click adds · the arrows move it".into()
             } else {
                 let what = if st.comp_pivot().is_some() { "drag an arrow to move" } else if !st.picked_profile_corners().is_empty() { "a fillet or a bevel in the window" } else { "Shift + click adds" };
                 format!("{} vert{} picked · {what} · Esc deselects", st.vert_sel.len(), if st.vert_sel.len() == 1 { "ex" } else { "ices" })
@@ -857,9 +877,9 @@ pub fn hint(st: &AppState) -> String {
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Edge => {
             if let Some(f) = st.selected_round() {
-                format!("{} · set its size in its window · Shift + click an edge to add it · Del deletes", f.kind_label())
+                format!("{} · drag on it or set its size in its window · Shift + click an edge to add it · Del deletes", f.kind_label())
             } else if st.edge_sel.is_empty() {
-                "Edges: click an edge of the part · Shift + click adds · click a fillet to edit it · 4 or Q: objects".into()
+                "Edges: click an edge · drag on one: a fillet (or chamfer, top bar) · Shift + click adds · Ctrl + B chamfers".into()
             } else {
                 "Arrows: move the edge · or a fillet / chamfer in the window · Shift + click adds an edge · Esc deselects".into()
             }

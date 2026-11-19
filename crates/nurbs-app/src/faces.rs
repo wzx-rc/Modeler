@@ -691,3 +691,235 @@ impl AppState {
         });
     }
 }
+
+// ------------------------------------------- fillets and chamfers by drag
+
+/// A size rounded to a step fit for `px` mm per point (1, 2, 5 × 10ⁿ, at
+/// least two points' worth), as in Rectify.
+pub fn nice_round(v: f64, px: f64) -> f64 {
+    let want = (px * 2.0).max(1e-4);
+    let e = 10f64.powf(want.log10().floor());
+    let step = [1.0, 2.0, 5.0, 10.0].iter().map(|m| m * e).find(|s| *s >= want).unwrap_or(want);
+    (v / step).round() * step
+}
+
+impl AppState {
+    /// mm per screen point at a world point.
+    pub fn mm_per_point(&self, at: DVec3) -> f64 {
+        let v = self.view();
+        (v.pixel_size_at((at.as_vec3() - v.eye).length()) as f64).max(1e-5)
+    }
+
+    /// A press and drag in Edge or Vertex mode (Rectify): on an edge, a new
+    /// fillet (or chamfer, the option) of it and the edges picked with it;
+    /// on a fillet's faces, its size; on a sketch or path corner, its cut;
+    /// at a thin plate's corner, its short edge rounded. False: nothing
+    /// there to size.
+    pub fn begin_round_drag(&mut self, p: [f32; 2]) -> bool {
+        let chamfer = self.round_chamfer;
+        match self.sel_mode {
+            SelMode::Edge => {
+                if let Some(r) = self.pick_edge(p).and_then(|i| self.edge_ref(i)) {
+                    let same = |x: &EdgeRef| x.key() == r.key() && x.at.distance(r.at) < 1e-3;
+                    if !self.edge_sel.iter().any(same) {
+                        self.edge_sel = vec![r.clone()];
+                    }
+                    self.selection.clear();
+                    let px = self.mm_per_point(r.at);
+                    self.round_drag = Some(RoundDrag { what: RoundWhat::Edges, press: p, r0: 0.0, px, chamfer, size: 0.0 });
+                    return true;
+                }
+                let Some(h) = self.pick_at(p) else { return false };
+                let Some(id) = self.feature_of_face(h.face) else { return false };
+                let Some(rd) = self.doc.feature(id).and_then(|f| f.round.clone()) else { return false };
+                self.edge_sel.clear();
+                self.selection = vec![id];
+                let (ro, dir) = self.ray(p);
+                let px = self.mm_per_point(ro + dir * h.t as f64);
+                self.begin_live(rd.label());
+                self.round_drag = Some(RoundDrag { what: RoundWhat::Step(id), press: p, r0: rd.size, px, chamfer: rd.chamfer, size: rd.size });
+                true
+            }
+            SelMode::Vertex => {
+                let Some(v) = self.pick_vertex(p) else { return false };
+                if let Some((id, i)) = self.profile_corner(v) {
+                    if !self.vert_sel.iter().any(|q| self.profile_corner(*q) == Some((id, i))) {
+                        self.vert_sel = vec![v];
+                    }
+                    let Some((size, was_chamfer, _)) = self.profile_corner_state_of(id, i) else { return false };
+                    // a sharp corner takes the option, a cut one keeps its kind
+                    let chamfer = if size > 1e-9 { was_chamfer } else { chamfer };
+                    let Some((_, bis, per, y)) = self.corner_dot(id, i, v, chamfer) else { return false };
+                    let px = self.mm_per_point(v);
+                    let corners = self.picked_profile_corners();
+                    self.begin_live(if chamfer { "Chamfer corner" } else { "Fillet corner" });
+                    self.round_drag = Some(RoundDrag { what: RoundWhat::Corners { corners, id, bis, per, y }, press: p, r0: size, px, chamfer, size });
+                    return true;
+                }
+                if let Some(r) = self.corner_edge(v) {
+                    self.edge_sel = vec![r];
+                    self.vert_sel.clear();
+                    self.hover_vertex = None;
+                    self.selection.clear();
+                    let px = self.mm_per_point(v);
+                    self.round_drag = Some(RoundDrag { what: RoundWhat::Edges, press: p, r0: 0.0, px, chamfer, size: 0.0 });
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// The pointer moved during the drag. `free` (Ctrl): the size is not
+    /// rounded to a nice step.
+    pub fn update_round_drag(&mut self, at: [f32; 2], free: bool) {
+        let Some(g) = self.round_drag.clone() else { return };
+        let dist = (at[0] - g.press[0]).hypot(at[1] - g.press[1]) as f64;
+        let mut size = g.r0 + dist * g.px;
+        // a corner's dot follows the pointer along its bisector (from where
+        // the press was, so the size does not jump)
+        if let RoundWhat::Corners { id, bis, per, y, .. } = &g.what {
+            let along = |st: &AppState, sp: [f32; 2]| -> Option<f64> {
+                let f = st.doc.feature(*id)?;
+                let inv = f.matrix().inverse();
+                let (ro, rd) = st.ray(sp);
+                let (lo, ld) = (inv.transform_point3(ro), inv.transform_vector3(rd));
+                if ld.y.abs() < 1e-6 {
+                    return None;
+                }
+                let t = (y - lo.y) / ld.y;
+                let q = lo + ld * t;
+                (t > 0.0).then(|| q.x * bis[0] + q.z * bis[1])
+            };
+            if let (Some(a), Some(b)) = (along(self, g.press), along(self, at)) {
+                size = (g.r0 + (b - a) / per).max(0.0);
+            }
+        }
+        let size = if free { size } else { nice_round(size, g.px) }.max(0.0);
+        match g.what {
+            RoundWhat::Edges => {
+                if size > 1e-6 {
+                    self.set_round(size, g.chamfer, true);
+                    if let Some(id) = self.selected_round().map(|f| f.id) {
+                        if let Some(r) = self.round_drag.as_mut() {
+                            r.what = RoundWhat::Step(id);
+                        }
+                    }
+                }
+            }
+            RoundWhat::Step(_) => self.set_round(size, g.chamfer, false),
+            RoundWhat::Corners { ref corners, id, y, .. } => {
+                let v = if g.chamfer { -size } else { size };
+                self.live(|d| {
+                    for (fid, i) in corners {
+                        if let Some(pr) = d.feature_mut(*fid).and_then(|f| f.profile.as_mut()) {
+                            if pr.corner.len() < pr.points.len() {
+                                pr.corner.resize(pr.points.len(), 0.0);
+                            }
+                            pr.corner[*i] = v;
+                        }
+                    }
+                });
+                // the picks follow the cut corners (their vertices moved)
+                self.vert_sel = corners.iter().filter_map(|(fid, i)| self.corner_vertex(*fid, *i, if *fid == id { y } else { 0.0 })).collect();
+            }
+        }
+        let shown = match &g.what {
+            RoundWhat::Corners { id, corners, .. } => corners.first().and_then(|c| self.profile_corner_state_of(*id, c.1)).map(|(s, _, max)| s.min(max)).unwrap_or(size),
+            _ => self.selected_round().and_then(|f| f.round.as_ref().map(|r| r.size)).unwrap_or(size),
+        };
+        if let Some(r) = self.round_drag.as_mut() {
+            r.size = shown;
+        }
+    }
+
+    pub fn end_round_drag(&mut self) {
+        if let Some(g) = self.round_drag.take() {
+            self.end_live();
+            if g.what == RoundWhat::Edges {
+                // released before any size: the edge stays picked
+                return;
+            }
+            if !matches!(g.what, RoundWhat::Corners { .. }) {
+                self.edge_sel.clear();
+            }
+        }
+    }
+
+    /// The cut of sketch corner `i` of feature `id` (size, chamfer, the
+    /// largest it can be).
+    pub fn profile_corner_state_of(&self, id: FeatureId, i: usize) -> Option<(f64, bool, f64)> {
+        let f = self.doc.feature(id)?;
+        let (Prim::Profile { x, z, .. } | Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { return None };
+        let c = pr.corner.get(i).copied().unwrap_or(0.0);
+        let mut big = pr.clone();
+        big.corner.resize(big.points.len(), 0.0);
+        big.corner[i] = if c < 0.0 { -1e9 } else { 1e9 };
+        let max = nurbs_kernel::doc::corner_cut_open(&big.scaled(*x, *z), &big.smooth, &big.corner, i, big.open).map(|k| k.max).unwrap_or(0.0);
+        Some((c.abs(), c < 0.0, max))
+    }
+
+    /// Where sketch corner `i` of `id` shows as a vertex at the level `y`
+    /// of its frame: a path's cut by its middle, a solid's by the cut's
+    /// start (a vertex of the part), a sharp one at its point.
+    pub fn corner_vertex(&self, id: FeatureId, i: usize, y: f64) -> Option<DVec3> {
+        let f = self.doc.feature(id)?;
+        let (Prim::Profile { x, z, .. } | Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { return None };
+        let path = matches!(f.prim, Prim::Path { .. });
+        let q = match pr.cuts(*x, *z).get(i).copied().flatten() {
+            Some(c) => if path { c.m } else { c.a },
+            None => *pr.scaled(*x, *z).get(i)?,
+        };
+        Some(f.matrix().transform_point3(DVec3::new(q[0], y, q[1])))
+    }
+
+    /// The dot of sketch corner `i` (the middle of its cut): the corner's
+    /// point, the way the dot moves as the cut grows, how far per mm, and
+    /// the level of the vertex `v` in the sketch's frame.
+    fn corner_dot(&self, id: FeatureId, i: usize, v: DVec3, chamfer: bool) -> Option<([f64; 2], [f64; 2], f64, f64)> {
+        let f = self.doc.feature(id)?;
+        let (Prim::Profile { x, z, .. } | Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { return None };
+        let pts = pr.scaled(*x, *z);
+        let p = *pts.get(i)?;
+        let mut c = pr.corner.clone();
+        c.resize(pr.points.len(), 0.0);
+        // the cut's middle at a small size, well within the sides' room
+        let s = 0.05 * {
+            let n = pts.len();
+            let a = pts[(i + n - 1) % n];
+            let b = pts[(i + 1) % n];
+            (a[0] - p[0]).hypot(a[1] - p[1]).min((b[0] - p[0]).hypot(b[1] - p[1]))
+        }
+        .max(1e-4);
+        c[i] = if chamfer { -s } else { s };
+        let m = nurbs_kernel::doc::corner_cut_open(&pts, &pr.smooth, &c, i, pr.open)?.m;
+        let d = [m[0] - p[0], m[1] - p[1]];
+        let len = d[0].hypot(d[1]);
+        if len < 1e-12 {
+            return None;
+        }
+        let y = f.matrix().inverse().transform_point3(v).y;
+        Some((p, [d[0] / len, d[1] / len], len / s, y))
+    }
+
+    /// Ctrl + B (Rectify's bevel): a chamfer on what is picked: the picked
+    /// edges (1 mm), the selected fillet becomes a chamfer, the picked
+    /// sketch corners (their size, else 2 mm).
+    pub fn make_bevel(&mut self) {
+        self.round_chamfer = true;
+        if let Some(r) = self.selected_round().and_then(|f| f.round.clone()) {
+            self.set_round(r.size, true, true);
+            self.end_live();
+        } else if !self.edge_sel.is_empty() {
+            self.set_round(1.0, true, true);
+            self.end_live();
+            self.edge_sel.clear();
+        } else if let Some((s, _, _)) = self.profile_corner_state() {
+            self.set_profile_corners(if s > 1e-9 { s } else { 2.0 }, true, true);
+            self.end_live();
+        } else {
+            self.toast("Ctrl + B: pick edges (2) or sketch corners (1) first", true);
+        }
+    }
+}
