@@ -1292,7 +1292,7 @@ fn main() {
         h.touch_drag(&[(3, a), (4, b)], &[a + vec2(-90.0, -40.0), b + vec2(90.0, -40.0)], 12, true);
         h.settle();
         h.shot("ipad/ipad-4-pinch");
-        // Shift held on the key bar by a finger, Ctrl latched by a tap
+        // Shift held by a finger, Ctrl latched by a tap
         let key = |h: &Harness, k: nurbs_app::touch::BarKey| h.st.touch.keys.iter().find(|(_, x)| *x == k).map(|(r, _)| r.center()).unwrap();
         let shift = key(&h, nurbs_app::touch::BarKey::Shift);
         let ctrl = key(&h, nurbs_app::touch::BarKey::Ctrl);

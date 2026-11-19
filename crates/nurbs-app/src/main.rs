@@ -131,7 +131,7 @@ impl App {
     }
 
     /// iPad: a touch goes to `touch.rs` (fingers = camera, Pencil = mouse,
-    /// the key bar), not to egui-winit.
+    /// the Shift / Ctrl buttons), not to egui-winit.
     fn touch(&mut self, window: &Window, t: &winit::event::Touch) {
         let ppp = self.ctx.pixels_per_point() as f64;
         let p = egui::pos2((t.location.x / ppp) as f32, (t.location.y / ppp) as f32);
@@ -159,7 +159,7 @@ impl ApplicationHandler for App {
         let mut attrs = Window::default_attributes().with_title(nurbs_app::version_title()).with_inner_size(winit::dpi::LogicalSize::new(1600.0, 900.0)).with_window_icon(theme::window_icon());
         #[cfg(target_os = "ios")]
         {
-            // the bottom edge is the key bar's: a swipe there must not send
+            // the Shift / Ctrl buttons sit by the bottom edge: a swipe there must not send
             // the app home at once (iPadOS asks for a second swipe)
             use winit::platform::ios::{ScreenEdge, WindowAttributesExtIOS};
             attrs = attrs.with_preferred_screen_edges_deferring_system_gestures(ScreenEdge::BOTTOM).with_prefers_home_indicator_hidden(true).with_prefers_status_bar_hidden(true);
