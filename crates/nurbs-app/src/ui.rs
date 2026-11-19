@@ -1184,6 +1184,16 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
             }
         }
     });
+    // the fillet's tension (straight fillets between flat ends)
+    if let (Some(r), Some(id)) = (existing.as_ref().filter(|r| !r.chamfer), st.selected_round().map(|f| f.id)) {
+        ui.add_space(2.0);
+        if let Some((t, start)) = tension_rows(ui, r.tension, nurbs_kernel::doc::circle_rho(std::f64::consts::FRAC_PI_2)) {
+            st.set_round_tension(id, t, start || t == 0.0);
+            if t == 0.0 {
+                st.end_live();
+            }
+        }
+    }
     // fillets made one after the other meet in one rounded corner
     if let Some(r) = existing.as_ref().filter(|r| !r.chamfer) {
         ui.add_space(2.0);
@@ -1261,6 +1271,26 @@ fn push_card(ui: &mut Ui, st: &mut AppState) {
     }
 }
 
+/// A fillet's tension: the slider shows the conic's rho (the circle's while
+/// it is circular, 0); "Circular" puts it back. Returns the new value and
+/// whether a new undo step starts.
+fn tension_rows(ui: &mut Ui, cur: f64, circle: f64) -> Option<(f64, bool)> {
+    let mut out = None;
+    let mut v = if cur > 0.0 { cur } else { circle } as f32;
+    let (ch, start) = slider_row(ui, "Tension", &mut v, 0.05..=0.95, 0.01, "");
+    if ch {
+        out = Some(((v as f64).clamp(0.05, 0.95), start));
+    }
+    ui.horizontal(|ui| {
+        let txt = if cur > 0.0 { "Conic: higher is fuller, lower flatter · Shift + drag sets it" } else { "Circular · Shift + drag sets the tension" };
+        ui.label(egui::RichText::new(txt).font(regular(12.0)).color(TEXT2()));
+    });
+    if cur > 0.0 && secondary_btn(ui, "Circular", ui.available_width()).clicked() {
+        out = Some((0.0, true));
+    }
+    out
+}
+
 /// Vertices picked: the arrows move them; at a corner of a thin plate, a
 /// radius rounds it in its plane (a fillet on the short edge there).
 fn vertex_card(ui: &mut Ui, st: &mut AppState) {
@@ -1293,6 +1323,19 @@ fn vertex_card(ui: &mut Ui, st: &mut AppState) {
         }
         if size > max + 1e-6 {
             ui.label(egui::RichText::new(format!("Stops at {} mm: half of its shorter side", fmt_mm(max as f32))).font(regular(12.0)).color(TEXT2()));
+        }
+        if !chamfer && size > 0.0 {
+            let picked = st.picked_profile_corners();
+            if let Some(&(id, i)) = picked.first() {
+                let cur = st.corner_tension(id, i);
+                let circle = if cur > 0.0 { nurbs_kernel::doc::circle_rho(std::f64::consts::FRAC_PI_2) } else { st.corner_rho(id, i).unwrap_or(0.41) };
+                if let Some((t, start)) = tension_rows(ui, cur, circle) {
+                    st.set_corners_tension(&picked, t, start || t == 0.0);
+                    if t == 0.0 {
+                        st.end_live();
+                    }
+                }
+            }
         }
         if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
             st.end_live();

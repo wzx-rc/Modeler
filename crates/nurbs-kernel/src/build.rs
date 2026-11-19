@@ -9,7 +9,7 @@
 use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, Knife, Op, Prim, Push, Round, Tweak};
 use crate::model::{Edge, EdgeKind, Face, FaceTag, Model, SurfKind};
 use crate::proto::step;
-use forme_occt::{Shape, SurfKind as OccSurf};
+use forme_occt::{CutKind, Shape, SurfKind as OccSurf};
 use glam::{DMat4, DVec3};
 use std::collections::HashMap;
 use std::io::Write;
@@ -111,8 +111,9 @@ fn tool(f: &Feature) -> Result<Shape, String> {
             // (x, z) is OCC (x, -z), then turned so OCC Z is local Y
             let pts: Vec<[f64; 2]> = pr.scaled(x.max(0.01), z.max(0.01)).iter().map(|p| [p[0], -p[1]]).collect();
             let flip = |q: [f64; 2]| [q[0], -q[1]];
-            let cuts: Vec<_> = pr.cuts(x.max(0.01), z.max(0.01)).into_iter().map(|c| c.map(|c| (c.chamfer, flip(c.a), flip(c.m), flip(c.b)))).collect();
-            let s = if cuts.iter().any(|c| c.is_some()) { Shape::prism_cut(&pts, &pr.smooth, &cuts, h * 0.5)? } else { Shape::prism(&pts, &pr.smooth, h * 0.5)? };
+            let kind = |c: &crate::doc::Cut| if c.chamfer { CutKind::Chamfer } else if c.rho > 0.0 { CutKind::Conic } else { CutKind::Arc };
+            let cuts: Vec<_> = pr.cuts(x.max(0.01), z.max(0.01)).into_iter().map(|c| c.map(|c| (kind(&c), flip(c.a), flip(c.m), flip(c.b)))).collect();
+            let s = if cuts.iter().any(|c| c.is_some()) { Shape::prism_cuts(&pts, &pr.smooth, &cuts, h * 0.5)? } else { Shape::prism(&pts, &pr.smooth, h * 0.5)? };
             s.transformed(rows(DMat4::from_rotation_x(-std::f64::consts::FRAC_PI_2)))?
         }
         Prim::Path { .. } => return Err("a path has no solid".into()),
@@ -468,6 +469,19 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
                 match res {
                     Some(Ok(s)) => {
                         model.booleans += 1;
+                        // tension: its straight fillets made conic
+                        let s = if r.tension > 0.0 && !r.chamfer && !skipped("round") {
+                            mark(&step("round", f));
+                            match s.fillet_tension(FaceTag { feature: f.id, sub: 0 }.pack(), r.tension) {
+                                Ok((t, _)) => t,
+                                Err(e) => {
+                                    stage.errors.push(format!("{}: {e}", f.name));
+                                    s
+                                }
+                            }
+                        } else {
+                            s
+                        };
                         stage.shape = Some(Rc::new(s));
                     }
                     Some(Err(e)) => stage.errors.push(format!("{}: OpenCascade cannot make it at {} mm ({e})", f.name, r.size)),
@@ -720,7 +734,7 @@ mod tests {
         // an L of 20 × 20 mm, 10 mm high, its inside corner a curve point
         let mut d = Doc::default();
         let l = d.add(Op::Add, Prim::Profile { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        let pr = crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false, false, false, true, false, false], corner: vec![], open: false };
+        let pr = crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false, false, false, true, false, false], corner: vec![], tension: vec![], open: false };
         let pieces = pr.pieces(20.0, 20.0).len();
         d.feature_mut(l).unwrap().profile = Some(pr);
         let mut cache = Cache::default();
@@ -749,12 +763,12 @@ mod tests {
         let mut d = Doc::default();
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 40.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let c = d.add(Op::Carve, Prim::Profile { x: 20.0, y: 5.0, z: 20.0 }, DVec3::new(0.0, 20.0, 0.0), DQuat::from_rotation_x(std::f64::consts::PI));
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false, false, true], corner: vec![], open: false });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false, false, true], corner: vec![], tension: vec![], open: false });
         let m3 = build(&d, true, false, &[], &mut cache);
         assert!(m3.errors.is_empty(), "{:?}", m3.errors);
         assert!(m3.faces.iter().any(|f| f.tag.map(|t| t.feature) == Some(c)), "the pocket's faces carry the sketch's tags");
         // a bow tie crosses itself: an error, the block stays
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![], open: false });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![], tension: vec![], open: false });
         let m4 = build(&d, true, false, &[], &mut cache);
         assert_eq!(m4.errors.len(), 1, "{:?}", m4.errors);
     }
@@ -828,7 +842,7 @@ mod tests {
         // its sides allow)
         let mut d = Doc::default();
         let c = d.add(Op::Add, Prim::Profile { x: 20.0, y: 6.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![4.0, -3.0, 50.0, 0.0], open: false });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![4.0, -3.0, 50.0, 0.0], tension: vec![], open: false });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let cyl: Vec<f64> = m.faces.iter().filter(|f| f.kind == SurfKind::Cylinder).map(|f| f.radius).collect();
@@ -846,6 +860,83 @@ mod tests {
     }
 
     #[test]
+    fn edge_tension() {
+        // a block's top front edge, a 5 mm fillet, then tension 0.75 and 0.3
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let r = d.add_round(5.0, false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        // the corner of the two tangents (0, 20, 15), the tangent points at
+        // (0, 15, 15) and (0, 20, 10): the section's middle by rho
+        let mid = DVec3::new(0.0, 17.5, 12.5);
+        let corner = DVec3::new(0.0, 20.0, 15.0);
+        for t in [0.75, 0.3] {
+            d.feature_mut(r).unwrap().round.as_mut().unwrap().tension = t;
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "tension {t}: {:?}", m.errors);
+            assert_eq!(m.faces.len(), m0.faces.len(), "tension {t}");
+            assert!(m.faces.iter().all(|f| f.kind != SurfKind::Cylinder), "tension {t}: still round");
+            let want = mid + (corner - mid) * t;
+            // the mesh's point nearest the section's middle line (x = 0)
+            let near = m.positions.iter().map(|p| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)).filter(|p| p.y > 14.9 && p.z > 9.9).map(|p| DVec3::new(0.0, p.y, p.z).distance(want)).fold(f64::MAX, f64::min);
+            assert!(near < 0.3, "tension {t}: {near}");
+            // the fillet's face keeps the fillet's tag
+            assert!(m.faces.iter().any(|f| f.tag.map(|x| x.feature) == Some(r)));
+        }
+    }
+
+    #[test]
+    fn edge_tension_test_part() {
+        // the app's test part (block, hole, boss, slot): the top front edge
+        // right of the slot, a fillet with tension
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-10.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Box { x: 8.0, y: 8.0, z: 40.0 }, DVec3::new(0.0, 14.0, 0.0), DQuat::IDENTITY);
+        let r = d.add_round(4.6, false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(12.0, 20.0, 15.0) }]);
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        for t in [0.63, 0.2] {
+            d.feature_mut(r).unwrap().round.as_mut().unwrap().tension = t;
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "tension {t}: {:?}", m.errors);
+            assert_eq!(m.faces.len(), m0.faces.len(), "tension {t}");
+        }
+    }
+
+    #[test]
+    fn corner_tension() {
+        // a 20 mm square sketch, one corner a 6 mm fillet: circular, then
+        // with tension 0.7 (fuller) and 0.3 (flatter)
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Profile { x: 20.0, y: 6.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let mut pr = crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![0.0, 6.0, 0.0, 0.0], tension: vec![], open: false };
+        d.feature_mut(c).unwrap().profile = Some(pr.clone());
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        // the circle's own rho at a right angle: sin 45° / (1 + sin 45°)
+        let cut = pr.cuts(20.0, 20.0)[1].unwrap();
+        assert!((cut.rho_or_circle() - crate::doc::circle_rho(std::f64::consts::FRAC_PI_2)).abs() < 1e-9, "{}", cut.rho_or_circle());
+        for t in [0.7, 0.3] {
+            pr.tension = vec![0.0, t, 0.0, 0.0];
+            d.feature_mut(c).unwrap().profile = Some(pr.clone());
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "tension {t}: {:?}", m.errors);
+            assert_eq!(m.faces.len(), m0.faces.len(), "tension {t}");
+            let cut = pr.cuts(20.0, 20.0)[1].unwrap();
+            assert!((cut.rho - t).abs() < 1e-9);
+            // the corner's face is no longer a cylinder
+            assert!(m.faces.iter().filter(|f| f.kind == SurfKind::Cylinder).count() == 0, "tension {t}");
+            // the mesh reaches the conic's middle
+            let mid = DVec3::new(cut.m[0], 3.0, cut.m[1]);
+            let near = m.positions.iter().map(|p| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64).distance(mid)).fold(f64::MAX, f64::min);
+            assert!(near < 0.6, "tension {t}: {near}");
+        }
+    }
+
+    #[test]
     fn paths_have_no_solid() {
         // a block and an open path (an L of 3 points, its middle corner
         // rounded at 5 mm) over it: the path changes nothing in the part
@@ -853,7 +944,7 @@ mod tests {
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let m0 = build(&d, true, false, &[], &mut Cache::default());
         let p = d.add(Op::Add, Prim::Path { x: 20.0, z: 20.0 }, DVec3::new(0.0, 20.0, 0.0), DQuat::IDENTITY);
-        let pr = crate::doc::Profile { points: vec![[-0.5, 0.5], [-0.5, -0.5], [0.5, -0.5]], smooth: vec![false; 3], corner: vec![0.0, 5.0, 0.0], open: true };
+        let pr = crate::doc::Profile { points: vec![[-0.5, 0.5], [-0.5, -0.5], [0.5, -0.5]], smooth: vec![false; 3], corner: vec![0.0, 5.0, 0.0], tension: vec![], open: true };
         d.feature_mut(p).unwrap().profile = Some(pr.clone());
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);

@@ -50,6 +50,7 @@ extern "C" {
     fn focc_edge_count(s: *const FShape) -> c_int;
     fn focc_edge_faces(s: *const FShape, out: *mut c_int, cap: c_int) -> c_int;
     fn focc_edge_sample(s: *const FShape, index: c_int, n: c_int, xyz: *mut c_double) -> c_int;
+    fn focc_fillet_tension(s: *const FShape, tag: i64, rho: c_double, done: *mut c_int) -> *mut FShape;
     fn focc_fillet(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
     fn focc_fillet_multi(s: *const FShape, idx: *const c_int, r: *const c_double, tags: *const i64, n: c_int, fresh: i64) -> *mut FShape;
     fn focc_chamfer(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
@@ -107,6 +108,15 @@ fn last_error() -> String {
 }
 
 /// A B-rep shape (solid) owned on the C++ side.
+/// How a corner of a prism's outline is cut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CutKind {
+    Arc,
+    Chamfer,
+    /// A fillet with tension: a conic.
+    Conic,
+}
+
 pub struct Shape(*mut FShape);
 
 // the C++ side keeps no global state per shape: a shape can move to another thread
@@ -399,9 +409,15 @@ impl Shape {
     /// middle, end): a fillet is the arc through the three points, a
     /// chamfer the straight side from start to end.
     pub fn prism_cut(points: &[[f64; 2]], smooth: &[bool], cuts: &[Option<(bool, [f64; 2], [f64; 2], [f64; 2])>], h: f64) -> Result<Shape, String> {
+        let kinds: Vec<Option<(CutKind, [f64; 2], [f64; 2], [f64; 2])>> = cuts.iter().map(|c| c.map(|(ch, a, m, b)| (if ch { CutKind::Chamfer } else { CutKind::Arc }, a, m, b))).collect();
+        Shape::prism_cuts(points, smooth, &kinds, h)
+    }
+    /// The same, each cut an arc, a chamfer or a conic (a fillet with
+    /// tension: the point given is on it, the corner its middle pole).
+    pub fn prism_cuts(points: &[[f64; 2]], smooth: &[bool], cuts: &[Option<(CutKind, [f64; 2], [f64; 2], [f64; 2])>], h: f64) -> Result<Shape, String> {
         let xy: Vec<f64> = points.iter().flat_map(|p| [p[0], p[1]]).collect();
         let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
-        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((true, ..)) => 2, Some(_) => 1, None => 0 }).collect();
+        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some(_) => 1, None => 0 }).collect();
         let abm: Vec<f64> = (0..points.len()).flat_map(|i| match cuts.get(i).copied().flatten() { Some((_, a, m, b)) => [a[0], a[1], m[0], m[1], b[0], b[1]], None => [0.0; 6] }).collect();
         shape(unsafe { focc_prism_cut(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int, h) })
     }
@@ -510,6 +526,13 @@ impl Shape {
     /// operation. Err when OpenCascade cannot make it or the result is not
     /// a valid solid.
     /// The new (fillet) faces get the tag `fresh`; the others keep theirs.
+    /// The straight fillets tagged `tag` made conic (tension `rho`, the
+    /// same tangent lines); how many were.
+    pub fn fillet_tension(&self, tag: i64, rho: f64) -> Result<(Shape, usize), String> {
+        let mut done: c_int = 0;
+        let s = shape(unsafe { focc_fillet_tension(self.0, tag, rho, &mut done) })?;
+        Ok((s, done as usize))
+    }
     pub fn fillet(&self, edges: &[i32], r: f64, fresh: i64) -> Result<Shape, String> {
         shape(unsafe { focc_fillet(self.0, edges.as_ptr(), edges.len() as c_int, r, fresh) })
     }

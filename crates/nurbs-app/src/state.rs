@@ -226,6 +226,12 @@ pub struct RoundDrag {
     pub chamfer: bool,
     /// The size now (shown by the pointer).
     pub size: f64,
+    /// The kind it started with (Ctrl held makes it a chamfer meanwhile).
+    pub chamfer0: bool,
+    /// Shift held: the tension follows the pointer from here (where Shift
+    /// went down, the tension then); the tension now (0: circular).
+    pub tension_from: Option<([f32; 2], f64)>,
+    pub tension: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1328,7 +1334,7 @@ impl AppState {
             return;
         }
         let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
-        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: k.corner.clone(), open: false };
+        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: k.corner.clone(), tension: vec![], open: false };
         self.sketch = None;
         self.begin_live("New Sketch");
         let op = self.mode;
@@ -1368,7 +1374,7 @@ impl AppState {
         // a straight path along X or Z: its box is 0.01 mm across
         let (w, dp) = (w.max(0.01), dp.max(0.01));
         let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
-        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: k.corner.clone(), open: !closed };
+        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: k.corner.clone(), tension: vec![], open: !closed };
         self.sketch = None;
         let (origin, rot) = (k.plane.at(c), basis_rotation(k.plane.u, k.plane.n));
         let mut id = 0;

@@ -726,7 +726,7 @@ impl AppState {
                     }
                     self.selection.clear();
                     let px = self.mm_per_point(r.at);
-                    self.round_drag = Some(RoundDrag { what: RoundWhat::Edges, press: p, r0: 0.0, px, chamfer, size: 0.0 });
+                    self.round_drag = Some(RoundDrag { what: RoundWhat::Edges, press: p, r0: 0.0, px, chamfer, size: 0.0, chamfer0: chamfer, tension_from: None, tension: 0.0 });
                     return true;
                 }
                 let Some(h) = self.pick_at(p) else { return false };
@@ -737,7 +737,7 @@ impl AppState {
                 let (ro, dir) = self.ray(p);
                 let px = self.mm_per_point(ro + dir * h.t as f64);
                 self.begin_live(rd.label());
-                self.round_drag = Some(RoundDrag { what: RoundWhat::Step(id), press: p, r0: rd.size, px, chamfer: rd.chamfer, size: rd.size });
+                self.round_drag = Some(RoundDrag { what: RoundWhat::Step(id), press: p, r0: rd.size, px, chamfer: rd.chamfer, size: rd.size, chamfer0: rd.chamfer, tension_from: None, tension: rd.tension });
                 true
             }
             SelMode::Vertex => {
@@ -753,7 +753,7 @@ impl AppState {
                     let px = self.mm_per_point(v);
                     let corners = self.picked_profile_corners();
                     self.begin_live(if chamfer { "Chamfer corner" } else { "Fillet corner" });
-                    self.round_drag = Some(RoundDrag { what: RoundWhat::Corners { corners, id, bis, per, y }, press: p, r0: size, px, chamfer, size });
+                    self.round_drag = Some(RoundDrag { what: RoundWhat::Corners { corners, id, bis, per, y }, press: p, r0: size, px, chamfer, size, chamfer0: chamfer, tension_from: None, tension: self.corner_tension(id, i) });
                     return true;
                 }
                 if let Some(r) = self.corner_edge(v) {
@@ -762,7 +762,7 @@ impl AppState {
                     self.hover_vertex = None;
                     self.selection.clear();
                     let px = self.mm_per_point(v);
-                    self.round_drag = Some(RoundDrag { what: RoundWhat::Edges, press: p, r0: 0.0, px, chamfer, size: 0.0 });
+                    self.round_drag = Some(RoundDrag { what: RoundWhat::Edges, press: p, r0: 0.0, px, chamfer, size: 0.0, chamfer0: chamfer, tension_from: None, tension: 0.0 });
                     return true;
                 }
                 false
@@ -771,32 +771,54 @@ impl AppState {
         }
     }
 
-    /// The pointer moved during the drag. `free` (Ctrl): the size is not
-    /// rounded to a nice step.
-    pub fn update_round_drag(&mut self, at: [f32; 2], free: bool) {
-        let Some(g) = self.round_drag.clone() else { return };
+    /// The pointer moved during the drag (Romain 19 nov., "direct
+    /// fillet"): Ctrl held, a chamfer; Shift held, the tension follows the
+    /// pointer instead of the size (up: fuller, down: flatter; on a sketch
+    /// corner its dot along the line to the corner).
+    pub fn update_round_drag(&mut self, at: [f32; 2], ctrl: bool, shift: bool) {
+        let Some(mut g) = self.round_drag.clone() else { return };
+        let chamfer = g.chamfer0 || ctrl;
+        // Shift down or up: the tension starts from where it is, the size
+        // goes on from where it was
+        match (shift && !chamfer, g.tension_from.is_some()) {
+            (true, false) => {
+                let t0 = if g.tension > 0.0 { g.tension } else { self.circle_tension(&g) };
+                g.tension_from = Some((at, t0));
+            }
+            (false, true) => {
+                g.tension_from = None;
+                g.press = at;
+                g.r0 = g.size;
+            }
+            _ => {}
+        }
+        g.chamfer = chamfer;
+        if let Some((from, t0)) = g.tension_from {
+            let mut t = (t0 + (from[1] - at[1]) as f64 * 0.004).clamp(0.05, 0.95);
+            if let RoundWhat::Corners { id, .. } = &g.what {
+                if let Some(rho) = self.corner_rho_at(*id, &g, at) {
+                    t = rho.clamp(0.05, 0.95);
+                }
+            }
+            let t = (t * 100.0).round() / 100.0;
+            g.tension = t;
+            self.round_drag = Some(g.clone());
+            self.set_drag_tension(&g, t);
+            return;
+        }
+        self.round_drag = Some(g.clone());
         let dist = (at[0] - g.press[0]).hypot(at[1] - g.press[1]) as f64;
         let mut size = g.r0 + dist * g.px;
         // a corner's dot follows the pointer along its bisector (from where
         // the press was, so the size does not jump)
         if let RoundWhat::Corners { id, bis, per, y, .. } = &g.what {
-            let along = |st: &AppState, sp: [f32; 2]| -> Option<f64> {
-                let f = st.doc.feature(*id)?;
-                let inv = f.matrix().inverse();
-                let (ro, rd) = st.ray(sp);
-                let (lo, ld) = (inv.transform_point3(ro), inv.transform_vector3(rd));
-                if ld.y.abs() < 1e-6 {
-                    return None;
-                }
-                let t = (y - lo.y) / ld.y;
-                let q = lo + ld * t;
-                (t > 0.0).then(|| q.x * bis[0] + q.z * bis[1])
-            };
-            if let (Some(a), Some(b)) = (along(self, g.press), along(self, at)) {
+            if let (Some(a), Some(b)) = (self.along_corner(*id, *bis, *y, g.press), self.along_corner(*id, *bis, *y, at)) {
                 size = (g.r0 + (b - a) / per).max(0.0);
             }
         }
-        let size = if free { size } else { nice_round(size, g.px) }.max(0.0);
+        let size = nice_round(size, g.px).max(0.0);
+        // Ctrl is held for this drag only: the top bar's option stays
+        let option = self.round_chamfer;
         match g.what {
             RoundWhat::Edges => {
                 if size > 1e-6 {
@@ -825,6 +847,7 @@ impl AppState {
                 self.vert_sel = corners.iter().filter_map(|(fid, i)| self.corner_vertex(*fid, *i, if *fid == id { y } else { 0.0 })).collect();
             }
         }
+        self.round_chamfer = option;
         let shown = match &g.what {
             RoundWhat::Corners { id, corners, .. } => corners.first().and_then(|c| self.profile_corner_state_of(*id, c.1)).map(|(s, _, max)| s.min(max)).unwrap_or(size),
             _ => self.selected_round().and_then(|f| f.round.as_ref().map(|r| r.size)).unwrap_or(size),
@@ -832,6 +855,114 @@ impl AppState {
         if let Some(r) = self.round_drag.as_mut() {
             r.size = shown;
         }
+    }
+
+    /// How far along a sketch corner's bisector the pointer is, on the
+    /// corner's plane (the sketch's frame).
+    fn along_corner(&self, id: FeatureId, bis: [f64; 2], y: f64, sp: [f32; 2]) -> Option<f64> {
+        let q = self.on_sketch_plane(id, y, sp)?;
+        Some(q[0] * bis[0] + q[1] * bis[1])
+    }
+
+    /// The pointer on the plane of a sketch at level `y` of its frame (its
+    /// local x, z).
+    fn on_sketch_plane(&self, id: FeatureId, y: f64, sp: [f32; 2]) -> Option<[f64; 2]> {
+        let f = self.doc.feature(id)?;
+        let inv = f.matrix().inverse();
+        let (ro, rd) = self.ray(sp);
+        let (lo, ld) = (inv.transform_point3(ro), inv.transform_vector3(rd));
+        if ld.y.abs() < 1e-6 {
+            return None;
+        }
+        let t = (y - lo.y) / ld.y;
+        let q = lo + ld * t;
+        (t > 0.0).then_some([q.x, q.z])
+    }
+
+    /// Shift on a sketch corner: the conic's rho that puts its middle where
+    /// the pointer is, along the line from its ends' middle to the corner.
+    fn corner_rho_at(&self, id: FeatureId, g: &RoundDrag, at: [f32; 2]) -> Option<f64> {
+        let RoundWhat::Corners { corners, y, .. } = &g.what else { return None };
+        let (_, i) = *corners.iter().find(|c| c.0 == id)?;
+        let f = self.doc.feature(id)?;
+        let (Prim::Profile { x, z, .. } | Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { return None };
+        let c = pr.cuts(*x, *z).get(i).copied().flatten()?;
+        let q = self.on_sketch_plane(id, *y, at)?;
+        let mid = [(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5];
+        let d = [c.corner[0] - mid[0], c.corner[1] - mid[1]];
+        let l2 = d[0] * d[0] + d[1] * d[1];
+        (l2 > 1e-12).then(|| ((q[0] - mid[0]) * d[0] + (q[1] - mid[1]) * d[1]) / l2)
+    }
+
+    /// The circular arc's tension where the drag is (the start of a Shift
+    /// drag on a round fillet): a corner's own, else a right angle's.
+    fn circle_tension(&self, g: &RoundDrag) -> f64 {
+        if let RoundWhat::Corners { id, corners, .. } = &g.what {
+            if let Some(f) = self.doc.feature(*id) {
+                if let (Prim::Profile { x, z, .. } | Prim::Path { x, z }, Some(pr), Some((_, i))) = (&f.prim, &f.profile, corners.iter().find(|c| c.0 == *id)) {
+                    if let Some(c) = pr.cuts(*x, *z).get(*i).copied().flatten() {
+                        return c.rho_or_circle();
+                    }
+                }
+            }
+        }
+        nurbs_kernel::doc::circle_rho(std::f64::consts::FRAC_PI_2)
+    }
+
+    /// A sketch corner's conic rho as built (its own tension, else the
+    /// circle's for its angle).
+    pub fn corner_rho(&self, id: FeatureId, i: usize) -> Option<f64> {
+        let f = self.doc.feature(id)?;
+        let (Prim::Profile { x, z, .. } | Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { return None };
+        pr.cuts(*x, *z).get(i).copied().flatten().map(|c| c.rho_or_circle())
+    }
+
+    /// A sketch corner's tension (0: circular).
+    pub fn corner_tension(&self, id: FeatureId, i: usize) -> f64 {
+        self.doc.feature(id).and_then(|f| f.profile.as_ref()).and_then(|p| p.tension.get(i).copied()).unwrap_or(0.0)
+    }
+
+    /// The drag's tension written to what it sizes.
+    fn set_drag_tension(&mut self, g: &RoundDrag, t: f64) {
+        match &g.what {
+            RoundWhat::Step(id) => self.set_round_tension(*id, t, false),
+            RoundWhat::Corners { corners, .. } => {
+                let corners = corners.clone();
+                self.set_corners_tension(&corners, t, false);
+            }
+            RoundWhat::Edges => {}
+        }
+    }
+
+    /// A fillet step's tension (0: circular). `start`: one undo step.
+    pub fn set_round_tension(&mut self, id: FeatureId, t: f64, start: bool) {
+        if start || !self.is_live() {
+            self.end_live();
+            self.begin_live("Tension");
+        }
+        self.live(|d| {
+            if let Some(r) = d.feature_mut(id).and_then(|f| f.round.as_mut()) {
+                r.tension = t;
+            }
+        });
+    }
+
+    /// Sketch corners' tension (0: circular).
+    pub fn set_corners_tension(&mut self, corners: &[(FeatureId, usize)], t: f64, start: bool) {
+        if start || !self.is_live() {
+            self.end_live();
+            self.begin_live("Tension");
+        }
+        self.live(|d| {
+            for (fid, i) in corners {
+                if let Some(pr) = d.feature_mut(*fid).and_then(|f| f.profile.as_mut()) {
+                    if pr.tension.len() < pr.points.len() {
+                        pr.tension.resize(pr.points.len(), 0.0);
+                    }
+                    pr.tension[*i] = t;
+                }
+            }
+        });
     }
 
     pub fn end_round_drag(&mut self) {

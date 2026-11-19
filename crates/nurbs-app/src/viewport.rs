@@ -33,7 +33,8 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         if let (Some(g), Some(h)) = (&st.round_drag, ctx.input(|i| i.pointer.latest_pos())) {
             if g.size > 1e-9 {
                 let label = if g.chamfer { "Chamfer" } else { "Fillet" };
-                chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("{label} {} mm", fmt_mm(g.size as f32)), HOT, HOT);
+                let tension = if !g.chamfer && g.tension > 0.0 { format!(" · tension {:.2}", g.tension) } else { String::new() };
+                chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("{label} {} mm{tension}", fmt_mm(g.size as f32)), HOT, HOT);
             }
         }
         draw_creation(p, st);
@@ -265,7 +266,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 if st.drag.is_some() {
                     st.update_drag(p2(p));
                 } else if st.round_drag.is_some() {
-                    st.update_round_drag(p2(p), ctrl);
+                    st.update_round_drag(p2(p), ctrl, shift);
                     st.interacting = true;
                 }
             }
@@ -912,7 +913,7 @@ pub fn hint(st: &AppState) -> String {
             }
         }
         (None, Tool::Point) => "Point on edge · click on an edge: a point cut into it (its middle catches) · Esc: Select".into(),
-        (None, Tool::Select) if st.round_drag.is_some() => "Away from the press: bigger · Ctrl: free size · the kernel stops at the largest that works".into(),
+        (None, Tool::Select) if st.round_drag.is_some() => "Away from the press: bigger · Ctrl held: chamfer · Shift held: tension (up fuller, down flatter)".into(),
         (None, Tool::Select) if st.sel_mode == SelMode::Vertex => {
             if st.vert_sel.is_empty() {
                 "Vertices: click one · drag a sketch corner: its fillet · Shift + click adds · the arrows move it".into()

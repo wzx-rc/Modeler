@@ -830,7 +830,7 @@ fn main() {
         // fillets and a chamfer (Romain 18 nov.: "Bevel fillet sur un path")
         let mut d = Doc::default();
         let id = d.add(Op::Add, Prim::Profile { x: 40.0, y: 6.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(id).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.0], [0.0, 0.0], [0.0, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], open: false });
+        d.feature_mut(id).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.0], [0.0, 0.0], [0.0, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false });
         h.reset(d, "Sketch");
         h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(25.0, 10.0, 20.0));
         h.steps(2);
@@ -1052,6 +1052,107 @@ fn main() {
             }
         }
         h.shot("zero-rdrag-4-corner");
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
+    if want("tension") {
+        // the direct fillet's modifiers: Shift held during the drag sets
+        // the tension (up fuller), Ctrl held makes a chamfer
+        h.reset(test_part(), "Test part");
+        h.key(egui::Key::Num2);
+        let a = h.screen_of(Vec3::new(12.0, 20.0, 15.0));
+        h.drag(a, a + egui::vec2(0.0, -60.0), 10, true);
+        h.settle();
+        let fillet = |h: &Harness| h.st.doc.features.iter().filter(|f| f.round.is_some()).map(|f| (f.name.clone(), f.round.as_ref().unwrap().size, f.round.as_ref().unwrap().tension, f.round.as_ref().unwrap().chamfer)).collect::<Vec<_>>();
+        eprintln!("  fillet {:?}", fillet(&h));
+        h.shot("zero-tension-1-circular");
+        // on the fillet's face: Shift held, up = fuller
+        let face = h.screen_of(Vec3::new(14.0, 19.3, 14.3));
+        h.press(face, true);
+        h.move_to(face + egui::vec2(0.0, -4.0));
+        h.hold(Modifiers::SHIFT);
+        for i in 1..=10 {
+            h.move_to(face + egui::vec2(0.0, -4.0 - 6.0 * i as f32));
+        }
+        h.settle();
+        h.shot("zero-tension-2-shift-drag");
+        h.press(face + egui::vec2(0.0, -64.0), false);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  after Shift drag {:?} errors {:?}", fillet(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-tension-3-fuller");
+        // down = flatter
+        let face = h.screen_of(Vec3::new(14.0, 19.3, 14.3));
+        h.press(face, true);
+        h.move_to(face + egui::vec2(0.0, 4.0));
+        h.hold(Modifiers::SHIFT);
+        for i in 1..=10 {
+            h.move_to(face + egui::vec2(0.0, 4.0 + 12.0 * i as f32));
+        }
+        h.press(face + egui::vec2(0.0, 124.0), false);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  flatter {:?}", fillet(&h));
+        h.shot("zero-tension-4-flatter");
+        // Ctrl held on another edge: a chamfer
+        h.key(egui::Key::Escape);
+        let b = h.screen_of(Vec3::new(20.0, 8.0, 15.0));
+        h.press(b, true);
+        h.move_to(b + egui::vec2(4.0, 0.0));
+        h.hold(Modifiers::CTRL);
+        for i in 1..=10 {
+            h.move_to(b + egui::vec2(4.0 + 4.0 * i as f32, 0.0));
+        }
+        h.press(b + egui::vec2(44.0, 0.0), false);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  Ctrl drag {:?}", fillet(&h));
+        h.shot("zero-tension-5-ctrl-chamfer");
+        // a sketch corner: rounded, then Shift drag on it
+        h.key(egui::Key::Num4);
+        h.st.camera.frame(Vec3::new(-60.0, 0.0, 10.0), Vec3::new(20.0, 0.0, 50.0));
+        h.steps(2);
+        h.key(egui::Key::L);
+        let g = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 0.0, z));
+        for (x, z) in [(-50.0, 20.0), (-20.0, 20.0), (-20.0, 45.0), (-50.0, 45.0), (-50.0, 20.0)] {
+            h.click(g(&h, x, z));
+        }
+        h.click(g(&h, -30.0, 30.0) + egui::vec2(0.0, -40.0));
+        h.settle();
+        let sk = h.st.doc.features.iter().find(|f| f.profile.is_some() && !f.is_path()).map(|f| f.id);
+        h.key(egui::Key::Num1);
+        h.steps(2);
+        if let Some(id) = sk {
+            let top = h.st.doc.feature(id).map(|f| f.prim.height()).unwrap_or(0.0);
+            if let Some(v) = h.st.corner_vertex(id, 1, top) {
+                let s = h.screen_of(v.as_vec3());
+                h.drag(s, s + egui::vec2(-20.0, 20.0), 10, true);
+                h.settle();
+                h.shot("zero-tension-6-corner-circular");
+                if let Some(v) = h.st.vert_sel.first().copied() {
+                    // Shift: the dot towards the sharp corner (fuller)
+                    let s = h.screen_of(v.as_vec3());
+                    let f = h.st.doc.feature(id).unwrap().clone();
+                    let (Prim::Profile { x, z, .. }, Some(pr)) = (&f.prim, &f.profile) else { panic!() };
+                    let c = pr.cuts(*x, *z)[1].unwrap();
+                    let cw = f.matrix().transform_point3(DVec3::new(c.corner[0], top, c.corner[1]));
+                    let k = h.screen_of(cw.as_vec3());
+                    h.press(s, true);
+                    h.move_to(s + (k - s) * 0.05);
+                    h.hold(Modifiers::SHIFT);
+                    for i in 1..=10 {
+                        h.move_to(s + (k - s) * (0.05 + 0.055 * i as f32));
+                    }
+                    h.settle();
+                    h.shot("zero-tension-7-corner-shift");
+                    h.press(s + (k - s) * 0.6, false);
+                    h.hold(Modifiers::NONE);
+                    h.settle();
+                }
+                eprintln!("  corner {:?} tension {:?}", h.st.doc.feature(id).and_then(|f| f.profile.as_ref()).map(|p| p.corner.clone()), h.st.doc.feature(id).and_then(|f| f.profile.as_ref()).map(|p| p.tension.clone()));
+                h.shot("zero-tension-8-corner-fuller");
+            }
+        }
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 

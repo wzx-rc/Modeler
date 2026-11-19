@@ -136,6 +136,12 @@ pub struct Profile {
     /// side), in mm; 0 or missing: a sharp corner. Curve points ignore it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub corner: Vec<f64>,
+    /// Each fillet corner's tension (Romain 19 nov.: "SHIFT maintenu :
+    /// tension set"): the conic's rho in (0, 1), the cut's middle at
+    /// M + rho (corner − M), M the middle of its two ends; fuller towards 1,
+    /// flatter towards 0; 0 or missing: a circular arc.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tension: Vec<f64>,
     /// An open path (`Prim::Path` only): no side from the last point back
     /// to the first, and its two ends are plain points.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -155,6 +161,29 @@ pub struct Cut {
     pub size: f64,
     /// The largest size the sides allow.
     pub max: f64,
+    /// The outline's corner (the conic's middle control point).
+    pub corner: [f64; 2],
+    /// A conic (rho in (0, 1)) instead of the circular arc; 0: the arc.
+    pub rho: f64,
+}
+
+/// The rho of the circular arc at a corner whose sides meet at `theta`
+/// (radians): the arc as a conic.
+pub fn circle_rho(theta: f64) -> f64 {
+    let w = (theta * 0.5).sin();
+    w / (1.0 + w)
+}
+
+impl Cut {
+    /// The conic's rho, the circle's when it is a plain arc.
+    pub fn rho_or_circle(&self) -> f64 {
+        if self.rho > 0.0 {
+            return self.rho;
+        }
+        let mid = [(self.a[0] + self.b[0]) * 0.5, (self.a[1] + self.b[1]) * 0.5];
+        let full = (self.corner[0] - mid[0]).hypot(self.corner[1] - mid[1]);
+        if full < 1e-12 { 0.5 } else { (self.m[0] - mid[0]).hypot(self.m[1] - mid[1]) / full }
+    }
 }
 
 /// The cut of corner `i` of an outline (points already scaled, mm). It
@@ -183,7 +212,7 @@ pub fn corner_cut(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], i: usize) -> 
     if c < 0.0 {
         let t = (-c).min(tmax);
         let (a, b) = at(t);
-        return Some(Cut { chamfer: true, a, m: [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5], b, size: t, max: tmax });
+        return Some(Cut { chamfer: true, a, m: [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5], b, size: t, max: tmax, corner: q, rho: 0.0 });
     }
     let half = (theta * 0.5).tan();
     let t = (c / half).min(tmax);
@@ -194,7 +223,21 @@ pub fn corner_cut(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], i: usize) -> 
     let d = r / (theta * 0.5).sin();
     let centre = [q[0] + bis[0] * d, q[1] + bis[1] * d];
     let m = [centre[0] - bis[0] * r, centre[1] - bis[1] * r];
-    Some(Cut { chamfer: false, a, m, b, size: r, max: tmax * half })
+    Some(Cut { chamfer: false, a, m, b, size: r, max: tmax * half, corner: q, rho: 0.0 })
+}
+
+/// The cut with its tension (`Profile::tension`): a fillet becomes the
+/// conic of that rho between the same two ends.
+pub fn corner_cut_t(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], tension: &[f64], i: usize, open: bool) -> Option<Cut> {
+    let mut c = corner_cut_open(p, smooth, corner, i, open)?;
+    let rho = tension.get(i).copied().unwrap_or(0.0);
+    if !c.chamfer && rho > 1e-6 {
+        let rho = rho.clamp(0.02, 0.98);
+        let mid = [(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5];
+        c.m = [mid[0] + rho * (c.corner[0] - mid[0]), mid[1] + rho * (c.corner[1] - mid[1])];
+        c.rho = rho;
+    }
+    Some(c)
 }
 
 /// The same on an outline that may be open: its two ends have no cut.
@@ -209,6 +252,20 @@ pub fn corner_cut_open(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], i: usize
 fn cut_points(c: &Cut) -> Vec<[f64; 2]> {
     if c.chamfer {
         return vec![c.a, c.b];
+    }
+    if c.rho > 0.0 {
+        // the rational quadratic through a, b, with the corner as its
+        // middle control point, weight rho / (1 − rho)
+        let w = c.rho / (1.0 - c.rho);
+        let k = 16;
+        return (0..=k)
+            .map(|j| {
+                let t = j as f64 / k as f64;
+                let (u, v, x) = ((1.0 - t) * (1.0 - t), 2.0 * t * (1.0 - t) * w, t * t);
+                let s = u + v + x;
+                [(u * c.a[0] + v * c.corner[0] + x * c.b[0]) / s, (u * c.a[1] + v * c.corner[1] + x * c.b[1]) / s]
+            })
+            .collect();
     }
     // the circle through the three points
     let (a, m, b) = (c.a, c.m, c.b);
@@ -246,12 +303,12 @@ impl Profile {
     /// Its pieces, in a box of `w` × `d`, curves sampled (as the kernel
     /// builds them: a curve between the middles of the two sides).
     pub fn pieces(&self, w: f64, d: f64) -> Vec<Piece> {
-        pieces_open(&self.scaled(w, d), &self.smooth, &self.corner, self.open)
+        pieces_t(&self.scaled(w, d), &self.smooth, &self.corner, &self.tension, self.open)
     }
     /// Each point's cut, in a box of `w` × `d`.
     pub fn cuts(&self, w: f64, d: f64) -> Vec<Option<Cut>> {
         let p = self.scaled(w, d);
-        (0..p.len()).map(|i| corner_cut_open(&p, &self.smooth, &self.corner, i, self.open)).collect()
+        (0..p.len()).map(|i| corner_cut_t(&p, &self.smooth, &self.corner, &self.tension, i, self.open)).collect()
     }
     /// The outline as one polyline (closed: last point = first).
     pub fn polyline(&self, w: f64, d: f64) -> Vec<[f64; 2]> {
@@ -272,7 +329,7 @@ impl Profile {
     }
     /// Mirrored across local X (the feature turned over to grow downwards).
     pub fn flipped(&self) -> Profile {
-        Profile { points: self.points.iter().map(|p| [p[0], -p[1]]).collect(), smooth: self.smooth.clone(), corner: self.corner.clone(), open: self.open }
+        Profile { points: self.points.iter().map(|p| [p[0], -p[1]]).collect(), smooth: self.smooth.clone(), corner: self.corner.clone(), tension: self.tension.clone(), open: self.open }
     }
 }
 
@@ -290,6 +347,11 @@ pub fn pieces_cut(p: &[[f64; 2]], smooth: &[bool], corner: &[f64]) -> Vec<Piece>
 /// The same on an outline that may be open (a path): no closing side, and
 /// its two ends are plain points.
 pub fn pieces_open(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], open: bool) -> Vec<Piece> {
+    pieces_t(p, smooth, corner, &[], open)
+}
+
+/// The same with each fillet corner's tension.
+pub fn pieces_t(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], tension: &[f64], open: bool) -> Vec<Piece> {
     let n = p.len();
     let end = |i: usize| open && (i == 0 || i + 1 == n);
     let mut out = vec![];
@@ -299,7 +361,7 @@ pub fn pieces_open(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], open: bool) 
     let mid = |a: [f64; 2], b: [f64; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
     let far = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() > 1e-9;
     let round = |i: usize| !end(i) && smooth.get(i).copied().unwrap_or(false) && far(p[(i + n - 1) % n], p[i]) && far(p[i], p[(i + 1) % n]);
-    let cuts: Vec<Option<Cut>> = (0..n).map(|i| corner_cut_open(p, smooth, corner, i, open)).collect();
+    let cuts: Vec<Option<Cut>> = (0..n).map(|i| corner_cut_t(p, smooth, corner, tension, i, open)).collect();
     // where each point's piece starts and ends (the point itself at a corner)
     let ends = |i: usize| {
         if round(i) {
@@ -366,6 +428,15 @@ pub struct Round {
     /// ending on its own (fillets only).
     #[serde(default)]
     pub blend: bool,
+    /// Tension (Romain 19 nov.): a fillet's section a conic of this rho in
+    /// (0, 1) instead of a circular arc (fuller towards 1); 0: circular.
+    /// Straight fillets between flat ends only (`build::round`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tension: f64,
+}
+
+fn is_zero(x: &f64) -> bool {
+    *x == 0.0
 }
 
 impl Round {
@@ -655,7 +726,7 @@ impl Doc {
     pub fn add_round(&mut self, size: f64, chamfer: bool, edges: Vec<EdgeRef>) -> FeatureId {
         let id = self.next_id;
         self.next_id += 1;
-        let round = Round { size, chamfer, edges, blend: !chamfer };
+        let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0 };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
         self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None });

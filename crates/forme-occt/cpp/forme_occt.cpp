@@ -44,6 +44,13 @@
 #include <BRepBuilderAPI_Copy.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <BRepTools_ReShape.hxx>
+#include <ShapeFix_Shape.hxx>
+#include <ShapeBuild_ReShape.hxx>
+#include <Geom_SurfaceOfLinearExtrusion.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom_Line.hxx>
+#include <Geom2d_Line.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <TColgp_Array1OfPnt2d.hxx>
 #include <TColStd_Array1OfReal.hxx>
@@ -228,6 +235,22 @@ static bool valid(const TopoDS_Shape& s) {
     return a.IsValid() == Standard_True;
 }
 
+// FORME_OCCT_DEBUG=1: what BRepCheck finds wrong in a shape.
+static void dump_check(const TopoDS_Shape& solid) {
+    if (!getenv("FORME_OCCT_DEBUG")) return;
+    BRepCheck_Analyzer an(solid);
+    for (TopAbs_ShapeEnum t : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_WIRE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID})
+        for (TopExp_Explorer x(solid, t); x.More(); x.Next()) {
+            opencascade::handle<BRepCheck_Result> res = an.Result(x.Current());
+            if (res.IsNull()) continue;
+            for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More(); it.Next())
+                if (it.Value() != BRepCheck_NoError) fprintf(stderr, "check: shape type %d status %d\n", (int)t, (int)it.Value());
+            for (res->InitContextIterator(); res->MoreShapeInContext(); res->NextShapeInContext())
+                for (BRepCheck_ListOfStatus::Iterator it(res->StatusOnShape()); it.More(); it.Next())
+                    if (it.Value() != BRepCheck_NoError) fprintf(stderr, "check: shape type %d in context status %d\n", (int)t, (int)it.Value());
+        }
+}
+
 extern "C" {
 
 const char* focc_last_error() { return g_err.c_str(); }
@@ -264,7 +287,9 @@ FShape* focc_prism_cut(const double* xy, const int* smooth, const int* cut, cons
 FShape* focc_prism(const double* xy, const int* smooth, int n, double h) { return focc_prism_cut(xy, smooth, nullptr, nullptr, n, h); }
 
 // The same, corners cut: cut[i] 1 a fillet (an arc through abm[6 i..]: its
-// start, middle, end), 2 a chamfer (a straight side from start to end).
+// start, middle, end), 2 a chamfer (a straight side from start to end), 3 a
+// conic (a fillet with tension: start, a point of it, end; the corner is its
+// middle pole).
 FShape* focc_prism_cut(const double* xy, const int* smooth, const int* cut, const double* abm, int n, double h) {
     return guard(
         [&]() -> FShape* {
@@ -306,6 +331,27 @@ FShape* focc_prism_cut(const double* xy, const int* smooth, const int* cut, cons
                 int ck = cut ? cut[i] : 0;
                 if (!vin[i].IsSame(vout[i]) && ck == 2) {
                     mw.Add(BRepBuilderAPI_MakeEdge(vin[i], vout[i]).Edge());
+                } else if (!vin[i].IsSame(vout[i]) && ck == 3) {
+                    // a conic (a fillet with tension): the rational quadratic
+                    // through start and end, the corner its middle pole, the
+                    // weight from where its middle lies (rho / (1 - rho))
+                    gp_Pnt a = BRep_Tool::Pnt(vin[i]), b = BRep_Tool::Pnt(vout[i]);
+                    gp_Pnt m(abm[6 * i + 2], abm[6 * i + 3], -h);
+                    gp_Pnt mid((a.X() + b.X()) / 2, (a.Y() + b.Y()) / 2, -h);
+                    double full = mid.Distance(p[i]);
+                    double rho = full > 1e-12 ? mid.Distance(m) / full : 0.5;
+                    if (rho < 0.02) rho = 0.02;
+                    if (rho > 0.98) rho = 0.98;
+                    TColgp_Array1OfPnt poles(1, 3);
+                    poles(1) = a;
+                    poles(2) = p[i];
+                    poles(3) = b;
+                    TColStd_Array1OfReal weights(1, 3);
+                    weights(1) = 1.0;
+                    weights(2) = rho / (1.0 - rho);
+                    weights(3) = 1.0;
+                    opencascade::handle<Geom_BezierCurve> c = new Geom_BezierCurve(poles, weights);
+                    mw.Add(BRepBuilderAPI_MakeEdge(c, vin[i], vout[i]).Edge());
                 } else if (!vin[i].IsSame(vout[i]) && ck == 1) {
                     GC_MakeArcOfCircle arc(BRep_Tool::Pnt(vin[i]), gp_Pnt(abm[6 * i + 2], abm[6 * i + 3], -h), BRep_Tool::Pnt(vout[i]));
                     if (!arc.IsDone()) {
@@ -533,6 +579,191 @@ FShape* focc_fillet(const FShape* s, const int* idx, int n, double r, long long 
             }
             FShape* res = wrap(op.Shape());
             if (res) carry_tags(op, s, res, fresh);
+            return res;
+        },
+        (FShape*)nullptr);
+}
+
+// A fillet with tension (Romain 19 nov.: "SHIFT maintenu : tension set"):
+// each face tagged `tag` that is a straight fillet (a cylinder bounded by two
+// lines along its axis and two arcs on flat end faces square to it) becomes
+// a conic extruded along the axis: the same two tangent lines, the arcs
+// replaced by rational quadratics (the corner of the two tangents as middle
+// pole, weight rho / (1 - rho)), the end faces keeping their planes.
+// `done` gets how many faces were made conic; the others stay round.
+FShape* focc_fillet_tension(const FShape* s, long long tag, double rho, int* done) {
+    return guard(
+        [&]() -> FShape* {
+            *done = 0;
+            if (rho < 0.02) rho = 0.02;
+            if (rho > 0.98) rho = 0.98;
+            double w = rho / (1.0 - rho);
+            TopTools_IndexedMapOfShape fm;
+            face_map(s->s, fm);
+            TopTools_IndexedDataMapOfShapeListOfShape e2f;
+            TopExp::MapShapesAndAncestors(s->s, TopAbs_EDGE, TopAbs_FACE, e2f);
+            opencascade::handle<ShapeBuild_ReShape> rs = new ShapeBuild_ReShape();
+            std::vector<std::pair<TopoDS_Shape, long long>> fresh_faces;
+            for (int i = 1; i <= fm.Extent(); i++) {
+                long long t = i - 1 < (int)s->tags.size() ? s->tags[i - 1] : -1;
+                if (t != tag) continue;
+                TopoDS_Face f = TopoDS::Face(fm(i));
+                BRepAdaptor_Surface sa(f, Standard_False);
+                if (sa.GetType() != GeomAbs_Cylinder) continue;
+                gp_Dir ax = sa.Cylinder().Axis().Direction();
+                std::vector<TopoDS_Edge> lines, arcs;
+                bool ok = true;
+                for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                    TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                    BRepAdaptor_Curve ca(e);
+                    if (ca.GetType() == GeomAbs_Line && ca.Line().Direction().IsParallel(ax, 1e-6)) lines.push_back(e);
+                    else if (ca.GetType() == GeomAbs_Circle && ca.Circle().Axis().Direction().IsParallel(ax, 1e-6)) arcs.push_back(e);
+                    else ok = false;
+                }
+                if (!ok || lines.size() != 2 || arcs.size() != 2) continue;
+                // the end faces: flat, square to the axis
+                for (const TopoDS_Edge& e : arcs) {
+                    const TopTools_ListOfShape& fs = e2f.FindFromKey(e);
+                    for (TopTools_ListOfShape::Iterator it(fs); it.More(); it.Next()) {
+                        if (it.Value().IsSame(f)) continue;
+                        BRepAdaptor_Surface ea(TopoDS::Face(it.Value()), Standard_False);
+                        if (ea.GetType() != GeomAbs_Plane || !ea.Plane().Axis().Direction().IsParallel(ax, 1e-6)) ok = false;
+                    }
+                }
+                if (!ok) continue;
+                // each arc as a conic between the same vertices
+                std::vector<TopoDS_Edge> conics;
+                opencascade::handle<Geom_BezierCurve> first;
+                for (const TopoDS_Edge& e : arcs) {
+                    TopoDS_Vertex v1, v2;
+                    TopExp::Vertices(e, v1, v2, Standard_False);
+                    gp_Pnt a = BRep_Tool::Pnt(v1), b = BRep_Tool::Pnt(v2);
+                    gp_Circ c = BRepAdaptor_Curve(e).Circle();
+                    gp_Pnt o = c.Location();
+                    gp_Vec ua(o, a), ub(o, b);
+                    ua.Normalize();
+                    ub.Normalize();
+                    double k = 1.0 + ua.Dot(ub);
+                    if (k < 1e-6) {
+                        ok = false;
+                        break;
+                    }
+                    gp_Pnt pc = o.Translated((ua + ub) * (c.Radius() / k));
+                    TColgp_Array1OfPnt poles(1, 3);
+                    poles(1) = a;
+                    poles(2) = pc;
+                    poles(3) = b;
+                    TColStd_Array1OfReal wt(1, 3);
+                    wt(1) = 1.0;
+                    wt(2) = w;
+                    wt(3) = 1.0;
+                    opencascade::handle<Geom_BezierCurve> bc = new Geom_BezierCurve(poles, wt);
+                    if (first.IsNull()) first = bc;
+                    TopoDS_Edge ne = BRepBuilderAPI_MakeEdge(bc, v1, v2).Edge();
+                    ne.Orientation(e.Orientation());
+                    conics.push_back(ne);
+                }
+                if (!ok) continue;
+                // the face: the conic swept along the axis, bounded by the
+                // two lines and the two conics, in the face's own order
+                opencascade::handle<Geom_SurfaceOfLinearExtrusion> surf = new Geom_SurfaceOfLinearExtrusion(first, ax);
+                // the face built by hand: the surface, the edges' curves on
+                // it, then the wire (the round face's, arcs swapped)
+                BRep_Builder bb;
+                TopoDS_Face nf;
+                bb.MakeFace(nf, surf, 1e-7);
+                {
+                    gp_Pnt c0 = first->StartPoint(), c1 = first->EndPoint();
+                    for (int k = 0; k < 2; k++) {
+                        double cf0, cf1;
+                        opencascade::handle<Geom_BezierCurve> bk = opencascade::handle<Geom_BezierCurve>::DownCast(BRep_Tool::Curve(conics[k], cf0, cf1));
+                        if (bk.IsNull()) { ok = false; continue; }
+                        gp_Pnt s0 = bk->StartPoint();
+                        double l = gp_Vec(c0, s0).Dot(gp_Vec(ax));
+                        bool same = c0.Translated(gp_Vec(ax) * l).Distance(s0) < 1e-6;
+                        if (!same) l = gp_Vec(c1, s0).Dot(gp_Vec(ax));
+                        opencascade::handle<Geom2d_Line> pc = same ? new Geom2d_Line(gp_Pnt2d(0, l), gp_Dir2d(1, 0)) : new Geom2d_Line(gp_Pnt2d(1, l), gp_Dir2d(-1, 0));
+                        bb.UpdateEdge(conics[k], pc, nf, 1e-6);
+                    }
+                    for (const TopoDS_Edge& e : lines) {
+                        double f0, f1;
+                        opencascade::handle<Geom_Curve> lc = BRep_Tool::Curve(e, f0, f1);
+                        opencascade::handle<Geom_Line> gl = opencascade::handle<Geom_Line>::DownCast(lc);
+                        if (gl.IsNull()) { ok = false; continue; }
+                        gp_Pnt o = gl->Position().Location();
+                        double sgn = gl->Position().Direction().Dot(ax) > 0 ? 1.0 : -1.0;
+                        bool at0 = gp_Vec(c0, o).Crossed(gp_Vec(ax)).Magnitude() < 1e-6;
+                        gp_Pnt base = at0 ? c0 : c1;
+                        double v0 = gp_Vec(base, o).Dot(gp_Vec(ax));
+                        opencascade::handle<Geom2d_Line> pc = new Geom2d_Line(gp_Pnt2d(at0 ? 0.0 : 1.0, v0), gp_Dir2d(0, sgn));
+                        bb.UpdateEdge(e, pc, nf, 1e-6);
+                    }
+                }
+                if (!ok) continue;
+                // the swept surface's normal against the cylinder's own
+                // (outward when its axes are direct): when they disagree
+                // the wire (counter-clockwise in the cylinder's (u, v))
+                // runs the other way in the new one, and the face is turned
+                bool flip;
+                {
+                    BRepAdaptor_Surface na(nf, Standard_False);
+                    gp_Pnt np;
+                    gp_Vec du, dv;
+                    na.D1(0.5, 0.0, np, du, dv);
+                    gp_Vec nn = du.Crossed(dv);
+                    gp_Vec out(sa.Cylinder().Axis().Location(), np);
+                    out = out - gp_Vec(ax) * out.Dot(gp_Vec(ax));
+                    flip = (nn.Dot(out) > 0) != sa.Cylinder().Position().Direct();
+                }
+                TopoDS_Wire nw;
+                bb.MakeWire(nw);
+                TopoDS_Face ff = TopoDS::Face(f.Oriented(TopAbs_FORWARD));
+                TopoDS_Wire ow = BRepTools::OuterWire(ff);
+                for (TopoDS_Iterator it(ow, Standard_False); it.More(); it.Next()) {
+                    TopoDS_Edge e = TopoDS::Edge(it.Value());
+                    TopoDS_Edge ne = e;
+                    if (e.IsSame(arcs[0])) ne = conics[0];
+                    else if (e.IsSame(arcs[1])) ne = conics[1];
+                    ne.Orientation(e.Orientation());
+                    bb.Add(nw, ne);
+                }
+                nw.Orientation(flip ? TopAbs::Reverse(ow.Orientation()) : ow.Orientation());
+                bb.Add(nf, nw);
+                nf.Orientation(flip ? TopAbs::Reverse(f.Orientation()) : f.Orientation());
+                BRepLib::SameParameter(nf, 1e-6);
+                rs->Replace(arcs[0], conics[0]);
+                rs->Replace(arcs[1], conics[1]);
+                rs->Replace(f, nf);
+                fresh_faces.push_back({nf, t});
+                (*done)++;
+            }
+            if (*done == 0) {
+                set_err("tension: only on straight fillets between flat ends");
+                return nullptr;
+            }
+            TopoDS_Shape r = rs->Apply(s->s);
+            ShapeFix_Shape fix(r);
+            fix.SetContext(rs);
+            fix.Perform();
+            r = fix.Shape();
+            if (!valid(r)) {
+                dump_check(r);
+                set_err("tension gave an invalid solid");
+                return nullptr;
+            }
+            FShape* res = wrap(r);
+            // the tags: each face of the input to what it became
+            TopTools_IndexedMapOfShape om;
+            face_map(r, om);
+            res->tags.assign(om.Extent(), tag);
+            for (int i = 1; i <= fm.Extent(); i++) {
+                long long t = i - 1 < (int)s->tags.size() ? s->tags[i - 1] : -1;
+                TopoDS_Shape g = rs->Value(fm(i));
+                for (TopExp_Explorer ex(g, TopAbs_FACE); ex.More(); ex.Next()) {
+                    int j = om.FindIndex(ex.Current());
+                    if (j > 0) res->tags[j - 1] = t;
+                }
+            }
             return res;
         },
         (FShape*)nullptr);

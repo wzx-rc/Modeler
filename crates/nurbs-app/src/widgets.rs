@@ -158,7 +158,7 @@ pub fn value_field(ui: &mut Ui, v: &mut f32, range: std::ops::RangeInclusive<f32
     let field = egui::DragValue::new(v)
         .speed(step)
         .range(range)
-        .custom_formatter(move |x, _| format!("{}{}", fmt_mm(x as f32), sfx))
+        .custom_formatter(move |x, _| if step < 0.1 { format!("{:.2}{}", x, sfx).replace('.', ",") } else { format!("{}{}", fmt_mm(x as f32), sfx) })
         .custom_parser(move |s| s.trim().trim_end_matches(parse_sfx.as_str()).trim().replace(',', ".").parse::<f64>().ok());
     ui.scope(|ui| {
         let w = &mut ui.visuals_mut().widgets;
