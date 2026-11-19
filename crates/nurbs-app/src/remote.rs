@@ -162,6 +162,8 @@ fn waits_for(method: &str) -> (bool, bool, bool) {
         "deviation" => (true, true, true),
         "measure" | "primary_candidates" => (false, true, false),
         "edge_candidates" => (true, true, false),
+        // its edges are found on the part as built from the document
+        "add_fillets" => (true, false, false),
         "list_features" => (true, false, false),
         "status" => (false, false, false),
         _ => (false, false, false),
