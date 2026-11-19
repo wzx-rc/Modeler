@@ -1940,7 +1940,7 @@ impl AppState {
     /// is live, the document takes that size (no undo step of its own).
     fn clamp_rounds(&mut self) {
         let Some(m) = self.model.clone() else { return };
-        if self.is_live() || m.serial / 4 != self.version || m.limits.is_empty() {
+        if self.is_live() || m.serial / 4 != self.version || (m.limits.is_empty() && m.tension_limits.is_empty()) {
             return;
         }
         let mut said = None;
@@ -1957,6 +1957,19 @@ impl AppState {
                     if p.inset > l + 1e-6 {
                         p.inset = *l;
                         said = Some(format!("{name}: {} mm is its largest inset", crate::widgets::fmt_mm(*l as f32)));
+                    }
+                }
+            }
+        }
+        // a tension too full or too flat for a fillet running round it
+        for (id, t) in &m.tension_limits {
+            if let Some(f) = self.doc.feature_mut(*id) {
+                let name = f.name.clone();
+                if let Some(r) = f.round.as_mut() {
+                    if (r.tension - t).abs() > 1e-6 {
+                        let fuller = *t < r.tension;
+                        r.tension = *t;
+                        said = Some(format!("{name}: tension {t:.2} is its {} here (a fillet runs round it)", if fuller { "fullest" } else { "flattest" }));
                     }
                 }
             }

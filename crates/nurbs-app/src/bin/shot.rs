@@ -1627,6 +1627,76 @@ fn main() {
         h.settle();
         h.shot("zero-tension-box-5-corner-fuller");
     }
+    if want("tension-two") {
+        // two fillet sizes on a block: the top edges at 3 mm, then the
+        // vertical ones at 5 mm (their corners run round under the top
+        // one), circular, then each with its tension; then the other order
+        let refs = |h: &Harness, mids: &[Vec3]| -> Vec<EdgeRef> {
+            let m = h.st.model.as_ref().unwrap();
+            mids.iter()
+                .filter_map(|p| {
+                    let near = |i: usize| {
+                        let pts: Vec<Vec3> = m.edges[i].pts.iter().map(|q| Vec3::from_array(*q)).collect();
+                        pts.windows(2)
+                            .map(|w| {
+                                let d = w[1] - w[0];
+                                let t = ((*p - w[0]).dot(d) / d.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                                (w[0] + d * t).distance(*p)
+                            })
+                            .fold(f32::MAX, f32::min)
+                    };
+                    let i = (0..m.edges.len()).min_by(|a, b| near(*a).total_cmp(&near(*b)))?;
+                    h.st.edge_ref(i)
+                })
+                .collect()
+        };
+        let vert = [Vec3::new(20.0, 10.0, 15.0), Vec3::new(-20.0, 10.0, 15.0), Vec3::new(20.0, 10.0, -15.0), Vec3::new(-20.0, 10.0, -15.0)];
+        let top = [Vec3::new(0.0, 20.0, 15.0), Vec3::new(0.0, 20.0, -15.0), Vec3::new(20.0, 20.0, 0.0), Vec3::new(-20.0, 20.0, 0.0)];
+        for (order, vfirst, tvert) in [("top-first", false, 0.5), ("vertical-first", true, 0.5), ("top-first-too-full", false, 0.7), ("vertical-first-too-full", true, 0.7)] {
+            let mut d = Doc::default();
+            d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            h.reset(d, "Two fillets");
+            h.settle();
+            let (m1, r1, m2, r2) = if vfirst { (&vert, 5.0, &top, 3.0) } else { (&top, 3.0, &vert, 5.0) };
+            let e1 = refs(&h, m1);
+            let mut a = 0;
+            h.st.edit("Fillet", |d| a = d.add_round(r1, false, e1));
+            h.settle();
+            let e2 = refs(&h, m2);
+            let mut b = 0;
+            h.st.edit("Fillet", |d| b = d.add_round(r2, false, e2));
+            h.settle();
+            let (tv, tt) = if vfirst { (a, b) } else { (b, a) };
+            h.st.select(Some(b), false);
+            h.st.camera.frame(Vec3::new(-20.0, 0.0, -15.0), Vec3::new(20.0, 20.0, 15.0));
+            h.steps(2);
+            h.settle();
+            if order == "top-first" {
+                h.shot("zero-tension-two-1-circular");
+            }
+            h.st.set_round_tension(tt, 0.7, true);
+            h.st.end_live();
+            h.settle();
+            h.st.set_round_tension(tv, tvert, true);
+            h.st.end_live();
+            h.settle();
+            eprintln!("  {order}: errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+            h.shot(&format!("zero-tension-two-2-{order}"));
+            h.st.select(None, false);
+            h.st.camera.frame(Vec3::new(10.0, 10.0, 5.0), Vec3::new(20.0, 20.0, 15.0));
+            h.steps(2);
+            h.settle();
+            h.shot(&format!("zero-tension-two-3-{order}-corner"));
+            if tvert > 0.6 {
+                // seen from above: the top fillet's edge round the corner
+                h.st.camera.preset(nurbs_app::camera::ViewPreset::Top);
+                h.st.camera.frame(Vec3::new(8.0, 18.0, 3.0), Vec3::new(20.0, 20.0, 15.0));
+                h.steps(2);
+                h.settle();
+                h.shot(&format!("zero-tension-two-4-{order}-above"));
+            }
+        }
+    }
     if want("tension") {
         // the direct fillet's modifiers: Shift held during the drag sets
         // the tension (up fuller), Ctrl held makes a chamfer

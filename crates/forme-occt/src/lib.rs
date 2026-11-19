@@ -50,7 +50,7 @@ extern "C" {
     fn focc_edge_count(s: *const FShape) -> c_int;
     fn focc_edge_faces(s: *const FShape, out: *mut c_int, cap: c_int) -> c_int;
     fn focc_edge_sample(s: *const FShape, index: c_int, n: c_int, xyz: *mut c_double) -> c_int;
-    fn focc_fillet_tension(s: *const FShape, tags: *const i64, rhos: *const c_double, n: c_int, done: *mut c_int, total: *mut c_int) -> *mut FShape;
+    fn focc_fillet_tension(s: *const FShape, tags: *const i64, rhos: *const c_double, n: c_int, done: *mut c_int, total: *mut c_int, tight: *mut c_double) -> *mut FShape;
     fn focc_fillet(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
     fn focc_fillet_multi(s: *const FShape, idx: *const c_int, r: *const c_double, tags: *const i64, n: c_int, fresh: i64) -> *mut FShape;
     fn focc_chamfer(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
@@ -109,7 +109,6 @@ fn last_error() -> String {
     }
 }
 
-/// A B-rep shape (solid) owned on the C++ side.
 /// How a corner of a prism's outline is cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CutKind {
@@ -119,6 +118,29 @@ pub enum CutKind {
     Conic,
 }
 
+/// What `Shape::fillet_tension` did for one fillet: how many of its faces
+/// took the tension, of how many.
+#[derive(Clone, Copy, Debug)]
+pub struct Tension {
+    pub done: usize,
+    pub total: usize,
+    /// Its faces left round because a fillet running round them is bigger
+    /// than their conic's tightest curve.
+    pub tight: Option<Tight>,
+}
+
+/// A conic too tight for the fillet running round it.
+#[derive(Clone, Copy, Debug)]
+pub struct Tight {
+    /// Its tightest radius of curvature at this tension.
+    pub radius: f64,
+    /// The size of the fillet running round it.
+    pub need: f64,
+    /// The tensions (rho) that would do, from and to.
+    pub works: Option<(f64, f64)>,
+}
+
+/// A B-rep shape (solid) owned on the C++ side.
 pub struct Shape(*mut FShape);
 
 // the C++ side keeps no global state per shape: a shape can move to another thread
@@ -528,13 +550,23 @@ impl Shape {
     /// faces' tag) with its own tension (a conic's rho): the solid, and for
     /// each fillet how many of its faces took it out of how many. Two
     /// fillets meeting in a mitre go together when their tensions agree.
-    pub fn fillet_tension(&self, fillets: &[(i64, f64)]) -> Result<(Shape, Vec<(usize, usize)>), String> {
+    pub fn fillet_tension(&self, fillets: &[(i64, f64)]) -> Result<(Shape, Vec<Tension>), String> {
         let tags: Vec<i64> = fillets.iter().map(|f| f.0).collect();
         let rhos: Vec<f64> = fillets.iter().map(|f| f.1).collect();
         let mut done = vec![0 as c_int; fillets.len()];
         let mut total = vec![0 as c_int; fillets.len()];
-        let s = shape(unsafe { focc_fillet_tension(self.0, tags.as_ptr(), rhos.as_ptr(), fillets.len() as c_int, done.as_mut_ptr(), total.as_mut_ptr()) })?;
-        Ok((s, done.iter().zip(&total).map(|(d, t)| (*d as usize, *t as usize)).collect()))
+        let mut tight = vec![0.0 as c_double; 4 * fillets.len()];
+        let s = shape(unsafe { focc_fillet_tension(self.0, tags.as_ptr(), rhos.as_ptr(), fillets.len() as c_int, done.as_mut_ptr(), total.as_mut_ptr(), tight.as_mut_ptr()) })?;
+        Ok((
+            s,
+            (0..fillets.len())
+                .map(|k| Tension {
+                    done: done[k] as usize,
+                    total: total[k] as usize,
+                    tight: (tight[4 * k + 1] > 0.0).then(|| Tight { radius: tight[4 * k], need: tight[4 * k + 1], works: (tight[4 * k + 2] > 0.0).then(|| (tight[4 * k + 2], tight[4 * k + 3])) }),
+                })
+                .collect(),
+        ))
     }
     /// Rounds the edges (indices in this shape) with radius r, in one
     /// operation. Err when OpenCascade cannot make it or the result is not

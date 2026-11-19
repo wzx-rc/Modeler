@@ -108,6 +108,9 @@ pub struct Model {
     /// Fillets and chamfers asked too big: (feature, the size they were
     /// made at, the largest that works).
     pub limits: Vec<(u32, f64)>,
+    /// Fillets whose tension was too full or too flat for a fillet running
+    /// round them: (feature, the tension they were made at).
+    pub tension_limits: Vec<(u32, f64)>,
 }
 
 /// The part as quads (`quads.rs`): positions shared by the faces along
@@ -216,6 +219,11 @@ impl Model {
             w.u32(*id);
             w.f64(*size);
         }
+        w.u32(self.tension_limits.len() as u32);
+        for (id, t) in &self.tension_limits {
+            w.u32(*id);
+            w.f64(*t);
+        }
         w.0
     }
 
@@ -292,6 +300,10 @@ impl Model {
         let n = r.u32()? as usize;
         for _ in 0..n {
             m.limits.push((r.u32()?, r.f64()?));
+        }
+        let n = r.u32()? as usize;
+        for _ in 0..n {
+            m.tension_limits.push((r.u32()?, r.f64()?));
         }
         Some(m)
     }
@@ -381,6 +393,7 @@ mod tests {
             ms: 3.5,
             quads: None,
             limits: vec![(4, 2.35)],
+            tension_limits: vec![(5, 0.54)],
         };
         assert_eq!(Model::decode(&m.encode()).unwrap(), m);
         let q = Model { quads: Some(Quads { positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], quads: vec![[0, 1, 2, 3]], quad_face: vec![0], skipped: vec![(2, "a face with a hole".into())] }), ..m.clone() };
