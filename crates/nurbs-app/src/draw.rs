@@ -87,6 +87,11 @@ impl Drawer {
                 .iter()
                 .enumerate()
                 .map(|(i, f)| {
+                    // a material ball dragged over it: shown on it already
+                    if let Some(d) = st.mat_drag.as_ref().filter(|d| d.target.map(|t| st.face_in_target(i, &t)).unwrap_or(false)) {
+                        let mat = materials::get(d.material);
+                        return FaceGpu { color: linear(mat.color), flags: 0, metal: mat.metal, rough: mat.rough, pad: [0.0; 2] };
+                    }
                     let flags = if by_face {
                         if picked.contains(&i) || f.tag.map(|t| st.selection.contains(&t.feature)).unwrap_or(false) {
                             FACE_SELECTED
@@ -102,7 +107,7 @@ impl Drawer {
                             _ => 0,
                         }
                     };
-                    let mat = materials::get(f.tag.map(|t| st.material_of(t.feature)).unwrap_or(0));
+                    let mat = materials::get(st.face_material(i));
                     // Quads view: the fillet and chamfer bands in orange
                     let band = self.quads_shown && f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| x.round.is_some()).unwrap_or(false);
                     if band {

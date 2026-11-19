@@ -1329,6 +1329,51 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("materials") {
+        // the materials island under the rail: a ball dragged onto a shape,
+        // in Face mode onto a face, then a click on picked faces
+        h.reset(test_part(), "Test part");
+        h.st.select(Some(3), false);
+        h.steps(3);
+        let ball = |h: &Harness, i: usize| h.ctx.data(|d| d.get_temp::<Pos2>(egui::Id::new(("mat-ball", i)))).expect("ball drawn");
+        let front = h.screen_of(Vec3::new(-12.0, 8.0, 15.0));
+        h.move_to(ball(&h, 2));
+        h.steps(3);
+        h.shot("zero-materials-1-island");
+        // Orange onto the Block
+        h.drag(ball(&h, 2), front, 14, false);
+        h.steps(3);
+        h.shot("zero-materials-2-drag");
+        h.press(front, false);
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(2);
+        h.shot("zero-materials-3-dropped");
+        eprintln!("  block material {} paint {:?}", h.st.doc.features[0].material, h.st.doc.paint);
+        // Face mode: Steel onto the top face
+        h.st.set_sel_mode(SelMode::Face);
+        h.steps(2);
+        let top = h.screen_of(Vec3::new(-14.0, 20.0, 10.0));
+        h.drag(ball(&h, 4), top, 14, false);
+        h.steps(3);
+        h.shot("zero-materials-4-face-drag");
+        h.press(top, false);
+        h.settle();
+        // two faces picked (the boss's side and the front), Green clicked
+        let side = h.screen_of(Vec3::new(10.0 + 7.0 * 0.6, 25.0, 7.0 * 0.8));
+        h.click(side);
+        h.hold(Modifiers::SHIFT);
+        h.click(front);
+        h.hold(Modifiers::NONE);
+        h.click(ball(&h, 1));
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(2);
+        h.shot("zero-materials-5-faces");
+        eprintln!("  paint {:?}", h.st.doc.paint);
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
     if want("marking") {
         // the marking menu (right button): on a shape, its material arc, a
         // quick flick, on a picked edge, in empty space

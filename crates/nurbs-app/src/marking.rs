@@ -332,9 +332,8 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect) -> bool {
     }
     if !down {
         let menu = st.marking.menu.take().unwrap();
-        if let (Some(k), Ctx::Shape(_)) = (menu.ball, menu.ctx) {
-            st.set_material(k as u32);
-            st.toast(&format!("Material: {}", MATERIALS[k].name), false);
+        if let (Some(k), Ctx::Shape(id)) = (menu.ball, menu.ctx) {
+            st.drop_material(crate::state::DropTarget::Shape(id), k as u32);
         } else if let Some(d) = menu.hover {
             if let Some(item) = items(st, menu.ctx).into_iter().find(|i| i.dir == d && i.act != Act::Material) {
                 if !menu.shown {

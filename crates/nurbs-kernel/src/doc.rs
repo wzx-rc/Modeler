@@ -119,6 +119,10 @@ impl Prim {
     }
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 fn yes() -> bool {
     true
 }
@@ -549,6 +553,11 @@ pub struct Feature {
     pub visible: bool,
     #[serde(default)]
     pub material: u32,
+    /// Left out of the build for now (an operation turned off, or past its
+    /// element's history marker), kept in the document: the chain is not
+    /// broken, it comes back when turned on.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub suspended: bool,
     /// A fillet or chamfer step: `op`, `prim` and `rot` are not used (a box
     /// of size 0), `origin` is the middle of its edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -696,11 +705,22 @@ pub struct Doc {
     pub version: u32,
     pub features: Vec<Feature>,
     pub next_id: FeatureId,
+    /// Faces given their own material (Face mode, or a ball dropped on a
+    /// face), by their packed tag. The kernel does not use it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paint: Vec<Paint>,
+}
+
+/// A face's own material.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Paint {
+    pub tag: i64,
+    pub material: u32,
 }
 
 impl Default for Doc {
     fn default() -> Self {
-        Doc { version: VERSION, features: vec![], next_id: 1 }
+        Doc { version: VERSION, features: vec![], next_id: 1, paint: vec![] }
     }
 }
 
@@ -719,7 +739,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, suspended: false });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -729,7 +749,7 @@ impl Doc {
         let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0 };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, suspended: false });
         id
     }
     /// Adds an inset or extrusion of a face at the end.
@@ -738,7 +758,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(push.label());
         let origin = push.face.at;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, suspended: false });
         id
     }
     /// Adds a move of a face, edge or vertex at the end.
@@ -747,7 +767,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(tweak.label());
         let origin = tweak.at();
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, suspended: false });
         id
     }
     /// Adds a Knife step (its first point) at the end.
@@ -756,7 +776,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(name);
         let origin = cut.pts.first().map(|p| p.at).unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut) });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), suspended: false });
         id
     }
     /// "Cube", then "Cube 2", "Cube 3"…

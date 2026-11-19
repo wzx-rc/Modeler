@@ -116,6 +116,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     st.view_rect = [left, EDGE + ISLAND_H, screen.width() - 2.0 * EDGE - CARDS_W, screen.height() - HISTORY_H];
     top_bar(ctx, st, screen);
     rail(ctx, st, screen);
+    materials_island(ctx, st);
     history_strip(ctx, st, screen);
     help_box(ctx, st);
     if st.panel_visible {
@@ -454,6 +455,110 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     });
 }
 
+// ----------------------------------------------------------- materials
+
+/// The material shown as current: the first picked face's (Face mode),
+/// the selected element's, or with nothing selected the new shapes'.
+fn current_material(st: &AppState) -> Option<u32> {
+    if st.sel_mode == SelMode::Face && !st.face_sel.is_empty() {
+        return st.face_sel.first().and_then(|r| st.model_face_of(r)).map(|f| st.face_material(f));
+    }
+    if st.selection.is_empty() {
+        return Some(st.material);
+    }
+    let f = st.single()?;
+    let id = st.element_of(f.id);
+    st.doc.feature(id).filter(|g| g.is_solid()).map(|_| st.material_of(id))
+}
+
+/// The materials island under the rail (Romain, 19 nov.: "je prends des
+/// composants, je clique, ça applique le matériel, mais aussi… je prends
+/// une sphère et je viens la lâcher sur un élément"): six balls; a click
+/// gives the ball to what is picked, a drag carries it onto the part.
+fn materials_island(ctx: &egui::Context, st: &mut AppState) {
+    let Some(rail) = ctx.memory(|m| m.area_rect(Id::new("rail"))) else { return };
+    let off = panel_offset(ctx, "materials");
+    egui::Area::new(Id::new("materials")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(rail.max.x, rail.max.y + 8.0) + off).show(ctx, |ui| {
+        island().inner_margin(Margin::same(6)).show(ui, |ui| {
+            ui.set_width(CARDS_W - 12.0);
+            grip(ui, "materials");
+            let cur = current_material(st);
+            let w = CARDS_W - 12.0;
+            let (hr, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
+            let (br, _) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
+            let n = materials::MATERIALS.len();
+            let gap = (w - 4.0 - 22.0 * n as f32) / (n - 1) as f32;
+            let mut hovered: Option<usize> = None;
+            for (i, m) in materials::MATERIALS.iter().enumerate() {
+                let c = pos2(br.min.x + 2.0 + 11.0 + i as f32 * (22.0 + gap), br.center().y);
+                let r = Rect::from_center_size(c, vec2(22.0, 22.0));
+                ui.ctx().data_mut(|d| d.insert_temp(Id::new(("mat-ball", i)), c));
+                let resp = ui.interact(r, Id::new(("mat-ball", i)), Sense::click_and_drag());
+                let dragging = st.mat_drag.map(|d| d.material as usize == i).unwrap_or(false);
+                let p = ui.painter();
+                if cur == Some(i as u32) {
+                    p.circle_stroke(c, 10.5, Stroke::new(1.2, accent()));
+                } else if resp.hovered() || dragging {
+                    p.circle_stroke(c, 10.5, Stroke::new(1.0, DIVIDER()));
+                }
+                material_ball(p, c, 8.0, m);
+                if resp.hovered() || dragging {
+                    hovered = Some(i);
+                }
+                if resp.drag_started() {
+                    st.mat_drag = Some(MatDrag { material: i as u32, target: None });
+                }
+                if resp.dragged() {
+                    let pos = ctx.input(|i| i.pointer.hover_pos());
+                    let vr = st.view_rect;
+                    let target = pos.filter(|q| q.x > vr[0] && q.x < vr[2] && q.y > vr[1] && q.y < vr[3] && ctx.layer_id_at(*q).map(|l| l.order == Order::Background).unwrap_or(false)).and_then(|q| st.drop_target([q.x, q.y]));
+                    if let Some(d) = st.mat_drag.as_mut() {
+                        d.target = target;
+                    }
+                    if let Some(q) = pos {
+                        drag_ball(ctx, st, q, m);
+                    }
+                }
+                if resp.drag_stopped() {
+                    if let Some(t) = st.mat_drag.and_then(|d| d.target) {
+                        st.drop_material(t, i as u32);
+                    }
+                    st.mat_drag = None;
+                } else if resp.clicked() {
+                    st.apply_material(i as u32);
+                }
+                resp.on_hover_text(format!("{}: click to give it to what is picked (Face mode: the picked faces), or drag it onto a shape (Face mode: onto a face)", m.name));
+            }
+            let p = ui.painter();
+            p.text(pos2(hr.min.x + 2.0, hr.center().y), Align2::LEFT_CENTER, "MATERIAL", mono(10.0), LABEL());
+            let name = hovered.or(cur.map(|c| c as usize)).map(|i| materials::get(i as u32).name).unwrap_or("–");
+            p.text(pos2(hr.max.x - 2.0, hr.center().y), Align2::RIGHT_CENTER, name, regular(10.5), TEXT2());
+        });
+    });
+    // a drag that ended elsewhere (the button let go off the ball's
+    // response): nothing lands
+    if st.mat_drag.is_some() && !ctx.input(|i| i.pointer.any_down()) {
+        st.mat_drag = None;
+    }
+}
+
+/// The ball carried by the pointer, with what it would land on.
+fn drag_ball(ctx: &egui::Context, st: &AppState, at: egui::Pos2, m: &materials::Material) {
+    let p = ctx.layer_painter(egui::LayerId::new(Order::Tooltip, Id::new("mat-drag")));
+    let c = at + vec2(14.0, -14.0);
+    p.circle_filled(c + vec2(0.0, 1.5), 12.0, Color32::from_black_alpha(70));
+    material_ball(&p, c, 11.0, m);
+    let what = match st.mat_drag.and_then(|d| d.target) {
+        Some(DropTarget::Face { .. }) => "a face".to_string(),
+        Some(DropTarget::Shape(id)) => st.doc.feature(id).map(|f| f.name.clone()).unwrap_or_default(),
+        None => return,
+    };
+    let g = p.layout_no_wrap(what, medium(11.5), TEXT());
+    let r = Rect::from_min_size(pos2(c.x + 16.0, c.y - g.size().y / 2.0 - 3.0), g.size() + vec2(12.0, 6.0));
+    p.rect(r, 6.0, PANEL(), Stroke::new(1.0, PANEL_BORDER()), StrokeKind::Inside);
+    p.galley(r.min + vec2(6.0, 3.0), g, TEXT());
+}
+
 // --------------------------------------------------------- history strip
 
 fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
@@ -542,6 +647,9 @@ fn history_chip(ui: &mut Ui, st: &AppState, f: &Feature) -> Response {
 fn help_title(st: &AppState) -> String {
     if st.marking.is_open() {
         return "Marking menu".into();
+    }
+    if let Some(d) = &st.mat_drag {
+        return format!("Material · {}", materials::get(d.material).name);
     }
     match st.tool {
         Tool::Create(k) if matches!(k, PrimKind::Path) => "Path".into(),
@@ -1386,7 +1494,7 @@ fn face_card(ui: &mut Ui, st: &mut AppState) {
         if secondary_btn(ui, "Inset  I", w).clicked() {
             st.arm_push(PushKind::Inset, None);
         }
-        if secondary_btn(ui, "Extrude  E", w).clicked() {
+        if secondary_btn(ui, "Extrude  Ctrl+E", w).clicked() {
             st.arm_push(PushKind::Extrude, None);
         }
     });

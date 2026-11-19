@@ -463,7 +463,7 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let mut used_stages = vec![];
     // the stage before each feature (blended fillets start again from there)
     let mut befores: Vec<(&Feature, Stage)> = vec![];
-    for f in doc.features.iter().filter(|f| f.visible && !f.is_path()) {
+    for f in doc.features.iter().filter(|f| f.visible && !f.suspended && !f.is_path()) {
         befores.push((f, stage.clone()));
         let fh = f.hash();
         key = hash2(key, fh);

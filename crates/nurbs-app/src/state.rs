@@ -306,6 +306,20 @@ pub struct Remeshed {
     pub ms: f32,
 }
 
+/// A material ball being dragged onto the part.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MatDrag {
+    pub material: u32,
+    pub target: Option<DropTarget>,
+}
+
+/// What a material lands on: one face (Face mode), or a whole element.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DropTarget {
+    Face { tag: i64, face: usize },
+    Shape(FeatureId),
+}
+
 pub struct Toast {
     pub text: String,
     pub until: f64,
@@ -368,6 +382,9 @@ pub struct AppState {
     pub gizmo_readout: Option<String>,
     /// The marking menu (right button), open or flashing.
     pub marking: crate::marking::Marking,
+    /// A material ball dragged from the materials island, and what it
+    /// would land on.
+    pub mat_drag: Option<MatDrag>,
     /// Selection rectangle (screen).
     pub marquee: Option<([f32; 2], [f32; 2])>,
 
@@ -456,6 +473,7 @@ impl AppState {
             gizmo: GizmoMode::Move,
             gizmo_readout: None,
             marking: Default::default(),
+            mat_drag: None,
             hot_handle: None,
             marquee: None,
             camera: OrbitCamera { target: Vec3::new(0.0, 10.0, 0.0), yaw: 0.62, pitch: 0.42, dist: 160.0, ..Default::default() },
@@ -797,17 +815,119 @@ impl AppState {
     /// Gives the selected shapes a material (with nothing selected: the
     /// material of new shapes).
     pub fn set_material(&mut self, m: u32) {
-        let ids: Vec<FeatureId> = self.selection.iter().copied().filter(|id| self.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false)).collect();
+        let mut ids: Vec<FeatureId> = self.selection.iter().map(|id| self.element_of(*id)).filter(|id| self.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false)).collect();
+        ids.dedup();
         if ids.is_empty() {
             self.material = m;
             return;
         }
+        self.shapes_material(&ids, m);
+    }
+
+    /// A face's own material, if it was given one (by its packed tag).
+    pub fn paint_of(&self, tag: i64) -> Option<u32> {
+        self.doc.paint.iter().find(|p| p.tag == tag).map(|p| p.material)
+    }
+
+    /// The material a model face shows: its own, else its element's.
+    pub fn face_material(&self, face: usize) -> u32 {
+        let Some(t) = self.model.as_ref().and_then(|m| m.faces.get(face)).and_then(|f| f.tag) else { return 0 };
+        self.paint_of(t.pack()).unwrap_or_else(|| self.material_of(t.feature))
+    }
+
+    /// The element (shape) a feature's faces belong to: itself for a
+    /// shape, the shape an operation works on.
+    pub fn element_of(&self, id: FeatureId) -> FeatureId {
+        match self.doc.feature(id) {
+            Some(f) if f.is_solid() || f.is_path() => id,
+            _ => self.owner_of(id).unwrap_or(id),
+        }
+    }
+
+    /// What a material ball let go at `p` (screen) lands on: in Face mode
+    /// the face under it, else the element the face comes from.
+    pub fn drop_target(&self, p: [f32; 2]) -> Option<DropTarget> {
+        let h = self.pick_at(p)?;
+        let t = self.model.as_ref()?.faces.get(h.face)?.tag?;
+        if self.sel_mode == SelMode::Face {
+            return Some(DropTarget::Face { tag: t.pack(), face: h.face });
+        }
+        let id = self.element_of(t.feature);
+        self.doc.feature(id).filter(|f| f.is_solid()).map(|_| DropTarget::Shape(id))
+    }
+
+    /// Whether model face `face` is (part of) a drop target.
+    pub fn face_in_target(&self, face: usize, t: &DropTarget) -> bool {
+        let Some(tag) = self.model.as_ref().and_then(|m| m.faces.get(face)).and_then(|f| f.tag) else { return false };
+        match t {
+            DropTarget::Face { tag: x, .. } => tag.pack() == *x,
+            DropTarget::Shape(id) => self.element_of(tag.feature) == *id && self.paint_of(tag.pack()).is_none(),
+        }
+    }
+
+    /// A material ball clicked: the faces picked in Face mode, else the
+    /// selected shapes (an operation's: its shape's), else new shapes.
+    pub fn apply_material(&mut self, m: u32) {
+        let name = crate::materials::get(m).name;
+        if self.sel_mode == SelMode::Face && !self.face_sel.is_empty() {
+            let mut tags: Vec<i64> = self.face_sel.iter().map(|r| r.tag).collect();
+            tags.dedup();
+            let n = tags.len();
+            self.paint_faces(&tags, m);
+            self.toast(&format!("{name} on {n} face{}", if n == 1 { "" } else { "s" }), false);
+            return;
+        }
+        let mut ids: Vec<FeatureId> = self.selection.iter().map(|id| self.element_of(*id)).filter(|id| self.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false)).collect();
+        ids.dedup();
+        if ids.is_empty() {
+            self.material = m;
+            self.toast(&format!("New shapes: {name}"), false);
+            return;
+        }
+        self.shapes_material(&ids, m);
+        let what = if ids.len() == 1 { self.doc.feature(ids[0]).map(|f| f.name.clone()).unwrap_or_default() } else { format!("{} shapes", ids.len()) };
+        self.toast(&format!("{name} on {what}"), false);
+    }
+
+    /// A material ball let go on the part.
+    pub fn drop_material(&mut self, t: DropTarget, m: u32) {
+        let name = crate::materials::get(m).name;
+        match t {
+            DropTarget::Face { tag, .. } => {
+                self.paint_faces(&[tag], m);
+                self.toast(&format!("{name} on a face"), false);
+            }
+            DropTarget::Shape(id) => {
+                self.shapes_material(&[id], m);
+                let n = self.doc.feature(id).map(|f| f.name.clone()).unwrap_or_default();
+                self.toast(&format!("{name} on {n}"), false);
+            }
+        }
+    }
+
+    /// Gives faces their own material (one undo step).
+    fn paint_faces(&mut self, tags: &[i64], m: u32) {
+        let tags = tags.to_vec();
+        self.edit("Material", |d| {
+            for t in tags {
+                d.paint.retain(|p| p.tag != t);
+                d.paint.push(nurbs_kernel::Paint { tag: t, material: m });
+            }
+        });
+    }
+
+    /// Gives whole shapes a material: their faces' own materials go (as
+    /// in Maya, a material given to the object replaces its faces').
+    fn shapes_material(&mut self, ids: &[FeatureId], m: u32) {
+        let owned: Vec<i64> = self.doc.paint.iter().map(|p| p.tag).filter(|t| FaceTag::unpack(*t).map(|x| ids.contains(&self.element_of(x.feature))).unwrap_or(false)).collect();
+        let ids = ids.to_vec();
         self.edit("Material", |d| {
             for id in &ids {
                 if let Some(f) = d.feature_mut(*id) {
                     f.material = m;
                 }
             }
+            d.paint.retain(|p| !owned.contains(&p.tag));
         });
     }
 

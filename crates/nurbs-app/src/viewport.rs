@@ -1025,6 +1025,13 @@ fn status(p: &Painter, st: &AppState) {
 
 /// What the help box says: "Key: what it does" parts joined by " · ".
 pub fn hint(st: &AppState) -> String {
+    if st.mat_drag.is_some() {
+        return if st.sel_mode == SelMode::Face {
+            "Release on a face: that face takes it · Off the part: nothing".into()
+        } else {
+            "Release on a shape: it takes it (its faces' own go) · Face mode (3): one face · Off the part: nothing".into()
+        };
+    }
     if let Some(m) = &st.marking.menu {
         return match m.ctx {
             crate::marking::Ctx::Shape(_) => "Release on an item: run it · Up: the materials · In the middle: nothing · Esc: close".into(),
