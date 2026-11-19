@@ -38,7 +38,10 @@ pub struct Primary {
     pub area: f64,
     /// How much of it was read flat, front and back (0 to 1).
     pub flat: f64,
-    /// Its outline is a rectangle (four square corners): a Cube.
+    /// Each corner's cut, as a sketch corner's (mm): a fillet's radius
+    /// (> 0), a chamfer's size along each side (< 0), 0 sharp.
+    pub corner: Vec<f64>,
+    /// Its outline is a rectangle (four square sharp corners): a Cube.
     pub rect: bool,
 }
 
@@ -628,6 +631,299 @@ fn square_up(p: Vec<DVec2>, short: f64) -> Vec<DVec2> {
     p
 }
 
+/// A straight side of an outline being fitted: its points' range, its line
+/// (through `c` along `d`), its ends on the line.
+#[derive(Clone, Copy, Debug)]
+struct Side {
+    s: usize,
+    e: usize,
+    c: DVec2,
+    d: DVec2,
+    a: DVec2,
+    b: DVec2,
+}
+
+impl Side {
+    fn fit(p: &[DVec2], s: usize, e: usize) -> Side {
+        let n = p.len();
+        let pts: Vec<DVec2> = (s..=e).map(|k| p[k % n]).collect();
+        let c = pts.iter().copied().sum::<DVec2>() / pts.len() as f64;
+        let (mut xx, mut xy, mut yy) = (0.0, 0.0, 0.0);
+        for q in &pts {
+            let r = *q - c;
+            xx += r.x * r.x;
+            xy += r.x * r.y;
+            yy += r.y * r.y;
+        }
+        let ang = 0.5 * (2.0 * xy).atan2(xx - yy);
+        let mut d = DVec2::new(ang.cos(), ang.sin());
+        if d.dot(pts[pts.len() - 1] - pts[0]) < 0.0 {
+            d = -d;
+        }
+        Side::on(p, s, e, c, d)
+    }
+    fn on(p: &[DVec2], s: usize, e: usize, c: DVec2, d: DVec2) -> Side {
+        let n = p.len();
+        let proj = |q: DVec2| c + d * (q - c).dot(d);
+        Side { s, e, c, d, a: proj(p[s % n]), b: proj(p[e % n]) }
+    }
+    fn len(&self) -> f64 {
+        self.a.distance(self.b)
+    }
+}
+
+/// The signed turn from direction `a` to `b` (radians, left > 0).
+fn turn(a: DVec2, b: DVec2) -> f64 {
+    a.perp_dot(b).atan2(a.dot(b))
+}
+
+/// The hard-surface outline (the rule: straight sides, each corner sharp,
+/// a fillet of one radius or a chamfer): the traced cells' outline
+/// (`raw`, counter-clockwise, mm) smoothed and cut into its straight runs
+/// at a coarse tolerance (3 % of `size`, the region's √area, at least 0.6
+/// mm: ribs and waves along a side are not sides); a short run whose two
+/// ends turn the same way (the chords of a rounded corner, a chamfer
+/// across a right angle) is no side; near-collinear neighbours are one;
+/// each side is the line its points follow, moved out onto their
+/// envelope (the 85th percentile: the ribs' tips), squared to the axes
+/// within 5°. Each corner is where two sides meet; a convex one takes the
+/// cut its points make there (those off both sides, near the corner): an
+/// arc tangent to both (its radius searched) or a straight chamfer,
+/// whichever fits; a concave one stays sharp (the closing rounded it).
+/// None when fewer than three sides.
+fn fit_outline(raw: &[DVec2], px: f64, size: f64) -> Option<(Vec<DVec2>, Vec<f64>)> {
+    let n = raw.len();
+    if n < 8 {
+        return None;
+    }
+    // the staircase off: the cell sides' middles, smoothed twice
+    let mut p: Vec<DVec2> = (0..n).map(|i| (raw[i] + raw[(i + 1) % n]) * 0.5).collect();
+    for _ in 0..2 {
+        p = (0..n).map(|i| (p[(i + n - 1) % n] + p[i] * 2.0 + p[(i + 1) % n]) * 0.25).collect();
+    }
+    // start where it turns most (not halfway along a side)
+    let w = ((0.5 / px).round() as usize).max(2);
+    let start = (0..n)
+        .max_by(|&i, &j| {
+            let t = |k: usize| turn(p[k] - p[(k + n - w) % n], p[(k + w) % n] - p[k]).abs();
+            t(i).total_cmp(&t(j))
+        })
+        .unwrap_or(0);
+    p.rotate_left(start);
+    let coarse = (0.03 * size).max(0.6);
+    let fine = (0.8 * px).max(0.25);
+    let seg_dist = |q: DVec2, a: DVec2, b: DVec2| {
+        let ab = b - a;
+        let l2 = ab.length_squared();
+        let t = if l2 > 1e-18 { ((q - a).dot(ab) / l2).clamp(0.0, 1.0) } else { 0.0 };
+        q.distance(a + ab * t)
+    };
+    // the longest straight runs, one after the other
+    let mut runs = vec![];
+    let mut s = 0;
+    while s < n {
+        let mut best = s + 1;
+        let mut e = s + 2;
+        while e <= n {
+            let (a, b) = (p[s], p[e % n]);
+            if (s + 1..e).any(|k| seg_dist(p[k], a, b) > coarse) {
+                break;
+            }
+            best = e;
+            e += 1;
+        }
+        runs.push((s, best));
+        s = best;
+    }
+    let lmin = (0.06 * size).max(2.0);
+    let mut sides: Vec<Side> = runs.iter().filter(|(s, e)| p[*s].distance(p[*e % n]) >= lmin).map(|&(s, e)| Side::fit(&p, s, e)).collect();
+    if sides.len() < 3 {
+        return None;
+    }
+    // short runs turning the same way at both ends: a rounded corner's
+    // chords, or a chamfer (a step turns one way then the other)
+    let short = (0.12 * size).clamp(3.5, 6.0);
+    loop {
+        let m = sides.len();
+        if m <= 3 {
+            break;
+        }
+        let mut drop = None;
+        let mut best = f64::INFINITY;
+        for i in 0..m {
+            let (a, b, c) = (sides[(i + m - 1) % m], sides[i], sides[(i + 1) % m]);
+            let (t1, t2) = (turn(a.d, b.d), turn(b.d, c.d));
+            let l = b.len();
+            let chamfer = t1 > 0.0 && t2 > 0.0 && a.d.dot(c.d).abs() < 10f64.to_radians().sin() && l < 8.0 && l < 0.35 * a.len().min(c.len());
+            // a concave corner the closing rounded (its disc's arc)
+            let closed = t1 < 0.0 && t2 < 0.0 && l < 2.0 * CLOSE && l < 0.5 * a.len().min(c.len());
+            if (l < short || chamfer || closed) && t1 * t2 > 0.0 && (t1 + t2).abs() < 120f64.to_radians() && l < best {
+                best = l;
+                drop = Some(i);
+            }
+        }
+        match drop {
+            Some(i) => {
+                sides.remove(i);
+            }
+            None => break,
+        }
+    }
+    // near-collinear neighbours: one side
+    loop {
+        let m = sides.len();
+        if m <= 3 {
+            break;
+        }
+        let mut merged = false;
+        for i in 0..m {
+            let j = (i + 1) % m;
+            let (a, b) = (sides[i], sides[j]);
+            if turn(a.d, b.d).abs() > 8f64.to_radians() {
+                continue;
+            }
+            let e = if b.e < a.s { b.e + n } else { b.e };
+            let one = Side::fit(&p, a.s, e);
+            if (a.s..=e).all(|k| (p[k % n] - one.c).perp_dot(one.d).abs() <= coarse * 1.5) {
+                sides[i] = one;
+                sides.remove(j);
+                merged = true;
+                break;
+            }
+        }
+        if !merged {
+            break;
+        }
+    }
+    // each side on its points' envelope, squared to the axes within 5°
+    let snap = AXIS_SNAP_DEG.to_radians().sin();
+    for sd in sides.iter_mut() {
+        let d = sd.d;
+        let d2 = if d.y.abs() < snap {
+            DVec2::new(d.x.signum(), 0.0)
+        } else if d.x.abs() < snap {
+            DVec2::new(0.0, d.y.signum())
+        } else {
+            d
+        };
+        // outward: to the right of the way the outline runs
+        let out = DVec2::new(d2.y, -d2.x);
+        let mut off: Vec<f64> = (sd.s..=sd.e).map(|k| (p[k % n] - sd.c).dot(out)).collect();
+        off.sort_by(|a, b| a.total_cmp(b));
+        let o = off[((off.len() - 1) as f64 * 0.85).round() as usize];
+        *sd = Side::on(&p, sd.s, sd.e, sd.c + out * o, d2);
+    }
+    // the corners
+    let m = sides.len();
+    let mut pts = vec![];
+    let mut cuts = vec![];
+    for i in 0..m {
+        let (a, b) = (sides[i], sides[(i + 1) % m]);
+        let phi = turn(a.d, b.d);
+        let gap = a.b.distance(b.a);
+        let den = a.d.perp_dot(b.d);
+        let x = if phi.abs() > 10f64.to_radians() && phi.abs() < 170f64.to_radians() {
+            let x = a.c + a.d * (b.c - a.c).perp_dot(b.d) / den;
+            (x.distance(a.b) < gap * 3.0 + 4.0 && x.distance(b.a) < gap * 3.0 + 4.0).then_some(x)
+        } else {
+            None
+        };
+        let Some(x) = x else {
+            // a jog or a turn back: the two ends as they are
+            pts.push(a.b);
+            cuts.push(0.0);
+            pts.push(b.a);
+            cuts.push(0.0);
+            continue;
+        };
+        let mut cut = 0.0;
+        let sharp = (3.0 * px).max(0.8);
+        if phi > 0.0 {
+            // the outline's points near the corner, off both sides
+            let reach = (0.45 * a.len().min(b.len())).min(10.0).max(gap * 1.5);
+            let dl = |l: &Side, q: DVec2| (q - l.c).perp_dot(l.d).abs();
+            let zone: Vec<DVec2> = p.iter().copied().filter(|q| q.distance(x) < reach && dl(&a, *q) > fine && dl(&b, *q) > fine).collect();
+            if zone.len() >= 3 {
+                // the arc tangent to both sides that fits them best: its
+                // centre on the bisector, its radius searched
+                let bis = (b.d - a.d).normalize_or_zero();
+                let half = (phi * 0.5).cos();
+                let err = |r: f64| {
+                    let c = x + bis * (r / half);
+                    zone.iter().map(|q| (q.distance(c) - r).powi(2)).sum::<f64>()
+                };
+                let mut best = (f64::INFINITY, 0.0);
+                for k in 0..=90 {
+                    let r = 0.3 * (40.0f64 / 0.3).powf(k as f64 / 90.0);
+                    let e = err(r);
+                    if e < best.0 {
+                        best = (e, r);
+                    }
+                }
+                let (mut lo, mut hi) = (best.1 / 1.06, best.1 * 1.06);
+                for _ in 0..30 {
+                    let (m1, m2) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+                    if err(m1) < err(m2) {
+                        hi = m2;
+                    } else {
+                        lo = m1;
+                    }
+                }
+                let r = (lo + hi) * 0.5;
+                let c = x + bis * (r / half);
+                let arc_err = zone.iter().map(|q| (q.distance(c) - r).abs()).fold(0.0, f64::max);
+                // a straight chamfer through them
+                let ch = Side::fit(&zone, 0, zone.len() - 1);
+                let ch_err = zone.iter().map(|q| (*q - ch.c).perp_dot(ch.d).abs()).fold(0.0, f64::max);
+                let meet = |l: &Side| {
+                    let den = l.d.perp_dot(ch.d);
+                    (den.abs() > 1e-6).then(|| l.c + l.d * (ch.c - l.c).perp_dot(ch.d) / den)
+                };
+                let (t, ch_span) = match (meet(&a), meet(&b)) {
+                    (Some(p1), Some(p2)) => {
+                        // how much of the chamfer its points cover
+                        let along: Vec<f64> = zone.iter().map(|q| (*q - p1).dot(ch.d)).collect();
+                        let lo = along.iter().copied().fold(f64::INFINITY, f64::min);
+                        let hi = along.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                        ((p1.distance(x) + p2.distance(x)) * 0.5, (hi - lo) / p1.distance(p2).max(1e-9))
+                    }
+                    _ => (0.0, 0.0),
+                };
+                // how much of the arc its points cover (it turns by phi)
+                let ang: Vec<f64> = zone.iter().map(|q| turn(-bis, *q - c)).collect();
+                let arc_span = (ang.iter().copied().fold(f64::NEG_INFINITY, f64::max) - ang.iter().copied().fold(f64::INFINITY, f64::min)) / phi;
+                let fits = (0.5f64).max(0.12 * r);
+                if arc_err <= ch_err * 1.2 && arc_err < fits && r >= sharp && arc_span > 0.5 {
+                    cut = (r * 10.0).round() / 10.0;
+                } else if ch_err < arc_err && ch_err < 0.5 && t >= sharp && ch_span > 0.5 {
+                    cut = -((t * 10.0).round() / 10.0);
+                }
+            }
+        }
+        pts.push(x);
+        cuts.push(cut);
+    }
+    if pts.len() < 3 {
+        return None;
+    }
+    // a cut takes at most half of each side next to it (as `corner_cut`)
+    let k = pts.len();
+    for i in 0..k {
+        if cuts[i] == 0.0 {
+            continue;
+        }
+        let (a, b, c) = (pts[(i + k - 1) % k], pts[i], pts[(i + 1) % k]);
+        let room = 0.5 * a.distance(b).min(b.distance(c));
+        let phi = turn(b - a, c - b).abs();
+        let per = if cuts[i] > 0.0 { (phi * 0.5).tan().max(1e-6) } else { 1.0 };
+        let along = cuts[i].abs() * per;
+        if along > room {
+            cuts[i] = cuts[i].signum() * ((room / per) * 10.0).floor() / 10.0;
+        }
+    }
+    Some((pts, cuts))
+}
+
 /// Whether an outline is a rectangle: four corners, each within 3° of square.
 fn is_rect(p: &[DVec2]) -> bool {
     if p.len() != 4 {
@@ -866,15 +1162,44 @@ pub fn read_along(m: &Mesh, w: DVec3, grain: f64) -> Primaries {
         // the outline's sides within about 2 % of its size: a primary
         // shape has few corners
         let tol = (px * 2.5).max(0.6).max((r.cells as f64 * cell).sqrt() * 0.02);
-        let mut outline = square_up(simplify(&pts, tol), tol * 1.5);
+        let (mut outline, mut corner) = match fit_outline(&pts, px, (r.cells as f64 * cell).sqrt()) {
+            Some(x) => x,
+            None => {
+                let o = square_up(simplify(&pts, tol), tol * 1.5);
+                let n = o.len();
+                (o, vec![0.0; n])
+            }
+        };
         if signed_area(&outline) < 0.0 {
             outline.reverse();
+            corner.reverse();
         }
         if outline.len() < 3 {
             continue;
         }
-        let rect = is_rect(&outline);
-        parts.push(Primary { outline, back: r.back, front: r.front, area: r.cells as f64 * cell, flat: r.flat as f64 / (2.0 * r.cells as f64), rect });
+        // a corner against a thicker slab (where the two meet) stays sharp:
+        // only the part's own outline is rounded or chamfered
+        for (q, c) in outline.iter().zip(corner.iter_mut()) {
+            if *c == 0.0 {
+                continue;
+            }
+            let reach = ((c.abs() + 1.0) / px).ceil() as i64;
+            let (cx, cy) = (((q.x - g.u0) / px) as i64, ((q.y - g.v0) / px) as i64);
+            let against = (-reach..=reach).any(|dy| {
+                (-reach..=reach).any(|dx| {
+                    let (x, y) = (cx + dx, cy + dy);
+                    x >= 0 && y >= 0 && (x as usize) < g.w && (y as usize) < g.h && {
+                        let l = lab[y as usize * g.w + x as usize];
+                        l != 0 && l != id && regions[l as usize].front - regions[l as usize].back > thick + 0.2
+                    }
+                })
+            });
+            if against {
+                *c = 0.0;
+            }
+        }
+        let rect = is_rect(&outline) && corner.iter().all(|c| *c == 0.0);
+        parts.push(Primary { outline, back: r.back, front: r.front, area: r.cells as f64 * cell, flat: r.flat as f64 / (2.0 * r.cells as f64), corner, rect });
     }
     parts.sort_by(|a, b| (b.area * b.thickness()).total_cmp(&(a.area * a.thickness())));
     let _ = flab;
@@ -937,7 +1262,7 @@ mod tests {
         assert_eq!(side_axis(&m), DVec3::Z);
         let p = read(&m, 0.5);
         for s in &p.parts {
-            eprintln!("{:?} {:.2}..{:.2} area {:.0} flat {:.2} rect {}", s.outline, s.back, s.front, s.area, s.flat, s.rect);
+            eprintln!("{:?} {:?} {:.2}..{:.2} area {:.0} flat {:.2} rect {}", s.outline, s.corner, s.back, s.front, s.area, s.flat, s.rect);
         }
         assert_eq!(p.parts.len(), 2, "two slabs");
         let a = &p.parts[0];
@@ -975,6 +1300,56 @@ mod tests {
         assert!((area - (300.0 + 200.0)).abs() < 25.0, "area {area}");
     }
 
+    /// A convex outline pulled from `z0` to `z1` (caps fanned from the
+    /// centre).
+    fn add_prism(m: &mut Mesh, o: &[DVec2], z0: f64, z1: f64) {
+        let c = o.iter().copied().sum::<DVec2>() / o.len() as f64;
+        let n = o.len() as u32;
+        let base = m.pos.len() as u32;
+        for z in [z0, z1] {
+            m.pos.push(DVec3::new(c.x, c.y, z));
+            for q in o {
+                m.pos.push(DVec3::new(q.x, q.y, z));
+            }
+        }
+        let (b0, b1) = (base, base + n + 1);
+        for i in 0..n {
+            let j = (i + 1) % n;
+            m.tris.push([b0, b0 + 1 + j, b0 + 1 + i]);
+            m.tris.push([b1, b1 + 1 + i, b1 + 1 + j]);
+            m.tris.push([b0 + 1 + i, b0 + 1 + j, b1 + 1 + j]);
+            m.tris.push([b0 + 1 + i, b1 + 1 + j, b1 + 1 + i]);
+        }
+    }
+
+    /// A slab whose outline has a rounded corner (5 mm) and a chamfered one
+    /// (4 mm): four corners, the fillet and the chamfer read as cuts.
+    #[test]
+    fn rounded_and_chamfered() {
+        let mut o = vec![DVec2::new(0.0, 0.0), DVec2::new(40.0, 0.0)];
+        for k in 0..=24 {
+            let a = std::f64::consts::FRAC_PI_2 * k as f64 / 24.0;
+            o.push(DVec2::new(35.0 + 5.0 * a.cos(), 20.0 + 5.0 * a.sin()));
+        }
+        o.push(DVec2::new(4.0, 25.0));
+        o.push(DVec2::new(0.0, 21.0));
+        let mut m = mesh();
+        add_prism(&mut m, &o, -8.0, 8.0);
+        let p = read_along(&m, DVec3::Z, 0.2);
+        assert_eq!(p.parts.len(), 1);
+        let s = &p.parts[0];
+        eprintln!("{:?} {:?}", s.outline, s.corner);
+        assert_eq!(s.outline.len(), 4, "{:?}", s.outline);
+        let near = |q: DVec2| s.outline.iter().position(|c| c.distance(q) < 0.5);
+        let (k0, k1, k2, k3) = (near(DVec2::new(0.0, 0.0)), near(DVec2::new(40.0, 0.0)), near(DVec2::new(40.0, 25.0)), near(DVec2::new(0.0, 25.0)));
+        assert!(k0.is_some() && k1.is_some() && k2.is_some() && k3.is_some(), "{:?}", s.outline);
+        assert_eq!(s.corner[k0.unwrap()], 0.0);
+        assert_eq!(s.corner[k1.unwrap()], 0.0);
+        assert!((s.corner[k2.unwrap()] - 5.0).abs() < 0.35, "fillet {}", s.corner[k2.unwrap()]);
+        assert!((s.corner[k3.unwrap()] + 4.0).abs() < 0.35, "chamfer {}", s.corner[k3.unwrap()]);
+        assert!(!s.rect);
+    }
+
     /// The pistol (ignored: the mesh is not in the repository): its primary
     /// shapes printed. `FORME_REF` = another .obj.
     #[test]
@@ -987,7 +1362,8 @@ mod tests {
         eprintln!("side {:?}, step {:.3} mm, {} parts, {:.0} ms", p.w, p.px, p.parts.len(), t.elapsed().as_secs_f64() * 1e3);
         for s in &p.parts {
             let pts: Vec<String> = s.outline.iter().map(|q| format!("[{:.2},{:.2}]", q.x, q.y)).collect();
-            println!("{{\"back\":{:.3},\"front\":{:.3},\"area\":{:.1},\"flat\":{:.3},\"rect\":{},\"outline\":[{}]}}", s.back, s.front, s.area, s.flat, s.rect, pts.join(","));
+            let cuts: Vec<String> = s.corner.iter().map(|c| format!("{c:.1}")).collect();
+            println!("{{\"back\":{:.3},\"front\":{:.3},\"area\":{:.1},\"flat\":{:.3},\"rect\":{},\"outline\":[{}],\"corner\":[{}]}}", s.back, s.front, s.area, s.flat, s.rect, pts.join(","), cuts.join(","));
         }
     }
 }

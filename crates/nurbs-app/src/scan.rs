@@ -273,7 +273,9 @@ pub fn primary_step(p: &Primaries, s: &Primary) -> Option<PrimaryRead> {
     let flip = p.u.cross(p.w).dot(p.v).signum();
     let points: Vec<[f64; 2]> = s.outline.iter().map(|q| [(q.x - centre.x) / size.x, flip * (q.y - centre.y) / size.y]).collect();
     let n = points.len();
-    let profile = Profile { points, smooth: vec![false; n], corner: vec![], tension: vec![], open: false };
+    // the corners read rounded (> 0, a radius) or chamfered (< 0)
+    let corner = if s.corner.iter().any(|c| *c != 0.0) { s.corner.iter().copied().take(n).collect() } else { vec![] };
+    let profile = Profile { points, smooth: vec![false; n], corner, tension: vec![], open: false };
     Some(PrimaryRead { prim: Prim::Profile { x: size.x, y: h, z: size.y }, profile: Some(profile), origin: p.at(centre, s.back), rot })
 }
 
@@ -903,8 +905,14 @@ impl AppState {
         self.selection = vec![];
         let cubes = reads.iter().filter(|(x, _)| matches!(x.prim, Prim::Box { .. })).count();
         let axis = if pr.w.x.abs() > 0.5 { "X" } else if pr.w.y.abs() > 0.5 { "Y" } else { "Z" };
+        let cut = |f: fn(f64) -> bool| reads.iter().filter_map(|(x, _)| x.profile.as_ref()).map(|p| p.corner.iter().filter(|c| f(**c)).count()).sum::<usize>();
+        let (rounded, chamfered) = (cut(|c| c > 0.0), cut(|c| c < 0.0));
         self.toast(
-            &format!("{} primary shapes read on the scan, seen along {axis}: {cubes} cubes, {} outlines · the deviation shows what is left", reads.len(), reads.len() - cubes),
+            &format!(
+                "{} primary shapes read on the scan, seen along {axis}: {cubes} cubes, {} outlines ({rounded} corners rounded, {chamfered} chamfered) · the deviation shows what is left",
+                reads.len(),
+                reads.len() - cubes
+            ),
             false,
         );
         self.set_deviation(true);
