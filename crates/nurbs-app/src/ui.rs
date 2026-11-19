@@ -251,10 +251,32 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 if icon_btn(ui, Icon::Frame, false, "Frame the whole part (F with nothing selected)", 28.0).clicked() {
                     st.frame_all();
                 }
-                if icon_btn(ui, Icon::Quads, st.quads, "Quads view: the part as a quad mesh, fillets in orange (first version: faces with holes stay triangles)", 28.0).clicked() {
-                    st.quads = !st.quads;
+                if icon_btn(ui, Icon::Quads, st.quads, "Quads view, face by face: each B-rep face cut into quad patches, fillets in orange", 28.0).clicked() {
+                    st.set_quads_view(!st.quads);
                 }
-                if st.quads && icon_btn(ui, Icon::Export, false, "Export the quads as .obj (Documents/Forme NURBS)", 28.0).clicked() {
+                if icon_btn(ui, Icon::Remesh, st.remesh_on, "Remesh view (QuadRemesher style): the whole part remeshed in quads that follow its edges and fillets, made in the background", 28.0).clicked() {
+                    st.set_remesh_view(!st.remesh_on);
+                }
+                if st.remesh_on {
+                    // QuadRemesher's Target Quad Count: a click goes to the next
+                    const TARGETS: [usize; 6] = [500, 1000, 1500, 3000, 6000, 12000];
+                    let t = st.remesh_target;
+                    let label = if t >= 1000 { format!("{}k", fmt_mm(t as f32 / 1000.0)) } else { t.to_string() };
+                    let g = ui.painter().layout_no_wrap(label, mono(11.0), TEXT());
+                    let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 16.0, 28.0), Sense::click());
+                    if resp.hovered() {
+                        ui.painter().rect_filled(r, 7.0, RAISED());
+                    }
+                    ui.painter().galley(r.center() - g.size() * 0.5, g, TEXT());
+                    let resp = resp.on_hover_text("Target quad count (about): click for more, right click for fewer");
+                    let i = TARGETS.iter().position(|x| *x == t).unwrap_or(2);
+                    if resp.clicked() {
+                        st.set_remesh_target(TARGETS[(i + 1) % TARGETS.len()]);
+                    } else if resp.secondary_clicked() {
+                        st.set_remesh_target(TARGETS[(i + TARGETS.len() - 1) % TARGETS.len()]);
+                    }
+                }
+                if (st.quads || st.remesh_on) && icon_btn(ui, Icon::Export, false, if st.remesh_on { "Export the remesh as .obj (Documents/Forme NURBS, <name>-remesh.obj)" } else { "Export the quads as .obj (Documents/Forme NURBS)" }, 28.0).clicked() {
                     st.export_obj();
                 }
                 if icon_btn(ui, Icon::Light, st.settings.light, "Light theme", 28.0).clicked() {

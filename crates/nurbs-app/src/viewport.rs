@@ -826,7 +826,19 @@ fn status(p: &Painter, st: &AppState) {
             if rounds > 0 {
                 parts.push(format!("{rounds} fillet{}", if rounds == 1 { "" } else { "s" }));
             }
-            if let Some(q) = st.quad_mesh() {
+            if st.remesh_on {
+                if st.remeshing() {
+                    parts.push("remeshing…".into());
+                }
+                match st.remesh.as_ref().map(|r| (&r.result, r.ms)) {
+                    Some((Ok((q, rep)), ms)) => parts.push(format!("remesh {} quads · {:.1} mm · {:.1} s", q.quads.len(), rep.quad_size, ms / 1000.0)),
+                    Some((Err(e), _)) => {
+                        parts.push(format!("remesh failed: {e}"));
+                        color = ERROR;
+                    }
+                    None => {}
+                }
+            } else if let Some(q) = st.quad_mesh() {
                 parts.push(format!("{} quads", q.quads.len()));
             } else if st.quads && !st.building() {
                 parts.push("no quads".into());

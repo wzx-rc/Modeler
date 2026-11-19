@@ -602,6 +602,38 @@ fn main() {
         }
     }
 
+    if want("remesh") {
+        // the « Export converter » (field-aligned remesh), its own view
+        // apart from the face-by-face Quads view
+        let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        let mut d = test_part();
+        let block = d.features.iter().find(|f| f.name == "Block").map(|f| f.id).unwrap();
+        d.add_round(3.0, false, vec![EdgeRef { faces: [tag(block, 0), tag(block, 4)], at: DVec3::new(20.0, 10.0, 15.0) }]);
+        h.reset(d, "Remesh part");
+        h.st.set_remesh_view(true);
+        h.settle();
+        let t0 = std::time::Instant::now();
+        while h.st.remeshing() && t0.elapsed().as_secs() < 120 {
+            std::thread::sleep(Duration::from_millis(50));
+            h.steps(1);
+        }
+        h.steps(2);
+        match h.st.remesh.as_ref().map(|r| (&r.result, r.ms)) {
+            Some((Ok((q, rep)), ms)) => eprintln!("  remesh {} quads, quad {:.2} mm, {:.0} ms, closed {}", q.quads.len(), rep.quad_size, ms, nurbs_kernel::remesh::is_closed(q)),
+            Some((Err(e), _)) => eprintln!("  remesh failed: {e}"),
+            None => eprintln!("  no remesh"),
+        }
+        h.shot("zero-remesh-1");
+        std::env::set_var("FORME_DOCS", &out);
+        h.st.export_obj();
+        h.steps(1);
+        // the Quads view turns it off: the two stay apart
+        h.st.set_quads_view(true);
+        h.settle();
+        eprintln!("  quads view: remesh_on {} quads {}", h.st.remesh_on, h.st.quad_mesh().map(|q| q.quads.len()).unwrap_or(0));
+        h.shot("zero-remesh-2-faces-view");
+    }
+
     if want("quads") {
         let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
         // a 20 mm cube, its top front edge filleted at 4 mm

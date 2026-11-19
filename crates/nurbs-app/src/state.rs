@@ -240,6 +240,15 @@ pub enum RoundWhat {
     Corners { corners: Vec<(FeatureId, usize)>, id: FeatureId, bis: [f64; 2], per: f64, y: f64 },
 }
 
+/// A remesh of the part (`nurbs_kernel::remesh`).
+pub struct Remeshed {
+    /// The model's serial.
+    pub serial: u64,
+    pub target: usize,
+    pub result: Result<(nurbs_kernel::Quads, nurbs_kernel::remesh::Report), String>,
+    pub ms: f32,
+}
+
 pub struct Toast {
     pub text: String,
     pub until: f64,
@@ -321,6 +330,16 @@ pub struct AppState {
     pub panel_visible: bool,
     /// Quads view: the part as the kernel's quad mesh (fillets in orange).
     pub quads: bool,
+    /// Remesh view (the « Export converter », `nurbs_kernel::remesh`, kept
+    /// apart from the face-by-face Quads view): the whole part remeshed in
+    /// field-aligned quads, made in the background from the fine model.
+    pub remesh_on: bool,
+    /// QuadRemesher's "Target Quad Count".
+    pub remesh_target: usize,
+    /// The remesh shown: for the model `model_gen` and the target, and what
+    /// it did (or why it failed).
+    pub remesh: Option<Remeshed>,
+    remesh_job: Option<(u64, usize, std::sync::mpsc::Receiver<(Result<(nurbs_kernel::Quads, nurbs_kernel::remesh::Report), String>, f32)>)>,
     /// The part's points of interest (`snap.rs`), for the model `snaps_gen`.
     pub snaps: Vec<crate::snap::SnapPoint>,
     pub snaps_gen: u64,
@@ -385,6 +404,10 @@ impl AppState {
             save_name: name.to_string(),
             panel_visible: true,
             quads: false,
+            remesh_on: false,
+            remesh_target: 1500,
+            remesh: None,
+            remesh_job: None,
             snaps: vec![],
             snaps_gen: 0,
             snap_shown: None,
@@ -1554,6 +1577,7 @@ impl AppState {
             }
         }
         self.refresh_snaps();
+        self.remesh_tick();
         let fine = !self.is_live();
         // quads only for a finished state (not while a gesture is live)
         let quads = self.quads && fine;
@@ -1595,9 +1619,84 @@ impl AppState {
         self.kernel.busy() || self.model.as_ref().map(|m| m.serial / 4 != self.version).unwrap_or(!self.doc.features.is_empty())
     }
 
-    /// The quad mesh of the part, when the Quads view has it.
+    /// The quad mesh of the part, when the Quads view (face by face) or the
+    /// Remesh view has it.
     pub fn quad_mesh(&self) -> Option<&nurbs_kernel::Quads> {
+        if self.remesh_on {
+            return self.remesh.as_ref().and_then(|r| r.result.as_ref().ok()).map(|r| &r.0);
+        }
         self.model.as_ref().and_then(|m| m.quads.as_ref()).filter(|_| self.quads)
+    }
+
+    /// The Quads view (face by face) on or off; it turns the Remesh view
+    /// off (two separate views).
+    pub fn set_quads_view(&mut self, on: bool) {
+        self.quads = on;
+        if on {
+            self.remesh_on = false;
+        }
+        self.model_gen += 1;
+    }
+
+    /// The Remesh view on or off; it turns the Quads view off.
+    pub fn set_remesh_view(&mut self, on: bool) {
+        self.remesh_on = on;
+        if on {
+            self.quads = false;
+        }
+        self.model_gen += 1;
+    }
+
+    /// The Remesh view's target quad count.
+    pub fn set_remesh_target(&mut self, n: usize) {
+        self.remesh_target = n.clamp(100, 50_000);
+    }
+
+    /// The remesh under way (once per fine model of the current document
+    /// and target, in a thread: it takes seconds).
+    pub fn remeshing(&self) -> bool {
+        let serial = self.model.as_ref().map(|m| m.serial).unwrap_or(0);
+        self.remesh_on && (self.remesh_job.is_some() || self.remesh.as_ref().map(|r| r.serial != serial || r.target != self.remesh_target).unwrap_or(true))
+    }
+
+    fn remesh_tick(&mut self) {
+        // its answer
+        if let Some((g, t, rx)) = &self.remesh_job {
+            match rx.try_recv() {
+                Ok((res, ms)) => {
+                    let (g, t) = (*g, *t);
+                    self.remesh_job = None;
+                    if self.model.as_ref().map(|m| m.serial) == Some(g) && t == self.remesh_target {
+                        self.remesh = Some(Remeshed { serial: g, target: t, result: res, ms });
+                        // the renderer takes the new quads
+                        self.model_gen += 1;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(_) => self.remesh_job = None,
+            }
+        }
+        if !self.remesh_on || self.remesh_job.is_some() {
+            return;
+        }
+        let Some(m) = self.model.clone() else { return };
+        // only a finished model of the current document
+        if !m.fine || self.is_live() || m.serial / 4 != self.version || m.triangles.is_empty() {
+            return;
+        }
+        if self.remesh.as_ref().map(|r| r.serial == m.serial && r.target == self.remesh_target).unwrap_or(false) {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let target = self.remesh_target;
+        let serial = m.serial;
+        std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
+            let s = nurbs_kernel::remesh::Settings { target_quads: target, ..Default::default() };
+            let res = std::panic::catch_unwind(|| nurbs_kernel::remesh::remesh(&m, s)).unwrap_or_else(|_| Err("the remesh crashed".into()));
+            let _ = tx.send((res, t0.elapsed().as_secs_f32() * 1000.0));
+        });
+        self.remesh_job = Some((serial, target, rx));
     }
 
     /// Writes the quads as Wavefront OBJ next to the documents (one group
@@ -1605,6 +1704,26 @@ impl AppState {
     /// not in it).
     pub fn export_obj(&mut self) {
         let Some(m) = self.model.clone() else { return };
+        if self.remesh_on {
+            let Some(q) = self.remesh.as_ref().and_then(|r| r.result.as_ref().ok()).map(|r| r.0.clone()) else {
+                self.toast("No remesh yet: it is being made", true);
+                return;
+            };
+            let s = nurbs_kernel::remesh::obj(&q, |f| {
+                let tag = m.faces.get(f as usize).and_then(|x| x.tag);
+                let who = tag.and_then(|t| self.doc.feature(t.feature)).map(|x| crate::files::sanitize(&x.name).replace(' ', "_")).unwrap_or_else(|| "part".into());
+                format!("{who}_face{f}")
+            });
+            let path = crate::files::documents_dir().join(format!("{}-remesh.obj", crate::files::sanitize(&self.doc_name)));
+            match std::fs::write(&path, s) {
+                Ok(()) => {
+                    let text = format!("Saved {} quads to {}", q.quads.len(), path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                    self.toast(&text, false);
+                }
+                Err(e) => self.toast(&format!("Export failed: {e}"), true),
+            }
+            return;
+        }
         let Some(q) = m.quads.as_ref() else {
             self.toast("No quads yet: turn on the Quads view", true);
             return;

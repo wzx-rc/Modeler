@@ -56,6 +56,8 @@ pub enum Icon {
     Inset,
     /// Extrude face: a face and an arrow up out of it.
     Extrude,
+    /// Remesh: quads flowing round a bend, the whole part at once.
+    Remesh,
     /// Knife: a blade (as in Forme Rectify).
     Knife,
     /// Point on edge: an edge and a point on it.
@@ -228,6 +230,17 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(15.0, 6.0), (11.0, 11.0)]);
             pen.line(&[(17.0, 10.0), (12.0, 13.0)]);
             pen.line(&[(17.0, 17.0), (12.0, 17.0)]);
+        }
+        Icon::Remesh => {
+            // two families of curves crossing: a quad field round a bend
+            pen.arc(17.0, 17.0, 14.0, 14.0, PI, 1.5 * PI);
+            pen.arc(17.0, 17.0, 9.5, 9.5, PI, 1.5 * PI);
+            pen.arc(17.0, 17.0, 5.0, 5.0, PI, 1.5 * PI);
+            pen.line(&[(3.0, 17.0), (7.5, 17.0)]);
+            pen.line(&[(17.0, 3.0), (17.0, 7.5)]);
+            pen.line(&[(7.1, 7.1), (10.3, 10.3)]);
+            pen.line(&[(4.1, 11.6), (8.3, 13.4)]);
+            pen.line(&[(11.6, 4.1), (13.4, 8.3)]);
         }
         Icon::Grid => {
             pen.closed(&[(3.0, 3.0), (17.0, 3.0), (17.0, 17.0), (3.0, 17.0)]);
