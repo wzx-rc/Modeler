@@ -1723,6 +1723,131 @@ fn main() {
         h.settle();
         h.shot("zero-tension-box-5-corner-fuller");
     }
+    if want("tension-two") || want("tension-small") {
+        // two fillet sizes on a block: the top edges at 3 mm, then the
+        // vertical ones at 5 mm (their corners run round under the top
+        // one), circular, then each with its tension; then the other order.
+        // tension-small: the vertical ones at 3 mm under top ones at 5 mm
+        // (OpenCascade's corner between them follows)
+        let refs = |h: &Harness, mids: &[Vec3]| -> Vec<EdgeRef> {
+            let m = h.st.model.as_ref().unwrap();
+            mids.iter()
+                .filter_map(|p| {
+                    let near = |i: usize| {
+                        let pts: Vec<Vec3> = m.edges[i].pts.iter().map(|q| Vec3::from_array(*q)).collect();
+                        pts.windows(2)
+                            .map(|w| {
+                                let d = w[1] - w[0];
+                                let t = ((*p - w[0]).dot(d) / d.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                                (w[0] + d * t).distance(*p)
+                            })
+                            .fold(f32::MAX, f32::min)
+                    };
+                    let i = (0..m.edges.len()).min_by(|a, b| near(*a).total_cmp(&near(*b)))?;
+                    h.st.edge_ref(i)
+                })
+                .collect()
+        };
+        let vert = [Vec3::new(20.0, 10.0, 15.0), Vec3::new(-20.0, 10.0, 15.0), Vec3::new(20.0, 10.0, -15.0), Vec3::new(-20.0, 10.0, -15.0)];
+        let top = [Vec3::new(0.0, 20.0, 15.0), Vec3::new(0.0, 20.0, -15.0), Vec3::new(20.0, 20.0, 0.0), Vec3::new(-20.0, 20.0, 0.0)];
+        let runs = [("two", 5.0, 3.0, "top-first", false, 0.5), ("two", 5.0, 3.0, "vertical-first", true, 0.5), ("two", 5.0, 3.0, "top-first-too-full", false, 0.7), ("two", 5.0, 3.0, "vertical-first-too-full", true, 0.7), ("small", 3.0, 5.0, "top-first", false, 0.5), ("small", 3.0, 5.0, "vertical-first", true, 0.5)];
+        for (set, rv, rt, order, vfirst, tvert) in runs {
+            if !want(&format!("tension-{set}")) {
+                continue;
+            }
+            let mut d = Doc::default();
+            d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            h.reset(d, "Two fillets");
+            h.settle();
+            let (m1, r1, m2, r2) = if vfirst { (&vert, rv, &top, rt) } else { (&top, rt, &vert, rv) };
+            let e1 = refs(&h, m1);
+            let mut a = 0;
+            h.st.edit("Fillet", |d| a = d.add_round(r1, false, e1));
+            h.settle();
+            let e2 = refs(&h, m2);
+            let mut b = 0;
+            h.st.edit("Fillet", |d| b = d.add_round(r2, false, e2));
+            h.settle();
+            let (tv, tt) = if vfirst { (a, b) } else { (b, a) };
+            h.st.select(Some(b), false);
+            h.st.camera.frame(Vec3::new(-20.0, 0.0, -15.0), Vec3::new(20.0, 20.0, 15.0));
+            h.steps(2);
+            h.settle();
+            if order == "top-first" {
+                h.shot(&format!("zero-tension-{set}-1-circular"));
+                if set == "small" {
+                    h.st.select(None, false);
+                    h.st.camera.frame(Vec3::new(10.0, 10.0, 5.0), Vec3::new(20.0, 20.0, 15.0));
+                    h.steps(2);
+                    h.settle();
+                    h.shot("zero-tension-small-1-circular-corner");
+                    h.st.select(Some(b), false);
+                    h.st.camera.frame(Vec3::new(-20.0, 0.0, -15.0), Vec3::new(20.0, 20.0, 15.0));
+                    h.steps(2);
+                    h.settle();
+                }
+            }
+            h.st.set_round_tension(tt, 0.7, true);
+            h.st.end_live();
+            h.settle();
+            h.st.set_round_tension(tv, tvert, true);
+            h.st.end_live();
+            h.settle();
+            eprintln!("  {order}: errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+            h.shot(&format!("zero-tension-{set}-2-{order}"));
+            h.st.select(None, false);
+            h.st.camera.frame(Vec3::new(10.0, 10.0, 5.0), Vec3::new(20.0, 20.0, 15.0));
+            h.steps(2);
+            h.settle();
+            h.shot(&format!("zero-tension-{set}-3-{order}-corner"));
+            if tvert > 0.6 && set == "two" {
+                // seen from above: the top fillet's edge round the corner
+                h.st.camera.preset(nurbs_app::camera::ViewPreset::Top);
+                h.st.camera.frame(Vec3::new(8.0, 18.0, 3.0), Vec3::new(20.0, 20.0, 15.0));
+                h.steps(2);
+                h.settle();
+                h.shot(&format!("zero-tension-two-4-{order}-above"));
+            }
+        }
+    }
+    if want("tension-point") {
+        // the top front edge filleted at 2 mm, then the top -X edge at 3 mm:
+        // OpenCascade carries the second round the first one's end and down
+        // the front vertical edge, its corner there closing on a point of
+        // the -X side; with tension that corner turns conic too
+        let mut d = Doc::default();
+        let bx = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Point corner");
+        h.settle();
+        let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        let mut a = 0;
+        h.st.edit("Fillet", |d| a = d.add_round(2.0, false, vec![EdgeRef { faces: [tag(bx, 2), tag(bx, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]));
+        h.settle();
+        let mut b = 0;
+        h.st.edit("Fillet", |d| b = d.add_round(3.0, false, vec![EdgeRef { faces: [tag(bx, 2), tag(bx, 1)], at: DVec3::new(-20.0, 20.0, 0.0) }]));
+        h.settle();
+        let _ = a;
+        h.st.select(None, false);
+        h.st.camera.yaw = -0.75;
+        h.st.camera.pitch = 0.55;
+        h.st.camera.frame(Vec3::new(-24.0, 6.0, 4.0), Vec3::new(-10.0, 22.0, 18.0));
+        h.st.camera.target = Vec3::new(-18.5, 17.0, 13.0);
+        h.st.camera.dist *= 0.45;
+        h.steps(2);
+        h.settle();
+        h.shot("zero-tension-point-0-blended");
+        // (Blend corners off: the shape tension is made on, still circular)
+        h.st.edit("Blend", |d| d.feature_mut(b).unwrap().round.as_mut().unwrap().blend = false);
+        h.settle();
+        h.shot("zero-tension-point-1-circular");
+        for (t, name) in [(0.7, "2-full"), (0.3, "3-flat")] {
+            h.st.set_round_tension(b, t, true);
+            h.st.end_live();
+            h.settle();
+            eprintln!("  tension {t}: errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+            h.shot(&format!("zero-tension-point-{name}"));
+        }
+    }
     if want("tension") {
         // the direct fillet's modifiers: Shift held during the drag sets
         // the tension (up fuller), Ctrl held makes a chamfer
@@ -1861,6 +1986,190 @@ fn main() {
         eprintln!("  edges {} errors {:?}", h.st.model.as_ref().map(|m| m.edges.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
     }
 
+    if want("comp-bend") {
+        // a face of more than four sides bent by a vertex move (19 nov.): a
+        // cube's top front edge chamfered (its +X side a pentagon), the
+        // bottom front corner of that side pulled out with the gizmo; then
+        // an L sketch's outer top corner raised (its top: six sides)
+        let pull = |h: &mut Harness, axis: usize, mm: f32| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + Vec3::AXES[axis]) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let by = h.screen_of(c + Vec3::AXES[axis] * mm) - s0;
+            h.drag(grab, grab + by, 10, true);
+            h.settle();
+        };
+        let say = |h: &Harness| eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let t = |sub: u16| FaceTag { feature: c, sub }.pack();
+        d.add_round(4.0, true, vec![EdgeRef { faces: [t(2), t(4)], at: DVec3::new(0.0, 20.0, 10.0) }]);
+        h.reset(d, "Chamfered cube");
+        h.st.camera.frame(Vec3::new(-12.0, 0.0, -12.0), Vec3::new(16.0, 22.0, 14.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num1);
+        let corner = h.screen_of(Vec3::new(10.0, 0.0, 10.0));
+        h.click(corner);
+        h.steps(2);
+        h.shot("zero-comp-bend-1-picked");
+        pull(&mut h, 0, 5.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-comp-bend-2-pentagon");
+        // from its side: the bent face
+        h.st.camera.orbit(-260.0, 40.0);
+        h.st.camera.frame(Vec3::new(-12.0, 0.0, -12.0), Vec3::new(16.0, 22.0, 14.0));
+        h.steps(2);
+        h.settle();
+        h.shot("zero-comp-bend-2b-pentagon-side");
+        let mut d = Doc::default();
+        let l = d.add(Op::Add, Prim::Profile { x: 30.0, y: 10.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(l).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false });
+        h.reset(d, "L sketch");
+        h.st.camera.frame(Vec3::new(-16.0, 0.0, -16.0), Vec3::new(16.0, 16.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num1);
+        let corner = h.screen_of(Vec3::new(15.0, 10.0, -15.0));
+        h.click(corner);
+        h.steps(2);
+        pull(&mut h, 1, 6.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.st.camera.orbit(0.0, -120.0);
+        h.st.camera.frame(Vec3::new(-16.0, 0.0, -16.0), Vec3::new(16.0, 16.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.shot("zero-comp-bend-3-sketch-top");
+    }
+    if want("comp-tilt") {
+        // a face with a hole, a boss or a pocket tilted by an edge move (19
+        // nov.): their walls run on to the new plane. The test part's top
+        // left (the hole) raised on its -X edge; a block with a boss and a
+        // square pocket raised on its +X edge, then lowered
+        let pull = |h: &mut Harness, axis: usize, mm: f32| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + Vec3::AXES[axis]) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let by = h.screen_of(c + Vec3::AXES[axis] * mm) - s0;
+            h.drag(grab, grab + by, 10, true);
+            h.settle();
+        };
+        let say = |h: &Harness| eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.reset(test_part(), "Test part");
+        h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num2);
+        let edge = h.screen_of(Vec3::new(-20.0, 20.0, 6.0));
+        h.click(edge);
+        h.steps(2);
+        h.shot("zero-comp-tilt-1-picked");
+        pull(&mut h, 1, 6.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-comp-tilt-2-hole");
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Cylinder { radius: 6.0, height: 8.0 }, DVec3::new(-9.0, 20.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Box { x: 10.0, y: 6.0, z: 12.0 }, DVec3::new(9.0, 14.0, 0.0), DQuat::IDENTITY);
+        let _ = b;
+        h.reset(d, "Boss and pocket");
+        h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num2);
+        let edge = h.screen_of(Vec3::new(20.0, 20.0, 6.0));
+        h.click(edge);
+        h.steps(2);
+        pull(&mut h, 1, 6.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-comp-tilt-3-boss-pocket");
+        h.st.undo();
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num2);
+        let edge = h.screen_of(Vec3::new(20.0, 20.0, 6.0));
+        h.click(edge);
+        h.steps(2);
+        pull(&mut h, 1, -3.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-comp-tilt-4-lowered");
+    }
+    if want("comp-fillet") {
+        // a face moved where fillets made before run along it (19 nov.):
+        // moved before them, they made again. A block with its top edges
+        // filleted (tension 0.7): the top pulled up; then a block with a
+        // hole whose mouth is chamfered, its top tilted by an edge
+        let pull = |h: &mut Harness, axis: usize, mm: f32| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + Vec3::AXES[axis]) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let by = h.screen_of(c + Vec3::AXES[axis] * mm) - s0;
+            h.drag(grab, grab + by, 10, true);
+            h.settle();
+        };
+        let say = |h: &Harness| eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let t = |sub: u16| FaceTag { feature: b, sub }.pack();
+        let r = d.add_round(5.0, false, vec![
+            EdgeRef { faces: [t(2), t(0)], at: DVec3::new(20.0, 20.0, 0.0) },
+            EdgeRef { faces: [t(2), t(1)], at: DVec3::new(-20.0, 20.0, 0.0) },
+            EdgeRef { faces: [t(2), t(4)], at: DVec3::new(0.0, 20.0, 15.0) },
+            EdgeRef { faces: [t(2), t(5)], at: DVec3::new(0.0, 20.0, -15.0) },
+        ]);
+        d.feature_mut(r).unwrap().round.as_mut().unwrap().tension = 0.7;
+        h.reset(d, "Filleted block");
+        h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num3);
+        let top = h.screen_of(Vec3::new(2.0, 20.0, 2.0));
+        h.click(top);
+        h.steps(2);
+        h.shot("zero-comp-fillet-1-picked");
+        pull(&mut h, 1, 8.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-comp-fillet-2-top-up");
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let hole = d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
+        let t = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        d.add_round(1.5, true, vec![EdgeRef { faces: [t(b, 2), t(hole, 0)], at: DVec3::new(0.0, 20.0, 0.0) }]);
+        h.reset(d, "Chamfered hole");
+        h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num2);
+        let edge = h.screen_of(Vec3::new(6.0, 20.0, 15.0));
+        h.click(edge);
+        h.steps(2);
+        pull(&mut h, 1, 6.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-comp-fillet-3-chamfered-hole");
+    }
     if want("comp-curved") {
         // a flat face moved along its normal with curved faces round it:
         // the boss's top up (its side follows), the block's top up and
