@@ -1765,6 +1765,48 @@ fn main() {
         eprintln!("  edges {} errors {:?}", h.st.model.as_ref().map(|m| m.edges.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
     }
 
+    if want("comp-curved") {
+        // a flat face moved along its normal with curved faces round it:
+        // the boss's top up (its side follows), the block's top up and
+        // down (the hole's wall, the boss's side, the slot's wall follow)
+        h.reset(test_part(), "Test part");
+        let pull = |h: &mut Harness, axis: usize, mm: f32| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + Vec3::AXES[axis]) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let by = h.screen_of(c + Vec3::AXES[axis] * mm) - s0;
+            h.drag(grab, grab + by, 10, true);
+            h.settle();
+        };
+        let say = |h: &Harness| eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.key(egui::Key::Num3);
+        let top = h.screen_of(Vec3::new(10.0, 30.0, 2.0));
+        h.click(top);
+        h.steps(2);
+        h.shot("zero-comp-curved-1-picked");
+        pull(&mut h, 1, 6.0);
+        say(&h);
+        h.shot("zero-comp-curved-2-boss-up");
+        h.key(egui::Key::Escape);
+        let left = h.screen_of(Vec3::new(-15.0, 20.0, 8.0));
+        h.click(left);
+        h.steps(2);
+        pull(&mut h, 1, 4.0);
+        say(&h);
+        h.shot("zero-comp-curved-3-top-up");
+        h.key(egui::Key::Escape);
+        let right = h.screen_of(Vec3::new(17.0, 20.0, 10.0));
+        h.click(right);
+        h.steps(2);
+        pull(&mut h, 1, -3.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.shot("zero-comp-curved-4-top-down");
+        let made = h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| (f.name.clone(), t.delta))).collect::<Vec<_>>();
+        eprintln!("  moves {made:?}");
+    }
+
     if want("knife-curved") {
         // the Knife across the boss's round side: top circle to foot
         // circle, twice (each its own cut); the line follows the side

@@ -24,6 +24,7 @@
 #include <Bnd_Box.hxx>
 #include <gp_Pln.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
@@ -37,6 +38,12 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <GeomLProp_SLProps.hxx>
+#include <BRepTools_Modification.hxx>
+#include <BRepTools_Modifier.hxx>
+#include <gp_Trsf2d.hxx>
+#include <gp_Ax2d.hxx>
+#include <TopTools_DataMapOfShapeInteger.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRep_Tool.hxx>
@@ -53,6 +60,7 @@
 #include <GeomAPI_IntCS.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <functional>
+#include <memory>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_Line.hxx>
 #include <Geom2d_Line.hxx>
@@ -259,6 +267,98 @@ static void dump_check(const TopoDS_Shape& solid) {
                 for (BRepCheck_ListOfStatus::Iterator it(res->StatusOnShape()); it.More(); it.Next())
                     if (it.Value() != BRepCheck_NoError) fprintf(stderr, "check: shape type %d in context status %d\n", (int)t, (int)it.Value());
         }
+}
+
+// Every cylinder given one frame for its axis line and radius: direct, the
+// axis pointing the way of its largest positive component, the origin the
+// axis point nearest the world's, X from the world axis least along it.
+// Two faces on one cylinder then share their parameters, which
+// ShapeUpgrade_UnifySameDomain needs to make them one face. Each face's
+// pcurves follow: (u, v) -> (alpha +- u, c +- v); a mirror there turns the
+// face and its wires over. The faces stay in the same order.
+class CanonCylinders : public BRepTools_Modification {
+public:
+    struct Map { opencascade::handle<Geom_Surface> s; gp_Trsf2d t; bool rev; };
+    TopTools_DataMapOfShapeInteger idx;
+    std::vector<Map> maps;
+    bool find(const TopoDS_Face& F, Map& out) {
+        TopoDS_Face key = F;
+        key.Orientation(TopAbs_FORWARD);
+        if (idx.IsBound(key)) {
+            int i = idx.Find(key);
+            if (i < 0) return false;
+            out = maps[i];
+            return true;
+        }
+        TopLoc_Location L;
+        opencascade::handle<Geom_Surface> S = BRep_Tool::Surface(F, L);
+        opencascade::handle<Geom_CylindricalSurface> c = opencascade::handle<Geom_CylindricalSurface>::DownCast(S);
+        if (c.IsNull()) { idx.Bind(key, -1); return false; }
+        gp_Ax3 a = c->Position();
+        if (!L.IsIdentity()) a.Transform(L.Transformation());
+        gp_XYZ z = a.Direction().XYZ();
+        double zs[3] = {z.X(), z.Y(), z.Z()};
+        int big = 0, small = 0;
+        for (int k = 1; k < 3; k++) {
+            if (std::fabs(zs[k]) > std::fabs(zs[big])) big = k;
+            if (std::fabs(zs[k]) < std::fabs(zs[small])) small = k;
+        }
+        gp_Dir Zc = zs[big] > 0 ? a.Direction() : a.Direction().Reversed();
+        gp_XYZ O = a.Location().XYZ();
+        O = O - Zc.XYZ() * O.Dot(Zc.XYZ());
+        gp_XYZ w(small == 0, small == 1, small == 2);
+        gp_Dir Xc(w - Zc.XYZ() * w.Dot(Zc.XYZ()));
+        gp_Ax3 ac(gp_Pnt(O), Zc, Xc);
+        double su = a.YDirection().XYZ().Dot(Zc.XYZ().Crossed(a.XDirection().XYZ())) > 0 ? 1 : -1;
+        double sv = a.Direction().XYZ().Dot(Zc.XYZ()) > 0 ? 1 : -1;
+        double alpha = std::atan2(a.XDirection().XYZ().Dot(ac.YDirection().XYZ()), a.XDirection().XYZ().Dot(ac.XDirection().XYZ()));
+        double cc = (a.Location().XYZ() - O).Dot(Zc.XYZ());
+        if (su > 0 && sv > 0 && std::fabs(alpha) < 1e-12 && std::fabs(cc) < 1e-12 && L.IsIdentity()) { idx.Bind(key, -1); return false; }
+        gp_Trsf2d t;
+        if (su < 0 && sv < 0) t.SetRotation(gp_Pnt2d(0, 0), M_PI);
+        else if (su < 0) t.SetMirror(gp_Ax2d(gp_Pnt2d(0, 0), gp_Dir2d(0, 1)));
+        else if (sv < 0) t.SetMirror(gp_Ax2d(gp_Pnt2d(0, 0), gp_Dir2d(1, 0)));
+        gp_Trsf2d tr;
+        tr.SetTranslation(gp_Vec2d(alpha, cc));
+        Map m;
+        m.s = new Geom_CylindricalSurface(ac, c->Radius());
+        m.t = tr * t;
+        m.rev = su * sv < 0;
+        maps.push_back(m);
+        idx.Bind(key, (int)maps.size() - 1);
+        out = m;
+        return true;
+    }
+    Standard_Boolean NewSurface(const TopoDS_Face& F, opencascade::handle<Geom_Surface>& S, TopLoc_Location& L, Standard_Real& Tol, Standard_Boolean& RevWires, Standard_Boolean& RevFace) override {
+        Map m;
+        if (!find(F, m)) return Standard_False;
+        S = m.s;
+        L.Identity();
+        Tol = BRep_Tool::Tolerance(F);
+        RevWires = m.rev;
+        RevFace = m.rev;
+        return Standard_True;
+    }
+    Standard_Boolean NewCurve(const TopoDS_Edge&, opencascade::handle<Geom_Curve>&, TopLoc_Location&, Standard_Real&) override { return Standard_False; }
+    Standard_Boolean NewPoint(const TopoDS_Vertex&, gp_Pnt&, Standard_Real&) override { return Standard_False; }
+    Standard_Boolean NewCurve2d(const TopoDS_Edge& E, const TopoDS_Face& F, const TopoDS_Edge&, const TopoDS_Face&, opencascade::handle<Geom2d_Curve>& C, Standard_Real& Tol) override {
+        Map m;
+        if (!find(F, m)) return Standard_False;
+        double f, l;
+        opencascade::handle<Geom2d_Curve> c = BRep_Tool::CurveOnSurface(E, F, f, l);
+        if (c.IsNull()) return Standard_False;
+        C = opencascade::handle<Geom2d_Curve>::DownCast(c->Transformed(m.t));
+        Tol = BRep_Tool::Tolerance(E);
+        return Standard_True;
+    }
+    Standard_Boolean NewParameter(const TopoDS_Vertex&, const TopoDS_Edge&, Standard_Real&, Standard_Real&) override { return Standard_False; }
+    GeomAbs_Shape Continuity(const TopoDS_Edge& E, const TopoDS_Face& F1, const TopoDS_Face& F2, const TopoDS_Edge&, const TopoDS_Face&, const TopoDS_Face&) override { return BRep_Tool::Continuity(E, F1, F2); }
+};
+static TopoDS_Shape canon_cylinders(const TopoDS_Shape& s) {
+    opencascade::handle<CanonCylinders> m = new CanonCylinders();
+    BRepTools_Modifier md(s, m);
+    if (!md.IsDone()) return s;
+    return md.ModifiedShape(s);
 }
 
 extern "C" {
@@ -1574,6 +1674,190 @@ FShape* focc_thicken_face(const FShape* s, int index, double t, long long base, 
         (FShape*)nullptr);
 }
 
+static FShape* unify_across(FShape* res, const TopTools_MapOfShape& across, const TopTools_MapOfShape* ends);
+
+// Flat face `index` (0-based) of a solid moved `d` along its outward
+// normal, the faces round it (flat or curved, they must run along the
+// move: a box's sides, a hole's wall, a boss's side) made longer or
+// shorter: the prism the face sweeps fused (d > 0) or cut (d < 0), its
+// sides then made one with the faces they extend. Tags kept: the moved
+// face its own, each side its neighbour's.
+FShape* focc_move_face(const FShape* s, int index, double d) {
+    return guard(
+        [&]() -> FShape* {
+            TopTools_IndexedMapOfShape fm0, fm;
+            face_map(s->s, fm0);
+            if (index < 0 || index >= fm0.Extent()) {
+                set_err("no such face");
+                return nullptr;
+            }
+            if (std::fabs(d) < 1e-6) {
+                set_err("no move");
+                return nullptr;
+            }
+            // the solid with its cylinders in one frame each (the sides
+            // the prism adds must share the frame of the faces they extend)
+            std::unique_ptr<FShape> bs(wrap(canon_cylinders(s->s)));
+            if (!bs) return nullptr;
+            face_map(bs->s, fm);
+            if (fm.Extent() != fm0.Extent()) {
+                set_err("the faces could not be read");
+                return nullptr;
+            }
+            bs->tags = s->tags;
+            TopoDS_Face F = TopoDS::Face(fm(index + 1));
+            BRepAdaptor_Surface sa(F, Standard_False);
+            if (sa.GetType() != GeomAbs_Plane) {
+                set_err("only a flat face moves along its normal this way");
+                return nullptr;
+            }
+            gp_Dir n = sa.Plane().Axis().Direction();
+            if (F.Orientation() == TopAbs_REVERSED) n.Reverse();
+            auto tag_of = [&](const TopoDS_Shape& f) -> long long {
+                int i = fm.FindIndex(f);
+                return i > 0 && i - 1 < (int)bs->tags.size() ? bs->tags[i - 1] : -1;
+            };
+            // the faces round it run along the move
+            TopTools_IndexedDataMapOfShapeListOfShape ef;
+            TopExp::MapShapesAndAncestors(bs->s, TopAbs_EDGE, TopAbs_FACE, ef);
+            TopTools_IndexedMapOfShape fe;
+            edge_map(F, fe);
+            std::vector<long long> side(fe.Extent() + 1, tag_of(F));
+            for (int k = 1; k <= fe.Extent(); k++) {
+                TopoDS_Edge e = TopoDS::Edge(fe(k));
+                if (BRep_Tool::Degenerated(e) || !ef.Contains(e)) continue;
+                BRepAdaptor_Curve c(e);
+                gp_Pnt p = c.Value(0.5 * (c.FirstParameter() + c.LastParameter()));
+                for (TopTools_ListIteratorOfListOfShape it(ef.FindFromKey(e)); it.More(); it.Next()) {
+                    if (it.Value().IsSame(F)) continue;
+                    TopoDS_Face G = TopoDS::Face(it.Value());
+                    opencascade::handle<Geom_Surface> S = BRep_Tool::Surface(G);
+                    if (S.IsNull()) continue;
+                    ShapeAnalysis_Surface sas(S);
+                    gp_Pnt2d uv = sas.ValueOfUV(p, 1e-7);
+                    GeomLProp_SLProps pr(S, uv.X(), uv.Y(), 1, 1e-9);
+                    if (pr.IsNormalDefined() && std::fabs(pr.Normal().Dot(n)) > 1e-3) {
+                        set_err("a face round it does not run along the move (a fillet, a slanted face): it cannot follow yet");
+                        return nullptr;
+                    }
+                    side[k] = tag_of(G);
+                }
+            }
+            gp_Vec v(n.XYZ() * d);
+            BRepPrimAPI_MakePrism mp(F, v, Standard_False, Standard_True);
+            if (!mp.IsDone()) {
+                set_err("the face could not sweep its way");
+                return nullptr;
+            }
+            TopTools_IndexedMapOfShape pf;
+            face_map(mp.Shape(), pf);
+            std::vector<long long> ptags(pf.Extent(), tag_of(F));
+            std::vector<int> sides;
+            for (int k = 1; k <= fe.Extent(); k++)
+                for (TopTools_ListIteratorOfListOfShape it(mp.Generated(fe(k))); it.More(); it.Next()) {
+                    int j = pf.FindIndex(it.Value());
+                    if (j > 0) {
+                        ptags[j - 1] = side[k];
+                        sides.push_back(j);
+                    }
+                }
+            std::unique_ptr<FShape> prism(wrap(canon_cylinders(mp.Shape())));
+            if (!prism) return nullptr;
+            TopTools_IndexedMapOfShape pf2;
+            face_map(prism->s, pf2);
+            if (pf2.Extent() != pf.Extent()) {
+                set_err("the face could not sweep its way");
+                return nullptr;
+            }
+            prism->tags = ptags;
+            TopoDS_Shape r;
+            FShape* res = nullptr;
+            auto finish = [&](BRepAlgoAPI_BooleanOperation& op) -> bool {
+                op.SetFuzzyValue(1e-6);
+                op.Build();
+                if (!op.IsDone() || op.HasErrors()) return false;
+                r = op.Shape();
+                int solids = 0;
+                TopoDS_Shape one;
+                for (TopExp_Explorer x(r, TopAbs_SOLID); x.More(); x.Next()) {
+                    solids++;
+                    one = x.Current();
+                }
+                if (solids != 1) return false;
+                res = wrap(one);
+                if (!res) return false;
+                carry_tags(op, bs.get(), res, -1);
+                carry_tags(op, prism.get(), res, -1);
+                // the sides made one with the faces they extend: across the
+                // face's old edges, and any edge between a side and a face
+                // of its tag (a notch's edge it now meets)
+                TopTools_MapOfShape across, ends, sidef;
+                for (int k = 1; k <= fe.Extent(); k++) {
+                    const TopTools_ListOfShape& im = op.Modified(fe(k));
+                    if (im.IsEmpty() && !op.IsDeleted(fe(k))) across.Add(fe(k));
+                    for (TopTools_ListIteratorOfListOfShape it(im); it.More(); it.Next()) across.Add(it.Value());
+                }
+                for (int j : sides) {
+                    const TopoDS_Shape& f = pf2(j);
+                    const TopTools_ListOfShape& im = op.Modified(f);
+                    if (im.IsEmpty() && !op.IsDeleted(f)) sidef.Add(f);
+                    for (TopTools_ListIteratorOfListOfShape it(im); it.More(); it.Next()) sidef.Add(it.Value());
+                }
+                {
+                    TopTools_IndexedMapOfShape rf;
+                    face_map(res->s, rf);
+                    TopTools_IndexedDataMapOfShapeListOfShape ref;
+                    TopExp::MapShapesAndAncestors(res->s, TopAbs_EDGE, TopAbs_FACE, ref);
+                    for (int i = 1; i <= ref.Extent(); i++) {
+                        const TopTools_ListOfShape& fs = ref(i);
+                        if (fs.Extent() != 2 || fs.First().IsSame(fs.Last())) continue;
+                        if (!sidef.Contains(fs.First()) && !sidef.Contains(fs.Last())) continue;
+                        int a = rf.FindIndex(fs.First()), b = rf.FindIndex(fs.Last());
+                        if (a > 0 && b > 0 && res->tags[a - 1] == res->tags[b - 1]) across.Add(ref.FindKey(i));
+                    }
+                }
+                for (TopExp_Explorer x(F, TopAbs_VERTEX); x.More(); x.Next()) {
+                    const TopTools_ListOfShape& im = op.Modified(x.Current());
+                    if (im.IsEmpty()) ends.Add(x.Current());
+                    for (TopTools_ListIteratorOfListOfShape it(im); it.More(); it.Next()) ends.Add(it.Value());
+                }
+                res = unify_across(res, across, &ends);
+                return true;
+            };
+            bool ok;
+            if (d > 0) {
+                BRepAlgoAPI_Fuse op;
+                TopTools_ListOfShape a, t;
+                a.Append(bs->s);
+                t.Append(prism->s);
+                op.SetArguments(a);
+                op.SetTools(t);
+                ok = finish(op);
+            } else {
+                BRepAlgoAPI_Cut op;
+                TopTools_ListOfShape a, t;
+                a.Append(bs->s);
+                t.Append(prism->s);
+                op.SetArguments(a);
+                op.SetTools(t);
+                ok = finish(op);
+            }
+            if (!ok || !res) {
+                delete res;
+                set_err(d < 0 ? "the face cannot go in that far (the part would come apart)" : "the face could not be moved out");
+                return nullptr;
+            }
+            if (!valid(res->s)) {
+                dump_check(res->s);
+                delete res;
+                set_err("the move gives an invalid solid");
+                return nullptr;
+            }
+            return res;
+        },
+        (FShape*)nullptr);
+}
+
 // The solid with the tool (a face on its boundary) drawn into its faces:
 // the face under the tool is cut along the tool's outline, its inside
 // takes the tool's tag.
@@ -1630,6 +1914,55 @@ int focc_edge_point(const FShape* s, int edge, double f, double* xyz) {
         -1);
 }
 
+// Faces of `res` lying on one surface and meeting along an edge of
+// `across` made one face (ShapeUpgrade_UnifySameDomain on those edges
+// only), with the tag they share; with `ends`, edges meeting at one of
+// those vertices on one line or circle made one edge too. Returns `res`
+// itself when the result is not valid; `res` is freed otherwise.
+static FShape* unify_across(FShape* res, const TopTools_MapOfShape& across, const TopTools_MapOfShape* ends) {
+    // every edge kept but those, and a closed face's seam (one face on
+    // both its sides: it parts nothing, and a seam kept stops the faces
+    // of a closed surface being joined)
+    TopTools_MapOfShape keep;
+    for (TopExp_Explorer fx(res->s, TopAbs_FACE); fx.More(); fx.Next())
+        for (TopExp_Explorer ex(fx.Current(), TopAbs_EDGE); ex.More(); ex.Next())
+            if (!across.Contains(ex.Current()) && !BRep_Tool::IsClosed(TopoDS::Edge(ex.Current()), TopoDS::Face(fx.Current()))) keep.Add(ex.Current());
+    if (ends)
+        for (TopExp_Explorer ex(res->s, TopAbs_VERTEX); ex.More(); ex.Next())
+            if (!ends->Contains(ex.Current())) keep.Add(ex.Current());
+    ShapeUpgrade_UnifySameDomain u(res->s, ends ? Standard_True : Standard_False, Standard_True, Standard_False);
+    u.KeepShapes(keep);
+    u.Build();
+    TopoDS_Shape out = u.Shape();
+    if (out.IsNull() || !BRepCheck_Analyzer(out).IsValid()) return res;
+    FShape* r2 = wrap(out);
+    if (!r2) return res;
+    TopTools_IndexedMapOfShape fin, fout;
+    face_map(res->s, fin);
+    face_map(out, fout);
+    r2->tags.assign(fout.Extent(), -1);
+    opencascade::handle<BRepTools_History> h = u.History();
+    for (int i = 1; i <= fin.Extent(); i++) {
+        long long t = i - 1 < (int)res->tags.size() ? res->tags[i - 1] : -1;
+        const TopoDS_Shape& f = fin(i);
+        bool found = false;
+        if (!h.IsNull())
+            for (TopTools_ListIteratorOfListOfShape it(h->Modified(f)); it.More(); it.Next()) {
+                int j = fout.FindIndex(it.Value());
+                if (j > 0) {
+                    r2->tags[j - 1] = t;
+                    found = true;
+                }
+            }
+        if (!found) {
+            int j = fout.FindIndex(f);
+            if (j > 0) r2->tags[j - 1] = t;
+        }
+    }
+    delete res;
+    return r2;
+}
+
 // After the Knife: a closed face's seam (a cylinder's) that now runs
 // between two pieces of that face (a cut across it left the seam inside one
 // region, and the splitter made two faces of it) is made a seam again, the
@@ -1664,37 +1997,10 @@ static FShape* knit_seams(BRepBuilderAPI_MakeShape& op, const FShape* s, FShape*
         else keep.Add(e);
     }
     if (!any) return res;
-    ShapeUpgrade_UnifySameDomain u(res->s, Standard_False, Standard_True, Standard_False);
-    u.KeepShapes(keep);
-    u.Build();
-    TopoDS_Shape out = u.Shape();
-    if (out.IsNull() || !BRepCheck_Analyzer(out).IsValid()) return res;
-    FShape* r2 = wrap(out);
-    if (!r2) return res;
-    TopTools_IndexedMapOfShape fin, fout;
-    face_map(res->s, fin);
-    face_map(out, fout);
-    r2->tags.assign(fout.Extent(), -1);
-    opencascade::handle<BRepTools_History> h = u.History();
-    for (int i = 1; i <= fin.Extent(); i++) {
-        long long t = i - 1 < (int)res->tags.size() ? res->tags[i - 1] : -1;
-        const TopoDS_Shape& f = fin(i);
-        bool found = false;
-        if (!h.IsNull())
-            for (TopTools_ListIteratorOfListOfShape it(h->Modified(f)); it.More(); it.Next()) {
-                int j = fout.FindIndex(it.Value());
-                if (j > 0) {
-                    r2->tags[j - 1] = t;
-                    found = true;
-                }
-            }
-        if (!found) {
-            int j = fout.FindIndex(f);
-            if (j > 0) r2->tags[j - 1] = t;
-        }
-    }
-    delete res;
-    return r2;
+    TopTools_MapOfShape across;
+    for (int i = 1; i <= ef.Extent(); i++)
+        if (!keep.Contains(ef.FindKey(i))) across.Add(ef.FindKey(i));
+    return unify_across(res, across, nullptr);
 }
 
 // The Knife: points (n, 3 doubles each, on edges) cut into the edges

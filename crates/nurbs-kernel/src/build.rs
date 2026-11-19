@@ -475,7 +475,22 @@ fn tweak(acc: &Shape, f: &Feature, t: &Tweak) -> Result<Option<Shape>, String> {
     let pts = acc.vertex_points();
     let moves: Vec<(i32, [f64; 3])> = vs.iter().map(|&v| (v, (DVec3::from_array(pts[(v - 1) as usize]) + t.delta).to_array())).collect();
     mark(&step("tweak", f));
-    acc.move_vertices(&moves).map(Some)
+    let err = match acc.move_vertices(&moves) {
+        Ok(s) => return Ok(Some(s)),
+        Err(e) => e,
+    };
+    // a flat face moved along its normal: the faces round it, curved ones
+    // and those with holes too, made longer or shorter to meet it
+    if let Comp::Face(r) = &t.comp {
+        if let Some((face, info)) = find_face(acc, r).and_then(|i| acc.face_info(i).map(|f| (i, f))) {
+            let n = DVec3::from_array(info.normal).normalize_or_zero();
+            let d = t.delta.dot(n);
+            if info.kind == OccSurf::Plane && (t.delta - n * d).length() < 1e-6 * t.delta.length().max(1.0) {
+                return acc.move_face(face, d).map(Some);
+            }
+        }
+    }
+    Err(err)
 }
 
 /// The Knife: its points found on the edges (the fraction from the end
@@ -1424,6 +1439,49 @@ mod tests {
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert_eq!(m.faces.len(), m0.faces.len() + 1);
+    }
+
+    #[test]
+    fn faces_moved_next_to_curved_faces() {
+        // the test part: the boss's top up and down (its round side
+        // follows), the block's top up and down (the hole's wall, the
+        // boss's side and the slot's walls follow)
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-10.0, -5.0, 0.0), DQuat::IDENTITY);
+        let s = d.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Box { x: 8.0, y: 8.0, z: 40.0 }, DVec3::new(0.0, 14.0, 0.0), DQuat::IDENTITY);
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        let cases = [
+            (tag(s, 1), DVec3::new(10.0, 30.0, 0.0), 5.0, 35.0),
+            (tag(s, 1), DVec3::new(10.0, 30.0, 0.0), -4.0, 26.0),
+            (tag(b, 2), DVec3::new(-15.0, 20.0, 10.0), 3.0, 23.0),
+            (tag(b, 2), DVec3::new(-15.0, 20.0, 10.0), -2.0, 18.0),
+            // the top's right part, under the boss: up, the boss shorter;
+            // down, the boss's side runs down to it
+            (tag(b, 2), DVec3::new(15.0, 20.0, 10.0), 3.0, 23.0),
+            (tag(b, 2), DVec3::new(15.0, 20.0, 10.0), -2.0, 18.0),
+        ];
+        for (t, at, dy, y) in cases {
+            let mut d = d.clone();
+            d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: t, at }), delta: DVec3::new(0.0, dy, 0.0) });
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{dy}: {:?}", m.errors);
+            assert_eq!(m.faces.len(), m0.faces.len(), "{dy}");
+            // (the block's top is in two, either side of the slot)
+            let f = m.faces.iter().find(|f| f.tag.map(|g| g.pack()) == Some(t) && f.point[0].signum() == at.x.signum()).unwrap();
+            assert!((f.point[1] - y).abs() < 1e-6, "{dy}: {:?}", f.point);
+            // the part's top: the boss's top
+            let top = m.positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+            assert!((top - if t == tag(s, 1) { y as f32 } else { 30.0 }).abs() < 1e-3, "{dy}: top {top}");
+        }
+        // a fillet round the boss's top: it does not run along the move
+        let mut d = d.clone();
+        d.add_round(1.0, false, vec![EdgeRef { faces: [tag(s, 0), tag(s, 1)], at: DVec3::new(17.0, 30.0, 0.0) }]);
+        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(s, 1), at: DVec3::new(10.0, 30.0, 0.0) }), delta: DVec3::new(0.0, 2.0, 0.0) });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.iter().any(|e| e.contains("run along")), "{:?}", m.errors);
     }
 
     #[test]
