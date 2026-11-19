@@ -6,7 +6,7 @@
 //! result after each feature (by the content of everything up to it). While
 //! one feature moves, only the booleans from it onwards are made again.
 
-use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, Op, Prim, Push, Round, Tweak};
+use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, Knife, Op, Prim, Push, Round, Tweak};
 use crate::model::{Edge, EdgeKind, Face, FaceTag, Model, SurfKind};
 use crate::proto::step;
 use forme_occt::{Shape, SurfKind as OccSurf};
@@ -393,6 +393,32 @@ fn tweak(acc: &Shape, f: &Feature, t: &Tweak) -> Result<Option<Shape>, String> {
     acc.move_vertices(&moves).map(Some)
 }
 
+/// The Knife: its points found on the edges (the fraction from the end
+/// nearer where each was put), cut into them with its lines. None when it
+/// has no point.
+fn knife(acc: &Shape, f: &Feature, k: &Knife) -> Result<Option<Shape>, String> {
+    if k.pts.is_empty() {
+        return Ok(None);
+    }
+    let refs: Vec<EdgeRef> = k.pts.iter().map(|p| p.edge.clone()).collect();
+    let mut p3 = vec![];
+    for (kp, r) in k.pts.iter().zip(refs.iter()) {
+        let (found, _) = resolve(acc, std::slice::from_ref(r));
+        let Some(&i) = found.first() else { return Err("its edges are gone".into()) };
+        let p = match (acc.edge_point(i, kp.f), acc.edge_point(i, 1.0 - kp.f)) {
+            (Some(a), Some(b)) => {
+                if DVec3::from_array(a).distance(kp.at) <= DVec3::from_array(b).distance(kp.at) { a } else { b }
+            }
+            (Some(a), None) | (None, Some(a)) => a,
+            _ => return Err("its edges are gone".into()),
+        };
+        p3.push(p);
+    }
+    let segs: Vec<[i32; 2]> = k.segs.iter().filter(|s| s[0] < p3.len() && s[1] < p3.len()).map(|s| [s[0] as i32, s[1] as i32]).collect();
+    mark(&step("cut", f));
+    acc.split(&p3, &segs).map(Some)
+}
+
 fn hash2(a: u64, b: u64) -> u64 {
     crate::doc::fnv(&[a.to_le_bytes(), b.to_le_bytes()].concat())
 }
@@ -413,7 +439,7 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         let fh = f.hash();
         key = hash2(key, fh);
         let skipped = |what: &str| skip.iter().any(|s| *s == step(what, f));
-        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") {
+        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") || skipped("cut") {
             key = hash2(key, 1);
         }
         used_stages.push(key);
@@ -471,6 +497,22 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         if let Some(t) = &f.tweak {
             if let Some(acc) = stage.shape.clone() {
                 let res = if skipped("tweak") { Err("skipped, it crashed the kernel".to_string()) } else { tweak(&acc, f, t) };
+                match res {
+                    Ok(Some(s)) => {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                    }
+                    Ok(None) => {}
+                    Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
+                }
+            }
+            cache.stages.insert(key, stage.clone());
+            continue;
+        }
+        // the Knife: on the solid built so far
+        if let Some(k) = &f.cut {
+            if let Some(acc) = stage.shape.clone() {
+                let res = if skipped("cut") { Err("skipped, it crashed the kernel".to_string()) } else { knife(&acc, f, k) };
                 match res {
                     Ok(Some(s)) => {
                         model.booleans += 1;
@@ -595,6 +637,7 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::KnifePoint;
     use crate::doc::PrimKind;
     use glam::DQuat;
 
@@ -827,6 +870,61 @@ mod tests {
         let o = d.feature(p).unwrap().outline();
         assert_eq!(o.len(), 1);
         assert!(o[0].iter().all(|q| (q.y - 20.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn knife_cuts() {
+        // a block: a point in its top front edge, then a line across its
+        // top from that edge's middle to the back edge's middle
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        let front = KnifePoint { edge: EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }, f: 0.5, at: DVec3::new(0.0, 20.0, 15.0) };
+        let back = KnifePoint { edge: EdgeRef { faces: [tag(b, 2), tag(b, 5)], at: DVec3::new(0.0, 20.0, -15.0) }, f: 0.5, at: DVec3::new(0.0, 20.0, -15.0) };
+        let k = d.add_knife(Knife { pts: vec![front.clone()], segs: vec![] }, "Points");
+        let m1 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m1.errors.is_empty(), "{:?}", m1.errors);
+        assert_eq!(m1.faces.len(), m0.faces.len());
+        assert_eq!(m1.edges.len(), m0.edges.len() + 1, "the edge cut in two");
+        d.feature_mut(k).unwrap().cut = Some(Knife { pts: vec![front, back], segs: vec![[0, 1]] });
+        assert_eq!(d.feature(k).unwrap().kind_label(), "Knife");
+        let m2 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m2.errors.is_empty(), "{:?}", m2.errors);
+        assert_eq!(m2.faces.len(), m0.faces.len() + 1, "the top in two");
+        let tops = m2.faces.iter().filter(|f| f.tag.map(|t| t.pack()) == Some(tag(b, 2))).count();
+        assert_eq!(tops, 2, "both halves keep the top's tag");
+        // a fillet after it still finds the front right edge
+        d.add_round(2.0, false, vec![EdgeRef { faces: [tag(b, 0), tag(b, 4)], at: DVec3::new(20.0, 10.0, 15.0) }]);
+        let m3 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m3.errors.is_empty(), "{:?}", m3.errors);
+    }
+
+    #[test]
+    fn knife_on_test_part() {
+        // the test part (block, hole, boss, slot): a line across the top
+        // left of the slot (through the hole or not) and right of the boss
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-10.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Box { x: 8.0, y: 8.0, z: 40.0 }, DVec3::new(0.0, 14.0, 0.0), DQuat::IDENTITY);
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        for x in [-10.0, -15.0, 18.0] {
+            let mut d = d.clone();
+            let kp = |z: f64, side: u16| KnifePoint { edge: EdgeRef { faces: [tag(b, 2), tag(b, side)], at: DVec3::new(x, 20.0, z) }, f: 0.5, at: DVec3::new(x, 20.0, z) };
+            // the fraction along the edge for x: the front edge runs -20..-4 or 4..20
+            let (lo, hi) = if x < 0.0 { (-20.0, -4.0) } else { (4.0, 20.0) };
+            let f = (x - lo) / (hi - lo);
+            let mut a = kp(15.0, 4);
+            a.f = f;
+            let mut c = kp(-15.0, 5);
+            c.f = f;
+            d.add_knife(Knife { pts: vec![a, c], segs: vec![[0, 1]] }, "Knife");
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            // the top cut in two, across the hole when it crosses it
+            assert!(m.errors.is_empty(), "x {x}: {:?}", m.errors);
+            assert_eq!(m.faces.len(), m0.faces.len() + 1, "x {x}");
+        }
     }
 
     #[test]

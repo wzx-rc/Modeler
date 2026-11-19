@@ -9,6 +9,7 @@ pub mod draw;
 pub mod faces;
 pub mod files;
 pub mod icons;
+pub mod knife;
 pub mod materials;
 pub mod pick;
 pub mod render;

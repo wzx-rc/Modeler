@@ -1023,6 +1023,43 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("knife") {
+        // from Forme Rectify: the Knife (K) across the block's top, from
+        // the front edge's middle to the back edge's, then a point (J)
+        h.reset(test_part(), "Test part");
+        h.key(egui::Key::K);
+        let a = h.screen_of(Vec3::new(-10.0, 20.0, 15.0));
+        h.move_to(a);
+        h.steps(2);
+        eprintln!("  hover {:?}", h.st.knife_hover);
+        h.click(a);
+        h.settle();
+        let b = h.screen_of(Vec3::new(-10.0, 20.0, -15.0));
+        h.move_to(b);
+        h.steps(2);
+        h.shot("zero-knife-1-line");
+        h.click(b);
+        h.settle();
+        h.key(egui::Key::Enter);
+        h.settle();
+        for f in h.st.doc.features.iter().filter(|f| f.cut.is_some()) {
+            let k = f.cut.as_ref().unwrap();
+            eprintln!("  {} {} points {:?} lines", f.name, k.pts.len(), k.segs);
+        }
+        eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-knife-2-done");
+        h.key(egui::Key::J);
+        let c = h.screen_of(Vec3::new(20.0, 8.0, 15.0));
+        h.move_to(c);
+        h.steps(2);
+        h.click(c);
+        h.settle();
+        h.key(egui::Key::Escape);
+        h.shot("zero-knife-3-point");
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+        eprintln!("  edges {} errors {:?}", h.st.model.as_ref().map(|m| m.edges.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+    }
+
     if want("snap") {
         // snapping to the part's points of interest, Plasticity style
         h.reset(test_part(), "Test part");

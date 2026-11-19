@@ -56,6 +56,10 @@ pub enum Icon {
     Inset,
     /// Extrude face: a face and an arrow up out of it.
     Extrude,
+    /// Knife: a blade (as in Forme Rectify).
+    Knife,
+    /// Point on edge: an edge and a point on it.
+    EdgePoint,
 }
 
 struct Pen<'a> {
@@ -198,6 +202,14 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             for (x, y) in [(3.0, 16.0), (3.0, 6.0), (9.0, 6.0)] {
                 pen.closed(&[(x - 1.3, y - 1.3), (x + 1.3, y - 1.3), (x + 1.3, y + 1.3), (x - 1.3, y + 1.3)]);
             }
+        }
+        Icon::Knife => {
+            pen.line(&[(3.0, 17.0), (15.5, 4.5), (17.0, 6.5), (7.5, 16.0), (3.0, 17.0)]);
+            pen.line(&[(11.0, 9.0), (13.0, 11.0)]);
+        }
+        Icon::EdgePoint => {
+            pen.line(&[(3.0, 15.0), (17.0, 5.0)]);
+            pen.fill(&[(8.4, 11.1), (10.0, 9.1), (12.0, 10.7), (10.4, 12.7)], 1.0);
         }
         Icon::Path => {
             pen.line(&[(3.5, 15.5), (3.5, 9.0), (4.0, 6.8), (5.6, 5.2), (7.8, 4.6), (16.5, 4.6)]);

@@ -45,6 +45,9 @@ pub fn paint_op_glyph(p: &egui::Painter, c: egui::Pos2, op: Op, color: Color32, 
 
 /// A feature's icon: its primitive, or the fillet's.
 pub fn feature_icon(f: &Feature) -> Icon {
+    if let Some(k) = &f.cut {
+        return if k.segs.is_empty() { Icon::EdgePoint } else { Icon::Knife };
+    }
     if f.tweak.is_some() {
         return Icon::Move;
     }
@@ -58,6 +61,10 @@ pub fn feature_icon(f: &Feature) -> Icon {
 
 /// What a step does, in a few words: "Fillet · 2 mm", "Inset · 2 mm · −3 mm".
 pub fn step_info(f: &Feature) -> String {
+    if let Some(k) = &f.cut {
+        let (n, l) = (k.pts.len(), k.segs.len());
+        return if l > 0 { format!("{l} line{}", if l > 1 { "s" } else { "" }) } else { format!("{n} point{}", if n > 1 { "s" } else { "" }) };
+    }
     if let Some(t) = &f.tweak {
         return format!("{} mm", fmt_mm(t.delta.length() as f32));
     }
@@ -169,6 +176,8 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 let tool = match st.tool {
                     Tool::Create(k) => k.label().to_uppercase(),
                     Tool::Push(k) => k.label().to_uppercase(),
+                    Tool::Knife => "KNIFE".into(),
+                    Tool::Point => "POINT ON EDGE".into(),
                     Tool::Select => format!("SELECTION · {}", st.sel_mode.label().to_uppercase()),
                 };
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
@@ -389,6 +398,15 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 }
             }
             divider(ui);
+            for (t, icon, name, key, tip) in [
+                (Tool::Knife, Icon::Knife, "KNIFE", "K", "Knife (K), like Maya's Multi-Cut: click points on the part's edges; each one after the first is joined to the one before across their flat face. Enter, Esc or a right click ends the cut"),
+                (Tool::Point, Icon::EdgePoint, "POINT", "J", "Point on edge (J): click on an edge to cut a point into it (the middle catches the pointer)"),
+            ] {
+                if card(ui, Some(icon), name, &format!("EDGE · {key}"), st.tool == t, EDGE_SEL, tip).clicked() {
+                    st.arm_knife(t);
+                }
+            }
+            divider(ui);
             let has = !st.selection.is_empty();
             if card(ui, Some(Icon::Duplicate), "DUPLICATE", "CTRL+D", false, TEXT2(), "Duplicate the selection").clicked() && has {
                 st.duplicate_selected();
@@ -487,6 +505,7 @@ fn hud(ctx: &egui::Context, st: &mut AppState) {
     let color = match st.tool {
         Tool::Create(_) => op_color(st.mode),
         Tool::Push(_) => FACE_SEL,
+        Tool::Knife | Tool::Point => EDGE_SEL,
         Tool::Select if st.sel_mode == SelMode::Edge => EDGE_SEL,
         Tool::Select if st.sel_mode == SelMode::Face => FACE_SEL,
         Tool::Select => st.single().map(feature_color).unwrap_or(TEXT2()),
@@ -1500,7 +1519,9 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         }
     }
     if pressed(Key::Escape) {
-        if st.push.is_some() {
+        if st.knife.is_some() {
+            st.knife_end();
+        } else if st.push.is_some() {
             st.abort_gestures();
             st.select_tool();
         } else if st.creation.is_some() || st.drag.is_some() || st.sketch.is_some() {
@@ -1519,6 +1540,15 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         if pressed(k) {
             st.set_sel_mode(m);
         }
+    }
+    for (k, t) in [(Key::K, Tool::Knife), (Key::J, Tool::Point)] {
+        if pressed(k) {
+            st.arm_knife(t);
+        }
+    }
+    // the Knife's cut under way: Enter ends it
+    if matches!(st.tool, Tool::Knife | Tool::Point) && pressed(Key::Enter) {
+        st.knife_end();
     }
     for (k, kind) in [(Key::I, PushKind::Inset), (Key::E, PushKind::Extrude)] {
         if pressed(k) && st.push.is_none() {

@@ -414,6 +414,32 @@ pub enum Comp {
 /// A component moved by `delta` (direct modelling, Romain 18 nov.:
 /// "Manipulation de component"): its vertices move, the faces round them
 /// follow.
+/// The Knife (Romain 19 nov., "like the Maya Multicut tool") and Point
+/// on edge: points cut into the part's edges, and straight lines between
+/// pairs of them (indices into `pts`) cut into the flat faces they cross.
+/// Both halves of a face keep its tag.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Knife {
+    pub pts: Vec<KnifePoint>,
+    #[serde(default)]
+    pub segs: Vec<[usize; 2]>,
+}
+
+/// A point of the Knife: on an edge, at a fraction of its curve counted
+/// from the end nearer `at` (where it was put).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct KnifePoint {
+    pub edge: EdgeRef,
+    pub f: f64,
+    pub at: DVec3,
+}
+
+impl Knife {
+    pub fn label(&self) -> &'static str {
+        if self.segs.is_empty() { "Points" } else { "Knife" }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tweak {
     pub comp: Comp,
@@ -467,13 +493,17 @@ pub struct Feature {
     /// before it (`origin` is where the component was).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tweak: Option<Tweak>,
+    /// The Knife or Point on edge (from Forme Rectify): like `round`, a
+    /// step on what is built before it (`origin` is its first point).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<Knife>,
 }
 
 impl Feature {
     /// A primitive (Add / Carve), not a step on the part (fillet,
     /// chamfer, inset, extrude).
     pub fn is_solid(&self) -> bool {
-        self.round.is_none() && self.push.is_none() && self.tweak.is_none()
+        self.round.is_none() && self.push.is_none() && self.tweak.is_none() && self.cut.is_none()
     }
     /// A path: a curve with no thickness, nothing for the kernel.
     pub fn is_path(&self) -> bool {
@@ -481,6 +511,9 @@ impl Feature {
     }
     /// What it is: "Cube", "Cylinder", "Fillet", "Chamfer", "Inset", "Extrude".
     pub fn kind_label(&self) -> &'static str {
+        if let Some(k) = &self.cut {
+            return k.label();
+        }
         match (&self.round, &self.push, &self.tweak) {
             (Some(r), _, _) => r.label(),
             (_, Some(p), _) => p.label(),
@@ -615,7 +648,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -625,7 +658,7 @@ impl Doc {
         let round = Round { size, chamfer, edges, blend: !chamfer };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None });
         id
     }
     /// Adds an inset or extrusion of a face at the end.
@@ -634,7 +667,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(push.label());
         let origin = push.face.at;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None });
         id
     }
     /// Adds a move of a face, edge or vertex at the end.
@@ -643,7 +676,16 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(tweak.label());
         let origin = tweak.at();
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak) });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None });
+        id
+    }
+    /// Adds a Knife step (its first point) at the end.
+    pub fn add_knife(&mut self, cut: Knife, name: &str) -> FeatureId {
+        let id = self.next_id;
+        self.next_id += 1;
+        let name = self.fresh_name(name);
+        let origin = cut.pts.first().map(|p| p.at).unwrap_or(DVec3::ZERO);
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut) });
         id
     }
     /// "Cube", then "Cube 2", "Cube 3"…

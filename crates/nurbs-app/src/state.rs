@@ -19,6 +19,10 @@ pub enum Tool {
     Create(PrimKind),
     /// Inset or Extrude a flat face.
     Push(PushKind),
+    /// The Knife (K): points in edges joined by lines across flat faces.
+    Knife,
+    /// Point on edge (J): points only.
+    Point,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,6 +277,10 @@ pub struct AppState {
     pub round_chamfer: bool,
     /// A fillet or chamfer being sized by a drag.
     pub round_drag: Option<RoundDrag>,
+    /// The Knife's cut under way (its step, its last point) and the point
+    /// under the pointer.
+    pub knife: Option<(FeatureId, usize)>,
+    pub knife_hover: Option<DVec3>,
     pub hover_feature: Option<FeatureId>,
     pub hover_hit: Option<Hit>,
     pub tool: Tool,
@@ -347,6 +355,8 @@ impl AppState {
             hover_edge: None,
             round_chamfer: false,
             round_drag: None,
+            knife: None,
+            knife_hover: None,
             hover_feature: None,
             hover_hit: None,
             tool: Tool::Select,
@@ -919,6 +929,8 @@ impl AppState {
             self.clean_selection_ids();
         }
         self.sketch = None;
+        self.knife = None;
+        self.knife_hover = None;
         self.marquee = None;
         self.acquired.clear();
         self.snap_shown = None;
