@@ -439,6 +439,10 @@ pub struct AppState {
     pub acquired: Vec<crate::snap::SnapPoint>,
     /// iPad: fingers and Pencil, the Shift / Ctrl buttons (`touch.rs`).
     pub touch: crate::touch::TouchInput,
+    /// The iPad edition: the hand tools only, no Quads view nor remesh
+    /// (Romain, 19 nov. 17 h 33: "pour l'iPad, je veux juste les outils à
+    /// utiliser manuellement"). On iOS, or FORME_MANUAL_ONLY=1.
+    pub manual_only: bool,
 }
 
 impl AppState {
@@ -508,6 +512,7 @@ impl AppState {
             shift_held: false,
             acquired: vec![],
             touch: Default::default(),
+            manual_only: cfg!(target_os = "ios") || std::env::var("FORME_MANUAL_ONLY").map(|v| v == "1").unwrap_or(false),
         }
     }
 

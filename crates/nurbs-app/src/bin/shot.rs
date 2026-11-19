@@ -1274,6 +1274,7 @@ fn main() {
         h.ppp = 2.0 * ppp;
         h.reset(test_part(), "Test part");
         h.st.touch.on = true;
+        h.st.manual_only = true;
         h.steps(3);
         h.shot("ipad/ipad-1-layout");
         // a finger tap on the boss selects it
