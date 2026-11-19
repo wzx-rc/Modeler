@@ -2039,7 +2039,7 @@ fn main() {
         if std::path::Path::new(&path).exists() {
             let mut d = Doc::default();
             d.reference = Some(nurbs_kernel::RefMesh { path: path.clone() });
-            let f = d.add(Op::Add, Prim::Box { x: 18.0, y: 37.0, z: 25.6 }, DVec3::new(47.0, 63.0, 0.0), DQuat::IDENTITY);
+            let f = d.add(Op::Add, Prim::Box { x: 18.0, y: 37.0, z: 24.8 }, DVec3::new(47.0, 63.0, 0.0), DQuat::IDENTITY);
             d.feature_mut(f).unwrap().name = "Front".into();
             h.reset(d, "Retopo");
             h.step();
