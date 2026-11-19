@@ -70,7 +70,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let tools = [
-                    (Tool::Select, Icon::Select, "Select: click to pick by mode (1 to 4); Shift + drag pulls what is under the pointer: a shape's thickness, an open edge out, a fillet; a drag turns around (Q)", "Q"),
+                    (Tool::Select, Icon::Select, "Select: click to pick by mode (1 to 4); a drag pulls what is under the pointer: a shape's thickness, an open edge out, a fillet or bevel; Alt + drag turns around (Q)", "Q"),
                     (Tool::Pen, Icon::Sketch, "Pen: click points; the plane found under the first one is the one you draw on; click the first point to close and fill it, Enter for a line (P)", "P"),
                     (Tool::Circle, Icon::Cylinder, "Circle: drag across a round part, rim to rim, freely; released, it is found on the scan and made a cylinder, else a flat disc as drawn (C)", "C"),
                     (Tool::Slot, Icon::Capsule, "Slot: drag along a slot with round ends, a NURBS surface is laid on its wall, every row an exact slot outline (S)", "S"),
@@ -89,11 +89,13 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     st.set_mode(m);
                 }
                 island_sep(ui);
-                if icon_btn(ui, Icon::Fillet, false, "Fillet: round the corners or edges picked", 28.0).clicked() {
-                    st.cut_selected(false);
+                // the option: a drag on a corner or an edge rounds it or
+                // cuts it straight (and what is picked follows)
+                if icon_btn(ui, Icon::Fillet, !st.cut_bevel, "Fillet: a drag on a corner or an edge rounds it", 28.0).clicked() {
+                    st.set_cut_option(false);
                 }
-                if icon_btn(ui, Icon::Bevel, false, "Bevel: cut the corners or edges picked straight (Ctrl+B)", 28.0).clicked() {
-                    st.cut_selected(true);
+                if icon_btn(ui, Icon::Bevel, st.cut_bevel, "Bevel: a drag on a corner or an edge cuts it straight (Ctrl+B: the corners or edges picked)", 28.0).clicked() {
+                    st.set_cut_option(true);
                 }
                 island_sep(ui);
                 if icon_btn(ui, Icon::Undo, false, "Undo (Ctrl+Z)", 28.0).clicked() {

@@ -32,8 +32,8 @@ impl Default for Settings {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
-    /// Pick by mode; Shift + drag pulls what is picked (a thickness, an
-    /// open edge, a fillet); a plain drag turns around.
+    /// Pick by mode; a drag pulls what is under the pointer (a thickness,
+    /// an open edge, a fillet or bevel); Alt + drag turns around.
     Select,
     /// Click points: a straight outline on the plane found under the
     /// first one; closed on its first point, it is filled.
@@ -172,9 +172,10 @@ pub struct PenEdit {
     pub pts: Vec<DVec2>,
     /// Each point's fillet (a press and a drag on it), 0: sharp.
     pub radii: Vec<f64>,
-    /// The point whose fillet a drag is setting, and whether its release
-    /// closes the outline (the drag began on the first point).
-    pub drag: Option<(usize, bool)>,
+    /// The point placed before whose fillet a Ctrl + drag is setting.
+    pub drag: Option<usize>,
+    /// Ctrl held: the point placed under the pointer (it can be grabbed).
+    pub grab: Option<usize>,
 }
 
 /// What caught the Pen's point.
@@ -233,7 +234,7 @@ impl CircleDraw {
     }
 }
 
-/// A Shift + drag going on.
+/// A drag going on (on a shape or one of its parts).
 #[derive(Clone, Debug)]
 pub enum Gesture {
     /// The thickness (step `k`), along `n` from the point pressed `o`.
@@ -324,6 +325,9 @@ pub struct AppState {
     live: bool,
     /// Bodies built coarse during the live change.
     coarse: Vec<usize>,
+    /// The option on the top island: a drag on a corner or an edge cuts it
+    /// straight (Bevel) rather than round (Fillet).
+    pub cut_bevel: bool,
     /// Bumped when the objects or what is picked change.
     pub objects_gen: u64,
     /// The scan not drawn: the shapes alone (H).
@@ -379,6 +383,7 @@ impl AppState {
             future: vec![],
             live: false,
             coarse: vec![],
+            cut_bevel: false,
             objects_gen: 1,
             hide_scan: false,
             sel: vec![],
@@ -1066,7 +1071,7 @@ impl AppState {
         let Some((obj, edges)) = self.picked_edges() else { return };
         let edges: Vec<EdgeRef> = edges.into_iter().filter(|e| e.1).map(|e| e.0).collect();
         if edges.is_empty() {
-            self.toast("These edges have a face on one side only: Shift + drag pulls them out", true);
+            self.toast("These edges have a face on one side only: a drag pulls them out", true);
             return;
         }
         let mut k = 0;
@@ -1133,6 +1138,20 @@ impl AppState {
             b.steps[k] = st;
         });
         self.report(obj);
+    }
+
+    /// The Fillet / Bevel option set; corners, edges or a step picked
+    /// follow it.
+    pub fn set_cut_option(&mut self, bevel: bool) {
+        self.cut_bevel = bevel;
+        let fits = match self.sel.first() {
+            Some(Comp::Corner { .. }) => true,
+            Some(Comp::Step { obj, k }) => matches!(self.body(*obj).and_then(|b| b.steps.get(*k)), Some(Step::Fillet { .. } | Step::Bevel { .. })),
+            _ => false,
+        };
+        if fits {
+            self.cut_selected(bevel);
+        }
     }
 
     /// Bevel (Ctrl+B) or Fillet on what is picked: corners, edges, or a
@@ -1247,21 +1266,20 @@ impl AppState {
         let Some(pr) = &mut self.press else { return false };
         if !pr.moved {
             if (at[0] - pr.at[0]).hypot(at[1] - pr.at[1]) < 3.0 {
-                return (pr.shift || pr.handle) && pr.comp.is_some();
+                return pr.comp.is_some() || pr.handle;
             }
             pr.moved = true;
-            if self.tool == Tool::Pen && self.pen.is_some() {
-                let (p0, sh) = (pr.at, pr.shift);
-                self.pen_drag_start(p0, sh, free);
-            } else if pr.shift || pr.handle {
+            // a drag (no turning round: that is Alt) pulls what is under
+            // the pointer; with the Pen, Shift before the first point
+            if self.tool == Tool::Select || pr.shift {
                 if let Some(c) = pr.comp.clone() {
                     let p0 = pr.at;
                     self.gesture_start(p0, c);
                 }
             }
         }
-        if self.pen.as_ref().map(|p| p.drag.is_some()).unwrap_or(false) {
-            self.pen_drag_move(at, free);
+        if self.tool == Tool::Pen && self.pen.as_ref().map(|p| p.grab.is_some()).unwrap_or(false) {
+            self.pen_drag_move(at);
             return true;
         }
         if self.gesture.is_some() {
@@ -1310,7 +1328,8 @@ impl AppState {
                     self.gesture = Some(Gesture::Extrude { obj, k, a, along, n: b.frame.n });
                 } else {
                     let px = self.px_at(b.built.edge_mid(e).0);
-                    self.edit_body(obj, "Fillet", true, |b| b.steps.push(Step::Fillet { edges: vec![edge], r: 0.0 }));
+                    let bevel = self.cut_bevel;
+                    self.edit_body(obj, if bevel { "Bevel" } else { "Fillet" }, true, |b| b.steps.push(if bevel { Step::Bevel { edges: vec![edge], d: 0.0 } } else { Step::Fillet { edges: vec![edge], r: 0.0 } }));
                     self.gesture = Some(Gesture::Radius { obj, k: Some(k), corners: vec![], at, r0: 0.0, px, handle: None });
                 }
             }
@@ -1319,9 +1338,22 @@ impl AppState {
                 if !corners.contains(&i) {
                     corners = vec![i];
                 }
+                // a sharp corner takes the option (Fillet or Bevel)
+                let bevel = self.cut_bevel;
+                self.begin_live(if bevel { "Corner bevel" } else { "Corner fillet" });
+                let sharp: Vec<usize> = corners.iter().copied().filter(|&c| b.corners.get(c).copied().unwrap_or(0.0) <= 0.0).collect();
+                if !sharp.is_empty() {
+                    self.edit_body(obj, "Corner", true, |b| {
+                        for &c in &sharp {
+                            if c < b.bevels.len() {
+                                b.bevels[c] = bevel;
+                            }
+                        }
+                    });
+                }
+                let Some(b) = self.body(obj).cloned() else { return };
                 let px = self.px_at(b.corner_show(i).unwrap_or(b.frame.o));
                 let handle = b.corner_handle(i);
-                self.begin_live(if b.bevel_at(i) { "Corner bevel" } else { "Corner fillet" });
                 self.gesture = Some(Gesture::Radius { obj, k: None, corners, at, r0: b.corners.get(i).copied().unwrap_or(0.0), px, handle });
             }
             Comp::Step { k, .. } => {
@@ -1584,7 +1616,15 @@ impl AppState {
         self.hover_key = Some(key);
         if self.pen.is_some() {
             self.pen_plane = None;
-            self.pen_hover = self.pen_point(at, shift, free);
+            if free {
+                // Ctrl: no next point; a point placed can be grabbed
+                self.pen_hover = None;
+                let g = self.pen_grab_at(at);
+                self.pen.as_mut().unwrap().grab = g;
+            } else {
+                self.pen.as_mut().unwrap().grab = None;
+                self.pen_hover = self.pen_point(at, shift, false);
+            }
         } else {
             match self.plane_sticky(at) {
                 Some((h, o, _)) => {
@@ -1604,7 +1644,13 @@ impl AppState {
     /// The left button down with the Pen: a click places a point (on the
     /// release); with Shift before the first point, on a shape, a drag
     /// thickens it.
-    pub fn pen_press(&mut self, at: [f32; 2], shift: bool) {
+    pub fn pen_press(&mut self, at: [f32; 2], shift: bool, ctrl: bool) {
+        if ctrl && self.pen.is_some() {
+            let g = self.pen_grab_at(at);
+            self.pen.as_mut().unwrap().grab = g;
+            self.press = Some(Press { at, shift, moved: false, comp: None, handle: true });
+            return;
+        }
         let comp = if shift && self.pen.is_none() { self.pick_object(at).filter(|&i| self.body(i).is_some()).map(Comp::Object) } else { None };
         if comp.is_some() {
             self.end_live();
@@ -1622,7 +1668,7 @@ impl AppState {
             let p = o;
             self.end_live();
             self.fresh = None;
-            self.pen = Some(PenEdit { frame: Frame { o: p, ..h.frame }, flat: h.flat, pts: vec![DVec2::ZERO], radii: vec![0.0], drag: None });
+            self.pen = Some(PenEdit { frame: Frame { o: p, ..h.frame }, flat: h.flat, pts: vec![DVec2::ZERO], radii: vec![0.0], drag: None, grab: None });
             self.pen_plane = None;
             self.pen_hover = None;
             self.overlay_gen += 1;
@@ -1643,53 +1689,43 @@ impl AppState {
         self.overlay_gen += 1;
     }
 
-    /// A press with the Pen dragged (an outline begun): the point placed
-    /// there (or the first one, to close on it) and its fillet set by the
-    /// drag.
-    pub fn pen_drag_start(&mut self, at: [f32; 2], shift: bool, free: bool) -> bool {
-        if self.pen.is_none() {
-            return false;
-        }
-        let Some(h) = self.pen_point(at, shift, free) else { return false };
-        let pe = self.pen.as_mut().unwrap();
-        let drag = if h.snap == PenSnap::Close {
-            (0, true)
-        } else {
-            if pe.pts.last().map(|l| (*l - h.q).length() >= 1e-6).unwrap_or(true) {
-                pe.pts.push(h.q);
-                pe.radii.push(0.0);
+    /// The point placed under the pointer (within 10 points).
+    pub fn pen_grab_at(&self, at: [f32; 2]) -> Option<usize> {
+        let pe = self.pen.as_ref()?;
+        let mut best: Option<(f32, usize)> = None;
+        for (i, q) in pe.pts.iter().enumerate() {
+            let Some(s) = self.project(pe.frame.to3(*q)) else { continue };
+            let d = (s[0] - at[0]).hypot(s[1] - at[1]);
+            if d <= 10.0 && best.map(|b| d < b.0).unwrap_or(true) {
+                best = Some((d, i));
             }
-            (pe.pts.len() - 1, false)
-        };
-        pe.drag = Some(drag);
-        self.pen_hover = None;
-        self.overlay_gen += 1;
-        true
+        }
+        best.map(|b| b.1)
     }
 
-    /// The fillet follows the pointer: its distance from the point, on the
-    /// plane.
-    pub fn pen_drag_move(&mut self, at: [f32; 2], free: bool) {
+    /// Ctrl + drag from a point placed: its fillet follows the pointer (its
+    /// distance from the point, on the plane).
+    pub fn pen_drag_move(&mut self, at: [f32; 2]) {
         let (o, d) = self.ray(at);
         let Some(pe) = &self.pen else { return };
-        let Some((i, _)) = pe.drag else { return };
+        let Some(i) = pe.drag.or(pe.grab) else { return };
         let Some(x) = pe.frame.hit(o, d) else { return };
         let q = pe.pts[i];
-        let r = (pe.frame.to2(x) - q).length();
-        let r = if free { r } else { nice_round(r, self.px_at(pe.frame.to3(q))) };
+        let r = nice_round((pe.frame.to2(x) - q).length(), self.px_at(pe.frame.to3(q)));
         let pe = self.pen.as_mut().unwrap();
-        pe.radii[i] = r;
+        pe.drag = Some(i);
+        if i < pe.radii.len() {
+            pe.radii[i] = r;
+        }
         self.overlay_gen += 1;
     }
 
-    /// Released: on the first point, the outline closes; else it goes on.
+    /// Released: the outline goes on.
     pub fn pen_drag_end(&mut self) {
         let Some(pe) = &mut self.pen else { return };
-        let Some((_, close)) = pe.drag.take() else { return };
-        self.hover_key = None;
-        self.overlay_gen += 1;
-        if close {
-            self.pen_make(true);
+        if pe.drag.take().is_some() {
+            self.hover_key = None;
+            self.overlay_gen += 1;
         }
     }
 
@@ -1726,7 +1762,7 @@ impl AppState {
         self.mode = SelMode::Object;
         self.sel = vec![Comp::Object(i)];
         self.toast(
-            if closed { format!("Filled: {n} corners · Shift + drag on it thickens it · Esc removes it") } else { format!("A line of {n} points · Shift + drag on an edge (Select, 2) pulls it · Esc removes it") },
+            if closed { format!("Filled: {n} corners · drag on it (Select) thickens it · Esc removes it") } else { format!("A line of {n} points · a drag on an edge (Select, 2) pulls it · Esc removes it") },
             false,
         );
     }

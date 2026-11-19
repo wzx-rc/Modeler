@@ -12,7 +12,7 @@
 //! with Shift, `cclick` with Ctrl), `drag x,y x,y …` (`sdrag`, `cdrag`;
 //! `hold`, `shold`: not released, `release`),
 //! `hover x,y` (`shover`), `key enter|esc|back|del`, `corner r`, `fillet
-//! r`, `bevel d` (Ctrl+B on what is picked), `thick t`, `shot NAME` (with the interface), `bare NAME` (the view
+//! r`, `bevel d` (Ctrl+B on what is picked), `cut fillet|bevel` (the option), `thick t`, `shot NAME` (with the interface), `bare NAME` (the view
 //! alone), `alone NAME` (the shapes alone), `print` (the shapes, what is
 //! picked).
 //! RECTIFY_LOOK="fx,fy,fz,dist,yaw,pitch": the camera of the `look`
@@ -475,6 +475,10 @@ fn script(h: &mut Harness, s: &str) {
             "fillet" => {
                 h.st.make_fillet(num);
                 h.st.end_live();
+                h.steps(2);
+            }
+            "cut" => {
+                h.st.set_cut_option(args.first().copied() == Some("bevel"));
                 h.steps(2);
             }
             "bevel" => {

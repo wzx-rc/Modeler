@@ -230,7 +230,7 @@ impl Drawer {
                 line_vertices(&[placed.clone()], [255, 118, 24, 255], 2.0, &mut out);
             }
             // a fillet being dragged: its circle round the point
-            if let Some((i, _)) = pe.drag {
+            if let Some(i) = pe.drag {
                 let r = pe.radii.get(i).copied().unwrap_or(0.0);
                 if r > 0.0 {
                     let c = pe.pts[i];

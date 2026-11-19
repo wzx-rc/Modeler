@@ -1,7 +1,7 @@
 //! The 3D view's input: Maya navigation (Alt + left orbit, Alt + middle pan,
 //! Alt + right zoom, the wheel zooms, the middle button alone pans, a left
 //! drag that no tool takes orbits). The tool in hand takes the left button:
-//! the Select tool picks by mode and Shift + drag pulls what it picked, the
+//! the Select tool picks by mode and a drag pulls what is under it, the
 //! Pen clicks points, the Circle, Slot and Box drag across the scan.
 
 use crate::state::*;
@@ -104,28 +104,27 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             return;
         }
     }
-    // the Select tool and the Pen: a click picks or places a point, Shift +
-    // drag pulls what is under the pointer, a plain drag turns around
+    // the Select tool and the Pen: a click picks or places a point, a drag
+    // pulls what is under the pointer (the view turns with Alt only, as in
+    // Maya); with the Pen, Ctrl + drag on a point placed rounds it
     if matches!(st.tool, Tool::Select | Tool::Pen) && !alt {
         if let Some(a) = at {
             if pressed && resp.hovered() {
                 if st.tool == Tool::Select {
                     st.select_press(a, shift);
                 } else {
-                    st.pen_press(a, shift);
+                    st.pen_press(a, shift, free);
                 }
             }
             if st.press.is_some() {
-                let taken = l && st.select_drag(a, free);
-                if !taken && l && st.press.as_ref().map(|p| p.moved).unwrap_or(false) && d != egui::Vec2::ZERO {
-                    st.camera.orbit(d.x, d.y);
-                    st.interacting = true;
+                if l {
+                    st.select_drag(a, free);
                 }
                 if released || !l {
                     if st.tool == Tool::Pen && st.gesture.is_none() {
                         if let Some(pr) = st.press.take() {
-                            if !pr.moved {
-                                st.pen_click(pr.at, shift, free);
+                            if !pr.moved && !pr.handle {
+                                st.pen_click(pr.at, shift, false);
                             }
                         }
                         st.pen_drag_end();
@@ -206,9 +205,17 @@ fn marks(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Res
             label = Some(if s.is_empty() || h.snap == PenSnap::Close { what } else { format!("{what} · {s}") });
         }
     }
-    if let Some((i, _)) = st.pen.as_ref().and_then(|pe| pe.drag) {
-        let r = st.pen.as_ref().and_then(|pe| pe.radii.get(i).copied()).unwrap_or(0.0);
-        label = Some(format!("Fillet {} mm", fmt(r, 2)));
+    // Ctrl: the point placed under the pointer, its fillet
+    if let Some(pe) = &st.pen {
+        if let Some(i) = pe.drag.or(pe.grab) {
+            if let Some(c) = scr(pe.frame.to3(pe.pts[i])) {
+                p.circle_stroke(c, 8.0, Stroke::new(1.8, Color32::WHITE));
+            }
+            let r = pe.radii.get(i).copied().unwrap_or(0.0);
+            label = Some(if pe.drag.is_some() || r > 0.0 { format!("Fillet {} mm", fmt(r, 2)) } else { "Ctrl + drag: fillet this point".into() });
+        } else if st.tool == Tool::Pen && ctx.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+            label = Some("Ctrl: drag a point placed to round it".into());
+        }
     }
     // the bodies' vertices in Vertex mode, the outline's corners brighter
     let vertex_mode = st.tool == Tool::Select && st.mode == SelMode::Vertex;
@@ -276,19 +283,19 @@ fn marks(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Res
     p.galley(r.min + vec2(6.0, 2.0), g, on_accent());
 }
 
-/// What the pointer is over in the Select tool, and what Shift + drag does.
+/// What the pointer is over in the Select tool, and what a drag does.
 fn hover_label(st: &AppState, h: &Comp) -> String {
     let b = st.body(h.obj());
     match h {
-        Comp::Object(_) if b.is_some() => "Object · Shift + drag: thickness".into(),
+        Comp::Object(_) if b.is_some() => "Object · drag: thickness".into(),
         Comp::Object(_) => "Object".into(),
-        Comp::Face { .. } => "Face · Shift + drag: thickness".into(),
-        Comp::Step { .. } => "Fillet · Shift + drag: its radius".into(),
+        Comp::Face { .. } => "Face · drag: thickness".into(),
+        Comp::Step { .. } => "Fillet · drag: its size".into(),
         Comp::Edge { edge, .. } => {
             let open = b.and_then(|b| b.built.find_edge(edge).map(|e| b.built.edge_open(e))).unwrap_or(false);
-            if open { "Open edge · Shift + drag pulls it out".into() } else { "Edge · Shift + drag: fillet".into() }
+            if open { "Open edge · drag pulls it out".into() } else if st.cut_bevel { "Edge · drag: bevel".into() } else { "Edge · drag: fillet".into() }
         }
-        Comp::Corner { .. } => "Corner · Shift + drag: round it · Ctrl+B: bevel".into(),
+        Comp::Corner { .. } => if st.cut_bevel { "Corner · drag: bevel".into() } else { "Corner · drag: fillet".into() },
         Comp::Vertex { .. } => "Vertex".into(),
     }
 }
@@ -334,15 +341,15 @@ pub fn hint(st: &AppState) -> String {
     }
     match st.tool {
         Tool::Select => match st.mode {
-            SelMode::Object => "Object (4): click a shape to pick it · Shift + drag on it: thickness · P pen · C circle · drag to turn around".into(),
-            SelMode::Face => "Face (3): click a face · Shift + drag: thickness · a fillet's face picks the fillet".into(),
-            SelMode::Edge => "Edge (2): click an edge (Shift + click adds) · Shift + drag: an open edge is pulled out, another one filleted".into(),
-            SelMode::Vertex => "Vertex (1): click a corner (Shift + click adds) · Shift + drag rounds it · a rounded or bevelled corner's dot drags its size · Ctrl+B bevels".into(),
+            SelMode::Object => "Object (4): click a shape to pick it · drag on it: thickness · Alt + drag turns around".into(),
+            SelMode::Face => "Face (3): click a face · drag: thickness · a fillet's face picks the fillet".into(),
+            SelMode::Edge => "Edge (2): click an edge (Shift + click adds) · drag: an open edge is pulled out, another one filleted or bevelled (the option on top)".into(),
+            SelMode::Vertex => "Vertex (1): click a corner (Shift + click adds) · drag on it: fillet or bevel (the option on top) · Ctrl+B bevels what is picked".into(),
         },
         Tool::Pen => match &st.pen {
-            None if st.fresh.is_some() => "Made · Shift + drag on it: thickness · Enter keeps it · Esc removes it · click elsewhere to draw the next one".into(),
+            None if st.fresh.is_some() => "Made · drag on it (Select): thickness · Enter keeps it · Esc removes it · click elsewhere to draw the next one".into(),
             None => "Pen: click on the scan · the plane under the pointer is the one you draw on (blue: a flat face) · then click the corners".into(),
-            Some(pe) if pe.pts.len() < 3 => format!("{} points · click the next corner · Shift: horizontal, vertical or 45° · press and drag on a point rounds it · Enter makes a line · Backspace takes one back · Esc stops", pe.pts.len()),
+            Some(pe) if pe.pts.len() < 3 => format!("{} points · click the next corner · Shift: horizontal, vertical or 45° · Ctrl + drag on a point rounds it · Enter makes a line · Backspace takes one back · Esc stops", pe.pts.len()),
             Some(pe) => format!("{} points · click the first point to close and fill it · Enter makes a line · Backspace takes one back · Esc stops", pe.pts.len()),
         },
         Tool::Circle => match &st.circle {
