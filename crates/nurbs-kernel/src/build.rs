@@ -1273,6 +1273,96 @@ mod tests {
     }
 
     #[test]
+    fn tension_two_sizes() {
+        // a box's vertical edges rounded at 5 mm, then its top edges at 3 mm
+        // (they run round the first): each fillet keeps its own tension, the
+        // top one also where it follows the vertical one's conic
+        let kinds = |m: &Model, r: u32| m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).map(|f| f.kind).collect::<Vec<_>>();
+        let vert = [DVec3::new(20.0, 10.0, 15.0), DVec3::new(-20.0, 10.0, 15.0), DVec3::new(20.0, 10.0, -15.0), DVec3::new(-20.0, 10.0, -15.0)];
+        let top = [DVec3::new(0.0, 20.0, 15.0), DVec3::new(0.0, 20.0, -15.0), DVec3::new(20.0, 20.0, 0.0), DVec3::new(-20.0, 20.0, 0.0)];
+        let mut circ = 0;
+        for (t1, t2) in [(0.0, 0.0), (0.7, 0.7), (0.0, 0.7), (0.7, 0.0), (0.3, 0.3)] {
+            let mut d = Doc::default();
+            d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            let m0 = build(&d, true, false, &[], &mut Cache::default());
+            let a = d.add_round(5.0, false, vert.iter().map(|p| edge_near(&m0, *p)).collect());
+            d.feature_mut(a).unwrap().round.as_mut().unwrap().tension = t1;
+            let m1 = build(&d, true, false, &[], &mut Cache::default());
+            let b = d.add_round(3.0, false, top.iter().map(|p| edge_near(&m1, *p)).collect());
+            d.feature_mut(b).unwrap().round.as_mut().unwrap().tension = t2;
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "tensions {t1} {t2}: {:?}", m.errors);
+            if t1 == 0.0 && t2 == 0.0 {
+                circ = m.faces.len();
+            }
+            assert_eq!(m.faces.len(), circ, "tensions {t1} {t2}");
+            let round = |k: &SurfKind| matches!(k, SurfKind::Cylinder | SurfKind::Torus);
+            if t1 > 0.0 {
+                assert!(!kinds(&m, a).iter().any(round), "tensions {t1} {t2}: {:?}", kinds(&m, a));
+            }
+            if t2 > 0.0 {
+                assert!(!kinds(&m, b).iter().any(round), "tensions {t1} {t2}: {:?}", kinds(&m, b));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn tension_probe2() {
+        // two sizes on a box: the vertical edges first, then the top ones
+        // (they run round the first), and the other way round
+        let kinds = |m: &Model, r: u32| m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).map(|f| f.kind).collect::<Vec<_>>();
+        let vert = [DVec3::new(20.0, 10.0, 15.0), DVec3::new(-20.0, 10.0, 15.0), DVec3::new(20.0, 10.0, -15.0), DVec3::new(-20.0, 10.0, -15.0)];
+        let top = [DVec3::new(0.0, 20.0, 15.0), DVec3::new(0.0, 20.0, -15.0), DVec3::new(20.0, 20.0, 0.0), DVec3::new(-20.0, 20.0, 0.0)];
+        for (name, first, second, r1, r2) in [("vertical 5 then top 3", vert, top, 5.0, 3.0), ("top 3 then vertical 5", top, vert, 3.0, 5.0), ("top 5 then vertical 3", top, vert, 5.0, 3.0)] {
+            for (t1, t2) in [(0.7, 0.7), (0.0, 0.7), (0.7, 0.0), (0.3, 0.3)] {
+                let mut d = Doc::default();
+                d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+                let m0 = build(&d, true, false, &[], &mut Cache::default());
+                let a = d.add_round(r1, false, first.iter().map(|p| edge_near(&m0, *p)).collect());
+                d.feature_mut(a).unwrap().round.as_mut().unwrap().tension = t1;
+                let m1 = build(&d, true, false, &[], &mut Cache::default());
+                // the second edges: their middles moved by the first
+                let b = d.add_round(r2, false, second.iter().map(|p| edge_near(&m1, *p)).collect());
+                d.feature_mut(b).unwrap().round.as_mut().unwrap().tension = t2;
+                let m = build(&d, true, false, &[], &mut Cache::default());
+                eprintln!("{name}, tensions {t1} {t2}: errors {:?}\n   first {:?}\n   second {:?}", m.errors, kinds(&m, a), kinds(&m, b));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn tension_probe3() {
+        // the topology of the top 3 then vertical 5 case, circular
+        let vert = [DVec3::new(20.0, 10.0, 15.0), DVec3::new(-20.0, 10.0, 15.0), DVec3::new(20.0, 10.0, -15.0), DVec3::new(-20.0, 10.0, -15.0)];
+        let top = [DVec3::new(0.0, 20.0, 15.0), DVec3::new(0.0, 20.0, -15.0), DVec3::new(20.0, 20.0, 0.0), DVec3::new(-20.0, 20.0, 0.0)];
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        let a = d.add_round(3.0, false, top.iter().map(|p| edge_near(&m0, *p)).collect());
+        let m1 = build(&d, true, false, &[], &mut Cache::default());
+        let b = d.add_round(5.0, false, vert.iter().map(|p| edge_near(&m1, *p)).collect());
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        eprintln!("fillets {a} {b}, errors {:?}", m.errors);
+        for (i, f) in m.faces.iter().enumerate() {
+            let t = f.tag.unwrap();
+            if t.feature != a && t.feature != b {
+                continue;
+            }
+            if !(f.point[0] > 0.0 && f.point[2] > 0.0) {
+                continue;
+            }
+            let nb: Vec<String> = m.edges.iter().filter(|e| e.faces.contains(&(i as i32))).map(|e| {
+                let o = if e.faces[0] == i as i32 { e.faces[1] } else { e.faces[0] };
+                let of = &m.faces[o as usize];
+                format!("{}:{}/{:?}{}", of.tag.unwrap().feature, of.tag.unwrap().sub, of.kind, if e.seam { " seam" } else { "" })
+            }).collect();
+            eprintln!("face {i} fillet {} {:?} r {:.2} at {:.2?}: {nb:?}", t.feature, f.kind, f.radius, f.point);
+        }
+    }
+
+    #[test]
     fn corner_tension() {
         // a 20 mm square sketch, one corner a 6 mm fillet: circular, then
         // with tension 0.7 (fuller) and 0.3 (flatter)
