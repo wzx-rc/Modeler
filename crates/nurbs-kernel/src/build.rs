@@ -1515,6 +1515,36 @@ mod tests {
     }
 
     #[test]
+    fn tension_point_corner() {
+        // the top front edge filleted (2 mm), then the top -X edge at 3 mm
+        // with tension: OpenCascade carries the second round the first one's
+        // end and down the front vertical edge, its corner there a
+        // three-sided face closing on a point of the -X side (the end
+        // curved tighter than the fillet). That corner is made conic too,
+        // its ends the two cylinders' new sections (a little off a plane:
+        // taken on the plane through their ends and middle)
+        let round = |m: &Model, id: u32| m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(id) && matches!(f.kind, SurfKind::Cylinder | SurfKind::Torus)).count();
+        for (r1, t1, r2, t2) in [(2.0, 0.0, 3.0, 0.7), (2.0, 0.0, 3.0, 0.3), (2.0, 0.5, 3.0, 0.7), (1.0, 0.0, 4.0, 0.3), (1.5, 0.4, 3.0, 0.6)] {
+            let mut d = Doc::default();
+            let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            let a = d.add_round(r1, false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
+            d.feature_mut(a).unwrap().round.as_mut().unwrap().tension = t1;
+            let c = d.add_round(r2, false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 1)], at: DVec3::new(-20.0, 20.0, 0.0) }]);
+            d.feature_mut(c).unwrap().round.as_mut().unwrap().tension = t2;
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            let what = format!("{r1} mm ({t1}) then {r2} mm ({t2})");
+            assert!(m.errors.is_empty(), "{what}: {:?}", m.errors);
+            assert!(m.limits.is_empty() && m.tension_limits.is_empty(), "{what}: {:?} {:?}", m.limits, m.tension_limits);
+            // (not blended with the first: the second fillet's three faces, all conic)
+            assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(c)).count(), 3, "{what}");
+            assert_eq!(round(&m, c), 0, "{what}");
+            if t1 > 0.0 {
+                assert_eq!(round(&m, a), 0, "{what}");
+            }
+        }
+    }
+
+    #[test]
     fn corner_tension() {
         // a 20 mm square sketch, one corner a 6 mm fillet: circular, then
         // with tension 0.7 (fuller) and 0.3 (flatter)

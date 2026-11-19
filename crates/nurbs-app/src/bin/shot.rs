@@ -1714,6 +1714,44 @@ fn main() {
             }
         }
     }
+    if want("tension-point") {
+        // the top front edge filleted at 2 mm, then the top -X edge at 3 mm:
+        // OpenCascade carries the second round the first one's end and down
+        // the front vertical edge, its corner there closing on a point of
+        // the -X side; with tension that corner turns conic too
+        let mut d = Doc::default();
+        let bx = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Point corner");
+        h.settle();
+        let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        let mut a = 0;
+        h.st.edit("Fillet", |d| a = d.add_round(2.0, false, vec![EdgeRef { faces: [tag(bx, 2), tag(bx, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]));
+        h.settle();
+        let mut b = 0;
+        h.st.edit("Fillet", |d| b = d.add_round(3.0, false, vec![EdgeRef { faces: [tag(bx, 2), tag(bx, 1)], at: DVec3::new(-20.0, 20.0, 0.0) }]));
+        h.settle();
+        let _ = a;
+        h.st.select(None, false);
+        h.st.camera.yaw = -0.75;
+        h.st.camera.pitch = 0.55;
+        h.st.camera.frame(Vec3::new(-24.0, 6.0, 4.0), Vec3::new(-10.0, 22.0, 18.0));
+        h.st.camera.target = Vec3::new(-18.5, 17.0, 13.0);
+        h.st.camera.dist *= 0.45;
+        h.steps(2);
+        h.settle();
+        h.shot("zero-tension-point-0-blended");
+        // (Blend corners off: the shape tension is made on, still circular)
+        h.st.edit("Blend", |d| d.feature_mut(b).unwrap().round.as_mut().unwrap().blend = false);
+        h.settle();
+        h.shot("zero-tension-point-1-circular");
+        for (t, name) in [(0.7, "2-full"), (0.3, "3-flat")] {
+            h.st.set_round_tension(b, t, true);
+            h.st.end_live();
+            h.settle();
+            eprintln!("  tension {t}: errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+            h.shot(&format!("zero-tension-point-{name}"));
+        }
+    }
     if want("tension") {
         // the direct fillet's modifiers: Shift held during the drag sets
         // the tension (up fuller), Ctrl held makes a chamfer
