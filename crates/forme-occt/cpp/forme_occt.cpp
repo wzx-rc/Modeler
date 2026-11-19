@@ -3204,16 +3204,18 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                     for (TopExp_Explorer x(fw, TopAbs_WIRE); x.More(); x.Next())
                         if (!x.Current().IsSame(ow)) inner.push_back(TopoDS::Wire(x.Current()));
                     if (inner.empty()) continue;
-                    bool moved = false, held = false;
+                    bool moved = false, whole = true, held = false;
                     std::vector<gp_Pnt> pts;
                     for (BRepTools_WireExplorer x(ow, fw); x.More(); x.Next()) {
                         TopoDS_Vertex cv = x.CurrentVertex();
                         moved = moved || vnew.IsBound(cv);
+                        whole = whole && vnew.IsBound(cv);
                         pts.push_back(vnew.IsBound(cv) ? BRep_Tool::Pnt(TopoDS::Vertex(vnew(cv))) : BRep_Tool::Pnt(cv));
                     }
                     for (const TopoDS_Wire& w : inner)
                         for (TopExp_Explorer x(w, TopAbs_VERTEX); x.More(); x.Next()) held = held || vnew.IsBound(x.Current());
-                    if (!moved || held || pts.size() < 3) continue;
+                    // (a hole's point moved on its own: refused below)
+                    if (!moved || (held && !whole) || pts.size() < 3) continue;
                     gp_XYZ nrm(0, 0, 0), cen(0, 0, 0);
                     for (size_t k = 0; k < pts.size(); k++) {
                         const gp_Pnt& p = pts[k];
@@ -3229,6 +3231,11 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                     if (off > 1e-6 * size + 1e-6) continue; // it bends: refused below
                     gp_Pln old = as.Plane();
                     if (std::abs(std::abs(old.Axis().Direction().Dot(nd)) - 1) < 1e-9 && old.Distance(gp_Pnt(cen)) < 1e-6 * size + 1e-7) continue;
+                    // the whole face moved (a Move face: its holes' points
+                    // with it): they slide along their walls instead
+                    if (held)
+                        for (const TopoDS_Wire& w : inner)
+                            for (TopExp_Explorer x(w, TopAbs_VERTEX); x.More(); x.Next()) vnew.UnBind(x.Current());
                     for (const TopoDS_Wire& w : inner) {
                         // its walls and the way they run
                         std::vector<TopoDS_Face> wf;

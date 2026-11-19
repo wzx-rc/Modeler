@@ -1486,6 +1486,35 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn tension_probe4() {
+        // two top edges meeting at a corner (the vertical edge there sharp):
+        // the front one (R1, T1), then the -X one (R2, T2)
+        let env = |k: &str, or: f64| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(or);
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let a = d.add_round(env("FORME_R1", 2.0), false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
+        d.feature_mut(a).unwrap().round.as_mut().unwrap().tension = env("FORME_T1", 0.0);
+        let c = d.add_round(env("FORME_R2", 3.0), false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 1)], at: DVec3::new(-20.0, 20.0, 0.0) }]);
+        d.feature_mut(c).unwrap().round.as_mut().unwrap().tension = env("FORME_T2", 0.7);
+        d.feature_mut(c).unwrap().round.as_mut().unwrap().blend = env("FORME_BLEND", 1.0) > 0.0;
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        eprintln!("fillets {a} {c}, errors {:?}, tension limits {:?}", m.errors, m.tension_limits);
+        for (i, f) in m.faces.iter().enumerate() {
+            let t = f.tag.unwrap();
+            if t.feature != a && t.feature != c {
+                continue;
+            }
+            let nb: Vec<String> = m.edges.iter().filter(|e| e.faces.contains(&(i as i32))).map(|e| {
+                let o = if e.faces[0] == i as i32 { e.faces[1] } else { e.faces[0] };
+                let of = &m.faces[o as usize];
+                format!("{}:{}/{:?}", of.tag.unwrap().feature, of.tag.unwrap().sub, of.kind)
+            }).collect();
+            eprintln!("face {i} fillet {} {:?} r {:.2} at {:.2?}: {nb:?}", t.feature, f.kind, f.radius, f.point);
+        }
+    }
+
+    #[test]
     fn corner_tension() {
         // a 20 mm square sketch, one corner a 6 mm fillet: circular, then
         // with tension 0.7 (fuller) and 0.3 (flatter)
@@ -1767,6 +1796,90 @@ mod tests {
                 }
             }
         }
+        assert!(bad.is_empty(), "{} failed:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    /// The tools one after another on the test part: every ordered pair of
+    /// a list of operations (fillets, chamfers, insets, extrusions, moves,
+    /// a tilt, the Knife), each pair built on its own; prints what fails.
+    /// `FORME_COMBO=name` keeps the pairs whose names contain it.
+    #[test]
+    #[ignore]
+    fn combo_battery() {
+        let (base, b, s) = test_part();
+        let h = 2u32;
+        let er = |a: i64, c: i64, x: f64, y: f64, z: f64| EdgeRef { faces: [a, c], at: DVec3::new(x, y, z) };
+        let fr = |t: i64, x: f64, y: f64, z: f64| FaceRef { tag: t, at: DVec3::new(x, y, z) };
+        type Op_ = Box<dyn Fn(&mut Doc)>;
+        let round = |size: f64, chamfer: bool, tension: f64, e: EdgeRef| -> Op_ {
+            Box::new(move |d: &mut Doc| {
+                let r = d.add_round(size, chamfer, vec![e.clone()]);
+                d.feature_mut(r).unwrap().round.as_mut().unwrap().tension = tension;
+            })
+        };
+        let push = |face: FaceRef, inset: f64, depth: f64| -> Op_ { Box::new(move |d: &mut Doc| { d.add_push(Push { face: face.clone(), inset, depth }); }) };
+        let tweak = |comp: Comp, delta: DVec3| -> Op_ { Box::new(move |d: &mut Doc| { d.add_tweak(Tweak { comp: comp.clone(), delta }); }) };
+        let ops: Vec<(&str, Op_)> = vec![
+            ("fillet top-front", round(2.0, false, 0.0, er(tag(b, 2), tag(b, 4), -12.0, 20.0, 15.0))),
+            ("tension fillet top -X", round(3.0, false, 0.7, er(tag(b, 2), tag(b, 1), -20.0, 20.0, 0.0))),
+            ("chamfer side vertical", round(2.0, true, 0.0, er(tag(b, 0), tag(b, 4), 20.0, 10.0, 15.0))),
+            ("fillet boss top", round(1.0, false, 0.0, er(tag(s, 0), tag(s, 1), 17.0, 30.0, 0.0))),
+            ("fillet hole mouth", round(1.0, false, 0.0, er(tag(b, 2), tag(h, 0), -5.0, 20.0, 0.0))),
+            ("inset front", push(fr(tag(b, 4), -12.0, 6.0, 15.0), 2.0, 0.0)),
+            ("extrude front", push(fr(tag(b, 4), -12.0, 6.0, 15.0), 0.0, 3.0)),
+            ("extrude +X in", push(fr(tag(b, 0), 20.0, 8.0, 0.0), 0.0, -2.0)),
+            ("extrude boss side", push(fr(tag(s, 0), 17.0, 25.0, 0.0), 0.0, 1.0)),
+            ("inset slot floor", push(fr(tag(4, 3), 0.0, 14.0, 0.0), 1.0, -1.0)),
+            ("move top-left up", tweak(Comp::Face(fr(tag(b, 2), -12.0, 20.0, 8.0)), DVec3::new(0.0, 3.0, 0.0))),
+            ("tilt top-left", tweak(Comp::Edge(er(tag(b, 2), tag(b, 1), -20.0, 20.0, 0.0)), DVec3::new(0.0, 3.0, 0.0))),
+            ("move +X out", tweak(Comp::Face(fr(tag(b, 0), 20.0, 8.0, 0.0)), DVec3::new(4.0, 0.0, 0.0))),
+            ("knife front", Box::new(move |d: &mut Doc| {
+                let pts = vec![
+                    KnifePoint { edge: er(tag(b, 1), tag(b, 4), -20.0, 10.0, 15.0), f: 0.5, at: DVec3::new(-20.0, 10.0, 15.0) },
+                    KnifePoint { edge: er(tag(b, 0), tag(b, 4), 20.0, 10.0, 15.0), f: 0.5, at: DVec3::new(20.0, 10.0, 15.0) },
+                ];
+                d.add_knife(Knife { pts, segs: vec![[0, 1]] }, "Knife");
+            })),
+        ];
+        let only = std::env::var("FORME_COMBO").ok();
+        let mut bad = vec![];
+        let mut n = 0;
+        for (an, a) in &ops {
+            // each alone first
+            let mut d = base.clone();
+            a(&mut d);
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            if !m.errors.is_empty() {
+                eprintln!("ALONE {an}: {:?}", m.errors);
+                bad.push(format!("{an}: {:?}", m.errors));
+                continue;
+            }
+            for (bn, bo) in &ops {
+                if an == bn {
+                    continue;
+                }
+                let name = format!("{an} → {bn}");
+                if only.as_ref().is_some_and(|o| !name.contains(o.as_str())) {
+                    continue;
+                }
+                let mut d = base.clone();
+                a(&mut d);
+                bo(&mut d);
+                let t = Instant::now();
+                let m = build(&d, true, false, &[], &mut Cache::default());
+                n += 1;
+                // (the second naming a face or an edge the first took away
+                // is no fault: listed apart)
+                let lost = |e: &String| e.contains("is gone") || e.contains("are gone") || e.contains("not found");
+                if m.errors.iter().any(|e| !lost(e)) {
+                    eprintln!("FAIL {name}: {:?} ({:.2} s)", m.errors, t.elapsed().as_secs_f64());
+                    bad.push(format!("{name}: {:?}", m.errors));
+                } else if !m.errors.is_empty() {
+                    eprintln!("GONE {name}: {:?}", m.errors);
+                }
+            }
+        }
+        eprintln!("{} of {n} pairs failed", bad.len());
         assert!(bad.is_empty(), "{} failed:\n{}", bad.len(), bad.join("\n"));
     }
 
