@@ -885,6 +885,9 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             });
         });
     });
+    if st.settings.show_tree && !st.doc.features.is_empty() {
+        components_column(ctx, st, pos2(screen.min.x + EDGE + LEFT_W + 8.0, top) + off, tree_h);
+    }
 }
 
 fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
@@ -907,67 +910,137 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             }
         }
     });
+    // Romain (19 nov.): the elements by kind; an element's operations in
+    // the second column, beside the panel
     let feats = st.doc.features.clone();
+    let ops_of = |st: &AppState, id: FeatureId| feats.iter().filter(|g| !g.is_solid() && !g.is_path() && st.owner_of(g.id) == Some(id)).count();
+    let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 4] = [
+        ("PRIMITIVES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }))),
+        ("SHAPES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Profile { .. }))),
+        ("PATHS", Box::new(|f: &Feature| f.is_path())),
+        ("OPERATIONS", Box::new(|_: &Feature| false)),
+    ];
+    let focus = st.outline_element();
     egui::ScrollArea::vertical().id_salt("tree-scroll").max_height(height - 32.0).min_scrolled_height(height - 32.0).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
         if feats.is_empty() {
             ui.label(egui::RichText::new("Empty · pick a shape on the right (B, C)").font(regular(12.0)).color(TEXT2()));
         }
-        for f in &feats {
-            let w = ui.available_width();
-            let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
-            let selected = st.is_selected(f.id);
-            let hovered_3d = st.hover_feature == Some(f.id);
+        for (gi, (title, keep)) in groups.iter().enumerate() {
+            // the last group: operations whose shape cannot be told
+            let members: Vec<&Feature> = if gi == 3 { feats.iter().filter(|f| !f.is_solid() && !f.is_path() && st.owner_of(f.id).is_none()).collect() } else { feats.iter().filter(|f| keep(f)).collect() };
+            if members.is_empty() {
+                continue;
+            }
+            let fid = Id::new(("tree-group", gi));
+            let folded = ui.data(|d| d.get_temp::<bool>(fid)).unwrap_or(false);
+            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
             let p = ui.painter();
-            if selected {
-                p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
-            } else if resp.hovered() || hovered_3d {
-                p.rect_filled(r, 6.0, RAISED());
+            icons::paint(p, Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(10.0, 10.0)), if folded { Icon::ChevronRight } else { Icon::Chevron }, TEXT2());
+            p.text(pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, *title, semibold(10.0), if resp.hovered() { TEXT() } else { TEXT2() });
+            p.text(pos2(r.max.x - 6.0, r.center().y), Align2::RIGHT_CENTER, members.len().to_string(), regular(11.0), TEXT2());
+            if resp.clicked() {
+                ui.data_mut(|d| d.insert_temp(fid, !folded));
             }
-            let x0 = r.min.x + 6.0;
-            let dim = if f.visible { 1.0 } else { 0.4 };
-            let c = feature_color(f);
-            let br = Rect::from_min_size(pos2(x0, r.center().y - 8.0), vec2(16.0, 16.0));
-            p.rect_filled(br, 4.0, tint(c, 0.16 * dim));
-            if f.is_solid() {
-                paint_op_glyph(p, br.center(), f.op, tint(c, dim), 9.0);
-            } else {
-                icons::paint(p, br.shrink(2.0), feature_icon(f), tint(c, dim));
+            if folded {
+                continue;
             }
-            let name_color = if selected { TEXT_STRONG() } else { tint(TEXT(), dim) };
-            let info = step_info(f);
-            let info_g = p.layout_no_wrap(info, regular(12.0), tint(TEXT2(), dim));
-            let info_x = r.max.x - 40.0 - info_g.size().x;
-            p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
-            let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
-            let mut job = egui::text::LayoutJob::single_section(f.name.clone(), egui::TextFormat::simple(if selected { semibold(13.0) } else { regular(13.0) }, name_color));
-            job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-            let name_g = ui.painter().layout_job(job);
-            ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
-            let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
-            icons::paint(ui.painter(), er, if f.visible { Icon::Eye } else { Icon::EyeOff }, tint(TEXT2(), 0.8));
-            let eresp = ui.interact(er.expand(6.0), Id::new(("eye", f.id)), Sense::click());
-            if eresp.clicked() {
-                st.toggle_visible(f.id);
-            } else if resp.clicked() {
-                if f.is_solid() {
-                    st.set_sel_mode(SelMode::Object);
-                } else if f.push.is_some() {
-                    st.set_sel_mode(SelMode::Face);
-                } else if let Some(t) = &f.tweak {
-                    st.set_sel_mode(match t.comp {
-                        nurbs_kernel::Comp::Face(_) => SelMode::Face,
-                        nurbs_kernel::Comp::Edge(_) => SelMode::Edge,
-                        nurbs_kernel::Comp::Vertex(_) => SelMode::Vertex,
-                    });
-                } else {
-                    st.select_tool();
-                    st.edge_sel.clear();
-                }
-                let add = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
-                st.select(Some(f.id), add);
+            for f in members {
+                let n = if gi < 3 { ops_of(st, f.id) } else { 0 };
+                tree_row(ui, st, f, n, focus == Some(f.id));
             }
+            ui.add_space(3.0);
         }
+    });
+}
+
+/// One row of the outliner: a shape, a path or an operation. `ops`: how
+/// many operations an element has (shown as a small count); `focused`: its
+/// operations are in the second column.
+fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bool) {
+    let w = ui.available_width();
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
+    let selected = st.is_selected(f.id);
+    let hovered_3d = st.hover_feature == Some(f.id);
+    let p = ui.painter();
+    if selected {
+        p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+    } else if focused {
+        p.rect(r, 6.0, RAISED(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+    } else if resp.hovered() || hovered_3d {
+        p.rect_filled(r, 6.0, RAISED());
+    }
+    let x0 = r.min.x + 6.0;
+    let dim = if f.visible { 1.0 } else { 0.4 };
+    let c = feature_color(f);
+    let br = Rect::from_min_size(pos2(x0, r.center().y - 8.0), vec2(16.0, 16.0));
+    p.rect_filled(br, 4.0, tint(c, 0.16 * dim));
+    if f.is_solid() {
+        paint_op_glyph(p, br.center(), f.op, tint(c, dim), 9.0);
+    } else {
+        icons::paint(p, br.shrink(2.0), feature_icon(f), tint(c, dim));
+    }
+    let name_color = if selected { TEXT_STRONG() } else { tint(TEXT(), dim) };
+    let info = if ops > 0 { format!("{} · {ops} op{}", step_info(f), if ops > 1 { "s" } else { "" }) } else { step_info(f) };
+    let info_g = p.layout_no_wrap(info, regular(12.0), tint(TEXT2(), dim));
+    let info_x = r.max.x - 40.0 - info_g.size().x;
+    p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
+    let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
+    let mut job = egui::text::LayoutJob::single_section(f.name.clone(), egui::TextFormat::simple(if selected { semibold(13.0) } else { regular(13.0) }, name_color));
+    job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let name_g = ui.painter().layout_job(job);
+    ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
+    let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
+    icons::paint(ui.painter(), er, if f.visible { Icon::Eye } else { Icon::EyeOff }, tint(TEXT2(), 0.8));
+    let eresp = ui.interact(er.expand(6.0), Id::new(("eye", f.id)), Sense::click());
+    if eresp.clicked() {
+        st.toggle_visible(f.id);
+    } else if resp.clicked() {
+        if f.is_solid() {
+            st.set_sel_mode(SelMode::Object);
+            st.outline_focus = Some(f.id);
+        } else if f.push.is_some() {
+            st.set_sel_mode(SelMode::Face);
+        } else if let Some(t) = &f.tweak {
+            st.set_sel_mode(match t.comp {
+                nurbs_kernel::Comp::Face(_) => SelMode::Face,
+                nurbs_kernel::Comp::Edge(_) => SelMode::Edge,
+                nurbs_kernel::Comp::Vertex(_) => SelMode::Vertex,
+            });
+        } else {
+            st.select_tool();
+            st.edge_sel.clear();
+        }
+        let add = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
+        st.select(Some(f.id), add);
+    }
+}
+
+/// The outliner's second column, beside the panel: the operations made on
+/// the element clicked (fillets, insets, moves, cuts), in history order.
+fn components_column(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2, height: f32) {
+    let Some(id) = st.outline_element() else { return };
+    let Some(el) = st.doc.feature(id).cloned() else { return };
+    let ops: Vec<Feature> = st.doc.features.iter().filter(|g| !g.is_solid() && !g.is_path() && st.owner_of(g.id) == Some(id)).cloned().collect();
+    egui::Area::new(Id::new("components")).order(Order::Middle).fixed_pos(at).show(ctx, |ui| {
+        island().inner_margin(Margin::same(10)).show(ui, |ui| {
+            ui.set_width(220.0);
+            ui.horizontal(|ui| {
+                ui.set_height(26.0);
+                ui.label(egui::RichText::new(&el.name).font(semibold(13.0)).color(TEXT()));
+                ui.label(egui::RichText::new(format!("{} op{}", ops.len(), if ops.len() == 1 { "" } else { "s" })).font(regular(11.5)).color(TEXT2()));
+            });
+            if ops.is_empty() {
+                ui.label(egui::RichText::new("No operations yet: its fillets, insets and moves show here").font(regular(11.5)).color(TEXT2()));
+                return;
+            }
+            egui::ScrollArea::vertical().id_salt("components-scroll").max_height((height - 40.0).max(60.0)).auto_shrink([false, true]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                for g in &ops {
+                    tree_row(ui, st, g, 0, false);
+                }
+            });
+        });
     });
 }
 

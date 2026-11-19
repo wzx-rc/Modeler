@@ -1193,6 +1193,25 @@ fn main() {
         h.st.settings.help = true;
     }
 
+    if want("outliner") {
+        // the outliner by kind, and the clicked element's operations in a
+        // second column
+        let mut d = test_part();
+        d.add_round(2.0, false, vec![EdgeRef { faces: [FaceTag { feature: 1, sub: 2 }.pack(), FaceTag { feature: 1, sub: 4 }.pack()], at: DVec3::new(12.0, 20.0, 15.0) }]);
+        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 4 }.pack(), at: DVec3::new(-12.0, 8.0, 15.0) }, inset: 2.0, depth: -1.0 });
+        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 3, sub: 1 }.pack(), at: DVec3::new(10.0, 30.0, 0.0) }, inset: 2.0, depth: 2.0 });
+        h.reset(d, "Test part");
+        h.st.select(Some(1), false);
+        h.settle();
+        h.shot("zero-outliner-1-block");
+        h.st.select(Some(7), false);
+        h.steps(3);
+        h.shot("zero-outliner-2-boss-step");
+        for f in &h.st.doc.features {
+            eprintln!("  {} {:?} owner {:?}", f.name, f.id, h.st.owner_of(f.id));
+        }
+    }
+
     if want("tension") {
         // the direct fillet's modifiers: Shift held during the drag sets
         // the tension (up fuller), Ctrl held makes a chamfer

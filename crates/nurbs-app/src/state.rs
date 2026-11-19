@@ -10,7 +10,7 @@ use crate::view::View;
 use glam::{DQuat, DVec3, Vec3};
 use nurbs_kernel::client::{Kernel, Status};
 use nurbs_kernel::doc::PrimKind;
-use nurbs_kernel::{Doc, EdgeRef, FaceRef, Feature, FeatureId, Model, Op, Prim, Profile};
+use nurbs_kernel::{Doc, EdgeRef, FaceRef, FaceTag, Feature, FeatureId, Model, Op, Prim, Profile};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -359,6 +359,8 @@ pub struct AppState {
     pub files_open: bool,
     pub save_name: String,
     pub panel_visible: bool,
+    /// The outliner's element whose operations show in its second column.
+    pub outline_focus: Option<FeatureId>,
     /// Quads view: the part as the kernel's quad mesh (fillets in orange).
     pub quads: bool,
     /// Remesh view (the « Export converter », `nurbs_kernel::remesh`, kept
@@ -435,6 +437,7 @@ impl AppState {
             files_open: false,
             save_name: name.to_string(),
             panel_visible: true,
+            outline_focus: None,
             quads: false,
             remesh_on: false,
             remesh_target: 1500,
@@ -1011,6 +1014,63 @@ impl AppState {
         let m = self.model.as_ref()?;
         let (ro, rd) = self.view().ray(p[0], p[1]);
         self.picker.pick(m, ro, rd)
+    }
+
+    /// The element (a shape or a path) an operation works on: the shape
+    /// that the faces or edges it names come from (through other
+    /// operations' faces). None for a shape, a path, or an operation whose
+    /// faces cannot be told.
+    pub fn owner_of(&self, id: FeatureId) -> Option<FeatureId> {
+        let mut id = id;
+        for _ in 0..64 {
+            let f = self.doc.feature(id)?;
+            let tag = if let Some(r) = &f.round {
+                r.edges.first().map(|e| e.faces[0])
+            } else if let Some(p) = &f.push {
+                Some(p.face.tag)
+            } else if let Some(t) = &f.tweak {
+                match &t.comp {
+                    nurbs_kernel::Comp::Face(r) => Some(r.tag),
+                    nurbs_kernel::Comp::Edge(e) => Some(e.faces[0]),
+                    nurbs_kernel::Comp::Vertex(v) => {
+                        // the solid made before it whose box holds the point
+                        let pos = self.doc.features.iter().position(|g| g.id == id)?;
+                        return self.doc.features[..pos].iter().filter(|g| g.is_solid() && !g.is_path()).find(|g| {
+                            let (lo, hi) = g.bounds();
+                            v.cmpge(lo - 1e-3).all() && v.cmple(hi + 1e-3).all()
+                        }).map(|g| g.id);
+                    }
+                }
+            } else if let Some(k) = &f.cut {
+                k.pts.first().map(|p| p.edge.faces[0])
+            } else {
+                return None;
+            };
+            let owner = FaceTag::unpack(tag?)?.feature;
+            let g = self.doc.feature(owner)?;
+            if g.is_solid() || g.is_path() {
+                return Some(owner);
+            }
+            if owner == id {
+                return None;
+            }
+            id = owner;
+        }
+        None
+    }
+
+    /// The element the outliner's second column shows: the selected shape
+    /// or path, the owner of the selected operation, else the last clicked.
+    pub fn outline_element(&self) -> Option<FeatureId> {
+        if let Some(f) = self.single() {
+            if f.is_solid() || f.is_path() {
+                return Some(f.id);
+            }
+            if let Some(o) = self.owner_of(f.id) {
+                return Some(o);
+            }
+        }
+        self.outline_focus.filter(|id| self.doc.feature(*id).is_some())
     }
 
     /// The feature a face comes from.
