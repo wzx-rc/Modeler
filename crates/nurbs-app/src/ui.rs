@@ -1021,13 +1021,16 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
 // ------------------------------------------------- the operation window
 
 /// What the operation window shows: the picked edges, faces or vertices,
-/// or the selected step (fillet, chamfer, inset, extrude, move) or path.
+/// the selected step (fillet, chamfer, inset, extrude, move) or path, or
+/// the selected shape's own sizes (Romain 19 nov.: a tool's settings float
+/// in the view, not in the left panel).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum OpPop {
     Edges,
     Faces,
     Verts,
     Step(FeatureId),
+    Shape(FeatureId),
 }
 
 fn op_pop(st: &AppState) -> Option<OpPop> {
@@ -1046,7 +1049,7 @@ fn op_pop(st: &AppState) -> Option<OpPop> {
         };
     }
     let f = st.single()?;
-    (!f.is_solid() || f.is_path()).then_some(OpPop::Step(f.id))
+    Some(if !f.is_solid() || f.is_path() { OpPop::Step(f.id) } else { OpPop::Shape(f.id) })
 }
 
 /// Where the worked component is on screen: the box round its points.
@@ -1067,6 +1070,7 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
                 vec![f.origin]
             }
         }
+        OpPop::Shape(id) => vec![st.doc.feature(id)?.origin],
     };
     let view = st.view();
     let mut r: Option<Rect> = None;
@@ -1167,6 +1171,14 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     } else {
                         round_card(ui, st);
                     }
+                }
+                OpPop::Shape(id) => {
+                    let Some(f) = st.doc.feature(id).cloned() else { return };
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&f.name).font(semibold(14.0)).color(TEXT()));
+                        chip_label(ui, f.kind_label(), RAISED(), LABEL());
+                    });
+                    shape_card(ui, st, &f);
                 }
             }
         });
@@ -1501,19 +1513,8 @@ fn components_column(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2, hei
 
 /// Nothing selected: what new shapes will be.
 fn defaults(ui: &mut Ui, st: &mut AppState) {
-    let path = st.tool == Tool::Create(PrimKind::Path);
-    section(ui, if path { "New path" } else { "New shapes" });
-    let items = [(Op::Add, "Add", accent()), (Op::Carve, "Carve", carve())];
-    if !path {
-        if let Some(m) = segmented(ui, &items, st.mode, 40.0) {
-            st.mode = m;
-        }
-        ui.add_space(4.0);
-    }
-    if !path {
-        let m = st.material;
-        material_section(ui, st, m);
-    }
+    // Add / Carve for new shapes: the top island; their material: the
+    // materials island (Romain 19 nov.)
     section(ui, "Display");
     if toggle_row(ui, "Shape list", st.settings.show_tree) {
         st.settings.show_tree = !st.settings.show_tree;
@@ -1629,9 +1630,22 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         return;
     }
 
+    // its sizes are in the window by it in the view; Add / Carve in the top
+    // island, its material in the materials island (Romain 19 nov.)
+    let any_down = ui.input(|i| i.pointer.any_down());
+    if fold_section(ui, "Position and rotation", "position-open") {
+        position_rows(ui, st, &f);
+    }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+        st.end_live();
+    }
+}
+
+/// The selected shape's sizes (the operation window).
+fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    let id = f.id;
     // a slider drag is one undo step: it ends when no pointer button is down
     let any_down = ui.input(|i| i.pointer.any_down());
-
     section(ui, "Shape");
     match f.prim {
         Prim::Box { x, y, z } | Prim::Profile { x, y, z } => {
@@ -1665,19 +1679,28 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         }
         Prim::Path { .. } => {}
     }
-
-    section(ui, "Combine");
-    let items = [(Op::Add, "Add", accent()), (Op::Carve, "Carve", carve())];
-    if let Some(m) = segmented(ui, &items, f.op, 40.0) {
-        st.set_op(id, m);
-    }
-    material_section(ui, st, f.material);
-
-    section(ui, "Position and rotation");
-    position_rows(ui, st, &f);
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
         st.end_live();
     }
+}
+
+/// A section title with a fold arrow; open by default, kept per session.
+/// True when open.
+fn fold_section(ui: &mut Ui, title: &str, key: &str) -> bool {
+    let id = Id::new(key);
+    let open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
+    ui.add_space(4.0);
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(r, 6.0, RAISED());
+    }
+    icons::paint(p, Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(11.0, 11.0)), if open { Icon::Chevron } else { Icon::ChevronRight }, TEXT2());
+    p.text(pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, title, semibold(12.0), TEXT2());
+    if resp.clicked() {
+        ui.data_mut(|d| d.insert_temp(id, !open));
+    }
+    open
 }
 
 /// A path: open or closed, its box, where it is. Its corners are cut in
@@ -1977,47 +2000,6 @@ pub fn material_ball(p: &egui::Painter, c: egui::Pos2, r: f32, m: &materials::Ma
     let spec = 0.22 + 0.45 * m.metal * (1.0 - m.rough);
     p.circle_filled(c + vec2(-0.36, -0.4) * r, r * (0.24 - 0.08 * m.metal), Color32::from_white_alpha((spec * 255.0) as u8));
     p.circle_stroke(c, r, Stroke::new(1.0, tint(Color32::WHITE, 0.22)));
-}
-
-/// "Material": folded by default (a quiet panel), the current ball beside
-/// the title; open, the six balls, a click applies one.
-fn material_section(ui: &mut Ui, st: &mut AppState, current: u32) {
-    let id = Id::new("material-open");
-    let open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
-    ui.add_space(4.0);
-    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
-    let p = ui.painter();
-    if resp.hovered() {
-        p.rect_filled(r, 6.0, RAISED());
-    }
-    icons::paint(p, Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(11.0, 11.0)), if open { Icon::Chevron } else { Icon::ChevronRight }, TEXT2());
-    p.text(pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, "Material", semibold(12.0), TEXT2());
-    let cur = materials::get(current);
-    p.text(pos2(r.max.x - 26.0, r.center().y), Align2::RIGHT_CENTER, cur.name, regular(11.5), TEXT2());
-    material_ball(p, pos2(r.max.x - 12.0, r.center().y), 8.0, cur);
-    if resp.clicked() {
-        ui.data_mut(|d| d.insert_temp(id, !open));
-    }
-    if !open {
-        return;
-    }
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
-        for (i, m) in materials::MATERIALS.iter().enumerate() {
-            let (r, resp) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
-            let on = current as usize == i;
-            let p = ui.painter();
-            if on {
-                p.circle_stroke(r.center(), 14.5, Stroke::new(1.5, accent()));
-            } else if resp.hovered() {
-                p.circle_stroke(r.center(), 14.5, Stroke::new(1.0, DIVIDER()));
-            }
-            material_ball(p, r.center(), 11.0, m);
-            if resp.on_hover_text(m.name).clicked() {
-                st.set_material(i as u32);
-            }
-        }
-    });
 }
 
 fn axis_field(ui: &mut Ui, label: &str, color: Color32, v: &mut f32, suffix: &str) -> egui::Response {

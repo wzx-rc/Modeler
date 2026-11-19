@@ -15,8 +15,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # on both Mac flavours, as the old Forme build: GitHub's arm64 Macs are
+  # often saturated, the first one to finish publishes (same .ipa)
   ipa:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +35,7 @@ jobs:
         id: occt
         with:
           path: ~/occt-ios
-          key: occt-ios-7.8.1-${{ hashFiles('ios/build_occt_ios.sh') }}
+          key: occt-ios-7.8.1-${{ matrix.os }}-${{ hashFiles('ios/build_occt_ios.sh') }}
       - name: OpenCascade for iOS
         if: steps.occt.outputs.cache-hit != 'true'
         run: bash ios/build_occt_ios.sh "$HOME/occt-ios"
@@ -37,15 +43,15 @@ jobs:
         if: steps.occt.outputs.cache-hit != 'true'
         with:
           path: ~/occt-ios
-          key: occt-ios-7.8.1-${{ hashFiles('ios/build_occt_ios.sh') }}
+          key: occt-ios-7.8.1-${{ matrix.os }}-${{ hashFiles('ios/build_occt_ios.sh') }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ios-nurbs
+          key: ios-nurbs-${{ matrix.os }}
       - name: Build FormeNURBS.ipa
         run: bash ios/build_nurbs_ipa.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: FormeNURBS-ipa
+          name: FormeNURBS-ipa-${{ matrix.os }}
           path: target/ipa-nurbs/FormeNURBS.ipa
       # direct download link: Releases > « Forme NURBS — dernière build iPad »
       - name: Publish the .ipa (release nurbs-ipa-latest)
