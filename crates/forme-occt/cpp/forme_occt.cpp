@@ -1601,6 +1601,48 @@ FShape* focc_round(const FShape* s, const int* idx, int n, double r, long long f
         (FShape*)nullptr);
 }
 
+// Edges cut flat at distance d on each face (a bevel), on the shape's faces
+// (a solid or a sheet), free edges kept; the new faces get `fresh`.
+FShape* focc_bevel(const FShape* s, const int* idx, int n, double d, long long fresh) {
+    return guard(
+        [&]() -> FShape* {
+            TopTools_IndexedMapOfShape m;
+            edge_map(s->s, m);
+            std::vector<TopoDS_Face> faces;
+            std::vector<TopoDS_Edge> loose;
+            split_free(s->s, faces, loose);
+            TopoDS_Shape part = faces_part(s->s);
+            if (part.IsNull()) {
+                set_err("a bevel needs faces");
+                return nullptr;
+            }
+            BRepFilletAPI_MakeChamfer op(part);
+            int added = 0;
+            for (int i = 0; i < n; i++)
+                if (idx[i] >= 1 && idx[i] <= m.Extent()) {
+                    op.Add(d, TopoDS::Edge(m(idx[i])));
+                    added++;
+                }
+            if (!added) {
+                set_err("no edge to bevel");
+                return nullptr;
+            }
+            op.Build();
+            if (!op.IsDone()) {
+                set_err("bevel failed");
+                return nullptr;
+            }
+            if (!valid(op.Shape())) {
+                set_err("bevel gave an invalid shape");
+                return nullptr;
+            }
+            FShape* res = wrap(with_free(op.Shape(), loose));
+            if (res) carry_tags(op, s, res, fresh);
+            return res;
+        },
+        (FShape*)nullptr);
+}
+
 // -------------------------------------------------------------- topology
 
 struct FBuf {

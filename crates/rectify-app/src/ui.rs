@@ -12,7 +12,7 @@ use egui::{pos2, vec2, Align2, Id, Key, Margin, Order, Rect, Sense, Stroke, Stro
 
 const EDGE: f32 = 14.0;
 const ISLAND_H: f32 = 40.0;
-const LEFT_W: f32 = 280.0;
+const LEFT_W: f32 = 420.0;
 const BOTTOM_H: f32 = 70.0;
 
 pub fn show(ctx: &egui::Context, st: &mut AppState) {
@@ -87,6 +87,13 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 let modes: Vec<(SelMode, &str, &str)> = SelMode::ALL.iter().map(|m| (*m, m.label(), m.key())).collect();
                 if let Some(m) = seg_inline(ui, "isl-mode", &modes, st.mode) {
                     st.set_mode(m);
+                }
+                island_sep(ui);
+                if icon_btn(ui, Icon::Fillet, false, "Fillet: round the corners or edges picked", 28.0).clicked() {
+                    st.cut_selected(false);
+                }
+                if icon_btn(ui, Icon::Bevel, false, "Bevel: cut the corners or edges picked straight (Ctrl+B)", 28.0).clicked() {
+                    st.cut_selected(true);
                 }
                 island_sep(ui);
                 if icon_btn(ui, Icon::Undo, false, "Undo (Ctrl+Z)", 28.0).clicked() {
@@ -267,16 +274,15 @@ fn slot_card(ui: &mut Ui, st: &mut AppState) {
     use rectify_core::circle::ProfileKind;
     let tool = st.tool;
     match tool {
-        Tool::Box => title(ui, "Box", "Press near a corner of a block with rounded corners, raised or cut in, drag across it to the far corner: a NURBS surface is laid on its wall, every row an exact rounded rectangle"),
-        _ => title(ui, "Slot", "Press at one end of a slot with round ends, drag along it to the other end: a NURBS surface is laid on its wall, every row an exact slot outline"),
+        Tool::Box => title(ui, "Box", ""),
+        _ => title(ui, "Slot", ""),
     }
     let mut refit = false;
     let mut apply = false;
     let mut cancel = false;
     let mut new_profile = None;
     match &mut st.slot {
-        None if tool == Tool::Box => line(ui, "The face around gives the axis, its walls its turn; its sides and corners are fitted on its wall, its height found from the face around."),
-        None => line(ui, "The face it is cut in gives the axis; its width, length and ends are fitted on its wall, its depth found from the floor."),
+        None => {}
         Some(se) => {
             let sl = &se.slot;
             let (kind, way) = if sl.inward { ("cut in", "deep") } else { ("raised", "high") };
@@ -298,18 +304,6 @@ fn slot_card(ui: &mut Ui, st: &mut AppState) {
                 se.params.levels = lv.round().max(1.0) as usize;
                 refit = true;
             }
-            let s = &se.laid.surface;
-            // each row's length: the far ends of its two round ends
-            let e = (se.slot.b - se.slot.a).normalize_or_zero();
-            let along = |j: usize| (0..s.nu).map(|i| (s.pts[j * s.nu + i] - se.slot.a).dot(e)).fold((f64::INFINITY, f64::NEG_INFINITY), |m, x| (m.0.min(x), m.1.max(x)));
-            let (lo, hi) = (0..s.nv).map(|j| { let (a, b) = along(j); b - a }).fold((f64::INFINITY, 0.0f64), |a, w| (a.0.min(w), a.1.max(w)));
-            match se.slot.kind {
-                Kind::Box => line(ui, format!("{} rows, each four lines and four exact quarter circles · {} to {} mm long", se.params.levels + 1, fmt(lo, 2), fmt(hi, 2))),
-                Kind::Slot => line(ui, format!("{} rows, each two lines and two exact half circles · {} to {} mm long", se.params.levels + 1, fmt(lo, 2), fmt(hi, 2))),
-                Kind::Round => line(ui, format!("{} rings, each an exact circle · Ø {} to {} mm", se.params.levels + 1, fmt(lo, 2), fmt(hi, 2))),
-            }
-            line(ui, format!("NURBS degree 2 × {} · {} × {} control points", s.dv, s.nu, s.nv));
-            line(ui, format!("{} points of the wall · the scan is {} mm from it", se.laid.points, fmt(se.laid.off, 3)));
             ui.add_space(6.0);
             let w = ui.available_width();
             let icon = match se.slot.kind {
@@ -336,29 +330,19 @@ fn slot_card(ui: &mut Ui, st: &mut AppState) {
 
 
 fn pen_card(ui: &mut Ui, st: &mut AppState) {
-    title(ui, "Pen", "Click points on the scan: a straight outline on the plane found under the first one. Closed on its first point, it is filled; Enter makes a line");
+    title(ui, "Pen", "");
     let mut finish = false;
     let mut back = false;
     let mut cancel = false;
     match &st.pen {
         None => {
-            match &st.pen_plane {
-                Some(h) if h.flat => line(ui, "Under the pointer: a flat face (blue grid)"),
-                Some(_) => line(ui, "Under the pointer: no flat face, the scan's tangent plane (grey grid)"),
-                None => line(ui, "Hover the scan: the plane you would draw on shows under the pointer"),
-            }
-            line(ui, "The faces' edges and corners catch the points (Ctrl: nothing catches); Shift: sides turned by 15°.");
             if let Some(i) = st.fresh {
-                ui.add_space(6.0);
                 fresh_card(ui, st, i);
             }
         }
         Some(pe) => {
-            line(ui, format!("{} points · on {}", pe.pts.len(), if pe.flat { "a flat face" } else { "the tangent plane" }));
-            if let Some(h) = &st.pen_hover {
-                if let Some(last) = pe.pts.last() {
-                    line(ui, format!("Next side {} mm{}", fmt((h.q - *last).length(), 2), if h.snap.label().is_empty() { String::new() } else { format!(" · {}", h.snap.label()) }));
-                }
+            if let (Some(h), Some(last)) = (&st.pen_hover, pe.pts.last()) {
+                line(ui, format!("{} mm", fmt((h.q - *last).length(), 2)));
             }
             ui.add_space(6.0);
             let w = ui.available_width();
@@ -383,8 +367,7 @@ fn pen_card(ui: &mut Ui, st: &mut AppState) {
 /// The shape a tool just made: Keep (Enter), Remove (Esc).
 fn fresh_card(ui: &mut Ui, st: &mut AppState, i: usize) {
     let Some(o) = st.objects.get(i) else { return };
-    line(ui, format!("Made: {}", o.what));
-    line(ui, "Shift + drag on it: its thickness.");
+    let _ = o;
     let w = ui.available_width();
     let keep = primary_btn(ui, None, "Keep (Enter)", Some(w)).clicked();
     let remove = secondary_btn(ui, "Remove (Esc)", w).clicked();
@@ -397,18 +380,14 @@ fn fresh_card(ui: &mut Ui, st: &mut AppState, i: usize) {
 }
 
 fn circle_card(ui: &mut Ui, st: &mut AppState) {
-    title(ui, "Circle", "Press on the rim of a round part (a hole, a boss, a button, a rivet) and drag across it, freely. Released, the round part is found on the scan and made a cylinder its size and height");
+    title(ui, "Circle", "");
     if let Some(cd) = &st.circle {
-        line(ui, format!("Drawn: Ø {} mm · released, the scan is read under it", fmt((cd.b - cd.a).length(), 2)));
+        line(ui, format!("Ø {} mm", fmt((cd.b - cd.a).length(), 2)));
         return;
     }
-    let Some(i) = st.fresh else {
-        line(ui, "When nothing round is under it, a flat disc as drawn.");
-        return;
-    };
+    let Some(i) = st.fresh else { return };
     let Some(b) = st.body(i).cloned() else { return };
     let Base::Circle { r } = b.base else { return };
-    line(ui, b.describe());
     let mut d = r * 2.0;
     let max = (d * 3.0).max(5.0) as f32;
     let mut df = d as f32;
@@ -436,23 +415,16 @@ fn circle_card(ui: &mut Ui, st: &mut AppState) {
 
 fn select_card(ui: &mut Ui, st: &mut AppState) {
     let Some(first) = st.sel.first().cloned() else {
-        title(ui, "Select", "Pick by mode: 1 Vertex · 2 Edge · 3 Face · 4 Object (the pill at the top)");
-        line(ui, "Shift + drag pulls what is under the pointer:");
-        line(ui, "· a shape or a face: its thickness");
-        line(ui, "· an open edge (orange): pulled out into a new face, on the scan under the pointer (Ctrl: in the air)");
-        line(ui, "· an edge between two faces: a fillet");
-        line(ui, "· a corner of the outline (Vertex): rounded");
-        line(ui, "Shift + click adds to what is picked.");
+        title(ui, "Select", "");
         return;
     };
     let obj = first.obj();
     let Some(o) = st.objects.get(obj) else { return };
-    let what = o.what.clone();
     let name = format!("{} {}", o.tool.label(), obj + 1);
     match first {
         Comp::Object(_) => {
             let n = st.sel.len();
-            title(ui, if n > 1 { "Objects" } else { &name }, &if n > 1 { format!("{n} picked") } else { what });
+            title(ui, if n > 1 { "Objects" } else { &name }, &if n > 1 { format!("{n} picked") } else { String::new() });
             if let Some(b) = st.body(obj).cloned() {
                 let t = b.thick().map(|s| s.1).unwrap_or(0.0);
                 let mut tf = t as f32;
@@ -475,15 +447,21 @@ fn select_card(ui: &mut Ui, st: &mut AppState) {
         Comp::Corner { .. } => {
             let Some((obj, cs)) = st.picked_corners() else { return };
             let Some(b) = st.body(obj).cloned() else { return };
-            title(ui, if cs.len() == 1 { "Corner" } else { "Corners" }, &format!("{} of the outline of {name}", cs.len()));
+            title(ui, if cs.len() == 1 { "Corner" } else { "Corners" }, &if cs.len() > 1 { format!("{}", cs.len()) } else { String::new() });
             let cur = cs.iter().map(|&i| b.corners.get(i).copied().unwrap_or(0.0)).fold(0.0, f64::max);
             let max = cs.iter().map(|&i| b.corner_max(i)).fold(f64::INFINITY, f64::min);
             if !max.is_finite() || max <= 1e-6 {
-                line(ui, "These corners cannot be rounded (an end of a line, or a straight corner).");
+                line(ui, "Cannot be rounded");
                 return;
             }
+            let bevel = cs.iter().any(|&i| b.bevel_at(i));
+            if let Some(v) = segmented(ui, &[(false, "Fillet", accent()), (true, "Bevel", accent())], bevel, 28.0) {
+                st.set_corner_kind(v);
+                return;
+            }
+            ui.add_space(4.0);
             let mut rf = cur as f32;
-            let (changed, start) = slider_row(ui, "Radius", &mut rf, 0.0..=max as f32, 0.01, "mm");
+            let (changed, start) = slider_row(ui, if bevel { "Bevel" } else { "Radius" }, &mut rf, 0.0..=max as f32, 0.01, "mm");
             if changed {
                 if start {
                     st.end_live();
@@ -494,18 +472,29 @@ fn select_card(ui: &mut Ui, st: &mut AppState) {
                 st.end_live();
                 st.set_corners(s, false);
             }
-            line(ui, format!("At most {} mm here (each side gives half of itself)", fmt(max, 2)));
         }
         Comp::Edge { .. } => {
             let Some((obj, edges)) = st.picked_edges() else { return };
             let open = edges.iter().filter(|e| !e.1).count();
             let closed = edges.len() - open;
-            title(ui, if edges.len() == 1 { "Edge" } else { "Edges" }, &format!("{} of {name}", edges.len()));
-            if open > 0 {
-                line(ui, format!("{open} open (a face on one side only): Shift + drag pulls it out into a new face, on the scan under the pointer (Ctrl: in the air)."));
-            }
+            title(ui, if edges.len() == 1 { "Edge" } else { "Edges" }, &if edges.len() > 1 { format!("{}", edges.len()) } else { String::new() });
+            let _ = open;
             if closed > 0 {
-                line(ui, format!("{closed} between two faces: a fillet"));
+                let w = ui.available_width();
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let half = (w - 6.0) * 0.5;
+                    if secondary_btn(ui, "Fillet", half).clicked() {
+                        st.cut_selected(false);
+                    }
+                    if secondary_btn(ui, "Bevel (Ctrl+B)", half).clicked() {
+                        st.cut_selected(true);
+                    }
+                });
+                if !matches!(st.sel.first(), Some(Comp::Edge { .. })) {
+                    return;
+                }
+                ui.add_space(4.0);
                 let mut r = 0.0f32;
                 let (changed, _) = slider_row(ui, "Fillet", &mut r, 0.0..=5.0, 0.01, "mm");
                 if changed && r > 0.0 {
@@ -522,7 +511,15 @@ fn select_card(ui: &mut Ui, st: &mut AppState) {
         Comp::Step { k, .. } => {
             let Some(b) = st.body(obj).cloned() else { return };
             let Some(s) = b.steps.get(k).cloned() else { return };
-            title(ui, s.label(), &format!("Step {} of {name}", k + 1));
+            title(ui, s.label(), "");
+            if let Step::Fillet { .. } | Step::Bevel { .. } = s {
+                let bevel = matches!(s, Step::Bevel { .. });
+                if let Some(v) = segmented(ui, &[(false, "Fillet", accent()), (true, "Bevel", accent())], bevel, 28.0) {
+                    st.set_step_kind(obj, k, v);
+                    return;
+                }
+                ui.add_space(4.0);
+            }
             step_slider(ui, st, obj, k, &s, &b);
             ui.add_space(6.0);
             let w = ui.available_width();
@@ -531,19 +528,12 @@ fn select_card(ui: &mut Ui, st: &mut AppState) {
             }
         }
         Comp::Face { tag, .. } => {
-            title(ui, "Face", &format!("of {name}"));
-            let step = crate::body::step_of(tag).and_then(|k| st.body(obj).and_then(|b| b.steps.get(k)).map(|s| s.label()));
-            line(ui, match step {
-                Some(l) => format!("Made by: {l}"),
-                None if tag == crate::body::BASE => "The outline's face".to_string(),
-                None => "A face of the thickness".to_string(),
-            });
-            line(ui, "Shift + drag on it: the shape's thickness.");
+            let _ = (tag, &name);
+            title(ui, "Face", "");
         }
         Comp::Vertex { at, .. } => {
-            title(ui, "Vertex", &format!("of {name}"));
-            line(ui, format!("{} · {} · {} mm", fmt(at.x, 2), fmt(at.y, 2), fmt(at.z, 2)));
-            line(ui, "Made by a step: only the outline's corners round (or fillet its edges in Edge mode).");
+            let _ = at;
+            title(ui, "Vertex", "");
         }
     }
 }
@@ -552,6 +542,7 @@ fn select_card(ui: &mut Ui, st: &mut AppState) {
 fn step_slider(ui: &mut Ui, st: &mut AppState, obj: usize, k: usize, s: &Step, b: &crate::body::Body) {
     let (label, v, lo, hi) = match s {
         Step::Fillet { r, .. } => ("Radius", *r, 0.0, (r * 3.0).max(5.0)),
+        Step::Bevel { d, .. } => ("Size", *d, 0.0, (d * 3.0).max(5.0)),
         Step::Thick { t } => ("Thickness", *t, -(t.abs() * 3.0).max(5.0), (t.abs() * 3.0).max(5.0)),
         Step::Extrude { v, .. } => ("Length", v.length(), 0.01, (v.length() * 3.0).max(5.0)),
     };
@@ -563,12 +554,12 @@ fn step_slider(ui: &mut Ui, st: &mut AppState, obj: usize, k: usize, s: &Step, b
         }
         st.set_step(obj, k, f as f64, true);
     }
-    if let Step::Fillet { r, edges } = s {
+    if let Step::Fillet { r, edges } | Step::Bevel { d: r, edges } = s {
         if let Some(c) = size_chips(ui, *r, 10.0) {
             st.end_live();
             st.set_step(obj, k, c, false);
         }
-        line(ui, format!("{} edge{}", edges.len(), if edges.len() == 1 { "" } else { "s" }));
+        let _ = edges;
     }
     if let Some((_, lim)) = b.built.limits.iter().find(|l| l.0 == k) {
         line(ui, format!("Too big: built at {} mm, the largest that works", fmt(*lim, 2)));
@@ -584,7 +575,6 @@ fn step_slider(ui: &mut Ui, st: &mut AppState, obj: usize, k: usize, s: &Step, b
 fn steps_list(ui: &mut Ui, st: &mut AppState, obj: usize) {
     let Some(b) = st.body(obj).cloned() else { return };
     if b.steps.is_empty() {
-        line(ui, "No steps yet: Shift + drag thickens it; Edge mode (2) pulls or fillets its edges; Vertex mode (1) rounds its corners.");
         return;
     }
     ui.add_space(4.0);
@@ -592,7 +582,7 @@ fn steps_list(ui: &mut Ui, st: &mut AppState, obj: usize) {
     let mut remove = None;
     for (k, s) in b.steps.iter().enumerate() {
         let v = match s {
-            Step::Fillet { r, .. } => format!("{} mm", fmt(*r, 2)),
+            Step::Fillet { r, .. } | Step::Bevel { d: r, .. } => format!("{} mm", fmt(*r, 2)),
             Step::Thick { t } => format!("{} mm", fmt(*t, 2)),
             Step::Extrude { v, .. } => format!("{} mm", fmt(v.length(), 2)),
         };
@@ -634,8 +624,7 @@ fn objects_card(ui: &mut Ui, st: &mut AppState) {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.label(egui::RichText::new(format!("{}", i + 1)).font(mono(10.5)).color(TEXT2()));
                 let r = ui.add(egui::Label::new(egui::RichText::new(o.tool.label()).font(medium(12.0)).color(if on { TEXT() } else { accent_text() })).sense(Sense::click()));
-                let r2 = ui.add(egui::Label::new(egui::RichText::new(&o.what).font(regular(12.0)).color(if on { TEXT() } else { TEXT2() })).truncate().sense(Sense::click())).on_hover_text(&o.what);
-                if r.clicked() || r2.clicked() {
+                if r.clicked() {
                     pick = Some(i);
                 }
             });
@@ -701,6 +690,8 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         }
     } else if cmd && y {
         st.redo();
+    } else if cmd && key(Key::B) {
+        st.cut_selected(true);
     } else if z {
         st.settings.zebra = !st.settings.zebra;
     }

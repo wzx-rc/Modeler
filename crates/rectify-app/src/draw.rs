@@ -5,7 +5,7 @@
 
 use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, Renderer, FACE_HOVERED, FACE_SELECTED};
 use crate::state::{AppState, Comp, SelMode, Shape, Tool};
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 use rayon::prelude::*;
 use rectify_core::mesh::crease_normals;
 use rectify_core::nurbs::Surface;
@@ -61,15 +61,15 @@ fn surface_vertices(s: &Surface, face: u32, line: [u8; 4], hull: Option<[u8; 4]>
     }
 }
 
-/// How far a body is drawn off the scan, along its plane's normal (mm): a
-/// flat one more (an AI's flat faces bow some tenths of a millimetre round
-/// the plane fitted to them).
+/// How far a body is drawn off the scan, along its plane's normal (mm):
+/// next to nothing, so it shows where it is (the shader pulls it towards
+/// the eye along the view instead, which does not move it on screen).
 fn lift_of(st: &AppState, b: &crate::body::Body) -> f64 {
     let e = st.doc.as_ref().map(|d| d.edge).unwrap_or(0.1);
     if b.built.solid() {
-        (e * 0.6).clamp(0.03, 0.1)
+        (e * 0.05).clamp(0.002, 0.01)
     } else {
-        (e * 2.5).clamp(0.15, 0.45)
+        (e * 0.1).clamp(0.005, 0.02)
     }
 }
 
@@ -215,10 +215,35 @@ impl Drawer {
         if let Some(pe) = &st.pen {
             let f = &pe.frame;
             let pts: Vec<[f32; 3]> = pe.pts.iter().map(|q| p(f.to3(*q))).collect();
-            if pts.len() >= 2 {
-                line_vertices(&[pts.clone()], [255, 118, 24, 255], 2.0, &mut out);
+            // the corners rounded so far (the last one too, towards the
+            // pointer)
+            let mut q2 = pe.pts.clone();
+            if let Some(h) = &st.pen_hover {
+                q2.push(h.q);
             }
-            if let (Some(h), Some(last)) = (&st.pen_hover, pts.last()) {
+            let round = crate::body::rounded_outline(&q2, &pe.radii, false);
+            let mut placed: Vec<[f32; 3]> = round.iter().map(|q| p(f.to3(*q))).collect();
+            if st.pen_hover.is_some() {
+                placed.pop();
+            }
+            if placed.len() >= 2 {
+                line_vertices(&[placed.clone()], [255, 118, 24, 255], 2.0, &mut out);
+            }
+            // a fillet being dragged: its circle round the point
+            if let Some((i, _)) = pe.drag {
+                let r = pe.radii.get(i).copied().unwrap_or(0.0);
+                if r > 0.0 {
+                    let c = pe.pts[i];
+                    let ring: Vec<[f32; 3]> = (0..=64)
+                        .map(|k| {
+                            let t = k as f64 / 64.0 * std::f64::consts::TAU;
+                            p(f.to3(c + DVec2::new(t.cos(), t.sin()) * r))
+                        })
+                        .collect();
+                    line_vertices(&[ring], [255, 214, 170, 230], 1.2, &mut out);
+                }
+            }
+            if let (Some(h), Some(last)) = (&st.pen_hover, placed.last().or(pts.last())) {
                 line_vertices(&[vec![*last, p(h.p)]], [255, 160, 90, 220], 1.4, &mut out);
                 if pe.pts.len() >= 2 {
                     line_vertices(&[vec![p(h.p), pts[0]]], [255, 160, 90, 70], 0.8, &mut out);

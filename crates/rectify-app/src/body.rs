@@ -91,6 +91,8 @@ pub enum Step {
     Thick { t: f64 },
     /// Edges between two faces rounded.
     Fillet { edges: Vec<EdgeRef>, r: f64 },
+    /// Edges between two faces cut flat, `d` along each face.
+    Bevel { edges: Vec<EdgeRef>, d: f64 },
 }
 
 impl Step {
@@ -99,6 +101,7 @@ impl Step {
             Step::Extrude { .. } => "Extrude edge",
             Step::Thick { .. } => "Thickness",
             Step::Fillet { .. } => "Fillet",
+            Step::Bevel { .. } => "Bevel",
         }
     }
 }
@@ -227,8 +230,10 @@ pub fn resolve(r: &EdgeRef, list: &[([i64; 2], DVec3)], size: f64) -> Option<usi
 pub struct Body {
     pub frame: Frame,
     pub base: Base,
-    /// Each corner of a `Poly` outline rounded by this radius (0: sharp).
+    /// Each corner of a `Poly` outline rounded by this radius (0: sharp),
+    /// or where `bevels[i]`, cut straight this far along each side.
     pub corners: Vec<f64>,
+    pub bevels: Vec<bool>,
     pub steps: Vec<Step>,
     pub built: Arc<Built>,
 }
@@ -239,13 +244,18 @@ impl Body {
             Base::Poly { pts, .. } => pts.len(),
             Base::Circle { .. } => 0,
         };
-        let mut b = Body { frame, base, corners: vec![0.0; n], steps: vec![], built: Arc::new(Built::default()) };
+        let mut b = Body { frame, base, corners: vec![0.0; n], bevels: vec![false; n], steps: vec![], built: Arc::new(Built::default()) };
         b.rebuild();
         b
     }
 
     pub fn rebuild(&mut self) {
-        self.built = Arc::new(build(self));
+        self.built = Arc::new(build(self, false));
+    }
+
+    /// Built with a coarser mesh (while a drag goes on).
+    pub fn rebuild_coarse(&mut self) {
+        self.built = Arc::new(build(self, true));
     }
 
     pub fn closed(&self) -> bool {
@@ -267,13 +277,20 @@ impl Body {
     /// the radius it got (at most half of each side next to it).
     pub fn corner_cut(&self, i: usize) -> Option<([DVec2; 3], f64)> {
         let Base::Poly { pts, closed } = &self.base else { return None };
-        corner_cut(pts, *closed, i, self.corners.get(i).copied().unwrap_or(0.0))
+        let r = self.corners.get(i).copied().unwrap_or(0.0);
+        if self.bevel_at(i) { bevel_cut(pts, *closed, i, r) } else { corner_cut(pts, *closed, i, r) }
     }
 
-    /// The largest radius corner `i` can take.
+    /// Corner `i` is cut straight (a bevel) rather than rounded.
+    pub fn bevel_at(&self, i: usize) -> bool {
+        self.bevels.get(i).copied().unwrap_or(false)
+    }
+
+    /// The largest size corner `i` can take (a radius, or a bevel's
+    /// distance along each side).
     pub fn corner_max(&self, i: usize) -> f64 {
         let Base::Poly { pts, closed } = &self.base else { return 0.0 };
-        corner_cut(pts, *closed, i, 1e9).map(|c| c.1).unwrap_or(0.0)
+        if self.bevel_at(i) { bevel_cut(pts, *closed, i, 1e9) } else { corner_cut(pts, *closed, i, 1e9) }.map(|c| c.1).unwrap_or(0.0)
     }
 
     /// The outline's corner at a vertex: the corner itself, or an end of
@@ -293,6 +310,29 @@ impl Body {
             Some((c, _)) => (c[0] - q).length() <= tol || (c[2] - q).length() <= tol,
             None => (pts[i] - q).length() <= tol,
         })
+    }
+
+    /// Corner `i`'s handle line: the corner (3D), the way into the shape
+    /// along its bisector, and how far the handle goes per mm of size
+    /// (a fillet's arc middle, a bevel's cut middle).
+    pub fn corner_handle(&self, i: usize) -> Option<(DVec3, DVec3, f64)> {
+        let Base::Poly { pts, closed } = &self.base else { return None };
+        let n = pts.len();
+        if n < 3 || (!*closed && (i == 0 || i + 1 >= n)) {
+            return None;
+        }
+        let p = pts[i];
+        let u = (pts[(i + n - 1) % n] - p).normalize_or_zero();
+        let w = (pts[(i + 1) % n] - p).normalize_or_zero();
+        let th = u.dot(w).clamp(-1.0, 1.0).acos();
+        if th > std::f64::consts::PI - 1e-3 || th < 1e-3 {
+            return None;
+        }
+        let bis = (u + w).normalize_or_zero();
+        let per = if self.bevel_at(i) { (th * 0.5).cos() } else { 1.0 / (th * 0.5).sin() - 1.0 };
+        let p3 = self.frame.to3(p);
+        let b3 = self.frame.to3(p + bis) - p3;
+        Some((p3, b3.normalize_or_zero(), per.max(1e-3)))
     }
 
     /// Where corner `i` shows (3D): the corner, or the middle of its arc.
@@ -318,6 +358,7 @@ impl Body {
         match &self.base {
             Base::Poly { pts, closed } => {
                 let rounded = self.corners.iter().filter(|r| **r > 0.0).count();
+                let _ = &self.bevels;
                 parts.push(format!("{} {}{}", pts.len(), if *closed { "corners" } else { "points, open" }, if rounded > 0 { format!(" ({rounded} rounded)") } else { String::new() }));
             }
             Base::Circle { r } => parts.push(format!("circle Ø {}", fmt(r * 2.0, 2))),
@@ -327,6 +368,7 @@ impl Body {
                 Step::Extrude { v, .. } => format!("edge pulled {} mm", fmt(v.length(), 1)),
                 Step::Thick { t } => format!("{} mm thick", fmt(t.abs(), 2)),
                 Step::Fillet { edges, r } => format!("fillet {} mm on {} edge{}", fmt(*r, 2), edges.len(), if edges.len() == 1 { "" } else { "s" }),
+                Step::Bevel { edges, d } => format!("bevel {} mm on {} edge{}", fmt(*d, 2), edges.len(), if edges.len() == 1 { "" } else { "s" }),
             });
         }
         if let Some((k, e)) = &self.built.failed {
@@ -371,6 +413,65 @@ pub fn corner_cut(pts: &[DVec2], closed: bool, i: usize, r: f64) -> Option<([DVe
     Some(([p + u * d, mid, p + w * d], r))
 }
 
+/// An outline with its corners rounded by `radii` (one per point, 0: a
+/// sharp corner), as a polyline (to show it while it is drawn).
+pub fn rounded_outline(pts: &[DVec2], radii: &[f64], closed: bool) -> Vec<DVec2> {
+    let n = pts.len();
+    let mut out = vec![];
+    for i in 0..n {
+        let r = radii.get(i).copied().unwrap_or(0.0);
+        let Some(([s, _, e], _)) = corner_cut(pts, closed, i, r) else {
+            out.push(pts[i]);
+            continue;
+        };
+        let p = pts[i];
+        let (u, w) = ((pts[(i + n - 1) % n] - p).normalize_or_zero(), (pts[(i + 1) % n] - p).normalize_or_zero());
+        let half = u.dot(w).clamp(-1.0, 1.0).acos() * 0.5;
+        let c = p + (u + w).normalize_or_zero() * ((s - p).length() / half.cos().max(1e-6));
+        let (a0, mut a1) = ((s - c).y.atan2((s - c).x), (e - c).y.atan2((e - c).x));
+        while a1 - a0 > std::f64::consts::PI {
+            a1 -= std::f64::consts::TAU;
+        }
+        while a0 - a1 > std::f64::consts::PI {
+            a1 += std::f64::consts::TAU;
+        }
+        let rr = (s - c).length();
+        for k in 0..=12 {
+            let a = a0 + (a1 - a0) * k as f64 / 12.0;
+            out.push(c + DVec2::new(a.cos(), a.sin()) * rr);
+        }
+    }
+    if closed && n > 0 {
+        out.push(out[0]);
+    }
+    out
+}
+
+/// Corner `i` of an outline cut straight `d` along each side: the cut's
+/// start, middle and end, and the distance it got (at most half of each
+/// side). None: no cut.
+pub fn bevel_cut(pts: &[DVec2], closed: bool, i: usize, d: f64) -> Option<([DVec2; 3], f64)> {
+    let n = pts.len();
+    if d <= 1e-9 || n < 3 || (!closed && (i == 0 || i + 1 >= n)) {
+        return None;
+    }
+    let p = pts[i];
+    let a = pts[(i + n - 1) % n];
+    let b = pts[(i + 1) % n];
+    let (la, lb) = ((a - p).length(), (b - p).length());
+    if la < 1e-9 || lb < 1e-9 {
+        return None;
+    }
+    let (u, w) = ((a - p) / la, (b - p) / lb);
+    let th = u.dot(w).clamp(-1.0, 1.0).acos();
+    if th > std::f64::consts::PI - 1e-3 || th < 1e-3 {
+        return None;
+    }
+    let d = d.min(la * 0.5).min(lb * 0.5);
+    let (s, e) = (p + u * d, p + w * d);
+    Some(([s, (s + e) * 0.5, e], d))
+}
+
 fn v3(p: DVec3) -> [f64; 3] {
     p.to_array()
 }
@@ -389,7 +490,8 @@ fn base_shape(b: &Body) -> Result<Shape, String> {
         Base::Poly { pts, closed } => {
             let p3: Vec<[f64; 3]> = pts.iter().map(|q| v3(b.frame.to3(*q))).collect();
             let cuts: Vec<Option<[[f64; 3]; 3]>> = (0..pts.len()).map(|i| b.corner_cut(i).map(|(c, _)| [v3(b.frame.to3(c[0])), v3(b.frame.to3(c[1])), v3(b.frame.to3(c[2]))])).collect();
-            let mut s = Shape::outline(v3(b.frame.o), v3(b.frame.n), &p3, *closed, &cuts)?;
+            let bev: Vec<bool> = (0..pts.len()).map(|i| b.bevel_at(i)).collect();
+            let mut s = Shape::outline_bevel(v3(b.frame.o), v3(b.frame.n), &p3, *closed, &cuts, &bev)?;
             if *closed {
                 s.set_tags(&[BASE]);
             }
@@ -419,7 +521,7 @@ fn find(s: &Shape, r: &EdgeRef, size: f64) -> Option<i32> {
 }
 
 /// The body's outline, then its steps, by OpenCascade.
-fn build(b: &Body) -> Built {
+fn build(b: &Body, coarse: bool) -> Built {
     let mut out = Built::default();
     let mut shape = match base_shape(b) {
         Ok(s) => s,
@@ -458,14 +560,16 @@ fn build(b: &Body) -> Built {
                 }
                 shape.thicken(*t, k as i64 + 1)
             }
-            Step::Fillet { edges, r } => {
+            Step::Fillet { edges, r } | Step::Bevel { edges, d: r } => {
+                let bevel = matches!(st, Step::Bevel { .. });
                 let idx: Vec<i32> = edges.iter().filter_map(|e| find(&shape, e, size)).collect();
+                let cut = |s: &Shape, x: f64| if bevel { s.bevel(&idx, x, step_tag(k, 1)) } else { s.round(&idx, x, step_tag(k, 1)) };
                 if idx.is_empty() {
                     Err("its edges are gone".into())
                 } else if *r <= 1e-6 {
                     continue;
                 } else {
-                    match shape.round(&idx, *r, step_tag(k, 1)) {
+                    match cut(&shape, *r) {
                         Ok(s) => Ok(s),
                         // too big: the largest that works (by halves)
                         Err(e) => {
@@ -473,7 +577,7 @@ fn build(b: &Body) -> Built {
                             let mut best: Option<Shape> = None;
                             for _ in 0..7 {
                                 let m = (lo + hi) * 0.5;
-                                match shape.round(&idx, m, step_tag(k, 1)) {
+                                match cut(&shape, m) {
                                     Ok(s) => {
                                         lo = m;
                                         best = Some(s);
@@ -505,8 +609,8 @@ fn build(b: &Body) -> Built {
         }
     }
     out.size = size;
-    let defl = (size * 4e-4).clamp(0.002, 0.05);
-    match shape.topo(defl, 0.2) {
+    let defl = (size * 4e-4).clamp(0.002, 0.05) * if coarse { 5.0 } else { 1.0 };
+    match shape.topo(defl, if coarse { 0.35 } else { 0.2 }) {
         Ok(t) => out.topo = t,
         Err(e) => out.failed = Some((usize::MAX, e)),
     }
@@ -565,6 +669,44 @@ mod tests {
         b.rebuild();
         assert!(b.built.failed.is_none(), "{:?}", b.built.failed);
         assert!(b.built.topo.faces.iter().any(|f| f.info.kind == forme_occt::SurfKind::Cylinder && f.info.point[1] > 4.0));
+    }
+
+    #[test]
+    fn bevels() {
+        // a corner cut straight: 5 sides, no arc
+        let mut b = square(10.0);
+        b.corners[0] = 2.0;
+        b.bevels[0] = true;
+        b.rebuild();
+        assert!(b.built.failed.is_none(), "{:?}", b.built.failed);
+        assert_eq!(b.built.topo.edges.len(), 5);
+        assert!(b.built.topo.edges.iter().all(|e| e.kind == forme_occt::EdgeKind::Line));
+        assert_eq!(b.corner_at(b.frame.to3(DVec2::new(2.0, 0.0))), Some(0));
+        // its handle sits on the cut's middle
+        let (p, bis, per) = b.corner_handle(0).unwrap();
+        let mid = b.corner_show(0).unwrap();
+        assert!(((mid - p).dot(bis) - 2.0 * per).abs() < 1e-6);
+        // a top edge bevelled
+        b.steps.push(Step::Thick { t: 3.0 });
+        b.rebuild();
+        let e = (0..b.built.topo.edges.len())
+            .find(|&e| {
+                let (m, d) = b.built.edge_mid(e);
+                (m.y - 3.0).abs() < 1e-6 && d.x.abs() > 0.99 && m.z.abs() < 1e-6
+            })
+            .expect("the top front edge");
+        let r = b.built.edge_ref(e);
+        b.steps.push(Step::Bevel { edges: vec![r], d: 1.0 });
+        b.rebuild();
+        assert!(b.built.failed.is_none(), "{:?}", b.built.failed);
+        assert!(b.built.topo.faces.len() > 7);
+        // too big: the largest that works
+        if let Step::Bevel { d, .. } = &mut b.steps[1] {
+            *d = 50.0;
+        }
+        b.rebuild();
+        assert!(b.built.failed.is_none(), "{:?}", b.built.failed);
+        assert_eq!(b.built.limits.len(), 1);
     }
 
     #[test]

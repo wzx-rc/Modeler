@@ -10,7 +10,7 @@ use glam::{DVec2, DVec3, Vec3};
 use rayon::prelude::*;
 use rectify_core::circle::ProfileKind;
 use rectify_core::nurbs::Surface;
-use rectify_core::planes::{self, Plane};
+use rectify_core::planes;
 use rectify_core::slot::{Kind, Laid, Slot, SlotParams};
 use rectify_core::{Mesh, Topo};
 use std::path::PathBuf;
@@ -170,6 +170,11 @@ pub struct PenEdit {
     pub frame: Frame,
     pub flat: bool,
     pub pts: Vec<DVec2>,
+    /// Each point's fillet (a press and a drag on it), 0: sharp.
+    pub radii: Vec<f64>,
+    /// The point whose fillet a drag is setting, and whether its release
+    /// closes the outline (the drag began on the first point).
+    pub drag: Option<(usize, bool)>,
 }
 
 /// What caught the Pen's point.
@@ -180,11 +185,8 @@ pub enum PenSnap {
     Close,
     /// A corner of a shape, or a point already placed.
     Point,
-    /// Where two faces of the scan cross the plane (a corner of the face).
-    Corner,
-    /// Where a face of the scan crosses the plane (an edge of the face).
-    Edge,
-    /// Shift: the side turned by a multiple of 15° from the one before.
+    /// Shift: the side locked horizontal, vertical or on a 45° diagonal of
+    /// the plane (its angle from the horizontal, 0 to 180°).
     Angle(f64),
 }
 
@@ -194,8 +196,8 @@ impl PenSnap {
             PenSnap::Free => String::new(),
             PenSnap::Close => "Close".into(),
             PenSnap::Point => "Point".into(),
-            PenSnap::Corner => "Corner".into(),
-            PenSnap::Edge => "Edge".into(),
+            PenSnap::Angle(a) if a.round() == 0.0 || a.round() == 180.0 => "Horizontal".into(),
+            PenSnap::Angle(a) if a.round() == 90.0 => "Vertical".into(),
             PenSnap::Angle(a) => format!("{a:.0}°"),
         }
     }
@@ -241,7 +243,7 @@ pub enum Gesture {
     Extrude { obj: usize, k: usize, a: DVec3, along: Option<DVec3>, n: DVec3 },
     /// A radius: a fillet (step `k`) or the outline's corners, growing as
     /// the pointer goes away from where it was pressed (`px`: mm a point).
-    Radius { obj: usize, k: Option<usize>, corners: Vec<usize>, at: [f32; 2], r0: f64, px: f64 },
+    Radius { obj: usize, k: Option<usize>, corners: Vec<usize>, at: [f32; 2], r0: f64, px: f64, handle: Option<(DVec3, DVec3, f64)> },
 }
 
 /// The left button down in the Select tool: where, with Shift, what was
@@ -252,6 +254,8 @@ pub struct Press {
     pub shift: bool,
     pub moved: bool,
     pub comp: Option<Comp>,
+    /// On a corner's handle: a plain drag sizes it.
+    pub handle: bool,
 }
 
 /// A drag on the scan (Slot, Box): from the press to the pointer.
@@ -318,6 +322,8 @@ pub struct AppState {
     pub future: Vec<(String, Vec<Object>)>,
     /// A change going on (a slider, a drag): one undo step for all of it.
     live: bool,
+    /// Bodies built coarse during the live change.
+    coarse: Vec<usize>,
     /// Bumped when the objects or what is picked change.
     pub objects_gen: u64,
     /// The scan not drawn: the shapes alone (H).
@@ -372,6 +378,7 @@ impl AppState {
             history: vec![],
             future: vec![],
             live: false,
+            coarse: vec![],
             objects_gen: 1,
             hide_scan: false,
             sel: vec![],
@@ -585,6 +592,21 @@ impl AppState {
 
     pub fn end_live(&mut self) {
         self.live = false;
+        self.fine_again();
+    }
+
+    /// The bodies built coarse during a live change built fine again.
+    pub fn fine_again(&mut self) {
+        if self.coarse.is_empty() {
+            return;
+        }
+        for obj in std::mem::take(&mut self.coarse) {
+            if let Some(Shape::Body(b)) = self.objects.get_mut(obj).map(|o| &mut o.shape) {
+                b.rebuild();
+            }
+        }
+        self.objects_gen += 1;
+        self.overlay_gen += 1;
     }
 
     pub fn is_live(&self) -> bool {
@@ -597,6 +619,7 @@ impl AppState {
             return;
         }
         self.live = false;
+        self.coarse.clear();
         if let Some((_, o)) = self.history.pop() {
             self.objects = o;
         }
@@ -631,7 +654,7 @@ impl AppState {
             self.toast("Removed", false);
             return;
         }
-        self.live = false;
+        self.end_live();
         let Some((label, objs)) = self.history.pop() else {
             self.toast("Nothing to undo", false);
             return;
@@ -645,7 +668,7 @@ impl AppState {
     }
 
     pub fn redo(&mut self) {
-        self.live = false;
+        self.end_live();
         let Some((label, objs)) = self.future.pop() else {
             self.toast("Nothing to redo", false);
             return;
@@ -686,8 +709,21 @@ impl AppState {
         }
         let o = &mut self.objects[obj];
         if let Shape::Body(b) = &mut o.shape {
+            let before = (b.frame, b.base.clone(), b.corners.clone(), b.bevels.clone(), b.steps.clone());
             f(b);
-            b.rebuild();
+            // the same values (the pointer held still): not built again
+            if before == (b.frame, b.base.clone(), b.corners.clone(), b.bevels.clone(), b.steps.clone()) {
+                return true;
+            }
+            if live {
+                // coarse while it goes on, fine once it ends
+                b.rebuild_coarse();
+                if !self.coarse.contains(&obj) {
+                    self.coarse.push(obj);
+                }
+            } else {
+                b.rebuild();
+            }
             o.what = b.describe();
         }
         self.hover_key = None;
@@ -876,7 +912,7 @@ impl AppState {
                 let b = self.body(obj)?;
                 let f = *b.built.topo.tri_face.get(tri)? as usize;
                 let tag = b.built.topo.faces.get(f)?.tag;
-                match body::step_of(tag).filter(|&k| matches!(b.steps.get(k), Some(Step::Fillet { .. }))) {
+                match body::step_of(tag).filter(|&k| matches!(b.steps.get(k), Some(Step::Fillet { .. } | Step::Bevel { .. }))) {
                     Some(k) => Some(Comp::Step { obj, k }),
                     None => Some(Comp::Face { obj, tag, at: p }),
                 }
@@ -1043,11 +1079,86 @@ impl AppState {
         self.report(obj);
     }
 
+    /// The corners picked cut straight (`bevel`) or rounded; a corner not
+    /// cut yet gets 1 mm (at most what fits).
+    pub fn set_corner_kind(&mut self, bevel: bool) {
+        let Some((obj, cs)) = self.picked_corners() else { return };
+        self.end_live();
+        self.edit_body(obj, if bevel { "Corner bevel" } else { "Corner fillet" }, false, |b| {
+            for &i in &cs {
+                if i < b.bevels.len() {
+                    b.bevels[i] = bevel;
+                }
+                if i < b.corners.len() {
+                    let r = if b.corners[i] > 0.0 { b.corners[i] } else { 1.0 };
+                    b.corners[i] = r.min(b.corner_max(i)).max(0.0);
+                }
+            }
+        });
+    }
+
+    /// The edges picked (with a face on both sides) cut straight by `d`: a
+    /// new Bevel step, then picked.
+    pub fn make_bevel(&mut self, d: f64) {
+        let Some((obj, edges)) = self.picked_edges() else { return };
+        let edges: Vec<EdgeRef> = edges.into_iter().filter(|e| e.1).map(|e| e.0).collect();
+        if edges.is_empty() {
+            self.toast("These edges have a face on one side only", true);
+            return;
+        }
+        let mut k = 0;
+        self.edit_body(obj, "Bevel", false, |b| {
+            k = b.steps.len();
+            b.steps.push(Step::Bevel { edges, d });
+        });
+        self.mode = SelMode::Face;
+        self.sel = vec![Comp::Step { obj, k }];
+        self.report(obj);
+    }
+
+    /// A fillet step made a bevel, or the other way (same edges, same size).
+    pub fn set_step_kind(&mut self, obj: usize, k: usize, bevel: bool) {
+        self.end_live();
+        self.edit_body(obj, if bevel { "Bevel" } else { "Fillet" }, false, |b| {
+            let st = match b.steps.get(k) {
+                Some(Step::Fillet { edges, r } | Step::Bevel { edges, d: r }) => {
+                    if bevel {
+                        Step::Bevel { edges: edges.clone(), d: *r }
+                    } else {
+                        Step::Fillet { edges: edges.clone(), r: *r }
+                    }
+                }
+                _ => return,
+            };
+            b.steps[k] = st;
+        });
+        self.report(obj);
+    }
+
+    /// Bevel (Ctrl+B) or Fillet on what is picked: corners, edges, or a
+    /// fillet / bevel step.
+    pub fn cut_selected(&mut self, bevel: bool) {
+        match self.sel.first().cloned() {
+            Some(Comp::Corner { .. }) => self.set_corner_kind(bevel),
+            Some(Comp::Edge { .. }) => {
+                self.end_live();
+                if bevel {
+                    self.make_bevel(1.0);
+                } else {
+                    self.make_fillet(1.0);
+                    self.end_live();
+                }
+            }
+            Some(Comp::Step { obj, k }) if matches!(self.body(obj).and_then(|b| b.steps.get(k)), Some(Step::Fillet { .. } | Step::Bevel { .. })) => self.set_step_kind(obj, k, bevel),
+            _ => self.toast(if bevel { "Pick corners (1) or edges (2) to bevel" } else { "Pick corners (1) or edges (2) to round" }, true),
+        }
+    }
+
     /// A step's value: a fillet's radius, a pull's length, a thickness.
     pub fn set_step(&mut self, obj: usize, k: usize, v: f64, live: bool) {
         let label = self.body(obj).and_then(|b| b.steps.get(k)).map(|s| s.label()).unwrap_or("Step");
         self.edit_body(obj, label, live, |b| match b.steps.get_mut(k) {
-            Some(Step::Fillet { r, .. }) => *r = v.max(0.0),
+            Some(Step::Fillet { r, .. } | Step::Bevel { d: r, .. }) => *r = v.max(0.0),
             Some(Step::Thick { t }) => *t = v,
             Some(Step::Extrude { v: e, .. }) => {
                 let l = e.length();
@@ -1098,8 +1209,36 @@ impl AppState {
     /// before a point).
     pub fn select_press(&mut self, at: [f32; 2], shift: bool) {
         self.end_live();
+        if let Some((obj, i)) = self.pick_handle(at) {
+            self.press = Some(Press { at, shift, moved: false, comp: Some(Comp::Corner { obj, i }), handle: true });
+            return;
+        }
         let comp = self.pick_at(at);
-        self.press = Some(Press { at, shift, moved: false, comp });
+        self.press = Some(Press { at, shift, moved: false, comp, handle: false });
+    }
+
+    /// A corner's handle under the pointer (within 9 points, seen): a
+    /// rounded or bevelled corner in Vertex mode, or a corner picked.
+    pub fn pick_handle(&self, at: [f32; 2]) -> Option<(usize, usize)> {
+        let mut best: Option<(f32, usize, usize)> = None;
+        for (obj, ob) in self.objects.iter().enumerate() {
+            let Some(b) = ob.body() else { continue };
+            let Base::Poly { pts, .. } = &b.base else { continue };
+            for i in 0..pts.len() {
+                let picked = self.sel.contains(&Comp::Corner { obj, i });
+                let shown = self.mode == SelMode::Vertex && b.corners.get(i).copied().unwrap_or(0.0) > 0.0;
+                if !picked && !shown {
+                    continue;
+                }
+                let Some(x) = b.corner_show(i) else { continue };
+                let Some(s) = self.project(x) else { continue };
+                let d = (s[0] - at[0]).hypot(s[1] - at[1]);
+                if d <= 9.0 && best.map(|b| d < b.0).unwrap_or(true) && self.seen(x) {
+                    best = Some((d, obj, i));
+                }
+            }
+        }
+        best.map(|b| (b.1, b.2))
     }
 
     /// The pointer moving with the button down: true when a gesture takes
@@ -1108,15 +1247,22 @@ impl AppState {
         let Some(pr) = &mut self.press else { return false };
         if !pr.moved {
             if (at[0] - pr.at[0]).hypot(at[1] - pr.at[1]) < 3.0 {
-                return pr.shift && pr.comp.is_some();
+                return (pr.shift || pr.handle) && pr.comp.is_some();
             }
             pr.moved = true;
-            if pr.shift {
+            if self.tool == Tool::Pen && self.pen.is_some() {
+                let (p0, sh) = (pr.at, pr.shift);
+                self.pen_drag_start(p0, sh, free);
+            } else if pr.shift || pr.handle {
                 if let Some(c) = pr.comp.clone() {
                     let p0 = pr.at;
                     self.gesture_start(p0, c);
                 }
             }
+        }
+        if self.pen.as_ref().map(|p| p.drag.is_some()).unwrap_or(false) {
+            self.pen_drag_move(at, free);
+            return true;
         }
         if self.gesture.is_some() {
             self.gesture_move(at, free);
@@ -1165,7 +1311,7 @@ impl AppState {
                 } else {
                     let px = self.px_at(b.built.edge_mid(e).0);
                     self.edit_body(obj, "Fillet", true, |b| b.steps.push(Step::Fillet { edges: vec![edge], r: 0.0 }));
-                    self.gesture = Some(Gesture::Radius { obj, k: Some(k), corners: vec![], at, r0: 0.0, px });
+                    self.gesture = Some(Gesture::Radius { obj, k: Some(k), corners: vec![], at, r0: 0.0, px, handle: None });
                 }
             }
             Comp::Corner { i, .. } => {
@@ -1174,14 +1320,15 @@ impl AppState {
                     corners = vec![i];
                 }
                 let px = self.px_at(b.corner_show(i).unwrap_or(b.frame.o));
-                self.begin_live("Corner fillet");
-                self.gesture = Some(Gesture::Radius { obj, k: None, corners, at, r0: b.corners.get(i).copied().unwrap_or(0.0), px });
+                let handle = b.corner_handle(i);
+                self.begin_live(if b.bevel_at(i) { "Corner bevel" } else { "Corner fillet" });
+                self.gesture = Some(Gesture::Radius { obj, k: None, corners, at, r0: b.corners.get(i).copied().unwrap_or(0.0), px, handle });
             }
             Comp::Step { k, .. } => {
-                if let Some(Step::Fillet { r, .. }) = b.steps.get(k) {
+                if let Some(Step::Fillet { r, .. } | Step::Bevel { d: r, .. }) = b.steps.get(k) {
                     let px = self.pick_body(at).map(|h| self.px_at(h.3)).unwrap_or(0.05);
-                    self.begin_live("Fillet");
-                    self.gesture = Some(Gesture::Radius { obj, k: Some(k), corners: vec![], at, r0: *r, px });
+                    self.begin_live(b.steps[k].label());
+                    self.gesture = Some(Gesture::Radius { obj, k: Some(k), corners: vec![], at, r0: *r, px, handle: None });
                 }
             }
             Comp::Vertex { .. } => self.toast("Only the outline's corners round: this vertex comes from a step", true),
@@ -1244,19 +1391,34 @@ impl AppState {
                     }
                 });
             }
-            Gesture::Radius { obj, k, corners, at: p0, r0, px } => {
+            Gesture::Radius { obj, k, corners, at: p0, r0, px, handle } => {
                 let dist = (at[0] - p0[0]).hypot(at[1] - p0[1]) as f64;
-                let r = r0 + dist * px;
-                let r = if free { r } else { nice_round(r, px) };
+                // a corner's handle follows the pointer along its bisector;
+                // else the size grows as the pointer goes away
+                let on_handle = handle.and_then(|(p, bis, per)| {
+                    let n = self.body(obj)?.frame.n;
+                    let dn = rd.dot(n);
+                    let x = if dn.abs() > 1e-3 { ro + rd * ((p - ro).dot(n) / dn) } else { return None };
+                    Some(((x - p).dot(bis) / per).max(0.0))
+                });
+                let r = on_handle.unwrap_or(r0 + dist * px);
+                let mut r = if free { r } else { nice_round(r, px) };
                 match k {
                     Some(k) => {
-                        self.edit_body(obj, "Fillet", true, |b| {
-                            if let Some(Step::Fillet { r: rr, .. }) = b.steps.get_mut(k) {
+                        // past the largest that works: it stops there (no
+                        // search by halves at each move)
+                        if let Some(&(_, lim)) = self.body(obj).and_then(|b| b.built.limits.iter().find(|l| l.0 == k)) {
+                            r = r.min(lim);
+                        }
+                        let label = if matches!(self.body(obj).and_then(|b| b.steps.get(k)), Some(Step::Bevel { .. })) { "Bevel" } else { "Fillet" };
+                        self.edit_body(obj, label, true, |b| {
+                            if let Some(Step::Fillet { r: rr, .. } | Step::Bevel { d: rr, .. }) = b.steps.get_mut(k) {
                                 *rr = r;
                             }
                         });
                     }
                     None => {
+                        let r = r.max(0.0);
                         self.edit_body(obj, "Corner fillet", true, |b| {
                             for &i in &corners {
                                 if i < b.corners.len() {
@@ -1283,7 +1445,7 @@ impl AppState {
         let nothing = match &g {
             Gesture::Thick { k, t0, .. } => matches!(b.steps.get(*k), Some(Step::Thick { t }) if (t - t0).abs() < 1e-9),
             Gesture::Extrude { k, .. } => matches!(b.steps.get(*k), Some(Step::Extrude { v, .. }) if v.length() < 1e-9),
-            Gesture::Radius { k: Some(k), r0, .. } => matches!(b.steps.get(*k), Some(Step::Fillet { r, .. }) if (r - r0).abs() < 1e-9),
+            Gesture::Radius { k: Some(k), r0, .. } => matches!(b.steps.get(*k), Some(Step::Fillet { r, .. } | Step::Bevel { d: r, .. }) if (r - r0).abs() < 1e-9),
             Gesture::Radius { corners, r0, .. } => corners.iter().all(|&i| (b.corners.get(i).copied().unwrap_or(0.0) - r0).abs() < 1e-9),
         };
         if nothing {
@@ -1357,75 +1519,15 @@ impl AppState {
         Some((prev, x - prev.frame.n * d, Some((t, x))))
     }
 
-    /// Where the scan's faces cross the drawing plane near `p`: on the
-    /// crossing of two of them (a corner), else of one (an edge), within 12
-    /// points.
-    fn scan_snap(&self, frame: &Frame, t: u32, x: DVec3, q: DVec2) -> Option<(DVec2, PenSnap)> {
-        let d = self.doc.as_ref()?;
-        let p = frame.to3(q);
-        let px = self.px_at(p);
-        let catch = px * 12.0;
-        let reach = (px * 80.0).max(d.edge * 25.0).clamp(1.5, 20.0);
-        let me = Plane::through(frame.o, frame.n);
-        // each face crossing the plane: the line (a point, its direction)
-        // and how far it catches: the pointer's reach, plus how far the
-        // face stops short of the line (the scan rounds off there)
-        let lines: Vec<(DVec2, DVec2, f64)> = planes::planes_near_bend(&d.mesh, &d.topo, t, x, reach, d.edge, 0.16)
-            .iter()
-            .filter(|pl| {
-                let a = pl.angle(&me);
-                (25.0..=155.0).contains(&a) && pl.gap(p) <= reach
-            })
-            .filter_map(|pl| {
-                let (c, e) = planes::meet(&me, pl, p)?;
-                let e2 = DVec2::new(e.dot(frame.x), e.dot(frame.y)).normalize_or_zero();
-                let c2 = frame.to2(c);
-                let on = frame.to3(c2 + e2 * (q - c2).dot(e2));
-                let k = (catch + pl.gap(on)).min(catch * 4.0);
-                (e2.length() > 0.5).then_some((c2, e2, k))
-            })
-            .collect();
-        if std::env::var("RECTIFY_DEBUG").is_ok() {
-            eprintln!("scan_snap at {q:?}: catch {catch:.2} reach {reach:.2}, {} lines (distance, catch) {:?}", lines.len(), lines.iter().map(|(c, e, k)| { let w = q - *c; ((w.x * e.y - w.y * e.x).abs(), *k) }).collect::<Vec<_>>());
-        }
-        let near = |(c, e, k): &(DVec2, DVec2, f64)| {
-            let w = q - *c;
-            (*c + *e * w.dot(*e), (w.x * e.y - w.y * e.x).abs(), *k)
-        };
-        // two lines crossing near the pointer
-        let mut best: Option<(f64, DVec2)> = None;
-        for i in 0..lines.len() {
-            for j in i + 1..lines.len() {
-                let (c1, e1, k1) = lines[i];
-                let (c2, e2, k2) = lines[j];
-                let den = e1.x * e2.y - e1.y * e2.x;
-                if den.abs() < 0.26 {
-                    continue;
-                }
-                let w = c2 - c1;
-                let s = (w.x * e2.y - w.y * e2.x) / den;
-                let c = c1 + e1 * s;
-                let dd = (c - q).length();
-                // a corner catches further (both faces round off before it)
-                if dd <= k1.max(k2) * 1.5 && best.map(|b| dd < b.0).unwrap_or(true) {
-                    best = Some((dd, c));
-                }
-            }
-        }
-        if let Some((_, c)) = best {
-            return Some((c, PenSnap::Corner));
-        }
-        lines.iter().map(near).filter(|(_, dd, k)| dd <= k).min_by(|a, b| (a.1 / a.2).partial_cmp(&(b.1 / b.2)).unwrap()).map(|(c, _, _)| (c, PenSnap::Edge))
-    }
-
     /// Where the Pen's next point goes for the pointer at `at` (`shift`:
-    /// turns of 15°; `free`: nothing catches).
+    /// the side locked horizontal, vertical or at 45°; `free`: no point
+    /// catches).
     pub fn pen_point(&self, at: [f32; 2], shift: bool, free: bool) -> Option<PenHover> {
         let pe = self.pen.as_ref()?;
         let f = pe.frame;
         let h = self.pen_point_open(at, shift, free)?;
-        // the first point closes it: the pointer near it, or what catches
-        // the pointer landing on it (the first point was caught too)
+        // the first point closes it: the pointer near it, or the point
+        // caught (a point, a locked side) landing on it
         if pe.pts.len() >= 3 {
             let first = self.project(f.to3(pe.pts[0]));
             let near = |s: Option<[f32; 2]>, r: f32| first.zip(s).map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1]) <= r).unwrap_or(false);
@@ -1444,7 +1546,7 @@ impl AppState {
         let p = f.hit(o, d)?;
         let mut q = f.to2(p);
         let dist = |x: DVec3| self.project(x).map(|s| (s[0] - at[0]).hypot(s[1] - at[1])).unwrap_or(f32::MAX);
-        if !free {
+        if !free && !shift {
             // a corner of a shape near the plane, a point already placed
             let tol = self.px_at(p) * 20.0;
             let mut cands: Vec<DVec3> = self.objects.iter().filter_map(|o| o.body()).flat_map(|b| b.built.verts.iter().copied()).filter(|v| f.n.dot(*v - f.o).abs() <= tol.max(1.0)).collect();
@@ -1456,26 +1558,16 @@ impl AppState {
         }
         let last = *pe.pts.last()?;
         if shift {
-            // the side turned by a multiple of 15° from the one before
-            let refd = if pe.pts.len() >= 2 { (last - pe.pts[pe.pts.len() - 2]).normalize_or_zero() } else { DVec2::X };
+            // locked: horizontal, vertical or a 45° diagonal of the plane
+            // (its x is level)
             let w = q - last;
-            if w.length() > 1e-9 && refd.length() > 0.5 {
-                let a = w.y.atan2(w.x) - refd.y.atan2(refd.x);
-                let step = 15f64.to_radians();
-                let a = (a / step).round() * step;
-                let base = refd.y.atan2(refd.x) + a;
-                let u = DVec2::new(base.cos(), base.sin());
+            if w.length() > 1e-9 {
+                let step = 45f64.to_radians();
+                let a = (w.y.atan2(w.x) / step).round() * step;
+                let u = DVec2::new(a.cos(), a.sin());
                 q = last + u * w.dot(u).max(0.0);
-                let deg = a.to_degrees().rem_euclid(360.0);
-                let deg = if deg > 180.0 { 360.0 - deg } else { deg };
-                return Some(PenHover { q, p: f.to3(q), snap: PenSnap::Angle(180.0 - deg) });
-            }
-        }
-        if !free {
-            if let Some((t, x)) = self.pick_hit(at) {
-                if let Some((c, s)) = self.scan_snap(&f, t as u32, x, q) {
-                    return Some(PenHover { q: c, p: f.to3(c), snap: s });
-                }
+                let deg = a.to_degrees().rem_euclid(180.0);
+                return Some(PenHover { q, p: f.to3(q), snap: PenSnap::Angle(deg) });
             }
         }
         Some(PenHover { q, p: f.to3(q), snap: PenSnap::Free })
@@ -1495,12 +1587,10 @@ impl AppState {
             self.pen_hover = self.pen_point(at, shift, free);
         } else {
             match self.plane_sticky(at) {
-                Some((h, o, hit)) => {
+                Some((h, o, _)) => {
                     let q = h.frame.to2(o);
-                    let snapped = if free { None } else { hit.and_then(|(t, x)| self.scan_snap(&h.frame, t, x, q)) };
-                    let (q, snap) = snapped.unwrap_or((q, PenSnap::Free));
                     self.pen_plane = Some(h);
-                    self.pen_hover = Some(PenHover { q, p: h.frame.to3(q), snap });
+                    self.pen_hover = Some(PenHover { q, p: h.frame.to3(q), snap: PenSnap::Free });
                 }
                 None => {
                     self.pen_plane = None;
@@ -1519,7 +1609,7 @@ impl AppState {
         if comp.is_some() {
             self.end_live();
         }
-        self.press = Some(Press { at, shift, moved: false, comp });
+        self.press = Some(Press { at, shift, moved: false, comp, handle: false });
     }
 
     /// A click with the Pen: the first one finds the plane and starts the
@@ -1528,13 +1618,11 @@ impl AppState {
     pub fn pen_click(&mut self, at: [f32; 2], shift: bool, free: bool) {
         self.hover_key = None;
         if self.pen.is_none() {
-            let Some((h, o, hit)) = self.plane_sticky(at) else { return };
-            let q = h.frame.to2(o);
-            let q = if free { q } else { hit.and_then(|(t, x)| self.scan_snap(&h.frame, t, x, q)).map(|s| s.0).unwrap_or(q) };
-            let p = h.frame.to3(q);
+            let Some((h, o, _)) = self.plane_sticky(at) else { return };
+            let p = o;
             self.end_live();
             self.fresh = None;
-            self.pen = Some(PenEdit { frame: Frame { o: p, ..h.frame }, flat: h.flat, pts: vec![DVec2::ZERO] });
+            self.pen = Some(PenEdit { frame: Frame { o: p, ..h.frame }, flat: h.flat, pts: vec![DVec2::ZERO], radii: vec![0.0], drag: None });
             self.pen_plane = None;
             self.pen_hover = None;
             self.overlay_gen += 1;
@@ -1550,8 +1638,59 @@ impl AppState {
             return;
         }
         pe.pts.push(h.q);
+        pe.radii.push(0.0);
         self.pen_hover = None;
         self.overlay_gen += 1;
+    }
+
+    /// A press with the Pen dragged (an outline begun): the point placed
+    /// there (or the first one, to close on it) and its fillet set by the
+    /// drag.
+    pub fn pen_drag_start(&mut self, at: [f32; 2], shift: bool, free: bool) -> bool {
+        if self.pen.is_none() {
+            return false;
+        }
+        let Some(h) = self.pen_point(at, shift, free) else { return false };
+        let pe = self.pen.as_mut().unwrap();
+        let drag = if h.snap == PenSnap::Close {
+            (0, true)
+        } else {
+            if pe.pts.last().map(|l| (*l - h.q).length() >= 1e-6).unwrap_or(true) {
+                pe.pts.push(h.q);
+                pe.radii.push(0.0);
+            }
+            (pe.pts.len() - 1, false)
+        };
+        pe.drag = Some(drag);
+        self.pen_hover = None;
+        self.overlay_gen += 1;
+        true
+    }
+
+    /// The fillet follows the pointer: its distance from the point, on the
+    /// plane.
+    pub fn pen_drag_move(&mut self, at: [f32; 2], free: bool) {
+        let (o, d) = self.ray(at);
+        let Some(pe) = &self.pen else { return };
+        let Some((i, _)) = pe.drag else { return };
+        let Some(x) = pe.frame.hit(o, d) else { return };
+        let q = pe.pts[i];
+        let r = (pe.frame.to2(x) - q).length();
+        let r = if free { r } else { nice_round(r, self.px_at(pe.frame.to3(q))) };
+        let pe = self.pen.as_mut().unwrap();
+        pe.radii[i] = r;
+        self.overlay_gen += 1;
+    }
+
+    /// Released: on the first point, the outline closes; else it goes on.
+    pub fn pen_drag_end(&mut self) {
+        let Some(pe) = &mut self.pen else { return };
+        let Some((_, close)) = pe.drag.take() else { return };
+        self.hover_key = None;
+        self.overlay_gen += 1;
+        if close {
+            self.pen_make(true);
+        }
     }
 
     /// Enter: the outline drawn made an open line (two points or more).
@@ -1566,7 +1705,13 @@ impl AppState {
     /// The outline made a shape: closed, a filled face; open, a line.
     fn pen_make(&mut self, closed: bool) {
         let Some(pe) = self.pen.clone() else { return };
-        let b = Body::new(pe.frame, Base::Poly { pts: pe.pts.clone(), closed });
+        let mut b = Body::new(pe.frame, Base::Poly { pts: pe.pts.clone(), closed });
+        if pe.radii.iter().any(|r| *r > 0.0) {
+            for i in 0..b.corners.len() {
+                b.corners[i] = pe.radii.get(i).copied().unwrap_or(0.0).min(b.corner_max(i)).max(0.0);
+            }
+            b.rebuild();
+        }
         if let Some((_, e)) = b.built.failed.clone() {
             self.toast(format!("Not made ({e}): move on or take the last point back (Backspace)"), true);
             return;
@@ -1590,6 +1735,7 @@ impl AppState {
     pub fn pen_back(&mut self) {
         let Some(pe) = &mut self.pen else { return };
         pe.pts.pop();
+        pe.radii.truncate(pe.pts.len());
         if pe.pts.is_empty() {
             self.pen = None;
         }
@@ -1696,6 +1842,13 @@ impl AppState {
         let (b, msg) = match found {
             Some(s) => {
                 let mut b = Body::new(Frame::level(s.a, s.axis), Base::Circle { r: s.r });
+                // a depth the scan cannot hold (a wall read past its end):
+                // a flat disc
+                let sane = s.depth.is_finite() && s.depth < (s.r * 20.0).max(30.0);
+                let mut s = s;
+                if !sane {
+                    s.depth = 0.0;
+                }
                 if s.depth > 0.02 {
                     b.steps.push(Step::Thick { t: s.depth });
                     b.rebuild();

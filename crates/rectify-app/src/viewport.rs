@@ -34,6 +34,10 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             i.pointer.button_down(PointerButton::Secondary),
         )
     });
+    // a drag built coarse: fine again once the buttons are up
+    if !ctx.input(|i| i.pointer.any_down()) {
+        st.fine_again();
+    }
     let busy = st.slot_drag.is_some() || st.circle.is_some() || st.gesture.is_some();
     if alt && (resp.hovered() || resp.dragged() || l || m || r) && !busy {
         if (l || m || r) && d != egui::Vec2::ZERO {
@@ -124,6 +128,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                                 st.pen_click(pr.at, shift, free);
                             }
                         }
+                        st.pen_drag_end();
                     } else {
                         st.select_release();
                     }
@@ -174,13 +179,6 @@ fn marks(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Res
         if let Some(h) = &st.pen_hover {
             if let Some(c) = scr(h.p) {
                 match h.snap {
-                    PenSnap::Corner => {
-                        p.rect_stroke(Rect::from_center_size(c, vec2(10.0, 10.0)), 1.0, Stroke::new(1.6, blue), StrokeKind::Middle);
-                    }
-                    PenSnap::Edge => {
-                        let d = 6.0;
-                        p.add(egui::Shape::closed_line(vec![c + vec2(0.0, -d), c + vec2(d, 0.0), c + vec2(0.0, d), c + vec2(-d, 0.0)], Stroke::new(1.6, blue)));
-                    }
                     PenSnap::Point => {
                         p.circle_stroke(c, 6.5, Stroke::new(1.6, blue));
                     }
@@ -207,6 +205,10 @@ fn marks(p: &egui::Painter, ctx: &egui::Context, st: &AppState, resp: &egui::Res
             };
             label = Some(if s.is_empty() || h.snap == PenSnap::Close { what } else { format!("{what} · {s}") });
         }
+    }
+    if let Some((i, _)) = st.pen.as_ref().and_then(|pe| pe.drag) {
+        let r = st.pen.as_ref().and_then(|pe| pe.radii.get(i).copied()).unwrap_or(0.0);
+        label = Some(format!("Fillet {} mm", fmt(r, 2)));
     }
     // the bodies' vertices in Vertex mode, the outline's corners brighter
     let vertex_mode = st.tool == Tool::Select && st.mode == SelMode::Vertex;
@@ -286,7 +288,7 @@ fn hover_label(st: &AppState, h: &Comp) -> String {
             let open = b.and_then(|b| b.built.find_edge(edge).map(|e| b.built.edge_open(e))).unwrap_or(false);
             if open { "Open edge · Shift + drag pulls it out".into() } else { "Edge · Shift + drag: fillet".into() }
         }
-        Comp::Corner { .. } => "Corner · Shift + drag: round it".into(),
+        Comp::Corner { .. } => "Corner · Shift + drag: round it · Ctrl+B: bevel".into(),
         Comp::Vertex { .. } => "Vertex".into(),
     }
 }
@@ -303,10 +305,11 @@ fn gesture_label(st: &AppState, g: &Gesture) -> String {
         },
         Gesture::Radius { obj, k: Some(k), .. } => match st.body(*obj).and_then(|b| b.steps.get(*k)) {
             Some(crate::body::Step::Fillet { r, .. }) => format!("Fillet {} mm", fmt(*r, 2)),
+            Some(crate::body::Step::Bevel { d, .. }) => format!("Bevel {} mm", fmt(*d, 2)),
             _ => "Fillet".into(),
         },
         Gesture::Radius { obj, corners, .. } => match (st.body(*obj), corners.first()) {
-            (Some(b), Some(&i)) => format!("Corner {} mm", fmt(b.corners.get(i).copied().unwrap_or(0.0), 2)),
+            (Some(b), Some(&i)) => format!("{} {} mm", if b.bevel_at(i) { "Bevel" } else { "Fillet" }, fmt(b.corners.get(i).copied().unwrap_or(0.0), 2)),
             _ => "Corner".into(),
         },
     }
@@ -334,12 +337,12 @@ pub fn hint(st: &AppState) -> String {
             SelMode::Object => "Object (4): click a shape to pick it · Shift + drag on it: thickness · P pen · C circle · drag to turn around".into(),
             SelMode::Face => "Face (3): click a face · Shift + drag: thickness · a fillet's face picks the fillet".into(),
             SelMode::Edge => "Edge (2): click an edge (Shift + click adds) · Shift + drag: an open edge is pulled out, another one filleted".into(),
-            SelMode::Vertex => "Vertex (1): click a corner of the outline (Shift + click adds) · Shift + drag rounds it · or the slider on the left".into(),
+            SelMode::Vertex => "Vertex (1): click a corner (Shift + click adds) · Shift + drag rounds it · a rounded or bevelled corner's dot drags its size · Ctrl+B bevels".into(),
         },
         Tool::Pen => match &st.pen {
             None if st.fresh.is_some() => "Made · Shift + drag on it: thickness · Enter keeps it · Esc removes it · click elsewhere to draw the next one".into(),
             None => "Pen: click on the scan · the plane under the pointer is the one you draw on (blue: a flat face) · then click the corners".into(),
-            Some(pe) if pe.pts.len() < 3 => format!("{} points · click the next corner · Shift: turns of 15° · Ctrl: nothing catches · Enter makes a line · Backspace takes one back · Esc stops", pe.pts.len()),
+            Some(pe) if pe.pts.len() < 3 => format!("{} points · click the next corner · Shift: horizontal, vertical or 45° · press and drag on a point rounds it · Enter makes a line · Backspace takes one back · Esc stops", pe.pts.len()),
             Some(pe) => format!("{} points · click the first point to close and fill it · Enter makes a line · Backspace takes one back · Esc stops", pe.pts.len()),
         },
         Tool::Circle => match &st.circle {

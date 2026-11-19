@@ -61,6 +61,8 @@ pub enum Icon {
     Patch,
     /// Face (Forme Rectify): a face's outline and the pointer clicking in it.
     FacePick,
+    /// Bevel: a corner cut straight.
+    Bevel,
 }
 
 struct Pen<'a> {
@@ -300,6 +302,9 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.arc(10.0, 10.0, 6.5, 6.5, PI, 1.5 * PI);
             pen.line(&[(3.5, 10.0), (3.5, 17.0)]);
             pen.line(&[(10.0, 3.5), (17.0, 3.5)]);
+        }
+        Icon::Bevel => {
+            pen.line(&[(3.5, 17.0), (3.5, 9.0), (9.0, 3.5), (17.0, 3.5)]);
         }
         Icon::Rotate => {
             // a circular arrow

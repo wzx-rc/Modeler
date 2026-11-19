@@ -41,6 +41,7 @@ extern "C" {
     fn focc_extrude_edge(s: *const FShape, index: c_int, v: *const c_double, tag: i64) -> *mut FShape;
     fn focc_thicken(s: *const FShape, t: c_double, salt: i64) -> *mut FShape;
     fn focc_round(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
+    fn focc_bevel(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
     fn focc_transform(s: *const FShape, m: *const c_double) -> *mut FShape;
     fn focc_fuse(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_cut(a: *const FShape, b: *const FShape) -> *mut FShape;
@@ -408,8 +409,13 @@ impl Shape {
     /// edges free). Corner i cut by an arc through `cuts[i]` (its start,
     /// middle and end); an open line's ends are never cut.
     pub fn outline(o: [f64; 3], n: [f64; 3], pts: &[[f64; 3]], closed: bool, cuts: &[Option<[[f64; 3]; 3]>]) -> Result<Shape, String> {
+        Shape::outline_bevel(o, n, pts, closed, cuts, &[])
+    }
+    /// The same, corner i cut straight from its start to its end where
+    /// `bevel[i]` (a bevel) instead of by an arc.
+    pub fn outline_bevel(o: [f64; 3], n: [f64; 3], pts: &[[f64; 3]], closed: bool, cuts: &[Option<[[f64; 3]; 3]>], bevel: &[bool]) -> Result<Shape, String> {
         let xyz: Vec<f64> = pts.iter().flatten().copied().collect();
-        let ck: Vec<c_int> = (0..pts.len()).map(|i| cuts.get(i).copied().flatten().is_some() as c_int).collect();
+        let ck: Vec<c_int> = (0..pts.len()).map(|i| if cuts.get(i).copied().flatten().is_none() { 0 } else if bevel.get(i).copied().unwrap_or(false) { 2 } else { 1 }).collect();
         let abm: Vec<f64> = (0..pts.len()).flat_map(|i| cuts.get(i).copied().flatten().map(|c| [c[0], c[1], c[2]]).unwrap_or([[0.0; 3]; 3]).into_iter().flatten()).collect();
         shape(unsafe { focc_outline(o.as_ptr(), n.as_ptr(), xyz.as_ptr(), pts.len() as c_int, closed as c_int, ck.as_ptr(), abm.as_ptr()) })
     }
@@ -432,6 +438,11 @@ impl Shape {
     /// sheet), free edges kept; the new faces get `fresh`.
     pub fn round(&self, edges: &[i32], r: f64, fresh: i64) -> Result<Shape, String> {
         shape(unsafe { focc_round(self.0, edges.as_ptr(), edges.len() as c_int, r, fresh) })
+    }
+    /// Edges cut flat, `d` along each face (a bevel), on the shape's faces
+    /// (a solid or a sheet), free edges kept; the new faces get `fresh`.
+    pub fn bevel(&self, edges: &[i32], d: f64, fresh: i64) -> Result<Shape, String> {
+        shape(unsafe { focc_bevel(self.0, edges.as_ptr(), edges.len() as c_int, d, fresh) })
     }
 
     /// Copy moved by an affine map: 3 rows of 4 (rotation × uniform scale,

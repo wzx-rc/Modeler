@@ -220,7 +220,9 @@ fn shade(i: MOut) -> vec4<f32> {
     let whole = (i.face & 0x8000u) != 0u;
     let facing = select(smoothstep(0.0, 0.35, dot(n, d / max(dist, 1e-6))), 0.0, whole);
     let lifted = i.pos + n * ((0.12 + 0.0015 * dist) * facing);
-    o.clip = project(lifted + d / max(dist, 1e-6) * (0.02 + 0.001 * dist));
+    // a body: pulled towards the eye along the view only (unseen on
+    // screen, so it shows on the scan where its points are, not off it)
+    o.clip = project(lifted + d / max(dist, 1e-6) * select(0.02 + 0.001 * dist, 0.03 + 0.003 * dist, whole));
     o.nrm = i.nrm;
     o.wpos = i.pos;
     o.face = i.face & 0x7fffu;
