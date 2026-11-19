@@ -229,29 +229,6 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                         }
                     }
                 }
-                // the Surface tool: its points locked on the plane under the
-                // first one, or put on the scan
-                if st.tool == Tool::Create(PrimKind::Surface) {
-                    island_sep(ui);
-                    let (well, _) = ui.allocate_exact_size(vec2(2.0 * 84.0 + 6.0, 28.0), Sense::hover());
-                    ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
-                    for (i, (c, name)) in [(false, "ON PLANE"), (true, "ON SCAN")].into_iter().enumerate() {
-                        let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 84.0, 3.0), vec2(84.0, 22.0));
-                        let resp = ui.interact(r, Id::new(("isl-surf", i)), Sense::click());
-                        let on = st.surface_on_scan == c;
-                        if on {
-                            ui.painter().rect_filled(r, 11.0, PATH);
-                        } else if resp.hovered() {
-                            ui.painter().rect_filled(r, 11.0, RAISED());
-                        }
-                        ui.painter().text(r.center(), Align2::CENTER_CENTER, name, mono(11.0), if on { on_accent() } else { TEXT2() });
-                        let tip = if c { "Each point is put on the scan under the pointer; the surface follows the scan inside the outline" } else { "The points are locked on the plane under the first one (a face, the scan's face or the ground): a flat surface" };
-                        if resp.on_hover_text(tip).clicked() && st.surface_on_scan != c {
-                            st.surface_on_scan = c;
-                            st.sketch = None;
-                        }
-                    }
-                }
                 island_sep(ui);
                 if icon_btn(ui, Icon::Magnet, st.settings.snap, &format!("Snap to {} mm", fmt_mm(st.settings.step as f32)), 28.0).clicked() {
                     st.settings.snap = !st.settings.snap;
@@ -1150,9 +1127,14 @@ enum OpPop {
     Verts,
     Step(FeatureId),
     Shape(FeatureId),
+    /// A drawing tool's own options (the Surface's On plane / On scan).
+    Tool,
 }
 
 fn op_pop(st: &AppState) -> Option<OpPop> {
+    if st.tool == Tool::Create(PrimKind::Surface) && st.creation.is_none() {
+        return Some(OpPop::Tool);
+    }
     if st.creation.is_some() || st.sketch.is_some() || st.push.is_some() || st.tool != Tool::Select {
         return None;
     }
@@ -1190,6 +1172,11 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
             }
         }
         OpPop::Shape(id) => vec![st.doc.feature(id)?.origin],
+        OpPop::Tool => {
+            let vr = st.view_rect;
+            let q = pos2(vr[2] - 300.0, vr[1] + 160.0);
+            return Some(Rect::from_min_max(q, q));
+        }
     };
     let view = st.view();
     let mut r: Option<Rect> = None;
@@ -1251,7 +1238,10 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
     let (left, right, top, bottom) = (vr[0] + 8.0, vr[2] - 8.0, vr[1] + 48.0, vr[3] - 8.0);
     let y_by = (anchor.center().y - 60.0).clamp(top, (bottom - h).max(top));
     let x_by = (anchor.center().x - full * 0.5).clamp(left, (right - full).max(left));
-    let at = if part.max.x + gap + full < right {
+    let at = if k == OpPop::Tool {
+        // a tool's options: at the view's top right, out of the drawing
+        pos2(right - full, top + 60.0)
+    } else if part.max.x + gap + full < right {
         pos2(part.max.x + gap, y_by)
     } else if part.min.x - gap - full > left {
         pos2(part.min.x - gap - full, y_by)
@@ -1291,6 +1281,7 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                         round_card(ui, st);
                     }
                 }
+                OpPop::Tool => surface_options(ui, st),
                 OpPop::Shape(id) => {
                     let Some(f) = st.doc.feature(id).cloned() else { return };
                     ui.horizontal(|ui| {
@@ -1301,6 +1292,39 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                 }
             }
         });
+    });
+}
+
+/// The Surface tool's options, in the operation window (Romain 19 nov.,
+/// 21 h 50: the tool's options in its pop-up, not in the top bar): its
+/// points locked on the plane under the first one, or put on the scan.
+fn surface_options(ui: &mut Ui, st: &mut AppState) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Surface").font(semibold(14.0)).color(TEXT()));
+        chip_label(ui, "Tool", RAISED(), LABEL());
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        // the Surface tool: its points locked on the plane under the
+        // first one, or put on the scan
+        let (well, _) = ui.allocate_exact_size(vec2(2.0 * 84.0 + 6.0, 28.0), Sense::hover());
+        ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+        for (i, (c, name)) in [(false, "ON PLANE"), (true, "ON SCAN")].into_iter().enumerate() {
+            let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 84.0, 3.0), vec2(84.0, 22.0));
+            let resp = ui.interact(r, Id::new(("isl-surf", i)), Sense::click());
+            let on = st.surface_on_scan == c;
+            if on {
+                ui.painter().rect_filled(r, 11.0, PATH);
+            } else if resp.hovered() {
+                ui.painter().rect_filled(r, 11.0, RAISED());
+            }
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, name, mono(11.0), if on { on_accent() } else { TEXT2() });
+            let tip = if c { "Each point is put on the scan under the pointer; the surface follows the scan inside the outline" } else { "The points are locked on the plane under the first one (a face, the scan's face or the ground): a flat surface" };
+            if resp.on_hover_text(tip).clicked() && st.surface_on_scan != c {
+                st.surface_on_scan = c;
+                st.sketch = None;
+            }
+        }
     });
 }
 
@@ -2366,6 +2390,9 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         if pressed(Key::Z) {
             if shift {
                 st.redo();
+            } else if st.sketch.is_some() {
+                // drawing an outline: only its last point goes
+                st.sketch_back();
             } else {
                 st.undo();
             }

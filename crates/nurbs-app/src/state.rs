@@ -213,6 +213,54 @@ impl Sketch {
     pub fn world(&self, i: usize) -> DVec3 {
         self.free.get(i).copied().flatten().unwrap_or_else(|| self.plane.at(self.pts[i]))
     }
+
+    /// The outline in the world with its corners' fillets (the Surface).
+    pub fn outline3(&self, extra: Option<DVec3>, closed: bool) -> Vec<DVec3> {
+        let mut w: Vec<DVec3> = (0..self.pts.len()).map(|i| self.world(i)).collect();
+        let mut c: Vec<f64> = (0..w.len()).map(|i| self.corner.get(i).copied().unwrap_or(0.0)).collect();
+        if let Some(e) = extra {
+            w.push(e);
+            c.push(0.0);
+        }
+        rounded(&w, &c, closed)
+    }
+}
+
+/// A polyline whose corners are cut by circular arcs (radius `corner[i]`,
+/// at most half of each side next to it), sampled.
+pub fn rounded(w: &[DVec3], corner: &[f64], closed: bool) -> Vec<DVec3> {
+    let n = w.len();
+    let mut out = vec![];
+    for i in 0..n {
+        let r = corner.get(i).copied().unwrap_or(0.0);
+        let ends = !closed && (i == 0 || i + 1 == n);
+        if r <= 0.0 || ends || n < 3 {
+            out.push(w[i]);
+            continue;
+        }
+        let (p, q, c) = (w[(i + n - 1) % n], w[(i + 1) % n], w[i]);
+        let (lp, lq) = ((p - c).length(), (q - c).length());
+        if lp < 1e-9 || lq < 1e-9 {
+            out.push(c);
+            continue;
+        }
+        let (a, b) = ((p - c) / lp, (q - c) / lq);
+        let ang = a.dot(b).clamp(-1.0, 1.0).acos();
+        if ang < 1e-3 || ang > std::f64::consts::PI - 1e-3 {
+            out.push(c);
+            continue;
+        }
+        let t = (r / (ang * 0.5).tan()).min(lp * 0.5).min(lq * 0.5);
+        let (s0, s1) = (c + a * t, c + b * t);
+        // a rational quadratic: the exact arc between both tangent points
+        let wt = (ang * 0.5).sin();
+        for k in 0..=10 {
+            let u = k as f64 / 10.0;
+            let (b0, b1, b2) = ((1.0 - u) * (1.0 - u), 2.0 * u * (1.0 - u) * wt, u * u);
+            out.push((s0 * b0 + c * b1 + s1 * b2) / (b0 + b1 + b2));
+        }
+    }
+    out
 }
 
 /// What a gizmo handle moves.
@@ -1585,7 +1633,8 @@ impl AppState {
         let v = self.view();
         let mut best: Option<(f32, usize)> = None;
         for (i, q) in k.pts.iter().enumerate() {
-            let Some(s) = v.project(k.plane.at(*q).as_vec3()) else { continue };
+            let _ = q;
+            let Some(s) = v.project(k.world(i).as_vec3()) else { continue };
             let d = (s[0] - p[0]).hypot(s[1] - p[1]);
             if d <= 10.0 && !k.smooth[i] && best.map(|b| d < b.0).unwrap_or(true) {
                 best = Some((d, i));
@@ -1614,9 +1663,13 @@ impl AppState {
         let snap = self.settings.snap;
         let Some(k) = self.sketch.as_mut() else { return };
         let Some(i) = k.grab else { return };
-        let Some(x) = k.plane.hit(ro, rd) else { return };
-        let q = k.plane.to_plane(x);
-        let d = (q[0] - k.pts[i][0]).hypot(q[1] - k.pts[i][1]);
+        // on the plane through the point (a point on the scan has its own)
+        let c = k.world(i);
+        let den = rd.dot(k.plane.n);
+        if den.abs() < 1e-9 {
+            return;
+        }
+        let d = (ro + rd * ((c - ro).dot(k.plane.n) / den)).distance(c);
         let r = if snap && step > 0.0 { (d / step).round() * step } else { d };
         if k.corner.len() < k.pts.len() {
             k.corner.resize(k.pts.len(), 0.0);
@@ -1765,7 +1818,7 @@ impl AppState {
             self.toast("A surface needs 3 points at least", true);
             return;
         }
-        let w: Vec<DVec3> = (0..k.pts.len()).map(|i| k.world(i)).collect();
+        let w: Vec<DVec3> = k.outline3(None, true);
         let c = w.iter().copied().sum::<DVec3>() / w.len() as f64;
         // its frame: the plane's axes (its normal from the outline when
         // the points are on the scan)

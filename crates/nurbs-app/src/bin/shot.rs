@@ -1036,6 +1036,42 @@ fn main() {
         }
     }
 
+    if want("surface") {
+        // the Surface tool: an outline filled with no thickness, a corner
+        // filleted by Ctrl + drag, Ctrl + Z takes the last point off only
+        h.reset(test_part(), "Test part");
+        h.st.camera.frame(Vec3::new(-80.0, 0.0, -10.0), Vec3::new(20.0, 0.0, 60.0));
+        h.steps(2);
+        h.key(egui::Key::U);
+        let g = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 0.0, z));
+        h.click(g(&h, -70.0, 10.0));
+        h.click(g(&h, -30.0, 10.0));
+        h.click(g(&h, -30.0, 50.0));
+        h.click(g(&h, -60.0, 55.0));
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::Z);
+        h.hold(Modifiers::NONE);
+        eprintln!("  after Ctrl+Z: {:?} points", h.st.sketch.as_ref().map(|k| k.pts.len()));
+        h.click(g(&h, -70.0, 50.0));
+        h.hold(Modifiers::CTRL);
+        h.drag(g(&h, -30.0, 10.0), g(&h, -30.0, 18.0), 8, false);
+        h.steps(2);
+        h.press(g(&h, -30.0, 18.0), false);
+        h.hold(Modifiers::NONE);
+        h.steps(2);
+        if let Some(k) = &h.st.sketch {
+            eprintln!("  surface points {:?} corners {:?}", k.pts.len(), k.corner);
+        }
+        h.shot("zero-surface-1-drawing");
+        h.key(egui::Key::Enter);
+        h.settle();
+        h.shot("zero-surface-2-done");
+        for f in h.st.doc.features.iter().filter(|f| f.is_sheet()) {
+            eprintln!("  {} sheet points {}", f.name, f.sheet.as_ref().map(|s| s.pts.len()).unwrap_or(0));
+        }
+        eprintln!("  model errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+    }
+
     if want("rdrag") {
         // from Forme Rectify: a drag on an edge makes its fillet, the top
         // bar's option a chamfer, Ctrl + B, a drag on a sketch corner

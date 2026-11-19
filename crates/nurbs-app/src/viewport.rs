@@ -807,28 +807,30 @@ fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch) {
     let col = PATH;
     let hover = p.ctx().input(|i| i.pointer.hover_pos());
     let closing = hover.map(|h| st.sketch_on_first(p2(h))).unwrap_or(false);
-    let mut pts: Vec<DVec3> = (0..k.pts.len()).map(|i| k.world(i)).collect();
-    let placed = pts.len();
-    if k.held.is_none() && !closing {
+    let placed = k.pts.len();
+    let ctrl = p.ctx().input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
+    let mut next = None;
+    if k.held.is_none() && k.grab.is_none() && !ctrl && !closing {
         if let Some(h) = hover {
-            let next = if st.surface_on_scan { st.reference_at(p2(h)).map(|x| x.0) } else { st.sketch_snap(p2(h)).map(|(q, _)| k.plane.at(q)) };
-            if let Some(q) = next {
-                pts.push(q);
-            }
+            next = if st.surface_on_scan { st.reference_at(p2(h)).map(|x| x.0) } else { st.sketch_snap(p2(h)).map(|(q, _)| k.plane.at(q)) };
         }
     }
-    let n = pts.len();
-    let sp: Vec<Option<Pos2>> = pts.iter().map(|q| world(st, *q)).collect();
-    for i in 0..n {
-        let j = (i + 1) % n;
+    // the outline with its fillets, closed once it has 3 points
+    let n = placed + next.is_some() as usize;
+    let line = k.outline3(next, n >= 3);
+    let sl: Vec<Option<Pos2>> = line.iter().map(|q| world(st, *q)).collect();
+    let m = sl.len();
+    for i in 0..m {
+        let j = (i + 1) % m;
         if j == 0 && n < 3 {
             continue;
         }
-        let (Some(a), Some(b)) = (sp[i], sp[j]) else { continue };
+        let (Some(a), Some(b)) = (sl[i], sl[j]) else { continue };
         let back = j == 0;
         let stroke = if back && !closing { Stroke::new(1.2, tint(col, 0.35)) } else { Stroke::new(2.0, col) };
         p.line_segment([a, b], stroke);
     }
+    let sp: Vec<Option<Pos2>> = (0..placed).map(|i| world(st, k.world(i))).collect();
     for (i, s) in sp.iter().enumerate().take(placed) {
         let Some(s) = s else { continue };
         let first = i == 0 && placed >= 3;
@@ -1186,19 +1188,19 @@ pub fn hint(st: &AppState) -> String {
         (None, Tool::Create(PrimKind::Path)) => match &st.sketch {
             None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),
             None => "Click: the first point, on a face or the ground".into(),
-            Some(k) if k.pts.len() < 2 => "Click or drag: a corner · Backspace: the last point off · Esc: drop it".into(),
+            Some(k) if k.pts.len() < 2 => "Click or drag: a corner · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
             Some(_) => "Enter: an open path · First point: a closed one · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Create(PrimKind::Surface)) => match &st.sketch {
-            None if st.surface_on_scan => "On scan: click the first point on the scan · Top bar: On plane / On scan".into(),
-            None => "Click: the first point, on a face, the scan's face or the ground (its plane holds the others) · Top bar: On plane / On scan".into(),
-            Some(k) if k.pts.len() < 3 => "Click or drag: a point · Backspace: the last point off · Esc: drop it".into(),
-            Some(_) => "First point or Enter: close it, filled with a surface with no thickness · Backspace: the last point off".into(),
+            None if st.surface_on_scan => "On scan: click the first point on the scan · Options window: On plane / On scan".into(),
+            None => "Click: the first point, on a face, the scan's face or the ground (its plane holds the others) · Options window: On plane / On scan".into(),
+            Some(k) if k.pts.len() < 3 => "Click or drag: a point · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
+            Some(_) => "First point or Enter: close it, filled with a surface with no thickness · Ctrl + drag a point: its fillet · Ctrl + Z: the last point off".into(),
         },
         (None, Tool::Create(PrimKind::Profile)) => match &st.sketch {
             None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),
             None => "Click: the first point, on a face or the ground".into(),
-            Some(k) if k.pts.len() < 3 => "Click or drag: a corner · Backspace: the last point off · Esc: drop it".into(),
+            Some(k) if k.pts.len() < 3 => "Click or drag: a corner · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
             Some(_) => "First point or Enter: close it · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Slot) if st.scan_slot.is_some() => "Along the slot, to its other end · Release: the scan read there, a sketch made as read · Esc: cancel".into(),
