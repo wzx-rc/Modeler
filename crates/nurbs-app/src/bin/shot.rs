@@ -1069,7 +1069,7 @@ fn main() {
         h.shot("zero-marquee-1-edges-drawing");
         h.press(pos2(mid.x, b.y), false);
         h.settle();
-        eprintln!("  edges picked {}", h.st.edge_sel.len());
+        eprintln!("  edges picked {:?}", h.st.edge_sel);
         h.shot("zero-marquee-2-edges");
         h.key(egui::Key::F9);
         h.drag(a, b, 10, true);
@@ -1087,6 +1087,68 @@ fn main() {
         h.settle();
         eprintln!("  faces after Ctrl {}", h.st.face_sel.len());
         h.shot("zero-marquee-4-faces");
+    }
+
+    if want("direct") {
+        // Shift + drag on a picked face: extrude; Ctrl + drag: inset;
+        // Shift + drag on a picked edge: the edge pulled out
+        h.reset(test_part(), "Test part");
+        h.key(egui::Key::F11);
+        let side = h.screen_of(Vec3::new(20.0, 8.0, 2.0));
+        h.click(side);
+        let out = h.screen_of(Vec3::new(26.0, 8.0, 2.0));
+        h.hold(Modifiers::SHIFT);
+        h.press(side, true);
+        for i in 1..=10 {
+            h.move_to(side + (out - side) * (i as f32 / 10.0));
+        }
+        h.steps(2);
+        h.shot("zero-direct-1-extrude-drag");
+        h.press(out, false);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let pushes = |h: &Harness| h.st.doc.features.iter().filter_map(|f| f.push.as_ref().map(|p| (f.name.clone(), p.inset, p.depth))).collect::<Vec<_>>();
+        eprintln!("  after Shift drag {:?} errors {:?}", pushes(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-direct-2-extruded");
+        // the front face, Ctrl + drag: an inset
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::F11);
+        let front = h.screen_of(Vec3::new(10.0, 7.0, 15.0));
+        h.click(front);
+        h.hold(Modifiers::CTRL);
+        h.press(front, true);
+        for i in 1..=10 {
+            h.move_to(front + egui::vec2(3.0 * i as f32, 0.0));
+        }
+        h.steps(2);
+        h.shot("zero-direct-3-inset-drag");
+        h.press(front + egui::vec2(30.0, 0.0), false);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  after Ctrl drag {:?} errors {:?}", pushes(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-direct-4-inset");
+        // an edge of a plain block (the faces round a moved edge must have
+        // no hole): its top front edge, Shift + drag up
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.key(egui::Key::F10);
+        let e = h.screen_of(Vec3::new(-14.0, 20.0, 15.0));
+        h.click(e);
+        eprintln!("  edges picked {:?}", h.st.edge_sel);
+        h.hold(Modifiers::SHIFT);
+        h.press(e, true);
+        for i in 1..=10 {
+            h.move_to(e + egui::vec2(0.0, -14.0 * i as f32));
+        }
+        h.steps(2);
+        h.shot("zero-direct-5-edge-drag");
+        h.press(e + egui::vec2(0.0, -140.0), false);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  edge {:?} errors {:?}", h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| (f.name.clone(), t.delta))).collect::<Vec<_>>(), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-direct-6-edge");
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
     if want("tension") {

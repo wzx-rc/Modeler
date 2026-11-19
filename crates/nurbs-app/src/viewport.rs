@@ -37,6 +37,13 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
                 chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("{label} {} mm{tension}", fmt_mm(g.size as f32)), HOT, HOT);
             }
         }
+        if let (Some(g), Some(h)) = (&st.face_drag, ctx.input(|i| i.pointer.latest_pos())) {
+            let txt = match g.what {
+                FaceDragWhat::Inset => format!("Inset {} mm", fmt_mm(g.size as f32)),
+                FaceDragWhat::Edge { .. } => format!("Pull edge {} mm", fmt_mm(g.size as f32)),
+            };
+            chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, HOT, HOT);
+        }
         draw_creation(p, st);
         draw_acquired(p, st);
         if let Some(s) = &st.snap_shown {
@@ -210,7 +217,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     let edges = (select && st.sel_mode == SelMode::Edge) || knife;
     let faces = (select && st.sel_mode == SelMode::Face) || matches!(st.tool, Tool::Push(_));
     let verts = select && st.sel_mode == SelMode::Vertex;
-    if st.drag.is_none() && st.round_drag.is_none() && st.creation.is_none() && st.marquee.is_none() && st.push.is_none() && !over_ui {
+    if st.drag.is_none() && st.round_drag.is_none() && st.face_drag.is_none() && st.creation.is_none() && st.marquee.is_none() && st.push.is_none() && !over_ui {
         st.hover_hit = hover.and_then(|h| st.pick_at(p2(h)));
         st.hover_edge = if edges { hover.and_then(|h| st.pick_edge(p2(h))) } else { None };
         st.hover_vertex = if verts { hover.and_then(|h| st.pick_vertex(p2(h))) } else { None };
@@ -259,7 +266,14 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 // Rectify: a drag on an edge, a fillet or a sketch corner
                 // sizes its fillet or chamfer; elsewhere a rectangle picks
                 // the components inside it (Maya)
-                if !st.begin_round_drag(p2(origin)) {
+                if (shift || ctrl) && st.begin_face_drag(p2(origin), shift, ctrl) {
+                    // Shift + drag on a picked face extrudes it (the push
+                    // gesture above takes it from the next frame), Ctrl
+                    // insets it; Shift on a picked edge pulls it out
+                    if st.push.is_some() {
+                        return;
+                    }
+                } else if !st.begin_round_drag(p2(origin)) {
                     st.marquee = Some((p2(origin), p2(origin)));
                 }
             }
@@ -271,6 +285,9 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 } else if st.round_drag.is_some() {
                     st.update_round_drag(p2(p), ctrl, shift);
                     st.interacting = true;
+                } else if st.face_drag.is_some() {
+                    st.update_face_drag(p2(p));
+                    st.interacting = true;
                 } else if let Some(mq) = &mut st.marquee {
                     mq.1 = p2(p);
                 }
@@ -281,6 +298,8 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 st.end_drag();
             } else if st.round_drag.is_some() {
                 st.end_round_drag();
+            } else if st.face_drag.is_some() {
+                st.end_face_drag();
             } else if let Some((a, b)) = st.marquee.take() {
                 st.marquee_components(a, b, shift, ctrl);
             }
@@ -920,6 +939,7 @@ pub fn hint(st: &AppState) -> String {
             }
         }
         (None, Tool::Point) => "Point on edge · click on an edge: a point cut into it (its middle catches) · Esc: Select".into(),
+        (None, Tool::Select) if st.face_drag.is_some() => "Away from the press: bigger · release to keep it".into(),
         (None, Tool::Select) if st.round_drag.is_some() => "Away from the press: bigger · Ctrl held: chamfer · Shift held: tension (up fuller, down flatter)".into(),
         (None, Tool::Select) if st.sel_mode == SelMode::Vertex => {
             if st.vert_sel.is_empty() {

@@ -782,6 +782,115 @@ impl AppState {
     }
 }
 
+// ------------------------------------------ direct drags on picked parts
+
+impl AppState {
+    /// Shift or Ctrl held at the press on a picked face or edge (Maya /
+    /// Plasticity): a face, Shift extrudes it, Ctrl insets it; an edge,
+    /// Shift pulls it out. False when the press is on nothing picked (then
+    /// the drag sizes a fillet or draws a rectangle).
+    pub fn begin_face_drag(&mut self, p: [f32; 2], shift: bool, ctrl: bool) -> bool {
+        match self.sel_mode {
+            SelMode::Face => {
+                let Some(h) = self.pick_at(p) else { return false };
+                if !self.picked_faces().contains(&h.face) {
+                    return false;
+                }
+                let at = h.point.as_dvec3();
+                if shift {
+                    self.push_start(h.face, at, p, true);
+                    return self.push.is_some();
+                }
+                if ctrl {
+                    let Some((r, origin, _)) = self.face_plane(h.face, at, "Inset") else { return true };
+                    self.begin_live("Inset");
+                    let mut id = 0;
+                    self.live(|d| id = d.add_push(Push { face: FaceRef { tag: r.tag, at: origin }, inset: 0.1, depth: 0.0 }));
+                    self.face_sel.clear();
+                    self.selection = vec![id];
+                    let px = self.mm_per_point(at);
+                    self.face_drag = Some(FaceDrag { id, what: FaceDragWhat::Inset, press: p, px, size: 0.1 });
+                    return true;
+                }
+                false
+            }
+            SelMode::Edge if shift => {
+                let Some(i) = self.pick_edge(p) else { return false };
+                let Some(r) = self.edge_ref(i) else { return false };
+                if !self.edge_sel.iter().any(|x| x.key() == r.key() && x.at.distance(r.at) < 1e-3) {
+                    return false;
+                }
+                let Some(n) = self.edge_normal(i) else {
+                    self.toast("Pull edge: only between flat faces for now", true);
+                    return true;
+                };
+                let (ro, rd) = self.ray(p);
+                let t0 = closest_on_line(r.at, n, ro, rd).unwrap_or(0.0);
+                let t = Tweak { comp: Comp::Edge(r.clone()), delta: DVec3::ZERO };
+                self.begin_live(t.label());
+                let mut id = 0;
+                self.live(|d| id = d.add_tweak(t));
+                self.edge_sel.clear();
+                self.selection = vec![id];
+                let px = self.mm_per_point(r.at);
+                self.face_drag = Some(FaceDrag { id, what: FaceDragWhat::Edge { at: r.at, n, t0 }, press: p, px, size: 0.0 });
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The mean of an edge's two faces' outward normals (both flat).
+    fn edge_normal(&self, i: usize) -> Option<DVec3> {
+        let m = self.model.as_ref()?;
+        let e = m.edges.get(i)?;
+        let f = |k: i32| m.faces.get(k as usize).filter(|f| f.kind == SurfKind::Plane).map(|f| DVec3::from_array(f.normal).normalize());
+        let n = f(e.faces[0])? + f(e.faces[1])?;
+        (n.length() > 1e-6).then(|| n.normalize())
+    }
+
+    pub fn update_face_drag(&mut self, p: [f32; 2]) {
+        let Some(mut g) = self.face_drag.clone() else { return };
+        let id = g.id;
+        match g.what {
+            FaceDragWhat::Inset => {
+                let dist = (p[0] - g.press[0]).hypot(p[1] - g.press[1]) as f64;
+                let size = nice_round(dist * g.px, g.px).max(0.1);
+                g.size = size;
+                self.live(|d| {
+                    if let Some(pu) = d.feature_mut(id).and_then(|f| f.push.as_mut()) {
+                        pu.inset = size;
+                    }
+                });
+            }
+            FaceDragWhat::Edge { at, n, t0 } => {
+                let (ro, rd) = self.ray(p);
+                let Some(t) = closest_on_line(at, n, ro, rd) else { return };
+                let d = self.snap(t - t0);
+                g.size = d;
+                self.live(|doc| {
+                    if let Some(tw) = doc.feature_mut(id).and_then(|f| f.tweak.as_mut()) {
+                        tw.delta = n * d;
+                    }
+                });
+            }
+        }
+        self.face_drag = Some(g);
+    }
+
+    pub fn end_face_drag(&mut self) {
+        let Some(g) = self.face_drag.take() else { return };
+        if g.what == FaceDragWhat::Inset || g.size.abs() > 1e-9 {
+            self.end_live();
+            self.selection = vec![g.id];
+        } else {
+            // not moved: nothing made
+            self.cancel_live();
+            self.selection.clear();
+        }
+    }
+}
+
 // ------------------------------------------- fillets and chamfers by drag
 
 /// A size rounded to a step fit for `px` mm per point (1, 2, 5 × 10ⁿ, at

@@ -214,6 +214,28 @@ pub struct Drag {
 /// A fillet or chamfer sized by a drag on screen (Rectify's Radius
 /// gesture): on an edge (a new step), on a fillet's faces (its size), on a
 /// sketch or path corner (its cut, the dot follows the pointer).
+/// A direct drag on a picked component (Romain 19 nov.: "Shift + drag =
+/// extrude direct, Ctrl + drag = inset direct").
+#[derive(Clone, Debug)]
+pub struct FaceDrag {
+    pub id: FeatureId,
+    pub what: FaceDragWhat,
+    /// Where the press was (screen points), mm per point there.
+    pub press: [f32; 2],
+    pub px: f64,
+    /// The size now (shown by the pointer).
+    pub size: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FaceDragWhat {
+    /// An inset: its size grows with the distance from the press.
+    Inset,
+    /// An edge pulled along its faces' mean normal (a Move edge step): the
+    /// edge's point, the direction, where the press was along it.
+    Edge { at: DVec3, n: DVec3, t0: f64 },
+}
+
 #[derive(Clone, Debug)]
 pub struct RoundDrag {
     pub what: RoundWhat,
@@ -292,6 +314,9 @@ pub struct AppState {
     pub round_chamfer: bool,
     /// A fillet or chamfer being sized by a drag.
     pub round_drag: Option<RoundDrag>,
+    /// Ctrl + drag on a picked face (an inset) or Shift + drag on a picked
+    /// edge (the edge pulled out), Maya / Plasticity style.
+    pub face_drag: Option<FaceDrag>,
     /// The Knife's cut under way (its step, its last point) and the point
     /// under the pointer.
     pub knife: Option<(FeatureId, usize)>,
@@ -380,6 +405,7 @@ impl AppState {
             hover_edge: None,
             round_chamfer: false,
             round_drag: None,
+            face_drag: None,
             knife: None,
             knife_hover: None,
             hover_feature: None,
@@ -953,7 +979,7 @@ impl AppState {
 
     /// Cancels what is under way (creation, sketch, drag, inset).
     pub fn abort_gestures(&mut self) {
-        if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() || self.round_drag.take().is_some() {
+        if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() || self.round_drag.take().is_some() || self.face_drag.take().is_some() {
             self.cancel_live();
             self.clean_selection_ids();
         }
