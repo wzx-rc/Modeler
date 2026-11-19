@@ -310,10 +310,10 @@ fn mode_pill(ui: &mut Ui, st: &mut AppState) {
         let icon = [Icon::ModeVertex, Icon::ModeEdge, Icon::ModeFace, Icon::ModeObject][i];
         icons::paint(p, Rect::from_center_size(r.center(), vec2(17.0, 17.0)), icon, if on { on_accent() } else if lit { accent() } else { TEXT_ICON() });
         let tip = match m {
-            SelMode::Vertex => "Vertex (1): pick the part's corners",
-            SelMode::Edge => "Edge (2): pick edges to fillet or chamfer",
-            SelMode::Face => "Face (3): pick faces to inset (I) or extrude (E)",
-            SelMode::Object => "Object (4 or Q): pick and move whole shapes",
+            SelMode::Vertex => "Vertex (1 or F9): pick the part's corners · drag a rectangle to pick several",
+            SelMode::Edge => "Edge (2 or F10): pick edges to fillet or chamfer · drag a rectangle to pick several",
+            SelMode::Face => "Face (3 or F11): pick faces to inset (I) or extrude (E) · drag a rectangle to pick several",
+            SelMode::Object => "Object (4, Q or F8): pick and move whole shapes",
         };
         if resp.on_hover_text(tip).clicked() {
             st.set_sel_mode(m);
@@ -385,7 +385,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 SelMode::Object => (Icon::Select, TEXT2()),
             };
             let sub = format!("{} · {}", m.label().to_uppercase(), m.key());
-            if card(ui, Some(icon), "SELECTION", &sub, select, color, "Select (Esc): what a click picks is set by the modes at the top (1 vertex, 2 edge, 3 face, 4 or Q object)").clicked() {
+            if card(ui, Some(icon), "SELECTION", &sub, select, color, "Select (Esc): what a click picks is set by the modes at the top (1 or F9 vertex, 2 or F10 edge, 3 or F11 face, 4, Q or F8 object)").clicked() {
                 st.select_tool();
             }
             divider(ui);
@@ -1601,7 +1601,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.selection.clear();
         }
     }
-    for (k, m) in [(Key::Num1, SelMode::Vertex), (Key::Num2, SelMode::Edge), (Key::Num3, SelMode::Face), (Key::Num4, SelMode::Object), (Key::Q, SelMode::Object)] {
+    for (k, m) in [(Key::Num1, SelMode::Vertex), (Key::Num2, SelMode::Edge), (Key::Num3, SelMode::Face), (Key::Num4, SelMode::Object), (Key::Q, SelMode::Object), (Key::F8, SelMode::Object), (Key::F9, SelMode::Vertex), (Key::F10, SelMode::Edge), (Key::F11, SelMode::Face)] {
         if pressed(k) {
             st.set_sel_mode(m);
         }

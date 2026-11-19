@@ -146,6 +146,96 @@ impl AppState {
             .map(|(q, _)| q.as_dvec3())
     }
 
+    /// A rectangle drawn in Vertex, Edge or Face mode (Maya): the
+    /// components the eye sees inside it. Shift adds them, Ctrl takes them
+    /// away, else they replace the picks. A vertex counts by its point, an
+    /// edge by its middle, a face by any of its triangles seen there.
+    pub fn marquee_components(&mut self, a: [f32; 2], b: [f32; 2], shift: bool, ctrl: bool) {
+        let (lo, hi) = ([a[0].min(b[0]), a[1].min(b[1])], [a[0].max(b[0]), a[1].max(b[1])]);
+        let inside = |s: [f32; 2]| s[0] >= lo[0] && s[0] <= hi[0] && s[1] >= lo[1] && s[1] <= hi[1];
+        let v = self.view();
+        self.selection.clear();
+        match self.sel_mode {
+            SelMode::Vertex => {
+                let found: Vec<DVec3> = self.visible_vertices().into_iter().filter(|(_, s)| inside(*s)).map(|(q, _)| q.as_dvec3()).collect();
+                if !(shift || ctrl) {
+                    self.vert_sel.clear();
+                }
+                for q in found {
+                    let at = self.vert_sel.iter().position(|x| x.distance(q) < 1e-3);
+                    match (ctrl, at) {
+                        (true, Some(i)) => {
+                            self.vert_sel.remove(i);
+                        }
+                        (false, None) => self.vert_sel.push(q),
+                        _ => {}
+                    }
+                }
+            }
+            SelMode::Edge => {
+                let Some(m) = self.model.as_ref() else { return };
+                let mut found: Vec<EdgeRef> = vec![];
+                for i in 0..m.edges.len() {
+                    let Some(r) = self.edge_ref(i) else { continue };
+                    let mid = r.at.as_vec3();
+                    if v.project(mid).map(inside).unwrap_or(false) && !self.hidden(mid) {
+                        found.push(r);
+                    }
+                }
+                if !(shift || ctrl) {
+                    self.edge_sel.clear();
+                }
+                for r in found {
+                    let at = self.edge_sel.iter().position(|x| x.key() == r.key() && x.at.distance(r.at) < 1e-3);
+                    match (ctrl, at) {
+                        (true, Some(i)) => {
+                            self.edge_sel.remove(i);
+                        }
+                        (false, None) => self.edge_sel.push(r),
+                        _ => {}
+                    }
+                }
+            }
+            SelMode::Face => {
+                let Some(m) = self.model.as_ref() else { return };
+                // per face, a few of its triangles inside the rectangle,
+                // seen there (the ray through it hits that face first)
+                let mut tries = vec![0u8; m.faces.len()];
+                let mut found: Vec<(usize, DVec3)> = vec![];
+                for (t, tri) in m.triangles.iter().enumerate() {
+                    let f = m.tri_face[t] as usize;
+                    if tries[f] >= 16 || found.iter().any(|x| x.0 == f) {
+                        continue;
+                    }
+                    let c = tri.iter().map(|k| Vec3::from(m.positions[*k as usize])).sum::<Vec3>() / 3.0;
+                    let Some(s) = v.project(c).filter(|s| inside(*s)) else { continue };
+                    tries[f] += 1;
+                    if self.pick_at(s).map(|h| h.face) == Some(f) {
+                        found.push((f, c.as_dvec3()));
+                    }
+                }
+                if !(shift || ctrl) {
+                    self.face_sel.clear();
+                }
+                for (f, c) in found {
+                    let at = self.face_sel.iter().position(|x| self.model_face_of(x) == Some(f));
+                    match (ctrl, at) {
+                        (true, Some(i)) => {
+                            self.face_sel.remove(i);
+                        }
+                        (false, None) => {
+                            if let Some(r) = self.face_ref(f, c) {
+                                self.face_sel.push(r);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            SelMode::Object => {}
+        }
+    }
+
     pub fn click_vertex(&mut self, v: Option<DVec3>, add: bool) {
         let Some(v) = v else {
             if !add {

@@ -1055,6 +1055,40 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("marquee") {
+        // Maya: a rectangle picks the components the eye sees inside it
+        // (F9 vertex, F10 edge, F11 face; Shift adds, Ctrl takes away)
+        h.reset(test_part(), "Test part");
+        let lo = h.screen_of(Vec3::new(-24.0, -2.0, 18.0));
+        let hi = h.screen_of(Vec3::new(24.0, 32.0, -18.0));
+        let (a, b) = (pos2(lo.x.min(hi.x) - 30.0, lo.y.max(hi.y) + 30.0), pos2(lo.x.max(hi.x) + 30.0, lo.y.min(hi.y) - 30.0));
+        h.key(egui::Key::F10);
+        let mid = h.screen_of(Vec3::new(4.0, 10.0, 15.0));
+        h.drag(a, pos2(mid.x, b.y), 10, false);
+        h.steps(2);
+        h.shot("zero-marquee-1-edges-drawing");
+        h.press(pos2(mid.x, b.y), false);
+        h.settle();
+        eprintln!("  edges picked {}", h.st.edge_sel.len());
+        h.shot("zero-marquee-2-edges");
+        h.key(egui::Key::F9);
+        h.drag(a, b, 10, true);
+        h.settle();
+        eprintln!("  vertices picked {} of {} seen", h.st.vert_sel.len(), h.st.visible_vertices().len());
+        h.shot("zero-marquee-3-vertices");
+        h.key(egui::Key::F11);
+        h.drag(a, b, 10, true);
+        h.settle();
+        eprintln!("  faces picked {}", h.st.face_sel.len());
+        // Ctrl: the left half taken away
+        h.hold(Modifiers::CTRL);
+        h.drag(a, pos2(mid.x, b.y), 10, true);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  faces after Ctrl {}", h.st.face_sel.len());
+        h.shot("zero-marquee-4-faces");
+    }
+
     if want("tension") {
         // the direct fillet's modifiers: Shift held during the drag sets
         // the tension (up fuller), Ctrl held makes a chamfer

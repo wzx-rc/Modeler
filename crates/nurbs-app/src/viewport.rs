@@ -257,8 +257,11 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 st.begin_drag(h, p2(origin));
             } else {
                 // Rectify: a drag on an edge, a fillet or a sketch corner
-                // sizes its fillet or chamfer
-                st.begin_round_drag(p2(origin));
+                // sizes its fillet or chamfer; elsewhere a rectangle picks
+                // the components inside it (Maya)
+                if !st.begin_round_drag(p2(origin)) {
+                    st.marquee = Some((p2(origin), p2(origin)));
+                }
             }
         }
         if resp.dragged_by(PointerButton::Primary) {
@@ -268,6 +271,8 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 } else if st.round_drag.is_some() {
                     st.update_round_drag(p2(p), ctrl, shift);
                     st.interacting = true;
+                } else if let Some(mq) = &mut st.marquee {
+                    mq.1 = p2(p);
                 }
             }
         }
@@ -276,6 +281,8 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 st.end_drag();
             } else if st.round_drag.is_some() {
                 st.end_round_drag();
+            } else if let Some((a, b)) = st.marquee.take() {
+                st.marquee_components(a, b, shift, ctrl);
             }
         }
     }
