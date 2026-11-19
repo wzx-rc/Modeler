@@ -608,9 +608,13 @@ impl AppState {
         let Some(r) = self.reference.clone() else { return false };
         let (o, d) = self.ray(p);
         let Some((_, to, _)) = r.hit_tri(o, d.normalize()) else { return false };
-        let drawn = c.plane.at([(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5]);
-        let diag = ((c.b[0] - c.a[0]).powi(2) + (c.b[1] - c.a[1]).powi(2)).sqrt();
         let found = Slot::detect_box(&r.mesh, &r.topo, from.0, from.1, to, r.edge);
+        // the drag as drawn on the scan, seen along the axis read (the base
+        // plane may be the slope under the press, tilted: the corners on it
+        // say less)
+        let axis = found.as_ref().map(|s| s.axis).unwrap_or(c.plane.n);
+        let drawn = (from.1 + to) * 0.5;
+        let diag = (to - from.1).reject_from(axis).length();
         if std::env::var_os("FORME_SCAN_DEBUG").is_some() {
             match &found {
                 Ok(s) => eprintln!("scan box: drawn {diag:.2} at {drawn:.2?}; found {:.2} × {:.2} r {:.2} at {:.2?} axis {:.3?} depth {:.2} inward {}", (s.b - s.a).length() + 2.0 * s.r, 2.0 * (s.w + s.r), s.r, (s.a + s.b) * 0.5, s.axis, s.depth, s.inward),
@@ -621,8 +625,7 @@ impl AppState {
         // about as big as drawn, about where it was drawn
         let size = read.x.hypot(read.z);
         let centre = read.origin + read.rot * DVec3::Y * if read.op == Op::Carve { read.height - read.depth } else { 0.0 };
-        let off = centre - drawn;
-        let off = off - c.plane.n * c.plane.n.dot(off);
+        let off = (centre - drawn).reject_from(axis);
         if size < diag * 0.4 || size > diag * 2.0 || off.length() > diag * 0.4 {
             if std::env::var_os("FORME_SCAN_DEBUG").is_some() {
                 eprintln!("scan box: not taken (size {size:.2} for {diag:.2} drawn, {:.2} off)", off.length());
@@ -888,6 +891,31 @@ mod tests {
             std::fs::write(format!("{out}/hmap-{name}.pgm"), f).unwrap();
             println!("{name}: {w} × {h}, x from {:.1}, y from {:.1} (top) at 4 px / mm", r.lo.x, r.hi.y);
         }
+    }
+
+    /// Writes the scan's heights seen from +Z over a box (ignored: the
+    /// pistol). `FORME_CROP="x0,y0,x1,y1,px_per_mm,out.f32"`: row-major f32,
+    /// top row first (y1), NaN where nothing is hit.
+    #[test]
+    #[ignore]
+    fn scan_crop() {
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        let r = crate::reference::Reference::load(&path).expect("reference");
+        let v: Vec<String> = std::env::var("FORME_CROP").unwrap().split(',').map(|x| x.to_string()).collect();
+        let f = |i: usize| v[i].parse::<f64>().unwrap();
+        let (x0, y0, x1, y1, k) = (f(0), f(1), f(2), f(3), f(4));
+        let (w, h) = (((x1 - x0) * k) as usize, ((y1 - y0) * k) as usize);
+        let mut out = Vec::with_capacity(w * h * 4);
+        for j in 0..h {
+            for i in 0..w {
+                let x = x0 + (i as f64 + 0.5) / k;
+                let y = y1 - (j as f64 + 0.5) / k;
+                let z = r.hit(DVec3::new(x, y, 100.0), DVec3::new(0.0, 0.0, -1.0)).map(|(q, _)| q.z as f32).unwrap_or(f32::NAN);
+                out.extend_from_slice(&z.to_le_bytes());
+            }
+        }
+        std::fs::write(&v[5], out).unwrap();
+        println!("{w} × {h}");
     }
 
     /// Reads the square button and the small pocket of the pistol's +Z side

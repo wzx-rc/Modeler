@@ -47,6 +47,17 @@ fn rect_dist(q: DVec2, a: DVec2, b: DVec2, w: f64) -> (f64, DVec2) {
     ((q - c).length(), c)
 }
 
+/// The signed distance from `q` to that rectangle: negative inside it, by
+/// how far from its border.
+fn rect_sd(q: DVec2, a: DVec2, b: DVec2, w: f64) -> f64 {
+    let ab = b - a;
+    let l = ab.length();
+    let e = if l > 1e-12 { ab / l } else { DVec2::X };
+    let d = q - (a + b) * 0.5;
+    let (dx, dy) = (d.dot(e).abs() - l * 0.5, d.perp_dot(e).abs() - w.max(0.0));
+    DVec2::new(dx.max(0.0), dy.max(0.0)).length() + dx.max(dy).min(0.0)
+}
+
 /// What was looked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -106,6 +117,7 @@ pub struct Laid {
 }
 
 /// The scan around the drag, in the drag's frame.
+#[derive(Clone)]
 struct Scene {
     /// The drag's middle, along it (e), across it (f), the face's normal (n).
     o: DVec3,
@@ -125,52 +137,88 @@ struct Scene {
     tris: usize,
 }
 
+/// A wall found along a direction: how far, and the flat levels on each
+/// side of it (inside, towards the drag's middle, and outside), along the
+/// axis: the four sides of one block go from one level to another, a plate
+/// under a button or a groove beside a pocket between others.
+#[derive(Clone, Copy, Debug)]
+struct Wall {
+    at: f64,
+    inner: f64,
+    outer: f64,
+}
+
 impl Scene {
     /// The triangles joined to the one pressed within `reach` × the drag's
     /// length of it; the axis by mean shift of their normals.
     fn gather(m: &Mesh, topo: &Topo, t0: u32, p0: DVec3, p1: DVec3, reach: f64, h: f64) -> Option<Scene> {
+        Self::gather_on(m, topo, t0, p0, p1, reach, h, false)
+    }
+
+    /// The same; `planar`: then gathered again with the reach measured on
+    /// the face's plane (a drag on a pocket's floor reaches the face round
+    /// it however deep the pocket).
+    #[allow(clippy::too_many_arguments)]
+    fn gather_on(m: &Mesh, topo: &Topo, t0: u32, p0: DVec3, p1: DVec3, reach: f64, h: f64, planar: bool) -> Option<Scene> {
         let len = (p1 - p0).length();
         let reach = len * reach + h * 4.0;
-        let seg3 = |x: DVec3| {
-            let ab = p1 - p0;
-            let t = ((x - p0).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
-            (x - (p0 + ab * t)).length()
-        };
-        let mut tris: Vec<u32> = vec![t0];
-        let mut seen: HashSet<u32> = HashSet::new();
-        seen.insert(t0);
-        let mut k = 0;
-        while k < tris.len() && tris.len() < 800_000 {
-            let t = tris[k];
-            k += 1;
-            for &u in &topo.adj[t as usize] {
-                if u != NONE && !seen.contains(&u) && seg3(m.tri_centre(u as usize)) <= reach {
-                    seen.insert(u);
-                    tris.push(u);
+        let collect = |n: Option<DVec3>| {
+            let flat = |v: DVec3| match n {
+                Some(n) => v.reject_from(n),
+                None => v,
+            };
+            let (a, ab) = (flat(p0), flat(p1 - p0));
+            let seg = |x: DVec3| {
+                let x = flat(x);
+                let t = if ab.length_squared() > 1e-18 { ((x - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                (x - (a + ab * t)).length()
+            };
+            let mut tris: Vec<u32> = vec![t0];
+            let mut seen: HashSet<u32> = HashSet::new();
+            seen.insert(t0);
+            let mut k = 0;
+            while k < tris.len() && tris.len() < 800_000 {
+                let t = tris[k];
+                k += 1;
+                for &u in &topo.adj[t as usize] {
+                    if u != NONE && !seen.contains(&u) && seg(m.tri_centre(u as usize)) <= reach {
+                        seen.insert(u);
+                        tris.push(u);
+                    }
                 }
             }
-        }
+            tris
+        };
         // the axis: the most common normal (the face, the floor), wide,
         // then narrower
-        let nrm: Vec<DVec3> = tris.iter().map(|&t| m.tri_normal(t as usize)).collect();
-        let area: Vec<f64> = tris.iter().map(|&t| m.tri_area(t as usize)).collect();
-        let mut n = nrm.iter().zip(&area).map(|(n, a)| *n * *a).sum::<DVec3>().normalize_or_zero();
-        if n == DVec3::ZERO {
-            return None;
-        }
-        for deg in [30.0f64, 20.0, 12.0, 8.0, 5.0, 5.0] {
-            let kk = deg.to_radians();
-            let mut sum = DVec3::ZERO;
-            for (nn, a) in nrm.iter().zip(&area) {
-                let c = nn.dot(n);
-                if c > 0.0 {
-                    let ang = c.min(1.0).acos();
-                    sum += *nn * (*a * (-(ang / kk).powi(2)).exp());
+        let axis = |tris: &[u32]| {
+            let nrm: Vec<DVec3> = tris.iter().map(|&t| m.tri_normal(t as usize)).collect();
+            let area: Vec<f64> = tris.iter().map(|&t| m.tri_area(t as usize)).collect();
+            let mut n = nrm.iter().zip(&area).map(|(n, a)| *n * *a).sum::<DVec3>().normalize_or_zero();
+            if n == DVec3::ZERO {
+                return None;
+            }
+            for deg in [30.0f64, 20.0, 12.0, 8.0, 5.0, 5.0] {
+                let kk = deg.to_radians();
+                let mut sum = DVec3::ZERO;
+                for (nn, a) in nrm.iter().zip(&area) {
+                    let c = nn.dot(n);
+                    if c > 0.0 {
+                        let ang = c.min(1.0).acos();
+                        sum += *nn * (*a * (-(ang / kk).powi(2)).exp());
+                    }
+                }
+                if sum.length() > 1e-12 {
+                    n = sum.normalize();
                 }
             }
-            if sum.length() > 1e-12 {
-                n = sum.normalize();
-            }
+            Some(n)
+        };
+        let mut tris = collect(None);
+        let mut n = axis(&tris)?;
+        if planar {
+            tris = collect(Some(n));
+            n = axis(&tris)?;
         }
         let o = (p0 + p1) * 0.5;
         let e = (p1 - p0).reject_from(n).normalize_or_zero();
@@ -217,9 +265,9 @@ impl Scene {
         Some(sc)
     }
 
-    /// The nearest strong peak of weighted values (`vals`: value, weight)
-    /// between `lo` and `hi` to `want`.
-    fn peak_near(&self, vals: &[(f64, f64)], lo: f64, hi: f64, want: f64, h: f64) -> Option<f64> {
+    /// The strong peaks of weighted values (`vals`: value, weight) between
+    /// `lo` and `hi`, and the histogram's bin.
+    fn peaks(&self, vals: &[(f64, f64)], lo: f64, hi: f64, h: f64) -> (Vec<f64>, f64) {
         let bin = (h * 0.5).max((hi - lo) / 240.0);
         let nb = (((hi - lo) / bin).ceil() as usize).max(3);
         let mut hist = vec![0.0f64; nb];
@@ -231,28 +279,111 @@ impl Scene {
         }
         let sm: Vec<f64> = (0..nb).map(|i| hist[i.saturating_sub(1)] + 2.0 * hist[i] + hist[(i + 1).min(nb - 1)]).collect();
         let top = sm.iter().cloned().fold(0.0, f64::max);
-        (1..nb - 1)
-            .filter(|&i| sm[i] >= sm[i - 1] && sm[i] >= sm[i + 1] && sm[i] >= (top * 0.25).max(4.0))
-            .map(|i| lo + (i as f64 + 0.5) * bin)
-            .min_by(|a, b| (a - want).abs().partial_cmp(&(b - want).abs()).unwrap())
+        // local maxima (a flat top counts once), the strongest first, none
+        // within 3 bins of a stronger one
+        let mut cand: Vec<usize> = (1..nb - 1).filter(|&i| sm[i] > sm[i - 1] && sm[i] >= sm[i + 1] && sm[i] >= (top * 0.25).max(4.0)).collect();
+        cand.sort_by(|&a, &b| sm[b].total_cmp(&sm[a]));
+        let mut kept: Vec<usize> = vec![];
+        for i in cand {
+            if kept.iter().all(|&k| k.abs_diff(i) > 3) {
+                kept.push(i);
+            }
+        }
+        kept.sort_unstable();
+        (kept.into_iter().map(|i| lo + (i as f64 + 0.5) * bin).collect(), bin)
+    }
+
+    /// The nearest strong peak of weighted values (`vals`: value, weight)
+    /// between `lo` and `hi` to `want`.
+    fn peak_near(&self, vals: &[(f64, f64)], lo: f64, hi: f64, want: f64, h: f64) -> Option<f64> {
+        self.peaks(vals, lo, hi, h).0.into_iter().min_by(|a, b| (a - want).abs().total_cmp(&(b - want).abs()))
     }
 
     /// The walls facing along `dir` (a unit direction on the plane) on its
     /// side of `c`, facing back (cut in) or out (raised), whose other
     /// coordinate is within `span` of `c`'s: the nearest strong peak of
     /// their distances from `c` along `dir` to `want`.
+    #[allow(clippy::too_many_arguments)]
     fn wall_along(&self, c: DVec2, dir: DVec2, span: f64, cut: bool, want: f64, hi: f64, h: f64) -> Option<f64> {
+        self.walls_along(c, dir, span, cut, hi, h).into_iter().map(|w| w.at).min_by(|a, b| (a - want).abs().total_cmp(&(b - want).abs()))
+    }
+
+    /// Every strong peak of those walls' distances, with the flat levels
+    /// just inside and just outside it (else the wall's own height there).
+    fn walls_along(&self, c: DVec2, dir: DVec2, span: f64, cut: bool, hi: f64, h: f64) -> Vec<Wall> {
         let across = DVec2::new(-dir.y, dir.x);
-        let vals: Vec<(f64, f64)> = (0..self.q.len())
+        let (idx, vals): (Vec<usize>, Vec<(f64, f64)>) = (0..self.q.len())
             .filter_map(|i| {
                 let d = self.q[i] - c;
                 let (x, y) = (d.dot(dir), d.dot(across));
                 let nn = self.n2[i];
                 let k = nn.dot(dir);
-                (self.wallness[i] > 0.0 && x > 0.0 && y.abs() < span && k.abs() > 0.8 * nn.length() && (k < 0.0) == cut).then_some((x, self.wallness[i]))
+                (self.wallness[i] > 0.0 && x > 0.0 && y.abs() < span && k.abs() > 0.8 * nn.length() && (k < 0.0) == cut).then_some((i, (x, self.wallness[i])))
             })
-            .collect();
-        self.peak_near(&vals, 0.0, hi, want, h)
+            .unzip();
+        let (peaks, bin) = self.peaks(&vals, 0.0, hi, h);
+        let (d1, d2) = ((h * 3.0).max(0.4), (h * 3.0).max(0.4) + (h * 6.0).max(1.0));
+        peaks
+            .into_iter()
+            .map(|at| {
+                let hs: Vec<f64> = idx.iter().zip(&vals).filter(|(_, v)| (v.0 - at).abs() < bin * 2.0 && v.1 > 0.3).map(|(&i, _)| self.hh[i]).collect();
+                let own = median(hs).unwrap_or(0.0);
+                let level = |from: f64, to: f64| {
+                    let hs: Vec<f64> = (0..self.q.len())
+                        .filter(|&i| {
+                            let d = self.q[i] - c;
+                            let x = d.dot(dir);
+                            self.nz[i] > 0.95 && x > from && x < to && d.dot(across).abs() < span
+                        })
+                        .map(|i| self.hh[i])
+                        .collect();
+                    median(hs).unwrap_or(own)
+                };
+                Wall { at, inner: level((at - d2).max(0.0), at - d1), outer: level(at + d1, at + d2) }
+            })
+            .collect()
+    }
+
+    /// The flat face round the rounded rectangle and the flat floor (or
+    /// top) inside it: the medians of their heights along the axis.
+    fn levels(&self, a2: DVec2, b2: DVec2, w: f64, r: f64, h: f64) -> (Option<f64>, Option<f64>) {
+        let s = r + w.min((b2 - a2).length() * 0.5);
+        let nv = self.q.len();
+        let flat = |i: usize| self.nz[i] > 0.95;
+        let dist = |i: usize| rect_sd(self.q[i], a2, b2, w) - r;
+        let ins: Vec<f64> = (0..nv).filter(|&i| flat(i) && dist(i) < -0.4 * s).map(|i| self.hh[i]).collect();
+        let band = (0.45 * s).min((8.0 * h).max(1.5));
+        let outs: Vec<f64> = (0..nv).filter(|&i| flat(i) && { let d = dist(i); d > 0.15 * s && d < 0.15 * s + band + 4.0 * h }).map(|i| self.hh[i]).collect();
+        (median(outs), median(ins))
+    }
+
+    /// The scene with only the inner part of the wall counted: from a fifth
+    /// to three fifths of the way from the floor (or top) inside to the face
+    /// round it, so a groove along a pocket's rim, a chamfer there or a
+    /// plate under a button (all near the face round it) does not pull the
+    /// outline.
+    fn mid_wall(&self, a2: DVec2, b2: DVec2, w: f64, r: f64, h: f64) -> Option<Scene> {
+        let lv = self.levels(a2, b2, w, r, h);
+        if debug() {
+            eprintln!("mid wall: A {a2:.3?} B {b2:.3?} w {w:.3} r {r:.3}: levels {lv:.3?}");
+        }
+        let (Some(ho), Some(hi)) = lv else { return None };
+        let d = (hi - ho).abs();
+        if d < h * 4.0 {
+            return None;
+        }
+        let (lo, top) = (hi + (ho - hi) * 0.2, hi + (ho - hi) * 0.6);
+        let (lo, top) = (lo.min(top), lo.max(top));
+        let mut sc = self.clone();
+        for i in 0..sc.q.len() {
+            if sc.hh[i] < lo || sc.hh[i] > top {
+                sc.wallness[i] = 0.0;
+            }
+        }
+        if debug() {
+            eprintln!("mid wall: face {ho:.3}, inside {hi:.3}, counted from {lo:.3} to {top:.3}");
+        }
+        Some(sc)
     }
 
     /// The vertices of the wall round the rounded rectangle (`a`, `b`, `w`,
@@ -379,12 +510,8 @@ impl Scene {
         // the size inside: from the inner rectangle's middle to the wall
         // across its narrow way
         let s = r + w.min((b2 - a2).length() * 0.5);
-        let flat = |i: usize| self.nz[i] > 0.95;
-        let dist = |i: usize| rect_dist(self.q[i], a2, b2, w).0 - r;
-        let ins: Vec<f64> = (0..nv).filter(|&i| flat(i) && dist(i) < -0.4 * s).map(|i| self.hh[i]).collect();
-        let band = (0.45 * s).min((8.0 * h).max(1.5));
-        let outs: Vec<f64> = (0..nv).filter(|&i| flat(i) && { let d = dist(i); d > 0.15 * s && d < 0.15 * s + band + 4.0 * h }).map(|i| self.hh[i]).collect();
-        let (h_out, h_in) = (median(outs.clone()), median(ins.clone()));
+        let dist = |i: usize| rect_sd(self.q[i], a2, b2, w) - r;
+        let (h_out, h_in) = self.levels(a2, b2, w, r, h);
         let wall_h: Vec<f64> = self.near(a2, b2, w, r, s * 0.2 + h * 2.0, cut).iter().map(|&(i, _)| self.hh[i]).collect();
         let (base, sign, depth) = match (h_out, h_in) {
             // the floor below the face for a wall facing in, the top above
@@ -428,7 +555,7 @@ impl Scene {
         let win = (s * 0.5).max(h * 4.0);
         let wall: Vec<(f64, f64)> = self.near(a2, b2, w, r, win, cut).iter().map(|&(i, d)| ((self.hh[i] - base) * sign, d)).collect();
         if debug() {
-            eprintln!("slot: A {:.3},{:.3} B {:.3},{:.3}, w {w:.3}, r {r:.3}, {:.3} × {:.3}, floor {h_in:?} face {h_out:?} → depth {depth:.3} ({}), {} wall points ({} inside, {} round)", a2.x, a2.y, b2.x, b2.y, (b2 - a2).length() + 2.0 * r, 2.0 * (w + r), if inward { "cut in" } else { "raised" }, wall.len(), ins.len(), outs.len());
+            eprintln!("slot: A {:.3},{:.3} B {:.3},{:.3}, w {w:.3}, r {r:.3}, {:.3} × {:.3}, floor {h_in:?} face {h_out:?} → depth {depth:.3} ({}), {} wall points", a2.x, a2.y, b2.x, b2.y, (b2 - a2).length() + 2.0 * r, 2.0 * (w + r), if inward { "cut in" } else { "raised" }, wall.len());
         }
         Ok(Slot { a: to3(a2), b: to3(b2), w, axis, r, depth, inward, kind, wall, edge: h })
     }
@@ -478,7 +605,7 @@ impl Slot {
         if (p1 - p0).length() < h * 8.0 {
             return Err(across.into());
         }
-        let sc = Scene::gather(m, topo, t0, p0, p1, 0.75, h).ok_or(across)?;
+        let sc = Scene::gather_on(m, topo, t0, p0, p1, 0.75, h, true).ok_or(across)?;
         let hl = sc.hl;
         // its turn: the walls' directions, folded on a quarter turn (four
         // times the angle), the most common
@@ -512,29 +639,80 @@ impl Slot {
         // sides
         let (d0, d1) = (DVec2::new(-hl, 0.0), DVec2::new(hl, 0.0));
         let (wx, wy) = ((d1 - d0).dot(ex).abs() * 0.5, (d1 - d0).dot(ey).abs() * 0.5);
-        let sides = |cut: bool| -> Option<[f64; 4]> {
-            let mut out = [0.0; 4];
-            for (k, (dir, want, other)) in [(ex, wx, wy), (-ex, wx, wy), (ey, wy, wx), (-ey, wy, wx)].into_iter().enumerate() {
+        // its four sides: for each, the strong walls nearest the drag's
+        // extents (three at most); of their combinations, the one nearest
+        // the drag whose four walls rise from one floor (or fall from one
+        // top) to one face (a plate under a button, a groove beside a
+        // pocket are walls too, between other levels). The level inside
+        // counts most: it is the block's own, the face round it may change
+        // from side to side.
+        let wants = [wx, wx, wy, wy];
+        let dirs = [ex, -ex, ey, -ey];
+        let sides = |cut: bool| -> Option<[Vec<Wall>; 4]> {
+            let mut out: [Vec<Wall>; 4] = Default::default();
+            for k in 0..4 {
+                let (want, other) = (wants[k], wants[(k + 2) % 4]);
                 let span = (other * 0.5).max(want * 0.25).max(h * 4.0);
-                out[k] = sc.wall_along(DVec2::ZERO, dir, span, cut, want, want * 1.6 + h * 8.0 + other * 0.3, h)?;
+                let mut ws = sc.walls_along(DVec2::ZERO, dirs[k], span, cut, want * 1.6 + h * 8.0 + other * 0.3, h);
+                ws.sort_by(|a, b| (a.at - want).abs().total_cmp(&(b.at - want).abs()));
+                ws.truncate(3);
+                if ws.is_empty() {
+                    return None;
+                }
+                out[k] = ws;
             }
             Some(out)
         };
-        let score = |s: &[f64; 4]| (s[0] - wx).abs() + (s[1] - wx).abs() + (s[2] - wy).abs() + (s[3] - wy).abs();
-        let pick = [true, false].into_iter().filter_map(|cut| Some((cut, sides(cut)?))).min_by(|a, b| score(&a.1).partial_cmp(&score(&b.1)).unwrap());
+        let best = |c: &[Vec<Wall>; 4]| -> (f64, [Wall; 4]) {
+            let mut best = (f64::INFINITY, [c[0][0]; 4]);
+            for i0 in &c[0] {
+                for i1 in &c[1] {
+                    for i2 in &c[2] {
+                        for i3 in &c[3] {
+                            let ws = [*i0, *i1, *i2, *i3];
+                            let hi = ws.iter().map(|w| w.inner).sum::<f64>() * 0.25;
+                            let ho = ws.iter().map(|w| w.outer).sum::<f64>() * 0.25;
+                            let score = (0..4).map(|k| (ws[k].at - wants[k]).abs() + 2.0 * (ws[k].inner - hi).abs() + 0.5 * (ws[k].outer - ho).abs()).sum::<f64>();
+                            if score < best.0 {
+                                best = (score, ws);
+                            }
+                        }
+                    }
+                }
+            }
+            best
+        };
         if debug() {
-            eprintln!("box: axis {:.3},{:.3},{:.3}, {} triangles, drag ±{hl:.3}, turn {:.1}°, wants {wx:.3} {wy:.3}, cut in {:?}, raised {:?}", sc.n.x, sc.n.y, sc.n.z, sc.tris, turn.to_degrees(), sides(true), sides(false));
+            let w3 = |d: DVec2| sc.e * d.x + sc.f * d.y;
+            eprintln!("box: axis {:.3},{:.3},{:.3}, {} triangles, drag ±{hl:.3}, turn {:.1}°, wants {wx:.3} {wy:.3}, sides along {:.2?}", sc.n.x, sc.n.y, sc.n.z, sc.tris, turn.to_degrees(), dirs.map(w3));
         }
-        let Some((cut, s)) = pick else {
+        let found: Vec<(bool, f64, [Wall; 4])> = [true, false]
+            .into_iter()
+            .filter_map(|cut| {
+                let c = sides(cut)?;
+                let (score, ws) = best(&c);
+                if debug() {
+                    eprintln!("box: {}: candidates {:.2?}, best {:.2?} (score {score:.2})", if cut { "cut in" } else { "raised" }, c.iter().map(|v| v.iter().map(|w| (w.at, w.inner, w.outer)).collect::<Vec<_>>()).collect::<Vec<_>>(), ws.iter().map(|w| (w.at, w.inner, w.outer)).collect::<Vec<_>>());
+                }
+                Some((cut, score, ws))
+            })
+            .collect();
+        let Some(&(cut, _, ws)) = found.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else {
             return Err("No block there: drag across a block with rounded corners, corner to corner".into());
         };
+        let s = ws.map(|w| w.at);
         let c = ex * (s[0] - s[1]) * 0.5 + ey * (s[2] - s[3]) * 0.5;
         let (hx, hy) = ((s[0] + s[1]) * 0.5, (s[2] + s[3]) * 0.5);
         let r = hx.min(hy) * 0.3;
         // the centre line along the long way
         let (long, hlong, hshort) = if hx >= hy { (ex, hx, hy) } else { (ey, hy, hx) };
         let (a2, b2) = (c - long * (hlong - r), c + long * (hlong - r));
-        let (a2, b2, w, r) = sc.fit(a2, b2, hshort - r, r, Kind::Box, cut, h);
+        // fitted on the middle of the wall only
+        let mid = sc.mid_wall(a2, b2, hshort - r, r, h);
+        let (a2, b2, w, r) = mid.as_ref().unwrap_or(&sc).fit(a2, b2, hshort - r, r, Kind::Box, cut, h);
+        if debug() {
+            eprintln!("box: fitted A {a2:.3?} B {b2:.3?} w {w:.3} r {r:.3}");
+        }
         sc.finish(a2, b2, w, r, cut, Kind::Box, h)
     }
 
@@ -717,6 +895,98 @@ mod tests {
                 assert!((p.z - p0.z).abs() < 1e-9);
                 assert!((rect_dist(DVec2::new(p.x, p.y), a2, b2, s.w).0 - r0).abs() < 1e-9, "v {v} k {k}");
             }
+        }
+    }
+
+    /// A height field sampled every `step` over a square of half side
+    /// `half`, as a scan: two triangles per cell.
+    fn height_field(half: f64, step: f64, z: impl Fn(f64, f64) -> f64) -> Mesh {
+        let n = (2.0 * half / step).round() as usize + 1;
+        let mut pos = vec![];
+        for j in 0..n {
+            for i in 0..n {
+                let (x, y) = (-half + i as f64 * step, -half + j as f64 * step);
+                pos.push(DVec3::new(x, y, z(x, y)));
+            }
+        }
+        let mut tris = vec![];
+        for j in 0..n - 1 {
+            for i in 0..n - 1 {
+                let v = (j * n + i) as u32;
+                let (a, b, c, d) = (v, v + 1, v + n as u32 + 1, v + n as u32);
+                tris.push([a, b, c]);
+                tris.push([a, c, d]);
+            }
+        }
+        Mesh { pos, tris, unit_mm: 1.0, ..Default::default() }
+    }
+
+    /// A rounded rectangle's signed distance (centre, half sizes, corner
+    /// radius).
+    fn rounded_sd(x: f64, y: f64, c: DVec2, hx: f64, hy: f64, r: f64) -> f64 {
+        let (dx, dy) = ((x - c.x).abs() - (hx - r), (y - c.y).abs() - (hy - r));
+        DVec2::new(dx.max(0.0), dy.max(0.0)).length() + dx.max(dy).min(0.0) - r
+    }
+
+    /// 0 outside, 1 inside, a smooth wall `width` wide across the border
+    /// (the AI's walls: a fillet into a fillet).
+    fn inside(sd: f64, width: f64) -> f64 {
+        let t = (0.5 - sd / width).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    /// The Box dragged corner to corner, `margin` outside the corners
+    /// (`lo`, `hi`): its size, centre, corner radius, depth.
+    fn drag_box(m: &Mesh, lo: DVec2, hi: DVec2, margin: f64) -> Result<Slot, String> {
+        let topo = Topo::new(m);
+        let near = |p: DVec2| (0..m.tris.len()).min_by(|&a, &b| (m.tri_centre(a).truncate() - p).length().total_cmp(&(m.tri_centre(b).truncate() - p).length())).unwrap();
+        let (p0, p1) = (lo - DVec2::splat(margin), hi + DVec2::splat(margin));
+        let (t0, t1) = (near(p0), near(p1));
+        Slot::detect_box(m, &topo, t0 as u32, m.tri_centre(t0), m.tri_centre(t1), 0.15)
+    }
+
+    fn box_size(s: &Slot) -> (f64, f64) {
+        let l = (s.b - s.a).length();
+        let (long, short) = (l + 2.0 * s.r, 2.0 * (s.w + s.r));
+        if (s.b - s.a).x.abs() >= (s.b - s.a).y.abs() || l < 1e-9 { (long, short) } else { (short, long) }
+    }
+
+    #[test]
+    fn box_on_a_plate() {
+        // a button 5.8 × 5.2 (corners 1.3), 2.5 high, on a plate 1.5 high
+        // whose -X and -Y edges pass 1.5 and 1.2 mm outside it: from a
+        // drag past the corners, the plate's edges are nearer the drag than
+        // the button's walls on two sides
+        let m = height_field(14.0, 0.15, |x, y| {
+            1.5 * inside(rounded_sd(x, y, DVec2::new(14.0, 14.0), 18.4, 18.0, 0.8), 0.6) + 2.5 * inside(rounded_sd(x, y, DVec2::ZERO, 2.9, 2.6, 1.3), 0.7)
+        });
+        for margin in [-0.5, 0.0, 0.8, 1.2, 1.8] {
+            let s = drag_box(&m, DVec2::new(-2.9, -2.6), DVec2::new(2.9, 2.6), margin).unwrap_or_else(|e| panic!("margin {margin}: {e}"));
+            let (sx, sy) = box_size(&s);
+            let c = (s.a + s.b) * 0.5;
+            assert!((sx - 5.8).abs() < 0.12 && (sy - 5.2).abs() < 0.12, "margin {margin}: {sx:.3} × {sy:.3}");
+            assert!(c.truncate().length() < 0.06, "margin {margin}: centre {c:.3?}");
+            assert!(!s.inward && (s.depth - 2.5).abs() < 0.1, "margin {margin}: depth {:.3}", s.depth);
+        }
+    }
+
+    #[test]
+    fn pocket_with_a_groove() {
+        // a pocket 3.6 × 4 (corners 0.5), 3.3 deep, and a rounded groove
+        // 1.2 deep, 2 wide, running along Y across its +X side
+        let m = height_field(10.0, 0.15, |x, y| {
+            let pocket = -3.3 * inside(rounded_sd(x, y, DVec2::ZERO, 1.8, 2.0, 0.5), 0.5);
+            let t = ((x - 1.9) / 1.0).abs();
+            let groove = if t < 1.0 { -1.2 * (1.0 - t * t) } else { 0.0 };
+            pocket.min(groove)
+        });
+        for margin in [-0.5, 0.0, 0.4, 0.8, 1.2] {
+            let s = drag_box(&m, DVec2::new(-1.8, -2.0), DVec2::new(1.8, 2.0), margin).unwrap_or_else(|e| panic!("margin {margin}: {e}"));
+            let (sx, sy) = box_size(&s);
+            let c = (s.a + s.b) * 0.5;
+            assert!((sx - 3.6).abs() < 0.15 && (sy - 4.0).abs() < 0.15, "margin {margin}: {sx:.3} × {sy:.3}");
+            assert!(c.truncate().length() < 0.08, "margin {margin}: centre {c:.3?}");
+            assert!(s.inward && (s.depth - 3.3).abs() < 0.12, "margin {margin}: depth {:.3}", s.depth);
         }
     }
 

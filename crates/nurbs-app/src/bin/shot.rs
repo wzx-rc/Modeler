@@ -2098,8 +2098,8 @@ fn main() {
             h.st.camera.frame(Vec3::new(-24.0, 68.0, 8.0), Vec3::new(-3.0, 88.0, 18.0));
             h.steps(2);
             h.st.tool = Tool::Create(PrimKind::Box);
-            // from just outside a corner to just outside the other (from
-            // 1.2 mm outside, an outer step is read: 7.9 × 7.4)
+            // from just outside a corner to just outside the other (shot
+            // scan-box: from 2 mm outside)
             let (a, b) = (h.screen_of(side(-16.25, 75.25)), h.screen_of(side(-9.75, 81.25)));
             h.move_to(a);
             h.steps(2);
@@ -2129,6 +2129,74 @@ fn main() {
             h.steps(2);
             h.shot("zero-scan-slot-10-block-alone");
             h.st.ref_shown = true;
+            for f in &h.st.doc.features {
+                eprintln!("  {} {:?} {:?} at {:.2?} up {:.3?} corner {:?}", f.name, f.op, f.prim, f.origin, f.rot * DVec3::Y, f.profile.as_ref().map(|p| p.corner.clone()));
+            }
+        }
+    }
+
+    if want("scan-box") {
+        // the Cube read on the scan from a loose drag: the square button
+        // from 2 mm outside its corners (the plate under it, whose edges
+        // pass 1.5 mm outside it, is not taken for its sides), then the
+        // small pocket by the vents (3.3 mm deep, a groove along its side)
+        // from 1 mm outside its corners
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        if std::path::Path::new(&path).exists() {
+            let mut d = Doc::default();
+            d.reference = Some(nurbs_kernel::RefMesh { path: path.clone() });
+            let f = d.add(Op::Add, Prim::Box { x: 12.0, y: 14.0, z: 25.0 }, DVec3::new(32.0, 70.0, 0.0), DQuat::IDENTITY);
+            d.feature_mut(f).unwrap().name = "Side".into();
+            h.reset(d, "Retopo");
+            h.step();
+            let end = Instant::now() + Duration::from_secs(180);
+            while h.st.ref_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            h.settle();
+            h.st.toast = None;
+            let refm = h.st.reference.clone().expect("reference");
+            let side = |x: f64, y: f64| -> Vec3 { refm.hit(DVec3::new(x, y, 100.0), DVec3::new(0.0, 0.0, -1.0)).map(|q| q.0.as_vec3()).unwrap_or(Vec3::new(x as f32, y as f32, 12.0)) };
+            let toast = |h: &Harness| h.st.toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+            // (name, its corners, the margin outside them, whether the drag
+            // goes from the top left corner (the face is flat there), the
+            // view)
+            for (k, (name, lo, hi, margin, flip, from, to)) in [
+                ("button", (-15.75, 75.75), (-10.25, 80.75), 2.0, false, Vec3::new(-24.0, 68.0, 8.0), Vec3::new(-3.0, 88.0, 18.0)),
+                ("pocket", (30.25, 74.25), (33.75, 78.25), 1.0, true, Vec3::new(18.0, 62.0, 4.0), Vec3::new(46.0, 90.0, 16.0)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                h.st.camera.yaw = 0.35;
+                h.st.camera.pitch = 0.3;
+                h.st.camera.frame(from, to);
+                h.steps(2);
+                h.st.tool = Tool::Create(PrimKind::Box);
+                let (a, b) = if flip {
+                    (h.screen_of(side(lo.0 - margin, hi.1 + margin)), h.screen_of(side(hi.0 + margin, lo.1 - margin)))
+                } else {
+                    (h.screen_of(side(lo.0 - margin, lo.1 - margin)), h.screen_of(side(hi.0 + margin, hi.1 + margin)))
+                };
+                h.move_to(a);
+                h.steps(2);
+                h.drag(a, b, 10, false);
+                h.steps(2);
+                h.shot(&format!("zero-scan-box-{}-{name}-drag", 3 * k + 1));
+                h.press(b, false);
+                h.step();
+                h.settle();
+                eprintln!("  {name}: {}", toast(&h));
+                h.shot(&format!("zero-scan-box-{}-{name}-read", 3 * k + 2));
+                h.st.tool = Tool::Select;
+                h.st.select(None, false);
+                h.st.toast = None;
+                h.st.ref_shown = false;
+                h.steps(2);
+                h.shot(&format!("zero-scan-box-{}-{name}-alone", 3 * k + 3));
+                h.st.ref_shown = true;
+            }
             for f in &h.st.doc.features {
                 eprintln!("  {} {:?} {:?} at {:.2?} up {:.3?} corner {:?}", f.name, f.op, f.prim, f.origin, f.rot * DVec3::Y, f.profile.as_ref().map(|p| p.corner.clone()));
             }
