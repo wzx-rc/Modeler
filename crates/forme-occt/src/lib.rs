@@ -50,7 +50,7 @@ extern "C" {
     fn focc_edge_count(s: *const FShape) -> c_int;
     fn focc_edge_faces(s: *const FShape, out: *mut c_int, cap: c_int) -> c_int;
     fn focc_edge_sample(s: *const FShape, index: c_int, n: c_int, xyz: *mut c_double) -> c_int;
-    fn focc_fillet_tension(s: *const FShape, tag: i64, rho: c_double, done: *mut c_int) -> *mut FShape;
+    fn focc_fillet_tension(s: *const FShape, tags: *const i64, rhos: *const c_double, n: c_int, done: *mut c_int, total: *mut c_int) -> *mut FShape;
     fn focc_fillet(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
     fn focc_fillet_multi(s: *const FShape, idx: *const c_int, r: *const c_double, tags: *const i64, n: c_int, fresh: i64) -> *mut FShape;
     fn focc_chamfer(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
@@ -522,17 +522,22 @@ impl Shape {
         buf.chunks(2).take(n as usize).map(|c| [c[0], c[1]]).collect()
     }
 
+    /// Fillets' straight and circular faces made conic, each fillet (its
+    /// faces' tag) with its own tension (a conic's rho): the solid, and for
+    /// each fillet how many of its faces took it out of how many. Two
+    /// fillets meeting in a mitre go together when their tensions agree.
+    pub fn fillet_tension(&self, fillets: &[(i64, f64)]) -> Result<(Shape, Vec<(usize, usize)>), String> {
+        let tags: Vec<i64> = fillets.iter().map(|f| f.0).collect();
+        let rhos: Vec<f64> = fillets.iter().map(|f| f.1).collect();
+        let mut done = vec![0 as c_int; fillets.len()];
+        let mut total = vec![0 as c_int; fillets.len()];
+        let s = shape(unsafe { focc_fillet_tension(self.0, tags.as_ptr(), rhos.as_ptr(), fillets.len() as c_int, done.as_mut_ptr(), total.as_mut_ptr()) })?;
+        Ok((s, done.iter().zip(&total).map(|(d, t)| (*d as usize, *t as usize)).collect()))
+    }
     /// Rounds the edges (indices in this shape) with radius r, in one
     /// operation. Err when OpenCascade cannot make it or the result is not
     /// a valid solid.
     /// The new (fillet) faces get the tag `fresh`; the others keep theirs.
-    /// The straight fillets tagged `tag` made conic (tension `rho`, the
-    /// same tangent lines); how many were.
-    pub fn fillet_tension(&self, tag: i64, rho: f64) -> Result<(Shape, usize), String> {
-        let mut done: c_int = 0;
-        let s = shape(unsafe { focc_fillet_tension(self.0, tag, rho, &mut done) })?;
-        Ok((s, done as usize))
-    }
     pub fn fillet(&self, edges: &[i32], r: f64, fresh: i64) -> Result<Shape, String> {
         shape(unsafe { focc_fillet(self.0, edges.as_ptr(), edges.len() as c_int, r, fresh) })
     }

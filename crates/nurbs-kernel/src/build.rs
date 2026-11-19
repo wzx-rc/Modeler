@@ -35,6 +35,8 @@ struct Stage {
     errors: Vec<String>,
     /// Fillets and chamfers too big, made at the largest size that works.
     limits: Vec<(u32, f64)>,
+    /// The fillets with tension whose faces all took it.
+    conic: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -229,7 +231,7 @@ fn round(acc: &Shape, f: &Feature, r: &Round) -> (Option<Result<Shape, String>>,
 /// edge ends), on the solid from before that run. None when there is
 /// nothing to blend with or OpenCascade cannot make it (then each fillet is
 /// made on its own, as before).
-fn blend(befores: &[(&Feature, Stage)], f: &Feature, r: &Round) -> Option<Shape> {
+fn blend(befores: &[(&Feature, Stage)], f: &Feature, r: &Round) -> Option<(Shape, Vec<(u32, f64)>)> {
     let n = befores.len().checked_sub(1)?;
     let mut k = n;
     while k > 0 && befores[k - 1].0.round.as_ref().map(|g| !g.chamfer).unwrap_or(false) {
@@ -283,8 +285,12 @@ fn blend(befores: &[(&Feature, Stage)], f: &Feature, r: &Round) -> Option<Shape>
     // none is lost), all in one operation
     let base = befores[k + first].1.shape.clone()?;
     let mut entries = vec![];
+    let mut tensions = vec![];
     for (g, _) in &befores[k + first..=n] {
         let gr = g.round.as_ref()?;
+        if g.id != f.id && gr.tension > 0.0 {
+            tensions.push((g.id, gr.tension));
+        }
         let (edges, missing) = resolve(&base, &gr.edges);
         if missing > 0 {
             return None;
@@ -294,7 +300,50 @@ fn blend(befores: &[(&Feature, Stage)], f: &Feature, r: &Round) -> Option<Shape>
         entries.extend(edges.into_iter().map(|i| (i, *size, tag)));
     }
     mark(&step("round", f));
-    base.fillet_multi(&entries, FaceTag { feature: f.id, sub: 0 }.pack()).ok()
+    base.fillet_multi(&entries, FaceTag { feature: f.id, sub: 0 }.pack()).ok().map(|s| (s, tensions))
+}
+
+/// Fillets' straight and circular faces made conic, each with its tension
+/// (`Round.tension`), in one go (two meeting in a mitre need each other;
+/// when that fails, one after the other); what stays round is listed in
+/// `errors`. For each fillet: Some(true) when every face took it, None when
+/// none did.
+fn tension(s: Rc<Shape>, ts: &[(u32, f64)], name_of: &dyn Fn(u32) -> String, errors: &mut Vec<String>) -> (Rc<Shape>, Vec<Option<bool>>) {
+    if ts.is_empty() {
+        return (s, vec![]);
+    }
+    let tagged: Vec<(i64, f64)> = ts.iter().map(|&(id, t)| (FaceTag { feature: id, sub: 0 }.pack(), t)).collect();
+    match s.fillet_tension(&tagged) {
+        Ok((t, counts)) => {
+            let mut took = vec![];
+            for (&(id, _), &(done, total)) in ts.iter().zip(&counts) {
+                if done < total {
+                    let n = total - done;
+                    if done == 0 {
+                        errors.push(format!("{}: tension: only on fillets along straight or circular edges, ending on flat faces or a fillet of the same size and tension", name_of(id)));
+                    } else {
+                        errors.push(format!("{}: tension on {done} of {total} faces, {n} stay{} round (a blended corner or a curved end)", name_of(id), if n == 1 { "s" } else { "" }));
+                    }
+                }
+                took.push(if done == 0 { None } else { Some(done == total) });
+            }
+            (Rc::new(t), took)
+        }
+        Err(e) if ts.len() == 1 => {
+            errors.push(format!("{}: {e}", name_of(ts[0].0)));
+            (s, vec![None])
+        }
+        Err(_) => {
+            let mut s = s;
+            let mut took = vec![];
+            for t in ts {
+                let (n, k) = tension(s, std::slice::from_ref(t), name_of, errors);
+                s = n;
+                took.extend(k);
+            }
+            (s, took)
+        }
+    }
 }
 
 /// The face a reference names: among the faces with its tag, the nearest
@@ -457,7 +506,7 @@ fn hash2(a: u64, b: u64) -> u64 {
 pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Cache) -> Model {
     let t0 = Instant::now();
     let mut model = Model { fine, ..Default::default() };
-    let mut stage = Stage { shape: None, errors: vec![], limits: vec![] };
+    let mut stage = Stage { shape: None, errors: vec![], limits: vec![], conic: vec![] };
     let mut key = 0u64;
     let mut used_tools = vec![];
     let mut used_stages = vec![];
@@ -480,40 +529,82 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         // a fillet or chamfer: on the solid built so far
         if let Some(r) = &f.round {
             if let Some(acc) = stage.shape.clone() {
-                let blended = if r.blend && !r.chamfer && !skipped("round") { blend(&befores, f, r) } else { None };
-                let (res, missing, limit) = if let Some(b) = blended {
-                    (Some(Ok(b)), 0, None)
-                } else if skipped("round") {
-                    (Some(Err("skipped, it crashed the kernel".to_string())), 0, None)
-                } else {
-                    round(&acc, f, r)
+                let name_of = |id: u32| doc.feature(id).map(|g| g.name.clone()).unwrap_or_default();
+                let own = (r.tension > 0.0 && !r.chamfer && !skipped("round")).then_some((f.id, r.tension));
+                // the tensions `ts` put back on a solid made circular, this
+                // step's own too, in one go: the solid, the fillets whose
+                // faces all took it, how many tensions are lost (of `ts`
+                // those that had all taken it before, this step's own),
+                // what stayed round
+                let conic = &stage.conic;
+                let finish = |p: Shape, ts: &[(u32, f64)]| {
+                    let all: Vec<(u32, f64)> = ts.iter().copied().chain(own).collect();
+                    if !all.is_empty() {
+                        mark(&step("round", f));
+                    }
+                    let mut errs = vec![];
+                    let (t, took) = tension(Rc::new(p), &all, &name_of, &mut errs);
+                    let full: Vec<u32> = all.iter().zip(&took).filter(|(_, k)| **k == Some(true)).map(|(a, _)| a.0).collect();
+                    let lost = ts.iter().filter(|(id, _)| conic.contains(id) && !full.contains(id)).count() + own.filter(|o| !full.contains(&o.0)).iter().count();
+                    (t, full, lost, errs)
                 };
-                if let Some(l) = limit {
-                    stage.limits.push((f.id, l));
+                let mut made = None;
+                // blended with the fillets before it (rebuilt circular from
+                // the solid before them), kept when the tensions all go
+                // (back) on: else made on its own next to their conic faces
+                // when that keeps them, so a fillet with tension does not
+                // turn round because one is made next to it (or because
+                // its corner is blended)
+                let mut partial = None;
+                if r.blend && !r.chamfer && !skipped("round") {
+                    if let Some((b, run)) = blend(&befores, f, r) {
+                        let (t, full, lost, errs) = finish(b, &run);
+                        if lost == 0 {
+                            stage.errors.extend(errs);
+                            made = Some((t, full));
+                        } else {
+                            partial = Some((t, full, lost, errs));
+                        }
+                    }
                 }
-                if missing > 0 {
-                    stage.errors.push(format!("{}: {missing} edge{} not found", f.name, if missing > 1 { "s" } else { "" }));
-                }
-                match res {
-                    Some(Ok(s)) => {
-                        model.booleans += 1;
-                        // tension: its straight fillets made conic
-                        let s = if r.tension > 0.0 && !r.chamfer && !skipped("round") {
-                            mark(&step("round", f));
-                            match s.fillet_tension(FaceTag { feature: f.id, sub: 0 }.pack(), r.tension) {
-                                Ok((t, _)) => t,
-                                Err(e) => {
-                                    stage.errors.push(format!("{}: {e}", f.name));
-                                    s
+                if made.is_none() {
+                    let (res, missing, limit) = if skipped("round") { (Some(Err("skipped, it crashed the kernel".to_string())), 0, None) } else { round(&acc, f, r) };
+                    if missing > 0 {
+                        stage.errors.push(format!("{}: {missing} edge{} not found", f.name, if missing > 1 { "s" } else { "" }));
+                    }
+                    match (res, partial) {
+                        (Some(Ok(d)), partial) if limit.is_none() => {
+                            let (t, full, lost, errs) = finish(d, &[]);
+                            match partial {
+                                Some((pt, pfull, plost, perrs)) if plost < lost => {
+                                    stage.errors.extend(perrs);
+                                    made = Some((pt, pfull));
+                                }
+                                _ => {
+                                    stage.errors.extend(errs);
+                                    made = Some((t, full));
                                 }
                             }
-                        } else {
-                            s
-                        };
-                        stage.shape = Some(Rc::new(s));
+                        }
+                        (_, Some((t, full, _, errs))) => {
+                            stage.errors.extend(errs);
+                            made = Some((t, full));
+                        }
+                        (Some(Ok(d)), None) => {
+                            stage.limits.extend(limit.map(|l| (f.id, l)));
+                            let (t, full, _, errs) = finish(d, &[]);
+                            stage.errors.extend(errs);
+                            made = Some((t, full));
+                        }
+                        (Some(Err(e)), None) => stage.errors.push(format!("{}: OpenCascade cannot make it at {} mm ({e})", f.name, r.size)),
+                        (None, None) => {}
                     }
-                    Some(Err(e)) => stage.errors.push(format!("{}: OpenCascade cannot make it at {} mm ({e})", f.name, r.size)),
-                    None => {}
+                }
+                if let Some((s, full)) = made {
+                    model.booleans += 1;
+                    stage.shape = Some(s);
+                    stage.conic.retain(|id| *id != f.id && !full.contains(id));
+                    stage.conic.extend(full);
                 }
             }
             cache.stages.insert(key, stage.clone());
@@ -935,6 +1026,218 @@ mod tests {
             let m = build(&d, true, false, &[], &mut Cache::default());
             assert!(m.errors.is_empty(), "tension {t}: {:?}", m.errors);
             assert_eq!(m.faces.len(), m0.faces.len(), "tension {t}");
+        }
+    }
+
+    /// The model edge whose middle is nearest `p`, named by its faces' tags.
+    fn edge_near(m: &Model, p: DVec3) -> EdgeRef {
+        // an edge's middle: halfway along its polyline
+        let mid = |e: &crate::model::Edge| {
+            let v: Vec<DVec3> = e.pts.iter().map(|q| DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64)).collect();
+            let len: f64 = v.windows(2).map(|w| w[0].distance(w[1])).sum();
+            let mut acc = 0.0;
+            for w in v.windows(2) {
+                let l = w[0].distance(w[1]);
+                if acc + l >= len / 2.0 && l > 0.0 {
+                    return w[0].lerp(w[1], (len / 2.0 - acc) / l);
+                }
+                acc += l;
+            }
+            v[0]
+        };
+        let e = m.edges.iter().filter(|e| !e.seam && e.faces[0] >= 0 && e.faces[1] >= 0).min_by(|a, b| mid(a).distance(p).total_cmp(&mid(b).distance(p))).unwrap();
+        let t = |i: i32| m.faces[i as usize].tag.unwrap().pack();
+        EdgeRef { faces: [t(e.faces[0]), t(e.faces[1])], at: mid(e) }
+    }
+
+    /// A fillet of `size` on the edge nearest `p`, then each tension: no
+    /// error, as many faces, none of the fillet's faces still a cylinder or
+    /// a torus.
+    fn tension_case(name: &str, mut d: Doc, p: DVec3, size: f64) {
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m0.errors.is_empty(), "{name}: {:?}", m0.errors);
+        let e = edge_near(&m0, p);
+        let r = d.add_round(size, false, vec![e]);
+        let m1 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m1.errors.is_empty(), "{name}: {:?}", m1.errors);
+        let round = |m: &Model| m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r) && matches!(f.kind, SurfKind::Cylinder | SurfKind::Torus)).count();
+        assert!(round(&m1) > 0, "{name}: no round face");
+        for t in [0.75, 0.25] {
+            d.feature_mut(r).unwrap().round.as_mut().unwrap().tension = t;
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{name} tension {t}: {:?}", m.errors);
+            assert_eq!(m.faces.len(), m1.faces.len(), "{name} tension {t}");
+            assert_eq!(round(&m), 0, "{name} tension {t}: still round");
+        }
+    }
+
+    #[test]
+    fn tension_boss_ring() {
+        // the boss's top edge: a torus all round (its seam)
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0), DQuat::IDENTITY);
+        tension_case("boss top", d, DVec3::new(10.0, 30.0, 7.0), 2.0);
+    }
+
+    #[test]
+    fn tension_boss_foot() {
+        // where the boss meets the block: a hollow torus
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0), DQuat::IDENTITY);
+        tension_case("boss foot", d, DVec3::new(10.0, 20.0, 7.0), 2.0);
+    }
+
+    #[test]
+    fn tension_run() {
+        // a square sketch with its corners rounded: its top edge is one run
+        // of lines and arcs, the fillet goes all round (cylinders and tori)
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Profile { x: 30.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![5.0; 4], tension: vec![], open: false });
+        tension_case("rounded square", d, DVec3::new(0.0, 10.0, 10.0), 2.0);
+    }
+
+    #[test]
+    fn tension_oblique_ends() {
+        // a trapezoid prism: the fillet on its long top edge ends on the
+        // slanted sides
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Profile { x: 30.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.25, 0.5], [-0.25, 0.5]], smooth: vec![false; 4], corner: vec![], tension: vec![], open: false });
+        tension_case("trapezoid", d, DVec3::new(0.0, 10.0, -10.0), 2.0);
+    }
+
+    #[test]
+    fn tension_rounded_box() {
+        // a block with all its 12 edges filleted in one step (8 sphere
+        // corners), then with tension: every face conic, the corners
+        // remade to fit, nothing left round
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        let mut mids = vec![];
+        for (a, b) in [(20.0, 15.0), (20.0, -15.0), (-20.0, 15.0), (-20.0, -15.0)] {
+            mids.push(DVec3::new(a, 10.0, b));
+        }
+        for (y, z) in [(0.0, 15.0), (0.0, -15.0), (20.0, 15.0), (20.0, -15.0)] {
+            mids.push(DVec3::new(0.0, y, z));
+        }
+        for (x, y) in [(20.0, 0.0), (-20.0, 0.0), (20.0, 20.0), (-20.0, 20.0)] {
+            mids.push(DVec3::new(x, y, 0.0));
+        }
+        let r = d.add_round(3.0, false, mids.iter().map(|p| edge_near(&m0, *p)).collect());
+        let m1 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m1.errors.is_empty(), "{:?}", m1.errors);
+        let kinds = |m: &Model| m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).map(|f| f.kind).collect::<Vec<_>>();
+        assert_eq!(kinds(&m1).iter().filter(|k| **k == SurfKind::Sphere).count(), 8, "{:?}", kinds(&m1));
+        for t in [0.7, 0.3] {
+            d.feature_mut(r).unwrap().round.as_mut().unwrap().tension = t;
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "tension {t}: {:?}", m.errors);
+            assert_eq!(m.faces.len(), m1.faces.len(), "tension {t}");
+            assert!(kinds(&m).iter().all(|k| *k == SurfKind::Other), "tension {t}: {:?}", kinds(&m));
+        }
+    }
+
+    #[test]
+    fn tension_after_corner() {
+        // the block's front right edge chamfered (the fillet's end then
+        // lies on the chamfer and the side: its corner moves onto the conic)
+        // or filleted (the fillet runs on round it, a torus; with tension it
+        // is not blended into it, which would end it on that round face),
+        // then the top front edge filleted with tension
+        for chamfer in [true, false] {
+            let mut d = Doc::default();
+            d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            let m0 = build(&d, true, false, &[], &mut Cache::default());
+            d.add_round(3.0, chamfer, vec![edge_near(&m0, DVec3::new(20.0, 10.0, 15.0))]);
+            let m1 = build(&d, true, false, &[], &mut Cache::default());
+            let r = d.add_round(if chamfer { 4.0 } else { 2.0 }, false, vec![edge_near(&m1, DVec3::new(0.0, 20.0, 15.0))]);
+            for t in [0.75, 0.25] {
+                d.feature_mut(r).unwrap().round.as_mut().unwrap().tension = t;
+                let m = build(&d, true, false, &[], &mut Cache::default());
+                let what = format!("after a {} tension {t}", if chamfer { "chamfer" } else { "fillet" });
+                assert!(m.errors.is_empty(), "{what}: {:?}", m.errors);
+                let kinds: Vec<SurfKind> = m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).map(|f| f.kind).collect();
+                assert!(!kinds.is_empty() && kinds.iter().all(|k| !matches!(k, SurfKind::Cylinder | SurfKind::Torus)), "{what}: {kinds:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn tension_next_fillets() {
+        // a fillet with tension, then another on an edge meeting it at the
+        // block's corner: the same size (blended into one mitre), a
+        // smaller one (made on its own, on the conic faces): the first
+        // keeps its tension
+        let round = |m: &Model, id: u32| m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(id) && matches!(f.kind, SurfKind::Cylinder | SurfKind::Torus)).count();
+        for (size, tension2) in [(4.0, 0.7), (4.0, 0.0), (3.0, 0.0), (3.0, 0.3)] {
+            let mut d = Doc::default();
+            d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            let m0 = build(&d, true, false, &[], &mut Cache::default());
+            let a = d.add_round(4.0, false, vec![edge_near(&m0, DVec3::new(0.0, 20.0, 15.0))]);
+            d.feature_mut(a).unwrap().round.as_mut().unwrap().tension = 0.7;
+            let b = d.add_round(size, false, vec![edge_near(&m0, DVec3::new(20.0, 20.0, 0.0))]);
+            d.feature_mut(b).unwrap().round.as_mut().unwrap().tension = tension2;
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            let what = format!("second fillet {size} mm, tension {tension2}");
+            assert!(m.limits.is_empty(), "{what}: {:?}", m.limits);
+            assert_eq!(round(&m, a), 0, "{what}: the first one turned round");
+            if size == 4.0 {
+                // the same size: one mitre, the second conic when it asks
+                assert!(m.errors.is_empty(), "{what}: {:?}", m.errors);
+                assert_eq!(round(&m, b) == 0, tension2 > 0.0, "{what}");
+            } else if tension2 > 0.0 {
+                // smaller: its end lies on the first one's conic face, so it
+                // stays round (and says so)
+                assert!(m.errors.len() == 1 && m.errors[0].starts_with("Fillet 2: tension"), "{what}: {:?}", m.errors);
+            } else {
+                assert!(m.errors.is_empty(), "{what}: {:?}", m.errors);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn tension_probe() {
+        // what tension does at a box corner: two edges, three edges
+        for n in [2usize, 3] {
+            let mut d = Doc::default();
+            d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            let m0 = build(&d, true, false, &[], &mut Cache::default());
+            let pts = [DVec3::new(0.0, 20.0, 15.0), DVec3::new(20.0, 20.0, 0.0), DVec3::new(20.0, 10.0, 15.0)];
+            let edges: Vec<EdgeRef> = pts[..n].iter().map(|p| edge_near(&m0, *p)).collect();
+            let r = d.add_round(3.0, false, edges);
+            let m1 = build(&d, true, false, &[], &mut Cache::default());
+            let kinds: Vec<SurfKind> = m1.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).map(|f| f.kind).collect();
+            eprintln!("{n} edges: errors {:?} fillet faces {kinds:?}", m1.errors);
+            for t in [0.75, 0.25] {
+                d.feature_mut(r).unwrap().round.as_mut().unwrap().tension = t;
+                let m = build(&d, true, false, &[], &mut Cache::default());
+                let kinds: Vec<SurfKind> = m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).map(|f| f.kind).collect();
+                eprintln!("  tension {t}: errors {:?} faces {kinds:?}", m.errors);
+            }
+        }
+        // a chamfer next to a tensioned fillet: how far it goes
+        for t in [0.0, 0.2, 0.35, 0.4142, 0.45, 0.5, 0.6, 0.75] {
+            let mut d = Doc::default();
+            d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            let m0 = build(&d, true, false, &[], &mut Cache::default());
+            let e = edge_near(&m0, DVec3::new(0.0, 20.0, 15.0));
+            let r = d.add_round(4.0, false, vec![e]);
+            d.feature_mut(r).unwrap().round.as_mut().unwrap().tension = t;
+            let m1 = build(&d, true, false, &[], &mut Cache::default());
+            let e2 = edge_near(&m1, DVec3::new(20.0, 10.0, 15.0));
+            let c = d.add_round(3.0, true, vec![e2]);
+            let m2 = build(&d, true, false, &[], &mut Cache::default());
+            eprintln!("chamfer 3 next to fillet 4 tension {t}: errors {:?} limits {:?}", m2.errors, m2.limits.iter().filter(|l| l.0 == c).collect::<Vec<_>>());
+            let e3 = edge_near(&m1, DVec3::new(20.0, 20.0, 0.0));
+            let f = d.add_round(3.0, false, vec![e3]);
+            d.feature_mut(c).unwrap().visible = false;
+            let m3 = build(&d, true, false, &[], &mut Cache::default());
+            eprintln!("  fillet 3 on the right top edge: errors {:?} limits {:?}", m3.errors, m3.limits.iter().filter(|l| l.0 == f).collect::<Vec<_>>());
         }
     }
 

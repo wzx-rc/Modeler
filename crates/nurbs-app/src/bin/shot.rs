@@ -1508,6 +1508,69 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("tension-box") {
+        // a block with its 12 edges filleted (8 sphere corners), then the
+        // fillet's tension: fuller, flatter; the corners remade to fit
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Rounded box");
+        h.settle();
+        let mut mids = vec![];
+        for (a, b) in [(20.0, 15.0), (20.0, -15.0), (-20.0, 15.0), (-20.0, -15.0)] {
+            mids.push(Vec3::new(a, 10.0, b));
+        }
+        for (y, z) in [(0.0, 15.0), (0.0, -15.0), (20.0, 15.0), (20.0, -15.0)] {
+            mids.push(Vec3::new(0.0, y, z));
+        }
+        for (x, y) in [(20.0, 0.0), (-20.0, 0.0), (20.0, 20.0), (-20.0, 20.0)] {
+            mids.push(Vec3::new(x, y, 0.0));
+        }
+        let edges: Vec<EdgeRef> = {
+            let m = h.st.model.as_ref().unwrap();
+            mids.iter()
+                .filter_map(|p| {
+                    // the distance to the edge's polyline
+                    let near = |i: usize| {
+                        let pts: Vec<Vec3> = m.edges[i].pts.iter().map(|q| Vec3::from_array(*q)).collect();
+                        pts.windows(2)
+                            .map(|w| {
+                                let d = w[1] - w[0];
+                                let t = ((*p - w[0]).dot(d) / d.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                                (w[0] + d * t).distance(*p)
+                            })
+                            .fold(f32::MAX, f32::min)
+                    };
+                    let i = (0..m.edges.len()).min_by(|a, b| near(*a).total_cmp(&near(*b)))?;
+                    h.st.edge_ref(i)
+                })
+                .collect()
+        };
+        let mut id = 0;
+        h.st.edit("Fillet", |d| id = d.add_round(4.0, false, edges));
+        h.settle();
+        h.st.select(Some(id), false);
+        h.st.camera.frame(Vec3::new(-20.0, 0.0, -15.0), Vec3::new(20.0, 20.0, 15.0));
+        h.steps(2);
+        h.settle();
+        h.shot("zero-tension-box-1-circular");
+        for (t, name) in [(0.75, "2-fuller"), (0.25, "3-flatter")] {
+            h.st.set_round_tension(id, t, true);
+            h.st.end_live();
+            h.settle();
+            eprintln!("  tension {t}: errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+            h.shot(&format!("zero-tension-box-{name}"));
+        }
+        // a corner seen close, with its edges
+        h.st.select(None, false);
+        h.st.camera.frame(Vec3::new(12.0, 12.0, 7.0), Vec3::new(20.0, 20.0, 15.0));
+        h.steps(2);
+        h.settle();
+        h.shot("zero-tension-box-4-corner-flatter");
+        h.st.set_round_tension(id, 0.75, true);
+        h.st.end_live();
+        h.settle();
+        h.shot("zero-tension-box-5-corner-fuller");
+    }
     if want("tension") {
         // the direct fillet's modifiers: Shift held during the drag sets
         // the tension (up fuller), Ctrl held makes a chamfer
