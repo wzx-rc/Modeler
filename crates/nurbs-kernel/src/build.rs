@@ -413,24 +413,30 @@ fn resolve(shape: &Shape, refs: &[EdgeRef]) -> (Vec<i32>, usize) {
 /// to 0.1 mm, 0.01 under 1 mm: the fillet stops there instead of
 /// vanishing).
 /// `search`: when the size does not work, look for the largest that does
-/// (`round_search`).
-fn round(acc: &Shape, f: &Feature, r: &Round, search: bool) -> (Option<Result<Shape, String>>, usize, Option<f64>) {
+/// (`round_search`). `one`: when it fails, it may try the edges one at a
+/// time (`one_by_one`; not after that crashed the kernel).
+fn round(acc: &Shape, f: &Feature, r: &Round, search: bool, one: bool) -> (Option<Result<Shape, String>>, usize, Option<f64>) {
     let (edges, missing) = resolve(acc, &r.edges);
     if edges.is_empty() || r.size <= 1e-6 {
         return (None, missing, None);
     }
     let fresh = FaceTag { feature: f.id, sub: 0 }.pack();
     mark(&step("round", f));
-    let make = |size: f64| if r.chamfer { acc.chamfer(&edges, size, fresh) } else { acc.fillet(&edges, size, fresh) };
+    let make = |size: f64| made_on(acc, &edges, r, size, fresh);
     let mut res = make(r.size).map_err(|e| plain_error(&e));
     // two or three of the edges meeting at a corner of four (Romain 20 nov.,
     // a cap standing flush with a pocket's end): OpenCascade rounds one of
     // them, or all four, but not two or three in one go; one at a time in
     // some order it does
-    if res.is_err() && (2..=4).contains(&edges.len()) {
+    if res.is_err() && one && (2..=4).contains(&edges.len()) {
+        // OpenCascade can recurse without end in there (a chamfer at such a
+        // corner after a fillet ran into it, 20 nov.): a crash skips only
+        // this search the next time
+        mark(&step("onebyone", f));
         if let Some(s) = one_by_one(acc, r, fresh) {
             res = Ok(s);
         }
+        mark(&step("round", f));
     }
     if res.is_ok() || !search {
         return (Some(res), missing, None);
@@ -451,11 +457,103 @@ fn plain_error(e: &str) -> String {
     }
 }
 
+/// A fillet or chamfer of `edges` on `acc` at `size`: with Only Selected,
+/// cut back to them (`only_selected`).
+fn made_on(acc: &Shape, edges: &[i32], r: &Round, size: f64, fresh: i64) -> Result<Shape, String> {
+    let s = if r.chamfer { acc.chamfer(edges, size, fresh) } else { acc.fillet(edges, size, fresh) }?;
+    if r.only {
+        only_selected(acc, edges, size, fresh, s)
+    } else {
+        Ok(s)
+    }
+}
+
+/// Only Selected (Romain 20 nov., 10 h 54: "forcer à Fillet ou Chamfer que
+/// l'edge sélectionné"): OpenCascade carries a fillet or a chamfer along
+/// the edges tangent to the ones asked (a pill's top edge: round all of
+/// it). `made` is that; within a region round each edge asked (a box from
+/// its start to its end, square to it there, `size` × 3 + 1 mm round it;
+/// a curved edge: its samples' box less the half-spaces behind its ends)
+/// the part is `made`, elsewhere as it was: (made ∩ R) ∪ (acc − R). The
+/// fillet then ends square where the edge ends, its end face tagged as the
+/// fillet's. When `made`'s new faces all lie within the regions already
+/// (nothing carried along) it is kept as it is.
+fn only_selected(acc: &Shape, edges: &[i32], size: f64, fresh: i64, made: Shape) -> Result<Shape, String> {
+    let w = size * 3.0 + 1.0;
+    let mut boxes: Vec<(DVec3, DVec3)> = vec![];
+    let mut region: Option<Shape> = None;
+    let rows = |o: DVec3, x: DVec3, y: DVec3, z: DVec3| [[x.x, y.x, z.x, o.x], [x.y, y.y, z.y, o.y], [x.z, y.z, z.z, o.z]];
+    // a box of sizes (l, 2a, 2a) from o along x, centred across (a cuboid
+    // is made centred on the origin)
+    let slab = |o: DVec3, x: DVec3, l: f64, a: f64| -> Result<Shape, String> {
+        let y = x.any_orthonormal_vector();
+        let z = x.cross(y);
+        Shape::cuboid(l, 2.0 * a, 2.0 * a)?.transformed(rows(o + x * (l * 0.5), x, y, z))
+    };
+    for &e in edges {
+        let Some(ed) = acc.edge(e, 64) else { return Ok(made) };
+        let pts: Vec<DVec3> = ed.pts.iter().map(|p| DVec3::from_array(*p)).collect();
+        let (a, b) = (pts[0], pts[pts.len() - 1]);
+        if pts.len() < 2 || a.distance(b) < 1e-6 {
+            // a closed edge: nothing to carry it along to
+            return Ok(made);
+        }
+        let t = (b - a).normalize();
+        let straight = pts.iter().all(|p| (*p - a - t * (*p - a).dot(t)).length() < 1e-4);
+        let piece = if straight {
+            slab(a, t, a.distance(b), w)?
+        } else {
+            let lo = pts.iter().fold(DVec3::splat(f64::MAX), |m, p| m.min(*p)) - DVec3::splat(w);
+            let hi = pts.iter().fold(DVec3::splat(f64::MIN), |m, p| m.max(*p)) + DVec3::splat(w);
+            let ta = (pts[1] - pts[0]).normalize();
+            let tb = (pts[pts.len() - 1] - pts[pts.len() - 2]).normalize();
+            let big = (hi - lo).length() * 2.0 + 10.0;
+            let mut bx = Shape::cuboid(hi.x - lo.x, hi.y - lo.y, hi.z - lo.z)?.transformed(rows((lo + hi) * 0.5, DVec3::X, DVec3::Y, DVec3::Z))?;
+            // the half-spaces behind its start and past its end, unless the
+            // edge itself would go into them (an arc of more than half a turn)
+            let inside = pts[1..pts.len() - 1].iter().all(|p| (*p - a).dot(ta) > -1e-6 && (*p - b).dot(tb) < 1e-6);
+            if inside {
+                bx = bx.cut(&slab(a - ta * big, ta, big, big)?)?;
+                bx = bx.cut(&slab(b, tb, big, big)?)?;
+            }
+            bx
+        };
+        boxes.push(piece_box(&pts, w));
+        region = Some(match region {
+            None => piece,
+            Some(r) => r.fuse(&piece)?,
+        });
+    }
+    let Some(mut region) = region else { return Ok(made) };
+    // nothing carried along: the fillet as it is
+    let carried = (0..made.face_count()).filter(|&i| made.face_tag(i) == fresh).any(|i| {
+        made.face_box(i).map_or(true, |(lo, hi)| {
+            let (lo, hi) = (DVec3::from_array(lo), DVec3::from_array(hi));
+            !boxes.iter().any(|(a, b)| lo.cmpge(*a - DVec3::splat(1e-3)).all() && hi.cmple(*b + DVec3::splat(1e-3)).all())
+        })
+    });
+    if !carried {
+        return Ok(made);
+    }
+    let n = region.face_count();
+    region.set_tags(&vec![fresh; n.max(1)]);
+    let inner = made.common(&region)?;
+    let outer = acc.cut(&region)?;
+    outer.fuse(&inner)
+}
+
+/// The box round a run of points, `w` more each way.
+fn piece_box(pts: &[DVec3], w: f64) -> (DVec3, DVec3) {
+    let lo = pts.iter().fold(DVec3::splat(f64::MAX), |m, p| m.min(*p)) - DVec3::splat(w);
+    let hi = pts.iter().fold(DVec3::splat(f64::MIN), |m, p| m.max(*p)) + DVec3::splat(w);
+    (lo, hi)
+}
+
 /// The largest size that works for a fillet too big, by halves (for at most
 /// about 2 s: next to a face curved tighter than the fillet, OpenCascade can
 /// take many seconds for each try near the limit).
 fn round_search(acc: &Shape, edges: &[i32], r: &Round, fresh: i64) -> Option<(Shape, f64)> {
-    let make = |size: f64| if r.chamfer { acc.chamfer(edges, size, fresh) } else { acc.fillet(edges, size, fresh) };
+    let make = |size: f64| made_on(acc, edges, r, size, fresh);
     let (mut lo, mut hi) = (0.0, r.size);
     let t0 = std::time::Instant::now();
     for _ in 0..12 {
@@ -497,10 +595,8 @@ fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> Option<Shape> {
             let (e, missing) = resolve(s, std::slice::from_ref(&left[k]));
             let next = if missing > 0 || e.is_empty() {
                 continue;
-            } else if r.chamfer {
-                s.chamfer(&e, r.size, fresh)
             } else {
-                s.fillet(&e, r.size, fresh)
+                made_on(s, &e, r, r.size, fresh)
             };
             if let Ok(n) = next {
                 // the edges left that this one's fillet took along with it
@@ -526,7 +622,7 @@ fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> Option<Shape> {
 fn blend(befores: &[(&Feature, Stage)], f: &Feature, r: &Round) -> Option<(Shape, Vec<(u32, f64)>)> {
     let n = befores.len().checked_sub(1)?;
     let mut k = n;
-    while k > 0 && befores[k - 1].0.round.as_ref().map(|g| !g.chamfer).unwrap_or(false) {
+    while k > 0 && befores[k - 1].0.round.as_ref().map(|g| !g.chamfer && !g.only).unwrap_or(false) {
         k -= 1;
     }
     if k == n {
@@ -877,7 +973,7 @@ fn tweak_unrounded(doc: &Doc, acc: &Shape, f: &Feature, t: &Tweak) -> Result<Sha
             }
         }
         let again = Round { edges, ..rd.clone() };
-        match round(&s, g, &again, true) {
+        match round(&s, g, &again, true, false) {
             (Some(Ok(r)), _, _) => s = r,
             _ => return Err(format!("{} could not be made again", g.name)),
         }
@@ -1077,7 +1173,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                 // turn round because one is made next to it (or because
                 // its corner is blended)
                 let mut partial = None;
-                if r.blend && !r.chamfer && !skipped("round") {
+                if r.blend && !r.chamfer && !r.only && !skipped("round") {
                     if let Some((b, run)) = blend(&befores, f, r) {
                         let (t, full, lost, errs) = finish(b, &run);
                         if lost == 0 {
@@ -1090,7 +1186,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                     }
                 }
                 if made.is_none() {
-                    let (mut res, missing, mut limit) = if skipped("round") { (Some(Err("skipped, it crashed the kernel".to_string())), 0, None) } else { round(&acc, f, r, false) };
+                    let (mut res, missing, mut limit) = if skipped("round") { (Some(Err("skipped, it crashed the kernel".to_string())), 0, None) } else { round(&acc, f, r, false, !skip.contains(&step("onebyone", f))) };
                     // (with a blended result at hand, a smaller size made on
                     // its own would not be taken: no search for it)
                     if matches!(res, Some(Err(_))) && partial.is_none() && !skipped("round") {
@@ -3379,6 +3475,50 @@ mod tests {
 
     /// The test part of the app (block, hole, boss, slot).
     #[test]
+    fn only_selected_edges() {
+        // Romain 20 nov., 10 h 54: "Only Selected" rounds the edge picked
+        // alone, not the pill's whole tangent outline OpenCascade carries
+        // the fillet along; it ends square where the edge ends
+        let mut d = Doc::default();
+        let p = d.add(Op::Add, Prim::Profile { x: 60.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(p).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![10.0; 4], tension: vec![], open: false });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        // the top edge along +Z's straight side, then the top arc at +X
+        let near = |at: DVec3| {
+            let mid = |e: &Edge| {
+                let p = e.pts.iter().map(|q| DVec3::from_array(q.map(|v| v as f64))).min_by(|a, b| a.distance(at).partial_cmp(&b.distance(at)).unwrap()).unwrap();
+                let ends = (DVec3::from_array(e.pts[0].map(|v| v as f64)) + DVec3::from_array(e.pts[e.pts.len() - 1].map(|v| v as f64))) * 0.5;
+                p.distance(at).min(ends.distance(at))
+            };
+            let e = m.edges.iter().min_by(|a, b| mid(a).partial_cmp(&mid(b)).unwrap()).unwrap();
+            EdgeRef { faces: e.faces.map(|f| m.faces[f as usize].tag.unwrap().pack()), at }
+        };
+        for (top, span) in [(near(DVec3::new(0.0, 20.0, 10.0)), (-20.1, 20.1)), (near(DVec3::new(30.0, 20.0, 0.0)), (19.9, 30.1))] {
+            for chamfer in [false, true] {
+                for only in [false, true] {
+                    let mut d2 = d.clone();
+                    let id = d2.add_round(2.0, chamfer, vec![top.clone()]);
+                    d2.feature_mut(id).unwrap().round.as_mut().unwrap().only = only;
+                    let m2 = build(&d2, true, false, &[], &mut Cache::default());
+                    let mine: Vec<SurfKind> = m2.faces.iter().filter(|f| f.tag.map_or(false, |t| t.feature == id)).map(|f| f.kind).collect();
+                    eprintln!("chamfer {chamfer} only {only}: errors {:?} faces {} its faces {:?}", m2.errors, m2.faces.len(), mine);
+                    assert!(m2.errors.is_empty(), "{:?}", m2.errors);
+                    // its faces' box: along X the edge's length alone when only
+                    let xs: Vec<f32> = m2.triangles.iter().enumerate().filter(|(t, _)| m2.faces[m2.tri_face[*t] as usize].tag.map_or(false, |g| g.feature == id)).flat_map(|(_, tri)| tri.iter().map(|&v| m2.positions[v as usize][0])).collect();
+                    let (lo, hi) = xs.iter().fold((f32::MAX, f32::MIN), |(a, b), x| (a.min(*x), b.max(*x)));
+                    eprintln!("  x {lo} .. {hi}");
+                    if only {
+                        assert!(lo > span.0 && hi < span.1, "only the edge: {lo} {hi}");
+                    } else {
+                        assert!(lo < -25.0 && hi > 25.0, "the whole outline: {lo} {hi}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn corner_of_four() {
         // Romain 20 nov., 9 h 56: a pocket carved with the same outline as
         // the cap standing on its end ("extrude en aller-retour"): the cap's
@@ -3639,6 +3779,31 @@ mod tests {
 }
 
 #[cfg(test)]
+mod crash_probe {
+    use crate::client::Kernel;
+    use crate::doc::Doc;
+    use std::time::Duration;
+
+    #[test]
+    #[ignore]
+    fn crash_probe() {
+        // FORME_DOC through the kernel process (FORME_NURBS_KERNEL): a step
+        // that crashes OpenCascade is skipped and the build goes on; prints
+        // the errors of the features from FORME_FROM on
+        let Ok(p) = std::env::var("FORME_DOC") else { return };
+        let d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+        let from: u32 = std::env::var("FORME_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let k = Kernel::start(crate::client::kernel_exe());
+        let t0 = std::time::Instant::now();
+        k.submit(1, &d, true, false);
+        let b = k.wait_for(1, Duration::from_secs(120)).expect("an answer");
+        let names: Vec<String> = d.features.iter().filter(|f| f.id >= from).map(|f| f.name.clone()).collect();
+        let errs: Vec<&String> = b.model.errors.iter().filter(|e| names.iter().any(|n| e.starts_with(&format!("{n}:")))).collect();
+        eprintln!("CRASH {:.2} s: faces {} errors {:?}", t0.elapsed().as_secs_f64(), b.model.faces.len(), errs);
+    }
+}
+
+#[cfg(test)]
 mod vertex4_probe {
     use super::*;
     use crate::doc::*;
@@ -3652,6 +3817,12 @@ mod vertex4_probe {
         let Ok(p) = std::env::var("FORME_DOC") else { return };
         let mut d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
         if let Ok(modes) = std::env::var("FORME_LAST") {
+            // FORME_KEEP: the features before that id only, and the last
+            if let Some(keep) = std::env::var("FORME_KEEP").ok().and_then(|v| v.parse::<u32>().ok()) {
+                let last = d.features.last().unwrap().clone();
+                d.features.retain(|f| f.id < keep);
+                d.features.push(last);
+            }
             // the last step as it is, made a chamfer (c) or a fillet (f), with or
             // without tension (t0), blend (b0), at a size (s0.5): "c,f,c s0.2"
             for m in modes.split(',') {
@@ -3672,6 +3843,12 @@ mod vertex4_probe {
                     }
                 }
                 let last = d2.features.last().unwrap().clone();
+                // FORME_BEFORE: the last step moved before that id
+                if let Some(b) = std::env::var("FORME_BEFORE").ok().and_then(|v| v.parse::<u32>().ok()) {
+                    let l = d2.features.pop().unwrap();
+                    let at = d2.features.iter().position(|f| f.id == b).unwrap();
+                    d2.features.insert(at, l);
+                }
                 let t0 = std::time::Instant::now();
                 let mut cache = Cache::default();
                 let m2 = build(&d2, true, false, &[], &mut cache);
@@ -3702,10 +3879,11 @@ mod vertex4_probe {
                 let mut ids = vec![];
                 for st in case.split(';') {
                     let (es, rest) = st.split_once('@').unwrap();
-                    let blend = rest.ends_with('b');
-                    let size: f64 = rest.trim_end_matches('b').parse().unwrap();
+                    let blend = rest.contains('b');
+                    let chamfer = rest.contains('c');
+                    let size: f64 = rest.trim_end_matches(['b', 'c']).parse().unwrap();
                     let edges: Vec<EdgeRef> = es.chars().map(|c| e[c.to_digit(10).unwrap() as usize].clone()).collect();
-                    let id = d2.add_round(size, false, edges);
+                    let id = d2.add_round(size, chamfer, edges);
                     d2.features.last_mut().unwrap().round.as_mut().unwrap().blend = blend;
                     ids.push(id);
                 }

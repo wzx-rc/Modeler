@@ -3521,6 +3521,40 @@ fn main() {
         eprintln!("  undo ×2: {} · faces {}", order(&h), faces(&h));
     }
 
+    if want("only-selected") {
+        // Only Selected (Romain 20 nov., 10 h 54): the pill's top straight
+        // edge picked, filleted alone (it ends square where the edge
+        // ends), then chamfered; off, the whole tangent outline
+        let mut d = Doc::default();
+        let p = d.add(Op::Add, Prim::Profile { x: 60.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(p).unwrap().profile = Some(nurbs_kernel::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![10.0; 4], tension: vec![], open: false });
+        h.reset(d, "Pill");
+        h.st.camera.frame(Vec3::new(-32.0, 0.0, -12.0), Vec3::new(32.0, 22.0, 12.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num2);
+        h.click(h.screen_of(Vec3::new(-5.0, 20.0, 10.0)));
+        eprintln!("  picked {}", h.st.edge_sel.len());
+        h.st.set_round_only(true);
+        h.steps(2);
+        h.shot("zero-only-1-picked");
+        h.st.set_round(2.0, false, true);
+        h.st.end_live();
+        h.settle();
+        let its = |h: &Harness| h.st.model.as_ref().map(|m| m.faces.iter().filter(|f| f.tag.map_or(false, |t| t.feature > p)).count()).unwrap_or(0);
+        eprintln!("  fillet only: its faces {} errors {:?}", its(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-only-2-fillet");
+        h.st.set_round(2.0, true, true);
+        h.st.end_live();
+        h.settle();
+        eprintln!("  chamfer only: its faces {} errors {:?}", its(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-only-3-chamfer");
+        h.st.set_round_only(false);
+        h.settle();
+        eprintln!("  chamfer, tangent edges: its faces {} errors {:?}", its(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-only-4-off");
+    }
+
     if want("isolate") {
         // Isolate (Romain 20 nov., 9 h 38, Maya): a block beside the test
         // part picked, the top bar's icon: it alone, framed; again: all

@@ -625,6 +625,11 @@ pub struct Round {
     /// Straight fillets between flat ends only (`build::round`).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub tension: f64,
+    /// Only Selected (Romain 20 nov., 10 h 54): the picked edges alone,
+    /// not the edges tangent to them OpenCascade carries the fillet along
+    /// (it ends square where the edge ends); not blended.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub only: bool,
 }
 
 fn is_zero(x: &f64) -> bool {
@@ -1075,7 +1080,7 @@ impl Doc {
     pub fn add_round(&mut self, size: f64, chamfer: bool, edges: Vec<EdgeRef>) -> FeatureId {
         let id = self.next_id;
         self.next_id += 1;
-        let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0 };
+        let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0, only: false };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
         self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });

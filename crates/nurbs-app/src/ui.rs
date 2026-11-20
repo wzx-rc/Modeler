@@ -2409,6 +2409,13 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
             }
         }
     });
+    // the picked edges alone, not those tangent to them (Romain 20 nov.,
+    // 10 h 54: "Only Selected")
+    ui.add_space(2.0);
+    let only = existing.as_ref().map(|r| r.only).unwrap_or(st.round_only);
+    if toggle_row(ui, "Only selected", only) {
+        st.set_round_only(!only);
+    }
     // the radius the reference mesh has along these edges (retopo)
     if st.reference.is_some() && existing.as_ref().map(|r| !r.chamfer).unwrap_or(true) {
         ui.add_space(2.0);
@@ -2428,7 +2435,7 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
         }
     }
     // fillets made one after the other meet in one rounded corner
-    if let Some(r) = existing.as_ref().filter(|r| !r.chamfer) {
+    if let Some(r) = existing.as_ref().filter(|r| !r.chamfer && !r.only) {
         ui.add_space(2.0);
         if toggle_row(ui, "Blend corners", r.blend) {
             st.set_blend(!r.blend);

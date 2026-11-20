@@ -626,6 +626,9 @@ pub struct AppState {
     /// Fillet or chamfer for the picked edges and sharp corners (the
     /// top island's option, Ctrl + B).
     pub round_chamfer: bool,
+    /// Only Selected for the fillets and chamfers made next (Romain 20
+    /// nov., 10 h 54): the picked edges alone, not those tangent to them.
+    pub round_only: bool,
     /// The Surface tool's points: put on the reference under the pointer
     /// (true), else locked on the plane under its first point.
     pub surface_on_scan: bool,
@@ -812,6 +815,7 @@ impl AppState {
             edge_sel: vec![],
             hover_edge: None,
             round_chamfer: false,
+            round_only: false,
             surface_on_scan: false,
             slot_on_scan: false,
             slot_draw: None,
@@ -2109,10 +2113,29 @@ impl AppState {
             self.begin_live(label);
             let edges = std::mem::take(&mut self.edge_sel);
             let mut id = 0;
-            self.live(|d| id = d.add_round(size, chamfer, edges));
+            let only = self.round_only;
+            self.live(|d| {
+                id = d.add_round(size, chamfer, edges);
+                if let Some(r) = d.feature_mut(id).and_then(|f| f.round.as_mut()) {
+                    r.only = only;
+                    r.blend &= !only;
+                }
+            });
             self.selection = vec![id];
         }
         self.round_chamfer = chamfer;
+    }
+
+    /// Only Selected on or off: for the selected fillet or chamfer (one
+    /// undo step), else for those made next.
+    pub fn set_round_only(&mut self, on: bool) {
+        self.round_only = on;
+        let Some(id) = self.selected_round().map(|f| f.id) else { return };
+        self.edit(if on { "Only selected" } else { "Tangent edges" }, |d| {
+            if let Some(r) = d.feature_mut(id).and_then(|f| f.round.as_mut()) {
+                r.only = on;
+            }
+        });
     }
 
     /// Blend corners on or off for the selected fillet.
