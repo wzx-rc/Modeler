@@ -213,6 +213,8 @@ impl Drawer {
         for f in st.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()) {
             let creating = st.creation.as_ref().map(|c| c.id == f.id).unwrap_or(false);
             let selected = st.selection.contains(&f.id);
+            // an Object-mode drag shows the faces themselves (no cage)
+            let moving = moving && st.dragged_shapes().is_none();
             let show = creating || (selected && (moving || f.op == Op::Carve || !f.visible)) || (st.tool == Tool::Select && st.hover_feature == Some(f.id) && f.op == Op::Carve);
             if !show || (creating && !f.visible) {
                 continue;
@@ -232,11 +234,22 @@ impl Drawer {
                     let t = m.faces.get(usize::try_from(fi).ok()?)?.tag?;
                     Some(elements.get(&t.feature).copied().unwrap_or(t.feature))
                 };
+                // moved with the drag's preview, as the faces are
+                let pv = st.drag_preview().unwrap_or_default();
+                let place = |e: &nurbs_kernel::Edge, els: &[Option<nurbs_kernel::FeatureId>; 2]| -> Vec<[f32; 3]> {
+                    match els.iter().flatten().find_map(|x| pv.get(x)) {
+                        Some(x) => {
+                            let x = x.as_mat4();
+                            e.pts.iter().map(|p| x.transform_point3(glam::Vec3::from(*p)).to_array()).collect()
+                        }
+                        None => e.pts.clone(),
+                    }
+                };
                 let (mut sel, mut hov) = (vec![], vec![]);
                 for e in m.edges.iter().filter(|e| !e.seam) {
                     let els = [of(e.faces[0]), of(e.faces[1])];
                     if els.iter().flatten().any(|x| st.selection.contains(x)) {
-                        sel.push(e.pts.clone());
+                        sel.push(place(e, &els));
                     } else if st.hover_feature.map(|h| els.contains(&Some(h))).unwrap_or(false) {
                         hov.push(e.pts.clone());
                     }

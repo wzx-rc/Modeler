@@ -3091,6 +3091,74 @@ fn main() {
         eprintln!("  tweak {:?}", h.st.doc.features.last().and_then(|f| f.tweak.as_ref()).map(|t| (t.delta, t.copy)));
         eprintln!("  copy moved: steps {:?} faces {} errors {:?}", h.st.doc.features.iter().map(|f| f.name.clone()).collect::<Vec<_>>(), h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
         h.shot("zero-dup-faces-1-piece");
+        // a double-click on the copy's top (20 nov.): its piece's faces,
+        // then moved up 10 as one
+        h.key(egui::Key::F11);
+        h.key(egui::Key::Escape);
+        let p = h.screen_of(Vec3::new(50.0, 20.0, 0.0));
+        h.click(p);
+        h.click(p);
+        h.steps(2);
+        eprintln!("  double-click: faces picked {} ({:?})", h.st.face_sel.len(), h.st.picked_faces());
+        let c = h.st.pivot().expect("a gizmo").as_vec3();
+        let s0 = h.screen_of(c);
+        let dir = (h.screen_of(c + Vec3::Y) - s0).normalized();
+        let grab = s0 + dir * 55.0;
+        let by = h.screen_of(c + Vec3::Y * 10.0) - s0;
+        h.drag(grab, grab + by, 10, true);
+        h.settle();
+        eprintln!("  tweak {:?}", h.st.doc.features.last().and_then(|f| f.tweak.as_ref()).map(|t| (t.delta, t.copy)));
+        if let Some(m) = &h.st.model {
+            let ys: Vec<f32> = m.positions.iter().filter(|q| q[0] > 30.0).map(|q| q[1]).collect();
+            eprintln!("  the copy's y: {:?} to {:?}", ys.iter().cloned().fold(f32::MAX, f32::min), ys.iter().cloned().fold(f32::MIN, f32::max));
+        }
+        eprintln!("  piece moved: steps {:?} errors {:?}", h.st.doc.features.iter().map(|f| f.name.clone()).collect::<Vec<_>>(), h.st.model.as_ref().map(|m| m.errors.clone()));
+        eprintln!("  journal: {:?}", h.st.journal.iter().rev().take(4).map(|j| format!("{} {}", j.kind, j.what)).collect::<Vec<_>>());
+        h.shot("zero-dup-faces-2-linked");
+        // an edge's loop: the copy's top front edge double-clicked
+        h.key(egui::Key::F10);
+        let p = h.screen_of(Vec3::new(50.0, 30.0, 15.0));
+        h.click(p);
+        h.click(p);
+        h.steps(2);
+        eprintln!("  edge double-click: {} edges", h.st.edge_sel.len());
+    }
+
+    if want("linked") {
+        // double-clicks (20 nov.): a block whose four vertical edges are
+        // filleted, its top's edges double-clicked (the loop round it)
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        let t = |sub: u16| FaceTag { feature: b, sub }.pack();
+        let e = |a: u16, c: u16, x: f64, z: f64| EdgeRef { faces: [t(a), t(c)], at: glam::DVec3::new(x, 10.0, z) };
+        d.add_round(5.0, false, vec![e(0, 4, 20.0, 15.0), e(0, 5, 20.0, -15.0), e(1, 4, -20.0, 15.0), e(1, 5, -20.0, -15.0)]);
+        h.reset(d, "Rounded");
+        h.settle();
+        h.key(egui::Key::F10);
+        let p = h.screen_of(Vec3::new(0.0, 20.0, 15.0));
+        h.click(p);
+        h.click(p);
+        h.steps(2);
+        eprintln!("  top edge double-clicked: {} edges", h.st.edge_sel.len());
+        h.shot("zero-linked-1-edges");
+        h.key(egui::Key::F11);
+        h.steps(40);
+        h.click(p + egui::vec2(0.0, 30.0));
+        h.click(p + egui::vec2(0.0, 30.0));
+        h.steps(2);
+        eprintln!("  front face double-clicked: {} faces", h.st.face_sel.len());
+        h.shot("zero-linked-2-faces");
+        h.key(egui::Key::F9);
+        h.steps(40);
+        let q = h.screen_of(Vec3::new(-20.0, 20.0, 10.0));
+        let v = h.st.pick_vertex([q.x, q.y]);
+        if let Some(v) = v {
+            let q = h.screen_of(v.as_vec3());
+            h.click(q);
+            h.click(q);
+            h.steps(2);
+        }
+        eprintln!("  vertex {v:?} double-clicked: {} vertices", h.st.vert_sel.len());
     }
 
     if want("knife-diag") {

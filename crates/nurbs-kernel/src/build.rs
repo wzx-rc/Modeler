@@ -746,6 +746,19 @@ fn tweak(acc: &Shape, f: &Feature, t: &Tweak) -> Result<Option<Shape>, String> {
     if t.copy {
         return duplicate(acc, f, t);
     }
+    // a part with sheets beside its solids (a copy of open faces): the move
+    // made on the side its components are on, the other kept as it is
+    if let (Ok(sheets), Ok(solids)) = (acc.lumps_of(false), acc.lumps_of(true)) {
+        let on = |s: &Shape| t.comps().all(|c| comp_vertices(s, c).map(|v| !v.is_empty()).unwrap_or(false));
+        for (side, other) in [(&solids, &sheets), (&sheets, &solids)] {
+            if on(side) {
+                return match tweak(side, f, t)? {
+                    Some(r) => r.compound(other).map(Some),
+                    None => Ok(None),
+                };
+            }
+        }
+    }
     let scaled = (t.scale - DVec3::ONE).abs().max_element() > 1e-9;
     if t.delta.length() < 1e-6 && !scaled {
         return Ok(None);
@@ -766,6 +779,12 @@ fn tweak(acc: &Shape, f: &Feature, t: &Tweak) -> Result<Option<Shape>, String> {
     let centre = vs.iter().map(|&v| at(v)).sum::<DVec3>() / vs.len() as f64;
     let moves: Vec<(i32, [f64; 3])> = vs.iter().map(|&v| (v, (centre + (at(v) - centre) * t.scale + t.delta).to_array())).collect();
     mark(&step("tweak", f));
+    // a whole piece moved (a copy's faces all picked, a lump beside the
+    // part): carried as it is, whatever its faces
+    let m = DMat4::from_translation(centre + t.delta) * DMat4::from_scale(t.scale) * DMat4::from_translation(-centre);
+    if let Ok(s) = acc.move_lumps(&vs, rows(m)) {
+        return Ok(Some(s));
+    }
     let err = match acc.move_vertices(&moves) {
         Ok(s) => return Ok(Some(s)),
         Err(e) => e,
@@ -2248,6 +2267,10 @@ mod tests {
         assert_eq!(m.faces.len(), 11, "a 1 mm wall stays");
     }
 
+    fn b0(d: &Doc) -> FeatureId {
+        d.features[0].id
+    }
+
     #[test]
     fn faces_duplicated() {
         // Ctrl + D on picked faces (20 nov.): a block's top and its four
@@ -2267,6 +2290,59 @@ mod tests {
         assert_eq!(m.faces.len(), 12, "two blocks");
         let (_, hi) = m.bounds().unwrap();
         assert!((hi[0] - 70.0).abs() < 1e-3, "{hi:?}");
+        // every face of the copy moved: it goes as a piece (20 nov.: its
+        // faces moved one by one only moved the pivot)
+        let cid = box5.features.last().unwrap().id;
+        let comps: Vec<Comp> = m.faces.iter().enumerate().filter(|(_, f)| f.tag.map(|t| t.feature) == Some(cid)).map(|(i, f)| {
+            let t = m.tri_face.iter().position(|&x| x as usize == i).unwrap();
+            let c = m.triangles[t].iter().map(|&v| DVec3::from_array(m.positions[v as usize].map(|x| x as f64))).sum::<DVec3>() / 3.0;
+            Comp::Face(FaceRef { tag: f.tag.unwrap().pack(), at: c })
+        }).collect();
+        assert_eq!(comps.len(), 6, "the copy's faces");
+        let subs: std::collections::HashSet<u64> = m.faces.iter().filter_map(|f| f.tag).filter(|t| t.feature == cid).map(|t| t.pack() as u64).collect();
+        assert_eq!(subs.len(), 6, "each copied face its own tag");
+        let mut mv = box5.clone();
+        let mut t = Tweak::new(comps).unwrap();
+        t.delta = DVec3::new(10.0, 0.0, 5.0);
+        mv.add_tweak(t);
+        let m2 = build(&mv, true, false, &[], &mut Cache::default());
+        assert!(m2.errors.is_empty(), "{:?}", m2.errors);
+        let (_, hi) = m2.bounds().unwrap();
+        assert!((hi[0] - 80.0).abs() < 1e-3 && (hi[2] - 20.0).abs() < 1e-3, "{hi:?}");
+        // a block with a filleted top edge: its top, fillet and front copied
+        // (an open sheet), then all moved
+        let mut fd = d.clone();
+        let e = |a: u16, b: u16, at: DVec3| vec![EdgeRef { faces: [tag(b0(&fd), a), tag(b0(&fd), b)], at }];
+        let r = e(2, 4, DVec3::new(0.0, 20.0, 15.0));
+        fd.add_round(3.0, false, r);
+        let fm = build(&fd, true, false, &[], &mut Cache::default());
+        assert!(fm.errors.is_empty(), "{:?}", fm.errors);
+        let pick = |m: &Model, keep: &dyn Fn(FaceTag) -> bool| -> Vec<Comp> {
+            m.faces.iter().enumerate().filter(|(_, f)| f.tag.map(|t| keep(t)).unwrap_or(false)).map(|(i, f)| {
+                let t = m.tri_face.iter().position(|&x| x as usize == i).unwrap();
+                let c = m.triangles[t].iter().map(|&v| DVec3::from_array(m.positions[v as usize].map(|x| x as f64))).sum::<DVec3>() / 3.0;
+                Comp::Face(FaceRef { tag: f.tag.unwrap().pack(), at: c })
+            }).collect()
+        };
+        let rid = fd.features.last().unwrap().id;
+        let comps = pick(&fm, &|t| (t.feature == b && (t.sub == 2 || t.sub == 4)) || t.feature == rid);
+        assert_eq!(comps.len(), 3);
+        let mut t = Tweak::new(comps).unwrap();
+        t.copy = true;
+        t.delta = DVec3::new(45.0, 0.0, 0.0);
+        fd.add_tweak(t);
+        let cm = build(&fd, true, false, &[], &mut Cache::default());
+        assert!(cm.errors.is_empty(), "{:?}", cm.errors);
+        let cid = fd.features.last().unwrap().id;
+        let comps = pick(&cm, &|t| t.feature == cid);
+        let mut t = Tweak::new(comps).unwrap();
+        t.delta = DVec3::new(0.0, 0.0, 7.0);
+        fd.add_tweak(t);
+        let mm = build(&fd, true, false, &[], &mut Cache::default());
+        eprintln!("sheet copy moved: errors {:?}, bounds {:?}", mm.errors, mm.bounds());
+        assert!(mm.errors.is_empty(), "{:?}", mm.errors);
+        let (_, hi) = mm.bounds().unwrap();
+        assert!((hi[2] - 22.0).abs() < 1e-3, "{hi:?}");
         let mut top = d.clone();
         let mut t = Tweak::new(vec![fr(2, DVec3::new(0.0, 20.0, 0.0))]).unwrap();
         t.copy = true;

@@ -5252,6 +5252,144 @@ FShape* focc_compound(const FShape* a, const FShape* b) {
 // piece of the part), then moved by the affine map `m` (3 rows of 4). The
 // copies are tagged `tag | 1`, the closing faces `tag`. A piece that cannot
 // be closed stays a sheet (its volume is 0).
+// The solids of a shape (`solids` 1) or what is not a solid (0: sheets,
+// shells, faces left beside the part), tags kept; null when there is none.
+// A boolean is made on the solids alone, the sheets put back beside it
+// (a union of a solid with a compound holding a sheet fails).
+FShape* focc_lumps_of(const FShape* s, int solids) {
+    return guard(
+        [&]() -> FShape* {
+            std::vector<TopoDS_Shape> keep;
+            std::function<void(const TopoDS_Shape&)> flat = [&](const TopoDS_Shape& x) {
+                if (x.ShapeType() == TopAbs_COMPOUND || x.ShapeType() == TopAbs_COMPSOLID) {
+                    for (TopoDS_Iterator it(x); it.More(); it.Next()) flat(it.Value());
+                } else if ((x.ShapeType() == TopAbs_SOLID) == (solids != 0)) {
+                    keep.push_back(x);
+                }
+            };
+            flat(s->s);
+            if (keep.empty()) {
+                set_err(solids ? "no solid" : "no sheet");
+                return nullptr;
+            }
+            TopoDS_Shape res;
+            if (keep.size() == 1) {
+                res = keep[0];
+            } else {
+                BRep_Builder bb;
+                TopoDS_Compound c;
+                bb.MakeCompound(c);
+                for (const TopoDS_Shape& k : keep) bb.Add(c, k);
+                res = c;
+            }
+            TopTools_IndexedMapOfShape of, rf;
+            face_map(s->s, of);
+            face_map(res, rf);
+            std::vector<long long> tags(rf.Extent(), -1);
+            for (int i = 1; i <= rf.Extent(); i++) {
+                int k = of.FindIndex(rf(i));
+                if (k > 0 && k - 1 < (int)s->tags.size()) tags[i - 1] = s->tags[k - 1];
+            }
+            FShape* r = wrap(res);
+            if (!r) return nullptr;
+            r->tags = tags;
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
+// The lumps (solids, shells or faces side by side in a compound) whose
+// vertices are all among `vidx` (1-based) moved whole by the 3 × 4 matrix
+// `m` (rows); the others kept. Null when a lump has only some of its
+// vertices there (a deformation: focc_move_vertices) or none moves.
+FShape* focc_move_lumps(const FShape* s, const int* vidx, int n, const double* m) {
+    return guard(
+        [&]() -> FShape* {
+            TopTools_IndexedMapOfShape vm;
+            TopExp::MapShapes(s->s, TopAbs_VERTEX, vm);
+            TopTools_MapOfShape moved;
+            for (int i = 0; i < n; i++) {
+                if (vidx[i] < 1 || vidx[i] > vm.Extent()) {
+                    set_err("no such vertex");
+                    return nullptr;
+                }
+                moved.Add(vm(vidx[i]));
+            }
+            std::vector<TopoDS_Shape> lumps;
+            std::function<void(const TopoDS_Shape&)> flat = [&](const TopoDS_Shape& x) {
+                if (x.ShapeType() == TopAbs_COMPOUND) {
+                    for (TopoDS_Iterator it(x); it.More(); it.Next()) flat(it.Value());
+                } else {
+                    lumps.push_back(x);
+                }
+            };
+            flat(s->s);
+            gp_GTrsf g;
+            g.SetVectorialPart(gp_Mat(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]));
+            g.SetTranslationPart(gp_XYZ(m[3], m[7], m[11]));
+            BRep_Builder bb;
+            TopoDS_Compound out;
+            bb.MakeCompound(out);
+            TopTools_DataMapOfShapeShape fmap;
+            int any = 0;
+            for (const TopoDS_Shape& L : lumps) {
+                TopTools_IndexedMapOfShape lv;
+                TopExp::MapShapes(L, TopAbs_VERTEX, lv);
+                int in = 0;
+                for (int j = 1; j <= lv.Extent(); j++) in += moved.Contains(lv(j)) ? 1 : 0;
+                if (in == 0) {
+                    bb.Add(out, L);
+                    continue;
+                }
+                if (in != lv.Extent()) {
+                    set_err("only part of a piece moves");
+                    return nullptr;
+                }
+                TopoDS_Shape nl;
+                if (g.Form() == gp_Other) {
+                    BRepBuilderAPI_GTransform gt(L, g, Standard_True);
+                    if (!gt.IsDone()) {
+                        set_err("the piece could not be scaled");
+                        return nullptr;
+                    }
+                    nl = gt.Shape();
+                    for (TopExp_Explorer x(L, TopAbs_FACE); x.More(); x.Next()) fmap.Bind(x.Current(), gt.ModifiedShape(x.Current()));
+                } else {
+                    gp_Trsf t;
+                    t.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+                    BRepBuilderAPI_Transform tr(L, t, Standard_True);
+                    nl = tr.Shape();
+                    for (TopExp_Explorer x(L, TopAbs_FACE); x.More(); x.Next()) fmap.Bind(x.Current(), tr.ModifiedShape(x.Current()));
+                }
+                bb.Add(out, nl);
+                any++;
+            }
+            if (any == 0) {
+                set_err("nothing moves");
+                return nullptr;
+            }
+            TopoDS_Shape res = out;
+            if (lumps.size() == 1) {
+                TopoDS_Iterator it(out);
+                res = it.Value();
+            }
+            TopTools_IndexedMapOfShape of, rf;
+            face_map(s->s, of);
+            face_map(res, rf);
+            std::vector<long long> tags(rf.Extent(), -1);
+            for (int i = 1; i <= of.Extent(); i++) {
+                TopoDS_Shape nf = fmap.IsBound(of(i)) ? fmap(of(i)) : of(i);
+                int k = rf.FindIndex(nf);
+                if (k > 0 && i - 1 < (int)s->tags.size()) tags[k - 1] = s->tags[i - 1];
+            }
+            FShape* r = wrap(res);
+            if (!r) return nullptr;
+            r->tags = tags;
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
 FShape* focc_piece(const FShape* s, const int* idx, int n, const double* m, long long tag) {
     return guard(
         [&]() -> FShape* {
@@ -5318,7 +5456,25 @@ FShape* focc_piece(const FShape* s, const int* idx, int n, const double* m, long
             std::vector<long long> tags;
             TopTools_IndexedMapOfShape om;
             face_map(out, om);
-            for (int i = 1; i <= om.Extent(); i++) tags.push_back(capped.Contains(om(i)) ? tag : (tag | 1));
+            // each copied face its own sub (1, 2…: the order of its source),
+            // the caps the step's own tag (sub 0); a sewn face keeps its
+            // source's surface
+            for (int i = 1; i <= om.Extent(); i++) {
+                if (capped.Contains(om(i))) {
+                    tags.push_back(tag);
+                    continue;
+                }
+                Handle(Geom_Surface) gs = BRep_Tool::Surface(TopoDS::Face(om(i)));
+                long long sub = 1;
+                for (size_t k = 0; k < copies.size(); k++) {
+                    TopExp_Explorer cx(copies[k], TopAbs_FACE);
+                    if (cx.More() && BRep_Tool::Surface(TopoDS::Face(cx.Current())) == gs) {
+                        sub = (long long)k + 1;
+                        break;
+                    }
+                }
+                tags.push_back(tag | sub);
+            }
             gp_GTrsf g;
             g.SetVectorialPart(gp_Mat(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]));
             g.SetTranslationPart(gp_XYZ(m[3], m[7], m[11]));

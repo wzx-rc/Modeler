@@ -404,11 +404,23 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                     _ => st.click_edge(edge, shift || ctrl),
                 }
             }
+            // a double-click: the edges linked to it (Maya's edge loop)
+            if resp.double_clicked_by(PointerButton::Primary) {
+                if let Some(e) = resp.interact_pointer_pos().or(hover).map(p2).and_then(|p| st.pick_edge(p)) {
+                    st.pick_linked_edges(e, shift || ctrl);
+                }
+            }
         }
         Tool::Select if st.sel_mode == SelMode::Face => {
             if resp.clicked_by(PointerButton::Primary) {
                 let at = resp.interact_pointer_pos().or(hover).map(p2);
                 st.click_face(at, shift || ctrl);
+            }
+            // a double-click: the faces linked to it (Maya's shell)
+            if resp.double_clicked_by(PointerButton::Primary) {
+                if let Some(p) = resp.interact_pointer_pos().or(hover).map(p2) {
+                    st.pick_linked_faces(p, shift || ctrl);
+                }
             }
         }
         Tool::Select if st.sel_mode == SelMode::Vertex => {
@@ -416,6 +428,11 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 let at = resp.interact_pointer_pos().or(hover).map(p2);
                 let v = at.and_then(|p| st.pick_vertex(p));
                 st.click_vertex(v, shift || ctrl);
+            }
+            if resp.double_clicked_by(PointerButton::Primary) {
+                if let Some(v) = resp.interact_pointer_pos().or(hover).map(p2).and_then(|p| st.pick_vertex(p)) {
+                    st.pick_linked_vertices(v, shift || ctrl);
+                }
             }
         }
         Tool::Slot => {
@@ -1329,7 +1346,7 @@ pub fn hint(st: &AppState) -> String {
         (None, Tool::Select) if st.round_drag.is_some() => "Away from the press: bigger · Ctrl held: chamfer · Shift held: tension (up fuller, down flatter)".into(),
         (None, Tool::Select) if st.sel_mode == SelMode::Vertex => {
             if st.vert_sel.is_empty() {
-                "Click: a vertex · Drag on empty: a rectangle · Drag a sketch corner: its fillet · Shift + click: add".into()
+                "Click: a vertex · Double-click: those of its piece · Drag on empty: a rectangle · Drag a sketch corner: its fillet · Shift + click: add".into()
             } else if !st.picked_profile_corners().is_empty() {
                 "Drag the corner: its fillet · Ctrl held: chamfer · Shift held: tension · Arrows: move it · Esc: deselect".into()
             } else {
@@ -1344,16 +1361,16 @@ pub fn hint(st: &AppState) -> String {
                     "Arrow: out adds, in carves · Del: delete it".into()
                 }
             } else if st.face_sel.is_empty() {
-                "Click: a face · Drag on empty: a rectangle · Shift + click: add · I: inset · Ctrl + E: extrude".into()
+                "Click: a face · Double-click: its linked faces · Drag on empty: a rectangle · Shift + click: add · I: inset · Ctrl + E: extrude".into()
             } else {
-                "Shift + drag the face: extrude · Ctrl + drag: inset · Arrows: move it · I: inset · Ctrl + E: extrude · Esc: deselect".into()
+                "Double-click: its linked faces · Shift + drag the face: extrude · Ctrl + drag: inset · Arrows: move it · I: inset · Ctrl + E: extrude · Esc: deselect".into()
             }
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Edge => {
             if st.selected_round().is_some() {
                 "Drag on it: its size · Shift held: tension · Shift + click an edge: add it · Del: delete it".into()
             } else if st.edge_sel.is_empty() {
-                "Click: an edge · Drag on one: a fillet · Ctrl held: chamfer · Shift held: tension · Drag on empty: a rectangle · Ctrl + B: chamfer".into()
+                "Click: an edge · Double-click: its loop · Drag on one: a fillet · Ctrl held: chamfer · Shift held: tension · Drag on empty: a rectangle · Ctrl + B: chamfer".into()
             } else {
                 "Drag an edge: a fillet · Shift + drag a picked edge: pull it · Arrows: move it · Ctrl + B: chamfer · Esc: deselect".into()
             }

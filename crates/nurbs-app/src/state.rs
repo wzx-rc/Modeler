@@ -483,6 +483,29 @@ pub struct Toast {
     pub warn: bool,
 }
 
+/// One line of the debug journal (Romain, 20 nov. 6 h 15: "un Interactive
+/// Debug mode qui te permet de lire la scène actuelle et les 5 derniers
+/// mouvements"): what was done, in what state, what the build said.
+#[derive(Clone, Debug)]
+pub struct JournalEntry {
+    /// Seconds since the app started, and the time of day (UTC).
+    pub at: f64,
+    pub clock: String,
+    /// edit, undo, redo, auto-undo, toast, tool, mode.
+    pub kind: &'static str,
+    pub what: String,
+    pub mode: String,
+    pub tool: String,
+    pub selection: Vec<FeatureId>,
+    /// What was picked (faces, edges, vertices), as text.
+    pub picked: String,
+    pub pivot: Option<[f64; 3]>,
+    /// The steps this change made or changed.
+    pub steps: Vec<FeatureId>,
+    /// The build's new errors after it (filled when the model arrives).
+    pub errors: Vec<String>,
+}
+
 pub struct AppState {
     pub doc: Doc,
     pub doc_name: String,
@@ -519,6 +542,12 @@ pub struct AppState {
     pub slot_on_scan: bool,
     /// The Slot drawn by hand.
     pub slot_draw: Option<crate::slot::SlotDraw>,
+    /// The debug journal, newest last (at most `JOURNAL`).
+    pub journal: std::collections::VecDeque<JournalEntry>,
+    journal_seen: (String, String),
+    /// A change waiting for its build: (document version, the steps it
+    /// made or changed, the errors before it).
+    pending_check: Option<(u64, Vec<FeatureId>, Vec<String>)>,
     /// The Surface's outline: straight sides (false) or SplitIt's curve
     /// through the points.
     pub surface_curve: bool,
@@ -571,8 +600,8 @@ pub struct AppState {
     pub model_gen: u64,
     pub picker: Picker,
     submitted: u64,
-    /// While whole shapes are dragged: each request sent, with the dragged
-    /// shapes' frames in it (the drag's preview, `drag_preview`).
+    /// Each request sent lately, with its shapes' frames (the drag's
+    /// preview, `drag_preview`).
     sent_frames: Vec<(u64, Vec<(FeatureId, DMat4)>)>,
     /// Kernel round trip of the last model (ms).
     pub round_ms: f32,
@@ -678,6 +707,9 @@ impl AppState {
             surface_on_scan: false,
             slot_on_scan: false,
             slot_draw: None,
+            journal: Default::default(),
+            journal_seen: (String::new(), String::new()),
+            pending_check: None,
             surface_curve: false,
             round_drag: None,
             face_drag: None,
@@ -801,11 +833,15 @@ impl AppState {
         let before = self.doc.clone();
         f(&mut self.doc);
         if self.doc != before {
-            if self.live_before.is_none() {
-                self.undo.push((label.to_string(), before));
+            let fresh = self.live_before.is_none();
+            if fresh {
+                self.undo.push((label.to_string(), before.clone()));
                 self.redo.clear();
             }
             self.touched();
+            if fresh {
+                self.after_change(label, &before);
+            }
         }
     }
 
@@ -827,12 +863,84 @@ impl AppState {
 
     pub fn end_live(&mut self) {
         if let Some((label, before)) = self.live_before.take() {
-            if before != self.doc {
-                self.undo.push((label, before));
+            let changed = before != self.doc;
+            if changed {
+                self.undo.push((label.clone(), before.clone()));
                 self.redo.clear();
             }
             // fine meshing now
             self.touched();
+            if changed {
+                self.after_change(&label, &before);
+            }
+        }
+    }
+
+    /// A change kept: written in the journal, and its build checked when it
+    /// arrives (`check_build`).
+    fn after_change(&mut self, label: &str, before: &Doc) {
+        let steps: Vec<FeatureId> = self.doc.features.iter().filter(|f| before.feature(f.id) != Some(*f)).map(|f| f.id).collect();
+        self.record("edit", label);
+        if let Some(e) = self.journal.back_mut() {
+            e.steps = steps.clone();
+        }
+        let prev = self.model.as_ref().map(|m| m.errors.clone()).unwrap_or_default();
+        self.pending_check = Some((self.version, steps, prev));
+    }
+
+    /// Writes a line in the debug journal.
+    pub fn record(&mut self, kind: &'static str, what: &str) {
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) % 86400;
+        let picked = format!(
+            "faces {:?}; edges {:?}; vertices {:?}",
+            self.face_sel.iter().map(|r| (r.tag, [r.at.x, r.at.y, r.at.z].map(|v| (v * 1000.0).round() / 1000.0))).collect::<Vec<_>>(),
+            self.edge_sel.iter().map(|e| (e.faces, [e.at.x, e.at.y, e.at.z].map(|v| (v * 1000.0).round() / 1000.0))).collect::<Vec<_>>(),
+            self.vert_sel.iter().map(|v| [v.x, v.y, v.z].map(|x| (x * 1000.0).round() / 1000.0)).collect::<Vec<_>>()
+        );
+        self.journal.push_back(JournalEntry {
+            at: self.now,
+            clock: format!("{:02}:{:02}:{:02} UTC", secs / 3600, secs / 60 % 60, secs % 60),
+            kind,
+            what: what.to_string(),
+            mode: format!("{:?}", self.sel_mode),
+            tool: format!("{:?}", self.tool),
+            selection: self.selection.clone(),
+            picked,
+            pivot: self.pivot().map(|p| p.to_array()),
+            steps: vec![],
+            errors: vec![],
+        });
+        while self.journal.len() > JOURNAL {
+            self.journal.pop_front();
+        }
+    }
+
+    /// The build of a change kept has arrived: its new errors go in the
+    /// journal; a move (Move face / edge / vertex, Scale) that the kernel
+    /// could not make is undone and the reason said (Romain, 20 nov.
+    /// 6 h 15: "c'est que le pivot qui se déplace").
+    fn check_build(&mut self) {
+        let Some((v, steps, prev)) = self.pending_check.clone() else { return };
+        let Some(m) = self.model.clone() else { return };
+        if m.serial / 4 != v || !m.fine {
+            if self.version != v {
+                self.pending_check = None;
+            }
+            return;
+        }
+        self.pending_check = None;
+        let new: Vec<String> = m.errors.iter().filter(|e| !prev.contains(e)).cloned().collect();
+        if let Some(e) = self.journal.iter_mut().rev().find(|e| e.kind == "edit") {
+            e.errors = new.clone();
+        }
+        if self.is_live() {
+            return;
+        }
+        let failed = steps.iter().filter_map(|id| self.doc.feature(*id)).filter(|f| f.tweak.as_ref().map(|t| !t.copy).unwrap_or(false)).find_map(|f| new.iter().find(|e| e.starts_with(&format!("{}:", f.name))).cloned());
+        if let Some(err) = failed {
+            self.undo();
+            self.record("auto-undo", &err);
+            self.toast(&format!("{err} · undone"), true);
         }
     }
 
@@ -2564,21 +2672,23 @@ impl AppState {
     /// transform qui contient l'élément, du coup ce doit être fluide et
     /// léger"): while whole shapes are dragged, each one's faces (its
     /// operations' too) shown at once where the pointer takes them, from
-    /// where the model on screen has them; the kernel's booleans catch up.
-    /// Each dragged element with its matrix (model → now).
+    /// where the model on screen has them, until the kernel's model of the
+    /// document as it is now arrives (the kernel builds when they are let
+    /// go). Each moved element with its matrix (model → now); None when the
+    /// model on screen is the document's.
     pub fn drag_preview(&self) -> Option<std::collections::HashMap<FeatureId, DMat4>> {
-        let ids = self.dragged_shapes()?;
-        let d = self.drag.as_ref()?;
-        let serial = self.model.as_ref()?.serial;
-        let sent = self.sent_frames.iter().find(|(s, _)| *s == serial).map(|(_, f)| f);
+        let m = self.model.as_ref()?;
+        if m.serial / 4 == self.version {
+            return None;
+        }
+        // the shapes' frames when the model on screen was asked for
+        let (_, then) = self.sent_frames.iter().find(|(s, _)| *s == m.serial)?;
         let mut out = std::collections::HashMap::new();
-        for id in ids {
-            let Some(now) = self.doc.feature(id) else { continue };
-            let then = sent.and_then(|v| v.iter().find(|(i, _)| *i == id).map(|(_, m)| *m)).or_else(|| d.start.iter().find(|f| f.id == id).map(shape_frame));
-            let Some(then) = then else { continue };
-            let m = shape_frame(now) * then.inverse();
-            if !m.abs_diff_eq(DMat4::IDENTITY, 1e-9) && m.is_finite() {
-                out.insert(id, m);
+        for (id, t) in then {
+            let Some(now) = self.doc.feature(*id) else { continue };
+            let x = shape_frame(now) * t.inverse();
+            if !x.abs_diff_eq(DMat4::IDENTITY, 1e-9) && x.is_finite() {
+                out.insert(*id, x);
             }
         }
         Some(out)
@@ -2608,7 +2718,15 @@ impl AppState {
                 self.model = Some(Arc::new(b.model));
                 self.model_gen += 1;
                 self.clamp_rounds();
+                self.check_build();
             }
+        }
+        // the journal: tool and mode changes
+        let seen = (format!("{:?}", self.tool), format!("{:?}", self.sel_mode));
+        if seen != self.journal_seen {
+            let what = format!("{} · {}", seen.0, seen.1);
+            self.journal_seen = seen;
+            self.record("tool", &what);
         }
         self.refresh_snaps();
         self.remesh_tick();
@@ -2618,17 +2736,17 @@ impl AppState {
         // quads only for a finished state (not while a gesture is live)
         let quads = self.quads && fine;
         let want = self.version * 4 + fine as u64 * 2 + quads as u64;
-        if want != self.submitted && self.kernel.status() != Status::Missing {
+        // whole shapes dragged in Object mode: a transform only, drawn
+        // from the model as it is (`drag_preview`); the kernel builds once
+        // they are let go (Romain, 20 nov. 6 h 11: "pas ultra fluide")
+        let dragging = self.dragged_shapes().is_some();
+        if want != self.submitted && self.kernel.status() != Status::Missing && !dragging {
             self.kernel.submit(want, &self.doc, fine, quads);
             self.submitted = want;
-            if let Some(ids) = self.dragged_shapes() {
-                let frames = ids.iter().filter_map(|id| self.doc.feature(*id)).map(|f| (f.id, shape_frame(f))).collect();
-                self.sent_frames.push((want, frames));
-                if self.sent_frames.len() > 64 {
-                    self.sent_frames.remove(0);
-                }
-            } else {
-                self.sent_frames.clear();
+            let frames = self.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()).map(|f| (f.id, shape_frame(f))).collect();
+            self.sent_frames.push((want, frames));
+            if self.sent_frames.len() > 16 {
+                self.sent_frames.remove(0);
             }
         }
     }
@@ -2888,7 +3006,8 @@ impl AppState {
     }
 
     pub fn toast(&mut self, text: &str, warn: bool) {
-        self.toast = Some(Toast { text: text.to_string(), until: self.now + 2.5, warn });
+        self.toast = Some(Toast { text: text.to_string(), until: self.now + if warn { 4.0 } else { 2.5 }, warn });
+        self.record("toast", text);
     }
 
     // ---------------------------------------------------------- documents
@@ -3165,3 +3284,6 @@ pub fn shape_frame(f: &Feature) -> DMat4 {
     };
     f.matrix() * DMat4::from_scale(k.max(DVec3::splat(1e-6)))
 }
+
+/// How many lines the debug journal keeps.
+pub const JOURNAL: usize = 40;

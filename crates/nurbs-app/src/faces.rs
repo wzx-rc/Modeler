@@ -83,6 +83,189 @@ impl AppState {
         }
     }
 
+    // ----------------------------------------------------- linked (Maya)
+
+    /// The faces linked to `face` (a double-click in Face mode, as Maya's
+    /// shell): those reached across the part's edges without leaving its
+    /// element. A piece of faces copied apart from the part is all of it.
+    pub fn linked_faces(&self, face: usize) -> Vec<usize> {
+        let Some(m) = &self.model else { return vec![] };
+        let el = |f: usize| m.faces.get(f).and_then(|x| x.tag).map(|t| self.element_of(t.feature));
+        let want = el(face);
+        if want.is_none() {
+            return vec![face];
+        }
+        let mut nb: Vec<Vec<usize>> = vec![vec![]; m.faces.len()];
+        for e in &m.edges {
+            let (a, b) = (e.faces[0], e.faces[1]);
+            if a >= 0 && b >= 0 && a != b {
+                nb[a as usize].push(b as usize);
+                nb[b as usize].push(a as usize);
+            }
+        }
+        let mut seen = vec![false; m.faces.len()];
+        let mut out = vec![face];
+        seen[face] = true;
+        let mut i = 0;
+        while i < out.len() {
+            for &g in &nb[out[i]] {
+                if !seen[g] && el(g) == want {
+                    seen[g] = true;
+                    out.push(g);
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// A point on a model face (its largest triangle's centre), to name it.
+    pub fn face_point(&self, face: usize) -> Option<DVec3> {
+        let m = self.model.as_ref()?;
+        let mut best: Option<(f32, Vec3)> = None;
+        for (t, tri) in m.triangles.iter().enumerate() {
+            if m.tri_face[t] as usize != face {
+                continue;
+            }
+            let [a, b, c] = tri.map(|v| Vec3::from(m.positions[v as usize]));
+            let area = (b - a).cross(c - a).length();
+            if best.map(|x| area > x.0).unwrap_or(true) {
+                best = Some((area, (a + b + c) / 3.0));
+            }
+        }
+        best.map(|b| b.1.as_dvec3())
+    }
+
+    /// A double-click in Face mode: the linked faces picked (Shift / Ctrl:
+    /// added to those picked).
+    pub fn pick_linked_faces(&mut self, at: [f32; 2], add: bool) {
+        let Some(h) = self.pick_at(at) else { return };
+        let refs: Vec<FaceRef> = self.linked_faces(h.face).into_iter().filter_map(|f| self.face_ref(f, self.face_point(f)?)).collect();
+        if refs.is_empty() {
+            return;
+        }
+        self.selection.clear();
+        if !add {
+            self.face_sel.clear();
+        }
+        for r in refs {
+            if !self.face_sel.iter().any(|x| x.tag == r.tag && x.at.distance(r.at) < 1e-3) {
+                self.face_sel.push(r);
+            }
+        }
+        let n = self.face_sel.len();
+        self.record("pick", &format!("double-click: {n} linked faces"));
+    }
+
+    /// The edges linked to edge `i` (a double-click in Edge mode, as
+    /// Maya's edge loop): on from each end through the edge that goes on
+    /// tangent to it (within 20°), or the only other edge there.
+    pub fn linked_edges(&self, i: usize) -> Vec<usize> {
+        let Some(m) = &self.model else { return vec![] };
+        let ok = |j: usize| {
+            let e = &m.edges[j];
+            !e.seam && e.faces[0] >= 0 && e.faces[1] >= 0 && e.pts.len() >= 2
+        };
+        if i >= m.edges.len() || !ok(i) {
+            return vec![i];
+        }
+        // an end of edge j: its point and the way out of the edge there
+        let end = |j: usize, last: bool| -> (Vec3, Vec3) {
+            let p = &m.edges[j].pts;
+            let (a, b) = if last { (p[p.len() - 1], p[p.len() - 2]) } else { (p[0], p[1]) };
+            let (a, b) = (Vec3::from(a), Vec3::from(b));
+            (a, (a - b).normalize_or_zero())
+        };
+        const TOL: f32 = 2e-3;
+        let cos = 20f32.to_radians().cos();
+        let mut out = vec![i];
+        for last in [false, true] {
+            let (mut p, mut d) = end(i, last);
+            let mut cur = i;
+            loop {
+                // the other edges ending at p: how many, and those that may
+                // go on (not taken yet), with the way into them
+                let mut others = 0;
+                let mut here: Vec<(usize, bool, Vec3)> = vec![];
+                for (j, e) in m.edges.iter().enumerate() {
+                    if j == cur || e.seam || e.pts.len() < 2 {
+                        continue;
+                    }
+                    for l in [false, true] {
+                        let (q, w) = end(j, l);
+                        if q.distance(p) < TOL {
+                            others += 1;
+                            if ok(j) && !out.contains(&j) {
+                                here.push((j, l, -w));
+                            }
+                        }
+                    }
+                }
+                let next = here
+                    .iter()
+                    .map(|&(j, l, w)| (j, l, w.dot(d)))
+                    .filter(|&(_, _, c)| c > cos || others == 1)
+                    .max_by(|a, b| a.2.total_cmp(&b.2));
+                let Some((j, l, _)) = next else { break };
+                out.push(j);
+                cur = j;
+                (p, d) = end(j, !l);
+            }
+        }
+        out
+    }
+
+    /// A double-click in Edge mode: the linked edges picked (Shift / Ctrl:
+    /// added to those picked).
+    pub fn pick_linked_edges(&mut self, edge: usize, add: bool) {
+        let refs: Vec<EdgeRef> = self.linked_edges(edge).into_iter().filter_map(|j| self.edge_ref(j)).collect();
+        if refs.is_empty() {
+            return;
+        }
+        self.selection.clear();
+        if !add {
+            self.edge_sel.clear();
+        }
+        for r in refs {
+            if !self.edge_sel.iter().any(|x| x.key() == r.key() && x.at.distance(r.at) < 1e-3) {
+                self.edge_sel.push(r);
+            }
+        }
+        let n = self.edge_sel.len();
+        self.record("pick", &format!("double-click: {n} linked edges"));
+    }
+
+    /// A double-click in Vertex mode: the vertices of the faces linked to
+    /// one face round the vertex (Shift / Ctrl: added).
+    pub fn pick_linked_vertices(&mut self, v: DVec3, add: bool) {
+        let Some(m) = &self.model else { return };
+        let v32 = v.as_vec3();
+        let near = |p: &[f32; 3]| Vec3::from(*p).distance(v32) < 2e-3;
+        let Some(face) = m.edges.iter().filter(|e| !e.seam && e.pts.len() >= 2 && (near(&e.pts[0]) || near(e.pts.last().unwrap()))).flat_map(|e| e.faces).find(|f| *f >= 0) else { return };
+        let faces = self.linked_faces(face as usize);
+        let Some(m) = &self.model else { return };
+        let mut pts: Vec<DVec3> = vec![];
+        for e in m.edges.iter().filter(|e| !e.seam && e.pts.len() >= 2 && e.faces.iter().any(|f| *f >= 0 && faces.contains(&(*f as usize)))) {
+            for p in [e.pts[0], *e.pts.last().unwrap()] {
+                let p = Vec3::from(p).as_dvec3();
+                if !pts.iter().any(|q| q.distance(p) < 1e-3) {
+                    pts.push(p);
+                }
+            }
+        }
+        self.selection.clear();
+        if !add {
+            self.vert_sel.clear();
+        }
+        for p in pts {
+            if !self.vert_sel.iter().any(|q| q.distance(p) < 1e-3) {
+                self.vert_sel.push(p);
+            }
+        }
+        let n = self.vert_sel.len();
+        self.record("pick", &format!("double-click: {n} linked vertices"));
+    }
+
     // ------------------------------------------------------------ vertices
 
     /// The vertices Vertex mode picks: the part's, and the paths' points

@@ -166,6 +166,7 @@ fn waits_for(method: &str) -> (bool, bool, bool) {
         "add_fillets" => (true, false, false),
         "list_features" => (true, false, false),
         "document" => (true, false, false),
+        "journal" => (false, false, false),
         "status" => (false, false, false),
         _ => (false, false, false),
     }
@@ -202,6 +203,7 @@ fn handle(st: &mut AppState, r: Request) {
     let out = match r.method.as_str() {
         "status" => Ok(status(st)),
         "document" => Ok(document(st)),
+        "journal" => Ok(journal(st, &p)),
         "open_reference" => open_reference(st, &p),
         "primary_candidates" => primary_candidates(st, &p),
         "list_features" => Ok(list_features(st, &p)),
@@ -504,6 +506,59 @@ fn document(st: &AppState) -> Value {
         "errors": m.map(|m| m.errors.clone()),
         "odd_edges": edges,
     })
+}
+
+/// The debug journal (Romain, 20 nov. 6 h 15): the last `n` lines (10 by
+/// default: edits, undos, toasts, tool and mode changes, each with the mode,
+/// tool, selection, what was picked, the pivot, the steps made and the
+/// build's new errors), and the state now; `document`: true adds the
+/// document as `document` gives it.
+fn journal(st: &AppState, p: &Value) -> Value {
+    let n = p.get("n").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let lines: Vec<Value> = st
+        .journal
+        .iter()
+        .rev()
+        .take(n)
+        .rev()
+        .map(|e| {
+            json!({
+                "at_s": r(e.at),
+                "clock": e.clock,
+                "kind": e.kind,
+                "what": e.what,
+                "mode": e.mode,
+                "tool": e.tool,
+                "selection": e.selection,
+                "picked": e.picked,
+                "pivot": e.pivot.map(|p| r3(glam::DVec3::from_array(p))),
+                "steps": e.steps,
+                "errors": e.errors,
+            })
+        })
+        .collect();
+    let m = st.model.as_ref();
+    let mut out = json!({
+        "app": crate::version_title(),
+        "now_s": r(st.now),
+        "journal": lines,
+        "mode": format!("{:?}", st.sel_mode),
+        "tool": format!("{:?}", st.tool),
+        "gizmo": format!("{:?}", st.gizmo),
+        "selection": st.selection,
+        "faces_picked": st.face_sel.iter().map(|f| json!({ "tag": f.tag, "at": r3(f.at) })).collect::<Vec<_>>(),
+        "edges_picked": st.edge_sel.iter().map(|e| json!({ "faces": e.faces, "at": r3(e.at) })).collect::<Vec<_>>(),
+        "vertices_picked": st.vert_sel.iter().map(|v| r3(*v)).collect::<Vec<_>>(),
+        "pivot": st.pivot().map(r3),
+        "toast": st.toast.as_ref().map(|t| t.text.clone()),
+        "building": st.building(),
+        "errors": m.map(|m| m.errors.clone()),
+        "undo": st.undo_labels().into_iter().rev().take(10).collect::<Vec<_>>(),
+    });
+    if p.get("document").and_then(|v| v.as_bool()).unwrap_or(false) {
+        out["document"] = document(st);
+    }
+    out
 }
 
 fn status(st: &AppState) -> Value {

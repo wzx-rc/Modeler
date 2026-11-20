@@ -72,6 +72,8 @@ extern "C" {
     fn focc_vertex_points(s: *const FShape, xyz: *mut c_double, cap: c_int) -> c_int;
     fn focc_sub_vertices(s: *const FShape, kind: c_int, index: c_int, out: *mut c_int, cap: c_int) -> c_int;
     fn focc_move_vertices(s: *const FShape, idx: *const c_int, xyz: *const c_double, n: c_int) -> *mut FShape;
+    fn focc_move_lumps(s: *const FShape, idx: *const c_int, n: c_int, m: *const c_double) -> *mut FShape;
+    fn focc_lumps_of(s: *const FShape, solids: c_int) -> *mut FShape;
     fn focc_face_count(s: *const FShape) -> c_int;
     fn focc_face_info(s: *const FShape, index: c_int, out: *mut c_double) -> c_int;
     fn focc_face_box(s: *const FShape, index: c_int, out: *mut c_double) -> c_int;
@@ -526,11 +528,27 @@ impl Shape {
     pub fn compound(&self, other: &Shape) -> Result<Shape, String> {
         shape(unsafe { focc_compound(self.0, other.0) })
     }
+    /// Its solids alone, or (false) what is not a solid (sheets beside the
+    /// part); Err when there is none.
+    pub fn lumps_of(&self, solids: bool) -> Result<Shape, String> {
+        shape(unsafe { focc_lumps_of(self.0, solids as c_int) })
+    }
+    /// A union or a cut made on the solids, the sheets beside them kept
+    /// as they are (a boolean with a sheet in the part fails).
+    fn solid_boolean(&self, tool: &Shape, f: unsafe extern "C" fn(*const FShape, *const FShape) -> *mut FShape) -> Result<Shape, String> {
+        match self.lumps_of(false) {
+            Ok(sheets) => match self.lumps_of(true) {
+                Ok(solids) => shape(unsafe { f(solids.0, tool.0) })?.compound(&sheets),
+                Err(_) => shape(unsafe { f(self.0, tool.0) }),
+            },
+            Err(_) => shape(unsafe { f(self.0, tool.0) }),
+        }
+    }
     pub fn fuse(&self, other: &Shape) -> Result<Shape, String> {
-        shape(unsafe { focc_fuse(self.0, other.0) })
+        self.solid_boolean(other, focc_fuse)
     }
     pub fn cut(&self, tool: &Shape) -> Result<Shape, String> {
-        shape(unsafe { focc_cut(self.0, tool.0) })
+        self.solid_boolean(tool, focc_cut)
     }
 
     /// Junction edges made by the boolean that produced this shape.
@@ -714,6 +732,14 @@ impl Shape {
     /// The solid with vertices moved (1-based index, new point), the faces
     /// round them following (flat faces with straight edges for now; a bent
     /// four-sided face becomes a bilinear patch). Tags stay.
+    /// The pieces (lumps) whose vertices (1-based) are all in `vs` moved
+    /// whole by the matrix (3 rows of 4); Err when a piece has only some of
+    /// them (a deformation) or none moves.
+    pub fn move_lumps(&self, vs: &[i32], rows: [[f64; 4]; 3]) -> Result<Shape, String> {
+        let idx: Vec<c_int> = vs.to_vec();
+        let m: Vec<f64> = rows.iter().flatten().copied().collect();
+        shape(unsafe { focc_move_lumps(self.0, idx.as_ptr(), idx.len() as c_int, m.as_ptr()) })
+    }
     pub fn move_vertices(&self, moves: &[(i32, [f64; 3])]) -> Result<Shape, String> {
         let idx: Vec<c_int> = moves.iter().map(|m| m.0).collect();
         let xyz: Vec<f64> = moves.iter().flat_map(|m| m.1).collect();
