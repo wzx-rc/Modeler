@@ -71,6 +71,7 @@
 #include <Geom_SurfaceOfLinearExtrusion.hxx>
 #include <Geom_SurfaceOfRevolution.hxx>
 #include <ShapeFix_Edge.hxx>
+#include <BRepAlgoAPI_Defeaturing.hxx>
 #include <GeomAPI_IntCS.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <functional>
@@ -3500,6 +3501,57 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                     }
                 }
             }
+            // curved edges whose ends move (20 nov.): carried whole when
+            // both ends move by one vector (a fillet's end on a face moved
+            // along its axis), else kept on their curve when each moved end
+            // stays on it (a cut's end sliding along a fillet's edge)
+            {
+                TopTools_IndexedMapOfShape em;
+                TopExp::MapShapes(src, TopAbs_EDGE, em);
+                const double tol = 1e-6 * size + 1e-6;
+                for (int i = 1; i <= em.Extent(); i++) {
+                    TopoDS_Edge ef = TopoDS::Edge(em(i).Oriented(TopAbs_FORWARD));
+                    if (enew.IsBound(ef) || BRep_Tool::Degenerated(ef)) continue;
+                    TopoDS_Vertex a, b;
+                    TopExp::Vertices(ef, a, b);
+                    bool ma = vnew.IsBound(a), mb = vnew.IsBound(b);
+                    if (!ma && !mb) continue;
+                    if (BRepAdaptor_Curve(ef).GetType() == GeomAbs_Line) continue;
+                    double t0, t1;
+                    opencascade::handle<Geom_Curve> gc = BRep_Tool::Curve(ef, t0, t1);
+                    if (gc.IsNull()) continue;
+                    TopoDS_Vertex na = ma ? TopoDS::Vertex(vnew(a)) : a, nb = mb ? TopoDS::Vertex(vnew(b)) : b;
+                    gp_Pnt pa = BRep_Tool::Pnt(a), pb = BRep_Tool::Pnt(b), qa = BRep_Tool::Pnt(na), qb = BRep_Tool::Pnt(nb);
+                    gp_Vec va(pa, qa), vb(pb, qb);
+                    TopoDS_Edge ne;
+                    if (ma && mb && (va - vb).Magnitude() < tol) {
+                        gp_Trsf tr;
+                        tr.SetTranslation(va);
+                        opencascade::handle<Geom_Curve> mc = opencascade::handle<Geom_Curve>::DownCast(gc->Transformed(tr));
+                        BRepBuilderAPI_MakeEdge me(mc, TopoDS::Vertex(na.Oriented(TopAbs_FORWARD)), TopoDS::Vertex(nb.Oriented(TopAbs_FORWARD)), t0, t1);
+                        if (me.IsDone()) ne = me.Edge();
+                    } else if (!a.IsSame(b)) {
+                        // each moved end on the curve: its parameter there
+                        auto param = [&](const gp_Pnt& q, double old, double& t) {
+                            GeomAPI_ProjectPointOnCurve pj(q, gc);
+                            if (pj.NbPoints() == 0 || pj.LowerDistance() > tol) return false;
+                            t = pj.LowerDistanceParameter();
+                            if (gc->IsPeriodic()) {
+                                double per = gc->Period();
+                                while (t - old > per / 2) t -= per;
+                                while (old - t > per / 2) t += per;
+                            }
+                            return true;
+                        };
+                        double n0 = t0, n1 = t1;
+                        if ((ma && !param(qa, t0, n0)) || (mb && !param(qb, t1, n1))) continue;
+                        if (n1 - n0 < 1e-9) continue;
+                        BRepBuilderAPI_MakeEdge me(gc, TopoDS::Vertex(na.Oriented(TopAbs_FORWARD)), TopoDS::Vertex(nb.Oriented(TopAbs_FORWARD)), n0, n1);
+                        if (me.IsDone()) ne = me.Edge();
+                    }
+                    if (!ne.IsNull()) enew.Bind(ef, ne);
+                }
+            }
             TopoDS_Shell shell;
             bb.MakeShell(shell);
             std::vector<long long> tags;
@@ -3675,8 +3727,102 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                     continue;
                 }
                 if (as.GetType() != GeomAbs_Plane) {
-                    set_err("only flat faces can follow a move for now");
-                    return nullptr;
+                    // a curved face round the move (20 nov.: a fillet's face
+                    // whose edge a cut's end slides along, a fillet's end
+                    // carried along its axis): it keeps its surface when
+                    // the moved points and edges stay on it
+                    TopLoc_Location loc;
+                    opencascade::handle<Geom_Surface> gs = BRep_Tool::Surface(f, loc);
+                    opencascade::handle<Geom_Surface> gl = BRep_Tool::Surface(f);
+                    const double tol = 1e-5 * size + 1e-6;
+                    const char* why = "only flat faces can follow a move for now (a curved face next to it would have to change)";
+                    auto on = [&](const gp_Pnt& p) {
+                        GeomAPI_ProjectPointOnSurf pj(p, gl);
+                        return pj.NbPoints() > 0 && pj.LowerDistance() <= tol;
+                    };
+                    TopoDS_Face fw = TopoDS::Face(f.Oriented(TopAbs_FORWARD));
+                    TopoDS_Face nf;
+                    bb.MakeFace(nf, gs, loc, BRep_Tool::Tolerance(f));
+                    std::vector<TopoDS_Edge> fresh;
+                    for (TopoDS_Iterator wi(fw); wi.More(); wi.Next()) {
+                        TopoDS_Wire ow = TopoDS::Wire(wi.Value());
+                        TopoDS_Wire nw;
+                        bb.MakeWire(nw);
+                        for (TopoDS_Iterator ei(ow.Oriented(TopAbs_FORWARD)); ei.More(); ei.Next()) {
+                            TopoDS_Edge e = TopoDS::Edge(ei.Value());
+                            TopoDS_Edge ef = TopoDS::Edge(e.Oriented(TopAbs_FORWARD));
+                            TopoDS_Vertex a, b;
+                            TopExp::Vertices(ef, a, b);
+                            bool ma = vnew.IsBound(a), mb = vnew.IsBound(b);
+                            if (!ma && !mb) {
+                                bb.Add(nw, e);
+                                continue;
+                            }
+                            if (BRep_Tool::IsClosed(ef, fw)) {
+                                set_err(why);
+                                return nullptr;
+                            }
+                            TopoDS_Edge ne;
+                            if (enew.IsBound(ef)) {
+                                ne = TopoDS::Edge(enew(ef));
+                            } else if (BRepAdaptor_Curve(ef).GetType() == GeomAbs_Line) {
+                                TopoDS_Vertex na = ma ? TopoDS::Vertex(vnew(a)) : a;
+                                TopoDS_Vertex nb = mb ? TopoDS::Vertex(vnew(b)) : b;
+                                if (BRep_Tool::Pnt(na).Distance(BRep_Tool::Pnt(nb)) < 1e-4) {
+                                    set_err("the move folds an edge to nothing");
+                                    return nullptr;
+                                }
+                                BRepBuilderAPI_MakeEdge me(TopoDS::Vertex(na.Oriented(TopAbs_FORWARD)), TopoDS::Vertex(nb.Oriented(TopAbs_FORWARD)));
+                                if (!me.IsDone()) {
+                                    set_err("an edge could not follow the move");
+                                    return nullptr;
+                                }
+                                ne = me.Edge();
+                                enew.Bind(ef, ne);
+                            } else {
+                                set_err("only straight edges can follow a move for now");
+                                return nullptr;
+                            }
+                            BRepAdaptor_Curve nc(ne);
+                            for (int k = 0; k <= 8; k++)
+                                if (!on(nc.Value(nc.FirstParameter() + (nc.LastParameter() - nc.FirstParameter()) * k / 8.0))) {
+                                    set_err(why);
+                                    return nullptr;
+                                }
+                            bb.Add(nw, TopoDS::Edge(ne.Oriented(e.Orientation())));
+                            fresh.push_back(ne);
+                        }
+                        nw.Closed(Standard_True);
+                        nw.Orientation(ow.Orientation());
+                        bb.Add(nf, nw);
+                    }
+                    for (const TopoDS_Edge& e : fresh) {
+                        ShapeFix_Edge sfe;
+                        sfe.FixAddPCurve(e, nf, Standard_False, 1e-6);
+                        double g0, g1;
+                        opencascade::handle<Geom2d_Curve> pc = BRep_Tool::CurveOnSurface(e, nf, g0, g1);
+                        if (pc.IsNull()) {
+                            set_err(why);
+                            return nullptr;
+                        }
+                        BRepAdaptor_Curve ec(e);
+                        BRepAdaptor_Surface an(nf, Standard_False);
+                        double dmax = 0;
+                        for (int k = 0; k <= 160; k++) {
+                            double t = ec.FirstParameter() + (ec.LastParameter() - ec.FirstParameter()) * k / 160.0;
+                            gp_Pnt2d uv = pc->Value(g0 + (g1 - g0) * k / 160.0);
+                            dmax = std::max(dmax, an.Value(uv.X(), uv.Y()).Distance(ec.Value(t)));
+                        }
+                        if (dmax > 1e-3 * size) {
+                            set_err(why);
+                            return nullptr;
+                        }
+                        if (dmax > BRep_Tool::Tolerance(e)) bb.UpdateEdge(e, 1.5 * dmax);
+                    }
+                    nf.Orientation(f.Orientation());
+                    bb.Add(shell, nf);
+                    tags.push_back(tag);
+                    continue;
                 }
                 TopoDS_Face fw = TopoDS::Face(f.Oriented(TopAbs_FORWARD));
                 TopoDS_Wire ow = BRepTools::OuterWire(fw);
@@ -4995,6 +5141,45 @@ FShape* focc_compound(const FShape* a, const FShape* b) {
 // Delete faces (Face mode + Del, Romain 19 nov. 23 h 22): the faces at
 // these indices (0-based) taken out, the part left open where they were.
 // The others keep their tags.
+// Faces (0-based) taken away and the faces round them made longer to close
+// the part again (BRepAlgoAPI_Defeaturing: a fillet's faces gone, its edge
+// sharp again), the tags carried.
+FShape* focc_defeature(const FShape* s, const int* idx, int n) {
+    return guard(
+        [&]() -> FShape* {
+            TopTools_IndexedMapOfShape fm;
+            face_map(s->s, fm);
+            BRepAlgoAPI_Defeaturing df;
+            df.SetShape(s->s);
+            df.SetRunParallel(Standard_False);
+            int k = 0;
+            for (int i = 0; i < n; i++)
+                if (idx[i] >= 0 && idx[i] < fm.Extent()) {
+                    df.AddFaceToRemove(fm(idx[i] + 1));
+                    k++;
+                }
+            if (k == 0) {
+                set_err("no face to take away");
+                return nullptr;
+            }
+            df.Build();
+            if (!df.IsDone() || df.HasErrors()) {
+                set_err("the faces could not be taken away");
+                return nullptr;
+            }
+            TopoDS_Shape out = df.Shape();
+            if (!valid(out)) {
+                set_err("the faces could not be taken away");
+                return nullptr;
+            }
+            FShape* r = wrap(out);
+            if (!r) return nullptr;
+            carry_tags(df, s, r, -1);
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
 FShape* focc_remove_faces(const FShape* s, const int* idx, int n) {
     return guard(
         [&]() -> FShape* {

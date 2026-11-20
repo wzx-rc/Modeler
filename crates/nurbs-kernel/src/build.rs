@@ -6,7 +6,7 @@
 //! result after each feature (by the content of everything up to it). While
 //! one feature moves, only the booleans from it onwards are made again.
 
-use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, Knife, Op, Prim, Push, Round, Tweak};
+use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Knife, Op, Prim, Push, Round, Tweak};
 use crate::model::{Edge, EdgeKind, Face, FaceTag, Model, SurfKind};
 use crate::proto::step;
 use forme_occt::{CutKind, Shape, SurfKind as OccSurf};
@@ -509,6 +509,100 @@ fn comp_vertices(acc: &Shape, c: &Comp) -> Result<Vec<i32>, String> {
 /// A face, edge or vertex moved (`doc::Tweak`) on what is built so far:
 /// its vertices moved by `delta`, the faces round them following. None
 /// when it does not move.
+/// A move next to fillets or chamfers made earlier (20 nov.: Romain's
+/// flank, a Knife after its top fillets): the faces of those round round
+/// what moves taken away (the faces round them grown back sharp,
+/// BRepAlgoAPI_Defeaturing), the move made, then each made again on the
+/// edges between the faces it ran along, near where it was.
+fn tweak_unrounded(doc: &Doc, acc: &Shape, f: &Feature, t: &Tweak) -> Result<Shape, String> {
+    let mut vs: Vec<i32> = vec![];
+    for c in t.comps() {
+        for v in comp_vertices(acc, c)? {
+            if !vs.contains(&v) {
+                vs.push(v);
+            }
+        }
+    }
+    let round_of = |i: usize| FaceTag::unpack(acc.face_tag(i)).and_then(|tg| doc.feature(tg.feature)).filter(|g| g.round.is_some() && g.id != f.id);
+    // the round steps with a face at a moved vertex, in the document's order
+    let mut rids: Vec<FeatureId> = vec![];
+    for i in 0..acc.face_count() {
+        if let Some(g) = round_of(i) {
+            if !rids.contains(&g.id) && acc.face_vertices(i).iter().any(|v| vs.contains(v)) {
+                rids.push(g.id);
+            }
+        }
+    }
+    if rids.is_empty() {
+        return Err("no fillet round it".into());
+    }
+    rids.sort_by_key(|id| doc.features.iter().position(|g| g.id == *id));
+    let faces: Vec<usize> = (0..acc.face_count()).filter(|&i| round_of(i).is_some_and(|g| rids.contains(&g.id))).collect();
+    mark(&step("unround", f));
+    let mut base = acc.defeature(&faces)?;
+    // the Knife's straight lines between two pieces of one face that ran
+    // to those faces: the pieces were made one again; cut again, the line
+    // carried on to the face's new border
+    let tags0: Vec<i64> = (0..acc.face_count()).map(|i| acc.face_tag(i)).collect();
+    let span = vs.iter().map(|&v| DVec3::from_array(acc.vertex_points()[(v - 1) as usize])).fold(0.0f64, |m, p| m.max(p.length())) * 4.0 + 1000.0;
+    for (i, fs) in acc.edge_faces().iter().enumerate() {
+        if fs[0] < 0 || fs[1] < 0 || fs[0] == fs[1] || tags0[fs[0] as usize] != tags0[fs[1] as usize] {
+            continue;
+        }
+        let Some(e) = acc.edge(i as i32 + 1, 9) else { continue };
+        if e.kind != forme_occt::EdgeKind::Line || e.pts.len() < 2 {
+            continue;
+        }
+        let (a, b) = (DVec3::from_array(e.pts[0]), DVec3::from_array(*e.pts.last().unwrap()));
+        let mid = DVec3::from_array(e.pts[4]);
+        let t = tags0[fs[0] as usize];
+        let btags: Vec<i64> = (0..base.face_count()).map(|i| base.face_tag(i)).collect();
+        let kept = base.edge_faces().iter().enumerate().any(|(j, g)| {
+            g[0] >= 0 && g[1] >= 0 && btags[g[0] as usize] == t && btags[g[1] as usize] == t && base.edge(j as i32 + 1, 9).is_some_and(|x| x.pts.iter().any(|p| DVec3::from_array(*p).distance(mid) < 1e-3))
+        });
+        if kept || a.distance(b) < 1e-6 {
+            continue;
+        }
+        let d = (b - a).normalize();
+        if let Ok(s) = base.split(&[(a - d * span).to_array(), (b + d * span).to_array()], &[[0, 1]]) {
+            base = s;
+        }
+    }
+    let mut s = match tweak(&base, f, t)? {
+        Some(s) => s,
+        None => base,
+    };
+    let reach = t.delta.length() + 0.5;
+    for rid in rids {
+        let g = doc.feature(rid).unwrap();
+        let rd = g.round.as_ref().unwrap();
+        let old: Vec<usize> = faces.iter().copied().filter(|&i| round_of(i).is_some_and(|x| x.id == rid)).collect();
+        let keys: Vec<[i64; 2]> = rd.edges.iter().map(|e| e.key()).collect();
+        let tags: Vec<i64> = (0..s.face_count()).map(|i| s.face_tag(i)).collect();
+        let mut edges = vec![];
+        for (i, fs) in s.edge_faces().iter().enumerate() {
+            if fs[0] < 0 || fs[1] < 0 {
+                continue;
+            }
+            let (a, b) = (tags[fs[0] as usize], tags[fs[1] as usize]);
+            let k = if a <= b { [a, b] } else { [b, a] };
+            if !keys.contains(&k) {
+                continue;
+            }
+            let Some(mid) = s.edge(i as i32 + 1, 9).and_then(|e| e.pts.get(4).copied()) else { continue };
+            if old.iter().any(|&o| acc.face_distance(o, mid).is_some_and(|d| d <= rd.size + reach)) {
+                edges.push(EdgeRef { faces: k, at: DVec3::from_array(mid) });
+            }
+        }
+        let again = Round { edges, ..rd.clone() };
+        match round(&s, g, &again, true) {
+            (Some(Ok(r)), _, _) => s = r,
+            _ => return Err(format!("{} could not be made again", g.name)),
+        }
+    }
+    Ok(s)
+}
+
 fn tweak(acc: &Shape, f: &Feature, t: &Tweak) -> Result<Option<Shape>, String> {
     let scaled = (t.scale - DVec3::ONE).abs().max_element() > 1e-9;
     if t.delta.length() < 1e-6 && !scaled {
@@ -740,7 +834,13 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                     Ok(None) => {}
                     Err(e) => match replay(doc, &feats[..i], f, t, &stage, skip, cache, model, used_tools, used_stages) {
                         Some(s) => stage = s,
-                        None => stage.errors.push(format!("{}: {e}", f.name)),
+                        None => match tweak_unrounded(doc, &acc, f, t) {
+                            Ok(s) => {
+                                model.booleans += 1;
+                                stage.shape = Some(Rc::new(s));
+                            }
+                            Err(_) => stage.errors.push(format!("{}: {e}", f.name)),
+                        },
                     },
                 }
             }
@@ -1920,6 +2020,86 @@ mod tests {
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert_eq!(m.faces.len(), m0.faces.len() + 1);
+    }
+
+    #[test]
+    fn moves_by_fillets_and_cuts() {
+        // Romain's flank (20 nov.): a block whose top long edges are
+        // filleted, then cut by the Knife on its +Z side; the cut's edge
+        // moved along X (its top end slides along the fillet's edge), a
+        // diagonal cut from a corner taken out, the +X end moved out (its
+        // fillets' ends follow along their axes)
+        let block = |d: &mut Doc| {
+            let b = d.add(Op::Add, Prim::Box { x: 60.0, y: 40.0, z: 27.4 }, DVec3::ZERO, DQuat::IDENTITY);
+            let r = d.add_round(
+                6.6,
+                false,
+                vec![
+                    EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 40.0, 13.7) },
+                    EdgeRef { faces: [tag(b, 2), tag(b, 5)], at: DVec3::new(0.0, 40.0, -13.7) },
+                ],
+            );
+            (b, r)
+        };
+        // a point on a straight edge running along X from -30 to 30
+        let kx = |faces: [i64; 2], at: DVec3| KnifePoint { edge: EdgeRef { faces, at }, f: (30.0 - at.x.abs()) / 60.0, at };
+        let mut cases: Vec<(&str, Doc)> = vec![];
+        for (name, dx) in [("cut edge moved +X", 1.631), ("cut edge moved -X", -4.0)] {
+            let mut d = Doc::default();
+            let (b, r) = block(&mut d);
+            let side = tag(b, 4);
+            d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(11.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(11.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+            d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [side, side], at: DVec3::new(11.0, 16.7, 13.7) }), delta: DVec3::new(dx, 0.0, 0.0), more: vec![], scale: DVec3::ONE });
+            cases.push((name, d));
+        }
+        {
+            let mut d = Doc::default();
+            let (b, r) = block(&mut d);
+            let side = tag(b, 4);
+            d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(11.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(11.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+            d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(30.0, 15.0, 0.0) }), delta: DVec3::new(3.0, 0.0, 0.0), more: vec![], scale: DVec3::ONE });
+            cases.push(("+X end moved out after a cut", d));
+        }
+        // across the fillet: a half of the cut flank moved out, the top
+        // moved up (the fillet made again after the move)
+        for (name, face, at, delta) in [
+            ("cut flank's half moved out", 4u16, DVec3::new(20.0, 15.0, 13.7), DVec3::new(0.0, 0.0, 2.0)),
+            ("top moved up after a cut", 2u16, DVec3::new(0.0, 40.0, 0.0), DVec3::new(0.0, 3.0, 0.0)),
+            ("cut flank's half moved in", 4u16, DVec3::new(20.0, 15.0, 13.7), DVec3::new(0.0, 0.0, -2.0)),
+        ] {
+            let mut d = Doc::default();
+            let (b, r) = block(&mut d);
+            let side = tag(b, 4);
+            d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(11.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(11.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+            d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, face), at }), delta, more: vec![], scale: DVec3::ONE });
+            cases.push((name, d));
+        }
+        {
+            let mut d = Doc::default();
+            let (b, r) = block(&mut d);
+            let side = tag(b, 4);
+            d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(-30.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(5.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            eprintln!("diagonal cut: errors {:?}, faces {}", m.errors, m.faces.len());
+            let e = m.edges.iter().filter(|e| e.faces[0] >= 0 && e.faces[1] >= 0 && m.faces[e.faces[0] as usize].tag.map(|t| t.pack()) == Some(side) && m.faces[e.faces[1] as usize].tag.map(|t| t.pack()) == Some(side)).count();
+            let one_sided = m.edges.iter().filter(|e| e.faces[1] < 0).count();
+            eprintln!("diagonal cut: {e} edges between its halves, {one_sided} one-sided edges");
+            let mut d2 = d.clone();
+            d2.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![EdgeRef { faces: [side, side], at: DVec3::new(-12.5, 16.7, 13.7) }] }, "Delete");
+            cases.push(("diagonal cut from a corner deleted", d2));
+            d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [side, side], at: DVec3::new(-12.5, 16.7, 13.7) }), delta: DVec3::new(2.0, 0.0, 0.0), more: vec![], scale: DVec3::ONE });
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            eprintln!("diagonal cut from a corner moved: {:?} (its corner cannot leave the fillet's end)", m.errors);
+        }
+        let mut bad = vec![];
+        for (name, d) in &cases {
+            let m = build(d, true, false, &[], &mut Cache::default());
+            eprintln!("{name:<40} errors {:?}, {} faces, bounds {:?}", m.errors, m.faces.len(), m.bounds());
+            if !m.errors.is_empty() {
+                bad.push(format!("{name}: {:?}", m.errors));
+            }
+        }
+        assert!(bad.is_empty(), "{} failed:\n{}", bad.len(), bad.join("\n"));
     }
 
     #[test]

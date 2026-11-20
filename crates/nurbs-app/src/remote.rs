@@ -165,6 +165,7 @@ fn waits_for(method: &str) -> (bool, bool, bool) {
         // its edges are found on the part as built from the document
         "add_fillets" => (true, false, false),
         "list_features" => (true, false, false),
+        "document" => (true, false, false),
         "status" => (false, false, false),
         _ => (false, false, false),
     }
@@ -200,6 +201,7 @@ fn handle(st: &mut AppState, r: Request) {
     let p = r.params.clone();
     let out = match r.method.as_str() {
         "status" => Ok(status(st)),
+        "document" => Ok(document(st)),
         "open_reference" => open_reference(st, &p),
         "primary_candidates" => primary_candidates(st, &p),
         "list_features" => Ok(list_features(st, &p)),
@@ -469,6 +471,40 @@ fn apply_spec(spec: &Value, base: Option<&Feature>) -> Result<(Op, Prim, DVec3, 
 }
 
 // --------------------------------------------------------------- requests
+
+/// The document as saved (.fnurbs JSON) and what is picked, with the
+/// part's edges between two pieces of one face and its edges with one face
+/// only (to look into a document from the user's machine).
+fn document(st: &AppState) -> Value {
+    let doc: Value = serde_json::from_str(&st.doc.to_json()).unwrap_or(Value::Null);
+    let m = st.model.as_ref();
+    let edges: Vec<Value> = m
+        .map(|m| {
+            m.edges
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    let tag = |f: i32| (f >= 0).then(|| m.faces.get(f as usize).and_then(|x| x.tag)).flatten().map(|t| t.pack());
+                    e.faces[1] < 0 || e.seam || (tag(e.faces[0]).is_some() && tag(e.faces[0]) == tag(e.faces[1]))
+                })
+                .map(|(i, e)| {
+                    let tag = |f: i32| (f >= 0).then(|| m.faces.get(f as usize).and_then(|x| x.tag)).flatten().map(|t| (t.feature, t.sub));
+                    json!({ "index": i, "faces": [tag(e.faces[0]), tag(e.faces[1])], "seam": e.seam, "from": e.pts.first().map(|p| r3(Vec3::from(*p).as_dvec3())), "to": e.pts.last().map(|p| r3(Vec3::from(*p).as_dvec3())), "pickable": st.edge_ref(i).is_some() })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "document": doc,
+        "mode": format!("{:?}", st.sel_mode),
+        "tool": format!("{:?}", st.tool),
+        "selection": st.selection,
+        "edges_picked": st.edge_sel.iter().map(|e| json!({ "faces": e.faces, "at": r3(e.at) })).collect::<Vec<_>>(),
+        "faces_picked": st.face_sel.len(),
+        "errors": m.map(|m| m.errors.clone()),
+        "odd_edges": edges,
+    })
+}
 
 fn status(st: &AppState) -> Value {
     let m = st.model.as_ref();

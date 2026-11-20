@@ -3021,6 +3021,36 @@ fn main() {
         h.shot("zero-comp-flow-6-duplicate");
     }
 
+    if want("knife-diag") {
+        // Romain's flank (20 nov.): a block with filleted top edges, a
+        // diagonal knife cut from the flank's top corner; the cut picked in
+        // Edge mode and deleted; a vertical cut moved along X
+        use nurbs_kernel::{FeatureId, Knife, KnifePoint};
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 60.0, y: 40.0, z: 27.4 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        let t = |f: FeatureId, sub: u16| FaceTag { feature: f, sub }.pack();
+        let r = d.add_round(6.6, false, vec![EdgeRef { faces: [t(b, 2), t(b, 4)], at: glam::DVec3::new(0.0, 40.0, 13.7) }, EdgeRef { faces: [t(b, 2), t(b, 5)], at: glam::DVec3::new(0.0, 40.0, -13.7) }]);
+        let kx = |faces: [i64; 2], at: glam::DVec3| KnifePoint { edge: EdgeRef { faces, at }, f: (30.0 - at.x.abs()) / 60.0, at };
+        d.add_knife(Knife { pts: vec![kx([t(b, 4), t(r, 0)], glam::DVec3::new(-30.0, 33.4, 13.7)), kx([t(b, 4), t(b, 3)], glam::DVec3::new(5.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+        h.reset(d, "Flank");
+        h.st.camera.frame(Vec3::new(-32.0, 0.0, -15.0), Vec3::new(32.0, 42.0, 15.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::F10);
+        for at in [Vec3::new(-12.5, 16.7, 13.7), Vec3::new(-20.0, 26.2, 13.7), Vec3::new(0.0, 4.8, 13.7)] {
+            let p = h.screen_of(at);
+            let e = h.st.pick_edge([p.x, p.y]);
+            h.click(p);
+            h.steps(2);
+            eprintln!("  click at {at:?}: pick {:?} ref {:?}, picked {}", e, e.and_then(|i| h.st.edge_ref(i)).map(|r| r.faces), h.st.edge_sel.len());
+        }
+        h.shot("zero-knife-diag-1-picked");
+        h.key(egui::Key::Delete);
+        h.settle();
+        eprintln!("  deleted: steps {:?} errors {:?}", h.st.doc.features.iter().map(|f| f.name.clone()).collect::<Vec<_>>(), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-knife-diag-2-deleted");
+    }
+
     if want("comp-delete") {
         // Del on picked components (19 nov. 23 h 22): a knife line taken
         // out (its two faces one again), a face taken out (a hole)
