@@ -5311,8 +5311,9 @@ static bool similarity(const double* m) {
     gp_Vec c0(m[0], m[4], m[8]), c1(m[1], m[5], m[9]), c2(m[2], m[6], m[10]);
     double s = c0.SquareMagnitude();
     if (s < 1e-24) return false;
-    auto near = [&](double a, double b) { return std::abs(a - b) <= 1e-9 * s; };
-    return near(c1.SquareMagnitude(), s) && near(c2.SquareMagnitude(), s) && near(c0.Dot(c1), 0) && near(c0.Dot(c2), 0) && near(c1.Dot(c2), 0) && c0.Crossed(c1).Dot(c2) > 0;
+    // (not `near`: a macro on Windows)
+    auto same = [&](double a, double b) { return std::abs(a - b) <= 1e-9 * s; };
+    return same(c1.SquareMagnitude(), s) && same(c2.SquareMagnitude(), s) && same(c0.Dot(c1), 0) && same(c0.Dot(c2), 0) && same(c1.Dot(c2), 0) && c0.Crossed(c1).Dot(c2) > 0;
 }
 
 // The lumps (solids, shells or faces side by side in a compound) whose
