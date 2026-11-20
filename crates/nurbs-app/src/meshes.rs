@@ -87,6 +87,9 @@ pub fn surface_polys(f: &Feature, p: &Patch, solids: &[Solid], n: usize) -> (Vec
         wn.extend(patch::grid_normals(&cv, &uv).iter().map(|q| rot * *q));
         faces.extend(fs.into_iter().map(|q| q.into_iter().map(|v| v + at).collect::<Vec<u32>>()));
     }
+    if p.count() > 1 {
+        wn = seam_normals(&wp, &wn);
+    }
     if solids.is_empty() {
         return (wp, faces, wn);
     }
@@ -106,6 +109,30 @@ pub fn surface_polys(f: &Feature, p: &Patch, solids: &[Solid], n: usize) -> (Vec
         *v = v.normalize_or(Vec3::Y);
     }
     (cp, cf, nrm)
+}
+
+/// The normals of the patches' grid points at one place (on a seam) made
+/// one where they turn by less than 25° (a smooth seam: the patches of an
+/// end raised into a dome meet within a few degrees where three meet), so
+/// the shading shows no line there; a sharp seam (a rim, a cube's edge)
+/// keeps both.
+fn seam_normals(pts: &[Vec3], nrm: &[Vec3]) -> Vec<Vec3> {
+    let (lo, hi) = pts.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), q| (a.min(*q), b.max(*q)));
+    let eps = (hi - lo).max_element().max(1e-3) * 1e-4;
+    let key = |q: Vec3| ((q.x / eps).round() as i64, (q.y / eps).round() as i64, (q.z / eps).round() as i64);
+    let mut at: std::collections::HashMap<(i64, i64, i64), Vec<usize>> = std::collections::HashMap::new();
+    for (i, q) in pts.iter().enumerate() {
+        at.entry(key(*q)).or_default().push(i);
+    }
+    let cos = 25f32.to_radians().cos();
+    let mut out = nrm.to_vec();
+    for group in at.values().filter(|g| g.len() > 1) {
+        for &i in group {
+            let sum: Vec3 = group.iter().map(|j| nrm[*j]).filter(|n| n.dot(nrm[i]) > cos).sum();
+            out[i] = sum.normalize_or(nrm[i]);
+        }
+    }
+    out
 }
 
 /// A linked surface's Poly layer as polygons (world) less the Carves that

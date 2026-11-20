@@ -5806,6 +5806,33 @@ fn linked_objects(h: &mut Harness) {
     h.st.selection.clear();
     h.steps(4);
     h.shot("lobj-21-rim-smooth");
+    // the top's middle point raised 7 mm: a dome, the rim where it was
+    let centre = {
+        let f = h.st.doc.feature(lz).unwrap();
+        let c = cvs_world(f).unwrap();
+        let p = patch_of(f).unwrap();
+        p.contour().into_iter().find(|k| p.is_centre(*k) && c[*k].y > 20.0).unwrap()
+    };
+    h.st.move_patch_points(lz, &[centre], Vec3::new(0.0, 7.0, 0.0));
+    h.st.selection = vec![lz];
+    h.key(Key::Num1);
+    h.st.selection = vec![lz];
+    h.st.patch_sel = Some(nurbs_app::linked::PatchSel { id: lz, cvs: vec![centre] });
+    h.steps(4);
+    h.shot("lobj-22-dome");
+    h.key(Key::Num4);
+    h.st.selection.clear();
+    h.steps(4);
+    h.shot("lobj-23-dome-object");
+    // in Poly the layer is on the dome
+    h.st.set_patch_state(lz, PatchState::Poly);
+    h.st.selection.clear();
+    h.steps(4);
+    h.shot("lobj-24-dome-poly");
+    h.st.set_patch_state(lz, PatchState::Nurbs);
+    let f = h.st.doc.feature(lz).unwrap();
+    let top = nurbs_app::meshes::world_points(f).iter().map(|q| q.y).fold(f32::MIN, f32::max);
+    eprintln!("lobj: dome: the layer's top at {top:.2} mm (rim 24)");
 }
 
 /// The linked surface on a busier part (Romain, 20 nov., 20 h 58: "Test

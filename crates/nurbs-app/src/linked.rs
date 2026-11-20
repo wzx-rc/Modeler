@@ -972,7 +972,8 @@ mod tests {
         let p = patch_of(f).unwrap();
         // the side's four quarters, each end five patches round a square
         assert_eq!(p.count(), 14);
-        assert_eq!(p.contour().len(), 32);
+        // 32 on the rims and the side, each end's middle
+        assert_eq!(p.contour().len(), 34);
         assert!(bound_off(f) < 1e-3, "{}", bound_off(f));
         // the layer: closed, all quads, none thin
         let m = f.mesh.as_ref().unwrap();

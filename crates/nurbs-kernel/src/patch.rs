@@ -94,6 +94,25 @@ pub struct Patch {
 pub struct Cap {
     pub rim: [u32; 12],
     pub curves: Vec<([u32; 4], [f32; 4])>,
+    /// Its middle's point (an index into `cv`, on no patch): an edited
+    /// point, always the rim's Coons middle plus `lift`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub centre: Option<u32>,
+    /// How far its middle is raised (or moved) from the flat end its rim
+    /// makes (the unit box's): the inside curves follow, by
+    /// 16 s (1 − s) t (1 − t) of it at each place (`dome`): a dome.
+    #[serde(default, skip_serializing_if = "is_zero3")]
+    pub lift: [f32; 3],
+}
+
+fn is_zero3(v: &[f32; 3]) -> bool {
+    v.iter().all(|x| *x == 0.0)
+}
+
+/// How much of an end's lift a place of its rim's Coons square takes: 1 in
+/// the middle, 0 on the rim.
+pub fn dome(s: f32, t: f32) -> f32 {
+    16.0 * s * (1.0 - s) * t * (1.0 - t)
 }
 
 /// The Sculpt state's details (Romain, 20 nov., 23 h: "faire aussi le lien
@@ -326,7 +345,20 @@ impl Patch {
                 }
             }
         }
+        // the ends' middles
+        for c in &self.caps {
+            if let Some(i) = c.centre {
+                if (i as usize) < self.cv.len() && !out.contains(&(i as usize)) {
+                    out.push(i as usize);
+                }
+            }
+        }
         out
+    }
+
+    /// An end's middle point (moved, it raises the end: a dome).
+    pub fn is_centre(&self, cv: usize) -> bool {
+        self.caps.iter().any(|c| c.centre == Some(cv as u32))
     }
 
     /// A control point at a corner of a patch (drawn as a square; moved, it
@@ -417,14 +449,33 @@ impl Patch {
                 continue;
             }
             let rim: [Vec3; 12] = cap.rim.map(|i| Vec3::from(self.cv[i as usize]));
+            let lift = Vec3::from(cap.lift);
             for (cv, seg) in &cap.curves {
-                let c = cap_curve(&rim, *seg);
+                let c = cap_curve_lifted(&rim, *seg, lift);
                 for k in 0..4 {
                     if let Some(x) = self.cv.get_mut(cv[k] as usize) {
                         *x = c[k].to_array();
                     }
                 }
             }
+            if let Some(x) = cap.centre.and_then(|c| self.cv.get_mut(c as usize)) {
+                *x = (coons_rim(&rim, 0.5, 0.5) + lift).to_array();
+            }
+        }
+    }
+
+    /// The ends whose middle point is among these: their lift taken from
+    /// where it is now against the rim as it is now (so a middle moved
+    /// with its rim keeps its lift, alone it raises the end).
+    fn lift_caps(&mut self, moved: &[usize]) {
+        for k in 0..self.caps.len() {
+            let cap = &self.caps[k];
+            let Some(c) = cap.centre.map(|c| c as usize) else { continue };
+            if !moved.contains(&c) || c >= self.cv.len() || cap.rim.iter().any(|i| *i as usize >= self.cv.len()) {
+                continue;
+            }
+            let rim: [Vec3; 12] = cap.rim.map(|i| Vec3::from(self.cv[i as usize]));
+            self.caps[k].lift = (Vec3::from(self.cv[c]) - coons_rim(&rim, 0.5, 0.5)).to_array();
         }
     }
 
@@ -489,12 +540,16 @@ impl Patch {
         self.smooth = out;
     }
 
-    /// Across each smooth seam the two patches' inner points next to it put
-    /// in line with its point between them (each keeping its distance to
-    /// it): the surface turns smoothly across (G1 inside; at the seam's ends
-    /// the tangent points across its corners say it, kept in line by
-    /// `move_points`).
+    /// Across each smooth seam the two patches' inner points next to it
+    /// moved so the patches meet smoothly (G1): the two cross tangents at
+    /// each of its control points add up to a multiple of the seam's own
+    /// tangent there, that multiple going linearly from what the seam's ends
+    /// say (0 where the patches' tangents run on in line, as round a
+    /// cylinder; at a corner where three patches meet, an end's middle
+    /// square, what the three curves there say). Each pair is moved by half
+    /// the defect each.
     fn smooth_seams(&mut self) {
+        const ROUNDS: usize = 8;
         if self.smooth.is_empty() {
             return;
         }
@@ -502,24 +557,30 @@ impl Patch {
         let seams: Vec<_> = self.seams().into_iter().filter(|s| self.smooth.contains(&s.0)).collect();
         // an inner point next to two smooth seams (an end's middle patch):
         // a few rounds
-        for _ in 0..3 {
+        for _ in 0..ROUNDS {
             for (_, (pa, sa), (pb, sb)) in &seams {
                 let (qa, qb) = (quads[*pa], quads[*pb]);
                 let ca = SIDES[*sa].map(|i| qa[i]);
                 let cb = SIDES[*sb].map(|i| qb[i]);
                 let same = ca == cb;
+                let ia = |k: usize| qa[NEXT[*sa][k]];
+                let ib = |k: usize| if same { qb[NEXT[*sb][k]] } else { qb[NEXT[*sb][3 - k]] };
+                let cv = &self.cv;
+                let v = |i: usize| Vec3::from(cv[i]);
+                let sp: [Vec3; 4] = ca.map(v);
+                let m_at = |k: usize, d: Vec3| -> f32 {
+                    let w = v(ia(k)) - sp[k] + v(ib(k)) - sp[k];
+                    if d.length_squared() < 1e-12 { 0.0 } else { w.dot(d) / d.length_squared() }
+                };
+                let (m0, m3) = (m_at(0, (sp[1] - sp[0]) * 3.0), m_at(3, (sp[3] - sp[2]) * 3.0));
+                let inner: Vec<(Vec3, Vec3)> = (1..3).map(|k| (v(ia(k)), v(ib(k)))).collect();
                 for k in 1..3 {
-                    let s = Vec3::from(self.cv[ca[k]]);
-                    let ia = qa[NEXT[*sa][k]];
-                    let ib = if same { qb[NEXT[*sb][k]] } else { qb[NEXT[*sb][3 - k]] };
-                    let (a, b) = (Vec3::from(self.cv[ia]), Vec3::from(self.cv[ib]));
-                    let (da, db) = (a - s, b - s);
-                    let dir = (da - db).normalize_or_zero();
-                    if dir == Vec3::ZERO {
-                        continue;
-                    }
-                    self.cv[ia] = (s + dir * da.length()).to_array();
-                    self.cv[ib] = (s - dir * db.length()).to_array();
+                    let d = (sp[k + 1] - sp[k - 1]) * 1.5;
+                    let m = m0 + (m3 - m0) * k as f32 / 3.0;
+                    let (a, b) = inner[k - 1];
+                    let defect = (a - sp[k]) + (b - sp[k]) - d * m;
+                    self.cv[ia(k)] = (a - defect * 0.5).to_array();
+                    self.cv[ib(k)] = (b - defect * 0.5).to_array();
                 }
             }
         }
@@ -571,6 +632,7 @@ impl Patch {
                 self.cv[t2] = (c + way * len / size).to_array();
             }
         }
+        self.lift_caps(cvs);
         self.fill_inside();
     }
 
@@ -592,6 +654,9 @@ impl Patch {
     pub fn remap(&mut self, old: Vec3, base: Vec3, new: Vec3) {
         for c in self.cv.iter_mut() {
             *c = ((Vec3::from(*c) * old - base) / new).to_array();
+        }
+        for c in self.caps.iter_mut() {
+            c.lift = (Vec3::from(c.lift) * old / new).to_array();
         }
         if let Some(k) = self.keep.as_mut() {
             for c in k.verts.iter_mut() {
@@ -855,13 +920,41 @@ pub fn coons_rim(rim: &[Vec3; 12], s: f32, t: f32) -> Vec3 {
 /// sides run on as one and the Coons patch has no direction) straight to
 /// its other end, square to the rim.
 pub fn cap_curve(rim: &[Vec3; 12], seg: [f32; 4]) -> [Vec3; 4] {
-    let at = |t: f32| coons_rim(rim, seg[0] + (seg[2] - seg[0]) * t, seg[1] + (seg[3] - seg[1]) * t);
+    cap_curve_lifted(rim, seg, Vec3::ZERO)
+}
+
+/// `cap_curve` on an end whose middle is raised by `lift` (`dome`).
+pub fn cap_curve_lifted(rim: &[Vec3; 12], seg: [f32; 4], lift: Vec3) -> [Vec3; 4] {
+    let st = |t: f32| (seg[0] + (seg[2] - seg[0]) * t, seg[1] + (seg[3] - seg[1]) * t);
     let corner = |x: f32| x == 0.0 || x == 1.0;
-    if corner(seg[0]) && corner(seg[1]) {
-        let (a, b) = (at(0.0), at(1.0));
-        return [a, a.lerp(b, 1.0 / 3.0), a.lerp(b, 2.0 / 3.0), b];
+    let from_corner = corner(seg[0]) && corner(seg[1]);
+    let (a, b) = (coons_rim(rim, seg[0], seg[1]), coons_rim(rim, seg[2], seg[3]));
+    let at = |t: f32| {
+        let (s, u) = st(t);
+        let base = if from_corner { a.lerp(b, t) } else { coons_rim(rim, s, u) };
+        base + lift * dome(s, u)
+    };
+    let mut c = if from_corner && lift == Vec3::ZERO {
+        [a, a.lerp(b, 1.0 / 3.0), a.lerp(b, 2.0 / 3.0), b]
+    } else {
+        cubic_through(at(0.0), at(1.0 / 3.0), at(2.0 / 3.0), at(1.0))
+    };
+    // at an end inside the end (a corner of its middle square, where three
+    // of these curves meet) the tangent point put in the plane the end's
+    // shape has there, so the three patches round it meet smoothly
+    let f = |s: f32, t: f32| coons_rim(rim, s, t) + lift * dome(s, t);
+    let h = 1e-3;
+    for (end, next, (s0, t0)) in [(0usize, 1usize, (seg[0], seg[1])), (3, 2, (seg[2], seg[3]))] {
+        if corner(s0) && corner(t0) {
+            continue;
+        }
+        let n = ((f(s0 + h, t0) - f(s0 - h, t0)).cross(f(s0, t0 + h) - f(s0, t0 - h))).normalize_or_zero();
+        if n != Vec3::ZERO {
+            let d = c[next] - c[end];
+            c[next] -= n * d.dot(n);
+        }
     }
-    cubic_through(at(0.0), at(1.0 / 3.0), at(2.0 / 3.0), at(1.0))
+    c
 }
 
 /// A patch from its four sides (`bottom` along u at v = 0, `top` along u
@@ -956,8 +1049,13 @@ impl Patch {
         };
         p.caps = ends
             .into_iter()
-            .map(|(rim, curves)| Cap { rim: rim.map(find), curves: curves.into_iter().map(|(c, seg)| (c.map(find), seg)).collect() })
+            .map(|(rim, curves)| Cap { rim: rim.map(find), curves: curves.into_iter().map(|(c, seg)| (c.map(find), seg)).collect(), centre: None, lift: [0.0; 3] })
             .collect();
+        // each end's middle point, on no patch
+        for c in p.caps.iter_mut() {
+            p.cv.push([0.0; 3]);
+            c.centre = Some((p.cv.len() - 1) as u32);
+        }
         p.fill_inside();
         p.mark_smooth();
         p.fill_inside();
@@ -1689,7 +1787,7 @@ mod tests {
         // from the rim (not edited)
         let p = Patch::cylinder(10.0, 30.0);
         assert_eq!(p.count(), 14);
-        assert_eq!(p.contour().len(), 24 + 8);
+        assert_eq!(p.contour().len(), 24 + 8 + 2);
         assert_eq!(p.caps.len(), 2);
         for (k, cv) in p.surfaces(Vec3::ONE).iter().enumerate() {
             for (u, v) in [(0.5, 0.5), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.2, 0.7)] {
@@ -1743,6 +1841,9 @@ mod tests {
                 let (xa, (_, _, na)) = eval_frame(&surfs[pa], ua, va);
                 let (xb, (_, _, nb)) = eval_frame(&surfs[pb], ub, vb);
                 assert!(xa.distance(xb) < 1e-3, "the seam opens: {xa} {xb}");
+                if std::env::var("SEAM_DEBUG").is_ok() && na.dot(nb) < 0.999 {
+                    eprintln!("seam {pa}/{sa} {pb}/{sb} at {t}: {:.4} at {xa}", na.dot(nb));
+                }
                 worst = worst.min(na.dot(nb));
             }
         }
@@ -1780,6 +1881,45 @@ mod tests {
         let top = p.surfaces(Vec3::ONE)[4];
         let (s, (_, _, n)) = eval_frame(&top, 0.5, 0.5);
         assert!((s.y - 30.0).abs() < 1e-3 && n.dot(Vec3::Y) > 0.999, "{s} {n}");
+    }
+
+    #[test]
+    fn an_end_raised_into_a_dome() {
+        let mut p = Patch::cylinder(10.0, 30.0);
+        let top = p.caps.iter().map(|c| c.centre.unwrap() as usize).find(|c| p.cv[*c][1] > 29.0).unwrap();
+        assert!(p.contour().contains(&top) && !p.corner(top) && p.is_centre(top));
+        assert!(Vec3::from(p.cv[top]).distance(Vec3::new(0.0, 30.0, 0.0)) < 1e-3);
+        // the middle raised 6: a dome, smooth inside, the rim where it was
+        p.move_points(&[top], Vec3::new(0.0, 6.0, 0.0), Vec3::ONE);
+        let mid = p.surfaces(Vec3::ONE)[4];
+        let (s, (_, _, n)) = eval_frame(&mid, 0.5, 0.5);
+        // (the point is a control point: the surface passes near it)
+        assert!((s.y - 36.0).abs() < 0.6 && n.dot(Vec3::Y) > 0.999, "{s} {n}");
+        // a steep dome (6 mm on a 10 mm radius): its five bicubic patches
+        // meet within 7° where three of them meet (not exactly smooth
+        // there), within 4° elsewhere
+        assert!(seam_turn(&p) > 0.99, "{}", seam_turn(&p));
+        for c in &p.caps {
+            for i in c.rim {
+                let y = p.cv[i as usize][1];
+                assert!((y - 30.0).abs() < 1e-4 || y.abs() < 1e-4, "{y}");
+            }
+        }
+        // halfway out on the end: about three quarters of the lift
+        let (s, _) = eval_frame(&p.surfaces(Vec3::ONE)[5], 0.5, 0.5);
+        assert!(s.y > 31.0 && s.y < 35.0, "{s}");
+        // the whole top moved up 5 (rim and middle): the dome kept
+        let mut all: Vec<usize> = p.contour().into_iter().filter(|k| p.cv[*k][1] > 29.0).collect();
+        all.sort();
+        p.move_points(&all, Vec3::new(0.0, 5.0, 0.0), Vec3::ONE);
+        assert!((p.cv[top][1] - 41.0).abs() < 1e-3, "{}", p.cv[top][1]);
+        // the rim alone down 5: the middle follows it, the dome kept
+        let rim: Vec<usize> = all.iter().copied().filter(|k| *k != top).collect();
+        p.move_points(&rim, Vec3::new(0.0, -5.0, 0.0), Vec3::ONE);
+        assert!((p.cv[top][1] - 36.0).abs() < 1e-3, "{}", p.cv[top][1]);
+        // saved and read again: the same
+        let back: Patch = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
     }
 
     #[test]
