@@ -1879,6 +1879,74 @@ fn main() {
         eprintln!("  after undo {:?}", h.st.doc.looks);
     }
 
+    if want("mirror") {
+        // Mirror (Alt + M): half a part (a block from x = −5 to 35, a hole,
+        // a boss), mirrored across X; then a fillet picked on the mirror
+        // side, the boss moved, a slot carved on the far side: all made on
+        // both sides; the window set to Z
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::new(15.0, 0.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(b).unwrap().name = "Block".into();
+        let hole = d.add(Op::Carve, Prim::Cylinder { radius: 4.0, height: 30.0 }, DVec3::new(24.0, -5.0, -6.0), DQuat::IDENTITY);
+        d.feature_mut(hole).unwrap().name = "Hole".into();
+        let boss = d.add(Op::Add, Prim::Cylinder { radius: 5.0, height: 8.0 }, DVec3::new(14.0, 20.0, 5.0), DQuat::IDENTITY);
+        d.feature_mut(boss).unwrap().name = "Boss".into();
+        h.reset(d, "Mirror");
+        h.st.camera.dist *= 1.35;
+        h.st.camera.yaw -= 0.35;
+        h.st.camera.pitch += 0.12;
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-mirror-1-half");
+        h.hold(Modifiers::ALT);
+        h.key(egui::Key::M);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-mirror-2-mirrored");
+        eprintln!("  mirror: {:?}", h.st.selected_mirror().map(|f| (f.name.clone(), f.mirror)));
+        // the far end's top front edge picked (the mirror side), filleted
+        h.st.select(None, false);
+        h.key(egui::Key::Num2);
+        let e = h.screen_of(Vec3::new(-35.0, 20.0, 0.0));
+        h.click(e);
+        h.st.set_round(4.0, false, true);
+        h.st.end_live();
+        h.settle();
+        h.key(egui::Key::Q);
+        h.st.select(None, false);
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-mirror-3-fillet");
+        // the boss moved (its own side): both move
+        h.st.edit("Move", |d| d.feature_mut(boss).unwrap().origin.z = -4.0);
+        // a slot carved on the far side, after the Mirror
+        h.st.edit("Slot", |d| {
+            let s = d.add(Op::Carve, Prim::Box { x: 6.0, y: 6.0, z: 40.0 }, DVec3::new(-26.0, 15.0, 0.0), DQuat::IDENTITY);
+            d.feature_mut(s).unwrap().name = "Slot".into();
+        });
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-mirror-4-live");
+        // the Mirror selected again: across Z, keeping −Z
+        let mid = h.st.doc.features.iter().find(|f| f.mirror.is_some()).map(|f| f.id).unwrap();
+        h.st.selection = vec![mid];
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-mirror-5-selected");
+        h.st.set_mirror(nurbs_kernel::Mirror { axis: 2, offset: 0.0, flip: true }, true);
+        h.st.end_live();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-mirror-6-z");
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
     if want("align-window") {
         // Align (3ds Max's, Alt + A): a bracket turned 30° to the right of
         // the block, picked, Align, the block clicked; centre on centre,

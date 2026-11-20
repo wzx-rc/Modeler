@@ -82,6 +82,8 @@ pub enum Act {
     TurnOff,
     /// The element's history marker put just after this operation.
     Marker,
+    /// A Mirror across X (the steps after it made on both sides).
+    Mirror,
 }
 
 pub struct Item {
@@ -117,6 +119,7 @@ pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
             it(2, "Sketch", st.tool == Tool::Create(PrimKind::Profile), Act::Place(PrimKind::Profile)),
             it(3, "Path", st.tool == Tool::Create(PrimKind::Path), Act::Place(PrimKind::Path)),
             it(4, "Frame all", false, Act::FrameAll),
+            it(5, "Mirror X", false, Act::Mirror),
             it(6, "Snap", st.settings.snap, Act::Snap),
         ],
     }
@@ -133,6 +136,9 @@ fn run(st: &mut AppState, act: Act, ctx: Ctx, at: [f32; 2]) {
         }
         Act::Frame => st.frame_selection(),
         Act::FrameAll => st.frame_all(),
+        Act::Mirror => {
+            st.add_mirror(0);
+        }
         Act::Delete => st.delete_selected(),
         Act::Hide => {
             if let Ctx::Shape(id) = ctx {

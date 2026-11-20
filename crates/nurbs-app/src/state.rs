@@ -3831,6 +3831,11 @@ impl AppState {
         if m.serial / 4 == self.version {
             return None;
         }
+        // after a Mirror the faces on both sides carry the same tags (one
+        // side would move the wrong way): the kernel's model only
+        if self.doc.features.iter().any(|f| f.mirror.is_some() && f.visible && !f.suspended) {
+            return None;
+        }
         // the shapes' frames when the model on screen was asked for
         let (_, then) = self.sent_frames.iter().find(|(s, _)| *s == m.serial)?;
         let mut out = std::collections::HashMap::new();
@@ -4377,34 +4382,7 @@ fn from_norm(f: &Feature, q: DVec3) -> DVec3 {
 /// An operation with its points mapped by `m` (an affine map): its edges',
 /// face's, components' and knife points; a move's delta as a vector.
 pub fn carried(op: &Feature, m: &dyn Fn(DVec3) -> DVec3) -> Feature {
-    let mut f = op.clone();
-    let lin = |v: DVec3| m(v) - m(DVec3::ZERO);
-    if let Some(r) = f.round.as_mut() {
-        for e in &mut r.edges {
-            e.at = m(e.at);
-        }
-    }
-    if let Some(p) = f.push.as_mut() {
-        p.face.at = m(p.face.at);
-    }
-    if let Some(t) = f.tweak.as_mut() {
-        let c = |c: &mut nurbs_kernel::Comp| match c {
-            nurbs_kernel::Comp::Face(r) => r.at = m(r.at),
-            nurbs_kernel::Comp::Edge(e) => e.at = m(e.at),
-            nurbs_kernel::Comp::Vertex(v) => *v = m(*v),
-        };
-        c(&mut t.comp);
-        t.more.iter_mut().for_each(c);
-        t.delta = lin(t.delta);
-        t.about = t.about.map(m);
-    }
-    if let Some(k) = f.cut.as_mut() {
-        for p in &mut k.pts {
-            p.at = m(p.at);
-            p.edge.at = m(p.edge.at);
-        }
-    }
-    f
+    op.carried_by(m)
 }
 
 pub fn scaled(s: &Feature, pivot: DVec3, frame: DQuat, k: DVec3) -> Feature {

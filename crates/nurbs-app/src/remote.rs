@@ -328,6 +328,13 @@ pub fn spec_of(f: &Feature) -> Value {
         o["at"] = r3(f.origin);
         return o;
     }
+    if let Some(m) = &f.mirror {
+        o["kind"] = json!("mirror");
+        o["axis"] = json!(m.axis_name());
+        o["offset"] = json!(r(m.offset));
+        o["keep"] = json!(if m.flip { "-" } else { "+" });
+        return o;
+    }
     o["origin"] = r3(f.origin);
     o["x_axis"] = r3(x_axis);
     o["up"] = r3(up);
@@ -632,6 +639,7 @@ fn primary_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
             revolve: None,
             loft: None,
             form: None,
+            mirror: None,
         };
         let mut v = spec_of(&f);
         if let Some(o) = v.as_object_mut() {

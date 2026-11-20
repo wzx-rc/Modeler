@@ -29,6 +29,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_gizmo(p, st);
         draw_vertices(p, st);
         draw_push(p, st);
+        draw_mirror(p, st);
         draw_knife(p, st, ctx.input(|i| i.pointer.hover_pos()));
         draw_brush(p, st, ctx.input(|i| i.pointer.latest_pos()));
         if let (Some(g), Some(h)) = (&st.round_drag, ctx.input(|i| i.pointer.latest_pos())) {
@@ -1405,6 +1406,33 @@ fn draw_push(p: &Painter, st: &AppState) {
     }
 }
 
+/// The selected Mirror's plane: a faint pane round the part, its border
+/// dashed, its axis and the side kept.
+fn draw_mirror(p: &Painter, st: &AppState) {
+    let Some((m, q)) = st.mirror_plane() else { return };
+    let col = match m.axis {
+        0 => AXIS_X,
+        1 => AXIS_Y,
+        _ => AXIS_Z,
+    };
+    let pts: Vec<Pos2> = q.iter().filter_map(|w| world(st, *w)).collect();
+    if pts.len() != 4 {
+        return;
+    }
+    p.add(egui::Shape::convex_polygon(pts.clone(), tint(col, 0.07), Stroke::NONE));
+    for i in 0..4 {
+        p.add(egui::Shape::dashed_line(&[pts[i], pts[(i + 1) % 4]], Stroke::new(1.2, tint(col, 0.75)), 6.0, 4.0));
+    }
+    // the side kept: an arrow from the pane's middle
+    let c = (q[0] + q[1] + q[2] + q[3]) * 0.25;
+    let n = m.normal() * if m.flip { -1.0 } else { 1.0 };
+    let reach = (q[0] - q[2]).length() * 0.08;
+    if let (Some(a), Some(b)) = (world(st, c), world(st, c + n * reach)) {
+        arrow(p, a, b, col, 2.0);
+        chip(p, b + vec2(10.0, -4.0), Align2::LEFT_BOTTOM, &format!("Mirror {} · keeps {}{}", m.axis_name(), if m.flip { "−" } else { "+" }, m.axis_name()), col, col);
+    }
+}
+
 fn draw_marquee(p: &Painter, st: &AppState) {
     if let Some((a, b)) = st.marquee {
         let r = Rect::from_two_pos(pos2(a[0], a[1]), pos2(b[0], b[1]));
@@ -1618,6 +1646,8 @@ pub fn hint(st: &AppState) -> String {
                     Handle::Cage(_) => "The side facing the grip stays · Shift: proportions kept · Alt: from the middle · Ctrl: no snapping · Release: keep it".into(),
                     _ => "Moving: the kernel rebuilds the booleans live".into(),
                 }
+            } else if st.selected_mirror().is_some() {
+                "Window: the plane's axis, where it passes, the side kept · The steps after it are made on both sides · Del: delete it".into()
             } else if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {
                 "Window: Union, Subtract (the first picked less the others), Intersect: one curve, kept live · Shift + click: add a curve".into()
             } else if st.single().is_some_and(|f| f.is_extruded_curve()) {
@@ -1637,7 +1667,7 @@ pub fn hint(st: &AppState) -> String {
             } else {
                 match st.gizmo {
                     GizmoMode::Select => "W: move · E: rotate · R: scale · Right button: menu · Del: delete · Esc: deselect".into(),
-                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · E: rotate · R: scale · Del: delete".into(),
+                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · Alt + M: mirror · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
                     GizmoMode::Scale => "Cage: a face's grip one side, an edge's two, a corner all three · Shift: proportions kept · Alt: from the middle · W: move · E: rotate".into(),
                 }

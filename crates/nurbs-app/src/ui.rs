@@ -1372,6 +1372,9 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                     if icon_btn(ui, Icon::Align, st.tool == Tool::Align, "Align (Alt+A): then click the shape to align to", 28.0).clicked() {
                         st.begin_align();
                     }
+                    if icon_btn(ui, Icon::Mirror, false, "Mirror (Alt+M): the part made symmetric across X, the steps after it on both sides", 28.0).clicked() {
+                        st.add_mirror(0);
+                    }
                 }
                 if icon_btn(ui, Icon::Frame, false, "Frame (F)", 28.0).clicked() {
                     st.frame_selection();
@@ -1447,6 +1450,8 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
                 vec![t.at() + t.delta]
             } else if let Some(r) = &f.round {
                 r.edges.iter().map(|e| e.at).collect()
+            } else if let Some((_, q)) = st.mirror_plane().filter(|_| f.mirror.is_some()) {
+                q.to_vec()
             } else {
                 vec![f.origin]
             }
@@ -1747,6 +1752,8 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     } else if f.is_path() {
                         path_card(ui, st, &f);
                         curve_make_card(ui, st, &f);
+                    } else if f.mirror.is_some() {
+                        mirror_card(ui, st, &f);
                     } else {
                         round_card(ui, st);
                     }
@@ -1766,6 +1773,35 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
             }
         });
     });
+}
+
+/// A Mirror step: its plane (the axis it is square to, where it passes)
+/// and the side kept.
+fn mirror_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let Some(m) = f.mirror else { return };
+    section(ui, "Plane");
+    let items: Vec<(u8, &str, Color32)> = vec![(0, "X", AXIS_X), (1, "Y", AXIS_Y), (2, "Z", AXIS_Z)];
+    if let Some(a) = ui.push_id("mirror-axis", |ui| segmented(ui, &items, m.axis, 28.0)).inner {
+        if a != m.axis {
+            let flip = st.model.as_ref().and_then(|md| md.bounds()).map(|(lo, hi)| (lo[a as usize] + hi[a as usize]) < -1e-3).unwrap_or(false);
+            st.set_mirror(nurbs_kernel::Mirror { axis: a, offset: 0.0, flip }, true);
+            st.end_live();
+        }
+    }
+    let span = st.model.as_ref().and_then(|md| md.bounds()).map(|(lo, hi)| lo[m.axis as usize].abs().max(hi[m.axis as usize].abs())).unwrap_or(50.0).max(10.0).ceil();
+    let mut off = m.offset as f32;
+    let (ch, start) = slider_row(ui, "Offset", &mut off, -span..=span, 0.1, "mm");
+    if ch {
+        st.set_mirror(nurbs_kernel::Mirror { offset: off as f64, ..m }, start || !st.is_live());
+    }
+    if toggle_row(ui, &format!("Keep the −{} side", m.axis_name()), m.flip) {
+        st.set_mirror(nurbs_kernel::Mirror { flip: !m.flip, ..m }, true);
+        st.end_live();
+    }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
+        st.end_live();
+    }
 }
 
 /// The Slot tool's options (Romain, 20 nov. 5 h 55: by hand by default,
@@ -2477,6 +2513,9 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         }
         if icon_btn(ui, Icon::Align, st.tool == Tool::Align, "Align (Alt+A): then click the shape to align to", 30.0).clicked() {
             st.begin_align();
+        }
+        if f.is_solid() && icon_btn(ui, Icon::Mirror, false, "Mirror (Alt+M): the part made symmetric across X, the steps after it on both sides", 30.0).clicked() {
+            st.add_mirror(0);
         }
         if icon_btn(ui, if f.visible { Icon::Eye } else { Icon::EyeOff }, false, "Hide", 30.0).clicked() {
             st.toggle_visible(id);
@@ -3374,6 +3413,11 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.begin_align();
         return;
     }
+    // Mirror (Alt + M): across X, the steps after it made on both sides
+    if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::M) {
+        st.add_mirror(0);
+        return;
+    }
     if st.align.is_some() {
         if pressed(Key::Escape) {
             st.align_cancel();
@@ -3482,7 +3526,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if shift && pressed(Key::S) {
         st.arm_slot();
     }
-    if pressed(Key::M) && !shift {
+    if pressed(Key::M) && !shift && !ctx.input(|i| i.modifiers.alt) {
         st.arm_form();
     }
     if st.tool == Tool::Form {

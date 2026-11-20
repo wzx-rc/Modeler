@@ -6,7 +6,7 @@
 //! result after each feature (by the content of everything up to it). While
 //! one feature moves, only the booleans from it onwards are made again.
 
-use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Knife, Makes, Op, Prim, Push, Round, Tweak};
+use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Knife, Makes, Mirror, Op, Prim, Push, Round, Tweak};
 use crate::model::{Edge, EdgeKind, Face, FaceTag, Model, SurfKind};
 use crate::proto::step;
 use forme_occt::{CutKind, Shape, SurfKind as OccSurf};
@@ -53,6 +53,9 @@ struct Stage {
     /// Fillets whose tension was too full or too flat for a fillet running
     /// round them, made at the nearest that works.
     tension_limits: Vec<(u32, f64)>,
+    /// The move just made took its mirror image with it (one move of
+    /// both: a face across the plane bends once): the image step is done.
+    paired: bool,
 }
 
 #[derive(Default)]
@@ -1277,6 +1280,39 @@ fn tweak(acc: &Shape, f: &Feature, t: &Tweak) -> Result<Option<Shape>, String> {
     Err(err)
 }
 
+/// A move and its mirror image (after a Mirror) made in one go, each
+/// vertex by its own move (a face across the plane whose two corners move
+/// bends once, not twice: a bent face cannot follow a second move).
+fn tweak_pair(acc: &Shape, f: &Feature, t: &Tweak, u: &Tweak) -> Result<Option<Shape>, String> {
+    if t.copy || u.copy {
+        return Err("copies one at a time".into());
+    }
+    let pts = acc.vertex_points();
+    let at = |v: i32| DVec3::from_array(pts[(v - 1) as usize]);
+    let mut moves: Vec<(i32, [f64; 3])> = vec![];
+    for tw in [t, u] {
+        let mut vs: Vec<i32> = vec![];
+        for c in tw.comps() {
+            for v in comp_vertices(acc, c)? {
+                if !vs.contains(&v) {
+                    vs.push(v);
+                }
+            }
+        }
+        if vs.is_empty() {
+            return Err("nothing to move".into());
+        }
+        let centre = tw.about.unwrap_or_else(|| vs.iter().map(|&v| at(v)).sum::<DVec3>() / vs.len() as f64);
+        for &v in &vs {
+            if !moves.iter().any(|(w, _)| *w == v) {
+                moves.push((v, (centre + (at(v) - centre) * tw.scale + tw.delta).to_array()));
+            }
+        }
+    }
+    mark(&step("tweak", f));
+    acc.move_vertices(&moves).map(Some)
+}
+
 /// The Knife: its points found on the edges (the fraction from the end
 /// nearer where each was put), cut into them with its lines. None when it
 /// has no point.
@@ -1319,6 +1355,173 @@ fn knife(acc: &Shape, f: &Feature, k: &Knife) -> Result<Option<Shape>, String> {
     acc.split(&p3, &segs).map(Some)
 }
 
+// ---------------------------------------------------------------- mirror
+
+/// The box round a shape (its faces' boxes).
+fn shape_box(s: &Shape) -> Option<(DVec3, DVec3)> {
+    let mut b: Option<(DVec3, DVec3)> = None;
+    for i in 0..s.face_count() {
+        let Some((lo, hi)) = s.face_box(i) else { continue };
+        let (lo, hi) = (DVec3::from_array(lo), DVec3::from_array(hi));
+        b = Some(match b {
+            Some((a, c)) => (a.min(lo), c.max(hi)),
+            None => (lo, hi),
+        });
+    }
+    b
+}
+
+/// What is built so far made symmetric across the Mirror's plane: its
+/// solids cut at the plane (the side kept), mirrored and joined to it (the
+/// faces of one surface across the plane made one by the union); the
+/// sheets beside them mirrored whole. Faces keep their tags on both sides,
+/// so a click on either side names the same shape.
+fn mirror_part(acc: &Shape, id: FeatureId, m: &Mirror) -> Result<Shape, String> {
+    let sheets = acc.lumps_of(false).ok();
+    let solids = match &sheets {
+        Some(_) => acc.lumps_of(true).ok(),
+        None => None,
+    };
+    let solids: Option<&Shape> = if sheets.is_some() { solids.as_ref() } else { Some(acc) };
+    let mut out: Option<Shape> = None;
+    if let Some(sol) = solids {
+        let (lo, hi) = shape_box(sol).ok_or("nothing to mirror")?;
+        let n = m.normal();
+        let a = m.axis.min(2) as usize;
+        let (k0, k1) = (m.side(lo), m.side(hi));
+        let (klo, khi) = (k0.min(k1), k0.max(k1));
+        let size = (hi - lo).max_element().max(1.0);
+        let tol = 1e-6 * size;
+        if khi <= tol {
+            return Err(format!("nothing on the kept side of the plane (flip it: keep the {}{} side)", if m.flip { "+" } else { "−" }, m.axis_name()));
+        }
+        let cut;
+        let half: &Shape = if klo >= -tol {
+            sol
+        } else {
+            // a box over the kept side, from the plane out past the part
+            let margin = 1.0 + 0.1 * size;
+            let len = khi + margin;
+            let mut dims = (hi - lo) + DVec3::splat(2.0 * margin);
+            dims[a] = len;
+            let mut c = (lo + hi) * 0.5;
+            c[a] = m.offset + if m.flip { -0.5 * len } else { 0.5 * len };
+            let mut b = Shape::cuboid(dims.x, dims.y, dims.z)?;
+            b.set_tags(&vec![FaceTag { feature: id, sub: 0 }.pack(); b.face_count()]);
+            let b = b.transformed(rows(DMat4::from_translation(c)))?;
+            let _ = n;
+            cut = sol.common(&b)?;
+            &cut
+        };
+        let image = half.transformed(m.rows())?;
+        out = Some(half.fuse(&image)?);
+    }
+    if let Some(sh) = &sheets {
+        let both = sh.compound(&sh.transformed(m.rows())?)?;
+        out = Some(match out {
+            Some(o) => o.compound(&both)?,
+            None => both,
+        });
+    }
+    out.ok_or_else(|| "nothing to mirror".to_string())
+}
+
+/// A shape made after a Mirror: the tool and its image as one (an Add on
+/// both sides, a Carve through both), the tool alone when it is its own
+/// image (a box or a cylinder centred on the plane): None.
+fn twin_tool(t: &Shape, m: &Mirror) -> Result<Option<Shape>, String> {
+    let image = t.transformed(m.rows())?;
+    if let (Some((lo, hi)), Some((lo2, hi2))) = (shape_box(t), shape_box(&image)) {
+        let tol = 1e-4 * (hi - lo).length() + 1e-5;
+        if lo.distance(lo2) < tol && hi.distance(hi2) < tol {
+            let v = t.volume();
+            if let Ok(c) = t.common(&image) {
+                if v > 0.0 && (c.volume() - v).abs() < 1e-4 * v {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    t.fuse(&image).map(Some)
+}
+
+/// The document with every step after a Mirror made on both sides: a
+/// fillet's or chamfer's edges with their images (one step: both sides
+/// blend and stop alike); an inset, a move, the Knife followed by its image
+/// (the same id: its faces carry the same tags; `twin_of`). None when there
+/// is no Mirror. (The shapes after it are doubled in `run`, `twin_tool`.)
+fn mirrored_doc(doc: &Doc) -> Option<Doc> {
+    if !doc.features.iter().any(|f| f.mirror.is_some() && f.visible && !f.suspended) {
+        return None;
+    }
+    let mut out = doc.clone();
+    out.features.clear();
+    let mut sym: Option<Mirror> = None;
+    for f in &doc.features {
+        let on = f.visible && !f.suspended;
+        if let (Some(m), true) = (&f.mirror, on) {
+            sym = Some(*m);
+            out.features.push(f.clone());
+            continue;
+        }
+        let Some(m) = sym.filter(|_| on) else {
+            out.features.push(f.clone());
+            continue;
+        };
+        if let Some(r) = &f.round {
+            let mut g = f.clone();
+            let images: Vec<EdgeRef> = r.edges.iter().filter(|e| m.reflect(e.at).distance(e.at) > 1e-6).map(|e| EdgeRef { at: m.reflect(e.at), ..e.clone() }).collect();
+            if let Some(gr) = g.round.as_mut() {
+                gr.edges.extend(images);
+            }
+            out.features.push(g);
+        } else if f.push.is_some() || f.tweak.is_some() || f.cut.is_some() {
+            out.features.push(f.clone());
+            let refl = |p: DVec3| m.reflect(p);
+            let mut g = f.carried_by(&refl);
+            if g != *f {
+                g.name = format!("{} (mirror side)", f.name);
+                out.features.push(g);
+            }
+        } else {
+            out.features.push(f.clone());
+        }
+    }
+    Some(out)
+}
+
+/// The image of the step before it (`mirrored_doc`): the same id.
+fn twin_of<'a>(feats: &[&'a Feature], i: usize) -> Option<&'a Feature> {
+    (i > 0 && feats[i - 1].id == feats[i].id).then(|| feats[i - 1])
+}
+
+/// An image step that names what its step named on the solid before them
+/// (a face or a knife line across the plane): nothing more to make.
+fn twin_same(acc0: Option<&Shape>, a: &Feature, b: &Feature) -> bool {
+    if let (Some(p), Some(q)) = (&a.push, &b.push) {
+        let Some(acc) = acc0 else { return true };
+        return find_face(acc, &p.face) == find_face(acc, &q.face);
+    }
+    if let (Some(t), Some(u)) = (&a.tweak, &b.tweak) {
+        let Some(acc) = acc0 else { return true };
+        let verts = |t: &Tweak| {
+            let mut v: Vec<i32> = t.comps().filter_map(|c| comp_vertices(acc, c).ok()).flatten().collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        // the same components (across the plane): a move of them is not
+        // made twice, even one that leaves the part lopsided
+        return verts(t) == verts(u);
+    }
+    if let (Some(k), Some(l)) = (&a.cut, &b.cut) {
+        let near = |p: DVec3, set: &[DVec3]| set.iter().any(|q| q.distance(p) < 1e-6);
+        let (kp, kf, ke): (Vec<DVec3>, Vec<DVec3>, Vec<DVec3>) = (k.pts.iter().map(|q| q.at).collect(), k.remove_faces.iter().map(|q| q.at).collect(), k.remove_edges.iter().map(|q| q.at).collect());
+        return l.pts.iter().all(|p| near(p.at, &kp)) && l.remove_faces.iter().all(|r| near(r.at, &kf)) && l.remove_edges.iter().all(|e| near(e.at, &ke));
+    }
+    false
+}
+
 fn hash2(a: u64, b: u64) -> u64 {
     crate::doc::fnv(&[a.to_le_bytes(), b.to_le_bytes()].concat())
 }
@@ -1328,17 +1531,22 @@ fn hash2(a: u64, b: u64) -> u64 {
 /// Builds the features `feats` in this order: the stage after the last
 /// (the stages on the way cached by the hash of what comes before).
 fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Stage {
-    let mut stage = Stage { shape: None, errors: vec![], limits: vec![], conic: vec![], tension_limits: vec![] };
+    let mut stage = Stage { shape: None, errors: vec![], limits: vec![], conic: vec![], tension_limits: vec![], paired: false };
     let mut key = 0u64;
     // the stage before each feature (blended fillets start again from there)
     let mut befores: Vec<(&Feature, Stage)> = vec![];
+    // the Mirror the steps from here on are made on both sides of
+    let mut sym: Option<Mirror> = None;
     for (i, &f) in feats.iter().enumerate() {
         befores.push((f, stage.clone()));
         let fh = deep_hash(doc, f);
         key = hash2(key, fh);
         let skipped = |what: &str| skip.iter().any(|s| *s == step(what, f));
-        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") || skipped("cut") {
+        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") || skipped("cut") || skipped("mirror") {
             key = hash2(key, 1);
+        }
+        if let Some(m) = &f.mirror {
+            sym = Some(*m);
         }
         used_stages.push(key);
         if let Some(s) = cache.stages.get(&key) {
@@ -1346,6 +1554,36 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
             model.cached += 1;
             continue;
         }
+        // the part made symmetric
+        if let Some(m) = &f.mirror {
+            if let Some(acc) = stage.shape.clone() {
+                let res = if skipped("mirror") {
+                    Err("skipped, it crashed the kernel".to_string())
+                } else {
+                    mark(&step("mirror", f));
+                    mirror_part(&acc, f.id, m)
+                };
+                match res {
+                    Ok(s) => {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                    }
+                    Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
+                }
+            }
+            cache.stages.insert(key, stage.clone());
+            continue;
+        }
+        // the image of the step before (after a Mirror) that names what it
+        // named (a face across the plane): nothing more to make
+        if let Some(a) = twin_of(feats, i) {
+            if stage.paired || twin_same(befores[i - 1].1.shape.as_deref(), a, f) {
+                stage.paired = false;
+                cache.stages.insert(key, stage.clone());
+                continue;
+            }
+        }
+        stage.paired = false;
         // a fillet or chamfer: on the solid built so far
         if let Some(r) = &f.round {
             if let Some(acc) = stage.shape.clone() {
@@ -1485,6 +1723,17 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         // a face, edge or vertex moved: on the solid built so far
         if let Some(t) = &f.tweak {
             if let Some(acc) = stage.shape.clone() {
+                // with its mirror image next (after a Mirror): both moved
+                // in one go when they do not name the same components
+                if let Some(u) = feats.get(i + 1).filter(|g| g.id == f.id && twin_of(feats, i).is_none() && !skipped("tweak")).and_then(|g| g.tweak.as_ref().filter(|_| !twin_same(Some(&acc), f, g))) {
+                    if let Ok(Some(s)) = tweak_pair(&acc, f, t, u) {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                        stage.paired = true;
+                        cache.stages.insert(key, stage.clone());
+                        continue;
+                    }
+                }
                 let res = if skipped("tweak") { Err("skipped, it crashed the kernel".to_string()) } else { tweak(&acc, f, t) };
                 match res {
                     Ok(Some(s)) => {
@@ -1548,8 +1797,36 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         };
         // a face of it lying just off a face of the part (a thin wall, a
         // thin step, a gap): moved onto it, or for a Carve past it
-        let t = match &stage.shape {
-            Some(acc) if !skipped("boolean") => settle(acc, f, &t).and_then(|g| tool(&g).ok()).map(Rc::new).unwrap_or(t),
+        let (t, th) = match &stage.shape {
+            Some(acc) if !skipped("boolean") => match settle(acc, f, &t).and_then(|g| tool(&g).ok().map(|s| (Rc::new(s), g.hash()))) {
+                Some(x) => x,
+                None => (t, fh),
+            },
+            _ => (t, fh),
+        };
+        // after a Mirror: the shape and its image
+        let t = match sym {
+            Some(m) if !skipped("tool") => {
+                let th = hash2(hash2(th, 0x6d6972726f72), hash2(m.axis as u64 + 3 * m.flip as u64, m.offset.to_bits()));
+                match cache.tools.get(&th) {
+                    Some(d) => {
+                        used_tools.push(th);
+                        d.clone()
+                    }
+                    None => match twin_tool(&t, &m) {
+                        Ok(d) => {
+                            let d = d.map(Rc::new).unwrap_or_else(|| t.clone());
+                            cache.tools.insert(th, d.clone());
+                            used_tools.push(th);
+                            d
+                        }
+                        Err(e) => {
+                            stage.errors.push(format!("{}: its mirror image failed ({e})", f.name));
+                            t
+                        }
+                    },
+                }
+            }
             _ => t,
         };
         // the boolean
@@ -1677,6 +1954,9 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let mut model = Model { fine, ..Default::default() };
     let mut used_tools = vec![];
     let mut used_stages = vec![];
+    // after a Mirror, each step made on both sides
+    let mirrored = mirrored_doc(doc);
+    let doc = mirrored.as_ref().unwrap_or(doc);
     let feats: Vec<&Feature> = doc.features.iter().filter(|f| f.visible && !f.suspended && doc.makes(f) == Makes::Solid).collect();
     let mut stage = run(doc, &feats, skip, cache, &mut model, &mut used_tools, &mut used_stages);
     // the surfaces, beside the part (no boolean)
@@ -1831,6 +2111,126 @@ mod tests {
     use crate::doc::KnifePoint;
     use crate::doc::PrimKind;
     use glam::DQuat;
+
+    /// The mesh's volume (closed: the divergence theorem).
+    fn mesh_volume(m: &Model) -> f64 {
+        m.triangles
+            .iter()
+            .map(|t| {
+                let p = |i: u32| DVec3::from_array(m.positions[i as usize].map(|x| x as f64));
+                p(t[0]).dot(p(t[1]).cross(p(t[2]))) / 6.0
+            })
+            .sum()
+    }
+
+    #[test]
+    fn mirror_live() {
+        use crate::doc::Mirror;
+        // a block from x = −10 to 30 across the plane x = 0, mirrored: −30
+        // to 30, its top one face (no seam)
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, DVec3::new(10.0, 0.0, 0.0), DQuat::IDENTITY);
+        let mi = d.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false });
+        assert_eq!(d.feature(mi).unwrap().kind_label(), "Mirror");
+        assert!(!d.feature(mi).unwrap().is_solid());
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((lo[0] + 30.0).abs() < 1e-3 && (hi[0] - 30.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        assert_eq!(m.faces.len(), 6, "{:?}", m.faces.iter().map(|f| f.tag).collect::<Vec<_>>());
+        assert!((mesh_volume(&m) - 60.0 * 10.0 * 20.0).abs() < 1.0, "{}", mesh_volume(&m));
+        // both ends are the block's +X face (tag sub 0)
+        assert_eq!(m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: b, sub: 0 })).count(), 2);
+        // flipped: the −X side kept (x from −10 to 0), mirrored: −10 to 10
+        d.feature_mut(mi).unwrap().mirror.as_mut().unwrap().flip = true;
+        let m = build(&d, true, false, &[], &mut cache);
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((lo[0] + 10.0).abs() < 1e-3 && (hi[0] - 10.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        d.feature_mut(mi).unwrap().mirror.as_mut().unwrap().flip = false;
+        // a hole made after it at x = 15: one at −15 too
+        let h = d.add(Op::Carve, Prim::Cylinder { radius: 3.0, height: 20.0 }, DVec3::new(15.0, -5.0, 0.0), DQuat::IDENTITY);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(h)).count(), 2);
+        let v1 = 60.0 * 10.0 * 20.0 - 2.0 * std::f64::consts::PI * 9.0 * 10.0;
+        assert!((mesh_volume(&m) - v1).abs() < 2.0, "{} {v1}", mesh_volume(&m));
+        // a box centred on the plane after it: made once (its own image)
+        let c = d.add(Op::Add, Prim::Box { x: 10.0, y: 5.0, z: 10.0 }, DVec3::new(0.0, 10.0, 0.0), DQuat::IDENTITY);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((mesh_volume(&m) - (v1 + 500.0)).abs() < 2.0, "{}", mesh_volume(&m));
+        d.remove(&[c]);
+        // the front face (across the plane) pushed out by 3: once, not twice
+        let front = FaceRef { tag: tag(b, 4), at: DVec3::new(-20.0, 5.0, 10.0) };
+        let p = d.add_push(Push { face: front, inset: 0.0, depth: 3.0 });
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((hi[2] - 13.0).abs() < 1e-3 && (lo[2] + 10.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        d.remove(&[p]);
+        // a fillet on the +X end's top edge: the −X end's too
+        let m = build(&d, true, false, &[], &mut cache);
+        let e = edge_near(&m, DVec3::new(30.0, 10.0, 0.0));
+        let r = d.add_round(2.0, false, vec![e]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 2);
+        let cut = (4.0 - std::f64::consts::PI) * 20.0;
+        assert!((mesh_volume(&m) - (v1 - 2.0 * cut)).abs() < 2.0, "{} {}", mesh_volume(&m), v1 - 2.0 * cut);
+        // the −X end's bottom edge picked on the mirror side: the +X end's too
+        let e = edge_near(&m, DVec3::new(-30.0, 0.0, 0.0));
+        let r2 = d.add_round(1.0, false, vec![e]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r2)).count(), 2);
+        // a vertex moved on the +X side: its image on the −X side
+        let t = d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(30.0, 0.0, -10.0)), delta: DVec3::new(0.0, 0.0, -4.0), more: vec![], scale: DVec3::ONE, copy: false, about: None });
+        let _ = t;
+        d.remove(&[r, r2]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, _) = m.bounds().unwrap();
+        assert!((lo[2] + 14.0).abs() < 1e-3, "{lo:?}");
+        // the vertex at the −X end moved down too: the part stays symmetric
+        let low: Vec<[f32; 3]> = m.positions.iter().filter(|q| q[2] < -13.9).copied().collect();
+        assert!(low.iter().any(|q| q[0] > 29.0) && low.iter().any(|q| q[0] < -29.0), "{low:?}");
+    }
+
+    #[test]
+    #[ignore]
+    fn mirror_probe() {
+        // the push across the plane after fillets at both ends: with the
+        // Mirror, and the same block made whole without it
+        for mirrored in [false, true] {
+            let mut d = Doc::default();
+            let b = if mirrored { d.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, DVec3::new(10.0, 0.0, 0.0), DQuat::IDENTITY) } else { d.add(Op::Add, Prim::Box { x: 60.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY) };
+            if mirrored {
+                d.add_mirror(crate::doc::Mirror { axis: 0, offset: 0.0, flip: false });
+            }
+            let mut cache = Cache::default();
+            let m = build(&d, true, false, &[], &mut cache);
+            d.add(Op::Carve, Prim::Cylinder { radius: 3.0, height: 20.0 }, DVec3::new(15.0, -5.0, 0.0), DQuat::IDENTITY);
+            if !mirrored {
+                d.add(Op::Carve, Prim::Cylinder { radius: 3.0, height: 20.0 }, DVec3::new(-15.0, -5.0, 0.0), DQuat::IDENTITY);
+            }
+            let m = build(&d, true, false, &[], &mut cache);
+            let e = edge_near(&m, DVec3::new(30.0, 10.0, 0.0));
+            let e2 = edge_near(&m, DVec3::new(-30.0, 10.0, 0.0));
+            d.add_round(2.0, false, if mirrored { vec![e] } else { vec![e, e2] });
+            let m = build(&d, true, false, &[], &mut cache);
+            let e = edge_near(&m, DVec3::new(-30.0, 0.0, 0.0));
+            let e2 = edge_near(&m, DVec3::new(30.0, 0.0, 0.0));
+            d.add_round(1.0, false, if mirrored { vec![e] } else { vec![e, e2] });
+            let m = build(&d, true, false, &[], &mut cache);
+            eprintln!("mirrored {mirrored}: {} faces {:?}", m.faces.len(), m.errors);
+            let front = FaceRef { tag: tag(b, 4), at: DVec3::new(-20.0, 5.0, 10.0) };
+            d.add_push(Push { face: front, inset: 0.0, depth: 3.0 });
+            let t0 = Instant::now();
+            let m = build(&d, true, false, &[], &mut cache);
+            eprintln!("  push: {} faces {:?} {:.0} ms", m.faces.len(), m.errors, t0.elapsed().as_secs_f64() * 1e3);
+        }
+    }
 
     #[test]
     fn cube_with_a_hole() {

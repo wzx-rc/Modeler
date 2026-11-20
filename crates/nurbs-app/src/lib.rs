@@ -5,6 +5,7 @@
 //! document of features. Same look as the first Forme NURBS.
 
 pub mod align;
+pub mod mirror;
 pub mod cage;
 pub mod camera;
 pub mod draw;
