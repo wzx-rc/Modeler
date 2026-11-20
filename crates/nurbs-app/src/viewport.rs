@@ -29,6 +29,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_gizmo(p, st);
         draw_vertices(p, st);
         draw_poly(p, st);
+        draw_patch(p, st);
         draw_brush(p, st, ctx.input(|i| i.pointer.hover_pos()), resp.hovered() || resp.dragged());
         draw_push(p, st);
         draw_knife(p, st, ctx.input(|i| i.pointer.hover_pos()));
@@ -480,6 +481,52 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         }
         return;
     }
+    // a linked surface in its NURBS state, Vertex mode: its contour's
+    // points (clicks, rectangles, the gizmo on them; a drag on a point moves
+    // it at once, in the plane facing the eye)
+    if st.patch_comp() {
+        if st.patch_drag.is_none() && st.marquee.is_none() {
+            st.patch_hover = if over_ui { None } else { hover.and_then(|h| st.patch_hover_at(p2(h))) };
+        }
+        if resp.drag_started_by(PointerButton::Primary) {
+            let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+            if let Some(h) = handle_at(st, origin) {
+                st.begin_drag(h, p2(origin));
+            } else if let Some(k) = st.patch_hover_at(p2(origin)) {
+                if !st.patch_picked().contains(&k) {
+                    if let Some(id) = st.linked_target() {
+                        st.patch_sel = Some(crate::linked::PatchSel { id, cvs: vec![k] });
+                    }
+                }
+                st.begin_drag(Handle::Free, p2(origin));
+            } else {
+                st.marquee = Some((p2(origin), p2(origin)));
+            }
+        }
+        if resp.dragged_by(PointerButton::Primary) {
+            if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                if st.patch_drag.is_some() {
+                    st.update_patch_drag(p2(p));
+                    st.interacting = true;
+                } else if let Some(mq) = &mut st.marquee {
+                    mq.1 = p2(p);
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            if st.patch_drag.is_some() {
+                st.end_patch_drag();
+            } else if let Some((a, b)) = st.marquee.take() {
+                st.patch_marquee(a, b, shift, ctrl);
+            }
+        }
+        if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.patch_click(p2(p), shift, ctrl);
+            }
+        }
+        return;
+    }
     // the Poly tab's Vertex, Edge and Face modes: a Poly mesh's components
     // (clicks, rectangles, the gizmo on them)
     if st.poly_comp() && st.tool == Tool::Select {
@@ -918,7 +965,7 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
         return;
     }
     let hot = st.hot_handle;
-    let dragging = st.drag.as_ref().map(|d| d.handle).or(st.poly_drag.as_ref().map(|d| d.handle));
+    let dragging = st.drag.as_ref().map(|d| d.handle).or(st.poly_drag.as_ref().map(|d| d.handle)).or(st.patch_drag.as_ref().map(|d| d.handle));
     if st.gizmo == GizmoMode::Select {
         return;
     }
@@ -1345,6 +1392,35 @@ fn draw_vertices(p: &Painter, st: &AppState) {
             p.circle(s, 2.75, chip_bg(), Stroke::new(1.2, accent()));
         } else {
             p.circle(s, 1.75, chip_bg(), Stroke::new(1.0, tint(TEXT(), 0.8)));
+        }
+    }
+}
+
+/// A linked surface in its NURBS state, Vertex mode: its contour's points,
+/// a corner a small square, a tangent point a dot; picked ones filled.
+fn draw_patch(p: &Painter, st: &AppState) {
+    if !st.patch_comp() {
+        return;
+    }
+    let Some((_, cv)) = st.patch_points() else { return };
+    let picked = st.patch_picked();
+    let a = accent();
+    for k in nurbs_kernel::patch::CONTOUR {
+        let Some(s) = world(st, cv[k].as_dvec3()) else { continue };
+        let on = picked.contains(&k);
+        let hot = st.patch_hover == Some(k) && st.patch_drag.is_none();
+        let (fill, stroke) = if on {
+            (a, Stroke::new(1.0, chip_bg()))
+        } else if hot {
+            (chip_bg(), Stroke::new(1.6, a))
+        } else {
+            (chip_bg(), Stroke::new(1.2, tint(TEXT(), 0.9)))
+        };
+        if nurbs_kernel::patch::is_corner(k) {
+            let r = if on || hot { 4.5 } else { 3.6 };
+            p.rect(Rect::from_center_size(s, vec2(r * 2.0, r * 2.0)), 1.0, fill, stroke, egui::StrokeKind::Middle);
+        } else {
+            p.circle(s, if on || hot { 3.6 } else { 2.8 }, fill, stroke);
         }
     }
 }
@@ -1828,6 +1904,14 @@ pub fn hint(st: &AppState) -> String {
 /// The help box's lines in the Sculpt and Poly tabs (None: as in Forme).
 fn sculpt_poly_hint(st: &AppState) -> Option<String> {
     use crate::workspace::Workspace;
+    // a linked surface in NURBS: its contour's points
+    if st.patch_comp() {
+        return Some(if st.patch_drag.is_some() {
+            "Release: the contour kept (one undo step), the Poly layer follows".into()
+        } else {
+            "Click: a contour point (a square: a corner, it takes its tangents) · Shift: add · Drag a point: move it · W: the gizmo on the picked ones · 4: Object mode".into()
+        });
+    }
     if st.tool == Tool::Sculpt {
         let b = st.sculpt.brush;
         let what = if st.stroke.is_some() {

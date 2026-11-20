@@ -32,6 +32,7 @@ pub mod workspace;
 pub mod meshes;
 pub mod sculpt;
 pub mod poly;
+pub mod linked;
 pub mod tab_anim;
 
 pub use state::AppState;

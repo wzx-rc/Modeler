@@ -128,14 +128,20 @@ impl Drawer {
             let poly_tab = st.workspace == crate::workspace::Workspace::Poly;
             let target = st.poly_target();
             for f in st.shown_meshes() {
-                let n = crate::meshes::mesh_vertices(f, slot, &mut verts);
+                // a linked surface: the Carves after it cut it
+                let solids = if crate::linked::patch_of(f).is_some() { st.patch_solids(f.id) } else { vec![] };
+                let n = crate::meshes::mesh_vertices(f, slot, &solids, &mut verts);
                 self.mesh_slots.push((f.id, slot, n));
                 slot += n as u32;
-                let smooth = f.mesh.as_ref().map(|m| m.smooth).unwrap_or(false);
+                if crate::linked::shows_nurbs(f) {
+                    crate::meshes::linked_lines(f, &solids, &mut edges);
+                    continue;
+                }
+                let smooth = f.mesh.as_ref().map(|m| m.smooth && m.patch.is_none()).unwrap_or(false);
                 if poly_tab || !smooth {
                     let picked = st.poly_sel.as_ref().filter(|s| s.id == f.id).map(|s| s.edges.clone()).unwrap_or_default();
                     let a = theme::accent();
-                    crate::meshes::cage_lines(f, &picked, poly_tab && target == Some(f.id), [a.r(), a.g(), a.b(), 245], &mut edges);
+                    crate::meshes::cage_lines(f, &solids, &picked, poly_tab && target == Some(f.id), [a.r(), a.g(), a.b(), 245], &mut edges);
                 }
             }
             self.r.upload_part(device, queue, &verts, &edges);
@@ -202,6 +208,26 @@ impl Drawer {
                 }
                 None => (mat.color, mat.metal, mat.rough),
             };
+            // a linked surface in NURBS: the surface lit as a whole, the
+            // Poly layer's own shapes in the Poly tab's colour (shown, not
+            // editable)
+            if crate::linked::shows_nurbs(f) {
+                // its contour's points worked on: the surface not tinted
+                let fl = if st.patch_comp() {
+                    0
+                } else if st.selection.contains(id) {
+                    FACE_SELECTED
+                } else if st.hover_feature == Some(*id) {
+                    FACE_HOVERED
+                } else {
+                    0
+                };
+                flags.push(FaceGpu { color: linear(color), flags: fl, metal, rough, pad: [0.0; 2] });
+                let g = crate::workspace::Workspace::Poly.swatch();
+                let ghost = [g.r() as f32 / 255.0 * 0.62, g.g() as f32 / 255.0 * 0.66, g.b() as f32 / 255.0 * 0.72];
+                flags.push(FaceGpu { color: linear(ghost), flags: 0, metal: 0.0, rough: 0.75, pad: [0.0; 2] });
+                continue;
+            }
             for k in 0..*n as u32 {
                 let fl = if st.tool == Tool::Sculpt {
                     0
@@ -356,6 +382,23 @@ impl Drawer {
                 if let Some(i) = st.hover_edge.filter(|i| !picked.contains(i)) {
                     line_vertices(&[m.edges[i].pts.clone()], [y.r(), y.g(), y.b(), 150], 1.6, &mut over);
                 }
+            }
+        }
+        // a linked surface selected in its NURBS state: its contour in the
+        // accent, and in Vertex mode the lines to its tangent points
+        for f in st.shown_meshes().into_iter().filter(|f| st.selection.contains(&f.id) && crate::linked::shows_nurbs(f)) {
+            let Some(p) = crate::linked::patch_of(f) else { continue };
+            let Some(cv) = crate::linked::cvs_world(f) else { continue };
+            let pc = p.cvs(crate::meshes::size(f));
+            let x = crate::linked::to_world(f);
+            let sides: Vec<Vec<[f32; 3]>> = (0..4).map(|k| nurbs_kernel::patch::side(&pc, k, 48).iter().map(|q| x.transform_point3(*q).to_array()).collect()).collect();
+            line_vertices(&sides, [accent.r(), accent.g(), accent.b(), 240], 1.8, &mut over);
+            if st.sel_mode == SelMode::Vertex {
+                let mut hull = vec![];
+                for (c, t) in [(0, 1), (3, 2), (3, 7), (15, 11), (15, 14), (12, 13), (12, 8), (0, 4)] {
+                    hull.push(vec![cv[c].to_array(), cv[t].to_array()]);
+                }
+                line_vertices(&hull, [accent.r(), accent.g(), accent.b(), 150], 1.0, &mut over);
             }
         }
         // Insert Edge Loop: the loop a click would cut

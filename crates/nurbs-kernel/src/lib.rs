@@ -17,6 +17,7 @@ pub mod model;
 pub mod proto;
 pub mod mesh;
 pub mod mesh_bevel;
+pub mod patch;
 pub mod remesh;
 
 #[cfg(feature = "occ")]

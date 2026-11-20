@@ -54,6 +54,10 @@ pub struct MeshData {
     /// 180: every edge soft.
     #[serde(default = "default_angle", skip_serializing_if = "is_default_angle")]
     pub angle: f32,
+    /// A linked surface (`patch.rs`): this mesh is its Poly layer, bound to
+    /// the NURBS patch kept here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch: Option<crate::patch::Patch>,
 }
 
 /// Maya's default normal angle.
@@ -139,8 +143,19 @@ impl MeshData {
     /// Fits the unit box to the points again (they may have left it):
     /// the new sizes and the base's move in the feature's frame.
     pub fn renormalized(&mut self, size: Vec3) -> (Vec3, Vec3) {
-        let (unit, s, base) = normalize(&self.local(size));
+        let pts = self.local(size);
+        self.store(&pts, size)
+    }
+
+    /// Its points set from millimetres (the frame, for these sizes), the
+    /// unit box fitted to them; a linked surface's control points stay
+    /// where they are. The new sizes and the base's move in the frame.
+    pub fn store(&mut self, pts: &[Vec3], size: Vec3) -> (Vec3, Vec3) {
+        let (unit, s, base) = normalize(pts);
         self.verts = unit;
+        if let Some(p) = self.patch.as_mut() {
+            p.remap(size, base, s);
+        }
         (s, base)
     }
 
@@ -855,7 +870,7 @@ mod tests {
 
     #[test]
     fn smoothing_angle() {
-        let data = |p: &[Vec3], f: Vec<Vec<u32>>| MeshData { kind: MeshKind::Poly, verts: p.iter().map(|v| v.to_array()).collect(), faces: f, smooth: false, angle: DEFAULT_ANGLE };
+        let data = |p: &[Vec3], f: Vec<Vec<u32>>| MeshData { kind: MeshKind::Poly, verts: p.iter().map(|v| v.to_array()).collect(), faces: f, smooth: false, angle: DEFAULT_ANGLE, patch: None };
         // a cube: hard at 30 (each corner its face's normal), soft at 180
         let (p, f) = poly_cube(20.0);
         let m = data(&p, f);
@@ -931,7 +946,7 @@ mod tests {
         assert!((top.y - 30.0).abs() < 1e-4);
         inset_faces(&mut p, &mut f, &[3], 0.25);
         assert!(closed(&f) && outward(&p, &f));
-        let mut m = MeshData { kind: MeshKind::Poly, verts: p.iter().map(|v| v.to_array()).collect(), faces: f, smooth: false, angle: DEFAULT_ANGLE };
+        let mut m = MeshData { kind: MeshKind::Poly, verts: p.iter().map(|v| v.to_array()).collect(), faces: f, smooth: false, angle: DEFAULT_ANGLE, patch: None };
         delete_faces(&mut m, &[3]);
         assert_eq!(m.faces.len(), 13);
         assert_eq!(m.verts.len(), 16);

@@ -2391,6 +2391,49 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
     }
 }
 
+/// A linked surface's window (Romain 20 nov., 18 h 12: "un petit pop-up où
+/// j'ai les trois états"): its state, what each one lets you do, what it
+/// holds, the Carves that cut it.
+fn linked_card(ui: &mut Ui, st: &mut AppState, f: &Feature, p: &nurbs_kernel::patch::Patch) {
+    use nurbs_kernel::patch::PatchState;
+    let id = f.id;
+    section(ui, "State");
+    let items = [
+        (PatchState::Nurbs, "NURBS", Workspace::Forme.swatch()),
+        (PatchState::Poly, "POLY", Workspace::Poly.swatch()),
+        (PatchState::Sculpt, "SCULPT", Workspace::Sculpt.swatch()),
+    ];
+    if let Some(s) = segmented(ui, &items, p.state, 32.0) {
+        st.set_patch_state(id, s);
+    }
+    let (verts, faces) = f.mesh.as_ref().map(|m| (m.verts.len(), m.faces.len())).unwrap_or((0, 0));
+    let off = p.off_surface().iter().filter(|o| **o).count();
+    let lines: Vec<String> = match p.state {
+        PatchState::Poly => vec![
+            "The mesh is yours: Vertex, Edge, Face modes, Extrude, Bevel, Cut.".into(),
+            "Back to NURBS its points ride on the surface.".into(),
+        ],
+        _ => vec![
+            "Move the contour's points: Vertex mode (1), a point or the gizmo.".into(),
+            if off > 0 { format!("The Poly layer's own shapes ({off} points) ride on it, shown, not editable here.") } else { "The Poly layer follows it.".into() },
+        ],
+    };
+    for l in lines {
+        ui.label(egui::RichText::new(l).font(regular(12.0)).color(TEXT2()));
+    }
+    ui.label(egui::RichText::new(format!("Poly layer: {verts} points · {faces} faces")).font(regular(12.0)).color(LABEL()));
+    // the Carves after it that cut it
+    let at = st.doc.features.iter().position(|g| g.id == id).unwrap_or(0);
+    let cuts: Vec<String> = if st.patch_solids(id).is_empty() {
+        vec![]
+    } else {
+        st.doc.features[at + 1..].iter().filter(|g| g.visible && g.op == nurbs_kernel::Op::Carve && g.is_solid() && !g.is_mesh() && !g.is_path()).map(|g| g.name.clone()).collect()
+    };
+    if !cuts.is_empty() {
+        ui.label(egui::RichText::new(format!("Cut by {} (live, both states)", cuts.join(", "))).font(regular(12.0)).color(LABEL()));
+    }
+}
+
 /// The selected shape's sizes (the operation window).
 fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     if f.is_extruded_curve() {
@@ -2400,6 +2443,12 @@ fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     let id = f.id;
     // a slider drag is one undo step: it ends when no pointer button is down
     let any_down = ui.input(|i| i.pointer.any_down());
+    if let Some(p) = f.mesh.as_ref().and_then(|m| m.patch.clone()) {
+        linked_card(ui, st, f, &p);
+        if p.state != nurbs_kernel::patch::PatchState::Poly {
+            return;
+        }
+    }
     if let Some(m) = f.mesh.clone() {
         let sculpt = m.kind == nurbs_kernel::mesh::MeshKind::Sculpt;
         section(ui, if sculpt { "Clay" } else { "Poly mesh" });
@@ -2713,6 +2762,18 @@ fn path_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
                 }
             });
             st.end_live();
+        }
+    }
+    // four points, closed: a linked surface on them (NURBS and Poly at once)
+    if !pr.open && pr.points.len() == 4 && f.curve.is_none() {
+        ui.add_space(4.0);
+        if primary_btn(ui, None, "Linked surface", Some(ui.available_width()))
+            .on_hover_text("A NURBS surface on these 4 points, edited by its contour, that is also a Poly mesh: switch its state in its window (NURBS, POLY; SCULPT next)")
+            .clicked()
+        {
+            st.selection = vec![id];
+            st.make_linked_surface();
+            return;
         }
     }
     section(ui, "Size");

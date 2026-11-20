@@ -12,6 +12,14 @@ use glam::{DVec3, Vec3};
 use nurbs_kernel::mesh::{delete_faces, edge_key, edge_ring, extrude_faces, inset_faces, loop_cut, poly_centre, poly_cube, poly_cylinder, poly_normal, poly_plane, quad_sphere, triangulated, MeshData, MeshKind};
 use nurbs_kernel::{Feature, FeatureId};
 
+/// A linked surface's control points kept in place when its Poly layer's
+/// unit box is fitted again (`MeshData::store`).
+fn remap_patch(md: &mut MeshData, old: Vec3, base: Vec3, new: Vec3) {
+    if let Some(p) = md.patch.as_mut() {
+        p.remap(old, base, new);
+    }
+}
+
 /// The components picked on one Poly mesh.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PolySel {
@@ -107,7 +115,12 @@ impl AppState {
                 return Some(s.id);
             }
         }
-        let polys: Vec<FeatureId> = self.selection.iter().copied().filter(|id| self.is_poly(*id)).collect();
+        let polys: Vec<FeatureId> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|id| self.is_poly(*id) && !self.doc.feature(*id).map(crate::linked::shows_nurbs).unwrap_or(false))
+            .collect();
         (polys.len() == 1).then(|| polys[0])
     }
 
@@ -396,8 +409,7 @@ impl AppState {
             let mut pts = md.local(size);
             let mut faces = md.faces.clone();
             f(&mut pts, &mut faces, md);
-            let (unit, s2, base) = nurbs_kernel::mesh::normalize(&pts);
-            md.verts = unit;
+            let (s2, base) = md.store(&pts, size);
             md.faces = faces;
             ft.origin += ft.rot * base.as_dvec3();
             ft.prim = nurbs_kernel::Prim::Box { x: s2.x as f64, y: s2.y as f64, z: s2.z as f64 };
@@ -488,11 +500,13 @@ impl AppState {
         self.live(|doc| {
             if let Some(f) = doc.feature_mut(id) {
                 *f = before.clone();
+                let old = crate::meshes::size(f);
                 f.origin += f.rot * base.as_dvec3();
                 f.prim = nurbs_kernel::Prim::Box { x: s2.x as f64, y: s2.y as f64, z: s2.z as f64 };
                 if let Some(m) = f.mesh.as_mut() {
                     let md = m.make_mut();
                     md.verts = unit;
+                    remap_patch(md, old, base, s2);
                     md.faces = faces;
                 }
             }
@@ -550,7 +564,7 @@ impl AppState {
             return true;
         }
         self.poly_edit("Delete faces", s.id, |pts, faces, md| {
-            let mut tmp = MeshData { kind: MeshKind::Poly, verts: pts.iter().map(|p| p.to_array()).collect(), faces: faces.clone(), smooth: md.smooth, angle: md.angle };
+            let mut tmp = MeshData { kind: MeshKind::Poly, verts: pts.iter().map(|p| p.to_array()).collect(), faces: faces.clone(), smooth: md.smooth, angle: md.angle, patch: None };
             delete_faces(&mut tmp, &gone);
             *pts = tmp.verts.iter().map(|v| Vec3::from(*v)).collect();
             *faces = tmp.faces;
@@ -854,11 +868,13 @@ impl AppState {
                 self.live(|doc| {
                     if let Some(f) = doc.feature_mut(id) {
                         *f = before.clone();
+                        let old = crate::meshes::size(f);
                         f.origin += f.rot * base.as_dvec3();
                         f.prim = nurbs_kernel::Prim::Box { x: s2.x as f64, y: s2.y as f64, z: s2.z as f64 };
                         if let Some(m) = f.mesh.as_mut() {
                             let md = m.make_mut();
                             md.verts = unit;
+                            remap_patch(md, old, base, s2);
                             md.faces = faces;
                         }
                     }
@@ -1125,11 +1141,13 @@ impl AppState {
         let (unit, s2, base) = nurbs_kernel::mesh::normalize(&pts);
         self.live(|doc| {
             if let Some(ft) = doc.feature_mut(id) {
+                let old = crate::meshes::size(ft);
                 ft.origin += ft.rot * base.as_dvec3();
                 ft.prim = nurbs_kernel::Prim::Box { x: s2.x as f64, y: s2.y as f64, z: s2.z as f64 };
                 if let Some(mr) = ft.mesh.as_mut() {
                     let md = mr.make_mut();
                     md.verts = unit;
+                    remap_patch(md, old, base, s2);
                     md.faces = faces;
                 }
             }

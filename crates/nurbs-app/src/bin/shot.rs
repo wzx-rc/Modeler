@@ -335,6 +335,9 @@ fn main() {
     if want("tabanim") {
         tab_anim(&mut h);
     }
+    if want("lsurf") {
+        linked(&mut h);
+    }
 
     if want("empty") {
         h.reset(Doc::default(), "Untitled");
@@ -5180,3 +5183,262 @@ fn tab_anim(h: &mut Harness) {
     }
 }
 
+
+/// The linked surface (Romain 20 nov., 18 h 12: "une surface… peut avoir les
+/// trois états à la fois"): a path of four points made a NURBS surface, its
+/// contour waved (Vertex mode, the gizmo), switched to Poly, four faces
+/// extruded, back to NURBS (the extrusion rides on it, shown, not
+/// editable), a corner raised, a Carve cylinder through the middle (a hole
+/// in both states, the extrusion cut in half), back to Poly, the cylinder
+/// moved.
+fn linked(h: &mut Harness) {
+    use egui::Key;
+    use nurbs_app::linked::cvs_world;
+    use nurbs_kernel::patch::{is_corner, PatchState, CONTOUR};
+    h.reset(Doc::default(), "Linked surface");
+    let view = |h: &mut Harness| {
+        h.st.camera.yaw = 0.55;
+        h.st.camera.pitch = 0.6;
+        h.st.camera.target = Vec3::new(16.0, 2.0, 4.0);
+        h.st.camera.dist = 175.0;
+        h.steps(2);
+    };
+    view(h);
+    // 1. the Path tool: four clicks, the first one again closes it
+    h.key(Key::P);
+    let g = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 0.0, z));
+    let first = g(h, -35.0, 25.0);
+    h.click(first);
+    h.click(g(h, 35.0, 25.0));
+    h.click(g(h, 22.0, -25.0));
+    h.click(g(h, -22.0, -25.0));
+    h.move_to(first);
+    h.steps(2);
+    h.click(first);
+    h.settle();
+    let Some(path) = h.st.doc.features.iter().rev().find(|f| f.is_path()).map(|f| f.id) else {
+        eprintln!("linked: no path made");
+        return;
+    };
+    h.st.tool = Tool::Select;
+    h.st.selection = vec![path];
+    h.move_to(pos2(1200.0, 700.0));
+    h.steps(14);
+    h.shot("lsurf-01-path");
+    // 2. its window's Linked surface button
+    if !h.st.make_linked_surface() {
+        eprintln!("linked: not made");
+        return;
+    }
+    let id = h.st.selection[0];
+    h.steps(14);
+    h.shot("lsurf-02-surface");
+    // 3. the contour waved: Vertex mode, a point clicked, the gizmo's Y arrow
+    h.key(Key::Num1);
+    h.key(Key::W);
+    h.steps(2);
+    let cv = |h: &Harness| cvs_world(h.st.doc.feature(id).unwrap()).unwrap();
+    let lift = |h: &mut Harness, k: usize, d: f32| {
+        let c = cv(h)[k];
+        h.click(h.screen_of(c));
+        h.steps(2);
+        let s0 = h.screen_of(c);
+        let dir = (h.screen_of(c + Vec3::Y * 10.0) - s0).normalized();
+        let a = s0 + dir * 50.0;
+        let b = h.screen_of(c + Vec3::Y * d) + dir * 50.0;
+        h.move_to(a);
+        h.steps(2);
+        h.drag(a, b, 12, true);
+        h.steps(2);
+        let after = cv(h)[k];
+        eprintln!("linked: point {k} moved {:.2} mm up", after.y - c.y);
+    };
+    let c = cv(h);
+    let mut tangents: Vec<usize> = CONTOUR.iter().copied().filter(|k| !is_corner(*k)).collect();
+    tangents.sort_by(|a, b| c[*b].z.total_cmp(&c[*a].z));
+    let (f1, f2, back) = (tangents[0], tangents[1], tangents[tangents.len() - 1]);
+    lift(h, f1, 12.0);
+    lift(h, f2, -9.0);
+    lift(h, back, 8.0);
+    h.move_to(pos2(1200.0, 700.0));
+    h.steps(4);
+    h.shot("lsurf-03-wave");
+    h.key(Key::Num4);
+    h.st.selection = vec![id];
+    h.steps(14);
+    h.shot("lsurf-04-wave-object");
+    // 4. POLY in its window: the Poly tab, the layer as a mesh
+    h.st.set_patch_state(id, PatchState::Poly);
+    h.steps(14);
+    h.shot("lsurf-05-poly");
+    // 5. Face mode: four faces (two by two, from the middle), Ctrl + E
+    h.key(Key::Num3);
+    h.steps(2);
+    let f = h.st.doc.feature(id).unwrap().clone();
+    let pts = nurbs_app::meshes::world_points(&f);
+    let m = f.mesh.clone().unwrap();
+    let bind = m.patch.as_ref().unwrap().bind.clone();
+    let count = |k: usize| {
+        let mut v: Vec<i32> = bind.iter().map(|b| (b[k] * 1000.0).round() as i32).collect();
+        v.sort();
+        v.dedup();
+        v.len() - 1
+    };
+    let (nu, nv) = (count(0), count(1));
+    let du = 1.0 / nu as f32;
+    let dv = 1.0 / nv as f32;
+    // the grid's faces two by two from the middle (j * nu + i)
+    let mut picks = vec![];
+    for j in [nv / 2, nv / 2 + 1] {
+        for i in [nu / 2, nu / 2 + 1] {
+            let q = &m.faces[j * nu + i];
+            picks.push((j * nu + i, q.iter().map(|x| pts[*x as usize]).sum::<Vec3>() / q.len() as f32));
+        }
+    }
+    let _ = (du, dv);
+    eprintln!("linked: grid {nu} x {nv}, {} faces picked", picks.len());
+    for (n, (_, c)) in picks.iter().enumerate() {
+        if n > 0 {
+            h.hold(Modifiers::SHIFT);
+        }
+        h.click(h.screen_of(*c));
+        h.hold(Modifiers::NONE);
+    }
+    let mid = picks.iter().map(|p| p.1).sum::<Vec3>() / picks.len().max(1) as f32;
+    let at = h.screen_of(mid);
+    h.move_to(at);
+    h.steps(2);
+    h.shot("lsurf-06-faces");
+    h.hold(Modifiers::CTRL);
+    h.key(Key::E);
+    h.hold(Modifiers::NONE);
+    let up = h.screen_of(mid + Vec3::Y * 7.0);
+    for k in 1..=8 {
+        h.move_to(at + (up - at) * (k as f32 / 8.0));
+    }
+    h.steps(2);
+    h.click(up);
+    h.settle();
+    h.move_to(pos2(1200.0, 700.0));
+    h.steps(4);
+    h.shot("lsurf-07-extruded");
+    // 6. NURBS again: the extrusion rides on the surface, shown, not editable
+    h.st.set_patch_state(id, PatchState::Nurbs);
+    h.key(Key::Num4);
+    h.st.selection = vec![id];
+    h.steps(14);
+    h.shot("lsurf-08-nurbs");
+    // 7. the contour moved: a corner up (its tangent points with it), a
+    //    side's point down; the Poly layer follows
+    h.key(Key::Num1);
+    h.st.selection = vec![id];
+    h.steps(2);
+    let c = cv(h);
+    // the corner nearest the extrusion
+    let corner = [0usize, 3, 12, 15].into_iter().min_by(|a, b| c[*a].distance(mid).total_cmp(&c[*b].distance(mid))).unwrap();
+    lift(h, corner, 16.0);
+    h.move_to(pos2(1200.0, 700.0));
+    h.steps(4);
+    h.shot("lsurf-09-contour");
+    h.key(Key::Num4);
+    h.st.selection = vec![id];
+    h.steps(14);
+    h.shot("lsurf-10-follows");
+    // 8. a Cylinder in Carve through the middle and the extrusion (the
+    //    tool on the ground, then its base put under the surface and its
+    //    height through it, as the Shape window does)
+    let f = h.st.doc.feature(id).unwrap().clone();
+    let p = f.mesh.as_ref().unwrap().patch.clone().unwrap();
+    let cvm = p.cvs(nurbs_app::meshes::size(&f));
+    let x = nurbs_app::linked::to_world(&f);
+    // the patch's middle along u (the extrusion's -u side), the
+    // extrusion's middle along v: it takes the extrusion's -u half
+    let (bu, bv) = ((nu / 2) as f32 * du, (nv / 2 + 1) as f32 * dv);
+    let centre = x.transform_point3(nurbs_kernel::patch::eval(&cvm, bu, bv).0);
+    let r = 1.25 * (x.transform_point3(nurbs_kernel::patch::eval(&cvm, 0.5 + du, 0.5).0) - x.transform_point3(nurbs_kernel::patch::eval(&cvm, 0.5, 0.5).0)).length();
+    h.st.selection.clear();
+    h.st.mode = Op::Carve;
+    h.st.tool = Tool::Create(PrimKind::Cylinder);
+    let a = g(h, centre.x, centre.z);
+    let b = g(h, centre.x + r, centre.z);
+    h.drag(a, b, 8, true);
+    let top = h.screen_of(Vec3::new(centre.x, 20.0, centre.z));
+    h.move_to(top);
+    h.settle();
+    h.click(top);
+    h.settle();
+    h.st.tool = Tool::Select;
+    h.st.mode = Op::Add;
+    let Some(cyl) = h.st.doc.features.iter().rev().find(|f| matches!(f.prim, Prim::Cylinder { .. })).map(|f| f.id) else {
+        eprintln!("linked: no cylinder");
+        return;
+    };
+    h.st.edit("Size", |d| {
+        if let Some(c) = d.feature_mut(cyl) {
+            c.origin.y = -30.0;
+            if let Prim::Cylinder { height, .. } = &mut c.prim {
+                *height = 70.0;
+            }
+        }
+    });
+    let cf = h.st.doc.feature(cyl).unwrap();
+    eprintln!("linked: cylinder {:?} {:?} at {:?}", cf.op, cf.prim, cf.origin);
+    h.st.selection = vec![cyl];
+    h.key(Key::Num4);
+    h.st.selection = vec![cyl];
+    h.steps(14);
+    h.shot("lsurf-11-carve");
+    h.st.selection = vec![id];
+    h.steps(14);
+    h.shot("lsurf-12-carve-nurbs");
+    // 9. POLY again: the hole and the extrusion cut in half, a mesh
+    h.st.set_patch_state(id, PatchState::Poly);
+    h.steps(14);
+    h.shot("lsurf-13-carve-poly");
+    h.key(Key::Num3);
+    h.steps(2);
+    h.move_to(h.screen_of(mid + Vec3::new(0.0, 0.0, 0.0)));
+    h.steps(4);
+    h.shot("lsurf-14-carve-poly-faces");
+    // 10. the cylinder moved along X: the hole moves, in both states
+    h.key(Key::Num4);
+    h.st.edit("Move", |d| {
+        if let Some(c) = d.feature_mut(cyl) {
+            c.origin.x -= 14.0;
+        }
+    });
+    h.st.selection = vec![id];
+    h.move_to(pos2(1200.0, 700.0));
+    h.steps(14);
+    h.shot("lsurf-15-carve-moved-poly");
+    h.st.set_patch_state(id, PatchState::Nurbs);
+    h.key(Key::Num4);
+    h.st.selection = vec![id];
+    h.steps(14);
+    h.shot("lsurf-16-carve-moved-nurbs");
+    // 11. close, nothing selected: the hole and the halved extrusion in
+    // both states, the cylinder back under the extrusion
+    h.st.edit("Move", |d| {
+        if let Some(c) = d.feature_mut(cyl) {
+            c.origin.x += 14.0;
+        }
+    });
+    h.st.selection.clear();
+    h.st.camera.yaw = 0.35;
+    h.st.camera.pitch = 0.75;
+    h.st.camera.target = mid + Vec3::new(4.0, 0.0, 0.0);
+    h.st.camera.dist = 95.0;
+    h.move_to(pos2(1500.0, 120.0));
+    h.steps(14);
+    h.shot("lsurf-17-close-nurbs");
+    h.st.set_patch_state(id, PatchState::Poly);
+    h.st.selection.clear();
+    h.steps(14);
+    h.shot("lsurf-18-close-poly");
+    h.st.set_patch_state(id, PatchState::Nurbs);
+    h.st.selection.clear();
+    h.steps(4);
+    let f = h.st.doc.feature(id).unwrap();
+    let m = f.mesh.as_ref().unwrap();
+    eprintln!("linked: layer {} points, {} faces, {} off the surface; state {:?}", m.verts.len(), m.faces.len(), m.patch.as_ref().unwrap().off_surface().iter().filter(|o| **o).count(), m.patch.as_ref().unwrap().state);
+}

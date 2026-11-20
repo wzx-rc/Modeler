@@ -821,6 +821,11 @@ pub struct AppState {
     /// the pointer, a gizmo drag on them, an Extrude / Inset following the
     /// pointer, the loop Insert Edge Loop would cut.
     pub poly_sel: Option<crate::poly::PolySel>,
+    /// A linked surface (`linked.rs`) in its NURBS state, Vertex mode: its
+    /// contour's points picked, the one under the pointer, a gizmo drag.
+    pub patch_sel: Option<crate::linked::PatchSel>,
+    pub patch_hover: Option<usize>,
+    pub patch_drag: Option<crate::linked::PatchDrag>,
     pub poly_hover: Option<crate::poly::PolyHover>,
     pub poly_drag: Option<crate::poly::PolyDrag>,
     pub poly_pull: Option<crate::poly::PolyPull>,
@@ -948,6 +953,9 @@ impl AppState {
             stroke: None,
             sculpt_nb: None,
             poly_sel: None,
+            patch_sel: None,
+            patch_hover: None,
+            patch_drag: None,
             poly_hover: None,
             poly_drag: None,
             poly_pull: None,
@@ -2119,11 +2127,18 @@ impl AppState {
             self.hover_vertex = None;
             // the steps of the mode stay selected: a fillet in Edge mode,
             // an inset or extrusion in Face mode
-            let keep = |f: &Feature| match m {
-                SelMode::Object => true,
-                SelMode::Edge => f.round.is_some(),
-                SelMode::Face => f.push.is_some(),
-                SelMode::Vertex => false,
+            // in the Poly tab a Poly mesh stays selected (Maya): its
+            // components are the ones the mode picks
+            let poly_tab = self.workspace == crate::workspace::Workspace::Poly;
+            let keep = |f: &Feature| {
+                (poly_tab && f.mesh.as_ref().map(|m| m.kind == nurbs_kernel::mesh::MeshKind::Poly).unwrap_or(false) && !crate::linked::shows_nurbs(f))
+                    || match m {
+                        SelMode::Object => true,
+                        SelMode::Edge => f.round.is_some(),
+                        SelMode::Face => f.push.is_some(),
+                        // a linked surface in NURBS: its contour's points
+                        SelMode::Vertex => crate::linked::shows_nurbs(f),
+                    }
             };
             let ids: Vec<FeatureId> = self.selection.iter().copied().filter(|id| self.doc.feature(*id).map(keep).unwrap_or(false)).collect();
             self.selection = ids;
@@ -2335,7 +2350,7 @@ impl AppState {
         if self.stroke.is_some() {
             self.end_stroke();
         }
-        if self.poly_drag.take().is_some() || self.poly_pull.take().is_some() {
+        if self.poly_drag.take().is_some() || self.poly_pull.take().is_some() || self.patch_drag.take().is_some() {
             self.cancel_live();
             self.mesh_gen += 1;
         }
@@ -2383,6 +2398,9 @@ impl AppState {
         self.end_poly_cut();
         if self.poly_drag.is_some() {
             self.end_poly_drag();
+        }
+        if self.patch_drag.is_some() {
+            self.end_patch_drag();
         }
         if self.stroke.is_some() {
             self.end_stroke();
@@ -3605,6 +3623,9 @@ impl AppState {
     /// The selection's own pivot (centre of the selected shapes, or of the
     /// picked components).
     fn own_pivot(&self) -> Option<DVec3> {
+        if self.patch_comp() {
+            return self.patch_pivot();
+        }
         if self.poly_comp() {
             return self.poly_pivot();
         }
@@ -3654,6 +3675,10 @@ impl AppState {
     pub fn begin_drag(&mut self, h: Handle, p: [f32; 2]) {
         if matches!(h, Handle::PushInset | Handle::PushDepth) {
             self.begin_push_drag(h, p);
+            return;
+        }
+        if self.patch_comp() {
+            self.begin_patch_drag(h, p);
             return;
         }
         if self.poly_comp() {
