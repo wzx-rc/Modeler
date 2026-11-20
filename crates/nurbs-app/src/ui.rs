@@ -1327,8 +1327,9 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
     if st.tool != Tool::Select || st.creation.is_some() || st.drag.is_some() || st.selection.is_empty() {
         return;
     }
-    // an inset or extrusion: its handles are there instead (Del deletes it)
-    if st.selected_push().is_some() {
+    // an inset or extrusion, an Array: their handles are there instead (Del
+    // deletes them; the bar sat on an Array's first copy, over its grip)
+    if st.selected_push().is_some() || st.selected_array().is_some() {
         return;
     }
     let b = st.doc.features.iter().filter(|f| st.selection.contains(&f.id)).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
@@ -1644,97 +1645,169 @@ fn align_window(ctx: &egui::Context, st: &mut AppState) {
     }
 }
 
-/// The settings of the operation under way, in a small window next to the
-/// component it works on (Romain 18 nov., 22 h 31: "en pop-up fenêtre avec
-/// grip de déplacement… comme dans Maya quand on fait un Bevel"). It
-/// follows the component; its grip moves it (double-click: back by it).
-fn op_window(ctx: &egui::Context, st: &mut AppState) {
-    // the marking menu open: nothing over it
-    if st.marking.is_open() {
-        return;
+/// What the operation window works on, as a key: a new key is a new
+/// subject (a new selection, a tool run again), and the window takes a new
+/// place; adding to what is picked keeps the first one, so it stays.
+fn op_subject(st: &AppState, k: OpPop) -> String {
+    match k {
+        OpPop::Edges => format!("Edges {:?}", st.edge_sel.first().map(|e| e.faces)),
+        OpPop::Faces => format!("Faces {:?}", st.face_sel.first().map(|f| f.tag)),
+        OpPop::Verts => format!("Verts {:?}", st.vert_sel.first().map(|v| (*v * 100.0).round())),
+        OpPop::Curves => format!("Curves {:?}", st.selection.first()),
+        OpPop::Tool => format!("Tool {:?}", st.tool),
+        _ => format!("{k:?}"),
     }
-    let Some(k) = op_pop(st) else { return };
-    let Some(anchor) = op_anchor(st, k) else { return };
-    // a new subject: the window comes back next to it
-    let subject = format!("{k:?}");
-    let key = Id::new("op-pop-subject");
-    if ctx.data(|d| d.get_temp::<String>(key)) != Some(subject.clone()) {
-        ctx.data_mut(|d| {
-            d.insert_temp(key, subject);
-            d.insert_persisted(Id::new(("panel-offset", "op-pop")), egui::Vec2::ZERO);
-        });
-    }
-    const W: f32 = 236.0;
-    let full = W + 20.0;
+}
+
+/// The operation window's width (its content; the card adds its margins).
+const OP_W: f32 = 288.0;
+
+/// Where the operation window goes for a new subject: at the component's
+/// height, beside the part so it covers neither the part nor the gizmo. The
+/// part is what is on screen of the kernel's mesh, the paths and the
+/// subject's own points; of the places round it (its right, its left, below,
+/// above, the view's sides) the one that covers least of it, of the
+/// component and of the help box, then the nearest the component. A tool's
+/// options go at the view's top right.
+fn op_place(ctx: &egui::Context, st: &AppState, k: OpPop, anchor: Rect, h: f32) -> egui::Pos2 {
+    let full = OP_W + 26.0;
     let vr = st.view_rect;
-    // at the component's height, beside the part so it covers neither the
-    // part nor the gizmo: on its right, else its left, else by the component
+    let (left, right, top, bottom) = (vr[0] + 8.0, vr[2] - 8.0, vr[1] + 48.0, vr[3] - 8.0);
+    if k == OpPop::Tool {
+        return pos2(right - full, top + 60.0);
+    }
     let view = st.view();
     let mut part = anchor;
-    if let Some((lo, hi)) = st.model.as_ref().and_then(|m| m.bounds()) {
-        for i in 0..8 {
-            let c = glam::Vec3::new(if i & 1 == 0 { lo[0] } else { hi[0] }, if i & 2 == 0 { lo[1] } else { hi[1] }, if i & 4 == 0 { lo[2] } else { hi[2] });
-            if let Some(p) = view.project(c) {
-                part = part.union(Rect::from_min_max(pos2(p[0], p[1]), pos2(p[0], p[1])));
-            }
+    let mut add = |p: Option<[f32; 2]>| {
+        if let Some(p) = p {
+            part = part.union(Rect::from_min_max(pos2(p[0], p[1]), pos2(p[0], p[1])));
+        }
+    };
+    if let Some(m) = st.model.as_ref() {
+        // the mesh's points (some 4000 of them), not its box's corners: a
+        // disc's box reaches far past it on screen
+        let stride = (m.positions.len() / 4000).max(1);
+        for q in m.positions.iter().step_by(stride) {
+            add(view.project(glam::Vec3::from(*q)));
         }
     }
     // the paths too: they have no mesh
     for f in st.doc.features.iter().filter(|f| f.visible && f.is_path()) {
         for q in st.curve_lines(f).concat() {
-            if let Some(p) = view.project(q.as_vec3()) {
-                part = part.union(Rect::from_min_max(pos2(p[0], p[1]), pos2(p[0], p[1])));
-            }
+            add(view.project(q.as_vec3()));
         }
     }
+    let part = part.intersect(Rect::from_min_max(pos2(vr[0], vr[1]), pos2(vr[2], vr[3])));
+    let help = ctx.memory(|m| m.area_rect(Id::new("help-box")));
+    // the other islands on screen (the panel, the Sub Outliner, the rail,
+    // the history, the materials): not over them either
+    let islands: Vec<Rect> = ctx.memory(|m| {
+        m.areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter(|l| matches!(l.order, Order::Middle | Order::Foreground) && l.id != Id::new("op-pop") && l.id != Id::new("help-box"))
+            .filter_map(|l| m.area_rect(l.id))
+            .filter(|r| r.is_positive() && r.area() < (vr[2] - vr[0]) * (vr[3] - vr[1]) * 0.5)
+            .collect()
+    });
     let gap = 28.0;
-    // its height as drawn last frame keeps it inside the view
-    let h = ctx.memory(|m| m.area_rect(Id::new("op-pop"))).map(|r| r.height()).unwrap_or(200.0);
-    let (left, right, top, bottom) = (vr[0] + 8.0, vr[2] - 8.0, vr[1] + 48.0, vr[3] - 8.0);
-    let y_by = (anchor.center().y - 60.0).clamp(top, (bottom - h).max(top));
-    let x_by = (anchor.center().x - full * 0.5).clamp(left, (right - full).max(left));
-    let at = if k == OpPop::Tool {
-        // a tool's options: at the view's top right, out of the drawing
-        pos2(right - full, top + 60.0)
-    } else if part.max.x + gap + full < right {
-        pos2(part.max.x + gap, y_by)
-    } else if part.min.x - gap - full > left {
-        pos2(part.min.x - gap - full, y_by)
-    } else if part.max.y + gap + h < bottom {
-        pos2(x_by, part.max.y + gap)
-    } else if part.min.y - gap - h > top {
-        pos2(x_by, part.min.y - gap - h)
-    } else {
-        let x = if anchor.max.x + 96.0 + full < right { anchor.max.x + 96.0 } else { anchor.min.x - 96.0 - full };
-        pos2(x.clamp(left, (right - full).max(left)), y_by)
-    } + panel_offset(ctx, "op-pop");
-    // not over the help box (bottom right): moved up above it
-    let mut at = at;
-    if let Some(hb) = ctx.memory(|m| m.area_rect(Id::new("help-box"))) {
+    let y_by = anchor.center().y - 60.0;
+    let x_by = anchor.center().x - full * 0.5;
+    let cands = [
+        pos2(part.max.x + gap, y_by),
+        pos2(part.min.x - gap - full, y_by),
+        pos2(x_by, part.max.y + gap),
+        pos2(x_by, part.min.y - gap - h),
+        pos2(right - full, y_by),
+        pos2(left, y_by),
+        pos2(right - full, top),
+        pos2(left, top),
+    ];
+    let area = |a: Rect, b: Rect| {
+        let i = a.intersect(b);
+        if i.is_positive() { i.area() } else { 0.0 }
+    };
+    let near = anchor.expand(36.0);
+    let mut best: Option<(f32, egui::Pos2)> = None;
+    for c in cands {
+        let at = pos2(c.x.clamp(left, (right - full).max(left)), c.y.clamp(top, (bottom - h).max(top)));
         let r = Rect::from_min_size(at, vec2(full, h));
-        if r.intersects(hb) && k != OpPop::Tool {
-            at.y = (hb.min.y - 8.0 - h).max(top);
+        let mut score = area(r, part) + 6.0 * area(r, near) + help.map(|hb| 3.0 * area(r, hb.expand(8.0))).unwrap_or(0.0);
+        score += islands.iter().map(|i| 4.0 * area(r, i.expand(6.0))).sum::<f32>();
+        score += 0.5 * r.distance_to_pos(anchor.center()) * 40.0;
+        if best.map(|b| score < b.0).unwrap_or(true) {
+            best = Some((score, at));
         }
     }
+    best.map(|b| b.1).unwrap_or(pos2(right - full, top))
+}
+
+/// The settings of the operation under way, in a small window next to the
+/// component it works on (Romain 18 nov., 22 h 31: "en pop-up fenêtre avec
+/// grip de déplacement… comme dans Maya quand on fait un Bevel"). It takes
+/// its place when its subject is new (a selection, a tool run again), then
+/// stays there while the view turns or the part changes (Romain 20 nov.,
+/// 19 h 01: "après elle ne suit pas en permanence"); its grip moves it
+/// (double-click: back to its place).
+fn op_window(ctx: &egui::Context, st: &mut AppState) {
+    // the marking menu open: nothing over it
+    if st.marking.is_open() {
+        return;
+    }
+    let key = Id::new("op-pop-subject");
+    let base_key = Id::new("op-pop-base");
+    let shown = op_pop(st).and_then(|k| op_anchor(st, k).map(|a| (k, a)));
+    let Some((k, anchor)) = shown else {
+        // hidden: the next subject takes a place of its own, even the same one
+        ctx.data_mut(|d| d.remove::<String>(key));
+        return;
+    };
+    let subject = op_subject(st, k);
+    let h = ctx.memory(|m| m.area_rect(Id::new("op-pop"))).map(|r| r.height()).unwrap_or(200.0);
+    let known = ctx.data(|d| d.get_temp::<String>(key));
+    let kept = ctx.data(|d| d.get_temp::<egui::Pos2>(base_key));
+    // the window's own controls changed its subject (a fillet made from the
+    // picked edges, a curve picked in a boolean's list): it stays where it is
+    let over = ctx.input(|i| i.pointer.latest_pos()).zip(ctx.memory(|m| m.area_rect(Id::new("op-pop")))).map(|(p, r)| r.expand(6.0).contains(p)).unwrap_or(false);
+    let base = match kept {
+        Some(b) if known.as_deref() == Some(subject.as_str()) => b,
+        Some(b) if known.is_some() && over => {
+            ctx.data_mut(|d| d.insert_temp(key, subject));
+            b
+        }
+        _ => {
+            let at = op_place(ctx, st, k, anchor, h);
+            ctx.data_mut(|d| {
+                d.insert_temp(key, subject);
+                d.insert_temp(base_key, at);
+                d.insert_persisted(Id::new(("panel-offset", "op-pop")), egui::Vec2::ZERO);
+            });
+            at
+        }
+    };
+    // kept inside the view as it grows or the window is resized
+    let vr = st.view_rect;
+    let full = OP_W + 26.0;
+    let (left, right, top, bottom) = (vr[0] + 8.0, vr[2] - 8.0, vr[1] + 48.0, vr[3] - 8.0);
+    let at = base + panel_offset(ctx, "op-pop");
+    let at = pos2(at.x.clamp(left, (right - full).max(left)), at.y.clamp(top, (bottom - h).max(top)));
+    set_op_style(ctx, true);
     egui::Area::new(Id::new("op-pop")).order(Order::Foreground).fixed_pos(at).show(ctx, |ui| {
-        island().inner_margin(Margin::same(10)).show(ui, |ui| {
-            ui.set_width(W);
+        op_island().show(ui, |ui| {
+            ui.set_width(OP_W);
             grip(ui, "op-pop");
             match k {
                 OpPop::Edges => round_card(ui, st),
                 OpPop::Faces => face_card(ui, st),
                 OpPop::Verts => {
                     let n = st.vert_sel.len();
-                    ui.label(egui::RichText::new(if n > 1 { format!("{n} vertices") } else { "Vertex".to_string() }).font(semibold(14.0)).color(TEXT()));
+                    op_title(ui, &if n > 1 { format!("{n} vertices") } else { "Vertex".to_string() }, "");
                     vertex_card(ui, st);
                 }
                 OpPop::Curves => combine_card(ui, st),
                 OpPop::Step(id) => {
                     let Some(f) = st.doc.feature(id).cloned() else { return };
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&f.name).font(semibold(14.0)).color(TEXT()));
-                        chip_label(ui, f.kind_label(), RAISED(), LABEL());
-                    });
+                    op_title(ui, &f.name, f.kind_label());
                     // a curve of a 2D boolean: back to it
                     if let Some(b) = st.curve_inside(f.id).map(|b| (b.id, b.name.clone())) {
                         let r = ui.add(egui::Label::new(egui::RichText::new(format!("‹ In {}", b.1)).font(medium(12.0)).color(LABEL())).sense(Sense::click()));
@@ -1771,14 +1844,23 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                 OpPop::Tool => surface_options(ui, st),
                 OpPop::Shape(id) => {
                     let Some(f) = st.doc.feature(id).cloned() else { return };
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&f.name).font(semibold(14.0)).color(TEXT()));
-                        chip_label(ui, f.kind_label(), RAISED(), LABEL());
-                    });
+                    op_title(ui, &f.name, f.kind_label());
                     shape_card(ui, st, &f);
                 }
             }
         });
+    });
+    set_op_style(ctx, false);
+}
+
+/// The operation window's title: the name, and its kind when the name does
+/// not say it already ("Array 2" is an Array).
+fn op_title(ui: &mut Ui, name: &str, kind: &str) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(name).font(semibold(15.0)).color(TEXT_STRONG()));
+        if !kind.is_empty() && !name.starts_with(kind) {
+            chip_label(ui, kind, RAISED(), LABEL());
+        }
     });
 }
 
@@ -1817,6 +1899,10 @@ fn array_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
     use nurbs_kernel::ArrayKind;
     let any_down = ui.input(|i| i.pointer.any_down());
     let Some(a) = f.array.clone() else { return };
+    let note = |ui: &mut Ui, t: &str| {
+        ui.label(egui::RichText::new(t).font(regular(11.5)).color(LABEL()));
+    };
+    ui.add_space(4.0);
     let c = TEXT();
     let kinds: Vec<(ArrayKind, &str, Color32)> = vec![(ArrayKind::Line, "Line", c), (ArrayKind::Grid, "Grid", c), (ArrayKind::Circle, "Circle", c)];
     if let Some(k) = ui.push_id("array-kind", |ui| segmented(ui, &kinds, a.kind, 28.0)).inner {
@@ -1833,15 +1919,12 @@ fn array_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
             st.end_live();
         }
     }
+    note(ui, if a.kind == ArrayKind::Circle { "In the view: the square sets how many, the arrow the angle" } else { "In the view: the squares set the steps, the arrows how many" });
     let colors = [AXIS_X, AXIS_Y, AXIS_Z];
-    let mut count = a.count as f32;
-    let (ch, start) = slider_row(ui, "Count", &mut count, 1.0..=50.0, 1.0, "");
-    if ch {
-        st.set_array(nurbs_kernel::Array { count: count.round().max(1.0) as u32, ..a.clone() }, start || !st.is_live());
-    }
-    // a vector as X / Y / Z fields
+    // a vector as X / Y / Z fields under its name
     let vec_row = |ui: &mut Ui, st: &mut AppState, title: &str, v: DVec3, set: &dyn Fn(&mut nurbs_kernel::Array, DVec3)| {
-        ui.label(egui::RichText::new(title).font(regular(12.0)).color(TEXT2()));
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new(title).font(regular(12.5)).color(TEXT2()));
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             for k in 0..3 {
@@ -1857,34 +1940,41 @@ fn array_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
             }
         });
     };
+    section(ui, "Copies");
+    let mut count = a.count as f32;
+    let (ch, start) = slider_row(ui, "Count", &mut count, 1.0..=50.0, 1.0, "");
+    if ch {
+        st.set_array(nurbs_kernel::Array { count: count.round().max(1.0) as u32, ..a.clone() }, start || !st.is_live());
+    }
     match a.kind {
         ArrayKind::Line | ArrayKind::Grid => {
-            vec_row(ui, st, "Step (from one to the next, mm)", a.step, &|b, w| b.step = w);
+            vec_row(ui, st, "Step, mm", a.step, &|b, w| b.step = w);
             if a.kind == ArrayKind::Grid {
+                section(ui, "Rows");
                 let mut rows = a.count2 as f32;
                 let (ch, start) = slider_row(ui, "Rows", &mut rows, 1.0..=30.0, 1.0, "");
                 if ch {
                     st.set_array(nurbs_kernel::Array { count2: rows.round().max(1.0) as u32, ..a.clone() }, start || !st.is_live());
                 }
-                vec_row(ui, st, "Row step (mm)", a.step2, &|b, w| b.step2 = w);
+                vec_row(ui, st, "Row step, mm", a.step2, &|b, w| b.step2 = w);
             }
         }
         ArrayKind::Circle => {
+            let mut ang = a.angle as f32;
+            let (ch, start) = slider_row(ui, "Angle", &mut ang, 1.0..=360.0, 1.0, "°");
+            if ch {
+                st.set_array(nurbs_kernel::Array { angle: ang as f64, ..a.clone() }, start || !st.is_live());
+            }
+            note(ui, if a.angle >= 359.999 { "360°: evenly all round" } else { "The first and the last at the ends of the angle" });
+            section(ui, "Axis");
             let items: Vec<(u8, &str, Color32)> = vec![(0, "X", AXIS_X), (1, "Y", AXIS_Y), (2, "Z", AXIS_Z)];
-            ui.label(egui::RichText::new("Round the axis").font(regular(12.0)).color(TEXT2()));
             if let Some(x) = ui.push_id("array-axis", |ui| segmented(ui, &items, a.axis, 26.0)).inner {
                 if x != a.axis {
                     st.set_array(nurbs_kernel::Array { axis: x, ..a.clone() }, true);
                     st.end_live();
                 }
             }
-            vec_row(ui, st, "Through (mm)", a.centre, &|b, w| b.centre = w);
-            let mut ang = a.angle as f32;
-            let (ch, start) = slider_row(ui, "Angle", &mut ang, 1.0..=360.0, 1.0, "°");
-            if ch {
-                st.set_array(nurbs_kernel::Array { angle: ang as f64, ..a.clone() }, start || !st.is_live());
-            }
-            ui.label(egui::RichText::new(if a.angle >= 359.999 { "360°: evenly all round" } else { "The first and the last at the ends of the angle" }).font(regular(11.0)).color(TEXT2()));
+            vec_row(ui, st, "Through, mm", a.centre, &|b, w| b.centre = w);
         }
     }
     section(ui, "Repeats");
@@ -1896,7 +1986,7 @@ fn array_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
             chip_label(ui, &format!("+ {ops} operation{}", if ops == 1 { "" } else { "s" }), RAISED(), LABEL());
         }
     });
-    ui.label(egui::RichText::new("An operation on any copy is made on all of them").font(regular(11.0)).color(TEXT2()));
+    note(ui, "An operation on any copy is made on all of them");
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
         st.end_live();
     }
@@ -3121,10 +3211,11 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
     // one click sizes
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
+        let cw = ((ui.available_width() - 16.0) / 5.0).max(44.0);
         for q in [0.5, 1.0, 2.0, 3.0, 5.0] {
             let on = (size - q).abs() < 1e-6;
             let g = ui.painter().layout_no_wrap(fmt_mm(q as f32), medium(12.0), if on { on_accent() } else { TEXT() });
-            let (r, resp) = ui.allocate_exact_size(vec2(44.0, 24.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(cw, 24.0), Sense::click());
             let p = ui.painter();
             p.rect(r, 6.0, if on { EDGE_SEL } else if resp.hovered() { RAISED() } else { WELL() }, Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
             p.galley(r.center() - g.size() * 0.5, g, TEXT());
@@ -3386,7 +3477,8 @@ pub fn material_ball(p: &egui::Painter, c: egui::Pos2, r: f32, m: &materials::Lo
 fn axis_field(ui: &mut Ui, label: &str, color: Color32, v: &mut f32, suffix: &str) -> egui::Response {
     let (lr, _) = ui.allocate_exact_size(vec2(18.0, 22.0), Sense::hover());
     ui.painter().text(lr.center(), Align2::CENTER_CENTER, label, semibold(12.0), color);
-    value_field(ui, v, -100000.0..=100000.0, if suffix == "°" { 1.0 } else { 0.1 }, suffix, 66.0)
+    // in the operation window, the three fill its width
+    value_field(ui, v, -100000.0..=100000.0, if suffix == "°" { 1.0 } else { 0.1 }, suffix, if op_style(ui) { ((OP_W - 74.0) / 3.0).floor() } else { 66.0 })
 }
 
 fn position_rows(ui: &mut Ui, st: &mut AppState, f: &Feature) {

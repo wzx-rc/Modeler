@@ -2069,6 +2069,158 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("array-grips") {
+        // the Array's grips in the view (Romain 20 nov., 19 h 01: "des
+        // poignées pour manipuler directement l'influence des array"): the
+        // vent's line, its first copy dragged (the step), its arrow pulled
+        // (more copies), a grid's rows pulled; the operation window stays
+        // where it was put while the view turns; round a disc, the arrow
+        // turned back to 180° and the first copy brought further (fewer)
+        use nurbs_app::state::Handle;
+        let mut d = Doc::default();
+        let plate = d.add(Op::Add, Prim::Box { x: 90.0, y: 8.0, z: 60.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(plate).unwrap().name = "Plate".into();
+        let vent = d.add(Op::Carve, Prim::Profile { x: 5.0, y: 10.0, z: 16.0 }, DVec3::new(-36.0, 5.0, -12.0), DQuat::IDENTITY);
+        d.feature_mut(vent).unwrap().name = "Vent".into();
+        d.feature_mut(vent).unwrap().profile = Some(nurbs_kernel::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![2.5; 4], tension: vec![], open: false, spline: false });
+        h.reset(d, "Array grips");
+        h.st.camera.dist *= 1.2;
+        h.st.camera.pitch += 0.25;
+        h.settle();
+        h.key(egui::Key::Num2);
+        h.click(h.screen_of(Vec3::new(-33.5, 8.0, -12.0)));
+        h.st.set_round(0.8, false, true);
+        h.st.end_live();
+        h.settle();
+        h.key(egui::Key::Num4);
+        h.st.select(None, false);
+        h.click(h.screen_of(Vec3::new(-36.0, 5.0, -12.0)));
+        h.settle();
+        h.hold(Modifiers::CTRL | Modifiers::SHIFT);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let arr = |h: &Harness| h.st.selected_array().and_then(|f| f.array.clone()).unwrap();
+        // where a grip is on screen (an arrow: three quarters along it)
+        let grip = |h: &Harness, which: Handle| -> Pos2 {
+            let g = h.st.array_grips().into_iter().find(|g| g.handle == which).expect("grip");
+            match g.from {
+                None => h.screen_of(g.at.as_vec3()),
+                Some(f) => {
+                    let (a, b) = (h.screen_of(f.as_vec3()), h.screen_of(g.at.as_vec3()));
+                    a + (b - a) * 0.75
+                }
+            }
+        };
+        let origin = |h: &Harness| h.st.array_marks().unwrap().1[0];
+        eprintln!("  array: {:?}", arr(&h));
+        let p = grip(&h, Handle::ArrayStep(0));
+        h.move_to(p);
+        h.steps(3);
+        h.shot("zero-array-grips-1-hover");
+        // the first copy dragged out to 11 mm from the original
+        let o = origin(&h);
+        let q = h.screen_of((o + DVec3::X * 11.0).as_vec3());
+        h.drag(p, q, 10, false);
+        h.settle();
+        h.shot("zero-array-grips-2-step");
+        h.press(q, false);
+        h.settle();
+        eprintln!("  step: {:?}", arr(&h).step);
+        // the arrow pulled out by three steps: 3 more
+        let p = grip(&h, Handle::ArrayCount(0));
+        let a = arr(&h);
+        let q = p + (h.screen_of((o + a.step * 3.0).as_vec3()) - h.screen_of(o.as_vec3()));
+        h.drag(p, q, 12, false);
+        h.settle();
+        h.shot("zero-array-grips-3-count");
+        h.press(q, false);
+        h.settle();
+        eprintln!("  count: {}", arr(&h).count);
+        // a grid: its rows' arrow pulled by one row
+        let a = arr(&h);
+        h.st.set_array(nurbs_kernel::Array { kind: nurbs_kernel::ArrayKind::Grid, count2: 2, step2: DVec3::new(0.0, 0.0, 20.0), ..a }, true);
+        h.st.end_live();
+        h.settle();
+        let p = grip(&h, Handle::ArrayCount(1));
+        let q = p + (h.screen_of((o + DVec3::Z * 20.0).as_vec3()) - h.screen_of(o.as_vec3()));
+        h.drag(p, q, 10, false);
+        h.settle();
+        h.shot("zero-array-grips-4-rows");
+        h.press(q, false);
+        h.settle();
+        eprintln!("  rows: {}", arr(&h).count2);
+        // the view turned: the window stays where it was put
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        let before = h.ctx.memory(|m| m.area_rect(egui::Id::new("op-pop")));
+        h.shot("zero-array-grips-5-window");
+        h.st.camera.yaw += 0.6;
+        h.st.camera.dist *= 0.85;
+        h.settle();
+        h.steps(3);
+        let after = h.ctx.memory(|m| m.area_rect(egui::Id::new("op-pop")));
+        h.shot("zero-array-grips-6-turned");
+        eprintln!("  window before {:?} after {:?}", before.map(|r| r.min), after.map(|r| r.min));
+        // round a disc: 8, the arrow turned back to 180°, then the first
+        // copy brought further round (fewer copies)
+        let mut d = Doc::default();
+        let disc = d.add(Op::Add, Prim::Cylinder { radius: 40.0, height: 8.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(disc).unwrap().name = "Disc".into();
+        let boss = d.add(Op::Add, Prim::Cylinder { radius: 5.0, height: 6.0 }, DVec3::new(30.0, 8.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(boss).unwrap().name = "Boss".into();
+        h.reset(d, "Array grips round");
+        h.st.camera.dist *= 1.15;
+        h.st.camera.pitch += 0.3;
+        h.settle();
+        h.st.selection = vec![boss];
+        h.hold(Modifiers::CTRL | Modifiers::SHIFT);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let a = arr(&h);
+        h.st.set_array(nurbs_kernel::Array { kind: nurbs_kernel::ArrayKind::Circle, count: 8, ..a }, true);
+        h.st.end_live();
+        h.settle();
+        let p = grip(&h, Handle::ArrayAngle);
+        h.move_to(p);
+        h.steps(3);
+        h.shot("zero-array-grips-7-round");
+        // along the arc, from the end (360°) back to 180°
+        let a = arr(&h);
+        let o = origin(&h);
+        let c = DVec3::new(a.centre.x, o.y, a.centre.z);
+        let r0 = o - c;
+        h.press(p, true);
+        for i in 1..=12 {
+            let ang = (360.0 - 15.0 * i as f64).to_radians();
+            let w = c + DQuat::from_axis_angle(DVec3::Y, ang) * r0 * 1.15;
+            h.move_to(h.screen_of(w.as_vec3()));
+        }
+        h.settle();
+        h.shot("zero-array-grips-8-angle");
+        let w = c + DQuat::from_axis_angle(DVec3::Y, 180f64.to_radians()) * r0 * 1.15;
+        h.press(h.screen_of(w.as_vec3()), false);
+        h.settle();
+        eprintln!("  angle: {} count {}", arr(&h).angle, arr(&h).count);
+        // the first copy taken to 45°: 180 / 45 + 1 = 5
+        let p = grip(&h, Handle::ArrayCount(0));
+        let a0 = arr(&h).step_angle();
+        h.press(p, true);
+        for i in 1..=8 {
+            let ang = (a0 + (45.0 - a0) * i as f64 / 8.0).to_radians();
+            h.move_to(h.screen_of((c + DQuat::from_axis_angle(DVec3::Y, ang) * r0).as_vec3()));
+        }
+        h.settle();
+        h.shot("zero-array-grips-9-fewer");
+        let w = c + DQuat::from_axis_angle(DVec3::Y, 45f64.to_radians()) * r0;
+        h.press(h.screen_of(w.as_vec3()), false);
+        h.settle();
+        eprintln!("  angle: {} count {}", arr(&h).angle, arr(&h).count);
+        eprintln!("  errors: {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
     if want("align-window") {
         // Align (3ds Max's, Alt + A): a bracket turned 30° to the right of
         // the block, picked, Align, the block clicked; centre on centre,

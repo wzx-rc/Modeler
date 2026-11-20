@@ -390,6 +390,14 @@ pub enum Handle {
     /// cage à poignées"): a grip by its side of each axis (-1, 0, 1): a
     /// face's middle, an edge's middle, a corner.
     Cage([i8; 3]),
+    /// The selected Array's grips (Romain 20 nov., 19 h 01: "des poignées
+    /// pour manipuler directement l'influence des array"): the first copy
+    /// (0 along, 1 a Grid's rows) sets the step, the arrow past the last
+    /// copy the count; round a Circle the first copy sets the count, the
+    /// arrow at the end the angle.
+    ArrayStep(u8),
+    ArrayCount(u8),
+    ArrayAngle,
 }
 
 /// The directions a move handle may take: along its axis, in its plane, or
@@ -3536,7 +3544,7 @@ impl AppState {
                 let n = (self.view().eye.as_dvec3() - pivot).try_normalize()?;
                 BasePlane::new(pivot, n, None).hit(ro, rd)
             }
-            Handle::PushInset | Handle::PushDepth => None,
+            Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle => None,
             Handle::Rot(a) => BasePlane::new(pivot, DVec3::AXES[a], None).hit(ro, rd),
             Handle::Scale(a) => {
                 let axis = self.scale_frame()? * DVec3::AXES[a];
@@ -3559,6 +3567,10 @@ impl AppState {
     pub fn begin_drag(&mut self, h: Handle, p: [f32; 2]) {
         if matches!(h, Handle::PushInset | Handle::PushDepth) {
             self.begin_push_drag(h, p);
+            return;
+        }
+        if matches!(h, Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle) {
+            self.begin_array_drag(h, p);
             return;
         }
         if self.sel_mode != SelMode::Object {
@@ -3645,6 +3657,10 @@ impl AppState {
             self.update_path_points_drag(&d, p);
             return;
         }
+        if matches!(d.handle, Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle) {
+            self.update_array_drag(&d, p);
+            return;
+        }
         if d.line.is_some() {
             self.update_push_drag(&d, p);
             return;
@@ -3692,7 +3708,7 @@ impl AppState {
                     }
                 });
             }
-            Handle::PushInset | Handle::PushDepth => {}
+            Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle => {}
             Handle::Rot(a) => {
                 let axis = DVec3::AXES[a];
                 let flat = |v: DVec3| v - axis * v.dot(axis);

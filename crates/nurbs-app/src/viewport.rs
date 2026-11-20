@@ -119,6 +119,20 @@ fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
             }
         }
     }
+    // the selected Array's grips: its squares first, then its arrows
+    let grips = st.array_grips();
+    for g in grips.iter().filter(|g| g.from.is_none()) {
+        if world(st, g.at).map(|q| (q - p).length() < 9.0).unwrap_or(false) {
+            return Some(g.handle);
+        }
+    }
+    for g in grips.iter() {
+        if let (Some(f), Some(b)) = (g.from.and_then(|f| world(st, f)), world(st, g.at)) {
+            if dist_seg(p, f + (b - f) * 0.3, b + (b - f).normalized() * 10.0) < 8.0 {
+                return Some(g.handle);
+            }
+        }
+    }
     if st.tool != Tool::Select || st.creation.is_some() {
         return None;
     }
@@ -1489,9 +1503,59 @@ fn draw_array(p: &Painter, st: &AppState) {
         }
         p.circle_filled(*s, 2.6, col);
     }
-    if let Some(Some(last)) = screen.last() {
+    // its grips: squares on the first copies, arrows past the ends; the
+    // one hovered or dragged lit, its value by it
+    let hot = st.hot_handle;
+    let dragging = st.drag.as_ref().map(|d| d.handle);
+    let dark = Color32::from_rgb(0x20, 0x22, 0x26);
+    let mut lit_at = None;
+    let grips = st.array_grips();
+    for g in &grips {
+        if dragging.is_some() && dragging != Some(g.handle) {
+            continue;
+        }
+        let on = hot == Some(g.handle) || dragging == Some(g.handle);
+        let Some(q) = world(st, g.at) else { continue };
+        match g.from.and_then(|f| world(st, f)) {
+            Some(f) => {
+                p.circle_filled(f, 2.0, col);
+                arrow(p, f, q, if on { HOT } else { col }, if on { 2.8 } else { 2.0 });
+            }
+            None => {
+                let r = if on { 5.5 } else { 4.5 };
+                p.rect(Rect::from_center_size(q, vec2(r * 2.0, r * 2.0)), 1.5, if on { HOT } else { Color32::WHITE }, Stroke::new(1.0, dark), egui::StrokeKind::Middle);
+            }
+        }
+        if on {
+            lit_at = Some((g.handle, q));
+        }
+    }
+    if let Some((h, q)) = lit_at {
+        let text = match (&st.gizmo_readout, dragging) {
+            (Some(t), Some(_)) => t.clone(),
+            _ => grip_value(&a, h),
+        };
+        // over the windows (the operation window stays put: the arrow may
+        // reach under it)
+        let top = p.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("array-grip-chip"))).with_clip_rect(p.clip_rect());
+        chip(&top, q + vec2(14.0, 12.0), Align2::LEFT_TOP, &text, HOT, HOT);
+    } else if let Some(Some(last)) = screen.last() {
         let total = pts.len();
-        chip(p, *last + vec2(12.0, -8.0), Align2::LEFT_BOTTOM, &format!("Array · {} · {total}", a.kind_name()), col, col);
+        chip(p, *last + vec2(12.0, -10.0), Align2::LEFT_BOTTOM, &format!("Array · {} · {total}", a.kind_name()), col, col);
+    }
+}
+
+/// What an Array grip changes, as it is now (shown while hovered).
+fn grip_value(a: &nurbs_kernel::Array, h: Handle) -> String {
+    match h {
+        Handle::ArrayStep(w) => {
+            let s = if w == 0 { a.step } else { a.step2 };
+            format!("{} {} mm · drag", if w == 0 { "Step" } else { "Row step" }, crate::widgets::fmt3(s.length()))
+        }
+        Handle::ArrayCount(_) if a.kind == nurbs_kernel::ArrayKind::Circle => format!("Count {} · drag round", a.count),
+        Handle::ArrayCount(w) => format!("{} {} · pull: more", if w == 0 { "Count" } else { "Rows" }, if w == 0 { a.count } else { a.count2 }),
+        Handle::ArrayAngle => format!("Angle {}° · drag round", crate::widgets::fmt3(if a.angle.abs() >= 359.999 { 360.0 } else { a.angle }).trim_end_matches(",0")),
+        _ => String::new(),
     }
 }
 
@@ -1703,13 +1767,17 @@ pub fn hint(st: &AppState) -> String {
             if let Some(d) = &st.drag {
                 match d.handle {
                     Handle::Rot(_) => "Round the ring: turn · 15° steps while Snap is on · Release: keep it".into(),
+                    Handle::ArrayStep(_) => "Along the line: the step, the copies follow · Release: keep it".into(),
+                    Handle::ArrayCount(_) if st.selected_array().and_then(|f| f.array.as_ref()).map(|a| a.kind == nurbs_kernel::ArrayKind::Circle).unwrap_or(false) => "Round the axis: nearer the original, more copies · Release: keep it".into(),
+                    Handle::ArrayCount(_) => "Out: more copies, the same step · In: fewer · Release: keep it".into(),
+                    Handle::ArrayAngle => "Round the axis: the angle, the count kept · 15° steps while Snap is on · 360°: evenly all round · Release: keep it".into(),
                     Handle::Scale(_) => "Away from the centre: bigger · Release: keep it".into(),
                     Handle::ScaleAll => "To the right: bigger · To the left: smaller · Release: keep it".into(),
                     Handle::Cage(_) => "The side facing the grip stays · Shift: proportions kept · Alt: from the middle · Ctrl: no snapping · Release: keep it".into(),
                     _ => "Moving: the kernel rebuilds the booleans live".into(),
                 }
             } else if st.selected_array().is_some() {
-                "Window: Line, Grid or Circle, how many, how far · A copy clicked is the original: an operation on it is made on all · Del: delete it".into()
+                "Square on the first copy: the step (round a circle: how many) · Arrow at the end: how many (round a circle: the angle) · A copy clicked is the original: an operation on it is made on all · Del: delete it".into()
             } else if st.selected_mirror().is_some() {
                 "Window: the plane's axis, where it passes, the side kept · The steps after it are made on both sides · Del: delete it".into()
             } else if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {
