@@ -662,6 +662,12 @@ impl AppState {
             self.toast("Send to Sculpt: select a Poly mesh", true);
             return;
         }
+        // a linked object goes into its own Sculpt state (the clay stays
+        // linked to its NURBS and Poly layer)
+        if ids.len() == 1 && self.doc.feature(ids[0]).and_then(crate::linked::patch_of).is_some() {
+            self.set_patch_state(ids[0], nurbs_kernel::patch::PatchState::Sculpt);
+            return;
+        }
         let mut made = vec![];
         for id in ids {
             let Some(f) = self.doc.feature(id).cloned() else { continue };

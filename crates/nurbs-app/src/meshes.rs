@@ -75,12 +75,18 @@ pub fn smoothed(pts: &[Vec3], faces: &[Vec<u32>], levels: usize) -> (Vec<Vec3>, 
 /// less the Carves that cut it, with a normal per point (the surface's,
 /// the cut's polygons' at the new points).
 pub fn surface_polys(f: &Feature, p: &Patch, solids: &[Solid], n: usize) -> (Vec<Vec3>, Vec<Vec<u32>>, Vec<Vec3>) {
-    let cv = p.cvs(size(f));
     let x = crate::linked::to_world(f);
     let rot = f.rot.as_quat();
-    let (pts, faces, uv) = patch::grid(&cv, n, n);
-    let wp: Vec<Vec3> = pts.iter().map(|q| x.transform_point3(*q)).collect();
-    let wn: Vec<Vec3> = patch::grid_normals(&cv, &uv).iter().map(|q| rot * *q).collect();
+    // a closed object: each patch its own grid, coarser
+    let n = if p.count() > 1 { (n * 2 / 5).max(6) } else { n };
+    let (mut wp, mut faces, mut wn): (Vec<Vec3>, Vec<Vec<u32>>, Vec<Vec3>) = (vec![], vec![], vec![]);
+    for cv in p.surfaces(size(f)) {
+        let (pts, fs, uv) = patch::grid(&cv, n, n);
+        let at = wp.len() as u32;
+        wp.extend(pts.iter().map(|q| x.transform_point3(*q)));
+        wn.extend(patch::grid_normals(&cv, &uv).iter().map(|q| rot * *q));
+        faces.extend(fs.into_iter().map(|q| q.into_iter().map(|v| v + at).collect::<Vec<u32>>()));
+    }
     if solids.is_empty() {
         return (wp, faces, wn);
     }
@@ -120,6 +126,10 @@ pub fn layer_polys(f: &Feature, p: &Patch, solids: &[Solid], only_off: bool) -> 
     };
     if solids.is_empty() {
         return (pts, faces, of);
+    }
+    // a clay is fine enough as it is
+    if m.kind == MeshKind::Sculpt {
+        return patch::cut_all(&pts, &faces, solids);
     }
     // finer near the solids first: the cut then follows their curves
     // across big faces (an extrusion's walls)
@@ -163,7 +173,36 @@ fn layer_edges(f: &Feature, p: &Patch, solids: &[Solid], only_off: bool, picked:
 /// editable); in Poly its layer, each face its slot. The Carves after it
 /// cut both.
 fn linked_vertices(f: &Feature, m: &MeshData, p: &Patch, base: u32, solids: &[Solid], out: &mut Vec<MeshVertex>) -> usize {
+    // smooth shading, a normal per point (the clay)
+    let smooth_out = |pts: &[Vec3], faces: &[Vec<u32>], out: &mut Vec<MeshVertex>| {
+        let tmp = MeshData { kind: MeshKind::Sculpt, verts: vec![], faces: faces.to_vec(), smooth: false, angle: 0.0, patch: None, sdf: None };
+        let n = tmp.vertex_normals(pts);
+        for q in faces {
+            for t in patch::triangulate(pts, q) {
+                for v in t {
+                    out.push(MeshVertex { pos: pts[v as usize].to_array(), nrm: n[v as usize].normalize_or(Vec3::Y).to_array(), face: base, dev: NO_DEV });
+                }
+            }
+        }
+    };
+    if p.state == nurbs_kernel::patch::PatchState::Sculpt {
+        let (lp, lf, _) = layer_polys(f, p, solids, false);
+        smooth_out(&lp, &lf, out);
+        return 1;
+    }
     if crate::linked::shows_nurbs(f) {
+        // sculpted: the clay rides on the contour, shown as the surface
+        if let Some((cp, cf)) = crate::linked::sculpt_shown(f) {
+            let x = crate::linked::to_world(f);
+            let wp: Vec<Vec3> = cp.iter().map(|q| x.transform_point3(*q)).collect();
+            if solids.is_empty() {
+                smooth_out(&wp, &cf, out);
+            } else {
+                let (pp, ff, _) = patch::cut_all(&wp, &cf, solids);
+                smooth_out(&pp, &ff, out);
+            }
+            return 2;
+        }
         let (pts, faces, nrm) = surface_polys(f, p, solids, 40);
         for q in &faces {
             for t in patch::triangulate(&pts, q) {
@@ -228,12 +267,18 @@ fn clipped(lines: Vec<Vec<Vec3>>, solids: &[Solid]) -> Vec<Vec<[f32; 3]>> {
 /// Poly layer's own shapes' edges (in the Poly tab's colour).
 pub fn linked_lines(f: &Feature, solids: &[Solid], out: &mut Vec<LineVertex>) {
     let Some(p) = crate::linked::patch_of(f) else { return };
-    let cv = p.cvs(size(f));
     let x = crate::linked::to_world(f);
     let w = |l: Vec<Vec3>| -> Vec<Vec3> { l.into_iter().map(|q| x.transform_point3(q)).collect() };
-    let sides: Vec<Vec<Vec3>> = (0..4).map(|k| w(patch::side(&cv, k, 48))).collect();
+    let surfs = p.surfaces(size(f));
+    let sides: Vec<Vec<Vec3>> = surfs.iter().flat_map(|cv| (0..4).map(|k| w(patch::side(cv, k, 48)))).collect();
     line_vertices(&clipped(sides, solids), [24, 26, 30, 220], 1.1, out);
-    let iso: Vec<Vec<Vec3>> = patch::isolines(&cv, 3, 40).into_iter().map(w).collect();
+    // sculpted: the clay is shown, the surface's iso curves and the Poly
+    // layer's own shapes would float in it
+    if crate::linked::sculpt_shown(f).is_some() {
+        return;
+    }
+    let count = if surfs.len() > 1 { 1 } else { 3 };
+    let iso: Vec<Vec<Vec3>> = surfs.iter().flat_map(|cv| patch::isolines(cv, count, 40)).map(w).collect();
     line_vertices(&clipped(iso, solids), [24, 26, 30, 70], 0.7, out);
     if !solids.is_empty() {
         // the trim: where the Carves cut the surface, the border of what is
@@ -392,6 +437,10 @@ pub fn ray_mesh(f: &Feature, ro: Vec3, rd: Vec3) -> Option<MeshHit> {
 /// or its Poly layer (each face), less the Carves' holes.
 pub fn ray_linked(f: &Feature, solids: &[Solid], ro: Vec3, rd: Vec3) -> Option<MeshHit> {
     let p = crate::linked::patch_of(f)?;
+    // the clay, uncut: as any mesh (its box first)
+    if p.state == nurbs_kernel::patch::PatchState::Sculpt && solids.is_empty() {
+        return ray_mesh(f, ro, rd);
+    }
     let (pts, faces, slot) = if crate::linked::shows_nurbs(f) {
         let (pts, faces, _) = surface_polys(f, p, solids, 20);
         let n = faces.len();

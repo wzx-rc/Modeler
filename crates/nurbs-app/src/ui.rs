@@ -2603,20 +2603,43 @@ fn linked_card(ui: &mut Ui, st: &mut AppState, f: &Feature, p: &nurbs_kernel::pa
     if let Some(s) = state_buttons(ui, &items, p.state) {
         st.set_patch_state(id, s);
     }
-    let (verts, faces) = f.mesh.as_ref().map(|m| (m.verts.len(), m.faces.len())).unwrap_or((0, 0));
     let off = p.off_surface().iter().filter(|o| **o).count();
+    let clay = crate::linked::sculpt_shown(f).is_some();
     let lines: Vec<String> = match p.state {
         PatchState::Poly => vec![
             "The mesh is yours: Vertex, Edge, Face modes, Extrude, Bevel, Cut.".into(),
             "Back to NURBS its points ride on the surface.".into(),
+            if p.sculpt.is_some() { "The clay's details come back on the new faces.".into() } else { String::new() },
         ],
-        _ => vec![
+        PatchState::Sculpt => vec![
+            "The Poly layer as clay: the brushes (X C V S G I T P).".into(),
+            "Back to NURBS or Poly the details are kept and ride on the contour and the Poly layer.".into(),
+        ],
+        PatchState::Nurbs => vec![
             "Move the contour's points: Vertex mode (1), a point or the gizmo.".into(),
-            if off > 0 { format!("The Poly layer's own shapes ({off} points) ride on it, shown, not editable here.") } else { "The Poly layer follows it.".into() },
+            if clay {
+                "The clay rides on it (shown in place of the surface).".into()
+            } else if off > 0 {
+                format!("The Poly layer's own shapes ({off} points) ride on it, shown, not editable here.")
+            } else {
+                "The Poly layer follows it.".into()
+            },
         ],
     };
-    for l in lines {
+    for l in lines.into_iter().filter(|l| !l.is_empty()) {
         ui.label(egui::RichText::new(l).font(regular(12.0)).color(TEXT2()));
+    }
+    let (verts, faces) = match &p.keep {
+        Some(k) => (k.verts.len(), k.faces.len()),
+        None => f.mesh.as_ref().map(|m| (m.verts.len(), m.faces.len())).unwrap_or((0, 0)),
+    };
+    if p.count() > 1 {
+        ui.label(egui::RichText::new(format!("NURBS: {} patches, {} contour points", p.count(), p.contour().len())).font(regular(12.0)).color(LABEL()));
+    }
+    if p.state == PatchState::Sculpt {
+        if let Some(m) = f.mesh.as_ref() {
+            ui.label(egui::RichText::new(format!("Clay: {} points · {} faces", m.verts.len(), m.faces.len())).font(regular(12.0)).color(LABEL()));
+        }
     }
     ui.label(egui::RichText::new(format!("Poly layer: {verts} points · {faces} faces")).font(regular(12.0)).color(LABEL()));
     // the Carves after it that cut it
@@ -2775,6 +2798,16 @@ fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
         st.end_live();
     }
+    // a plain Cube or Cylinder: made a linked object (NURBS, Poly, Sculpt)
+    if st.linkable_solid().map(|g| g.id) == Some(id) {
+        ui.add_space(4.0);
+        if primary_btn(ui, None, "Linked object", Some(ui.available_width()))
+            .on_hover_text("This shape as NURBS patches (their contour edited) that are also a Poly mesh and a clay: switch its state in its window (NURBS, POLY, SCULPT). The shape is hidden.")
+            .clicked()
+        {
+            st.make_linked_solid();
+        }
+    }
 }
 
 /// A section title with a fold arrow; open by default, kept per session.
@@ -2887,7 +2920,7 @@ fn linked_button(ui: &mut Ui, st: &mut AppState, id: FeatureId) -> bool {
     }
     ui.add_space(4.0);
     if primary_btn(ui, None, "Linked surface", Some(ui.available_width()))
-        .on_hover_text("A NURBS surface on these 4 points, edited by its contour, that is also a Poly mesh: switch its state in its window (NURBS, POLY; SCULPT next)")
+        .on_hover_text("A NURBS surface on these 4 points, edited by its contour, that is also a Poly mesh and a clay: switch its state in its window (NURBS, POLY, SCULPT)")
         .clicked()
     {
         return st.make_linked_surface();

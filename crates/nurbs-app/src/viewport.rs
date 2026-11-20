@@ -1433,10 +1433,10 @@ fn draw_patch(p: &Painter, st: &AppState) {
     if !st.patch_comp() {
         return;
     }
-    let Some((_, cv)) = st.patch_points() else { return };
+    let Some((_, cv, contour)) = st.patch_points() else { return };
     let picked = st.patch_picked();
     let a = accent();
-    for k in nurbs_kernel::patch::CONTOUR {
+    for k in contour {
         let Some(s) = world(st, cv[k].as_dvec3()) else { continue };
         let on = picked.contains(&k);
         let hot = st.patch_hover == Some(k) && st.patch_drag.is_none();
@@ -1447,7 +1447,7 @@ fn draw_patch(p: &Painter, st: &AppState) {
         } else {
             (chip_bg(), Stroke::new(1.2, tint(TEXT(), 0.9)))
         };
-        if nurbs_kernel::patch::is_corner(k) {
+        if st.patch_is_corner(k) {
             let r = if on || hot { 4.5 } else { 3.6 };
             p.rect(Rect::from_center_size(s, vec2(r * 2.0, r * 2.0)), 1.0, fill, stroke, egui::StrokeKind::Middle);
         } else {

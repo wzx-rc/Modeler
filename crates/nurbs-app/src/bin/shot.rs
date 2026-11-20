@@ -344,6 +344,9 @@ fn main() {
     if want("lsurfx") {
         linked_complex(&mut h);
     }
+    if want("lobj") {
+        linked_objects(&mut h);
+    }
 
     if want("empty") {
         h.reset(Doc::default(), "Untitled");
@@ -5601,6 +5604,264 @@ fn linked(h: &mut Harness) {
     eprintln!("linked: extrusion {:.2} mm, scaled 1.5 then a point moved: {:.2} mm", before, tall(h));
     h.st.undo();
     h.st.undo();
+}
+
+/// Linked objects (Romain, 20 nov., 23 h: "pousser le Link surface à
+/// cylindre et cube… faire aussi le lien avec le Sculpt mode"): a Cube and a
+/// Cylinder made linked objects; the cube's top corner raised in NURBS, the
+/// cylinder made a barrel; the cube's top extruded in Poly; strokes on it in
+/// Sculpt; back in NURBS the clay shown and riding on a corner moved again;
+/// the cylinder sculpted and its top ring widened.
+fn linked_objects(h: &mut Harness) {
+    use egui::Key;
+    use nurbs_app::linked::{cvs_world, patch_of};
+    use nurbs_kernel::patch::PatchState;
+    let mut doc = Doc::default();
+    let cube = doc.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, glam::DVec3::new(-35.0, 0.0, 0.0), glam::DQuat::IDENTITY);
+    let cyl = doc.add(Op::Add, Prim::Cylinder { radius: 12.0, height: 30.0 }, glam::DVec3::new(30.0, 0.0, 0.0), glam::DQuat::IDENTITY);
+    h.reset(doc, "Linked objects");
+    let wide = |h: &mut Harness| {
+        h.st.camera.yaw = 0.55;
+        h.st.camera.pitch = 0.5;
+        h.st.camera.target = Vec3::new(-2.0, 14.0, 0.0);
+        h.st.camera.dist = 190.0;
+        h.steps(2);
+    };
+    wide(h);
+    h.settle();
+    h.shot("lobj-01-shapes");
+    h.st.selection = vec![cube];
+    h.move_to(pos2(1500.0, 120.0));
+    h.steps(14);
+    h.shot("lobj-02-cube-window");
+    let lc = if h.st.make_linked_solid() { h.st.selection[0] } else {
+        eprintln!("lobj: cube not made");
+        return;
+    };
+    h.st.selection = vec![cyl];
+    h.steps(2);
+    let ly = if h.st.make_linked_solid() { h.st.selection[0] } else {
+        eprintln!("lobj: cylinder not made");
+        return;
+    };
+    for id in [lc, ly] {
+        let f = h.st.doc.feature(id).unwrap();
+        let p = patch_of(f).unwrap();
+        let m = f.mesh.as_ref().unwrap();
+        eprintln!("lobj: {}: {} patches, {} contour points, layer {} points {} faces", f.name, p.count(), p.contour().len(), m.verts.len(), m.faces.len());
+    }
+    h.st.selection.clear();
+    h.settle();
+    h.shot("lobj-03-linked");
+    // the cube's contour (Vertex mode)
+    h.st.selection = vec![lc];
+    h.key(Key::Num1);
+    h.st.selection = vec![lc];
+    h.steps(4);
+    h.shot("lobj-04-cube-contour");
+    let near = |h: &Harness, id: nurbs_kernel::FeatureId, w: Vec3| -> usize {
+        let c = cvs_world(h.st.doc.feature(id).unwrap()).unwrap();
+        let p = patch_of(h.st.doc.feature(id).unwrap()).unwrap();
+        p.contour().into_iter().min_by(|a, b| c[*a].distance(w).total_cmp(&c[*b].distance(w))).unwrap()
+    };
+    let k = near(h, lc, Vec3::new(-15.0, 20.0, 15.0));
+    h.st.patch_sel = Some(nurbs_app::linked::PatchSel { id: lc, cvs: vec![k] });
+    h.st.move_patch_points(lc, &[k], Vec3::new(0.0, 12.0, 0.0));
+    h.steps(4);
+    h.shot("lobj-05-cube-corner");
+    // the cylinder a barrel: the side's seam tangents out, the top ring in
+    h.key(Key::Num4);
+    h.st.selection = vec![ly];
+    h.steps(2);
+    {
+        let c = cvs_world(h.st.doc.feature(ly).unwrap()).unwrap();
+        let p = patch_of(h.st.doc.feature(ly).unwrap()).unwrap().clone();
+        let axis = Vec3::new(30.0, 0.0, 0.0);
+        let mid: Vec<usize> = p.contour().into_iter().filter(|k| c[*k].y > 2.0 && c[*k].y < 28.0).collect();
+        eprintln!("lobj: {} tangent points up the side", mid.len());
+        for k in mid {
+            let out = Vec3::new(c[k].x - axis.x, 0.0, c[k].z - axis.z).normalize() * 6.0;
+            h.st.move_patch_points(ly, &[k], out);
+        }
+        let corners: Vec<usize> = p.contour().into_iter().filter(|k| p.corner(*k) && c[*k].y > 29.0).collect();
+        for k in corners {
+            let inn = -Vec3::new(c[k].x - axis.x, 0.0, c[k].z - axis.z).normalize() * 4.0;
+            h.st.move_patch_points(ly, &[k], inn);
+        }
+    }
+    h.st.selection = vec![ly];
+    h.key(Key::Num1);
+    h.st.selection = vec![ly];
+    h.steps(4);
+    h.shot("lobj-06-cyl-barrel");
+    h.key(Key::Num4);
+    h.st.selection.clear();
+    h.steps(4);
+    h.shot("lobj-07-both");
+    // the cube to Poly: its top's middle face extruded 8 mm
+    h.st.selection = vec![lc];
+    h.st.set_patch_state(lc, PatchState::Poly);
+    h.key(Key::Num3);
+    h.st.selection = vec![lc];
+    h.steps(2);
+    let f = h.st.doc.feature(lc).unwrap().clone();
+    let pts = nurbs_app::meshes::world_points(&f);
+    let m = f.mesh.clone().unwrap();
+    let top_mid = Vec3::new(-35.0, 20.0, 0.0);
+    let (fi, fc) = m
+        .faces
+        .iter()
+        .enumerate()
+        .map(|(i, q)| (i, q.iter().map(|x| pts[*x as usize]).sum::<Vec3>() / q.len() as f32))
+        .filter(|(_, c)| c.y > 19.0)
+        .min_by(|a, b| a.1.distance(top_mid).total_cmp(&b.1.distance(top_mid)))
+        .unwrap();
+    eprintln!("lobj: top face {fi} at {fc}");
+    h.click(h.screen_of(fc));
+    h.steps(2);
+    let at = h.screen_of(fc);
+    h.move_to(at);
+    h.hold(Modifiers::CTRL);
+    h.key(Key::E);
+    h.hold(Modifiers::NONE);
+    let up = h.screen_of(fc + Vec3::Y * 8.0);
+    for k in 1..=8 {
+        h.move_to(at + (up - at) * (k as f32 / 8.0));
+    }
+    h.steps(2);
+    h.click(up);
+    h.settle();
+    h.move_to(pos2(1500.0, 120.0));
+    h.steps(4);
+    eprintln!("lobj: cube layer now {} faces", h.st.doc.feature(lc).unwrap().mesh.as_ref().unwrap().faces.len());
+    h.shot("lobj-08-cube-poly");
+    // Sculpt: the Poly layer as clay; Draw strokes across its front
+    h.st.set_patch_state(lc, PatchState::Sculpt);
+    h.steps(2);
+    let f = h.st.doc.feature(lc).unwrap().clone();
+    eprintln!("lobj: clay {} points, {} faces, tool {:?}", f.mesh.as_ref().unwrap().verts.len(), f.mesh.as_ref().unwrap().faces.len(), h.st.tool);
+    h.st.camera.target = Vec3::new(-35.0, 14.0, 10.0);
+    h.st.camera.dist = 110.0;
+    h.steps(2);
+    let front = Vec3::new(-35.0, 10.0, 15.0);
+    let v = h.st.view();
+    let kpx = 1.0 / v.pixel_size_at((front - v.eye).length());
+    h.st.sculpt.radius = 5.0 * kpx;
+    h.st.sculpt.strength = 0.9;
+    h.st.sculpt.mirror = false;
+    for (a, b) in [(Vec3::new(-50.0, 12.0, 15.0), Vec3::new(-20.0, 12.0, 15.0)), (Vec3::new(-48.0, 6.0, 15.0), Vec3::new(-22.0, 6.0, 15.0))] {
+        for _ in 0..3 {
+            let (pa, pb) = (h.screen_of(a), h.screen_of(b));
+            h.drag(pa, pb, 24, true);
+            h.steps(2);
+        }
+    }
+    // a dent with Ctrl
+    h.hold(Modifiers::CTRL);
+    let (pa, pb) = (h.screen_of(Vec3::new(-40.0, 15.0, 15.0)), h.screen_of(Vec3::new(-30.0, 15.0, 15.0)));
+    h.drag(pa, pb, 10, true);
+    h.hold(Modifiers::NONE);
+    h.steps(2);
+    h.move_to(pos2(1500.0, 120.0));
+    h.steps(4);
+    eprintln!("lobj: undo after the strokes: {:?}", h.st.undo_labels().iter().rev().take(4).collect::<Vec<_>>());
+    h.shot("lobj-09-cube-sculpt");
+    // NURBS: the clay over the surface; another top corner raised, the
+    // clay rides on it
+    h.st.set_patch_state(lc, PatchState::Nurbs);
+    h.key(Key::Num4);
+    h.st.selection = vec![lc];
+    h.steps(4);
+    h.shot("lobj-10-cube-nurbs-clay");
+    let shown = |h: &Harness, id: nurbs_kernel::FeatureId| nurbs_app::linked::sculpt_shown(h.st.doc.feature(id).unwrap()).is_some();
+    eprintln!("lobj: clay shown in NURBS: {}", shown(h, lc));
+    let k = near(h, lc, Vec3::new(-55.0, 20.0, 15.0));
+    h.st.move_patch_points(lc, &[k], Vec3::new(-6.0, 10.0, 6.0));
+    h.key(Key::Num1);
+    h.st.selection = vec![lc];
+    h.st.patch_sel = Some(nurbs_app::linked::PatchSel { id: lc, cvs: vec![k] });
+    h.steps(4);
+    h.shot("lobj-11-clay-follows");
+    h.key(Key::Num4);
+    h.st.selection.clear();
+    h.steps(4);
+    h.shot("lobj-12-clay-follows-object");
+    // back in Poly: the layer, the clay kept; Sculpt again: it comes back
+    h.st.set_patch_state(lc, PatchState::Poly);
+    h.st.selection.clear();
+    h.steps(4);
+    h.shot("lobj-13-cube-poly-again");
+    h.st.set_patch_state(lc, PatchState::Sculpt);
+    h.st.selection.clear();
+    h.steps(4);
+    h.shot("lobj-14-cube-sculpt-again");
+    h.st.set_patch_state(lc, PatchState::Nurbs);
+    // the cylinder: a ring of clay round its side, then its top ring wider
+    wide(h);
+    h.st.camera.target = Vec3::new(30.0, 15.0, 0.0);
+    h.st.camera.dist = 120.0;
+    h.st.selection = vec![ly];
+    h.st.set_patch_state(ly, PatchState::Sculpt);
+    h.steps(2);
+    // a ring of strokes round the side facing the eye (points inside the
+    // clay: their place on screen is on its front)
+    let c0 = Vec3::new(30.0, 15.0, 0.0);
+    let eye = h.st.view().eye;
+    let face = Vec3::new(eye.x - c0.x, 0.0, eye.z - c0.z).normalize();
+    let side = Vec3::Y.cross(face);
+    let v = h.st.view();
+    h.st.sculpt.radius = 4.0 / v.pixel_size_at((c0 - v.eye).length());
+    for (a, b) in [(-0.9f32, 0.9f32)] {
+        let r = 9.0;
+        for _ in 0..3 {
+            let pts: Vec<Pos2> = (0..=16).map(|i| {
+                let t = a + (b - a) * i as f32 / 16.0;
+                h.screen_of(c0 + (face * t.cos() + side * t.sin()) * r)
+            }).collect();
+            h.press(pts[0], true);
+            for p in &pts[1..] {
+                h.move_to(*p);
+            }
+            h.press(pts[pts.len() - 1], false);
+            h.steps(2);
+        }
+    }
+    h.move_to(pos2(1500.0, 120.0));
+    h.steps(4);
+    h.shot("lobj-15-cyl-sculpt");
+    h.st.set_patch_state(ly, PatchState::Nurbs);
+    {
+        let c = cvs_world(h.st.doc.feature(ly).unwrap()).unwrap();
+        let p = patch_of(h.st.doc.feature(ly).unwrap()).unwrap().clone();
+        let axis = Vec3::new(30.0, 0.0, 0.0);
+        let corners: Vec<usize> = p.contour().into_iter().filter(|k| p.corner(*k) && c[*k].y > 29.0).collect();
+        for k in corners {
+            let out = Vec3::new(c[k].x - axis.x, 0.0, c[k].z - axis.z).normalize() * 9.0 + Vec3::Y * 4.0;
+            h.st.move_patch_points(ly, &[k], out);
+        }
+    }
+    h.st.selection = vec![ly];
+    h.key(Key::Num4);
+    h.st.selection = vec![ly];
+    h.steps(4);
+    eprintln!("lobj: cylinder clay shown in NURBS: {}", shown(h, ly));
+    h.shot("lobj-16-cyl-clay-follows");
+    wide(h);
+    h.st.selection.clear();
+    h.steps(4);
+    h.shot("lobj-17-all");
+    // undo all the way back and forth: the states come back as they were
+    let n = h.st.undo_labels().len();
+    for _ in 0..n {
+        h.st.undo();
+    }
+    h.steps(2);
+    for _ in 0..n {
+        h.st.redo();
+    }
+    h.steps(4);
+    eprintln!("lobj: undone and redone {n} steps; clay shown {} {}", shown(h, lc), shown(h, ly));
+    h.shot("lobj-18-redone");
 }
 
 /// The linked surface on a busier part (Romain, 20 nov., 20 h 58: "Test
