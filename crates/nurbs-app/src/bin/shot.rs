@@ -2069,6 +2069,123 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("shell") {
+        // Shell (Romain 20 nov., 20 h 58: "Continue les shell"): a case with
+        // rounded corners and a hole through it; its top face picked in Face
+        // mode, Alt + S: hollowed with 2 mm walls, the top open; its dot
+        // dragged to 4 mm; outwards; the front opened too (Pick faces); an
+        // inner edge rounded after it; then a closed block hollowed (X-ray)
+        // and asked too thick (it stops at the thickest that works)
+        use nurbs_app::state::Handle;
+        let mut d = Doc::default();
+        let case = d.add(Op::Add, Prim::Box { x: 80.0, y: 30.0, z: 50.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(case).unwrap().name = "Case".into();
+        let tg = |sub: u16| nurbs_kernel::model::FaceTag { feature: case, sub }.pack();
+        let corners: Vec<nurbs_kernel::EdgeRef> = [(0u16, 4u16, 40.0, 25.0), (1, 4, -40.0, 25.0), (0, 5, 40.0, -25.0), (1, 5, -40.0, -25.0)].iter().map(|(a, b, x, z)| nurbs_kernel::EdgeRef { faces: [tg(*a), tg(*b)], at: DVec3::new(*x, 15.0, *z) }).collect();
+        d.add_round(8.0, false, corners);
+        let hole = d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 40.0 }, DVec3::new(24.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(hole).unwrap().name = "Hole".into();
+        h.reset(d, "Shell");
+        h.st.camera.dist *= 1.3;
+        h.st.camera.pitch += 0.3;
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-shell-1-part");
+        // the top face picked
+        h.key(egui::Key::Num3);
+        h.click(h.screen_of(Vec3::new(-12.0, 30.0, 6.0)));
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-shell-2-face");
+        h.hold(Modifiers::ALT);
+        h.key(egui::Key::S);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let shell = |h: &Harness| h.st.selected_shell().and_then(|f| f.shell.clone());
+        eprintln!("  shell: {:?} errors {:?}", shell(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-shell-3-open");
+        // its dot hovered, then dragged to 4 mm
+        let g = h.st.shell_grip().expect("grip");
+        let p = h.screen_of(g.at.as_vec3());
+        h.move_to(p);
+        h.steps(3);
+        eprintln!("  hot: {:?}", h.st.hot_handle == Some(Handle::ShellThick));
+        h.shot("zero-shell-4-hover");
+        let q = h.screen_of((g.from + g.dir * 4.0).as_vec3());
+        h.drag(p, q, 10, false);
+        h.settle();
+        h.shot("zero-shell-5-four");
+        h.press(q, false);
+        h.settle();
+        eprintln!("  thickness: {:?}", shell(&h).map(|s| s.thickness));
+        // outwards
+        let s0 = shell(&h).unwrap();
+        h.st.set_shell(nurbs_kernel::Shell { outward: true, ..s0.clone() }, true);
+        h.st.end_live();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-shell-6-outward");
+        h.st.set_shell(nurbs_kernel::Shell { outward: false, thickness: 2.0, ..s0 }, true);
+        h.st.end_live();
+        h.settle();
+        // Pick faces: the front opened too, the left side hovered
+        h.st.shell_pick_toggle();
+        h.click(h.screen_of(Vec3::new(-14.0, 14.0, 25.0)));
+        h.settle();
+        h.move_to(h.screen_of(Vec3::new(40.0, 15.0, -6.0)));
+        h.steps(3);
+        eprintln!("  open: {:?}", shell(&h).map(|s| s.faces.len()));
+        h.shot("zero-shell-7-pick");
+        h.key(egui::Key::Escape);
+        h.settle();
+        // an inner edge rounded after it (the floor along the back wall)
+        h.key(egui::Key::Num2);
+        h.click(h.screen_of(Vec3::new(-6.0, 2.0, -23.0)));
+        h.st.set_round(3.0, false, true);
+        h.st.end_live();
+        h.settle();
+        h.key(egui::Key::Num4);
+        h.st.select(None, false);
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        eprintln!("  errors: {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-shell-8-inner-fillet");
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+        // a closed block: a cavity inside, seen in X-ray
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 60.0, y: 30.0, z: 40.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(b).unwrap().name = "Block".into();
+        h.reset(d, "Shell closed");
+        h.st.camera.dist *= 1.3;
+        h.settle();
+        h.key(egui::Key::Num4);
+        h.click(h.screen_of(Vec3::new(0.0, 30.0, 0.0)));
+        h.settle();
+        h.hold(Modifiers::ALT);
+        h.key(egui::Key::S);
+        h.key(egui::Key::X);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        eprintln!("  closed: {:?} volume-ish errors {:?}", shell(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-shell-9-closed-xray");
+        // asked 30 mm: the block is 30 high, it stops at the thickest
+        let s0 = shell(&h).unwrap();
+        h.st.set_shell(nurbs_kernel::Shell { thickness: 30.0, ..s0 }, true);
+        h.st.end_live();
+        h.settle();
+        h.steps(10);
+        h.settle();
+        eprintln!("  limit: {:?} toast {:?}", shell(&h).map(|s| s.thickness), h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.shot("zero-shell-10-limit");
+    }
+
     if want("array-grips") {
         // the Array's grips in the view (Romain 20 nov., 19 h 01: "des
         // poignées pour manipuler directement l'influence des array"): the

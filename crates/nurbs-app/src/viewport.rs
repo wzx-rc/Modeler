@@ -29,6 +29,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_gizmo(p, st);
         draw_vertices(p, st);
         draw_push(p, st);
+        draw_shell(p, st);
         draw_mirror(p, st);
         draw_array(p, st);
         draw_knife(p, st, ctx.input(|i| i.pointer.hover_pos()));
@@ -106,6 +107,14 @@ fn dist_seg(p: Pos2, a: Pos2, b: Pos2) -> f32 {
 
 /// The handle under the pointer: a size handle, an arrow, a plane square.
 fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
+    // the selected Shell's dot (or its line across the wall)
+    if let Some(g) = st.shell_grip() {
+        if let (Some(a), Some(b)) = (world(st, g.from), world(st, g.at)) {
+            if (b - p).length() < 10.0 || dist_seg(p, a, b) < 5.0 {
+                return Some(Handle::ShellThick);
+            }
+        }
+    }
     // the selected inset or extrusion: its dot, its arrow
     if let Some(hs) = st.push_handles() {
         if let Some((_, _, k)) = hs.inset {
@@ -318,7 +327,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     let select = st.tool == Tool::Select;
     let knife = matches!(st.tool, Tool::Knife | Tool::Point);
     let edges = (select && st.sel_mode == SelMode::Edge) || knife;
-    let faces = (select && st.sel_mode == SelMode::Face) || matches!(st.tool, Tool::Push(_));
+    let faces = (select && st.sel_mode == SelMode::Face) || matches!(st.tool, Tool::Push(_) | Tool::ShellPick);
     let verts = select && st.sel_mode == SelMode::Vertex;
     if st.drag.is_none() && st.round_drag.is_none() && st.face_drag.is_none() && st.creation.is_none() && st.marquee.is_none() && st.push.is_none() && !over_ui {
         st.hover_hit = hover.and_then(|h| st.pick_at(p2(h)));
@@ -385,6 +394,18 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             st.finish_curve_pull();
         } else if resp.clicked_by(PointerButton::Secondary) {
             st.abort_gestures();
+        }
+        return;
+    }
+
+    // the selected Shell's faces to open (`shell.rs`): a click opens one
+    if st.tool == Tool::ShellPick {
+        if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.shell_pick(p2(p));
+            }
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            st.select_tool();
         }
         return;
     }
@@ -510,7 +531,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 }
             }
         }
-        Tool::Align => {}
+        Tool::Align | Tool::ShellPick => {}
         Tool::Form => {
             // a brush stroke on a form (`forms.rs`)
             if st.sculpt.is_some() {
@@ -1421,6 +1442,35 @@ fn draw_push(p: &Painter, st: &AppState) {
     }
 }
 
+/// The selected Shell's grip: a line across the wall from the face it
+/// keeps, ticked at both ends, its dot at the thickness; hovered or
+/// dragged, the value by it.
+fn draw_shell(p: &Painter, st: &AppState) {
+    let Some(g) = st.shell_grip() else { return };
+    let Some(sh) = st.selected_shell().and_then(|f| f.shell.clone()) else { return };
+    let (Some(a), Some(b)) = (world(st, g.from), world(st, g.at)) else { return };
+    let col = accent();
+    let on = st.hot_handle == Some(Handle::ShellThick) || st.drag.as_ref().map(|d| d.handle == Handle::ShellThick).unwrap_or(false);
+    // seen short on screen: the line drawn on past the dot (dimmer), so it
+    // can be found and its way seen
+    let d = b - a;
+    let len = d.length();
+    let dir = if len > 1e-3 { d / len } else { vec2(0.0, -1.0) };
+    if len < 24.0 {
+        p.line_segment([b, b + dir * (24.0 - len)], Stroke::new(1.0, tint(col, 0.35)));
+    }
+    p.line_segment([a, b], Stroke::new(if on { 2.4 } else { 1.8 }, col));
+    let n = vec2(-dir.y, dir.x) * 5.0;
+    p.line_segment([a - n, a + n], Stroke::new(1.4, col));
+    p.circle(b, if on { 4.5 } else { 3.5 }, if on { HOT } else { chip_bg() }, Stroke::new(1.4, col));
+    if on {
+        let at = b + dir * 16.0;
+        let anchor = if dir.x >= 0.0 { Align2::LEFT_CENTER } else { Align2::RIGHT_CENTER };
+        let way = if sh.outward { " out" } else { "" };
+        chip(p, at, anchor, &format!("Wall {} mm{way}", fmt_mm(sh.thickness as f32)), col, col);
+    }
+}
+
 /// The selected Mirror's plane: a faint pane round the part, its border
 /// dashed, its axis and the side kept.
 fn draw_mirror(p: &Painter, st: &AppState) {
@@ -1691,6 +1741,7 @@ pub fn hint(st: &AppState) -> String {
             Some(_) => "First point or Enter: close it · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Align) => "Click: the shape to align the selection to · Esc or right click: cancel".into(),
+        (None, Tool::ShellPick) => "Click: a face of the part to open · Esc, Enter or right click: done · The window's ×: close one again".into(),
         (None, Tool::Select) if st.align_open() => "Min / Max: the box's sides · Center: its middle · Pivot: the base's centre (or the one put with D) · Apply: keep and go on · Enter: OK · Esc: cancel".into(),
         (None, Tool::Form) if st.sculpt.is_some() => "Drag: the brush pulls the surface · Release: done (one undo step) · Esc: cancel".into(),
         (None, Tool::Form) => format!(
@@ -1771,6 +1822,7 @@ pub fn hint(st: &AppState) -> String {
                     Handle::ArrayCount(_) if st.selected_array().and_then(|f| f.array.as_ref()).map(|a| a.kind == nurbs_kernel::ArrayKind::Circle).unwrap_or(false) => "Round the axis: nearer the original, more copies · Release: keep it".into(),
                     Handle::ArrayCount(_) => "Out: more copies, the same step · In: fewer · Release: keep it".into(),
                     Handle::ArrayAngle => "Round the axis: the angle, the count kept · 15° steps while Snap is on · 360°: evenly all round · Release: keep it".into(),
+                    Handle::ShellThick => "Along the line: the walls' thickness, 0.1 mm steps while Snap is on · Release: keep it".into(),
                     Handle::Scale(_) => "Away from the centre: bigger · Release: keep it".into(),
                     Handle::ScaleAll => "To the right: bigger · To the left: smaller · Release: keep it".into(),
                     Handle::Cage(_) => "The side facing the grip stays · Shift: proportions kept · Alt: from the middle · Ctrl: no snapping · Release: keep it".into(),
@@ -1778,6 +1830,8 @@ pub fn hint(st: &AppState) -> String {
                 }
             } else if st.selected_array().is_some() {
                 "Square on the first copy: the step (round a circle: how many) · Arrow at the end: how many (round a circle: the angle) · A copy clicked is the original: an operation on it is made on all · Del: delete it".into()
+            } else if st.selected_shell().is_some() {
+                "Dot: the walls' thickness · Window: Inward / Outward, the faces open, Pick faces · Del: delete it".into()
             } else if st.selected_mirror().is_some() {
                 "Window: the plane's axis, where it passes, the side kept · The steps after it are made on both sides · Del: delete it".into()
             } else if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {

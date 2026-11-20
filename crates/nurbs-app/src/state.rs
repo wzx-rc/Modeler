@@ -34,6 +34,8 @@ pub enum Tool {
     /// Align (Alt + A): the click on the shape to align the selection to
     /// (`align.rs`).
     Align,
+    /// The selected Shell's faces to open, clicked one by one (`shell.rs`).
+    ShellPick,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -398,6 +400,8 @@ pub enum Handle {
     ArrayStep(u8),
     ArrayCount(u8),
     ArrayAngle,
+    /// The selected Shell's grip: its dot across the wall, the thickness.
+    ShellThick,
 }
 
 /// The directions a move handle may take: along its axis, in its plane, or
@@ -2380,6 +2384,9 @@ impl AppState {
                 }
             } else if let Some(k) = &f.cut {
                 k.pts.first().map(|p| p.edge.faces[0]).or(k.remove_faces.first().map(|r| r.tag)).or(k.remove_edges.first().map(|e| e.faces[0]))
+            } else if let Some(sh) = &f.shell {
+                // a Shell: its first opening's (none: no element)
+                sh.faces.first().map(|r| r.tag)
             } else if let Some(a) = &f.array {
                 // an Array: its first shape's
                 return a.sources.first().copied().filter(|s| self.doc.feature(*s).is_some());
@@ -3544,7 +3551,7 @@ impl AppState {
                 let n = (self.view().eye.as_dvec3() - pivot).try_normalize()?;
                 BasePlane::new(pivot, n, None).hit(ro, rd)
             }
-            Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle => None,
+            Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick => None,
             Handle::Rot(a) => BasePlane::new(pivot, DVec3::AXES[a], None).hit(ro, rd),
             Handle::Scale(a) => {
                 let axis = self.scale_frame()? * DVec3::AXES[a];
@@ -3571,6 +3578,10 @@ impl AppState {
         }
         if matches!(h, Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle) {
             self.begin_array_drag(h, p);
+            return;
+        }
+        if h == Handle::ShellThick {
+            self.begin_shell_drag(p);
             return;
         }
         if self.sel_mode != SelMode::Object {
@@ -3661,6 +3672,10 @@ impl AppState {
             self.update_array_drag(&d, p);
             return;
         }
+        if d.handle == Handle::ShellThick {
+            self.update_shell_drag(&d, p);
+            return;
+        }
         if d.line.is_some() {
             self.update_push_drag(&d, p);
             return;
@@ -3708,7 +3723,7 @@ impl AppState {
                     }
                 });
             }
-            Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle => {}
+            Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick => {}
             Handle::Rot(a) => {
                 let axis = DVec3::AXES[a];
                 let flat = |v: DVec3| v - axis * v.dot(axis);
@@ -3856,8 +3871,9 @@ impl AppState {
         }
         // after a Mirror the faces on both sides carry the same tags (one
         // side would move the wrong way): the kernel's model only
-        // (an Array's copies too, each moved its own way round a circle)
-        if self.doc.features.iter().any(|f| (f.mirror.is_some() || f.array.is_some()) && f.visible && !f.suspended) {
+        // (an Array's copies too, each moved its own way round a circle; a
+        // Shell's inner walls carry the step's tags, they would stay behind)
+        if self.doc.features.iter().any(|f| (f.mirror.is_some() || f.array.is_some() || f.shell.is_some()) && f.visible && !f.suspended) {
             return None;
         }
         // the shapes' frames when the model on screen was asked for
@@ -3974,6 +3990,12 @@ impl AppState {
                     if p.inset > l + 1e-6 {
                         p.inset = *l;
                         said = Some(format!("{name}: {} mm is its largest inset", crate::widgets::fmt_mm(*l as f32)));
+                    }
+                }
+                if let Some(sh) = f.shell.as_mut() {
+                    if sh.thickness > l + 1e-6 {
+                        sh.thickness = *l;
+                        said = Some(format!("{name}: {} mm is its thickest wall here", crate::widgets::fmt_mm(*l as f32)));
                     }
                 }
             }

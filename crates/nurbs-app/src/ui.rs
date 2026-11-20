@@ -56,6 +56,15 @@ pub fn feature_icon(f: &Feature) -> Icon {
     if f.tweak.is_some() {
         return Icon::Move;
     }
+    if f.shell.is_some() {
+        return Icon::Shell;
+    }
+    if f.mirror.is_some() {
+        return Icon::Mirror;
+    }
+    if f.array.is_some() {
+        return Icon::Array;
+    }
     match (&f.round, &f.push) {
         (Some(_), _) => Icon::Fillet,
         (_, Some(p)) if p.inset > 0.0 => Icon::Inset,
@@ -78,6 +87,11 @@ pub fn step_info(f: &Feature) -> String {
     }
     if let Some(t) = &f.tweak {
         return format!("{} mm", fmt_mm(t.delta.length() as f32));
+    }
+    if let Some(sh) = &f.shell {
+        let n = sh.faces.len();
+        let open = if n == 0 { "closed".to_string() } else { format!("{n} open") };
+        return format!("{} mm · {open}", fmt_mm(sh.thickness as f32));
     }
     match (&f.round, &f.push) {
         (Some(r), _) => format!("{} mm", fmt_mm(r.size as f32)),
@@ -201,6 +215,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     Tool::Slot => format!("SLOT · {}", st.mode.label().to_uppercase()),
                     Tool::Form => format!("FORMS · {}", st.form.brush.label().to_uppercase()),
                     Tool::Align => "ALIGN · PICK THE TARGET".into(),
+                    Tool::ShellPick => "SHELL · PICK FACES TO OPEN".into(),
                     Tool::Select => format!("SELECTION · {}", st.sel_mode.label().to_uppercase()),
                 };
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
@@ -869,6 +884,12 @@ fn step_icon(label: &str) -> (Icon, Color32) {
         (Icon::Inset, FACE_SEL)
     } else if has(&["extrude"]) {
         (Icon::Extrude, FACE_SEL)
+    } else if has(&["shell", "open a face", "close a face"]) {
+        (Icon::Shell, TEXT2())
+    } else if has(&["mirror"]) {
+        (Icon::Mirror, TEXT2())
+    } else if has(&["array"]) {
+        (Icon::Array, TEXT2())
     } else if has(&["knife", "cut"]) {
         (Icon::Knife, EDGE_SEL)
     } else if has(&["point"]) {
@@ -1140,6 +1161,7 @@ fn help_title(st: &AppState) -> String {
         Tool::Slot => format!("Slot · {}", st.mode.label()),
         Tool::Form => format!("Forms · {}", st.form.brush.label()),
         Tool::Align => "Align · pick the target".into(),
+        Tool::ShellPick => "Shell · pick faces to open".into(),
         Tool::Select if st.align_open() => "Align".into(),
         Tool::Select => format!("{} · {}", st.gizmo.label(), st.sel_mode.label()),
     }
@@ -1238,6 +1260,7 @@ fn help_box(ctx: &egui::Context, st: &mut AppState) {
         Tool::Slot => accent(),
         Tool::Form => op_color(st.mode),
         Tool::Align => TEXT2(),
+        Tool::ShellPick => FACE_SEL,
         Tool::Select if st.sel_mode == SelMode::Edge => EDGE_SEL,
         Tool::Select if st.sel_mode == SelMode::Face => FACE_SEL,
         Tool::Select => st.single().map(feature_color).unwrap_or(TEXT2()),
@@ -1379,6 +1402,9 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                     if icon_btn(ui, Icon::Array, false, "Array (Ctrl+Shift+D): copies in a line, in rows or round an axis, with their operations", 28.0).clicked() {
                         st.add_array();
                     }
+                    if icon_btn(ui, Icon::Shell, false, "Shell (Alt+S): the part hollowed, 2 mm walls (Face mode: the faces picked left open)", 28.0).clicked() {
+                        st.add_shell();
+                    }
                 }
                 if icon_btn(ui, Icon::Frame, false, "Frame (F)", 28.0).clicked() {
                     st.frame_selection();
@@ -1416,6 +1442,10 @@ fn op_pop(st: &AppState) -> Option<OpPop> {
     }
     if (st.tool == Tool::Create(PrimKind::Surface) || st.tool == Tool::Create(PrimKind::Path) || st.tool == Tool::Form || (st.tool == Tool::Slot && st.slot_draw.is_none())) && st.creation.is_none() {
         return Some(OpPop::Tool);
+    }
+    // picking a Shell's faces: its window stays
+    if st.tool == Tool::ShellPick {
+        return st.selected_shell().map(|f| OpPop::Step(f.id));
     }
     if st.creation.is_some() || st.sketch.is_some() || st.push.is_some() || st.curve_pull.is_some() || st.tool != Tool::Select {
         return None;
@@ -1830,6 +1860,8 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     } else if f.is_path() {
                         path_card(ui, st, &f);
                         curve_make_card(ui, st, &f);
+                    } else if f.shell.is_some() {
+                        shell_card(ui, st, &f);
                     } else if f.mirror.is_some() {
                         mirror_card(ui, st, &f);
                     } else if f.array.is_some() {
@@ -1862,6 +1894,54 @@ fn op_title(ui: &mut Ui, name: &str, kind: &str) {
             chip_label(ui, kind, RAISED(), LABEL());
         }
     });
+}
+
+/// A Shell step: the walls' thickness and their way, the faces open (each
+/// closed again by its ×), Pick faces to open more.
+fn shell_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let Some(sh) = f.shell.clone() else { return };
+    section(ui, "Walls");
+    let small = st.model.as_ref().and_then(|m| m.bounds()).map(|(lo, hi)| (0..3).map(|a| hi[a] - lo[a]).fold(f32::MAX, f32::min)).unwrap_or(40.0);
+    let span = (small * 0.5).max(5.0).max(sh.thickness as f32).ceil();
+    let mut t = sh.thickness as f32;
+    let (ch, start) = slider_row(ui, "Thickness", &mut t, 0.1..=span, 0.1, "mm");
+    if ch {
+        st.set_shell(nurbs_kernel::Shell { thickness: (t as f64).max(0.05), ..sh.clone() }, start || !st.is_live());
+    }
+    let c = TEXT();
+    if let Some(out) = ui.push_id("shell-way", |ui| segmented(ui, &[(false, "Inward", c), (true, "Outward", c)], sh.outward, 28.0)).inner {
+        if out != sh.outward {
+            st.set_shell(nurbs_kernel::Shell { outward: out, ..sh.clone() }, true);
+            st.end_live();
+        }
+    }
+    section(ui, "Open faces");
+    if sh.faces.is_empty() {
+        ui.label(egui::RichText::new("None: a closed cavity inside (Alt+X: X-ray)").font(regular(12.0)).color(TEXT2()));
+    }
+    for (k, r) in sh.faces.iter().enumerate() {
+        let name = st.shell_face_label(r);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("{}  {name}", k + 1)).font(medium(13.0)).color(TEXT()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Label::new(egui::RichText::new("×").font(medium(14.0)).color(LABEL())).sense(Sense::click())).on_hover_text("Close it again").clicked() {
+                    st.shell_close_face(k);
+                }
+            });
+        });
+    }
+    ui.add_space(2.0);
+    let picking = st.tool == Tool::ShellPick;
+    if secondary_btn(ui, if picking { "Done  Esc" } else { "Pick faces to open" }, ui.available_width()).clicked() {
+        st.shell_pick_toggle();
+    }
+    if let Some(e) = st.feature_error(f) {
+        ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
+    }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
+        st.end_live();
+    }
 }
 
 /// A Mirror step: its plane (the axis it is square to, where it passes)
@@ -2708,6 +2788,9 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         if f.is_solid() && !f.is_path() && icon_btn(ui, Icon::Array, false, "Array (Ctrl+Shift+D): copies in a line, in rows or round an axis, with their operations", 30.0).clicked() {
             st.add_array();
         }
+        if f.is_solid() && !f.is_path() && icon_btn(ui, Icon::Shell, false, "Shell (Alt+S): the part hollowed, 2 mm walls (Face mode: the faces picked left open)", 30.0).clicked() {
+            st.add_shell();
+        }
         if icon_btn(ui, if f.visible { Icon::Eye } else { Icon::EyeOff }, false, "Hide", 30.0).clicked() {
             st.toggle_visible(id);
         }
@@ -3295,6 +3378,11 @@ fn face_card(ui: &mut Ui, st: &mut AppState) {
         }
     });
     ui.add_space(2.0);
+    let label = if n > 1 { format!("Shell, these {n} open  Alt+S") } else { "Shell, this face open  Alt+S".to_string() };
+    if secondary_btn(ui, &label, ui.available_width()).on_hover_text("The part hollowed (walls of 2 mm), the faces picked left open").clicked() {
+        st.add_shell();
+    }
+    ui.add_space(2.0);
     if secondary_btn(ui, "Deselect the faces", ui.available_width()).clicked() {
         st.face_sel.clear();
     }
@@ -3609,6 +3697,16 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     // Mirror (Alt + M): across X, the steps after it made on both sides
     if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::M) {
         st.add_mirror(0);
+        return;
+    }
+    // Shell (Alt + S): hollowed, the faces picked in Face mode left open
+    if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::S) {
+        st.add_shell();
+        return;
+    }
+    // picking a Shell's faces: Enter ends it (Esc too, below)
+    if st.tool == Tool::ShellPick && pressed(Key::Enter) {
+        st.select_tool();
         return;
     }
     if st.align.is_some() {

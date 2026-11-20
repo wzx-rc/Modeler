@@ -6,7 +6,7 @@
 //! result after each feature (by the content of everything up to it). While
 //! one feature moves, only the booleans from it onwards are made again.
 
-use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Knife, Makes, Mirror, Op, Prim, Push, Round, Tweak};
+use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Knife, Makes, Mirror, Op, Prim, Push, Round, Shell, Tweak};
 use crate::model::{Edge, EdgeKind, Face, FaceTag, Model, SurfKind};
 use crate::proto::step;
 use forme_occt::{CutKind, Shape, SurfKind as OccSurf};
@@ -1355,6 +1355,68 @@ fn knife(acc: &Shape, f: &Feature, k: &Knife) -> Result<Option<Shape>, String> {
     acc.split(&p3, &segs).map(Some)
 }
 
+// ----------------------------------------------------------------- shell
+
+/// The part hollowed (`doc::Shell`): its faces found again (by tag and
+/// nearest point), taken away as openings, the walls made as thick as
+/// asked, the faces grown sharp to meet (else filled round, which is what
+/// works next to a fillet beside an opening). Too thick, the thickest that
+/// works by halves (`limit`; at most 12 tries or 6 s). Also the count of
+/// faces not found.
+fn shell(acc: &Shape, f: &Feature, sh: &Shell, limit: &mut Option<f64>) -> (Result<Option<Shape>, String>, usize) {
+    if sh.thickness < 1e-3 {
+        return (Ok(None), 0);
+    }
+    let mut faces = vec![];
+    let mut missing = 0;
+    for r in &sh.faces {
+        match find_face(acc, r) {
+            Some(i) if !faces.contains(&i) => faces.push(i),
+            Some(_) => {}
+            None => missing += 1,
+        }
+    }
+    if !sh.faces.is_empty() && faces.is_empty() {
+        return (Err("its faces are gone".into()), missing);
+    }
+    let base = FaceTag { feature: f.id, sub: 0 }.pack();
+    mark(&step("shell", f));
+    let make = |t: f64| acc.shell(&faces, t, sh.outward, base, false).or_else(|e| acc.shell(&faces, t, sh.outward, base, true).map_err(|_| e));
+    let e = match make(sh.thickness) {
+        Ok(s) => return (Ok(Some(s)), missing),
+        Err(e) => e,
+    };
+    // too thick? (a thin one must work first, else it is not the thickness)
+    if make((sh.thickness * 0.05).min(0.1)).is_err() {
+        return (Err(e), missing);
+    }
+    let (mut lo, mut hi) = ((sh.thickness * 0.05).min(0.1), sh.thickness);
+    let t0 = Instant::now();
+    for _ in 0..12 {
+        if t0.elapsed().as_secs_f64() > SEARCH_STOP {
+            break;
+        }
+        let mid = (lo + hi) * 0.5;
+        if make(mid).is_ok() {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        if hi - lo < 0.02 {
+            break;
+        }
+    }
+    let q = if lo >= 1.0 { 0.1 } else { 0.01 };
+    let size = (lo / q).floor() * q;
+    match (size >= 0.01).then(|| make(size)) {
+        Some(Ok(s)) => {
+            *limit = Some(size);
+            (Ok(Some(s)), missing)
+        }
+        _ => (Err(e), missing),
+    }
+}
+
 // ---------------------------------------------------------------- mirror
 
 /// The box round a shape (its faces' boxes).
@@ -1475,6 +1537,14 @@ fn mirrored_doc(doc: &Doc) -> Option<Doc> {
                 gr.edges.extend(images);
             }
             out.features.push(g);
+        } else if let Some(sh) = &f.shell {
+            // the openings' images open too (one step: a part hollowed once)
+            let mut g = f.clone();
+            let images: Vec<FaceRef> = sh.faces.iter().filter(|r| m.reflect(r.at).distance(r.at) > 1e-6).map(|r| FaceRef { at: m.reflect(r.at), ..*r }).collect();
+            if let Some(gs) = g.shell.as_mut() {
+                gs.faces.extend(images);
+            }
+            out.features.push(g);
         } else if f.push.is_some() || f.tweak.is_some() || f.cut.is_some() {
             out.features.push(f.clone());
             let refl = |p: DVec3| m.reflect(p);
@@ -1573,7 +1643,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         let fh = deep_hash(doc, f);
         key = hash2(key, fh);
         let skipped = |what: &str| skip.iter().any(|s| *s == step(what, f));
-        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") || skipped("cut") || skipped("mirror") {
+        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") || skipped("cut") || skipped("mirror") || skipped("shell") {
             key = hash2(key, 1);
         }
         if let Some(m) = &f.mirror {
@@ -1783,6 +1853,29 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                             Err(_) => stage.errors.push(format!("{}: {e}", f.name)),
                         },
                     },
+                }
+            }
+            cache.stages.insert(key, stage.clone());
+            continue;
+        }
+        // the part hollowed: on the solid built so far
+        if let Some(sh) = &f.shell {
+            if let Some(acc) = stage.shape.clone() {
+                let mut limit = None;
+                let (res, missing) = if skipped("shell") { (Err("skipped, it crashed the kernel".to_string()), 0) } else { shell(&acc, f, sh, &mut limit) };
+                if let Some(l) = limit {
+                    stage.limits.push((f.id, l));
+                }
+                if missing > 0 {
+                    stage.errors.push(format!("{}: {missing} open face{} not found", f.name, if missing > 1 { "s" } else { "" }));
+                }
+                match res {
+                    Ok(Some(s)) => {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                    }
+                    Ok(None) => {}
+                    Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
                 }
             }
             cache.stages.insert(key, stage.clone());
@@ -2163,6 +2256,110 @@ mod tests {
                 p(t[0]).dot(p(t[1]).cross(p(t[2]))) / 6.0
             })
             .sum()
+    }
+
+    #[test]
+    fn shell_live() {
+        use crate::doc::Shell;
+        // a 40 × 20 × 30 block (20 high), its top open, walls of 2
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let top = FaceRef { tag: tag(b, 2), at: DVec3::new(5.0, 20.0, 3.0) };
+        let s = d.add_shell(Shell { faces: vec![top], thickness: 2.0, outward: false }, top.at);
+        assert_eq!(d.feature(s).unwrap().kind_label(), "Shell");
+        assert!(!d.feature(s).unwrap().is_solid());
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((mesh_volume(&m) - (24000.0 - 36.0 * 18.0 * 26.0)).abs() < 2.0, "{}", mesh_volume(&m));
+        // the block's five faces kept; its inner walls and the rim the step's
+        let by = |id: u32| m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(id)).count();
+        assert_eq!(by(b), 5);
+        assert_eq!(by(s), 6);
+        // a fillet on an inner edge (the floor along the +Z wall), picked
+        // by its faces' tags as any edge
+        let e = edge_near(&m, DVec3::new(0.0, 2.0, 13.0));
+        assert!(e.faces.iter().all(|t| (*t >> 16) as u32 == s), "{e:?}");
+        let r = d.add_round(1.0, false, vec![e]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 1);
+        d.remove(&[r]);
+        // closed: a cavity inside
+        d.feature_mut(s).unwrap().shell.as_mut().unwrap().faces.clear();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((mesh_volume(&m) - (24000.0 - 36.0 * 16.0 * 26.0)).abs() < 2.0, "{}", mesh_volume(&m));
+        // outwards, the top open: the walls round it
+        {
+            let sh = d.feature_mut(s).unwrap().shell.as_mut().unwrap();
+            sh.faces = vec![top];
+            sh.outward = true;
+        }
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((mesh_volume(&m) - (44.0 * 22.0 * 34.0 - 24000.0)).abs() < 2.0, "{}", mesh_volume(&m));
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((lo[1] + 2.0).abs() < 1e-3 && (hi[1] - 20.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        // too thick (the block is 30 deep): the thickest that works
+        {
+            let sh = d.feature_mut(s).unwrap().shell.as_mut().unwrap();
+            sh.outward = false;
+            sh.thickness = 16.0;
+        }
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let l = m.limits.iter().find(|(id, _)| *id == s).map(|x| x.1).unwrap_or(0.0);
+        assert!(l > 14.0 && l < 15.0, "{:?}", m.limits);
+        // its vertical edges rounded before it (5 mm): the walls follow
+        let mut d2 = Doc::default();
+        let b2 = d2.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let mut c2 = Cache::default();
+        let m = build(&d2, true, false, &[], &mut c2);
+        let es: Vec<EdgeRef> = [(20.0, 15.0), (-20.0, 15.0), (20.0, -15.0), (-20.0, -15.0)].iter().map(|(x, z)| edge_near(&m, DVec3::new(*x, 10.0, *z))).collect();
+        d2.add_round(5.0, false, es);
+        let top2 = FaceRef { tag: tag(b2, 2), at: DVec3::new(0.0, 20.0, 0.0) };
+        let s2 = d2.add_shell(Shell { faces: vec![top2], thickness: 2.0, outward: false }, top2.at);
+        let m = build(&d2, true, false, &[], &mut c2);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let v_round = 24000.0 - 4.0 * (25.0 - std::f64::consts::PI * 25.0 / 4.0) * 20.0;
+        let v_in = 36.0 * 26.0 * 18.0 - 4.0 * (9.0 - std::f64::consts::PI * 9.0 / 4.0) * 18.0;
+        assert!((mesh_volume(&m) - (v_round - v_in)).abs() < 3.0, "{} {}", mesh_volume(&m), v_round - v_in);
+        assert!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(s2)).count() >= 9);
+        // after a Mirror: a block from x = −10 to 30, its +X end opened, the
+        // −X end (its image) opens too
+        let mut d3 = Doc::default();
+        let b3 = d3.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, DVec3::new(10.0, 0.0, 0.0), DQuat::IDENTITY);
+        d3.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false });
+        let end = FaceRef { tag: tag(b3, 0), at: DVec3::new(30.0, 5.0, 0.0) };
+        d3.add_shell(Shell { faces: vec![end], thickness: 1.0, outward: false }, end.at);
+        let mut c3 = Cache::default();
+        let m = build(&d3, true, false, &[], &mut c3);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((mesh_volume(&m) - (60.0 * 10.0 * 20.0 - 60.0 * 8.0 * 18.0)).abs() < 2.0, "{}", mesh_volume(&m));
+    }
+
+    #[test]
+    #[ignore]
+    fn shell_probe() {
+        use crate::doc::Shell;
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Box { x: 80.0, y: 30.0, z: 50.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let corners: Vec<EdgeRef> = [(0u16, 4u16, 40.0, 25.0), (1, 4, -40.0, 25.0), (0, 5, 40.0, -25.0), (1, 5, -40.0, -25.0)].iter().map(|(a, b, x, z)| EdgeRef { faces: [tag(c, *a), tag(c, *b)], at: DVec3::new(*x, 15.0, *z) }).collect();
+        d.add_round(8.0, false, corners);
+        if std::env::var("FORME_HOLE").map(|v| v == "1").unwrap_or(true) {
+            d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 40.0 }, DVec3::new(24.0, -5.0, 0.0), DQuat::IDENTITY);
+        }
+        let top = FaceRef { tag: tag(c, 2), at: DVec3::new(-12.0, 30.0, 6.0) };
+        let front = FaceRef { tag: tag(c, 4), at: DVec3::new(-14.0, 14.0, 25.0) };
+        for faces in [vec![top], vec![front], vec![top, front]] {
+            for t in [1.0, 2.0] {
+                let mut e = d.clone();
+                e.add_shell(Shell { faces: faces.clone(), thickness: t, outward: false }, top.at);
+                let m = build(&e, true, false, &[], &mut Cache::default());
+                eprintln!("{} faces t {t}: {} faces, volume {:.0}, errors {:?}", faces.len(), m.faces.len(), mesh_volume(&m), m.errors);
+            }
+        }
     }
 
     #[test]

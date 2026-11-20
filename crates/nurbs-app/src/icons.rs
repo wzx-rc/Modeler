@@ -21,6 +21,8 @@ pub enum Icon {
     Mirror,
     /// Pattern / Array: one shape and its copies in a row.
     Array,
+    /// Shell: a block hollowed, open at the top (its walls in section).
+    Shell,
     Magnet,
     Grid,
     Export,
@@ -223,6 +225,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.closed(&sq(4.5, 13.0));
             pen.closed(&sq(10.0, 10.0));
             pen.closed(&sq(15.5, 7.0));
+        }
+        Icon::Shell => {
+            // a cup in section: its walls and floor, open at the top
+            pen.closed(&[(3.0, 4.5), (3.0, 16.0), (17.0, 16.0), (17.0, 4.5), (14.0, 4.5), (14.0, 13.0), (6.0, 13.0), (6.0, 4.5)]);
+            pen.fill(&[(3.0, 13.0), (3.0, 16.0), (17.0, 16.0), (17.0, 13.0)], 0.35);
         }
         Icon::Magnet => {
             pen.line(&[(6.0, 3.0), (6.0, 9.0)]);

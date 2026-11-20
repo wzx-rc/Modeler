@@ -335,6 +335,13 @@ pub fn spec_of(f: &Feature) -> Value {
         o["keep"] = json!(if m.flip { "-" } else { "+" });
         return o;
     }
+    if let Some(sh) = &f.shell {
+        o["kind"] = json!("shell");
+        o["thickness"] = json!(r(sh.thickness));
+        o["outward"] = json!(sh.outward);
+        o["open_faces"] = json!(sh.faces.iter().map(|q| r3(q.at)).collect::<Vec<_>>());
+        return o;
+    }
     if let Some(a) = &f.array {
         o["kind"] = json!("array");
         o["sources"] = json!(a.sources);
@@ -662,6 +669,7 @@ fn primary_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
             form: None,
             mirror: None,
             array: None,
+            shell: None,
         };
         let mut v = spec_of(&f);
         if let Some(o) = v.as_object_mut() {

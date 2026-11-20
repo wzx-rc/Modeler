@@ -72,6 +72,7 @@ extern "C" {
     fn focc_split(s: *const FShape, pts: *const f64, n: c_int, segs: *const c_int, nseg: c_int) -> *mut FShape;
     fn focc_remove_faces(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
     fn focc_defeature(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
+    fn focc_shell(s: *const FShape, idx: *const c_int, n: c_int, t: c_double, out: c_int, base: i64, arc: c_int) -> *mut FShape;
     fn focc_piece(s: *const FShape, idx: *const c_int, n: c_int, m: *const c_double, tag: i64) -> *mut FShape;
     fn focc_remove_edges(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
     fn focc_face_distance(s: *const FShape, face: c_int, p: *const c_double) -> c_double;
@@ -741,6 +742,16 @@ impl Shape {
         let idx: Vec<c_int> = faces.iter().map(|&i| i as c_int).collect();
         shape(unsafe { focc_defeature(self.0, idx.as_ptr(), idx.len() as c_int) })
     }
+    /// The part hollowed (Shell): faces (0-based) taken away as openings,
+    /// the walls `t` thick inwards (or `outward`); only the solids holding
+    /// an opening (every one when there is none: a cavity inside). `arc`:
+    /// the gaps between two faces' offsets filled round, not grown sharp.
+    /// Tags: a face kept its own, its offset `base` + 1 + a hash of its
+    /// tag, the rims `base`.
+    pub fn shell(&self, faces: &[usize], t: f64, outward: bool, base: i64, arc: bool) -> Result<Shape, String> {
+        let idx: Vec<c_int> = faces.iter().map(|&i| i as c_int).collect();
+        shape(unsafe { focc_shell(self.0, idx.as_ptr(), idx.len() as c_int, t, outward as c_int, base, arc as c_int) })
+    }
     /// Faces (0-based) copied as a piece (closed by flat faces where they
     /// are open, else a sheet: volume 0), moved by the affine map `rows`;
     /// the copies tagged `tag | 1`, the closing faces `tag`.
@@ -1158,6 +1169,49 @@ mod tests {
         let adj = cut.edge_faces();
         for e in &t.edges {
             assert_eq!(adj[e.index as usize - 1], e.faces, "edge {}", e.index);
+        }
+    }
+
+    #[test]
+    fn shell_box() {
+        // a 40 × 20 × 30 box (Y up), tagged face by face, hollowed 2 mm
+        let mut b = Shape::cuboid(40.0, 20.0, 30.0).unwrap();
+        let tags: Vec<i64> = (0..b.face_count() as i64).map(|i| 10 + i).collect();
+        b.set_tags(&tags);
+        let top = (0..b.face_count()).find(|i| b.face_info(*i).unwrap().normal[1] > 0.9).unwrap();
+        let base = 7i64 << 16;
+        // the top open, inwards: 24000 − 36 × 18 × 26
+        let s = b.shell(&[top], 2.0, false, base, false).unwrap();
+        assert!(s.is_valid());
+        assert!((s.volume() - 7152.0).abs() < 1.0, "open: {}", s.volume());
+        let t: Vec<i64> = (0..s.face_count()).map(|i| s.face_tag(i)).collect();
+        assert_eq!(t.iter().filter(|x| (10..16).contains(*x)).count(), 5, "the outer faces keep their tags: {t:?}");
+        assert_eq!(t.iter().filter(|x| **x > base && **x < base + 65536).count(), 5, "the inner faces: {t:?}");
+        assert!(t.iter().any(|x| *x == base), "the rim: {t:?}");
+        // closed: a cavity inside, 24000 − 36 × 16 × 26
+        let c = b.shell(&[], 2.0, false, base, false).unwrap();
+        assert!((c.volume() - 9024.0).abs() < 1.0, "closed: {}", c.volume());
+        // outwards: 44 × 22 × 34 − 24000
+        let o = b.shell(&[top], 2.0, true, base, false).unwrap();
+        assert!((o.volume() - 8912.0).abs() < 1.0, "outwards: {}", o.volume());
+        // too thick: the box is 30 deep
+        assert!(b.shell(&[top], 16.0, false, base, false).is_err());
+        // with a hole through it and its rims rounded
+        let hole = Shape::cylinder(4.0, 40.0).unwrap();
+        let cut = b.cut(&hole).unwrap();
+        let sec = cut.section_edges();
+        let f = cut.fillet(&sec, 1.0, 99).unwrap();
+        let top = (0..f.face_count()).find(|i| f.face_info(*i).map(|x| x.kind == SurfKind::Plane && x.normal[1] > 0.9).unwrap_or(false)).unwrap();
+        let topc = (0..cut.face_count()).find(|i| cut.face_info(*i).map(|x| x.kind == SurfKind::Plane && x.normal[1] > 0.9).unwrap_or(false)).unwrap();
+        let h = cut.shell(&[topc], 1.5, false, base, false).unwrap();
+        assert!(h.is_valid() && h.volume() > 6000.0 && h.volume() < 6500.0, "hole: {}", h.volume());
+        // the hole's rim rounded: the top meets the fillet tangent, its
+        // wall cut through after the offset
+        for (t, arc) in [(0.8, false), (0.8, true), (1.5, false), (1.5, true)] {
+            match f.shell(&[top], t, false, base, arc) {
+                Ok(h) => eprintln!("hole + fillet t {t} arc {arc}: valid {} volume {:.0} faces {}", h.is_valid(), h.volume(), h.face_count()),
+                Err(e) => eprintln!("hole + fillet t {t} arc {arc}: {e}"),
+            }
         }
     }
 }
