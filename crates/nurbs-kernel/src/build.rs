@@ -117,7 +117,14 @@ fn tool(f: &Feature) -> Result<Shape, String> {
             let pts: Vec<[f64; 2]> = pr.scaled(x.max(0.01), z.max(0.01)).iter().map(|p| [p[0], -p[1]]).collect();
             let flip = |q: [f64; 2]| [q[0], -q[1]];
             let kind = |c: &crate::doc::Cut| if c.chamfer { CutKind::Chamfer } else if c.rho > 0.0 { CutKind::Conic } else { CutKind::Arc };
-            let cuts: Vec<_> = pr.cuts(x.max(0.01), z.max(0.01)).into_iter().map(|c| c.map(|c| (kind(&c), flip(c.a), flip(c.m), flip(c.b)))).collect();
+            let mut cuts: Vec<_> = pr.cuts(x.max(0.01), z.max(0.01)).into_iter().map(|c| c.map(|c| (kind(&c), flip(c.a), flip(c.m), flip(c.b)))).collect();
+            // a curve point with tension: its conic (an ellipse's quarter)
+            for (i, c) in cuts.iter_mut().enumerate() {
+                let rho = pr.tension.get(i).copied().unwrap_or(0.0);
+                if c.is_none() && pr.smooth.get(i).copied().unwrap_or(false) && rho > 1e-6 {
+                    *c = Some((CutKind::Curve, [0.0; 2], [rho, 0.0], [0.0; 2]));
+                }
+            }
             let s = if cuts.iter().any(|c| c.is_some()) { Shape::prism_cuts(&pts, &pr.smooth, &cuts, h * 0.5)? } else { Shape::prism(&pts, &pr.smooth, h * 0.5)? };
             s.transformed(rows(DMat4::from_rotation_x(-std::f64::consts::FRAC_PI_2)))?
         }
@@ -1444,6 +1451,38 @@ mod tests {
         d.feature_mut(c).unwrap().op = Op::Carve;
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
+    }
+
+    #[test]
+    fn curves_made_solid() {
+        // the Curves set's outlines as sketches: a circle (four exact arcs),
+        // an ellipse (four conic quarters), a pentagon with round corners,
+        // a star with round inner corners
+        use crate::doc::{CurveKind, Prim};
+        for (kind, x, z) in [(CurveKind::Circle, 20.0, 20.0), (CurveKind::Ellipse, 30.0, 16.0), (CurveKind::Polygon, 22.83, 21.71), (CurveKind::Star, 22.83, 21.71)] {
+            let mut c = kind.new_curve();
+            c.corner = if kind == CurveKind::Polygon { 2.0 } else { 0.0 };
+            c.corner2 = if kind == CurveKind::Star { 1.0 } else { 0.0 };
+            let mut d = Doc::default();
+            let id = d.add(Op::Add, Prim::Profile { x, y: 5.0, z }, DVec3::ZERO, DQuat::IDENTITY);
+            d.feature_mut(id).unwrap().profile = Some(c.profile(x, z));
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{kind:?}: {:?}", m.errors);
+            let (lo, hi) = m.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])]));
+            // (a polygon's round corners pull its box in)
+            assert!(kind == CurveKind::Polygon || (((hi[0] - lo[0]) as f64 - x).abs() < 0.05 && ((hi[2] - lo[2]) as f64 - z).abs() < 0.05), "{kind:?}: {lo:?} {hi:?}");
+            if kind == CurveKind::Circle {
+                let cyl: Vec<f64> = m.faces.iter().filter(|f| f.kind == SurfKind::Cylinder).map(|f| f.radius).collect();
+                assert!(cyl.len() == 4 && cyl.iter().all(|r| (r - 10.0).abs() < 1e-6), "{cyl:?}");
+            }
+            if kind == CurveKind::Ellipse {
+                // a point of the ellipse at 45° in its own terms
+                let (a, b) = (15.0f32, 8.0f32);
+                let want = [a * std::f32::consts::FRAC_1_SQRT_2, b * std::f32::consts::FRAC_1_SQRT_2];
+                let near = m.positions.iter().map(|p| ((p[0] - want[0]).powi(2) + (p[2] - want[1]).powi(2)).sqrt()).fold(f32::MAX, f32::min);
+                assert!(near < 0.05, "no point near the ellipse at 45°: {near}");
+            }
+        }
     }
 
     #[test]

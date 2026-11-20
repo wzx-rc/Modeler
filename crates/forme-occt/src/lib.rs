@@ -126,6 +126,9 @@ pub enum CutKind {
     Chamfer,
     /// A fillet with tension: a conic.
     Conic,
+    /// A curve point with tension: its curve the conic of rho (given as the
+    /// middle point's x) instead of the quadratic (an ellipse's quarter).
+    Curve,
 }
 
 /// What `Shape::fillet_tension` did for one fillet: how many of its faces
@@ -451,7 +454,7 @@ impl Shape {
     pub fn prism_cuts(points: &[[f64; 2]], smooth: &[bool], cuts: &[Option<(CutKind, [f64; 2], [f64; 2], [f64; 2])>], h: f64) -> Result<Shape, String> {
         let xy: Vec<f64> = points.iter().flat_map(|p| [p[0], p[1]]).collect();
         let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
-        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some(_) => 1, None => 0 }).collect();
+        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some(_) => 1, None => 0 }).collect();
         let abm: Vec<f64> = (0..points.len()).flat_map(|i| match cuts.get(i).copied().flatten() { Some((_, a, m, b)) => [a[0], a[1], m[0], m[1], b[0], b[1]], None => [0.0; 6] }).collect();
         shape(unsafe { focc_prism_cut(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int, h) })
     }

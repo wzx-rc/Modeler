@@ -9,7 +9,7 @@ use crate::settings::Settings;
 use crate::view::View;
 use glam::{DMat4, DQuat, DVec3, Vec3};
 use nurbs_kernel::client::{Kernel, Status};
-use nurbs_kernel::doc::PrimKind;
+use nurbs_kernel::doc::{CurveKind, PrimKind};
 use nurbs_kernel::{Doc, EdgeRef, FaceRef, FaceTag, Feature, FeatureId, Knife, Model, Op, Prim, Profile};
 use std::sync::Arc;
 
@@ -26,6 +26,9 @@ pub enum Tool {
     /// The Slot (S): a drag along a slot (or a raised pill) of the
     /// reference, read there on release (`scan.rs`).
     Slot,
+    /// A curve of the Curves set (3ds Max's Shapes): Rectangle and Ellipse
+    /// drawn corner to corner, Circle, Polygon and Star from their centre.
+    Curve(CurveKind),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,6 +193,8 @@ pub struct Creation {
     pub height_from: [f32; 2],
     /// A sketch's outline (unit square, as it grows upwards).
     pub profile: Option<Profile>,
+    /// A curve of the Curves set (`kind` is Path): no height phase.
+    pub curve: Option<CurveKind>,
 }
 
 /// The Sketch tool's outline being drawn, on the flat face under its first
@@ -842,6 +847,8 @@ impl AppState {
     // ------------------------------------------------------------- history
 
     fn touched(&mut self) {
+        // the curves follow their settings and boxes
+        self.doc.regen_curves();
         self.keep_markers();
         self.version += 1;
     }
@@ -1803,7 +1810,7 @@ impl AppState {
             f.visible = false;
             f.material = mat;
         }
-        self.creation = Some(Creation { kind, id, plane, a, b: a, height: 0.0, phase: Phase::Base, height_from: p, profile: None });
+        self.creation = Some(Creation { kind, id, plane, a, b: a, height: 0.0, phase: Phase::Base, height_from: p, profile: None, curve: None });
         self.selection = vec![id];
     }
 
@@ -1816,7 +1823,7 @@ impl AppState {
                 if let Some((b, snapped)) = self.snap_on_plane(&c.plane, p, &[c.id]) {
                     c.b = b;
                     self.snap_shown = snapped;
-                    if shift && c.kind == PrimKind::Box {
+                    if shift && (c.kind == PrimKind::Box || matches!(c.curve, Some(CurveKind::Rectangle | CurveKind::Ellipse))) {
                         // a square
                         let d = (c.b[0] - c.a[0]).abs().max((c.b[1] - c.a[1]).abs());
                         c.b = [c.a[0] + d * (c.b[0] - c.a[0]).signum(), c.a[1] + d * (c.b[1] - c.a[1]).signum()];
@@ -1853,6 +1860,9 @@ impl AppState {
     }
 
     fn creation_base_centre(&self, c: &Creation) -> DVec3 {
+        if c.curve.map(|k| k.from_centre()).unwrap_or(false) {
+            return c.plane.at(c.a);
+        }
         match c.kind {
             PrimKind::Box | PrimKind::Profile | PrimKind::Path | PrimKind::Surface => c.plane.at([(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5]),
             PrimKind::Cylinder => c.plane.at(c.a),
@@ -1861,6 +1871,10 @@ impl AppState {
 
     /// Writes the creation into its feature.
     fn apply_creation(&mut self, c: &Creation) {
+        if let Some(kind) = c.curve {
+            self.apply_curve(c, kind);
+            return;
+        }
         let centre = self.creation_base_centre(c);
         use crate::snap::tidy;
         let (w, dpt) = (tidy((c.b[0] - c.a[0]).abs()), tidy((c.b[1] - c.a[1]).abs()));
@@ -1963,6 +1977,7 @@ impl AppState {
     /// G: the last tool used again (Maya).
     pub fn repeat_tool(&mut self, at: Option<[f32; 2]>) {
         match self.last_tool {
+            Some(Tool::Curve(k)) => self.arm_curve(k),
             Some(Tool::Create(k)) => {
                 self.abort_gestures();
                 self.tool = Tool::Create(k);
@@ -1972,6 +1987,94 @@ impl AppState {
             Some(Tool::Slot) => self.arm_slot(),
             _ => self.toast("No tool used yet", false),
         }
+    }
+
+    // -------------------------------------------------------------- curves
+
+    /// Arms a tool of the Curves set.
+    pub fn arm_curve(&mut self, kind: CurveKind) {
+        self.abort_gestures();
+        self.tool = Tool::Curve(kind);
+    }
+
+    /// Starts a curve at `p` (screen): its first corner, or its centre.
+    pub fn begin_curve(&mut self, kind: CurveKind, p: [f32; 2]) {
+        let Some((plane, a, snapped)) = self.start_plane(p) else { return };
+        self.snap_shown = snapped;
+        self.begin_live(&format!("New {}", kind.label()));
+        let origin = plane.at(a);
+        let rot = basis_rotation(plane.u, plane.n);
+        let mut id = 0;
+        self.live(|d| {
+            let name = d.fresh_name(kind.label());
+            id = d.add(Op::Add, Prim::Path { x: 0.01, z: 0.01 }, origin, rot);
+            if let Some(f) = d.feature_mut(id) {
+                f.name = name;
+                f.curve = Some(kind.new_curve());
+                // hidden until it has a size
+                f.visible = false;
+            }
+        });
+        self.creation = Some(Creation { kind: PrimKind::Path, id, plane, a, b: a, height: 0.0, phase: Phase::Base, height_from: p, profile: None, curve: Some(kind) });
+        self.selection = vec![id];
+    }
+
+    /// The curve being drawn written into its feature: corner to corner
+    /// (a Rectangle, an Ellipse), else from its centre to the pointer (a
+    /// Circle's radius, a Polygon's or Star's outer radius).
+    fn apply_curve(&mut self, c: &Creation, kind: CurveKind) {
+        use crate::snap::tidy;
+        let id = c.id;
+        let Some(curve) = self.doc.feature(id).and_then(|f| f.curve) else { return };
+        let (w, d, centre) = if kind.from_centre() {
+            let r = tidy(((c.b[0] - c.a[0]).powi(2) + (c.b[1] - c.a[1]).powi(2)).sqrt());
+            let (b, off) = curve.unit_box();
+            // the box's centre: off the curve's own for an odd polygon
+            (r * b[0], r * b[1], c.plane.at([c.a[0] - off[0] * r, c.a[1] - off[1] * r]))
+        } else {
+            (tidy((c.b[0] - c.a[0]).abs()), tidy((c.b[1] - c.a[1]).abs()), c.plane.at([(c.a[0] + c.b[0]) * 0.5, (c.a[1] + c.b[1]) * 0.5]))
+        };
+        let ok = w > 1e-6 && d > 1e-6;
+        let rot = basis_rotation(c.plane.u, c.plane.n);
+        self.live(|doc| {
+            if let Some(f) = doc.feature_mut(id) {
+                f.origin = centre;
+                f.rot = rot;
+                f.prim = Prim::Path { x: w.max(0.01), z: d.max(0.01) };
+                f.visible = ok;
+            }
+        });
+    }
+
+    /// The curve's drag let go: made (a click without a drag: 20 mm across,
+    /// centred there).
+    pub fn curve_released(&mut self) {
+        let Some(mut c) = self.creation.clone() else { return };
+        let Some(kind) = c.curve else { return };
+        let tiny = if kind.from_centre() { ((c.b[0] - c.a[0]).powi(2) + (c.b[1] - c.a[1]).powi(2)).sqrt() < 0.5 } else { (c.b[0] - c.a[0]).abs() < 0.5 || (c.b[1] - c.a[1]).abs() < 0.5 };
+        if tiny {
+            let s = 10.0;
+            if kind.from_centre() {
+                c.b = [c.a[0] + s, c.a[1]];
+            } else {
+                c.b = [c.a[0] + s, c.a[1] + s];
+                c.a = [c.a[0] - s, c.a[1] - s];
+            }
+            self.apply_curve(&c, kind);
+        }
+        self.snap_shown = None;
+        self.creation = None;
+        let id = c.id;
+        self.live(|d| {
+            if let Some(f) = d.feature_mut(id) {
+                f.visible = true;
+            }
+        });
+        self.end_live();
+        self.selection = vec![id];
+        self.sel_mode = SelMode::Object;
+        // one shape per tool, then Select; G calls it again
+        self.tool = Tool::Select;
     }
 
     pub fn cancel_creation(&mut self) {
@@ -2221,7 +2324,7 @@ impl AppState {
                 f.profile = Some(pr);
             }
         });
-        let cr = Creation { kind: PrimKind::Profile, id, plane: k.plane, a: lo, b: hi, height: 0.0, phase: Phase::Height, height_from: p, profile: Some(profile) };
+        let cr = Creation { kind: PrimKind::Profile, id, plane: k.plane, a: lo, b: hi, height: 0.0, phase: Phase::Height, height_from: p, profile: Some(profile), curve: None };
         self.creation = Some(cr.clone());
         self.selection = vec![id];
         self.apply_creation(&cr);

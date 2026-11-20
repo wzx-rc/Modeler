@@ -857,7 +857,7 @@ impl AppState {
         let picks: Vec<(usize, (FeatureId, usize))> = self.vert_sel.iter().enumerate().filter_map(|(k, q)| self.profile_corner(*q).map(|c| (k, c))).collect();
         self.live(|d| {
             for (id, i) in &corners {
-                if let Some(pr) = d.feature_mut(*id).and_then(|f| f.profile.as_mut()) {
+                if let Some(pr) = d.feature_mut(*id).and_then(editable) {
                     if pr.corner.len() < pr.points.len() {
                         pr.corner.resize(pr.points.len(), 0.0);
                     }
@@ -1365,7 +1365,7 @@ impl AppState {
                 let v = if g.chamfer { -size } else { size };
                 self.live(|d| {
                     for (fid, i) in corners {
-                        if let Some(pr) = d.feature_mut(*fid).and_then(|f| f.profile.as_mut()) {
+                        if let Some(pr) = d.feature_mut(*fid).and_then(editable) {
                             if pr.corner.len() < pr.points.len() {
                                 pr.corner.resize(pr.points.len(), 0.0);
                             }
@@ -1485,7 +1485,7 @@ impl AppState {
         }
         self.live(|d| {
             for (fid, i) in corners {
-                if let Some(pr) = d.feature_mut(*fid).and_then(|f| f.profile.as_mut()) {
+                if let Some(pr) = d.feature_mut(*fid).and_then(editable) {
                     if pr.tension.len() < pr.points.len() {
                         pr.tension.resize(pr.points.len(), 0.0);
                     }
@@ -1583,4 +1583,12 @@ impl AppState {
             self.toast("Ctrl + B: pick edges (2) or sketch corners (1) first", true);
         }
     }
+}
+
+/// A feature's outline to edit by hand: a curve of the Curves set becomes
+/// a plain path first (3ds Max's Convert to Editable Spline), else its
+/// settings would make it again.
+fn editable(f: &mut nurbs_kernel::Feature) -> Option<&mut nurbs_kernel::Profile> {
+    f.curve = None;
+    f.profile.as_mut()
 }

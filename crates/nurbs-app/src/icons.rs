@@ -70,6 +70,13 @@ pub enum Icon {
     Deviation,
     /// X-ray: a cube seen through, its hidden edges shown.
     Xray,
+    /// The Curves set: a rectangle with rounded corners, a circle, an
+    /// ellipse, a hexagon, a star.
+    CurveRect,
+    CurveCircle,
+    CurveEllipse,
+    CurvePolygon,
+    CurveStar,
 }
 
 struct Pen<'a> {
@@ -227,6 +234,29 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             for (x, y) in [(3.5, 15.5), (10.0, 16.0)] {
                 pen.closed(&[(x - 1.3, y - 1.3), (x + 1.3, y - 1.3), (x + 1.3, y + 1.3), (x - 1.3, y + 1.3)]);
             }
+        }
+        Icon::CurveRect => {
+            pen.arc(6.0, 7.0, 2.5, 2.5, PI, 1.5 * PI);
+            pen.arc(14.0, 7.0, 2.5, 2.5, 1.5 * PI, 2.0 * PI);
+            pen.arc(14.0, 13.0, 2.5, 2.5, 0.0, 0.5 * PI);
+            pen.arc(6.0, 13.0, 2.5, 2.5, 0.5 * PI, PI);
+            pen.line(&[(6.0, 4.5), (14.0, 4.5)]);
+            pen.line(&[(16.5, 7.0), (16.5, 13.0)]);
+            pen.line(&[(14.0, 15.5), (6.0, 15.5)]);
+            pen.line(&[(3.5, 13.0), (3.5, 7.0)]);
+        }
+        Icon::CurveCircle => {
+            pen.circle(10.0, 10.0, 6.5);
+            pen.dot(10.0, 10.0, 0.9);
+        }
+        Icon::CurveEllipse => pen.ellipse(10.0, 10.0, 7.5, 4.8),
+        Icon::CurvePolygon => {
+            let v: Vec<(f32, f32)> = (0..6).map(|k| { let a = PI / 6.0 + PI / 3.0 * k as f32; (10.0 + 7.0 * a.cos(), 10.0 + 7.0 * a.sin()) }).collect();
+            pen.closed(&v);
+        }
+        Icon::CurveStar => {
+            let v: Vec<(f32, f32)> = (0..10).map(|k| { let a = -PI / 2.0 + PI / 5.0 * k as f32; let r = if k % 2 == 0 { 7.5 } else { 3.3 }; (10.0 + r * a.cos(), 10.6 + r * a.sin()) }).collect();
+            pen.closed(&v);
         }
         Icon::Quads => {
             // a flat run that bends down: three rows of quads

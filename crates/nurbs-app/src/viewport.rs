@@ -9,7 +9,7 @@ use crate::widgets::fmt_mm;
 use egui::{pos2, vec2, Align2, Color32, Id, Order, Painter, PointerButton, Pos2, Rect, Sense, Shape, Stroke};
 use glam::DVec3;
 use nurbs_kernel::client::Status;
-use nurbs_kernel::doc::PrimKind;
+use nurbs_kernel::doc::{CurveKind, PrimKind};
 use nurbs_kernel::{Op, Prim};
 
 fn p2(v: Pos2) -> [f32; 2] {
@@ -634,6 +634,28 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 }
             }
         }
+        Tool::Curve(kind) => match st.creation.as_ref().map(|c| c.phase) {
+            None => {
+                if resp.drag_started_by(PointerButton::Primary) {
+                    let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                    st.begin_curve(kind, p2(origin));
+                } else if resp.clicked_by(PointerButton::Primary) {
+                    // a click without a drag: 20 mm across, there
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        st.begin_curve(kind, p2(p));
+                        st.curve_released();
+                    }
+                }
+            }
+            Some(_) => {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.update_creation(p2(p), shift);
+                }
+                if resp.drag_stopped() || !l {
+                    st.curve_released();
+                }
+            }
+        },
         Tool::Create(kind) => {
             // the Cylinder dragged across a round part of the reference
             // (`scan.rs`): read there when released
@@ -1036,6 +1058,8 @@ fn draw_creation(p: &Painter, st: &AppState) {
     let col = if f.op == Op::Carve { carve() } else { accent() };
     let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
     let txt = match (c.phase, f.prim) {
+        // a curve drawn from its centre: its radius
+        (_, Prim::Path { x, z }) if f.curve.is_some_and(|k| k.kind.from_centre()) => format!("R {} mm", fmt_mm(f.curve.map(|k| k.radius(x, z)).unwrap_or(0.0) as f32)),
         (Phase::Base, Prim::Box { x, z, .. } | Prim::Profile { x, z, .. } | Prim::Path { x, z }) => format!("{} × {} mm", fmt_mm(x as f32), fmt_mm(z as f32)),
         (Phase::Base, Prim::Cylinder { radius, .. }) => format!("R {} mm", fmt_mm(radius as f32)),
         (Phase::Height, _) => format!("H {} mm", fmt_mm(c.height as f32)),
@@ -1319,6 +1343,11 @@ pub fn hint(st: &AppState) -> String {
     // shapes start on the scan's faces too
     let on_scan = st.reference.is_some() && st.ref_shown;
     match (&st.creation, st.tool) {
+        (Some(c), _) if c.curve.is_some() => match c.curve {
+            Some(CurveKind::Rectangle) => "Drag: corner to corner · Shift: a square · Release: done".into(),
+            Some(CurveKind::Ellipse) => "Drag: corner to corner · Shift: a circle · Release: done".into(),
+            _ => "Drag: the radius · Release: done".into(),
+        },
         (Some(c), _) if c.phase == Phase::Base => match c.kind {
             PrimKind::Box | PrimKind::Profile | PrimKind::Path | PrimKind::Surface => "Drag: the base · Shift: a square · Release: then the height".into(),
             PrimKind::Cylinder => "Drag: the radius · Release: then the height".into(),
@@ -1357,6 +1386,10 @@ pub fn hint(st: &AppState) -> String {
         (None, Tool::Create(PrimKind::Box)) if on_scan => "Drag: the base, on a face, the scan or the ground · On the scan, corner to corner across a block or a pocket: read when let go (else on to the height) · Click: 20 mm · B: one at once · Top bar: Add or Carve".into(),
         (None, Tool::Create(k)) if on_scan => format!("Drag: the base, on a face, the scan's face under the pointer or the ground · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
         (None, Tool::Create(k)) => format!("Drag: the base, on the ground or a face · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
+        (None, Tool::Curve(k)) => {
+            let how = if k.from_centre() { "from its centre out" } else { "corner to corner" };
+            format!("Drag: a {} {how}, on a face or the ground · Click: 20 mm · Then its settings in its window · G: another", k.label().to_lowercase())
+        }
         (None, Tool::Push(k)) => match k {
             PushKind::Inset => "Click a flat face: 2 mm, then drag its dot · Press and drag: sized at once".into(),
             PushKind::Extrude => "Press on a face and drag: out adds, in carves · A round face goes along its normals".into(),

@@ -3306,6 +3306,79 @@ fn main() {
         );
     }
 
+    if want("curves") {
+        // the Curves set (Romain 20 nov. 8 h 08, 3ds Max's Shapes): each
+        // shape dragged on the ground, then its settings changed
+        use nurbs_kernel::doc::CurveKind;
+        h.reset(Doc::default(), "Curves");
+        h.st.camera.frame(Vec3::new(-65.0, 0.0, -25.0), Vec3::new(115.0, 5.0, 25.0));
+        h.st.camera.pitch = 1.1;
+        h.steps(2);
+        let say = |h: &Harness, what: &str| {
+            for f in h.st.doc.features.iter() {
+                if let (Some(c), nurbs_kernel::Prim::Path { x, z }) = (f.curve, f.prim) {
+                    eprintln!("  {what}: {} {:?} {:.2} x {:.2} at ({:.2}, {:.2}) r {:.2} pts {}", f.name, c.kind, x, z, f.origin.x, f.origin.z, c.radius(x, z), f.profile.as_ref().map(|p| p.points.len()).unwrap_or(0));
+                }
+            }
+        };
+        let w = |x: f32, z: f32| Vec3::new(x, 0.0, z);
+        for (k, a, b) in [
+            (CurveKind::Rectangle, w(-60.0, -10.0), w(-30.0, 10.0)),
+            (CurveKind::Circle, w(-10.0, 0.0), w(0.0, 0.0)),
+            (CurveKind::Ellipse, w(10.0, -8.0), w(40.0, 8.0)),
+            (CurveKind::Polygon, w(60.0, 0.0), w(72.0, 0.0)),
+            (CurveKind::Star, w(95.0, 0.0), w(107.0, 0.0)),
+        ] {
+            h.st.arm_curve(k);
+            h.steps(1);
+            let (pa, pb) = (h.screen_of(a), h.screen_of(b));
+            h.drag(pa, pb, 8, false);
+            h.steps(1);
+            if k == CurveKind::Polygon {
+                h.shot("zero-curves-1-drawing");
+            }
+            h.press(pb, false);
+            h.steps(2);
+        }
+        say(&h, "drawn");
+        h.shot("zero-curves-2-drawn");
+        // settings: the rectangle's corners, a pentagon, a star of 6
+        let ids: Vec<_> = h.st.doc.features.iter().map(|f| f.id).collect();
+        h.st.edit("Corner radius", |d| {
+            if let Some(c) = d.feature_mut(ids[0]).and_then(|f| f.curve.as_mut()) {
+                c.corner = 4.0;
+            }
+        });
+        h.st.edit("Sides", |d| {
+            let f = d.feature_mut(ids[3]).unwrap();
+            let (Some(mut c), nurbs_kernel::Prim::Path { x, z }) = (f.curve, f.prim) else { return };
+            let r = c.radius(x, z);
+            c.sides = 5;
+            c.corner = 2.0;
+            f.reshape_curve(c, r);
+        });
+        h.st.edit("Points", |d| {
+            let f = d.feature_mut(ids[4]).unwrap();
+            let (Some(mut c), nurbs_kernel::Prim::Path { x, z }) = (f.curve, f.prim) else { return };
+            let r = c.radius(x, z);
+            c.sides = 6;
+            c.inner = 0.6;
+            c.corner2 = 1.5;
+            f.reshape_curve(c, r);
+        });
+        // the circle stretched: an ellipse
+        h.st.edit("Size", |d| {
+            if let Some(nurbs_kernel::Prim::Path { x, .. }) = d.feature_mut(ids[1]).map(|f| &mut f.prim) {
+                *x = 26.0;
+            }
+        });
+        h.steps(2);
+        say(&h, "set");
+        h.st.selection = vec![ids[3]];
+        h.steps(3);
+        h.shot("zero-curves-3-set");
+    }
+
     if want("pivot-d") {
         // Romain (20 nov. 7 h 50): D held + click puts the pivot on a
         // point, the move then carries that point onto the points

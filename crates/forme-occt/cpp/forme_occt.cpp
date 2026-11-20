@@ -420,7 +420,8 @@ FShape* focc_prism(const double* xy, const int* smooth, int n, double h) { retur
 // The same, corners cut: cut[i] 1 a fillet (an arc through abm[6 i..]: its
 // start, middle, end), 2 a chamfer (a straight side from start to end), 3 a
 // conic (a fillet with tension: start, a point of it, end; the corner is its
-// middle pole).
+// middle pole); on a smooth point, 4 its curve the conic of rho abm[6 i + 2]
+// (an ellipse's quarter) instead of the quadratic.
 FShape* focc_prism_cut(const double* xy, const int* smooth, const int* cut, const double* abm, int n, double h) {
     return guard(
         [&]() -> FShape* {
@@ -437,7 +438,7 @@ FShape* focc_prism_cut(const double* xy, const int* smooth, const int* cut, cons
                 const gp_Pnt& prev = p[(i + n - 1) % n];
                 const gp_Pnt& next = p[(i + 1) % n];
                 bool round = smooth[i] && prev.Distance(p[i]) > 1e-6 && next.Distance(p[i]) > 1e-6;
-                int ck = cut && !round ? cut[i] : 0;
+                int ck = cut && !round && cut[i] != 4 ? cut[i] : 0;
                 if (ck) {
                     vin[i] = BRepBuilderAPI_MakeVertex(gp_Pnt(abm[6 * i], abm[6 * i + 1], -h));
                     vout[i] = BRepBuilderAPI_MakeVertex(gp_Pnt(abm[6 * i + 4], abm[6 * i + 5], -h));
@@ -495,7 +496,19 @@ FShape* focc_prism_cut(const double* xy, const int* smooth, const int* cut, cons
                     poles(1) = BRep_Tool::Pnt(vin[i]);
                     poles(2) = p[i];
                     poles(3) = BRep_Tool::Pnt(vout[i]);
-                    opencascade::handle<Geom_BezierCurve> c = new Geom_BezierCurve(poles);
+                    opencascade::handle<Geom_BezierCurve> c;
+                    double rho = ck == 4 ? abm[6 * i + 2] : 0.0;
+                    if (rho > 1e-6) {
+                        if (rho < 0.02) rho = 0.02;
+                        if (rho > 0.98) rho = 0.98;
+                        TColStd_Array1OfReal weights(1, 3);
+                        weights(1) = 1.0;
+                        weights(2) = rho / (1.0 - rho);
+                        weights(3) = 1.0;
+                        c = new Geom_BezierCurve(poles, weights);
+                    } else {
+                        c = new Geom_BezierCurve(poles);
+                    }
                     mw.Add(BRepBuilderAPI_MakeEdge(c, vin[i], vout[i]).Edge());
                 }
                 int j = (i + 1) % n;

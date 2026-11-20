@@ -12,7 +12,7 @@ use crate::theme::*;
 use crate::widgets::*;
 use egui::{pos2, vec2, Align2, Color32, Id, Margin, Order, Rect, Response, Sense, Stroke, StrokeKind, Ui};
 use glam::{DQuat, DVec3, EulerRot};
-use nurbs_kernel::doc::PrimKind;
+use nurbs_kernel::doc::{CurveKind, PrimKind};
 use nurbs_kernel::{Feature, FeatureId, Op, Prim};
 
 /// Margin between the islands and the screen edges.
@@ -84,7 +84,7 @@ pub fn step_info(f: &Feature) -> String {
         (_, Some(p)) if p.inset > 0.0 && p.depth != 0.0 => format!("{} · {} mm", fmt_mm(p.inset as f32), fmt_signed(p.depth)),
         (_, Some(p)) if p.inset > 0.0 => format!("{} mm", fmt_mm(p.inset as f32)),
         (_, Some(p)) => format!("{} mm", fmt_signed(p.depth)),
-        _ => f.prim.kind().label().to_string(),
+        _ => f.kind_label().to_string(),
     }
 }
 
@@ -192,6 +192,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 island_sep(ui);
                 let tool = match st.tool {
                     Tool::Create(k) => k.label().to_uppercase(),
+                    Tool::Curve(k) => format!("CURVE · {}", k.label().to_uppercase()),
                     Tool::Push(k) => k.label().to_uppercase(),
                     Tool::Knife => "KNIFE".into(),
                     Tool::Point => "POINT ON EDGE".into(),
@@ -444,10 +445,31 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 st.arm(sk);
             }
             let pk = PrimKind::Path;
-            let tip = "Path (P): a curve with no thickness, on a face or the ground. Click the corners; Enter ends it open, a click on the first point closes it. Its corners take a fillet or a bevel in Vertex mode (1)";
-            if card(ui, Some(Icon::Path), "PATH", "CURVE · P", st.tool == Tool::Create(pk), PATH, tip).clicked() {
+            let tip = "Curves (P: a line): curves with no thickness, on a face or the ground. The line: click the corners; Enter ends it open, a click on the first point closes it; its corners take a fillet or a bevel in Vertex mode (1). Below, 3ds Max's shapes, dragged out, their settings in their window";
+            let on = st.tool == Tool::Create(pk) || matches!(st.tool, Tool::Curve(_));
+            let sub = match st.tool {
+                Tool::Curve(k) => k.label().to_uppercase(),
+                _ => "PATH · P".to_string(),
+            };
+            if card(ui, Some(Icon::Path), "CURVES", &sub, on, PATH, tip).clicked() {
                 st.arm(pk);
             }
+            // 3ds Max's Shapes: the Curves set
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let w = ((CARDS_W - 12.0 - 4.0 * 4.0) / 5.0).floor();
+                for (k, icon, tip) in [
+                    (CurveKind::Rectangle, Icon::CurveRect, "Rectangle: drag corner to corner (Shift: a square); its width, length and corner radius in its window"),
+                    (CurveKind::Circle, Icon::CurveCircle, "Circle: drag from its centre out; its radius in its window"),
+                    (CurveKind::Ellipse, Icon::CurveEllipse, "Ellipse: drag corner to corner (Shift: a circle); its width and length in its window"),
+                    (CurveKind::Polygon, Icon::CurvePolygon, "Polygon: drag from its centre out; its radius, sides and corner radius in its window"),
+                    (CurveKind::Star, Icon::CurveStar, "Star: drag from its centre out; its points, inner radius and fillets in its window"),
+                ] {
+                    if icon_btn(ui, icon, st.tool == Tool::Curve(k), tip, w).clicked() {
+                        st.arm_curve(k);
+                    }
+                }
+            });
             let uk = PrimKind::Surface;
             let tip = "Surface (U): a surface with no thickness. Click the outline's points (on a plane, or on the scan with ON SCAN in the top bar); a click on the first point (or Enter) fills it";
             if card(ui, Some(Icon::Path), "SURFACE", "SHEET · U", st.tool == Tool::Create(uk), PATH, tip).clicked() {
@@ -657,7 +679,7 @@ fn step_icon(label: &str) -> (Icon, Color32) {
 fn history_cells(st: &AppState) -> (Option<FeatureId>, Vec<Cell>, usize) {
     if let Some(el) = st.history_element() {
         let f = st.doc.feature(el).cloned().unwrap();
-        let info = if f.is_path() { "Path".to_string() } else { format!("{} · {}", f.prim.kind().label(), f.op.label()) };
+        let info = if f.is_path() { f.kind_label().to_string() } else { format!("{} · {}", f.prim.kind().label(), f.op.label()) };
         let mut cells = vec![Cell { icon: feature_icon(&f), color: feature_color(&f), name: f.name.clone(), info, op: None, on: f.visible }];
         for id in st.element_ops(el) {
             let Some(g) = st.doc.feature(id) else { continue };
@@ -889,6 +911,7 @@ fn help_title(st: &AppState) -> String {
         Tool::Create(k) if matches!(k, PrimKind::Path) => "Path".into(),
         Tool::Create(k) if matches!(k, PrimKind::Surface) => if st.surface_on_scan { "Surface · on scan".into() } else { "Surface · on plane".into() },
         Tool::Create(k) => format!("{} · {}", k.label(), st.mode.label()),
+        Tool::Curve(k) => format!("Curve · {}", k.label()),
         Tool::Push(k) => k.label().into(),
         Tool::Knife => "Knife".into(),
         Tool::Point => "Point on edge".into(),
@@ -985,6 +1008,7 @@ fn help_box(ctx: &egui::Context, st: &mut AppState) {
     let text = crate::viewport::hint(st);
     let color = match st.tool {
         Tool::Create(_) => op_color(st.mode),
+        Tool::Curve(_) => PATH,
         Tool::Push(_) => FACE_SEL,
         Tool::Knife | Tool::Point => EDGE_SEL,
         Tool::Slot => accent(),
@@ -1292,6 +1316,8 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                         push_card(ui, st);
                     } else if f.tweak.is_some() {
                         tweak_card(ui, st, id);
+                    } else if f.curve.is_some() {
+                        curve_card(ui, st, &f);
                     } else if f.is_path() {
                         path_card(ui, st, &f);
                     } else {
@@ -1511,7 +1537,7 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 5] = [
         ("PRIMITIVES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }))),
         ("SHAPES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Profile { .. }))),
-        ("PATHS", Box::new(|f: &Feature| f.is_path())),
+        ("CURVES", Box::new(|f: &Feature| f.is_path())),
         ("SURFACES", Box::new(|f: &Feature| f.is_sheet())),
         ("OPERATIONS", Box::new(|_: &Feature| false)),
     ];
@@ -1939,7 +1965,7 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
                 }
             }
             chip_label(ui, f.kind_label(), RAISED(), LABEL());
-            if f.is_solid() {
+            if f.is_solid() && !f.is_path() {
                 let c = op_color(f.op);
                 chip_label(ui, f.op.label(), tint(c, 0.16), c);
             }
@@ -2049,6 +2075,86 @@ fn fold_section(ui: &mut Ui, title: &str, key: &str) -> bool {
         ui.data_mut(|d| d.insert_temp(id, !open));
     }
     open
+}
+
+/// A curve of the Curves set: its settings, as 3ds Max's Parameters
+/// rollout (a Rectangle's width, length and corner radius, a Circle's
+/// radius, a Polygon's radius, sides and corner radius, a Star's two radii,
+/// points and fillets). One undo step per slider drag.
+fn curve_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let id = f.id;
+    let (Some(c), Prim::Path { x, z }) = (f.curve, f.prim) else { return };
+    section(ui, "Parameters");
+    let size_rows = |ui: &mut Ui, st: &mut AppState, names: [&str; 2]| {
+        for (k, label, v) in [(0, names[0], x), (2, names[1], z)] {
+            let mut val = v as f32;
+            let (ch, start) = slider_row(ui, label, &mut val, 0.01..=2000.0, 0.1, "mm");
+            if ch {
+                feature_edit(st, id, "Size", start, |g| {
+                    if let Prim::Path { x, z } = &mut g.prim {
+                        *(if k == 0 { x } else { z }) = val.max(0.01) as f64;
+                    }
+                });
+            }
+        }
+    };
+    let corner_row = |ui: &mut Ui, st: &mut AppState, label: &str, v: f64, max: f64, inner: bool| {
+        let mut val = v as f32;
+        let (ch, start) = slider_row(ui, label, &mut val, 0.0..=(max.max(0.0) as f32), 0.1, "mm");
+        if ch {
+            feature_edit(st, id, "Corner radius", start, |g| {
+                if let Some(c) = g.curve.as_mut() {
+                    *(if inner { &mut c.corner2 } else { &mut c.corner }) = (val as f64).clamp(0.0, max.max(0.0));
+                }
+            });
+        }
+    };
+    let radius = c.radius(x, z);
+    let radius_row = |ui: &mut Ui, st: &mut AppState, label: &str| {
+        let mut val = radius as f32;
+        let (ch, start) = slider_row(ui, label, &mut val, 0.01..=1000.0, 0.1, "mm");
+        if ch {
+            feature_edit(st, id, "Radius", start, |g| g.reshape_curve(c, (val as f64).max(0.01)));
+        }
+    };
+    match c.kind {
+        CurveKind::Rectangle => {
+            size_rows(ui, st, ["Width", "Length"]);
+            corner_row(ui, st, "Corner", c.corner, c.corner_max(x, z, false), false);
+        }
+        CurveKind::Circle => radius_row(ui, st, "Radius"),
+        CurveKind::Ellipse => size_rows(ui, st, ["Width", "Length"]),
+        CurveKind::Polygon | CurveKind::Star => {
+            let star = c.kind == CurveKind::Star;
+            radius_row(ui, st, if star { "Radius 1" } else { "Radius" });
+            if star {
+                let mut val = (radius * c.ratio()) as f32;
+                let (ch, start) = slider_row(ui, "Radius 2", &mut val, 0.01..=(radius as f32 * 0.98), 0.1, "mm");
+                if ch {
+                    let mut n = c;
+                    n.inner = (val as f64 / radius.max(1e-9)).clamp(0.02, 0.98);
+                    feature_edit(st, id, "Radius 2", start, |g| g.reshape_curve(n, radius));
+                }
+            }
+            let mut sides = c.n() as f32;
+            let (ch, start) = slider_row(ui, if star { "Points" } else { "Sides" }, &mut sides, 3.0..=32.0, 1.0, "");
+            if ch {
+                let mut n = c;
+                n.sides = sides.round().clamp(3.0, 100.0) as u32;
+                if n.sides != c.sides {
+                    feature_edit(st, id, if star { "Points" } else { "Sides" }, start, |g| g.reshape_curve(n, radius));
+                }
+            }
+            corner_row(ui, st, if star { "Fillet 1" } else { "Corner" }, c.corner, c.corner_max(x, z, false), false);
+            if star {
+                corner_row(ui, st, "Fillet 2", c.corner2, c.corner_max(x, z, true), true);
+            }
+        }
+    }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+        st.end_live();
+    }
 }
 
 /// A path: open or closed, its box, where it is. Its corners are cut in

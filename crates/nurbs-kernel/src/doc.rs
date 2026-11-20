@@ -146,7 +146,8 @@ pub struct Profile {
     /// Each fillet corner's tension (Romain 19 nov.: "SHIFT maintenu :
     /// tension set"): the conic's rho in (0, 1), the cut's middle at
     /// M + rho (corner − M), M the middle of its two ends; fuller towards 1,
-    /// flatter towards 0; 0 or missing: a circular arc.
+    /// flatter towards 0; 0 or missing: a circular arc. On a curve point:
+    /// its curve the conic of that rho (0: the quadratic, rho 0.5).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tension: Vec<f64>,
     /// An open path (`Prim::Path` only): no side from the last point back
@@ -385,12 +386,17 @@ pub fn pieces_t(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], tension: &[f64]
     for i in 0..n {
         let (a, b) = ends(i);
         if round(i) {
+            // a quadratic; with a tension, the conic of that rho (an
+            // ellipse's quarter at the circle's rho, `Curve`)
+            let rho = tension.get(i).copied().unwrap_or(0.0);
+            let wm = if rho > 1e-6 { let r = rho.clamp(0.02, 0.98); r / (1.0 - r) } else { 1.0 };
             let k = 16;
             let pts = (0..=k)
                 .map(|j| {
                     let t = j as f64 / k as f64;
-                    let (u, v, w) = ((1.0 - t) * (1.0 - t), 2.0 * t * (1.0 - t), t * t);
-                    [u * a[0] + v * p[i][0] + w * b[0], u * a[1] + v * p[i][1] + w * b[1]]
+                    let (u, v, w) = ((1.0 - t) * (1.0 - t), 2.0 * t * (1.0 - t) * wm, t * t);
+                    let s = u + v + w;
+                    [(u * a[0] + v * p[i][0] + w * b[0]) / s, (u * a[1] + v * p[i][1] + w * b[1]) / s]
                 })
                 .collect();
             out.push(Piece { id: 2 * i, pts });
@@ -406,6 +412,149 @@ pub fn pieces_t(p: &[[f64; 2]], smooth: &[bool], corner: &[f64], tension: &[f64]
         }
     }
     out
+}
+
+/// The Curves set (Romain, 20 nov., 8 h 08: "tout un set de composant
+/// « curves »… dans le feeling de 3dsMax"): a path made from settings, as
+/// 3ds Max's Shapes. Its size is its box (`Prim::Path { x, z }`, the W / D
+/// handles, Scale); its outline (`Feature::profile`) is made again from its
+/// settings and that box at every change (`Doc::regen_curves`). An edit of
+/// its points or corners by hand makes it a plain path (3ds Max's Convert
+/// to Editable Spline).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Curve {
+    pub kind: CurveKind,
+    /// Rectangle, Polygon, Star (its outer corners): the corners' fillet
+    /// radius in mm (< 0: a chamfer of that size); 0 sharp.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub corner: f64,
+    /// Star: its inner corners' fillet.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub corner2: f64,
+    /// Polygon: its sides; Star: its points.
+    #[serde(default, skip_serializing_if = "is_zero_u")]
+    pub sides: u32,
+    /// Star: the inner radius over the outer one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub inner: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CurveKind {
+    Rectangle,
+    Circle,
+    Ellipse,
+    Polygon,
+    Star,
+}
+
+fn is_zero_u(x: &u32) -> bool {
+    *x == 0
+}
+
+impl CurveKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            CurveKind::Rectangle => "Rectangle",
+            CurveKind::Circle => "Circle",
+            CurveKind::Ellipse => "Ellipse",
+            CurveKind::Polygon => "Polygon",
+            CurveKind::Star => "Star",
+        }
+    }
+    /// Drawn from its centre out (Circle, Polygon, Star), else corner to
+    /// corner (as 3ds Max).
+    pub fn from_centre(self) -> bool {
+        matches!(self, CurveKind::Circle | CurveKind::Polygon | CurveKind::Star)
+    }
+    /// Its settings when made.
+    pub fn new_curve(self) -> Curve {
+        let (sides, inner) = match self {
+            CurveKind::Polygon => (6, 0.0),
+            CurveKind::Star => (5, 0.5),
+            _ => (0, 0.0),
+        };
+        Curve { kind: self, corner: 0.0, corner2: 0.0, sides, inner }
+    }
+}
+
+impl Curve {
+    /// Points or sides as used (3 to 100; a star 3 to 100 points).
+    pub fn n(&self) -> usize {
+        (self.sides.max(3) as usize).min(100)
+    }
+    /// The star's inner radius over its outer one, kept in (0.02, 0.98).
+    pub fn ratio(&self) -> f64 {
+        if self.inner > 0.0 { self.inner.clamp(0.02, 0.98) } else { 0.5 }
+    }
+    /// Its corners at radius 1 round its centre, in the plane's (x, z): a
+    /// polygon with a flat side towards +z, a star with a point towards −z.
+    /// None: a box (Rectangle, Circle, Ellipse).
+    pub fn star_points(&self) -> Option<Vec<[f64; 2]>> {
+        use std::f64::consts::{FRAC_PI_2, PI, TAU};
+        let n = self.n();
+        match self.kind {
+            CurveKind::Polygon => Some((0..n).map(|k| { let a = FRAC_PI_2 + PI / n as f64 + TAU * k as f64 / n as f64; [a.cos(), a.sin()] }).collect()),
+            CurveKind::Star => {
+                let r2 = self.ratio();
+                Some((0..2 * n).map(|k| { let a = -FRAC_PI_2 + PI * k as f64 / n as f64; let r = if k % 2 == 0 { 1.0 } else { r2 }; [r * a.cos(), r * a.sin()] }).collect())
+            }
+            _ => None,
+        }
+    }
+    /// At radius 1: its box's size and where its centre lies from the
+    /// box's centre (a pentagon's centre is not its box's).
+    pub fn unit_box(&self) -> ([f64; 2], [f64; 2]) {
+        let Some(p) = self.star_points() else { return ([2.0, 2.0], [0.0, 0.0]) };
+        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for q in &p {
+            for k in 0..2 {
+                lo[k] = lo[k].min(q[k]);
+                hi[k] = hi[k].max(q[k]);
+            }
+        }
+        ([hi[0] - lo[0], hi[1] - lo[1]], [-(lo[0] + hi[0]) * 0.5, -(lo[1] + hi[1]) * 0.5])
+    }
+    /// Its radius in a box of `x` × `z` (a circle's half width, a polygon's
+    /// or star's outer radius; its box stretched: the mean).
+    pub fn radius(&self, x: f64, z: f64) -> f64 {
+        let (b, _) = self.unit_box();
+        0.5 * (x / b[0] + z / b[1])
+    }
+    /// The largest fillet its outer corners (`inner`: a star's inner
+    /// ones) take in a box of `x` × `z` (a polygon's at its most: a circle).
+    pub fn corner_max(&self, x: f64, z: f64, inner: bool) -> f64 {
+        let mut big = *self;
+        big.corner = 1e9;
+        big.corner2 = 1e9;
+        let pr = big.profile(x, z);
+        pr.cuts(x, z).iter().enumerate().filter(|(i, _)| self.kind != CurveKind::Star || (i % 2 == 1) == inner).filter_map(|(_, c)| c.map(|c| c.max)).fold(f64::MAX, f64::min).min(1e6)
+    }
+    /// The outline in a box of `x` × `z` (the unit square stretched).
+    pub fn profile(&self, x: f64, z: f64) -> Profile {
+        let square = vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]];
+        let plain = |points: Vec<[f64; 2]>, corner: Vec<f64>| { let n = points.len(); Profile { points, smooth: vec![false; n], corner, tension: vec![], open: false } };
+        match self.kind {
+            CurveKind::Rectangle => plain(square, vec![self.corner; 4]),
+            CurveKind::Circle | CurveKind::Ellipse => {
+                if (x - z).abs() <= 1e-9 * x.abs().max(z.abs()).max(1.0) {
+                    // a circle: four exact quarter arcs meeting at the sides' middles
+                    plain(square, vec![0.5 * x.min(z); 4])
+                } else {
+                    // an ellipse: four curve points, each a conic quarter
+                    // between the sides' middles (a circle's, stretched)
+                    Profile { points: square, smooth: vec![true; 4], corner: vec![], tension: vec![circle_rho(std::f64::consts::FRAC_PI_2); 4], open: false }
+                }
+            }
+            CurveKind::Polygon | CurveKind::Star => {
+                let p = self.star_points().unwrap_or_default();
+                let (b, c) = self.unit_box();
+                let points = p.iter().map(|q| [(q[0] + c[0]) / b[0], (q[1] + c[1]) / b[1]]).collect::<Vec<_>>();
+                let corner = (0..points.len()).map(|i| if self.kind == CurveKind::Star && i % 2 == 1 { self.corner2 } else { self.corner }).collect();
+                plain(points, corner)
+            }
+        }
+    }
 }
 
 /// An edge of the part, found again at every build: the packed tags
@@ -650,6 +799,10 @@ pub struct Feature {
     /// remplit une surface"): `prim` is a `Path` of its box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet: Option<Sheet>,
+    /// A curve made from settings (`Prim::Path`, the Curves set): its
+    /// outline follows them (`Doc::regen_curves`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<Curve>,
 }
 
 /// A surface's closed outline (straight sides) and the scan points it
@@ -686,6 +839,9 @@ impl Feature {
         }
         if self.sheet.is_some() {
             return "Surface";
+        }
+        if let Some(c) = &self.curve {
+            return c.kind.label();
         }
         match (&self.round, &self.push, &self.tweak) {
             (Some(r), _, _) => r.label(),
@@ -783,6 +939,18 @@ impl Feature {
             }
         }
     }
+    /// A curve given new settings (sides, points) and radius, its centre
+    /// kept where it was (a pentagon's box is not round its centre).
+    pub fn reshape_curve(&mut self, c: Curve, r: f64) {
+        let (Prim::Path { x, z }, Some(old)) = (self.prim, self.curve) else { return };
+        let r0 = old.radius(x, z);
+        let (_, off0) = old.unit_box();
+        let (b, off) = c.unit_box();
+        let centre = self.origin + self.rot * DVec3::new(off0[0] * r0, 0.0, off0[1] * r0);
+        self.origin = centre - self.rot * DVec3::new(off[0] * r, 0.0, off[1] * r);
+        self.prim = Prim::Path { x: (r * b[0]).max(0.01), z: (r * b[1]).max(0.01) };
+        self.curve = Some(c);
+    }
     /// Content hash (the kernel's caches, and the name of a step to skip).
     pub fn hash(&self) -> u64 {
         let json = serde_json::to_vec(self).unwrap_or_default();
@@ -851,7 +1019,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, suspended: false });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, suspended: false });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -861,7 +1029,7 @@ impl Doc {
         let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0 };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, suspended: false });
         id
     }
     /// Adds an inset or extrusion of a face at the end.
@@ -870,7 +1038,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(push.label());
         let origin = push.face.at;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, suspended: false });
         id
     }
     /// Adds a move of a face, edge or vertex at the end.
@@ -879,7 +1047,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(tweak.label());
         let origin = tweak.at();
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, suspended: false });
         id
     }
     /// Adds a Knife step (its first point) at the end.
@@ -888,8 +1056,26 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(name);
         let origin = cut.pts.first().map(|p| p.at).or(cut.remove_faces.first().map(|r| r.at)).or(cut.remove_edges.first().map(|e| e.at)).unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, suspended: false });
         id
+    }
+    /// The curves' outlines made again from their settings and boxes (a
+    /// circle stretched becomes an ellipse). True when one changed.
+    pub fn regen_curves(&mut self) -> bool {
+        let mut changed = false;
+        for f in self.features.iter_mut() {
+            let (Some(c), Prim::Path { x, z }) = (f.curve.as_mut(), f.prim) else { continue };
+            if c.kind == CurveKind::Circle && (x - z).abs() > 1e-9 * x.abs().max(z.abs()).max(1.0) {
+                c.kind = CurveKind::Ellipse;
+                changed = true;
+            }
+            let pr = c.profile(x, z);
+            if f.profile.as_ref() != Some(&pr) {
+                f.profile = Some(pr);
+                changed = true;
+            }
+        }
+        changed
     }
     /// "Cube", then "Cube 2", "Cube 3"…
     pub fn fresh_name(&self, base: &str) -> String {
@@ -910,7 +1096,7 @@ impl Doc {
         for mut f in src {
             f.id = self.next_id;
             self.next_id += 1;
-            f.name = self.fresh_name(f.prim.kind().label());
+            f.name = self.fresh_name(f.kind_label());
             f.origin += offset;
             out.push(f.id);
             self.features.push(f);
