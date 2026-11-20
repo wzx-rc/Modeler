@@ -23,6 +23,19 @@ const COARSE: (f64, f64) = (0.08, 0.35);
 /// Writes the step on stderr before an operation that could crash the process.
 fn mark(s: &str) {
     let mut e = std::io::stderr();
+    // FORME_STAGE_MS=1: how long the step before took (the time from its
+    // mark to this one; "mesh" ends a build, the next build's first mark
+    // gives the meshing's)
+    if std::env::var_os("FORME_STAGE_MS").is_some() {
+        thread_local! { static LAST: std::cell::RefCell<Option<(Instant, String)>> = const { std::cell::RefCell::new(None) }; }
+        LAST.with(|l| {
+            let mut l = l.borrow_mut();
+            if let Some((t, what)) = l.take() {
+                let _ = writeln!(e, "TIME {what} {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+            }
+            *l = Some((Instant::now(), s.to_string()));
+        });
+    }
     let _ = writeln!(e, "STEP {s}");
     let _ = e.flush();
 }
@@ -49,6 +62,10 @@ pub struct Cache {
     /// The stages the build before used: kept one build more, so a
     /// document asked again after another (Isolate on, then off) is found.
     prev: Vec<u64>,
+    /// The Curves set's 2D booleans by their own hash and their curves'
+    /// (they do not depend on the part, so a drag of a shape does not make
+    /// them again).
+    regions: HashMap<u64, Result<Vec<Vec<[f32; 3]>>, String>>,
 }
 
 fn rows(m: DMat4) -> [[f64; 4]; 3] {
@@ -606,15 +623,16 @@ fn piece_box(pts: &[DVec3], w: f64) -> (DVec3, DVec3) {
     (lo, hi)
 }
 
-/// The largest size that works for a fillet too big, by halves (for at most
-/// about 2 s: next to a face curved tighter than the fillet, OpenCascade can
-/// take many seconds for each try near the limit).
+/// The largest size that works for a fillet too big, by halves: at most 12
+/// tries (a count, so the same document gives the same size whatever the
+/// load), and a last stop after 6 s (next to a face curved tighter than the
+/// fillet, OpenCascade can take many seconds for each try near the limit).
 fn round_search(acc: &Shape, edges: &[i32], r: &Round, fresh: i64) -> Option<(Shape, f64)> {
     let make = |size: f64| made_on(acc, edges, r, size, fresh);
     let (mut lo, mut hi) = (0.0, r.size);
     let t0 = std::time::Instant::now();
     for _ in 0..12 {
-        if t0.elapsed().as_secs_f64() > 2.0 {
+        if t0.elapsed().as_secs_f64() > SEARCH_STOP {
             break;
         }
         let mid = (lo + hi) * 0.5;
@@ -639,13 +657,14 @@ fn round_search(acc: &Shape, edges: &[i32], r: &Round, fresh: i64) -> Option<(Sh
 
 /// A fillet or chamfer of a few edges made one edge at a time, in the first
 /// order that makes them all at the size asked (depth first, so the orders
-/// share their first steps; at most about 3 s). An edge already rounded by
-/// one before it (OpenCascade carries a fillet along tangent edges) counts
-/// as made. All the faces made carry the step's tag.
+/// share their first steps; at most 40 tries, a count so that the answer
+/// does not depend on the load, and a last stop after 6 s). An edge already
+/// rounded by one before it (OpenCascade carries a fillet along tangent
+/// edges) counts as made. All the faces made carry the step's tag.
 fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> Option<Shape> {
-    fn go(s: &Shape, left: &[EdgeRef], r: &Round, fresh: i64, t0: Instant) -> Option<Shape> {
+    fn go(s: &Shape, left: &[EdgeRef], r: &Round, fresh: i64, t0: Instant, tries: &mut u32) -> Option<Shape> {
         for k in 0..left.len() {
-            if t0.elapsed().as_secs_f64() > 3.0 {
+            if *tries >= 40 || t0.elapsed().as_secs_f64() > SEARCH_STOP {
                 return None;
             }
             let rest: Vec<EdgeRef> = left.iter().enumerate().filter(|(j, _)| *j != k).map(|(_, e)| e.clone()).collect();
@@ -653,6 +672,7 @@ fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> Option<Shape> {
             let next = if missing > 0 || e.is_empty() {
                 continue;
             } else {
+                *tries += 1;
                 made_on(s, &e, r, r.size, fresh)
             };
             if let Ok(n) = next {
@@ -661,15 +681,20 @@ fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> Option<Shape> {
                 if rest.is_empty() {
                     return Some(n);
                 }
-                if let Some(done) = go(&n, &rest, r, fresh, t0) {
+                if let Some(done) = go(&n, &rest, r, fresh, t0, tries) {
                     return Some(done);
                 }
             }
         }
         None
     }
-    go(acc, &r.edges, r, fresh, Instant::now())
+    go(acc, &r.edges, r, fresh, Instant::now(), &mut 0)
 }
+
+/// The last stop of the fillet searches (`round_search`, `one_by_one`): they
+/// end on their count of tries first, this only keeps a pathological case
+/// from holding the kernel.
+const SEARCH_STOP: f64 = 6.0;
 
 /// A fillet that blends its corners: rebuilt in one operation with the run
 /// of fillets just before it (from the first one it touches, through shared
@@ -1575,14 +1600,24 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     }
     model.errors = stage.errors.clone();
     // the Curves set's 2D booleans: made exactly, their edges sent back
+    let mut regions = HashMap::new();
     for f in doc.features.iter().filter(|f| f.visible && !f.suspended && f.shape_bool.is_some()) {
-        mark(&format!("region:{}:0", f.id));
-        match region(doc, f, 0).and_then(|r| r.edge_lines(0.01, 0.05)) {
+        let h = deep_hash(doc, f);
+        let made = match cache.regions.remove(&h) {
+            Some(r) => r,
+            None => {
+                mark(&format!("region:{}:0", f.id));
+                region(doc, f, 0).and_then(|r| r.edge_lines(0.01, 0.05)).map(|lines| lines.iter().map(|l| l.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect()).collect())
+            }
+        };
+        match &made {
             Ok(lines) if lines.is_empty() => model.errors.push(format!("{}: nothing left (the curves share nothing)", f.name)),
-            Ok(lines) => model.curves.push((f.id, lines.iter().map(|l| l.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect()).collect())),
+            Ok(lines) => model.curves.push((f.id, lines.clone())),
             Err(e) => model.errors.push(format!("{}: {e}", f.name)),
         }
+        regions.insert(h, made);
     }
+    cache.regions = regions;
     model.limits = stage.limits.clone();
     model.tension_limits = stage.tension_limits.clone();
     if let Some(s) = &stage.shape {

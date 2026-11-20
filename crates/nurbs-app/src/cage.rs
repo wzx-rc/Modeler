@@ -162,6 +162,17 @@ impl AppState {
             // about through the grip
             let u = h0 - al;
             let mut t = (tl - al).dot(u) / u.length_squared().max(1e-12);
+            // free of a point of interest: where the pointer's ray passes
+            // nearest that line in space (the corner's own plane facing the
+            // eye gave far less than the pointer showed when the line runs
+            // into the depth)
+            if !caught {
+                let (ro, rd) = self.ray(p);
+                let (aw, uw) = (c.frame * al, c.frame * u);
+                if let Some(tt) = uw.try_normalize().and_then(|d| closest_on_line(aw, d, ro, rd)) {
+                    t = tt / uw.length();
+                }
+            }
             if self.settings.snap && !caught {
                 t = (t * 100.0).round() / 100.0;
             }

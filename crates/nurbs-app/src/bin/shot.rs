@@ -1702,10 +1702,11 @@ fn main() {
         h.key(egui::Key::R);
         h.settle();
         h.shot("zero-qwer-4-scale");
-        let pivot = h.st.pivot().unwrap().as_vec3();
-        let v = h.st.view();
-        let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0;
-        let (a, b) = (h.screen_of(pivot + Vec3::Y * k), h.screen_of(pivot + Vec3::Y * k * 1.5));
+        // R is the scale cage (20 nov.): the top face's grip pulled up half
+        // the height again (the bottom stays)
+        let c = h.st.cage().expect("a cage");
+        let (top, bottom) = (c.point([0, 1, 0]), c.point([0, -1, 0]));
+        let (a, b) = (h.screen_of(top.as_vec3()), h.screen_of((top + (top - bottom) * 0.5).as_vec3()));
         h.move_to(a);
         h.steps(2);
         h.drag(a, b, 12, false);
@@ -1714,14 +1715,18 @@ fn main() {
         eprintln!("  scale readout {:?}", h.st.gizmo_readout);
         h.press(b, false);
         h.settle();
-        // the centre: dragged to the right, bigger all round
-        let c = h.screen_of(h.st.pivot().unwrap().as_vec3());
-        h.move_to(c);
+        // a corner with Shift: bigger all round
+        let c = h.st.cage().expect("a cage");
+        let (k0, k1) = (c.point([-1, -1, -1]), c.point([1, 1, 1]));
+        let (g, to) = (h.screen_of(k1.as_vec3()), h.screen_of((k1 + (k1 - k0) * 0.13).as_vec3()));
+        h.move_to(g);
         h.steps(2);
-        h.drag(c, c + vec2(40.0, 0.0), 8, false);
+        h.hold(Modifiers::SHIFT);
+        h.drag(g, to, 8, false);
         h.settle();
         eprintln!("  scale all readout {:?}", h.st.gizmo_readout);
-        h.press(c + vec2(40.0, 0.0), false);
+        h.press(to, false);
+        h.hold(Modifiers::NONE);
         h.settle();
         h.shot("zero-qwer-6-scaled");
         eprintln!("  boss {:?}", h.st.doc.features[2].prim);
@@ -1843,7 +1848,7 @@ fn main() {
         h.shot("zero-marking-4-flick");
         h.settle();
         eprintln!("  boss op {:?}", h.st.doc.features[2].op);
-        h.st.undo();
+        h.st.undo_doc();
         h.settle();
         // Edge mode: on an edge, Fillet
         h.key(egui::Key::F10);
@@ -2216,7 +2221,7 @@ fn main() {
                 h.shot(&format!("zero-scan-{}-boss", 8 + k));
                 if k == 0 {
                     // undone: the outer step next, at the same place
-                    h.st.undo();
+                    h.st.undo_doc();
                     h.settle();
                 }
             }
@@ -3174,7 +3179,7 @@ fn main() {
         say(&h, "scaled");
         h.shot("zero-comp-flow-2-scaled");
         // an edge: W then R
-        h.st.undo();
+        h.st.undo_doc();
         h.settle();
         h.key(egui::Key::F10);
         h.click(h.screen_of(Vec3::new(0.0, 0.0, 10.0)));
@@ -3708,8 +3713,8 @@ fn main() {
         h.settle();
         eprintln!("  pocket {pocket} moved: {} · faces {} · toast {:?}", order(&h), faces(&h), h.st.toast.as_ref().map(|t| t.text.clone()));
         h.shot("zero-carve-order-4-pocket");
-        h.st.undo();
-        h.st.undo();
+        h.st.undo_doc();
+        h.st.undo_doc();
         h.settle();
         eprintln!("  undo ×2: {} · faces {}", order(&h), faces(&h));
     }
@@ -4076,7 +4081,7 @@ fn main() {
         // deleted: its curves go too; undone
         h.st.delete_selected();
         eprintln!("  deleted: {} features left", h.st.doc.features.len());
-        h.st.undo();
+        h.st.undo_doc();
         h.settle();
         eprintln!("  undone: {} features", h.st.doc.features.len());
     }
@@ -4424,7 +4429,7 @@ fn main() {
         h.st.select(None, false);
         h.steps(2);
         h.shot("zero-comp-tilt-3-boss-pocket");
-        h.st.undo();
+        h.st.undo_doc();
         h.steps(2);
         h.settle();
         h.key(egui::Key::Num2);
