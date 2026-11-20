@@ -81,6 +81,18 @@ pub struct Snapped {
     pub guides: Vec<(DVec3, DVec3)>,
 }
 
+/// What a move carries along (Romain, 20 nov., 7 h 22: "aligner ce point
+/// en rouge sur cette pièce sur le repère en jaune… pour l'instant ça le
+/// fait que avec le centre"): its points of interest where they were when
+/// the drag began, any of which lands on a point of interest it passes
+/// near, and which of the part's points they are (not targets meanwhile).
+#[derive(Clone, Debug, Default)]
+pub struct Carried {
+    pub pts: Vec<(DVec3, SnapKind)>,
+    /// Indices in `AppState::snaps` (frozen while the drag is live).
+    pub own: Vec<usize>,
+}
+
 /// Screen distance (points) under which a point of interest catches.
 pub const CATCH: f32 = 12.0;
 /// Screen distance under which a guide catches.
@@ -249,6 +261,92 @@ impl AppState {
             Some(h) if h.t < dist - tol => self.feature_of_face(h.face).map(|f| skip.contains(&f)).unwrap_or(false) == false,
             _ => false,
         }
+    }
+
+    /// The points a move carries (see `Carried`): the points of interest on
+    /// the model faces `faces` or on the features `feats`, and the points
+    /// `extra` (a picked vertex, an edge's ends and middle). Called before
+    /// the drag goes live (the points of interest made current first).
+    pub fn carried(&mut self, feats: &[FeatureId], faces: &[usize], extra: &[DVec3]) -> Carried {
+        self.refresh_snaps();
+        let mut c = Carried::default();
+        for (i, s) in self.snaps.iter().enumerate() {
+            if s.kind == SnapKind::Origin {
+                continue;
+            }
+            let mine = s.features.iter().any(|f| feats.contains(f)) || s.faces.iter().any(|f| faces.contains(f)) || extra.iter().any(|e| e.distance(s.pos) < 1e-3);
+            if mine {
+                c.own.push(i);
+                c.pts.push((s.pos, s.kind));
+            }
+        }
+        for e in extra {
+            if !c.pts.iter().any(|(q, _)| q.distance(*e) < 1e-3) {
+                c.pts.push((*e, SnapKind::End));
+            }
+        }
+        c
+    }
+
+    /// The alignment of a move along an axis or in a plane (`mask`: the
+    /// directions it may take; `raw`: the move the pointer asks for). A
+    /// point the move carries that passes near a point of interest on
+    /// screen lands on it (lined up only, with a dotted line, when the axis
+    /// or the plane cannot take it there); when the pointer itself is on
+    /// one, the nearest of `keys` (the pivot; a shape's centre, base or
+    /// top) lines up with it. The nearest on screen wins, a carried point
+    /// that would stay far from it in depth last. The move and what to draw.
+    pub fn align_move(&self, p: [f32; 2], raw: DVec3, mask: DVec3, keys: &[DVec3], carried: &Carried, skip: &[FeatureId]) -> Option<(DVec3, Snapped)> {
+        if !self.snapping() {
+            return None;
+        }
+        let v = self.view();
+        let targets: Vec<(usize, [f32; 2])> = self
+            .snaps
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| !carried.own.contains(i) && !s.features.iter().any(|f| skip.contains(f)))
+            .filter_map(|(i, s)| Some((i, v.project(s.pos.as_vec3())?)))
+            .collect();
+        // (score, the point moved, the move, the point of interest)
+        let mut cands: Vec<(f32, DVec3, DVec3, usize)> = vec![];
+        for (i, q) in &targets {
+            let d = (q[0] - p[0]).hypot(q[1] - p[1]);
+            if d >= CATCH {
+                continue;
+            }
+            let s = &self.snaps[*i];
+            if let Some((k, delta)) = keys.iter().map(|k| (*k, (s.pos - *k) * mask)).min_by(|x, y| x.1.distance(raw).total_cmp(&y.1.distance(raw))) {
+                cands.push((d + s.kind.rank(), k, delta, *i));
+            }
+        }
+        for (from, kind) in &carried.pts {
+            let Some(m) = v.project((*from + raw).as_vec3()) else { continue };
+            for (i, q) in &targets {
+                let d = (q[0] - m[0]).hypot(q[1] - m[1]);
+                if d >= CATCH {
+                    continue;
+                }
+                let s = &self.snaps[*i];
+                let delta = (s.pos - *from) * mask;
+                // near on screen only, far in depth: the piece would jump
+                let Some(k) = v.project((*from + delta).as_vec3()) else { continue };
+                if (k[0] - m[0]).hypot(k[1] - m[1]) > CATCH * 1.5 {
+                    continue;
+                }
+                // what the axis or plane leaves between them, in points
+                let gap = (s.pos.distance(*from + delta) / self.mm_per_point(s.pos)) as f32;
+                cands.push((d + s.kind.rank() + 0.5 * kind.rank() + (gap * 0.25).min(12.0), *from, delta, *i));
+            }
+        }
+        cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (_, from, delta, i) = cands.into_iter().take(12).find(|c| {
+            let s = &self.snaps[c.3];
+            s.kind == SnapKind::Origin || !self.hidden_but(s.pos.as_vec3(), skip)
+        })?;
+        let s = &self.snaps[i];
+        let pos = from + delta;
+        Some((delta, Snapped { pos, kind: s.kind, source: (pos.distance(s.pos) > 1e-3).then_some(s.pos), guides: vec![] }))
     }
 
     /// Remembers the point of interest under the pointer (the guides line

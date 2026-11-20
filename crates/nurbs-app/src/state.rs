@@ -395,6 +395,9 @@ pub struct Drag {
     /// their points go with it (19 nov.: a vertex moved, then the cube
     /// scaled, lost its vertex).
     pub ops: Vec<(Feature, FeatureId)>,
+    /// The points it carries, any of which lands on a point of interest
+    /// it passes near (moves along an axis or in a plane).
+    pub carried: crate::snap::Carried,
 }
 
 /// A fillet or chamfer sized by a drag on screen (Rectify's Radius
@@ -2471,6 +2474,14 @@ impl AppState {
         let Some(pivot) = self.handle_pivot(h) else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
         let start: Vec<Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).cloned().collect();
+        // the elements' points (their operations' faces too) go with them
+        let carried = match h {
+            Handle::Axis(_) | Handle::Plane(_) => {
+                let feats: Vec<FeatureId> = start.iter().flat_map(|s| std::iter::once(s.id).chain(self.element_ops(s.id))).collect();
+                self.carried(&feats, &[], &[])
+            }
+            _ => Default::default(),
+        };
         self.begin_live(match h {
             Handle::Size(_) => "Resize",
             Handle::Rot(_) => "Rotate",
@@ -2481,7 +2492,7 @@ impl AppState {
             .iter()
             .flat_map(|s| self.element_ops(s.id).into_iter().filter_map(|o| self.doc.feature(o).cloned()).map(move |o| (o, s.id)).collect::<Vec<_>>())
             .collect();
-        self.drag = Some(Drag { handle: h, grab, start, line: None, ops });
+        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried });
     }
 
     /// The point a handle sits on.
@@ -2540,26 +2551,25 @@ impl AppState {
         let Some(pivot0) = pivot0 else { return };
         let Some(now) = self.handle_param(d.handle, pivot0, p) else { return };
         let mut delta = now - d.grab;
-        let skip: Vec<FeatureId> = d.start.iter().map(|f| f.id).collect();
+        // the shapes moved and their operations: not snapped to
+        let skip: Vec<FeatureId> = d.start.iter().map(|f| f.id).chain(d.ops.iter().map(|o| o.0.id)).collect();
         self.snap_shown = None;
         match d.handle {
             Handle::Axis(a) | Handle::Plane(a) => {
                 let raw = delta;
                 delta = DVec3::new(self.snap(delta.x), self.snap(delta.y), self.snap(delta.z));
-                // a point of interest under the pointer: the shape's centre,
-                // base or top lines up with it (whichever is the closest to
-                // where the pointer took it), along the axis or in the plane
-                if let Some(s) = self.pick_snap(p, &skip).cloned() {
-                    let keys: Vec<DVec3> = match d.start.as_slice() {
-                        [f] => vec![f.centre(), f.origin, f.origin + f.axis() * f.prim.height()],
-                        _ => vec![pivot0],
-                    };
-                    let mask = if matches!(d.handle, Handle::Axis(_)) { DVec3::AXES[a] } else { DVec3::ONE - DVec3::AXES[a] };
-                    if let Some((k, best)) = keys.iter().map(|k| (*k, (s.pos - *k) * mask)).min_by(|x, y| x.1.distance(raw).total_cmp(&y.1.distance(raw))) {
-                        delta = best;
-                        let pos = k + best;
-                        self.snap_shown = Some(crate::snap::Snapped { pos, kind: s.kind, source: (pos.distance(s.pos) > 1e-3).then_some(s.pos), guides: vec![] });
-                    }
+                // a point of the shape passing near a point of interest
+                // lands on it; the pointer on one: the shape's centre, base
+                // or top lines up with it (whichever is the closest to where
+                // the pointer took it), along the axis or in the plane
+                let keys: Vec<DVec3> = match d.start.as_slice() {
+                    [f] => vec![f.centre(), f.origin, f.origin + f.axis() * f.prim.height()],
+                    _ => vec![pivot0],
+                };
+                let mask = if matches!(d.handle, Handle::Axis(_)) { DVec3::AXES[a] } else { DVec3::ONE - DVec3::AXES[a] };
+                if let Some((best, shown)) = self.align_move(p, raw, mask, &keys, &d.carried, &skip) {
+                    delta = best;
+                    self.snap_shown = Some(shown);
                 }
                 let start = d.start.clone();
                 self.live(|doc| {

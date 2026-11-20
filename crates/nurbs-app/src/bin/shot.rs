@@ -3244,6 +3244,62 @@ fn main() {
         h.shot("zero-dup-move-2-edge");
     }
 
+    if want("align") {
+        // Romain (20 nov. 7 h 22): a point of the moved piece, not only its
+        // centre, lands on a point of interest it passes near
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        let b = d.add(Op::Add, Prim::Box { x: 10.0, y: 20.0, z: 30.0 }, glam::DVec3::new(69.63, 0.0, 0.0), glam::DQuat::IDENTITY);
+        h.reset(d, "Cube");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(80.0, 25.0, 20.0));
+        h.steps(2);
+        h.settle();
+        // the pointer grabs the arrow, goes `by` along it, held for a shot
+        let arrow = |h: &mut Harness, axis: Vec3, by: f32, name: &str| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + axis) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let to = h.screen_of(c + axis * by) - s0;
+            h.drag(grab, grab + to, 10, false);
+            h.steps(3);
+            eprintln!("  snapped {:?}", h.st.snap_shown.as_ref().map(|s| (s.kind, s.pos, s.source)));
+            h.shot(name);
+            h.press(grab + to, false);
+            h.steps(2);
+            h.settle();
+        };
+        // Object mode: the small block along -X, its -X corners onto the
+        // big one's +X corners (x 20): moved by -44.63, off the grid
+        h.click(h.screen_of(Vec3::new(69.63, 20.0, 0.0)));
+        eprintln!("  selected {:?}", h.st.selection);
+        arrow(&mut h, Vec3::X, -44.0, "zero-align-1-object");
+        eprintln!("  block at x {:?} (want 25)", h.st.doc.feature(b).map(|f| f.origin.x));
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::Z);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  undone: block at x {:?}", h.st.doc.feature(b).map(|f| f.origin.x));
+        // Face mode: the big block's top, +X and +Z faces copied, the copy
+        // along +X: its +X corners onto the small block's -X ones (x 64.63)
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(20.0, 10.0, 0.0)));
+        h.click(h.screen_of(Vec3::new(0.0, 10.0, 15.0)));
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        arrow(&mut h, Vec3::X, 46.0, "zero-align-2-copy");
+        eprintln!(
+            "  copy moved by {:?} (want x 44.63), errors {:?}",
+            h.st.doc.features.last().and_then(|f| f.tweak.as_ref()).map(|t| t.delta),
+            h.st.model.as_ref().map(|m| m.errors.clone())
+        );
+    }
+
     if want("knife-diag") {
         // Romain's flank (20 nov.): a block with filleted top edges, a
         // diagonal knife cut from the flank's top corner; the cut picked in

@@ -735,7 +735,11 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
     if let Some(d) = &st.drag {
         if matches!(d.handle, Handle::Axis(_) | Handle::Plane(_)) {
             if let (Some(s), Some(f)) = (d.start.first(), d.start.first().and_then(|s| st.doc.feature(s.id))) {
-                let dv = f.origin - s.origin;
+                // a component move: its step's delta (its origin stays)
+                let dv = match (&f.tweak, &s.tweak) {
+                    (Some(t), Some(t0)) => t.delta - t0.delta,
+                    _ => f.origin - s.origin,
+                };
                 let txt = match d.handle {
                     Handle::Axis(a) => format!("{} {} mm", ["X", "Y", "Z"][a], fmt_mm(dv[a] as f32)),
                     _ => format!("{} × {} × {} mm", fmt_mm(dv.x as f32), fmt_mm(dv.y as f32), fmt_mm(dv.z as f32)),

@@ -717,7 +717,7 @@ impl AppState {
         let (ro, rd) = self.ray(p);
         let Some(t) = closest_on_line(line.0, line.1, ro, rd) else { return };
         self.begin_live(f.kind_label());
-        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![] });
+        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![], carried: Default::default() });
     }
 
     pub(crate) fn update_push_drag(&mut self, d: &Drag, p: [f32; 2]) {
@@ -983,6 +983,40 @@ impl AppState {
         Tweak::new(comps).map(|t| t.at())
     }
 
+    /// The points a component move carries, before it goes live: the
+    /// selected move step's (a copy: all its faces'; else its components
+    /// where the step put them), else the picked components' (a face's
+    /// corners, edges' middles and centre; an edge's ends and middle; a
+    /// vertex).
+    fn tweak_carried(&mut self) -> crate::snap::Carried {
+        let mut feats: Vec<FeatureId> = vec![];
+        let mut faces: Vec<usize> = vec![];
+        let mut extra: Vec<DVec3> = vec![];
+        let (comps, shift) = match self.selected_tweak() {
+            Some(f) => {
+                let t = f.tweak.clone().unwrap();
+                feats.push(f.id);
+                (if t.copy { vec![] } else { t.comps().cloned().collect() }, t.delta)
+            }
+            None => (self.picked_comps(), DVec3::ZERO),
+        };
+        for c in comps {
+            match c {
+                Comp::Face(r) => faces.extend(self.model_face_of(&FaceRef { at: r.at + shift, ..r })),
+                Comp::Edge(r) => {
+                    let Some(i) = self.model_edge_of(&EdgeRef { at: r.at + shift, ..r }) else { continue };
+                    let Some(e) = self.model.as_ref().and_then(|m| m.edges.get(i)) else { continue };
+                    let d3 = |q: &[f32; 3]| Vec3::from(*q).as_dvec3();
+                    extra.extend(e.pts.first().map(d3));
+                    extra.extend(e.pts.last().map(d3));
+                    extra.extend(polyline_middle(&e.pts));
+                }
+                Comp::Vertex(v) => extra.push(v + shift),
+            }
+        }
+        self.carried(&feats, &faces, &extra)
+    }
+
     /// A drag on the gizmo in Vertex, Edge or Face mode: the selected move
     /// step changes, or a new one starts on the picked component.
     pub(crate) fn begin_tweak_drag(&mut self, h: Handle, p: [f32; 2]) {
@@ -991,6 +1025,7 @@ impl AppState {
         }
         let Some(pivot) = self.comp_pivot() else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
+        let carried = if matches!(h, Handle::Axis(_) | Handle::Plane(_)) { self.tweak_carried() } else { Default::default() };
         let id = match self.selected_tweak() {
             Some(f) => {
                 let id = f.id;
@@ -1007,7 +1042,7 @@ impl AppState {
             }
         };
         let Some(f) = self.doc.feature(id).cloned() else { return };
-        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![] });
+        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried });
     }
 
     pub(crate) fn update_tweak_drag(&mut self, d: &Drag, p: [f32; 2]) {
@@ -1049,13 +1084,13 @@ impl AppState {
             Handle::Axis(a) | Handle::Plane(a) => a,
             _ => return,
         };
-        // a point of interest under the pointer: the component lines up
-        // with it, along the axis or in the plane
-        if let Some(s) = self.pick_snap(p, &[]).cloned() {
-            let mask = if matches!(d.handle, Handle::Axis(_)) { DVec3::AXES[a] } else { DVec3::ONE - DVec3::AXES[a] };
-            delta = (s.pos - pivot0) * mask;
-            let pos = pivot0 + delta;
-            self.snap_shown = Some(crate::snap::Snapped { pos, kind: s.kind, source: (pos.distance(s.pos) > 1e-3).then_some(s.pos), guides: vec![] });
+        // a point of what moves passing near a point of interest lands on
+        // it; the pointer on one: the pivot lines up with it, along the
+        // axis or in the plane
+        let mask = if matches!(d.handle, Handle::Axis(_)) { DVec3::AXES[a] } else { DVec3::ONE - DVec3::AXES[a] };
+        if let Some((best, shown)) = self.align_move(p, raw, mask, &[pivot0], &d.carried, &[]) {
+            delta = best;
+            self.snap_shown = Some(shown);
         }
         self.live(|doc| {
             if let Some(tw) = doc.feature_mut(id).and_then(|f| f.tweak.as_mut()) {
