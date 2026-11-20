@@ -3096,6 +3096,18 @@ fn main() {
         h.steps(2);
         eprintln!("  object click: selection {:?}", h.st.selection);
         h.shot("zero-slot-hand-3-object");
+        // Shift held (Romain 20 nov., 9 h 27): a drag 6° off X drawn level
+        h.key(egui::Key::Escape);
+        h.hold(Modifiers::SHIFT);
+        h.key(egui::Key::S);
+        h.steps(2);
+        let (a, b) = (h.screen_of(Vec3::new(-20.0, 20.0, -12.0)), h.screen_of(Vec3::new(10.0, 20.0, -9.0)));
+        h.drag(a, b, 10, true);
+        h.hold(Modifiers::NONE);
+        h.steps(2);
+        eprintln!("  shift slot: {:?}", h.st.slot_draw.as_ref().map(|s| (s.a, s.b)));
+        h.shot("zero-slot-hand-4-shift");
+        h.key(egui::Key::Escape);
     }
 
     if want("dup-faces") {
@@ -3248,6 +3260,78 @@ fn main() {
         arrow(&mut h, Vec3::Z, 5.0);
         eprintln!("  edge moved: {:?} {:?} errors {:?} toast {:?}", h.st.doc.features.last().map(|f| f.name.clone()), h.st.doc.features.last().and_then(|f| f.tweak.as_ref()).map(|t| t.delta), h.st.model.as_ref().map(|m| m.errors.clone()), h.st.toast.as_ref().map(|t| t.text.clone()));
         h.shot("zero-dup-move-2-edge");
+    }
+
+    if want("dup-object") {
+        // Romain (20 nov. 9 h 24): "CTRL + D doit dupliquer sur place et pas
+        // à côté": in Object mode too, the copy in place, the move gizmo on
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        h.reset(d, "Cube");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(75.0, 25.0, 20.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::F8);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let o = |h: &Harness, id| h.st.doc.feature(id).map(|f| f.origin);
+        let copy = *h.st.selection.first().expect("the copy selected");
+        eprintln!("  original {:?} copy {:?} gizmo {:?} toast {:?}", o(&h, b), o(&h, copy), h.st.gizmo, h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.shot("zero-dup-object-1-in-place");
+        let c = h.st.pivot().expect("a gizmo").as_vec3();
+        let s0 = h.screen_of(c);
+        let dir = (h.screen_of(c + Vec3::X) - s0).normalized();
+        let grab = s0 + dir * 55.0;
+        let to = h.screen_of(c + Vec3::X * 50.0) - s0;
+        h.drag(grab, grab + to, 10, true);
+        h.settle();
+        eprintln!("  original {:?} copy {:?}", o(&h, b), o(&h, copy));
+        h.shot("zero-dup-object-2-moved");
+    }
+
+    if want("move-free") {
+        // the Move gizmo's centre (Romain 20 nov., 9 h 34, Maya): on all
+        // three axes, in the plane facing the eye; on a point of interest
+        // the block's corner lands on it in depth too
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        let b = d.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, glam::DVec3::new(60.0, 0.0, 20.0), glam::DQuat::IDENTITY);
+        h.reset(d, "Cube");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(80.0, 25.0, 30.0));
+        h.steps(2);
+        h.settle();
+        h.click(h.screen_of(Vec3::new(60.0, 10.0, 20.0)));
+        let c = h.st.pivot().expect("a gizmo").as_vec3();
+        let s0 = h.screen_of(c);
+        h.move_to(s0);
+        h.steps(2);
+        eprintln!("  hot {:?}", h.st.hot_handle);
+        // up and left on screen: free, off the axes
+        h.drag(s0, s0 + vec2(-120.0, -60.0), 10, false);
+        h.steps(3);
+        eprintln!("  free: block at {:?}", h.st.doc.feature(b).map(|f| f.origin));
+        h.shot("zero-move-free-1-drag");
+        h.press(s0 + vec2(-120.0, -60.0), false);
+        h.settle();
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::Z);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        // onto the big block's top corner (20, 20, 15): the pointer there
+        let c = h.st.pivot().expect("a gizmo").as_vec3();
+        let s0 = h.screen_of(c);
+        let to = h.screen_of(Vec3::new(20.0, 20.0, 15.0));
+        h.drag(s0, to, 12, false);
+        h.steps(3);
+        eprintln!("  snapped {:?}", h.st.snap_shown.as_ref().map(|s| (s.kind, s.pos)));
+        h.shot("zero-move-free-2-snap");
+        h.press(to, false);
+        h.settle();
+        eprintln!("  on the corner: block at {:?}", h.st.doc.feature(b).map(|f| f.origin));
+        h.shot("zero-move-free-3-made");
     }
 
     if want("align") {
@@ -3518,9 +3602,17 @@ fn main() {
         h.settle();
         h.st.mode = Op::Add;
         // a star pulled 6 up, then 7 points
+        // with the Extrude tool (no Extrude of its own on a curve, 20 nov.
+        // 9 h 25): a press on its line, dragged up
         let star = draw(&mut h, CurveKind::Star, w(95.0, 0.0, 0.0), w(107.0, 0.0, 0.0));
-        pull(&mut h, w(95.0, 0.0, 0.0), Vec3::Y, 6.0);
-        h.st.finish_curve_pull();
+        h.st.selection.clear();
+        h.st.arm_push(PushKind::Extrude, None);
+        h.steps(2);
+        let tip = h.st.curve_lines(h.st.doc.feature(star).unwrap()).concat().into_iter().max_by(|a, b| a.distance(DVec3::new(95.0, 0.0, 0.0)).total_cmp(&b.distance(DVec3::new(95.0, 0.0, 0.0)))).unwrap().as_vec3();
+        let (s0, s1) = (h.screen_of(tip), h.screen_of(tip + Vec3::Y * 6.0));
+        h.drag(s0, s1, 10, true);
+        h.settle();
+        eprintln!("  star by the Extrude tool: {:?} tool {:?}", h.st.doc.feature(star).map(|f| f.prim), h.st.tool);
         h.st.edit("Points", |d| {
             let f = d.feature_mut(star).unwrap();
             let (Some(mut c), nurbs_kernel::Prim::Profile { x, z, .. }) = (f.curve, f.prim) else { return };

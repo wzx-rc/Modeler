@@ -73,7 +73,18 @@ impl AppState {
     pub fn slot_move(&mut self, p: [f32; 2]) {
         let Some(s) = self.slot_draw.clone() else { return };
         if !s.width {
-            if let Some((b, _)) = self.snap_on_plane(&s.plane, p, &[]) {
+            if let Some((mut b, _)) = self.snap_on_plane(&s.plane, p, &[]) {
+                // Shift (Romain 20 nov., 9 h 27: "Shift maintenu permet de
+                // tracer en ligne droite"): the slot's line locked level,
+                // upright or at 45° on its plane, its length on the grid step
+                let w = [b[0] - s.a[0], b[1] - s.a[1]];
+                if self.shift_held && w[0].hypot(w[1]) > 1e-9 {
+                    let step = std::f64::consts::FRAC_PI_4;
+                    let ang = (w[1].atan2(w[0]) / step).round() * step;
+                    let u = [ang.cos(), ang.sin()];
+                    let len = self.snap((w[0] * u[0] + w[1] * u[1]).max(0.0));
+                    b = [s.a[0] + u[0] * len, s.a[1] + u[1] * len];
+                }
                 if let Some(d) = &mut self.slot_draw {
                     d.b = b;
                 }

@@ -367,6 +367,9 @@ pub enum Handle {
     Axis(usize),
     /// Move in the plane normal to an axis.
     Plane(usize),
+    /// Move on all three axes (the gizmo's centre, Maya; Romain 20 nov.,
+    /// 9 h 34): in the plane facing the eye through the pivot.
+    Free,
     /// A size of the selected shape: 0 width (+X), 1 height (top), 2 depth (+Z), 3 radius.
     Size(usize),
     /// The selected inset's handle: the outline pulled in from the face's border.
@@ -378,6 +381,17 @@ pub enum Handle {
     /// Scale gizmo (R): along the shape's own X, Y, Z, or all at once.
     Scale(usize),
     ScaleAll,
+}
+
+/// The directions a move handle may take: along its axis, in its plane, or
+/// all three (the centre); None for the other handles.
+pub fn move_mask(h: Handle) -> Option<DVec3> {
+    match h {
+        Handle::Axis(a) => Some(DVec3::AXES[a]),
+        Handle::Plane(a) => Some(DVec3::ONE - DVec3::AXES[a]),
+        Handle::Free => Some(DVec3::ONE),
+        _ => None,
+    }
 }
 
 /// What the gizmo of the selection does (Maya: Q select, W move, E rotate,
@@ -1199,7 +1213,10 @@ impl AppState {
         if ids.is_empty() {
             return;
         }
-        let offset = if comps { DVec3::ZERO } else { DVec3::new(10.0, 0.0, 10.0) };
+        // in place in every mode (Romain 20 nov., 9 h 24: "CTRL + D doit
+        // dupliquer sur place et pas à côté"), as in Maya: the copy is
+        // selected and the move gizmo takes it where it goes
+        let offset = DVec3::ZERO;
         // each element with its operations, their faces' tags moved onto the copies
         let mut plan: Vec<(FeatureId, Vec<FeatureId>)> = vec![];
         for id in ids {
@@ -1234,9 +1251,9 @@ impl AppState {
             self.edge_sel.clear();
             self.vert_sel.clear();
             self.sel_mode = SelMode::Object;
-            self.gizmo = GizmoMode::Move;
-            self.toast("Duplicated in place: drag the arrows to move the copy", false);
         }
+        self.gizmo = GizmoMode::Move;
+        self.toast("Duplicated in place: drag the arrows to move the copy", false);
     }
 
     pub fn toggle_visible(&mut self, id: FeatureId) {
@@ -2174,7 +2191,21 @@ impl AppState {
     /// selected, closed, flat or already pulled.
     pub fn pullable(&self) -> Option<FeatureId> {
         let f = self.single().filter(|_| self.sel_mode == SelMode::Object)?;
+        let id = self.top_boolean(f.id);
+        let f = self.doc.feature(id)?;
         (self.doc.is_closed_curve(f.id) || f.is_extruded_curve()).then_some(f.id)
+    }
+
+    /// The 2D boolean a curve is in, up to the outermost (itself when in
+    /// none): an operand picked, its boolean is what Extrude pulls.
+    pub fn top_boolean(&self, mut id: FeatureId) -> FeatureId {
+        for _ in 0..64 {
+            match self.curve_inside(id) {
+                Some(b) => id = b.id,
+                None => break,
+            }
+        }
+        id
     }
 
     /// Starts pulling the curve into a solid from the pointer at `p`.
@@ -2881,6 +2912,10 @@ impl AppState {
                 closest_on_line(pivot, axis, ro, rd).map(|t| pivot + axis * t)
             }
             Handle::Plane(a) => BasePlane::new(pivot, DVec3::AXES[a], None).hit(ro, rd),
+            Handle::Free => {
+                let n = (self.view().eye.as_dvec3() - pivot).try_normalize()?;
+                BasePlane::new(pivot, n, None).hit(ro, rd)
+            }
             Handle::PushInset | Handle::PushDepth => None,
             Handle::Rot(a) => BasePlane::new(pivot, DVec3::AXES[a], None).hit(ro, rd),
             Handle::Scale(a) => {
@@ -2915,7 +2950,7 @@ impl AppState {
         // the elements' points (their operations' faces too) go with them;
         // a pivot put by hand alone
         let carried = match h {
-            Handle::Axis(_) | Handle::Plane(_) => {
+            Handle::Axis(_) | Handle::Plane(_) | Handle::Free => {
                 let feats: Vec<FeatureId> = start.iter().flat_map(|s| std::iter::once(s.id).chain(self.element_ops(s.id))).collect();
                 let mut c = self.carried(&feats, &[], &[]);
                 if custom {
@@ -2998,7 +3033,7 @@ impl AppState {
         let skip: Vec<FeatureId> = d.start.iter().map(|f| f.id).chain(d.ops.iter().map(|o| o.0.id)).collect();
         self.snap_shown = None;
         match d.handle {
-            Handle::Axis(a) | Handle::Plane(a) => {
+            Handle::Axis(_) | Handle::Plane(_) | Handle::Free => {
                 let raw = delta;
                 delta = DVec3::new(self.snap(delta.x), self.snap(delta.y), self.snap(delta.z));
                 // a point of the shape passing near a point of interest
@@ -3009,7 +3044,7 @@ impl AppState {
                     [f] if !d.custom => vec![f.centre(), f.origin, f.origin + f.axis() * f.prim.height()],
                     _ => vec![pivot0],
                 };
-                let mask = if matches!(d.handle, Handle::Axis(_)) { DVec3::AXES[a] } else { DVec3::ONE - DVec3::AXES[a] };
+                let Some(mask) = move_mask(d.handle) else { return };
                 if let Some((best, shown)) = self.align_move(p, raw, mask, &keys, &d.carried, &skip) {
                     delta = best;
                     self.snap_shown = Some(shown);

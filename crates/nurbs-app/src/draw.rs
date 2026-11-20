@@ -174,15 +174,19 @@ impl Drawer {
         let carve = theme::carve();
         let accent = theme::accent();
         let moving = st.drag.is_some();
-        // paths: always drawn (they have no faces), white when selected
-        // a 2D boolean's operands dimmer (hidden with it), the boolean as
-        // the kernel made it
+        // paths: always drawn (they have no faces), white when selected;
+        // a 2D boolean as the kernel made it, its curves hidden (Romain 20
+        // nov., 9 h 25: "n'avoir que le résultat de visible") while none of
+        // them is picked; the boolean selected, the one under the pointer
+        // shows (a click picks it)
         for f in st.doc.features.iter().filter(|f| f.visible && f.is_path()) {
             let selected = st.selection.contains(&f.id);
             let hovered = st.hover_feature == Some(f.id);
             let inside = st.curve_inside(f.id);
-            // in a boolean pulled into a solid: only while it is open
-            if inside.is_some_and(|b| !b.visible || (b.is_extruded_curve() && !st.boolean_open(b))) && !selected {
+            let shown = |b: &nurbs_kernel::Feature| {
+                b.visible && (b.shape_bool.as_ref().is_some_and(|s| s.operands.iter().any(|o| st.selection.contains(o))) || (hovered && st.boolean_open(b)))
+            };
+            if inside.is_some_and(|b| !shown(b)) && !selected {
                 continue;
             }
             let (c, a, w) = match (selected, hovered, inside) {

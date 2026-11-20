@@ -451,6 +451,16 @@ impl AppState {
     /// handle; Extrude follows the pointer (at `p`), a click ends it. Else
     /// the tool waits for a click on a flat face.
     pub fn arm_push(&mut self, kind: PushKind, p: Option<[f32; 2]>) {
+        // a closed curve selected: the Extrude tool pulls it into a solid
+        // (Romain 20 nov., 9 h 25: no Extrude of its own on a curve, "si on
+        // veut extrude on va chercher le Extrude tool")
+        if kind == PushKind::Extrude {
+            if let Some(id) = self.pullable() {
+                let at = p.or_else(|| self.doc.feature(id).and_then(|f| self.view().project(f.origin.as_vec3()))).unwrap_or(self.principal());
+                self.begin_curve_pull(id, at);
+                return;
+            }
+        }
         self.abort_gestures();
         let picked = if self.sel_mode == SelMode::Face && self.tool == Tool::Select { self.face_sel.first().copied() } else { None };
         self.tool = Tool::Push(kind);
@@ -533,6 +543,13 @@ impl AppState {
 
     /// A click with the Inset tool, or a press with the Extrude tool.
     pub fn push_press(&mut self, kind: PushKind, p: [f32; 2], held: bool) {
+        // Extrude on a closed curve's line: the curve pulled into a solid
+        if kind == PushKind::Extrude {
+            if let Some(id) = self.pick_path(p).map(|id| self.top_boolean(id)).filter(|id| self.doc.is_closed_curve(*id)) {
+                self.begin_curve_pull(id, p);
+                return;
+            }
+        }
         let Some(h) = self.pick_at(p) else {
             self.toast(&format!("{}: click a {}face of the part", kind.label(), if kind == PushKind::Inset { "flat " } else { "" }), true);
             return;
@@ -1020,13 +1037,13 @@ impl AppState {
     /// A drag on the gizmo in Vertex, Edge or Face mode: the selected move
     /// step changes, or a new one starts on the picked component.
     pub(crate) fn begin_tweak_drag(&mut self, h: Handle, p: [f32; 2]) {
-        if !matches!(h, Handle::Axis(_) | Handle::Plane(_) | Handle::Scale(_) | Handle::ScaleAll) {
+        if !matches!(h, Handle::Axis(_) | Handle::Plane(_) | Handle::Free | Handle::Scale(_) | Handle::ScaleAll) {
             return;
         }
         let Some(pivot) = self.pivot() else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
         let custom = self.custom_pivot_on();
-        let mut carried = if matches!(h, Handle::Axis(_) | Handle::Plane(_)) { self.tweak_carried() } else { Default::default() };
+        let mut carried = if crate::state::move_mask(h).is_some() { self.tweak_carried() } else { Default::default() };
         // a pivot put by hand (D): it alone lands on points
         if custom {
             carried.pts = vec![(pivot, crate::snap::SnapKind::End)];
@@ -1089,14 +1106,10 @@ impl AppState {
             });
             return;
         }
-        let a = match d.handle {
-            Handle::Axis(a) | Handle::Plane(a) => a,
-            _ => return,
-        };
         // a point of what moves passing near a point of interest lands on
         // it; the pointer on one: the pivot lines up with it, along the
-        // axis or in the plane
-        let mask = if matches!(d.handle, Handle::Axis(_)) { DVec3::AXES[a] } else { DVec3::ONE - DVec3::AXES[a] };
+        // axis, in the plane, or on it (the centre: all three axes)
+        let Some(mask) = crate::state::move_mask(d.handle) else { return };
         if let Some((best, shown)) = self.align_move(p, raw, mask, &[pivot0], &d.carried, &[]) {
             delta = best;
             self.snap_shown = Some(shown);

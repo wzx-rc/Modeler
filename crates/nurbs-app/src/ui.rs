@@ -484,7 +484,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             divider(ui);
             for (k, icon, tip) in [
                 (PushKind::Inset, Icon::Inset, "Inset (I): a flat face's outline moved in (2 mm), sized with its dot; its arrow raises or sinks it. Click a face, or pick a face (3) and press I"),
-                (PushKind::Extrude, Icon::Extrude, "Extrude (Ctrl + E): a face pulled out (adds) or pushed in (carves), a curved one along its normals. Press on a face and drag, or pick a face (3) and press Ctrl + E"),
+                (PushKind::Extrude, Icon::Extrude, "Extrude (Ctrl + E): a face pulled out (adds) or pushed in (carves), a curved one along its normals; a closed curve pulled into a solid. Press on a face or a curve and drag, or pick it and press Ctrl + E"),
             ] {
                 let on = st.tool == Tool::Push(k);
                 if card(ui, Some(icon), &k.label().to_uppercase(), &format!("FACE · {}", k.key()), on, FACE_SEL, tip).clicked() {
@@ -1337,17 +1337,14 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     }
                     if f.shape_bool.is_some() {
                         bool_card(ui, st, &f);
-                        extrude_button(ui, st, id);
                     } else if f.push.is_some() {
                         push_card(ui, st);
                     } else if f.tweak.is_some() {
                         tweak_card(ui, st, id);
                     } else if f.curve.is_some() {
                         curve_card(ui, st, &f);
-                        extrude_button(ui, st, id);
                     } else if f.is_path() {
                         path_card(ui, st, &f);
-                        extrude_button(ui, st, id);
                     } else {
                         round_card(ui, st);
                     }
@@ -2238,21 +2235,6 @@ fn extruded_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     }
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
         st.end_live();
-    }
-}
-
-/// The Extrude button under a closed curve's settings (Curves, step 3):
-/// the pointer then pulls it into a solid, Add or Carve as the top bar.
-fn extrude_button(ui: &mut Ui, st: &mut AppState, id: FeatureId) {
-    if !st.doc.is_closed_curve(id) {
-        return;
-    }
-    ui.add_space(6.0);
-    let w = ui.available_width();
-    let r = primary_btn(ui, None, "Extrude", Some(w)).on_hover_text("Pull it into a solid: the pointer sets its height, a click keeps it (Ctrl + E)");
-    if r.clicked() {
-        let at = ui.input(|i| i.pointer.interact_pos()).map(|p| [p.x, p.y]).unwrap_or(st.principal());
-        st.begin_curve_pull(id, at);
     }
 }
 
