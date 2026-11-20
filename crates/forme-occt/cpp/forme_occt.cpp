@@ -543,6 +543,43 @@ FShape* focc_transform(const FShape* s, const double* m) {
 
 // ------------------------------------------------------------------ booleans
 
+// BRepAlgoAPI_BuilderAlgo::SimplifyResult with the edges between two
+// faces of one tag in an input kept (the Knife's lines: the pieces of a
+// face it cut keep its tag).
+struct OpAccess : BRepAlgoAPI_BooleanOperation {
+    static TopoDS_Shape& shape(BRepAlgoAPI_BooleanOperation& o) { return o.*(&OpAccess::myShape); }
+    static opencascade::handle<BRepTools_History>& history(BRepAlgoAPI_BooleanOperation& o) { return o.*(&OpAccess::myHistory); }
+};
+
+static void simplify_keeping(BRepAlgoAPI_BooleanOperation& op, const FShape* a, const FShape* b) {
+    ShapeUpgrade_UnifySameDomain u(op.Shape(), Standard_True, Standard_True, Standard_True);
+    u.AllowInternalEdges(Standard_False);
+    TopTools_IndexedMapOfShape rm;
+    TopExp::MapShapes(op.Shape(), TopAbs_EDGE, rm);
+    for (const FShape* in : {a, b}) {
+        if (!in || in->tags.empty()) continue;
+        TopTools_IndexedMapOfShape fm;
+        face_map(in->s, fm);
+        TopTools_IndexedDataMapOfShapeListOfShape e2f;
+        TopExp::MapShapesAndAncestors(in->s, TopAbs_EDGE, TopAbs_FACE, e2f);
+        for (int i = 1; i <= e2f.Extent(); i++) {
+            const TopTools_ListOfShape& fl = e2f(i);
+            if (fl.Extent() != 2 || fl.First().IsSame(fl.Last())) continue;
+            int fa = fm.FindIndex(fl.First()), fb = fm.FindIndex(fl.Last());
+            if (fa < 1 || fb < 1 || fa > (int)in->tags.size() || fb > (int)in->tags.size()) continue;
+            long long ta = in->tags[fa - 1], tb = in->tags[fb - 1];
+            if (ta < 0 || ta != tb) continue;
+            const TopoDS_Shape& e = e2f.FindKey(i);
+            if (rm.Contains(e)) u.KeepShape(e);
+            for (TopTools_ListOfShape::Iterator it(op.Modified(e)); it.More(); it.Next())
+                if (rm.Contains(it.Value())) u.KeepShape(it.Value());
+        }
+    }
+    u.Build();
+    OpAccess::shape(op) = u.Shape();
+    if (op.HasHistory()) OpAccess::history(op)->Merge(u.History());
+}
+
 static FShape* boolean(BRepAlgoAPI_BooleanOperation& op, const char* what, const FShape* a, const FShape* b) {
     op.Build();
     if (!op.IsDone() || op.HasErrors()) {
@@ -553,8 +590,10 @@ static FShape* boolean(BRepAlgoAPI_BooleanOperation& op, const char* what, const
     std::vector<TopoDS_Shape> sec;
     for (TopTools_ListOfShape::Iterator it(op.SectionEdges()); it.More(); it.Next()) sec.push_back(it.Value());
     // merge faces of the same surface (two cylinders stacked end to end
-    // become one face, without a seam)
-    op.SimplifyResult(Standard_True, Standard_True);
+    // become one face, without a seam), but never two pieces of one face
+    // in a or b (a Knife's line: 20 nov., an Extrude or a Cube added later
+    // made them one again)
+    simplify_keeping(op, a, b);
     FShape* r = wrap(op.Shape());
     if (!r) return nullptr;
     // a face made of faces of both (flush faces merged) keeps the name it

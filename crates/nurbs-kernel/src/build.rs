@@ -2023,6 +2023,45 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn doc_probe() {
+        // FORME_DOC=file.fnurbs: its errors, faces and the edges between two
+        // pieces of one face (a document from the user's machine)
+        let Ok(p) = std::env::var("FORME_DOC") else { return };
+        let d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+        let n = std::env::var("FORME_DOC_UPTO").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(d.features.len());
+        let mut d2 = d.clone();
+        d2.features.truncate(n);
+        let m = build(&d2, true, false, &[], &mut Cache::default());
+        eprintln!("errors {:?}, {} faces, {} edges", m.errors, m.faces.len(), m.edges.len());
+        for (i, f) in m.faces.iter().enumerate() {
+            eprintln!("face {i}: {:?} {:?}", f.tag.map(|t| (t.feature, t.sub)), f.kind);
+        }
+        for (i, e) in m.edges.iter().enumerate() {
+            let a = e.pts.first().unwrap();
+            let b = e.pts.last().unwrap();
+            eprintln!("edge {i}: faces {:?} seam {} {:?} -> {:?}", e.faces, e.seam, a, b);
+        }
+    }
+
+    #[test]
+    fn knife_kept_by_later_booleans() {
+        // a Knife's line on a side, then a cube added apart and a boss on
+        // the cut side: the side stays in two pieces (20 nov.: the
+        // boolean's simplification made them one again)
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let kp = |faces: [i64; 2], at: DVec3| KnifePoint { edge: EdgeRef { faces, at }, f: (20.0 - at.x.abs()) / 40.0, at };
+        d.add_knife(Knife { pts: vec![kp([tag(b, 4), tag(b, 2)], DVec3::new(5.0, 20.0, 15.0)), kp([tag(b, 4), tag(b, 3)], DVec3::new(5.0, 0.0, 15.0))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+        d.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(0.0, 0.0, -80.0), DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Cylinder { radius: 3.0, height: 4.0 }, DVec3::new(-8.0, 10.0, 15.0), DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2));
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let n = m.faces.iter().filter(|f| f.tag.map(|t| t.pack()) == Some(tag(b, 4))).count();
+        assert_eq!(n, 2, "the cut side's pieces");
+    }
+
+    #[test]
     fn moves_by_fillets_and_cuts() {
         // Romain's flank (20 nov.): a block whose top long edges are
         // filleted, then cut by the Knife on its +Z side; the cut's edge
