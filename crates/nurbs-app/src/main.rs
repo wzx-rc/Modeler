@@ -76,11 +76,15 @@ impl App {
         self.t0.elapsed().as_secs_f64()
     }
 
-    fn frame(&mut self) {
-        let (Some(window), Some(gfx), Some(es)) = (self.window.clone(), self.gfx.as_mut(), self.egui_state.as_mut()) else {
-            return;
-        };
-        let raw = es.take_egui_input(&window);
+    /// Whether the window is minimized (no picture then: Windows sends it
+    /// no redraw, and a swapchain of no size can block).
+    fn minimized(&self) -> bool {
+        self.window.as_ref().map(|w| w.is_minimized() == Some(true) || w.inner_size().width == 0 || w.inner_size().height == 0).unwrap_or(false)
+    }
+
+    /// What goes on with or without a picture: the kernel's answers, the
+    /// link with Claude, the session saved every 10 s.
+    fn idle(&mut self) {
         let now = self.t0.elapsed().as_secs_f64();
         self.st.tick(now);
         nurbs_app::remote::poll(&mut self.st);
@@ -88,6 +92,36 @@ impl App {
             let _ = files::save(&self.st.doc, files::SESSION);
             self.saved = (self.st.version, now);
         }
+    }
+
+    /// Minimized (20 nov., 11 h 28: the app minimized answered neither the
+    /// link nor a close, and saved nothing): `idle` on a timer, and the
+    /// pictures Claude asks for still rendered offscreen.
+    fn frame_minimized(&mut self) {
+        self.idle();
+        if let Some(gfx) = self.gfx.as_mut() {
+            if !self.st.link.captures.is_empty() {
+                let (device, queue, format, drawer) = (&gfx.device, &gfx.queue, gfx.config.format, &mut gfx.drawer);
+                nurbs_app::remote::render_captures(&mut self.st, |st, w, h| {
+                    let tex = nurbs_app::remote::target(device, format, w, h);
+                    let view = tex.create_view(&Default::default());
+                    drawer.render(device, queue, &view, [w, h], 1.0, st, &[], &mut egui::TexturesDelta::default());
+                    nurbs_app::remote::read_rgba(device, queue, &tex)
+                });
+            }
+        }
+    }
+
+    fn frame(&mut self) {
+        if self.minimized() {
+            self.frame_minimized();
+            return;
+        }
+        self.idle();
+        let (Some(window), Some(gfx), Some(es)) = (self.window.clone(), self.gfx.as_mut(), self.egui_state.as_mut()) else {
+            return;
+        };
+        let raw = es.take_egui_input(&window);
         let st = &mut self.st;
         let mut out = self.ctx.run_pass(raw, |ctx| nurbs_app::run(ctx, st));
         es.handle_platform_output(&window, std::mem::take(&mut out.platform_output));
@@ -117,6 +151,7 @@ impl App {
             window.request_redraw();
         }
         // the kernel is working: keep looking for its answer
+        let now = self.now();
         let busy = self.st.interacting || self.st.toast.is_some() || self.st.building() || self.st.ref_busy() || self.st.dev_busy() || self.st.link.busy();
         let egui_wants = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay.as_secs_f32() < 0.05).unwrap_or(false);
         if busy || egui_wants || now < self.redraw_until {
@@ -128,7 +163,9 @@ impl App {
 impl ApplicationHandler<()> for App {
     /// Claude sent a request: a frame reads it.
     fn user_event(&mut self, _el: &ActiveEventLoop, _e: ()) {
-        if let Some(w) = &self.window {
+        if self.minimized() {
+            self.frame_minimized();
+        } else if let Some(w) = &self.window {
             w.request_redraw();
         }
     }
@@ -171,9 +208,10 @@ impl ApplicationHandler<()> for App {
                 el.exit();
             }
             WindowEvent::Resized(size) => {
-                if let Some(g) = self.gfx.as_mut() {
-                    g.config.width = size.width.max(1);
-                    g.config.height = size.height.max(1);
+                // minimized (no size): the swapchain is left as it was
+                if let (Some(g), true) = (self.gfx.as_mut(), size.width > 0 && size.height > 0) {
+                    g.config.width = size.width;
+                    g.config.height = size.height;
                     g.surface.configure(&g.device, &g.config);
                 }
                 window.request_redraw();
@@ -187,7 +225,13 @@ impl ApplicationHandler<()> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-        el.set_control_flow(ControlFlow::Wait);
+        if self.minimized() {
+            // no redraws come: the kernel, the link and the saves on a timer
+            self.frame_minimized();
+            el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + std::time::Duration::from_millis(100)));
+        } else {
+            el.set_control_flow(ControlFlow::Wait);
+        }
     }
 }
 
