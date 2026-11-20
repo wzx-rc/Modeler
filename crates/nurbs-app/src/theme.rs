@@ -9,6 +9,23 @@ use std::sync::Arc;
 static LIGHT: AtomicBool = AtomicBool::new(false);
 // The workspace (Forme, Sculpt, Poly): the accent below follows it.
 static SPACE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+// tab_anim: while a change of tab is animated, the tab it comes from and how
+// far it is (f32 bits; 1 = none): the accent fades from that tab's.
+static BLEND_FROM: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static BLEND: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F80_0000);
+
+/// tab_anim: the tab the colours come from and how far (eased), or None.
+pub fn set_blend(b: Option<(crate::workspace::Workspace, f32)>) {
+    let (from, t) = b.map(|(w, t)| (w.index(), t.clamp(0.0, 1.0))).unwrap_or((0, 1.0));
+    BLEND_FROM.store(from, Ordering::Relaxed);
+    BLEND.store(t.to_bits(), Ordering::Relaxed);
+}
+
+/// tab_anim: Some((tab, t)) while the colours fade from that tab's.
+fn blend() -> Option<(u8, f32)> {
+    let t = f32::from_bits(BLEND.load(Ordering::Relaxed));
+    (t < 1.0).then(|| (BLEND_FROM.load(Ordering::Relaxed), t))
+}
 
 pub fn workspace() -> crate::workspace::Workspace {
     crate::workspace::Workspace::from_index(SPACE.load(Ordering::Relaxed))
@@ -197,8 +214,11 @@ pub fn set_theme(ctx: &egui::Context, on: bool, space: crate::workspace::Workspa
     let before_space = SPACE.swap(space.index(), Ordering::Relaxed);
     let key = egui::Id::new("theme-light-styled");
     let styled: Option<(bool, u8)> = ctx.data(|d| d.get_temp(key));
-    if before != on || before_space != space.index() || styled != Some((on, space.index())) {
-        ctx.data_mut(|d| d.insert_temp(key, (on, space.index())));
+    // tab_anim: restyled every frame while the colours fade, once after
+    let blending = blend().is_some();
+    if before != on || before_space != space.index() || styled != Some((on, space.index())) || blending {
+        let k = if blending { (on, 255) } else { (on, space.index()) };
+        ctx.data_mut(|d| d.insert_temp(key, k));
         ctx.global_style_mut(|style| apply_visuals(&mut style.visuals));
     }
 }
@@ -212,9 +232,17 @@ pub fn set_theme(ctx: &egui::Context, on: bool, space: crate::workspace::Workspa
 
 /// One colour per workspace and theme: (Forme, Sculpt, Poly) × (dark, light).
 fn ws(c: [(u32, u32); 3]) -> Color32 {
-    let (d, l) = c[workspace().index() as usize];
-    let v = if light() { l } else { d };
-    Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+    let of = |i: usize| {
+        let (d, l) = c[i.min(2)];
+        let v = if light() { l } else { d };
+        Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+    };
+    let now = of(workspace().index() as usize);
+    // tab_anim: from the old tab's colour to the new one's
+    match blend() {
+        Some((from, t)) => of(from as usize).lerp_to_gamma(now, t),
+        None => now,
+    }
 }
 
 pub fn accent() -> Color32 {

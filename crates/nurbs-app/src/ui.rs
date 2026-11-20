@@ -228,11 +228,12 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
                 let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 20.0, 28.0), Sense::hover());
                 ui.painter().galley(pos2(r.min.x + 10.0, r.center().y - g.size().y * 0.5), g, TEXT());
-                match st.workspace {
+                // tab_anim: the tab's own controls come in
+                crate::tab_anim::enter(ui, vec2(0.0, -6.0), |ui| match st.workspace {
                     Workspace::Sculpt => sculpt_controls(ui, st),
                     Workspace::Poly => poly_controls(ui, st),
                     Workspace::Forme => forme_controls(ui, st),
-                }
+                });
                 island_sep(ui);
                 if icon_btn(ui, Icon::Magnet, st.settings.snap, &format!("Snap to {} mm", fmt_mm(st.settings.step as f32)), 28.0).clicked() {
                     st.settings.snap = !st.settings.snap;
@@ -472,26 +473,36 @@ fn tabs(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_height(TABS_H - 6.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
-                for (i, w) in Workspace::ALL.into_iter().enumerate() {
-                    let on = st.workspace == w;
-                    let (r, resp) = ui.allocate_exact_size(vec2(116.0, TABS_H - 6.0), Sense::click());
-                    let p = ui.painter();
-                    let fg = if on { on_accent() } else if resp.hovered() { TEXT() } else { TEXT2() };
-                    if on {
-                        p.rect_filled(r, 9.0, accent());
-                    } else if resp.hovered() {
-                        p.rect_filled(r, 9.0, RAISED());
+                let tabs: Vec<(Rect, egui::Response)> = Workspace::ALL.iter().map(|_| ui.allocate_exact_size(vec2(116.0, TABS_H - 6.0), Sense::click())).collect();
+                let rects = [tabs[0].0, tabs[1].0, tabs[2].0];
+                let p = ui.painter().clone();
+                for (w, (r, resp)) in Workspace::ALL.into_iter().zip(&tabs) {
+                    if st.workspace != w && resp.hovered() {
+                        p.rect_filled(*r, 9.0, RAISED());
                     }
+                }
+                // the lit pill (tab_anim: it slides from the old tab)
+                p.rect_filled(crate::tab_anim::pill(ui.ctx(), &rects, st.workspace), 9.0, accent());
+                crate::tab_anim::streak(ui.ctx(), &rects);
+                let mut go = None;
+                for (i, (w, (r, resp))) in Workspace::ALL.into_iter().zip(tabs).enumerate() {
+                    let on = st.workspace == w;
+                    let lit = crate::tab_anim::lit(ui.ctx(), w, st.workspace);
+                    let off = if resp.hovered() { TEXT() } else { TEXT2() };
+                    let fg = off.lerp_to_gamma(on_accent(), lit);
                     let ir = Rect::from_center_size(pos2(r.min.x + 22.0, r.center().y), vec2(15.0, 15.0));
-                    icons::paint(p, ir, w.icon(), fg);
+                    icons::paint(&p, ir, w.icon(), fg);
                     p.text(pos2(r.min.x + 36.0, r.center().y), Align2::LEFT_CENTER, w.label(), medium(13.0), fg);
                     // its colour
-                    if !on {
-                        p.circle_filled(pos2(r.max.x - 14.0, r.center().y), 3.5, w.swatch());
+                    if lit < 0.99 {
+                        p.circle_filled(pos2(r.max.x - 14.0, r.center().y), 3.5, w.swatch().gamma_multiply(1.0 - lit));
                     }
-                    if resp.on_hover_text(format!("{} (F{}) · Ctrl + Tab: the next tab", w.tip(), i + 1)).clicked() {
-                        st.set_workspace(w);
+                    if resp.on_hover_text(format!("{} (F{}) · Ctrl + Tab: the next tab", w.tip(), i + 1)).clicked() && !on {
+                        go = Some(w);
                     }
+                }
+                if let Some(w) = go {
+                    st.set_workspace(w);
                 }
             });
         });
@@ -632,7 +643,8 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 }
             });
             divider(ui);
-            match st.workspace {
+            // tab_anim: the tab's own cards come in from the right
+            crate::tab_anim::enter(ui, vec2(14.0, 0.0), |ui| match st.workspace {
                 Workspace::Sculpt => sculpt_rail(ui, st),
                 Workspace::Poly => poly_rail(ui, st),
                 Workspace::Forme => {
@@ -708,7 +720,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                         }
                     }
                 }
-            }
+            });
             divider(ui);
             let has = !st.selection.is_empty();
             if card(ui, Some(Icon::Duplicate), "DUPLICATE", "CTRL+D", false, TEXT2(), "Duplicate the selection").clicked() && has {
@@ -2251,6 +2263,11 @@ fn defaults(ui: &mut Ui, st: &mut AppState) {
             st.save_settings();
         }
         ui.add_space(2.0);
+    }
+    // tab_anim
+    if toggle_row(ui, "Tab animation", st.settings.tab_anim) {
+        st.settings.tab_anim = !st.settings.tab_anim;
+        st.save_settings();
     }
     if toggle_row(ui, "World origin", st.settings.origin) {
         st.settings.origin = !st.settings.origin;

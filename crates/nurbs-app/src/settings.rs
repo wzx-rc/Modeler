@@ -24,11 +24,14 @@ pub struct Settings {
     /// The Sub Outliner (the clicked element's operations): a fixed
     /// container in the left panel, else a floating column beside it.
     pub sub_fixed: bool,
+    /// tab_anim: the change of tab animated (colours fading, the pill
+    /// sliding, the new tools coming in).
+    pub tab_anim: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, tab_anim: true }
     }
 }
 

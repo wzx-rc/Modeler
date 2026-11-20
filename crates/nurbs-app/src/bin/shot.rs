@@ -103,6 +103,9 @@ impl Harness {
             eprintln!("kernel not found: set FORME_NURBS_KERNEL");
         }
         self.st = AppState::new(doc, name, Kernel::start(exe));
+        // the change of tab drawn at once (scenario `tabanim` turns its
+        // animation on), so the shots after a tab key do not catch it
+        self.st.settings.tab_anim = false;
         self.ctx = egui::Context::default();
         theme::install(&self.ctx);
         self.pending_tex = Default::default();
@@ -328,6 +331,9 @@ fn main() {
     }
     if want("pangle") {
         poly_angle(&mut h);
+    }
+    if want("tabanim") {
+        tab_anim(&mut h);
     }
 
     if want("empty") {
@@ -5149,3 +5155,28 @@ fn poly_angle(h: &mut Harness) {
     h.steps(14);
     h.shot("pangle-3-window");
 }
+
+/// The change of tab animated (Romain 20 nov., 17 h 15): Forme → Sculpt →
+/// Poly, a shot every two frames while the colours fade, the pill slides and
+/// the tab's tools come in.
+fn tab_anim(h: &mut Harness) {
+    use egui::Key;
+    h.reset(test_part(), "Tabs");
+    h.st.settings.tab_anim = true;
+    h.move_to(pos2(1200.0, 700.0));
+    h.steps(2);
+    h.shot("tabanim-00");
+    let mut n = 1;
+    for k in [Key::F2, Key::F3, Key::F1] {
+        h.key(k);
+        for _ in 0..11 {
+            h.shot(&format!("tabanim-{n:02}"));
+            n += 1;
+            h.steps(2);
+        }
+        h.steps(4);
+        h.shot(&format!("tabanim-{n:02}"));
+        n += 1;
+    }
+}
+
