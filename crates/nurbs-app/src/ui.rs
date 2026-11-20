@@ -697,35 +697,18 @@ fn sdf_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     ui.painter().galley(pos2(r.min.x, r.center().y - g.size().y * 0.5), g, TEXT2());
     section(ui, "Shapes");
     let picked = st.sdf_sel.filter(|(id, _)| *id == f.id).map(|(_, n)| n);
-    for n in &list {
-        let Some(nd) = scene.node(*n) else { continue };
-        let Some(sh) = nd.shape() else { continue };
-        let on = picked == Some(*n);
-        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
-        let p = ui.painter();
-        if on {
-            p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
-        } else if resp.hovered() {
-            p.rect_filled(r, 6.0, RAISED());
-        }
-        let c = match nd.combine.mode {
-            CombineMode::Carve => carve(),
-            CombineMode::Add => accent(),
-            _ => TEXT2(),
-        };
-        icons::paint(p, Rect::from_min_size(pos2(r.min.x + 6.0, r.center().y - 7.0), vec2(14.0, 14.0)), crate::sdf::prim_icon(sh.kind), c);
-        p.text(pos2(r.min.x + 28.0, r.center().y), Align2::LEFT_CENTER, &nd.name, regular(12.5), if on { accent_text() } else { TEXT() });
-        let info = if nd.combine.blend > 0.0 { format!("{} · {}", nd.combine.mode.label(), fmt_mm(nd.combine.blend)) } else { nd.combine.mode.label().to_string() };
-        p.text(pos2(r.max.x - 6.0, r.center().y), Align2::RIGHT_CENTER, info, mono(10.0), c);
-        if resp.clicked() {
-            st.sdf_sel = Some((f.id, *n));
-            st.selection = vec![f.id];
-            if st.workspace != Workspace::Sdf {
-                st.set_workspace(Workspace::Sdf);
-                st.sdf_sel = Some((f.id, *n));
+    // the same rows as the Sub Outliner's (`common::Item`): on / off, the
+    // marker, the right-click menu
+    let marker = st.item_marker(f.id);
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        for (k, n) in list.iter().enumerate() {
+            if k == marker {
+                history_marker_line(ui);
             }
+            item_row(ui, st, crate::common::Item::Shape(f.id, *n));
         }
-    }
+    });
     let Some(n) = picked else {
         let g = ui.painter().layout_no_wrap("Click a shape (here or in the view) to edit it".to_string(), regular(11.5), TEXT2());
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
@@ -781,6 +764,83 @@ fn sdf_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
                 }
             });
             live = true;
+        }
+    }
+    // the blend's profile: round, or a flat chamfer between the shapes
+    if nd.combine.blend > 0.0 {
+        use forme_core::BlendKind;
+        if let Some(k) = segmented(ui, &[(BlendKind::Smooth, "Round blend", accent()), (BlendKind::Chamfer, "Chamfer blend", accent())], nd.combine.kind, 26.0) {
+            st.sdf_edit_node("Blend kind", |x| x.combine.kind = k);
+        }
+    }
+    // where it sits in its object (mm; the gizmo moves it too)
+    if fold_section(ui, "Position", "sdf-pos") {
+        if let Some(pos) = xyz_fields(ui, ["X", "Y", "Z"], nd.transform.pos.to_array(), "") {
+            st.sdf_live_node("Move shape", |x| x.transform.pos = glam::Vec3::from(pos));
+            live = true;
+        }
+        let (ex, ey, ez) = nd.transform.rot.to_euler(glam::EulerRot::XYZ);
+        if let Some(e) = xyz_fields(ui, ["rX", "rY", "rZ"], [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()], "°") {
+            st.sdf_live_node("Rotate shape", |x| x.transform.rot = glam::Quat::from_euler(glam::EulerRot::XYZ, e[0].to_radians(), e[1].to_radians(), e[2].to_radians()));
+            live = true;
+        }
+    }
+    // mirror across the object's own planes, repeat round or along an axis
+    // (Forme SDF's engine does both; the copies blend like the shape)
+    if fold_section(ui, "Mirror and repeat", "sdf-rep") {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(egui::RichText::new("Mirror").font(regular(12.5)).color(LABEL()));
+            for (a, label) in ["X", "Y", "Z"].into_iter().enumerate() {
+                let on = [nd.mirror.x, nd.mirror.y, nd.mirror.z][a];
+                if chip(ui, None, label, on, &format!("Mirrored across the object's {label} plane")).clicked() {
+                    st.sdf_edit_node(&format!("Mirror {label}"), |x| match a {
+                        0 => x.mirror.x = !on,
+                        1 => x.mirror.y = !on,
+                        _ => x.mirror.z = !on,
+                    });
+                }
+            }
+        });
+        use forme_core::{Axis, Repeat};
+        let kind = match nd.repeat {
+            Repeat::None => 0,
+            Repeat::Radial { .. } => 1,
+            Repeat::Linear { .. } => 2,
+        };
+        if let Some(k) = segmented(ui, &[(0, "No repeat", TEXT()), (1, "Round", accent()), (2, "Along", accent())], kind, 26.0) {
+            let r = match k {
+                1 => Repeat::Radial { count: 6, axis: Axis::Y },
+                2 => Repeat::Linear { count: 3, step: glam::Vec3::new((sh.local_half_extents().x * 2.0 + 2.0).max(4.0), 0.0, 0.0) },
+                _ => Repeat::None,
+            };
+            st.sdf_edit_node("Repeat", |x| x.repeat = r);
+        }
+        match nd.repeat {
+            Repeat::Radial { count, axis } => {
+                let mut c = count as f32;
+                if slider_row(ui, "Copies", &mut c, 2.0..=48.0, 1.0, "").0 && c.round() as u32 != count {
+                    let c = c.round().max(2.0) as u32;
+                    st.sdf_live_node("Repeat", |x| x.repeat = Repeat::Radial { count: c, axis });
+                    live = true;
+                }
+                if let Some(ax) = segmented(ui, &[(Axis::X, "Round X", AXIS_X), (Axis::Y, "Round Y", AXIS_Y), (Axis::Z, "Round Z", AXIS_Z)], axis, 24.0) {
+                    st.sdf_edit_node("Repeat", |x| x.repeat = Repeat::Radial { count, axis: ax });
+                }
+            }
+            Repeat::Linear { count, step } => {
+                let mut c = count as f32;
+                if slider_row(ui, "Copies", &mut c, 2.0..=48.0, 1.0, "").0 && c.round() as u32 != count {
+                    let c = c.round().max(2.0) as u32;
+                    st.sdf_live_node("Repeat", |x| x.repeat = Repeat::Linear { count: c, step });
+                    live = true;
+                }
+                if let Some(s) = xyz_fields(ui, ["X", "Y", "Z"], step.to_array(), "") {
+                    st.sdf_live_node("Repeat", |x| x.repeat = Repeat::Linear { count, step: glam::Vec3::from(s) });
+                    live = true;
+                }
+            }
+            Repeat::None => {}
         }
     }
     if !any_down && !live && st.is_live() && st.sdf_drag.is_none() {
@@ -942,6 +1002,10 @@ fn current_material(st: &AppState) -> Option<u32> {
     if st.selection.is_empty() {
         return Some(st.material);
     }
+    // the SDF tab's picked shape: its own (else its object's)
+    if let Some((id, n)) = st.sdf_sel.filter(|_| st.sdf_comp()) {
+        return Some(st.item_material(crate::common::Item::Shape(id, n)));
+    }
     let f = st.single()?;
     let id = st.element_of(f.id);
     st.doc.feature(id).filter(|g| g.is_solid()).map(|_| st.material_of(id))
@@ -962,10 +1026,11 @@ fn materials_island(ctx: &egui::Context, st: &mut AppState) {
             let w = CARDS_W - 12.0;
             let (hr, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
             let (br, _) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
-            let n = materials::MATERIALS.len();
+            let mats = materials::all(&st.doc);
+            let n = mats.len();
             let gap = (w - 4.0 - 22.0 * n as f32) / (n - 1) as f32;
             let mut hovered: Option<usize> = None;
-            for (i, m) in materials::MATERIALS.iter().enumerate() {
+            for (i, m) in mats.iter().enumerate() {
                 let c = pos2(br.min.x + 2.0 + 11.0 + i as f32 * (22.0 + gap), br.center().y);
                 let r = Rect::from_center_size(c, vec2(22.0, 22.0));
                 ui.ctx().data_mut(|d| d.insert_temp(Id::new(("mat-ball", i)), c));
@@ -995,26 +1060,103 @@ fn materials_island(ctx: &egui::Context, st: &mut AppState) {
                         drag_ball(ctx, st, q, m);
                     }
                 }
+                if materials::edited(&st.doc, i as u32) {
+                    // its parameters set in this document: a small dot
+                    p.circle_filled(c + vec2(7.5, -7.5), 2.2, accent());
+                }
                 if resp.drag_stopped() {
                     if let Some(t) = st.mat_drag.and_then(|d| d.target) {
                         st.drop_material(t, i as u32);
                     }
                     st.mat_drag = None;
+                } else if resp.double_clicked() || resp.secondary_clicked() {
+                    // its shader parameters (the same in every tab)
+                    st.mat_edit = if st.mat_edit == Some(i as u32) { None } else { Some(i as u32) };
                 } else if resp.clicked() {
                     st.apply_material(i as u32);
+                    if st.mat_edit.is_some() {
+                        st.mat_edit = Some(i as u32);
+                    }
                 }
-                resp.on_hover_text(format!("{}: click to give it to what is picked (Face mode: the picked faces), or drag it onto a shape (Face mode: onto a face)", m.name));
+                resp.on_hover_text(format!("{}: click to give it to what is picked (Face mode: the picked faces; SDF tab: the picked shape), or drag it onto a shape · double-click or right-click: its shader settings", m.name));
             }
             let p = ui.painter();
             p.text(pos2(hr.min.x + 2.0, hr.center().y), Align2::LEFT_CENTER, "MATERIAL", mono(10.0), LABEL());
-            let name = hovered.or(cur.map(|c| c as usize)).map(|i| materials::get(i as u32).name).unwrap_or("–");
+            let name = hovered.or(cur.map(|c| c as usize)).map(|i| materials::get(&st.doc, i as u32).name).unwrap_or("–".into());
             p.text(pos2(hr.max.x - 2.0, hr.center().y), Align2::RIGHT_CENTER, name, regular(10.5), TEXT2());
         });
     });
+    // its shader settings: a window of their own left of the island
+    if let (Some(i), Some(isl)) = (st.mat_edit, ctx.memory(|m| m.area_rect(Id::new("materials")))) {
+        egui::Area::new(Id::new("mat-editor")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(isl.min.x - 8.0, isl.min.y)).show(ctx, |ui| {
+            island().inner_margin(Margin::same(10)).show(ui, |ui| {
+                ui.set_width(236.0);
+                material_editor(ui, st, i);
+            });
+        });
+    }
     // a drag that ended elsewhere (the button let go off the ball's
     // response): nothing lands
     if st.mat_drag.is_some() && !ctx.input(|i| i.pointer.any_down()) {
         st.mat_drag = None;
+    }
+}
+
+/// A material's shader parameters (Romain, 21 nov.: "shader parameter",
+/// common to every tab): its name, colour, metal and roughness, live on
+/// everything that wears it (NURBS faces, clay, Poly meshes, SDF shapes);
+/// one undo step per change. Stored in the document.
+fn material_editor(ui: &mut Ui, st: &mut AppState, i: u32) {
+    let any_down = ui.input(|q| q.pointer.any_down());
+    let was = materials::get(&st.doc, i);
+    let mut m = was.clone();
+    ui.label(egui::RichText::new("SHADER").font(mono(10.0)).color(LABEL()));
+    ui.horizontal(|ui| {
+        let (br, _) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
+        material_ball(ui.painter(), br.center(), 10.0, &m);
+        let mut name = m.name.clone();
+        let r = ui.add(egui::TextEdit::singleline(&mut name).font(medium(12.5)).desired_width(236.0 - 26.0 - 44.0));
+        if r.changed() && !name.trim().is_empty() {
+            m.name = name;
+        }
+        if ui.add(egui::Button::new(egui::RichText::new("×").font(medium(15.0)).color(TEXT2())).frame(false)).on_hover_text("Close the material's settings").clicked() {
+            st.mat_edit = None;
+        }
+    });
+    // the colour: egui's picker (sRGB)
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Colour").font(regular(12.5)).color(LABEL()));
+        ui.add_space((76.0 - 46.0f32).max(0.0));
+        let mut c = m.color;
+        if egui::color_picker::color_edit_button_rgb(ui, &mut c).changed() {
+            m.color = c;
+        }
+        let hex = format!("#{:02X}{:02X}{:02X}", (c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8);
+        ui.label(egui::RichText::new(hex).font(mono(10.5)).color(TEXT2()));
+    });
+    let mut metal = m.metal;
+    if slider_row(ui, "Metal", &mut metal, 0.0..=1.0, 0.01, "").0 {
+        m.metal = metal.clamp(0.0, 1.0);
+    }
+    let mut rough = m.rough;
+    if slider_row(ui, "Roughness", &mut rough, 0.0..=1.0, 0.01, "").0 {
+        m.rough = rough.clamp(0.04, 1.0);
+    }
+    if m != was {
+        st.begin_live("Material settings");
+        st.live(|d| materials::set(d, i, &m));
+    }
+    let edited = materials::edited(&st.doc, i);
+    ui.horizontal(|ui| {
+        let n = st.doc.features.iter().filter(|f| f.material == i).count();
+        ui.label(egui::RichText::new(format!("{n} element{} wear it", if n == 1 { "" } else { "s" })).font(regular(11.0)).color(TEXT2()));
+        if edited && secondary_btn(ui, "Reset", 64.0).on_hover_text("Back to its default settings").clicked() {
+            st.end_live();
+            st.edit("Material settings", |d| materials::set(d, i, &materials::default_of(i)));
+        }
+    });
+    if !any_down && st.is_live() && st.live_label() == Some("Material settings") {
+        st.end_live();
     }
 }
 
@@ -1027,6 +1169,7 @@ fn drag_ball(ctx: &egui::Context, st: &AppState, at: egui::Pos2, m: &materials::
     let what = match st.mat_drag.and_then(|d| d.target) {
         Some(DropTarget::Face { .. }) => "a face".to_string(),
         Some(DropTarget::Shape(id)) => st.doc.feature(id).map(|f| f.name.clone()).unwrap_or_default(),
+        Some(DropTarget::Node(id, n)) => st.item_name(crate::common::Item::Shape(id, n)),
         None => return,
     };
     let g = p.layout_no_wrap(what, medium(11.5), TEXT());
@@ -1043,8 +1186,8 @@ struct Cell {
     color: Color32,
     name: String,
     info: String,
-    /// The operation it is (its switch in the pop-up).
-    op: Option<FeatureId>,
+    /// The item it is (an operation, an SDF shape: its switch in the pop-up).
+    op: Option<crate::common::Item>,
     on: bool,
 }
 
@@ -1101,13 +1244,15 @@ fn step_icon(label: &str) -> (Icon, Color32) {
 fn history_cells(st: &AppState) -> (Option<FeatureId>, Vec<Cell>, usize) {
     if let Some(el) = st.history_element() {
         let f = st.doc.feature(el).cloned().unwrap();
-        let info = if f.is_path() { f.kind_label().to_string() } else { format!("{} · {}", f.prim.kind().label(), f.op.label()) };
+        let info = if f.is_path() || f.is_mesh() { f.kind_label().to_string() } else { format!("{} · {}", f.prim.kind().label(), f.op.label()) };
         let mut cells = vec![Cell { icon: feature_icon(&f), color: feature_color(&f), name: f.name.clone(), info, op: None, on: f.visible }];
-        for id in st.element_ops(el) {
-            let Some(g) = st.doc.feature(id) else { continue };
-            cells.push(Cell { icon: feature_icon(g), color: feature_color(g), name: g.name.clone(), info: format!("{} · {}", g.kind_label(), step_info(g)), op: Some(id), on: g.visible });
+        // its items: a shape's operations, an SDF object's shapes
+        for it in st.element_items(el) {
+            let (icon, color) = item_look(st, it);
+            let (kind, what) = st.item_info(it);
+            cells.push(Cell { icon, color, name: st.item_name(it), info: format!("{kind} · {what}"), op: Some(it), on: st.item_on(it) });
         }
-        return (Some(el), cells, st.marker_of(el));
+        return (Some(el), cells, st.item_marker(el));
     }
     let (names, at) = st.scene_history();
     let mut cells = vec![Cell { icon: Icon::Folder, color: TEXT2(), name: "Start".into(), info: "The document as opened".into(), op: None, on: true }];
@@ -1123,8 +1268,8 @@ fn history_cells(st: &AppState) -> (Option<FeatureId>, Vec<Cell>, usize) {
 fn history_go(st: &mut AppState, el: Option<FeatureId>, i: usize) {
     match el {
         Some(el) => {
-            if st.marker_of(el) != i {
-                st.set_marker(el, i);
+            if st.item_marker(el) != i {
+                st.set_item_marker(el, i);
             }
         }
         None => st.scene_go(i),
@@ -1193,14 +1338,19 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                             history_go(st, el, i);
                             if let Some(e) = el {
                                 // the step gone back to is selected (its handles, its window)
-                                let id = if i == 0 { Some(e) } else { cells[i].op };
-                                st.select_tool();
-                                st.select(id, false);
+                                match cells[i].op.filter(|_| i > 0) {
+                                    Some(it) => st.select_item(it),
+                                    None => {
+                                        st.select_tool();
+                                        st.select(Some(e), false);
+                                        st.sdf_sel = None;
+                                    }
+                                }
                             }
                         }
                     }
                     let now_at = match el {
-                        Some(e) => st.marker_of(e),
+                        Some(e) => st.item_marker(e),
                         None => st.scene_history().1,
                     };
                     let _ = at;
@@ -1209,7 +1359,7 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                         let r = cell(i);
                         ui.ctx().data_mut(|d| d.insert_temp(Id::new(("hist-cell", i)), r.center()));
                         let past = i > now_at;
-                        let sel = c.op.map(|id| st.is_selected(id)).unwrap_or(false) || (i == 0 && el.map(|e| st.is_selected(e)).unwrap_or(false));
+                        let sel = c.op.map(|it| st.item_selected(it)).unwrap_or(false) || (i == 0 && el.map(|e| st.is_selected(e) && st.sdf_sel.is_none()).unwrap_or(false));
                         if i == now_at {
                             p.rect(r, 7.0, tint(accent(), 0.12), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
                         } else if sel {
@@ -1298,12 +1448,12 @@ fn history_pop(ctx: &egui::Context, st: &mut AppState, cells: &[Cell], el: Optio
                 ui.label(egui::RichText::new(&c.name).font(semibold(12.5)).color(TEXT()));
             });
             ui.label(egui::RichText::new(&c.info).font(regular(11.5)).color(TEXT2()));
-            if let Some(id) = c.op {
+            if let Some(it) = c.op {
                 ui.add_space(3.0);
                 let at = ui.cursor().min + vec2(7.0, 10.0);
                 ui.ctx().data_mut(|d| d.insert_temp(Id::new("history-tick"), at));
                 if tick_row(ui, if c.on { "On" } else { "Off: left out of the build" }, c.on) {
-                    st.toggle_op(id);
+                    st.toggle_item(it);
                 }
             }
             ui.add_space(2.0);
@@ -1327,7 +1477,7 @@ fn help_title(st: &AppState) -> String {
         return "Marking menu".into();
     }
     if let Some(d) = &st.mat_drag {
-        return format!("Material · {}", materials::get(d.material).name);
+        return format!("Material · {}", materials::get(&st.doc, d.material).name);
     }
     match st.tool {
         Tool::Create(k) if matches!(k, PrimKind::Path) => "Path".into(),
@@ -1653,7 +1803,11 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
                 vec![f.origin]
             }
         }
-        OpPop::Shape(id) => vec![st.doc.feature(id)?.origin],
+        // an SDF object with a shape picked: by that shape (`common::Item`)
+        OpPop::Shape(id) => match st.sdf_sel.filter(|(f, _)| *f == id && st.sdf_comp()) {
+            Some((f, n)) => st.item_points(crate::common::Item::Shape(f, n)),
+            None => vec![st.doc.feature(id)?.origin],
+        },
         OpPop::PolyBevel => {
             let b = st.poly_bevel.as_ref()?;
             let f = st.doc.feature(b.id)?;
@@ -2070,15 +2224,18 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     // Romain (19 nov.): the elements by kind; an element's operations in
     // the second column, beside the panel
     let feats = st.doc.features.clone();
-    let ops_of = |st: &AppState, id: FeatureId| feats.iter().filter(|g| !g.is_solid() && !g.is_path() && st.owner_of(g.id) == Some(id)).count();
-    let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 7] = [
-        ("PRIMITIVES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && !f.is_mesh() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }))),
-        ("SHAPES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Profile { .. }))),
-        ("CURVES", Box::new(|f: &Feature| f.is_path())),
-        ("SURFACES", Box::new(|f: &Feature| f.is_sheet())),
-        ("OPERATIONS", Box::new(|_: &Feature| false)),
-        ("SCULPT", Box::new(|f: &Feature| f.mesh.as_ref().map(|m| m.kind == nurbs_kernel::mesh::MeshKind::Sculpt).unwrap_or(false))),
-        ("POLY", Box::new(|f: &Feature| f.mesh.as_ref().map(|m| m.kind == nurbs_kernel::mesh::MeshKind::Poly).unwrap_or(false))),
+    // the groups by kind of element (`common::Kind`, every tab's), the
+    // operations whose element cannot be told after the surfaces
+    use crate::common::{kind_of, Kind};
+    let groups: Vec<(&str, Option<Kind>)> = vec![
+        (Kind::Primitive.title(), Some(Kind::Primitive)),
+        (Kind::Shape.title(), Some(Kind::Shape)),
+        (Kind::Curve.title(), Some(Kind::Curve)),
+        (Kind::Surface.title(), Some(Kind::Surface)),
+        ("OPERATIONS", None),
+        (Kind::Sculpt.title(), Some(Kind::Sculpt)),
+        (Kind::Poly.title(), Some(Kind::Poly)),
+        (Kind::Sdf.title(), Some(Kind::Sdf)),
     ];
     let focus = st.outline_element();
     egui::ScrollArea::vertical().id_salt("tree-scroll").max_height(height - 32.0).min_scrolled_height(height - 32.0).auto_shrink([false, true]).show(ui, |ui| {
@@ -2087,13 +2244,12 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             ui.label(egui::RichText::new("Empty · pick a shape on the right (B, C), or drop an .obj here").font(regular(12.0)).color(TEXT2()));
         }
         reference_rows(ui, st);
-        for (gi, (title, keep)) in groups.iter().enumerate() {
-            // the last group: operations whose shape cannot be told
-            // a 2D boolean's curves under it, not on their own
-            let members: Vec<&Feature> = if gi == 4 {
-                feats.iter().filter(|f| !f.is_solid() && !f.is_path() && st.owner_of(f.id).is_none()).collect()
-            } else {
-                feats.iter().filter(|f| keep(f) && (gi != 2 || st.doc.boolean_of(f.id).is_none())).collect()
+        for (gi, (title, kind)) in groups.iter().enumerate() {
+            // the operations whose shape cannot be told; a 2D boolean's
+            // curves under it, not on their own
+            let members: Vec<&Feature> = match kind {
+                None => feats.iter().filter(|f| !f.is_solid() && !f.is_path() && st.owner_of(f.id).is_none()).collect(),
+                Some(k) => feats.iter().filter(|f| kind_of(f) == Some(*k) && (*k != Kind::Curve || st.doc.boolean_of(f.id).is_none())).collect(),
             };
             if members.is_empty() {
                 continue;
@@ -2112,7 +2268,8 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
                 continue;
             }
             for f in members {
-                let n = if gi < 3 { ops_of(st, f.id) } else { 0 };
+                // its items: a shape's operations, an SDF object's shapes
+                let n = if kind.is_some() { st.element_items(f.id).len() } else { 0 };
                 tree_row(ui, st, f, n, focus == Some(f.id));
                 if f.shape_bool.is_some() {
                     operand_rows(ui, st, f, 1);
@@ -2278,7 +2435,8 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
     }
     let name_color = if selected { TEXT_STRONG() } else { tint(TEXT(), dim) };
     let info = if ops > 0 {
-        format!("{} · {ops} op{}", step_info(f), if ops > 1 { "s" } else { "" })
+        let (one, many) = crate::common::kind_of(f).map(|k| k.items_word()).unwrap_or(("op", "ops"));
+        format!("{} · {ops} {}", step_info(f), if ops > 1 { many } else { one })
     } else if f.suspended {
         "past the marker".to_string()
     } else {
@@ -2377,8 +2535,140 @@ fn row_menu(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     }
 }
 
-/// The Sub Outliner's content: the element's name, then its operations in
-/// history order, the marker (a white line) before those left out.
+/// An item's icon and colour (`common::Item`): a feature's, or an SDF
+/// shape's primitive in its operation's colour.
+pub fn item_look(st: &AppState, it: crate::common::Item) -> (Icon, Color32) {
+    use crate::common::Item;
+    match it {
+        Item::Feature(id) => st.doc.feature(id).map(|f| (feature_icon(f), feature_color(f))).unwrap_or((Icon::Frame, TEXT2())),
+        Item::Shape(id, n) => {
+            let nd = st.doc.feature(id).and_then(crate::sdf::scene_of).and_then(|s| s.node(n));
+            let icon = nd.and_then(|x| x.shape()).map(|s| crate::sdf::prim_icon(s.kind)).unwrap_or(Icon::Box);
+            let c = match nd.map(|x| x.combine.mode) {
+                Some(forme_core::CombineMode::Carve) => carve(),
+                Some(forme_core::CombineMode::Add) | None => Workspace::Sdf.swatch(),
+                _ => TEXT2(),
+            };
+            (icon, c)
+        }
+    }
+}
+
+/// One row of an element's items (the Sub Outliner): a feature's row, or
+/// an SDF shape's with the same look, switch and menu.
+fn item_row(ui: &mut Ui, st: &mut AppState, it: crate::common::Item) {
+    use crate::common::Item;
+    let (id, n) = match it {
+        Item::Feature(id) => {
+            if let Some(g) = st.doc.feature(id).cloned() {
+                tree_row(ui, st, &g, 0, false);
+            }
+            return;
+        }
+        Item::Shape(id, n) => (id, n),
+    };
+    let w = ui.available_width();
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
+    let selected = st.item_selected(it);
+    let on = st.item_on(it);
+    let past = st.item_marker(id) <= st.element_items(id).iter().position(|x| *x == it).unwrap_or(0);
+    let p = ui.painter();
+    if selected {
+        p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+    } else if resp.hovered() {
+        p.rect_filled(r, 6.0, RAISED());
+    }
+    let dim = if on && !past { 1.0 } else { 0.4 };
+    let (icon, c) = item_look(st, it);
+    let x0 = r.min.x + 6.0;
+    let br = Rect::from_min_size(pos2(x0, r.center().y - 8.0), vec2(16.0, 16.0));
+    p.rect_filled(br, 4.0, tint(c, 0.16 * dim));
+    icons::paint(p, br.shrink(2.0), icon, tint(c, dim));
+    let name_color = if selected { TEXT_STRONG() } else { tint(TEXT(), dim) };
+    let info = if past { "past the marker".to_string() } else { st.item_info(it).1 };
+    let info_g = p.layout_no_wrap(info, regular(12.0), tint(TEXT2(), dim));
+    let info_x = r.max.x - 40.0 - info_g.size().x;
+    p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
+    let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
+    let mut job = egui::text::LayoutJob::single_section(st.item_name(it), egui::TextFormat::simple(if selected { semibold(13.0) } else { regular(13.0) }, name_color));
+    job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let name_g = ui.painter().layout_job(job);
+    ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
+    // on / off, as an operation's
+    let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
+    let eresp = ui.interact(er.expand(6.0), Id::new(("item-on", id, n)), Sense::click());
+    let b = Rect::from_center_size(er.center(), vec2(13.0, 13.0));
+    let p = ui.painter();
+    if on {
+        p.rect_filled(b, 3.0, tint(accent(), if past { 0.45 } else { 1.0 }));
+        p.line_segment([b.min + vec2(3.0, 6.8), b.min + vec2(5.6, 9.4)], Stroke::new(1.6, on_accent()));
+        p.line_segment([b.min + vec2(5.6, 9.4), b.min + vec2(10.2, 3.8)], Stroke::new(1.6, on_accent()));
+    } else {
+        p.rect(b, 3.0, Color32::TRANSPARENT, Stroke::new(1.2, if eresp.hovered() { LABEL() } else { DIVIDER() }), StrokeKind::Inside);
+    }
+    let eresp = eresp.on_hover_text("On / off: left out of the object, the shapes after it kept");
+    resp.context_menu(|ui| item_menu(ui, st, it));
+    if eresp.clicked() {
+        st.toggle_item(it);
+    } else if resp.clicked() {
+        st.select_item(it);
+    }
+}
+
+/// An item's right-click menu: on / off, the marker after it, all back,
+/// duplicate (a shape), delete.
+fn item_menu(ui: &mut Ui, st: &mut AppState, it: crate::common::Item) {
+    use crate::common::Item;
+    if let Item::Feature(id) = it {
+        if let Some(f) = st.doc.feature(id).cloned() {
+            row_menu(ui, st, &f);
+        }
+        return;
+    }
+    ui.set_min_width(160.0);
+    ui.spacing_mut().button_padding = vec2(8.0, 3.0);
+    ui.spacing_mut().interact_size.y = 24.0;
+    ui.style_mut().override_font_id = Some(regular(12.5));
+    let on = st.item_on(it);
+    if ui.button(if on { "Turn off" } else { "Turn on" }).clicked() {
+        st.toggle_item(it);
+        ui.close();
+    }
+    if let Some(el) = st.item_element(it) {
+        let items = st.element_items(el);
+        if ui.button("Back to here").clicked() {
+            let n = items.iter().position(|x| *x == it).map(|i| i + 1).unwrap_or(0);
+            st.set_item_marker(el, n);
+            ui.close();
+        }
+        if st.item_marker(el) < items.len() && ui.button("All shapes back").clicked() {
+            st.set_item_marker(el, items.len());
+            ui.close();
+        }
+    }
+    if let Item::Shape(..) = it {
+        if ui.button("Duplicate").clicked() {
+            st.select_item(it);
+            st.sdf_duplicate();
+            ui.close();
+        }
+        if ui.button("Frame").clicked() {
+            let pts: Vec<glam::Vec3> = st.item_points(it).iter().map(|p| p.as_vec3()).collect();
+            if let Some((lo, hi)) = pts.iter().fold(None, |b: Option<(glam::Vec3, glam::Vec3)>, p| Some(b.map(|(l, h)| (l.min(*p), h.max(*p))).unwrap_or((*p, *p)))) {
+                st.fly_frame(lo, hi);
+            }
+            ui.close();
+        }
+    }
+    if ui.button("Delete").clicked() {
+        st.delete_item(it);
+        ui.close();
+    }
+}
+
+/// The Sub Outliner's content: the element's name, then its items in
+/// history order (a shape's operations, an SDF object's shapes), the marker
+/// (a white line) before those left out.
 fn sub_outliner_body(ui: &mut Ui, st: &mut AppState, el: Option<FeatureId>, max_h: f32, fixed: bool) {
     ui.horizontal(|ui| {
         ui.set_height(24.0);
@@ -2394,15 +2684,17 @@ fn sub_outliner_body(ui: &mut Ui, st: &mut AppState, el: Option<FeatureId>, max_
         }
         return;
     };
-    let ops: Vec<Feature> = st.element_ops(id).iter().filter_map(|x| st.doc.feature(*x).cloned()).collect();
+    let ops = st.element_items(id);
     if ops.is_empty() {
-        ui.label(egui::RichText::new("No operations yet: its fillets, insets and moves show here").font(regular(11.5)).color(TEXT2()));
+        let sdf = st.doc.feature(id).map(crate::sdf::is_sdf).unwrap_or(false);
+        let empty = if sdf { "No shapes: add one from the SDF tab (B C O P T)" } else { "No operations yet: its fillets, insets and moves show here" };
+        ui.label(egui::RichText::new(empty).font(regular(11.5)).color(TEXT2()));
         if fixed {
             ui.add_space((max_h - 46.0).max(0.0));
         }
         return;
     }
-    let marker = st.marker_of(id);
+    let marker = st.item_marker(id);
     let mut sa = egui::ScrollArea::vertical().id_salt(if fixed { "sub-fixed-scroll" } else { "components-scroll" }).max_height(max_h).auto_shrink([false, !fixed]);
     if fixed {
         // a fixed container: the same height whatever it holds
@@ -2418,7 +2710,7 @@ fn sub_outliner_body(ui: &mut Ui, st: &mut AppState, el: Option<FeatureId>, max_
             if k == marker {
                 history_marker_line(ui);
             }
-            tree_row(ui, st, g, 0, false);
+            item_row(ui, st, *g);
         }
         if marker >= ops.len() {
             history_marker_line(ui);
@@ -3316,6 +3608,26 @@ pub fn material_ball(p: &egui::Painter, c: egui::Pos2, r: f32, m: &materials::Ma
     let spec = 0.22 + 0.45 * m.metal * (1.0 - m.rough);
     p.circle_filled(c + vec2(-0.36, -0.4) * r, r * (0.24 - 0.08 * m.metal), Color32::from_white_alpha((spec * 255.0) as u8));
     p.circle_stroke(c, r, Stroke::new(1.0, tint(Color32::WHITE, 0.22)));
+}
+
+/// Three narrow value fields (X Y Z, or rX rY rZ), for the operation
+/// window; the values when one changed.
+fn xyz_fields(ui: &mut Ui, labels: [&str; 3], vals: [f32; 3], suffix: &str) -> Option<[f32; 3]> {
+    let colors = [AXIS_X, AXIS_Y, AXIS_Z];
+    let mut v = vals;
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        let w = ((ui.available_width() - 3.0 * 22.0 - 6.0 * 3.0) / 3.0).clamp(40.0, 66.0);
+        for k in 0..3 {
+            let (lr, _) = ui.allocate_exact_size(vec2(if labels[k].len() > 1 { 20.0 } else { 14.0 }, 22.0), Sense::hover());
+            ui.painter().text(lr.center(), Align2::CENTER_CENTER, labels[k], semibold(11.5), colors[k]);
+            if value_field(ui, &mut v[k], -100000.0..=100000.0, if suffix == "°" { 1.0 } else { 0.1 }, suffix, w).changed() {
+                changed = true;
+            }
+        }
+    });
+    changed.then_some(v)
 }
 
 fn axis_field(ui: &mut Ui, label: &str, color: Color32, v: &mut f32, suffix: &str) -> egui::Response {

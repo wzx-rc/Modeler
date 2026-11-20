@@ -541,6 +541,8 @@ pub struct MatDrag {
 pub enum DropTarget {
     Face { tag: i64, face: usize },
     Shape(FeatureId),
+    /// A shape inside an SDF object (the SDF tab): its own material.
+    Node(FeatureId, forme_core::NodeId),
 }
 
 pub struct Toast {
@@ -601,6 +603,8 @@ pub struct SelState {
     pub faces: Vec<FaceRef>,
     pub edges: Vec<EdgeRef>,
     pub verts: Vec<DVec3>,
+    /// The SDF tab's picked shape (its object, its node).
+    pub shape: Option<(FeatureId, forme_core::NodeId)>,
 }
 
 /// One undo step: the document before it (None: a selection change only)
@@ -708,6 +712,8 @@ pub struct AppState {
     /// A material ball dragged from the materials island, and what it
     /// would land on.
     pub mat_drag: Option<MatDrag>,
+    /// The material whose shader settings are open in the materials island.
+    pub mat_edit: Option<u32>,
     /// Selection rectangle (screen).
     pub marquee: Option<([f32; 2], [f32; 2])>,
 
@@ -851,6 +857,10 @@ pub struct AppState {
     pub sdf_drag: Option<crate::sdf::SdfDrag>,
     pub sdf_meshed: std::collections::HashMap<FeatureId, (u64, bool)>,
     pub sdf_jobs: Vec<crate::sdf::SdfJob>,
+    /// Each SDF object's triangles' materials as last meshed: the engine's,
+    /// so a shape's material shows on its part of the surface and a Carve's
+    /// on the walls it cuts.
+    pub sdf_mats: std::collections::HashMap<FeatureId, Vec<u32>>,
     /// Bumped when a mesh changes without a new document version (a
     /// sculpt stroke): the renderer uploads the meshes again.
     pub mesh_gen: u64,
@@ -866,7 +876,7 @@ impl AppState {
             redo: vec![],
             live_before: None,
             live_sel: None,
-            sel_seen: SelState { mode: SelMode::Object, selection: vec![], faces: vec![], edges: vec![], verts: vec![] },
+            sel_seen: SelState { mode: SelMode::Object, selection: vec![], faces: vec![], edges: vec![], verts: vec![], shape: None },
             sel_version: u64::MAX,
             selection: vec![],
             sel_mode: SelMode::Object,
@@ -907,6 +917,7 @@ impl AppState {
             gizmo_readout: None,
             marking: Default::default(),
             mat_drag: None,
+            mat_edit: None,
             hot_handle: None,
             marquee: None,
             camera: OrbitCamera { target: Vec3::new(0.0, 10.0, 0.0), yaw: 0.62, pitch: 0.42, dist: 160.0, ..Default::default() },
@@ -983,6 +994,7 @@ impl AppState {
             sdf_drag: None,
             sdf_meshed: Default::default(),
             sdf_jobs: vec![],
+            sdf_mats: Default::default(),
             poly_loop: vec![],
             mesh_gen: 0,
         }
@@ -1181,6 +1193,13 @@ impl AppState {
             pts = self.picked_points();
             if !pts.is_empty() {
                 return bounds(&pts);
+            }
+        }
+        // the SDF tab's picked shape: its outline
+        if let Some((id, n)) = self.sdf_sel.filter(|_| self.sdf_comp()) {
+            let p = self.item_points(crate::common::Item::Shape(id, n));
+            if !p.is_empty() {
+                return bounds(&p.iter().map(|q| q.as_vec3()).collect::<Vec<_>>());
             }
         }
         let ids = self.doc.with_operands(&self.selection);
@@ -1458,7 +1477,7 @@ impl AppState {
 
     /// The selection now, as an undo step keeps it.
     pub fn sel_state(&self) -> SelState {
-        SelState { mode: self.sel_mode, selection: self.selection.clone(), faces: self.face_sel.clone(), edges: self.edge_sel.clone(), verts: self.vert_sel.clone() }
+        SelState { mode: self.sel_mode, selection: self.selection.clone(), faces: self.face_sel.clone(), edges: self.edge_sel.clone(), verts: self.vert_sel.clone(), shape: self.sdf_sel }
     }
 
     fn set_sel_state(&mut self, s: &SelState) {
@@ -1467,6 +1486,7 @@ impl AppState {
         self.face_sel = s.faces.clone();
         self.edge_sel = s.edges.clone();
         self.vert_sel = s.verts.clone();
+        self.sdf_sel = s.shape;
         self.clean_selection_ids();
     }
 
@@ -1523,6 +1543,11 @@ impl AppState {
 
     pub fn is_live(&self) -> bool {
         self.live_before.is_some()
+    }
+
+    /// The name of the live change under way.
+    pub fn live_label(&self) -> Option<&str> {
+        self.live_before.as_ref().map(|(l, _)| l.as_str())
     }
 
     pub fn undo(&mut self) {
@@ -1983,6 +2008,16 @@ impl AppState {
     /// What a material ball let go at `p` (screen) lands on: in Face mode
     /// the face under it, else the element the face comes from.
     pub fn drop_target(&self, p: [f32; 2]) -> Option<DropTarget> {
+        // a mesh in front (Sculpt, Poly, SDF): the whole of it; in the SDF
+        // tab the SDF shape under the ball
+        if let Some(id) = self.mesh_in_front(p) {
+            if self.workspace == crate::workspace::Workspace::Sdf {
+                if let Some((fid, n)) = self.sdf_pick_at(p) {
+                    return Some(DropTarget::Node(fid, n));
+                }
+            }
+            return Some(DropTarget::Shape(id));
+        }
         let h = self.pick_at(p)?;
         let t = self.model.as_ref()?.faces.get(h.face)?.tag?;
         if self.sel_mode == SelMode::Face {
@@ -1998,19 +2033,26 @@ impl AppState {
         match t {
             DropTarget::Face { tag: x, .. } => tag.pack() == *x,
             DropTarget::Shape(id) => self.element_of(tag.feature) == *id && self.paint_of(tag.pack()).is_none(),
+            DropTarget::Node(..) => false,
         }
     }
 
     /// A material ball clicked: the faces picked in Face mode, else the
     /// selected shapes (an operation's: its shape's), else new shapes.
     pub fn apply_material(&mut self, m: u32) {
-        let name = crate::materials::get(m).name;
+        let name = crate::materials::get(&self.doc, m).name;
         if self.sel_mode == SelMode::Face && !self.face_sel.is_empty() {
             let mut tags: Vec<i64> = self.face_sel.iter().map(|r| r.tag).collect();
             tags.dedup();
             let n = tags.len();
             self.paint_faces(&tags, m);
             self.toast(&format!("{name} on {n} face{}", if n == 1 { "" } else { "s" }), false);
+            return;
+        }
+        // the SDF tab's picked shape: its own material (as a face's in Face
+        // mode: the object's other shapes keep theirs)
+        if let Some((id, n)) = self.sdf_sel.filter(|_| self.sdf_comp()) {
+            self.set_shape_material(id, n, m);
             return;
         }
         let mut ids: Vec<FeatureId> = self.selection.iter().map(|id| self.element_of(*id)).filter(|id| self.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false)).collect();
@@ -2027,7 +2069,7 @@ impl AppState {
 
     /// A material ball let go on the part.
     pub fn drop_material(&mut self, t: DropTarget, m: u32) {
-        let name = crate::materials::get(m).name;
+        let name = crate::materials::get(&self.doc, m).name;
         match t {
             DropTarget::Face { tag, .. } => {
                 self.paint_faces(&[tag], m);
@@ -2038,6 +2080,7 @@ impl AppState {
                 let n = self.doc.feature(id).map(|f| f.name.clone()).unwrap_or_default();
                 self.toast(&format!("{name} on {n}"), false);
             }
+            DropTarget::Node(id, n) => self.set_shape_material(id, n, m),
         }
     }
 
@@ -2057,6 +2100,7 @@ impl AppState {
     fn shapes_material(&mut self, ids: &[FeatureId], m: u32) {
         let owned: Vec<i64> = self.doc.paint.iter().map(|p| p.tag).filter(|t| FaceTag::unpack(*t).map(|x| ids.contains(&self.element_of(x.feature))).unwrap_or(false)).collect();
         let ids = ids.to_vec();
+        let sdf: Vec<FeatureId> = ids.iter().copied().filter(|id| self.doc.feature(*id).map(crate::sdf::is_sdf).unwrap_or(false) && crate::sdf::scene_of(self.doc.feature(*id).unwrap()).map(|s| s.nodes.values().any(|n| n.material != 0)).unwrap_or(false)).collect();
         self.edit("Material", |d| {
             for id in &ids {
                 if let Some(f) = d.feature_mut(*id) {
@@ -2064,6 +2108,14 @@ impl AppState {
                 }
             }
             d.paint.retain(|p| !owned.contains(&p.tag));
+            // an SDF object's shapes likewise: theirs go
+            for id in &sdf {
+                if let Some(md) = crate::common::sdf_model_mut(d, *id) {
+                    for n in md.scene.nodes.values_mut() {
+                        n.material = 0;
+                    }
+                }
+            }
         });
     }
 

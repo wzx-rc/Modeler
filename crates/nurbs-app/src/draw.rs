@@ -130,7 +130,7 @@ impl Drawer {
             for f in st.shown_meshes() {
                 // a linked surface: the Carves after it cut it
                 let solids = if crate::linked::patch_of(f).is_some() { st.patch_solids(f.id) } else { vec![] };
-                let n = crate::meshes::mesh_vertices(f, slot, &solids, &mut verts);
+                let n = crate::meshes::mesh_vertices(f, slot, &solids, st.sdf_mats.get(&f.id).map(|v| v.as_slice()), &mut verts);
                 self.mesh_slots.push((f.id, slot, n));
                 slot += n as u32;
                 if crate::linked::shows_nurbs(f) {
@@ -163,7 +163,7 @@ impl Drawer {
                 .map(|(i, f)| {
                     // a material ball dragged over it: shown on it already
                     if let Some(d) = st.mat_drag.as_ref().filter(|d| d.target.map(|t| st.face_in_target(i, &t)).unwrap_or(false)) {
-                        let mat = materials::get(d.material);
+                        let mat = materials::get(&st.doc,d.material);
                         return FaceGpu { color: linear(mat.color), flags: 0, metal: mat.metal, rough: mat.rough, pad: [0.0; 2] };
                     }
                     let flags = if by_face {
@@ -183,7 +183,7 @@ impl Drawer {
                     };
                     let sheet = f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| x.is_sheet()).unwrap_or(false);
                     let flags = if sheet { flags | crate::render::FACE_SHEET } else { flags };
-                    let mat = materials::get(st.face_material(i));
+                    let mat = materials::get(&st.doc,st.face_material(i));
                     // Quads view: the fillet and chamfer bands in orange
                     let band = self.quads_shown && f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| x.round.is_some()).unwrap_or(false);
                     if band {
@@ -200,10 +200,10 @@ impl Drawer {
         let poly_target = if st.poly_comp() { st.poly_target() } else { None };
         for (id, _first, n) in &self.mesh_slots {
             let Some(f) = st.doc.feature(*id) else { continue };
-            let mat = materials::get(f.material);
+            let mat = materials::get(&st.doc,f.material);
             let (color, metal, rough) = match st.mat_drag.as_ref().filter(|d| d.target == Some(crate::state::DropTarget::Shape(*id))) {
                 Some(d) => {
-                    let m = materials::get(d.material);
+                    let m = materials::get(&st.doc,d.material);
                     (m.color, m.metal, m.rough)
                 }
                 None => (mat.color, mat.metal, mat.rough),
@@ -228,7 +228,16 @@ impl Drawer {
                 flags.push(FaceGpu { color: linear(ghost), flags: 0, metal: 0.0, rough: 0.75, pad: [0.0; 2] });
                 continue;
             }
+            let sdf = crate::sdf::is_sdf(f);
             for k in 0..*n as u32 {
+                // an SDF object: slot k > 0 is material k - 1 (a shape's own),
+                // unless a ball is dragged over the whole object
+                let (color, metal, rough) = if sdf && k > 0 && st.mat_drag.as_ref().filter(|d| d.target == Some(crate::state::DropTarget::Shape(*id))).is_none() {
+                    let m = materials::get(&st.doc, k - 1);
+                    (m.color, m.metal, m.rough)
+                } else {
+                    (color, metal, rough)
+                };
                 let fl = if st.tool == Tool::Sculpt {
                     0
                 } else if poly_target == Some(*id) {
@@ -343,7 +352,10 @@ impl Drawer {
             if let Some(f) = st.sdf_target().and_then(|id| st.doc.feature(id)).filter(|f| f.visible) {
                 if let Some(scene) = crate::sdf::scene_of(f) {
                     let picked = st.sdf_sel.map(|(_, n)| n);
-                    for n in crate::sdf::shapes(scene) {
+                    // the shapes built only (not those past the history
+                    // marker, nor those turned off)
+                    let built = crate::sdf::built_shapes(f);
+                    for n in crate::sdf::shapes(scene).into_iter().filter(|n| built.contains(n) && scene.node(*n).map(|x| x.visible).unwrap_or(false)) {
                         let carve_mode = scene.node(n).map(|x| x.combine.mode != forme_core::CombineMode::Add).unwrap_or(false);
                         let c = if carve_mode { carve } else { accent };
                         let on = picked == Some(n);

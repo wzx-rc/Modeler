@@ -15,7 +15,7 @@
 //!
 //! The items are listed in `items()`: change them there.
 
-use crate::materials::MATERIALS;
+use crate::materials::COUNT as MATERIAL_COUNT;
 use crate::state::{AppState, SelMode, Tool};
 use crate::theme::*;
 use egui::{pos2, vec2, Align2, Color32, Id, LayerId, Order, Painter, Pos2, Rect, Stroke};
@@ -37,6 +37,8 @@ const ARC_SPREAD: f32 = 1.7;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Ctx {
     Shape(FeatureId),
+    /// A shape inside an SDF object (the SDF tab).
+    SdfShape(FeatureId, forme_core::NodeId),
     /// A fillet, chamfer, inset, move… (an operation, no shape of its own).
     Step(FeatureId),
     Edge,
@@ -47,7 +49,7 @@ pub enum Ctx {
 impl Ctx {
     fn title(self) -> &'static str {
         match self {
-            Ctx::Shape(_) => "Shape",
+            Ctx::Shape(_) | Ctx::SdfShape(..) => "Shape",
             Ctx::Step(_) => "Operation",
             Ctx::Edge => "Edges",
             Ctx::Face => "Faces",
@@ -82,6 +84,10 @@ pub enum Act {
     TurnOff,
     /// The element's history marker put just after this operation.
     Marker,
+    /// The SDF tab: a shape of this kind added (sdf_add).
+    SdfPlace(forme_core::PrimKind),
+    /// The SDF tab: the picked shape made Add, Carve or Intersect.
+    SdfMode(forme_core::CombineMode),
 }
 
 pub struct Item {
@@ -98,11 +104,43 @@ fn it(dir: u8, label: &'static str, checked: bool, act: Act) -> Item {
 
 /// The items of each context. Change the menu here.
 pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
+    // the SDF tab: its five shapes on empty space, a shape's operation,
+    // material, copy and switch on a shape (the same gestures)
+    if st.workspace == crate::workspace::Workspace::Sdf {
+        use forme_core::{CombineMode as M, PrimKind as K};
+        match ctx {
+            Ctx::SdfShape(id, n) => {
+                let mode = st.doc.feature(id).and_then(crate::sdf::scene_of).and_then(|s| s.node(n)).map(|x| x.combine.mode);
+                return vec![
+                    it(0, "Material", false, Act::Material),
+                    it(1, "Add", mode == Some(M::Add), Act::SdfMode(M::Add)),
+                    it(2, "Carve", mode == Some(M::Carve), Act::SdfMode(M::Carve)),
+                    it(3, "Intersect", mode == Some(M::Intersect), Act::SdfMode(M::Intersect)),
+                    it(4, "Frame", false, Act::Frame),
+                    it(5, "Delete", false, Act::Delete),
+                    it(6, "Duplicate", false, Act::Duplicate),
+                    it(7, "Turn off", false, Act::TurnOff),
+                ];
+            }
+            Ctx::Empty => {
+                return vec![
+                    it(0, "Cube", false, Act::SdfPlace(K::Box)),
+                    it(1, "Cylinder", false, Act::SdfPlace(K::Cylinder)),
+                    it(2, "Sphere", false, Act::SdfPlace(K::Sphere)),
+                    it(3, "Capsule", false, Act::SdfPlace(K::Capsule)),
+                    it(4, "Frame all", false, Act::FrameAll),
+                    it(5, "Torus", false, Act::SdfPlace(K::Torus)),
+                    it(6, "Snap", st.settings.snap, Act::Snap),
+                ];
+            }
+            _ => {}
+        }
+    }
     match ctx {
         // on the part, only the four modes (Romain, 20 nov. 5 h 52: "ne
         // mettre que les 4 états, Object, Edge, Point, Face"), placed as
         // in Maya: Vertex west, Edge east, Face south, Object NE
-        Ctx::Shape(_) | Ctx::Step(_) | Ctx::Edge | Ctx::Face => {
+        Ctx::Shape(_) | Ctx::SdfShape(..) | Ctx::Step(_) | Ctx::Edge | Ctx::Face => {
             let m = st.sel_mode;
             vec![
                 it(1, "Object", m == SelMode::Object, Act::Mode(SelMode::Object)),
@@ -165,10 +203,15 @@ fn run(st: &mut AppState, act: Act, ctx: Ctx, at: [f32; 2]) {
         Act::Mode(m) => st.set_sel_mode(m),
         Act::Place(k) => st.arm(k),
         Act::Snap => st.settings.snap = !st.settings.snap,
-        Act::TurnOff => {
-            if let Ctx::Step(id) = ctx {
-                st.toggle_op(id);
-            }
+        Act::TurnOff => match ctx {
+            Ctx::Step(id) => st.toggle_op(id),
+            Ctx::SdfShape(id, n) => st.toggle_item(crate::common::Item::Shape(id, n)),
+            _ => {}
+        },
+        Act::SdfPlace(k) => st.sdf_add(k),
+        Act::SdfMode(m) => {
+            st.sdf.mode = m;
+            st.sdf_edit_node(&format!("Make it {}", m.label()), |n| n.combine.mode = m);
         }
         Act::Marker => {
             if let Ctx::Step(id) = ctx {
@@ -231,6 +274,15 @@ fn ball_at(c: Pos2, k: usize, n: usize) -> Pos2 {
 /// picked when it is part of it).
 fn context_at(st: &mut AppState, p: [f32; 2]) -> Ctx {
     if st.tool != Tool::Select {
+        return Ctx::Empty;
+    }
+    // the SDF tab: the shape under the pointer, picked as a click would
+    if st.workspace == crate::workspace::Workspace::Sdf {
+        if let Some((id, n)) = st.sdf_pick_at(p) {
+            st.sdf_sel = Some((id, n));
+            st.selection = vec![id];
+            return Ctx::SdfShape(id, n);
+        }
         return Ctx::Empty;
     }
     match st.sel_mode {
@@ -319,7 +371,7 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect) -> bool {
         menu.shown = true;
     }
     // the material arc: opens when the pointer reaches the top item
-    if matches!(menu.ctx, Ctx::Shape(_)) {
+    if matches!(menu.ctx, Ctx::Shape(_) | Ctx::SdfShape(..)) {
         if menu.arc.is_none() && menu.hover == Some(0) && dist > RADIUS * 0.7 {
             menu.arc = Some(now);
             menu.shown = true;
@@ -329,7 +381,7 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect) -> bool {
         }
         menu.ball = None;
         if menu.arc.is_some() {
-            let n = MATERIALS.len();
+            let n = MATERIAL_COUNT;
             let mut best = (BALL + 8.0, None);
             for k in 0..n {
                 let d = ball_at(c, k, n).distance(pos);
@@ -348,6 +400,8 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect) -> bool {
         let menu = st.marking.menu.take().unwrap();
         if let (Some(k), Ctx::Shape(id)) = (menu.ball, menu.ctx) {
             st.drop_material(crate::state::DropTarget::Shape(id), k as u32);
+        } else if let (Some(k), Ctx::SdfShape(id, n)) = (menu.ball, menu.ctx) {
+            st.set_shape_material(id, n, k as u32);
         } else if let Some(d) = menu.hover {
             if let Some(item) = items(st, menu.ctx).into_iter().find(|i| i.dir == d && i.act != Act::Material) {
                 if !menu.shown {
@@ -431,10 +485,15 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
         draw_pill(&p, r, g, hot || (item.act == Act::Material && m.arc.is_some()), 1.0);
     }
     // the material arc: the balls come out one by one
-    if let (Some(t0), Ctx::Shape(id)) = (m.arc, m.ctx) {
-        let cur = st.doc.feature(id).map(|f| f.material as usize);
-        let n = MATERIALS.len();
-        for (k, mat) in MATERIALS.iter().enumerate() {
+    let arc_of = match m.ctx {
+        Ctx::Shape(id) => Some(st.doc.feature(id).map(|f| f.material as usize)),
+        Ctx::SdfShape(id, n) => Some(Some(st.item_material(crate::common::Item::Shape(id, n)) as usize)),
+        _ => None,
+    };
+    if let (Some(t0), Some(cur)) = (m.arc, arc_of) {
+        let mats = crate::materials::all(&st.doc);
+        let n = mats.len();
+        for (k, mat) in mats.iter().enumerate() {
             let e = ease_out(((now - t0 - k as f64 * 0.0125) / 0.09) as f32);
             if e <= 0.0 {
                 continue;
@@ -448,7 +507,7 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
             let ring = if hot { LIT } else if cur == Some(k) { Color32::WHITE } else { Color32::from_rgba_unmultiplied(110, 114, 124, 200) };
             p.circle_stroke(q, r, Stroke::new(if hot || cur == Some(k) { 2.0 } else { 1.0 }, ring.gamma_multiply(e)));
             if hot {
-                p.text(q + vec2(0.0, -r - 6.0), Align2::CENTER_BOTTOM, mat.name, medium(12.0), Color32::from_rgb(236, 236, 226));
+                p.text(q + vec2(0.0, -r - 6.0), Align2::CENTER_BOTTOM, &mat.name, medium(12.0), Color32::from_rgb(236, 236, 226));
             }
         }
     }

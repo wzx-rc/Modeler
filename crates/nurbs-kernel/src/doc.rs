@@ -1056,6 +1056,22 @@ pub struct Doc {
     /// not use it; the app loads it and its tools read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<RefMesh>,
+    /// The materials as set in this document (the shader's parameters:
+    /// colour, metal, roughness), by index; empty or shorter: the app's
+    /// defaults for the others. Shared by every tab (Forme, Sculpt, Poly,
+    /// SDF). The kernel does not use it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materials: Vec<MatDef>,
+}
+
+/// A material's shader parameters.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MatDef {
+    pub name: String,
+    /// sRGB 0..1.
+    pub color: [f32; 3],
+    pub metal: f32,
+    pub rough: f32,
 }
 
 /// The reference mesh: its file (.obj).
@@ -1073,7 +1089,7 @@ pub struct Paint {
 
 impl Default for Doc {
     fn default() -> Self {
-        Doc { version: VERSION, features: vec![], next_id: 1, paint: vec![], reference: None }
+        Doc { version: VERSION, features: vec![], next_id: 1, paint: vec![], reference: None, materials: vec![] }
     }
 }
 
@@ -1112,7 +1128,7 @@ impl Doc {
     /// The document as the kernel needs it: without the meshes (it builds
     /// nothing from them, and they are big).
     pub fn for_kernel(&self) -> Doc {
-        let mut d = Doc { version: self.version, features: Vec::with_capacity(self.features.len()), next_id: self.next_id, paint: self.paint.clone(), reference: self.reference.clone() };
+        let mut d = Doc { version: self.version, features: Vec::with_capacity(self.features.len()), next_id: self.next_id, paint: self.paint.clone(), reference: self.reference.clone(), materials: vec![] };
         d.features.extend(self.features.iter().filter(|f| !f.is_mesh()).cloned());
         d
     }

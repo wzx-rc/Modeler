@@ -100,11 +100,14 @@ pub struct SdfJob {
 }
 
 /// A scene meshed: the model it was made from (its scale taken in), the
-/// points in the feature's frame, the triangles.
+/// points in the feature's frame, the triangles, and each triangle's
+/// material as the engine gives it (the shape's own, a Carve's on the walls
+/// it cuts, blended ones by the nearer; 0: the object's).
 pub struct Meshed {
     pub model: SdfModel,
     pub pts: Vec<Vec3>,
     pub faces: Vec<Vec<u32>>,
+    pub mats: Vec<u32>,
 }
 
 /// What the mesh was made from: the scene and the box's sizes.
@@ -113,6 +116,7 @@ pub fn key_of(f: &Feature) -> Option<u64> {
     let md = f.mesh.as_ref()?.sdf.as_ref()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     serde_json::to_string(&md.scene).unwrap_or_default().hash(&mut h);
+    md.marker.hash(&mut h);
     for v in size(f).to_array() {
         v.to_bits().hash(&mut h);
     }
@@ -134,22 +138,33 @@ fn cell_for(lo: Vec3, hi: Vec3, fine: bool) -> f32 {
 pub fn mesh_model(model: &SdfModel, now: Vec3, fine: bool) -> Meshed {
     let mut model = model.clone();
     model.take_scale(now);
-    let (lo, hi) = model.scene.bounds();
+    // the shapes past the history marker left out
+    let built = model.built_scene();
+    let (lo, hi) = built.bounds();
     if !(lo.x <= hi.x) {
-        return Meshed { model, pts: vec![], faces: vec![] };
+        return Meshed { model, pts: vec![], faces: vec![], mats: vec![] };
     }
-    let prog = forme_core::compile(&model.scene);
+    let prog = forme_core::compile(&built);
     let m = forme_core::mesh::dual_contour(&prog, lo, hi, cell_for(lo, hi, fine));
+    let mats = m
+        .indices
+        .chunks(3)
+        .map(|t| {
+            let c = t.iter().map(|i| m.positions[*i as usize]).fold(Vec3::ZERO, |a, b| a + b) / 3.0;
+            prog.eval(c).1
+        })
+        .collect();
     let pts = m.positions.iter().map(|p| model.to_frame(*p)).collect();
     let faces = m.indices.chunks(3).map(|t| t.to_vec()).collect();
-    Meshed { model, pts, faces }
+    Meshed { model, pts, faces, mats }
 }
 
 /// A meshing put into the feature: the unit box fitted to the surface, the
 /// frame's base moved there, the shapes kept where they were.
-pub fn apply(f: &mut Feature, m: Meshed) {
+pub fn apply(f: &mut Feature, mut m: Meshed) -> Vec<u32> {
+    let mats = std::mem::take(&mut m.mats);
     let now = size(f);
-    let Some(mesh) = f.mesh.as_mut() else { return };
+    let Some(mesh) = f.mesh.as_mut() else { return mats };
     let md = mesh.make_mut();
     let mut model = m.model;
     if m.pts.is_empty() {
@@ -158,7 +173,7 @@ pub fn apply(f: &mut Feature, m: Meshed) {
         md.faces.clear();
         model.size = now.to_array();
         md.sdf = Some(model);
-        return;
+        return mats;
     }
     md.faces = m.faces;
     let (s2, base) = md.store(&m.pts, now);
@@ -167,6 +182,7 @@ pub fn apply(f: &mut Feature, m: Meshed) {
     md.sdf = Some(model);
     f.origin += f.rot * base.as_dvec3();
     f.prim = Prim::Box { x: s2.x as f64, y: s2.y as f64, z: s2.z as f64 };
+    mats
 }
 
 /// The feature's frame with its box's stretch since the last meshing, from
@@ -193,7 +209,20 @@ pub fn is_sdf(f: &Feature) -> bool {
 
 /// The shapes of a scene in order (no groups).
 pub fn shapes(scene: &Scene) -> Vec<NodeId> {
-    scene.rows().into_iter().map(|(id, _)| id).filter(|id| scene.node(*id).map(|n| n.shape().is_some()).unwrap_or(false)).collect()
+    nurbs_kernel::mesh::sdf_shapes(scene)
+}
+
+/// The object's model (its shapes, its marker).
+pub fn model_of(f: &Feature) -> Option<&SdfModel> {
+    f.mesh.as_ref()?.sdf.as_ref()
+}
+
+/// The shapes built (before the object's history marker).
+pub fn built_shapes(f: &Feature) -> Vec<NodeId> {
+    let Some(md) = model_of(f) else { return vec![] };
+    let all = md.shapes();
+    let n = md.marker.unwrap_or(all.len()).min(all.len());
+    all[..n].to_vec()
 }
 
 /// A shape's outline as lines in the world: its box's 12 edges, and for a
@@ -341,10 +370,11 @@ impl AppState {
             }
         }
         let f = self.doc.feature(hit.id)?;
-        let scene = scene_of(f)?;
+        // the shapes built (those past the marker or turned off are not seen)
+        let scene = model_of(f)?.built_scene();
         let q = frame_matrix(f).inverse().transform_point3(hit.point);
         let d = (size(f).length() * 0.04).clamp(0.3, 4.0);
-        let n = forme_core::pick_node(scene, q, d)?;
+        let n = forme_core::pick_node(&scene, q, d)?;
         Some((f.id, n))
     }
 
@@ -398,7 +428,21 @@ impl AppState {
                     }
                 };
                 let label = d_name(s, name);
-                made = s.add(s.root, NodeSpec::shape(&label, sh.clone()).at(pos).mode(mode).blend(if mode == CombineMode::Add || mode == CombineMode::Carve { blend } else { blend.min(1.0) }));
+                let spec = NodeSpec::shape(&label, sh.clone()).at(pos).mode(mode).blend(if mode == CombineMode::Add || mode == CombineMode::Carve { blend } else { blend.min(1.0) });
+                // the history marker back: the new shape goes in at the
+                // marker, before those left out (as an operation on a NURBS
+                // shape, Fusion's timeline)
+                match md.marker {
+                    Some(m) => {
+                        let root = s.root;
+                        let at = s.node(root).map(|r| r.children().len()).unwrap_or(0);
+                        let shapes = nurbs_kernel::mesh::sdf_shapes(s);
+                        let index = shapes.get(m).and_then(|x| s.node(root).and_then(|r| r.children().iter().position(|c| c == x))).unwrap_or(at);
+                        made = s.insert(root, spec, Some(index));
+                        md.marker = Some(m + 1);
+                    }
+                    None => made = s.add(s.root, spec),
+                }
             });
             if made != 0 {
                 self.sdf_sel = Some((id, made));
@@ -461,11 +505,7 @@ impl AppState {
             self.selection = vec![id];
             return false;
         }
-        self.edit("Delete shape", |d| {
-            if let Some(md) = d.feature_mut(id).and_then(|ft| ft.mesh.as_mut()).and_then(|m| m.make_mut().sdf.as_mut()) {
-                md.scene.remove(n);
-            }
-        });
+        self.delete_item(crate::common::Item::Shape(id, n));
         self.sdf_sel = None;
         true
     }
@@ -479,7 +519,14 @@ impl AppState {
         let mut made = None;
         self.edit("Duplicate shape", |d| {
             if let Some(md) = d.feature_mut(id).and_then(|ft| ft.mesh.as_mut()).and_then(|m| m.make_mut().sdf.as_mut()) {
+                let at = md.shapes().iter().position(|x| *x == n);
                 made = md.scene.duplicate(n);
+                // the copy right after it: the marker stays after the same shapes
+                if let (Some(m), Some(at)) = (md.marker, at) {
+                    if at < m {
+                        md.marker = Some(m + 1);
+                    }
+                }
             }
         });
         if let Some(m) = made {
@@ -599,9 +646,10 @@ impl AppState {
             if key_of(f) != Some(key) {
                 continue;
             }
-            apply(f, m);
+            let mats = apply(f, m);
             let k = key_of(f).unwrap_or(0);
             self.sdf_meshed.insert(id, (k, true));
+            self.sdf_mats.insert(id, mats);
             self.mesh_gen += 1;
         }
         let ids: Vec<FeatureId> = self.doc.features.iter().filter(|f| is_sdf(f) && f.mesh.as_ref().map(|m| m.sdf.is_some()).unwrap_or(false)).map(|f| f.id).collect();
@@ -613,9 +661,10 @@ impl AppState {
                 // changed (or never meshed here): coarse now
                 let m = mesh_model(f.mesh.as_ref().unwrap().sdf.as_ref().unwrap(), size(f), false);
                 let f = self.doc.feature_mut(id).unwrap();
-                apply(f, m);
+                let mats = apply(f, m);
                 let k = key_of(f).unwrap_or(0);
                 self.sdf_meshed.insert(id, (k, false));
+                self.sdf_mats.insert(id, mats);
                 self.mesh_gen += 1;
                 continue;
             }
@@ -631,6 +680,8 @@ impl AppState {
             self.sdf_jobs.push(SdfJob { id, key, rx });
         }
         self.sdf_meshed.retain(|id, _| self.doc.feature(*id).is_some());
+        let alive: std::collections::HashSet<FeatureId> = self.sdf_meshed.keys().copied().collect();
+        self.sdf_mats.retain(|id, _| alive.contains(id));
         if self.sdf_sel.is_some() && !self.sdf_comp() && self.workspace == crate::workspace::Workspace::Sdf {
             self.sdf_sel = None;
         }

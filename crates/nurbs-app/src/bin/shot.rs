@@ -323,6 +323,9 @@ fn main() {
     if want("sdf") {
         sdf_tab(&mut h);
     }
+    if want("common") {
+        common_base(&mut h);
+    }
     if want("pbevel") {
         poly_bevel(&mut h);
     }
@@ -4798,6 +4801,89 @@ fn sdf_tab(h: &mut Harness) {
     h.st.settings.light = true;
     h.steps(3);
     h.shot("sdf-12-light");
+}
+
+/// The base shared by the tabs (Romain, 21 nov.: "tout feature commune…
+/// doit marcher sur une base commune"): an SDF object next to the NURBS
+/// test part, in the outliner's SDF group, its shapes in the Sub Outliner
+/// and the history strip (marker, on / off), a shape's own material, the
+/// materials' shader settings, the marking menu in the SDF tab.
+fn common_base(h: &mut Harness) {
+    use egui::Key;
+    use nurbs_app::common::Item;
+    h.reset(test_part(), "Common");
+    h.key(Key::F4);
+    h.steps(2);
+    h.key(Key::B);
+    h.st.sdf.blend = 3.0;
+    h.key(Key::O);
+    h.st.sdf.mode = forme_core::CombineMode::Carve;
+    h.st.sdf.blend = 1.0;
+    h.key(Key::C);
+    h.st.sdf_edit_node("Size", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::new(4.0, 30.0, 0.0);
+        }
+    });
+    let id = h.st.sdf_target().expect("an SDF object");
+    h.st.edit("Move", |d| d.feature_mut(id).unwrap().origin.x += 55.0);
+    h.st.sdf_settle();
+    h.st.frame_all();
+    h.settle();
+    let items = h.st.element_items(id);
+    eprintln!("SDF object {id}: {} shapes {:?}, marker {}", items.len(), items, h.st.item_marker(id));
+    assert_eq!(items.len(), 3);
+    h.shot("common-01-sdf-items");
+    // the sphere picked, Orange on it alone
+    if let Item::Shape(_, n) = items[1] {
+        h.st.select_item(Item::Shape(id, n));
+    }
+    h.st.apply_material(2);
+    h.st.sdf_settle();
+    h.steps(2);
+    eprintln!("sphere's material {}, mats {:?}", h.st.item_material(items[1]), h.st.sdf_mats.get(&id).map(|m| m.iter().filter(|x| **x == 3).count()));
+    h.shot("common-02-shape-material");
+    // the shader settings of Green, edited: the NURBS block wears it too
+    h.st.edit("Material", |d| d.features[0].material = 1);
+    h.st.mat_edit = Some(1);
+    let mut m = nurbs_app::materials::get(&h.st.doc, 1);
+    m.color = [0.22, 0.48, 0.78];
+    m.metal = 0.6;
+    m.rough = 0.25;
+    m.name = "Blue steel".into();
+    h.st.edit("Material settings", |d| nurbs_app::materials::set(d, 1, &m));
+    h.steps(3);
+    h.shot("common-03-shader-settings");
+    h.st.mat_edit = None;
+    // the history marker back to the cube alone, then all back
+    h.st.select_item(Item::Feature(id));
+    h.st.set_item_marker(id, 1);
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("common-04-marker");
+    h.st.set_item_marker(id, 3);
+    // the carve turned off from the Sub Outliner's switch
+    h.st.toggle_item(items[2]);
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("common-05-carve-off");
+    h.st.toggle_item(items[2]);
+    h.st.sdf_settle();
+    // the marking menu on the sphere (SDF tab), held open
+    let pv = h.st.item_points(items[1]);
+    let c = pv.iter().fold(glam::DVec3::ZERO, |a, b| a + *b) / pv.len().max(1) as f64;
+    let at = h.screen_of(c.as_vec3());
+    h.rpress(at, true);
+    h.steps(16);
+    eprintln!("marking menu on {:?}", h.st.marking.menu.as_ref().map(|m| m.ctx));
+    h.shot("common-06-marking");
+    h.rpress(at, false);
+    h.steps(2);
+    // the NURBS block: its own items, the same lists
+    h.key(Key::F1);
+    h.st.select_item(Item::Feature(h.st.doc.features[0].id));
+    h.steps(3);
+    h.shot("common-07-nurbs");
 }
 
 fn multi(h: &mut Harness) {

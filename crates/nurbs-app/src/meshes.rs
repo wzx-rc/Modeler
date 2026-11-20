@@ -247,9 +247,13 @@ pub fn linked_lines(f: &Feature, solids: &[Solid], out: &mut Vec<LineVertex>) {
     line_vertices(&ghost, [c.r() / 2, c.g() / 2, c.b() / 2, 200], 1.0, out);
 }
 
+/// An SDF object's face slots: its own material, then one per material
+/// (a shape's `material` is its index + 1).
+pub const SDF_SLOTS: usize = crate::materials::COUNT + 1;
+
 /// A mesh's triangles, its face slots starting at `base` (a linked
 /// surface's after the Carves that cut it).
-pub fn mesh_vertices(f: &Feature, base: u32, solids: &[Solid], out: &mut Vec<MeshVertex>) -> usize {
+pub fn mesh_vertices(f: &Feature, base: u32, solids: &[Solid], sdf_mats: Option<&[u32]>, out: &mut Vec<MeshVertex>) -> usize {
     let Some(m) = &f.mesh else { return 0 };
     if let Some(p) = &m.patch {
         return linked_vertices(f, m, p, base, solids, out);
@@ -271,15 +275,19 @@ pub fn mesh_vertices(f: &Feature, base: u32, solids: &[Solid], out: &mut Vec<Mes
         }
         MeshKind::Sdf => {
             // dual contouring keeps hard-surface edges: smooth within 40°,
-            // hard past it (a cube's edges, a carve's rim); one face slot
+            // hard past it (a cube's edges, a carve's rim); a face slot per
+            // material the engine gives (0: the object's, k: material k - 1),
+            // so each shape shows its own (`SDF_SLOTS`)
             let cn = m.corner_normals(&pts, 40.0);
+            let mats = sdf_mats.filter(|x| x.len() == m.faces.len());
             out.reserve(m.faces.len() * 3);
-            for (q, ns) in m.faces.iter().zip(&cn) {
+            for (i, (q, ns)) in m.faces.iter().zip(&cn).enumerate() {
+                let slot = mats.map(|x| x[i].min(SDF_SLOTS as u32 - 1)).unwrap_or(0);
                 for c in 0..3.min(q.len()) {
-                    out.push(MeshVertex { pos: pts[q[c] as usize].to_array(), nrm: ns[c].to_array(), face: base, dev: NO_DEV });
+                    out.push(MeshVertex { pos: pts[q[c] as usize].to_array(), nrm: ns[c].to_array(), face: base + slot, dev: NO_DEV });
                 }
             }
-            1
+            SDF_SLOTS
         }
         MeshKind::Poly => {
             if m.smooth {
