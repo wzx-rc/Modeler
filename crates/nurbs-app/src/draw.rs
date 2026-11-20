@@ -151,7 +151,7 @@ impl Drawer {
                             _ => 0,
                         }
                     };
-                    let sheet = f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| x.is_sheet()).unwrap_or(false);
+                    let sheet = f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| st.doc.makes(x) == nurbs_kernel::Makes::Sheet).unwrap_or(false);
                     let flags = if sheet { flags | crate::render::FACE_SHEET } else { flags };
                     let mat = materials::get(st.face_material(i));
                     // Quads view: the fillet and chamfer bands in orange

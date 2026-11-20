@@ -446,6 +446,9 @@ pub struct Drag {
     pub keep: Vec<(FeatureId, FeatureId)>,
     /// The scale cage as it was when it began.
     pub cage: Option<crate::cage::CageBox>,
+    /// Path points moved in Vertex mode (curve, point), `start` their
+    /// curves as they were.
+    pub pts: Vec<(FeatureId, usize)>,
 }
 
 /// A fillet or chamfer sized by a drag on screen (Rectify's Radius
@@ -3028,7 +3031,7 @@ impl AppState {
     /// Shift + click on a point placed (Surface, Curve mode): it breaks the
     /// curve in a V, or no longer. False when no point is there.
     pub fn sketch_toggle_sharp(&mut self, p: [f32; 2]) -> bool {
-        if self.tool != Tool::Create(PrimKind::Surface) || !self.surface_curve {
+        if !matches!(self.tool, Tool::Create(PrimKind::Surface) | Tool::Create(PrimKind::Path)) || !self.surface_curve {
             return false;
         }
         let i = self.sketch_point_at(p);
@@ -3107,7 +3110,7 @@ impl AppState {
             return;
         }
         let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
-        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: k.corner.clone(), tension: vec![], open: false };
+        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: k.corner.clone(), tension: vec![], open: false, spline: false };
         self.sketch = None;
         self.begin_live("New Sketch");
         let op = self.mode;
@@ -3136,6 +3139,30 @@ impl AppState {
         let Some(k) = self.sketch.clone() else { return };
         if k.pts.len() < 3 {
             self.toast("A surface needs 3 points at least", true);
+            return;
+        }
+        // on its plane (20 nov.): a closed curve filled, exact (the spline
+        // or straight sides with their fillets), still a curve to edit
+        if !(self.surface_on_scan || k.free.iter().any(|f| f.is_some())) {
+            let Some((profile, origin, rot, w, dp)) = crate::surfaces::sketch_profile(&k, true, self.surface_curve) else {
+                self.toast("The outline is too small: draw it wider", true);
+                return;
+            };
+            self.sketch = None;
+            let mut id = 0;
+            let mat = self.material;
+            self.edit("New Surface", |d| {
+                let name = d.fresh_name("Surface");
+                id = d.add(Op::Add, Prim::Path { x: w, z: dp }, origin, rot);
+                if let Some(f) = d.feature_mut(id) {
+                    f.name = name;
+                    f.material = mat;
+                    f.profile = Some(profile);
+                    f.fill = true;
+                }
+            });
+            self.selection = vec![id];
+            self.tool = Tool::Select;
             return;
         }
         let w: Vec<DVec3> = self.surface_line(&k, None, true);
@@ -3289,19 +3316,12 @@ impl AppState {
             self.toast(if closed { "A closed path needs 3 points at least" } else { "A path needs 2 points at least" }, true);
             return;
         }
-        let lo = k.pts.iter().fold([f64::MAX; 2], |a, q| [a[0].min(q[0]), a[1].min(q[1])]);
-        let hi = k.pts.iter().fold([f64::MIN; 2], |a, q| [a[0].max(q[0]), a[1].max(q[1])]);
-        let (w, dp) = (hi[0] - lo[0], hi[1] - lo[1]);
-        if w.max(dp) < 0.5 {
+        // straight sides, or the spline through the points (CURVE)
+        let Some((profile, origin, rot, w, dp)) = crate::surfaces::sketch_profile(&k, closed, self.surface_curve) else {
             self.toast("The path is too short: draw it longer", true);
             return;
-        }
-        // a straight path along X or Z: its box is 0.01 mm across
-        let (w, dp) = (w.max(0.01), dp.max(0.01));
-        let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
-        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: k.corner.clone(), tension: vec![], open: !closed };
+        };
         self.sketch = None;
-        let (origin, rot) = (k.plane.at(c), basis_rotation(k.plane.u, k.plane.n));
         let mut id = 0;
         self.edit("New Path", |d| {
             id = d.add(Op::Add, Prim::Path { x: w, z: dp }, origin, rot);
@@ -3537,7 +3557,7 @@ impl AppState {
             .collect();
         let keep: Vec<(FeatureId, FeatureId)> = start.iter().filter(|s| s.op == Op::Carve).flat_map(|s| self.later_overlaps(s.id).into_iter().map(move |h| (s.id, h))).collect();
         let cage = if matches!(h, Handle::Cage(_)) { self.cage() } else { None };
-        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom, keep, cage });
+        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom, keep, cage, pts: vec![] });
     }
 
     /// The point a handle sits on.
@@ -3582,6 +3602,10 @@ impl AppState {
 
     fn update_drag_shapes(&mut self, p: [f32; 2]) {
         let Some(d) = self.drag.clone() else { return };
+        if !d.pts.is_empty() {
+            self.update_path_points_drag(&d, p);
+            return;
+        }
         if d.line.is_some() {
             self.update_push_drag(&d, p);
             return;
@@ -4402,7 +4426,7 @@ pub fn size_handle_pos(f: &Feature, h: Handle) -> Option<DVec3> {
 /// The size handles of a shape.
 pub fn size_handles(f: &Feature) -> Vec<Handle> {
     // a 2D boolean's box is its operands' (Scale, R, sizes them)
-    if !f.is_solid() || f.is_sheet() || f.shape_bool.is_some() {
+    if !f.is_solid() || f.is_sheet() || f.shape_bool.is_some() || f.loft.is_some() {
         return vec![];
     }
     match f.prim {

@@ -13,6 +13,8 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepLProp_SLProps.hxx>
 #include <BRepTools.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -434,10 +436,12 @@ FShape* focc_prism(const double* xy, const int* smooth, int n, double h) { retur
 // start, middle, end), 2 a chamfer (a straight side from start to end), 3 a
 // conic (a fillet with tension: start, a point of it, end; the corner is its
 // middle pole); on a smooth point, 4 its curve the conic of rho abm[6 i + 2]
-// (an ellipse's quarter) instead of the quadratic.
-// The outline of focc_prism_cut as a flat face at height z0 (XY plane);
-// a null face (and the error set) when it cannot be made.
-static TopoDS_Face outline_face(const double* xy, const int* smooth, const int* cut, const double* abm, int n, double z0) {
+// (an ellipse's quarter) instead of the quadratic; 5 the side from point i to
+// the next a cubic Bezier, its inner controls abm[6 i..6 i + 4] (a spline).
+// The outline of focc_prism_cut as a wire at height z0 (XY plane); `open`:
+// from the first point to the last, its ends plain points (a path's). A
+// null wire (and the error set) when it cannot be made.
+static TopoDS_Wire outline_wire(const double* xy, const int* smooth, const int* cut, const double* abm, int n, double z0, bool open) {
     std::vector<gp_Pnt> p(n);
     for (int i = 0; i < n; i++) p[i] = gp_Pnt(xy[2 * i], xy[2 * i + 1], z0);
     auto mid = [](const gp_Pnt& a, const gp_Pnt& b) { return gp_Pnt((a.X() + b.X()) / 2, (a.Y() + b.Y()) / 2, (a.Z() + b.Z()) / 2); };
@@ -446,8 +450,9 @@ static TopoDS_Face outline_face(const double* xy, const int* smooth, const int* 
     for (int i = 0; i < n; i++) {
         const gp_Pnt& prev = p[(i + n - 1) % n];
         const gp_Pnt& next = p[(i + 1) % n];
-        bool round = smooth[i] && prev.Distance(p[i]) > 1e-6 && next.Distance(p[i]) > 1e-6;
-        int ck = cut && !round && cut[i] != 4 ? cut[i] : 0;
+        bool end = open && (i == 0 || i == n - 1);
+        bool round = !end && smooth[i] && prev.Distance(p[i]) > 1e-6 && next.Distance(p[i]) > 1e-6;
+        int ck = cut && !end && !round && cut[i] != 4 && cut[i] != 5 ? cut[i] : 0;
         if (ck) {
             vin[i] = BRepBuilderAPI_MakeVertex(gp_Pnt(abm[6 * i], abm[6 * i + 1], z0));
             vout[i] = BRepBuilderAPI_MakeVertex(gp_Pnt(abm[6 * i + 4], abm[6 * i + 5], z0));
@@ -459,7 +464,7 @@ static TopoDS_Face outline_face(const double* xy, const int* smooth, const int* 
         }
     }
     // two smooth points in a row meet at the middle of their edge: one vertex
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < (open ? n - 1 : n); i++) {
         int j = (i + 1) % n;
         if (BRep_Tool::Pnt(vout[i]).Distance(BRep_Tool::Pnt(vin[j])) < 1e-7) {
             bool corner = vin[j].IsSame(vout[j]);
@@ -470,6 +475,7 @@ static TopoDS_Face outline_face(const double* xy, const int* smooth, const int* 
     BRepBuilderAPI_MakeWire mw;
     for (int i = 0; i < n; i++) {
         int ck = cut ? cut[i] : 0;
+        if (open && i == n - 1) break;
         if (!vin[i].IsSame(vout[i]) && ck == 2) {
             mw.Add(BRepBuilderAPI_MakeEdge(vin[i], vout[i]).Edge());
         } else if (!vin[i].IsSame(vout[i]) && ck == 3) {
@@ -497,7 +503,7 @@ static TopoDS_Face outline_face(const double* xy, const int* smooth, const int* 
             GC_MakeArcOfCircle arc(BRep_Tool::Pnt(vin[i]), gp_Pnt(abm[6 * i + 2], abm[6 * i + 3], z0), BRep_Tool::Pnt(vout[i]));
             if (!arc.IsDone()) {
                 set_err("a rounded corner could not be made");
-                return TopoDS_Face();
+                return TopoDS_Wire();
             }
             mw.Add(BRepBuilderAPI_MakeEdge(arc.Value(), vin[i], vout[i]).Edge());
         } else if (!vin[i].IsSame(vout[i])) {
@@ -521,13 +527,31 @@ static TopoDS_Face outline_face(const double* xy, const int* smooth, const int* 
             mw.Add(BRepBuilderAPI_MakeEdge(c, vin[i], vout[i]).Edge());
         }
         int j = (i + 1) % n;
-        if (!vout[i].IsSame(vin[j])) mw.Add(BRepBuilderAPI_MakeEdge(vout[i], vin[j]).Edge());
+        if (ck == 5 && !vout[i].IsSame(vin[j])) {
+            // a spline's span (Profile::spline): the cubic Bezier from this
+            // point to the next, its inner controls abm[6 i..6 i + 4]
+            TColgp_Array1OfPnt poles(1, 4);
+            poles(1) = BRep_Tool::Pnt(vout[i]);
+            poles(2) = gp_Pnt(abm[6 * i], abm[6 * i + 1], z0);
+            poles(3) = gp_Pnt(abm[6 * i + 2], abm[6 * i + 3], z0);
+            poles(4) = BRep_Tool::Pnt(vin[j]);
+            opencascade::handle<Geom_BezierCurve> c = new Geom_BezierCurve(poles);
+            mw.Add(BRepBuilderAPI_MakeEdge(c, vout[i], vin[j]).Edge());
+        } else if (!vout[i].IsSame(vin[j])) mw.Add(BRepBuilderAPI_MakeEdge(vout[i], vin[j]).Edge());
     }
     if (!mw.IsDone()) {
-        set_err("the outline is not a closed line");
-        return TopoDS_Face();
+        set_err(open ? "the path could not be made" : "the outline is not a closed line");
+        return TopoDS_Wire();
     }
-    BRepBuilderAPI_MakeFace mf(mw.Wire(), Standard_True);
+    return mw.Wire();
+}
+
+// The outline of focc_prism_cut as a flat face at height z0 (XY plane);
+// a null face (and the error set) when it cannot be made.
+static TopoDS_Face outline_face(const double* xy, const int* smooth, const int* cut, const double* abm, int n, double z0) {
+    TopoDS_Wire w = outline_wire(xy, smooth, cut, abm, n, z0, false);
+    if (w.IsNull()) return TopoDS_Face();
+    BRepBuilderAPI_MakeFace mf(w, Standard_True);
     if (!mf.IsDone()) {
         set_err("the outline is not flat and closed");
         return TopoDS_Face();
@@ -571,6 +595,105 @@ FShape* focc_region_cut(const double* xy, const int* smooth, const int* cut, con
                 return nullptr;
             }
             return wrap(face);
+        },
+        (FShape*)nullptr);
+}
+
+// The same outline as a wire in the XY plane, open (a path: from its first
+// point to its last) or closed.
+FShape* focc_outline_wire(const double* xy, const int* smooth, const int* cut, const double* abm, int n, int open) {
+    return guard(
+        [&]() -> FShape* {
+            if (n < 2) {
+                set_err("a curve needs 2 points");
+                return nullptr;
+            }
+            TopoDS_Wire w = outline_wire(xy, smooth, cut, abm, n, 0.0, open != 0);
+            if (w.IsNull()) return nullptr;
+            return wrap(w);
+        },
+        (FShape*)nullptr);
+}
+
+// `s` (a face: a solid; a wire: a sheet) turned by `angle` (radians, 2 pi a
+// full turn) round the axis through o along d (Revolve, 3ds Max's Lathe).
+FShape* focc_revolve(const FShape* s, const double* o, const double* d, double angle) {
+    return guard(
+        [&]() -> FShape* {
+            gp_Ax1 ax(gp_Pnt(o[0], o[1], o[2]), gp_Dir(d[0], d[1], d[2]));
+            bool full = angle >= 2 * M_PI - 1e-9;
+            BRepPrimAPI_MakeRevol mk(s->s, ax, full ? 2 * M_PI : angle, Standard_True);
+            mk.Build();
+            if (!mk.IsDone()) {
+                set_err("the curve could not be turned round its axis");
+                return nullptr;
+            }
+            TopoDS_Shape r = mk.Shape();
+            // one solid when the face's turn made one (its own compound)
+            int solids = 0;
+            TopoDS_Shape one;
+            for (TopExp_Explorer x(r, TopAbs_SOLID); x.More(); x.Next()) {
+                solids++;
+                one = x.Current();
+            }
+            if (solids == 1) r = one;
+            if (!valid(r)) {
+                ShapeFix_Shape fix(r);
+                fix.Perform();
+                r = fix.Shape();
+                if (!valid(r)) {
+                    set_err("the turned curve crosses its axis or itself");
+                    return nullptr;
+                }
+            }
+            return wrap(r);
+        },
+        (FShape*)nullptr);
+}
+
+// A loft through sections (wires, or faces: their outer wire), in order:
+// a solid when `solid` (all closed), else a sheet; `ruled`: straight
+// between sections (Loft).
+FShape* focc_loft(const FShape* const* secs, int n, int solid, int ruled) {
+    return guard(
+        [&]() -> FShape* {
+            if (n < 2) {
+                set_err("a loft needs 2 curves at least");
+                return nullptr;
+            }
+            BRepOffsetAPI_ThruSections ts(solid != 0, ruled != 0, 1e-6);
+            ts.CheckCompatibility(Standard_True);
+            for (int i = 0; i < n; i++) {
+                TopoDS_Wire w;
+                TopExp_Explorer fx(secs[i]->s, TopAbs_FACE);
+                if (fx.More()) {
+                    w = BRepTools::OuterWire(TopoDS::Face(fx.Current()));
+                } else {
+                    TopExp_Explorer wx(secs[i]->s, TopAbs_WIRE);
+                    if (wx.More()) w = TopoDS::Wire(wx.Current());
+                }
+                if (w.IsNull()) {
+                    set_err("a curve of the loft has no line");
+                    return nullptr;
+                }
+                ts.AddWire(w);
+            }
+            ts.Build();
+            if (!ts.IsDone()) {
+                set_err("the loft could not be made through these curves");
+                return nullptr;
+            }
+            TopoDS_Shape r = ts.Shape();
+            if (!valid(r)) {
+                ShapeFix_Shape fix(r);
+                fix.Perform();
+                r = fix.Shape();
+                if (!valid(r)) {
+                    set_err("the loft twists through itself");
+                    return nullptr;
+                }
+            }
+            return wrap(r);
         },
         (FShape*)nullptr);
 }

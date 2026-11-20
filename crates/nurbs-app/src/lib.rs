@@ -23,6 +23,7 @@ pub mod settings;
 pub mod slot;
 pub mod snap;
 pub mod state;
+pub mod surfaces;
 pub mod theme;
 pub mod ui;
 pub mod view;

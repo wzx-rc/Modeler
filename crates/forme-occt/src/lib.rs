@@ -50,6 +50,9 @@ extern "C" {
     fn focc_cut(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_common(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_region_cut(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int) -> *mut FShape;
+    fn focc_outline_wire(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int, open: c_int) -> *mut FShape;
+    fn focc_revolve(s: *const FShape, o: *const c_double, d: *const c_double, angle: c_double) -> *mut FShape;
+    fn focc_loft(secs: *const *const FShape, n: c_int, solid: c_int, ruled: c_int) -> *mut FShape;
     fn focc_section_count(s: *const FShape) -> c_int;
     fn focc_section_edge(s: *const FShape, k: c_int) -> c_int;
     fn focc_edge_count(s: *const FShape) -> c_int;
@@ -131,6 +134,9 @@ pub enum CutKind {
     /// A curve point with tension: its curve the conic of rho (given as the
     /// middle point's x) instead of the quadratic (an ellipse's quarter).
     Curve,
+    /// A spline's span: the side from this point to the next a cubic
+    /// Bezier, its inner controls given as the cut's start and middle.
+    Span,
 }
 
 /// What `Shape::fillet_tension` did for one fillet: how many of its faces
@@ -456,7 +462,7 @@ impl Shape {
     pub fn prism_cuts(points: &[[f64; 2]], smooth: &[bool], cuts: &[Option<(CutKind, [f64; 2], [f64; 2], [f64; 2])>], h: f64) -> Result<Shape, String> {
         let xy: Vec<f64> = points.iter().flat_map(|p| [p[0], p[1]]).collect();
         let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
-        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some(_) => 1, None => 0 }).collect();
+        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some((CutKind::Span, ..)) => 5, Some(_) => 1, None => 0 }).collect();
         let abm: Vec<f64> = (0..points.len()).flat_map(|i| match cuts.get(i).copied().flatten() { Some((_, a, m, b)) => [a[0], a[1], m[0], m[1], b[0], b[1]], None => [0.0; 6] }).collect();
         shape(unsafe { focc_prism_cut(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int, h) })
     }
@@ -466,9 +472,30 @@ impl Shape {
     pub fn region_cuts(points: &[[f64; 2]], smooth: &[bool], cuts: &[Option<(CutKind, [f64; 2], [f64; 2], [f64; 2])>]) -> Result<Shape, String> {
         let xy: Vec<f64> = points.iter().flat_map(|p| [p[0], p[1]]).collect();
         let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
-        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some(_) => 1, None => 0 }).collect();
+        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some((CutKind::Span, ..)) => 5, Some(_) => 1, None => 0 }).collect();
         let abm: Vec<f64> = (0..points.len()).flat_map(|i| match cuts.get(i).copied().flatten() { Some((_, a, m, b)) => [a[0], a[1], m[0], m[1], b[0], b[1]], None => [0.0; 6] }).collect();
         shape(unsafe { focc_region_cut(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int) })
+    }
+
+    /// The outline of `prism_cuts` as a wire in the XY plane, open (a
+    /// path: its first point to its last, the ends plain) or closed.
+    pub fn outline_wire(points: &[[f64; 2]], smooth: &[bool], cuts: &[Option<(CutKind, [f64; 2], [f64; 2], [f64; 2])>], open: bool) -> Result<Shape, String> {
+        let xy: Vec<f64> = points.iter().flat_map(|p| [p[0], p[1]]).collect();
+        let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
+        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some((CutKind::Span, ..)) => 5, Some(_) => 1, None => 0 }).collect();
+        let abm: Vec<f64> = (0..points.len()).flat_map(|i| match cuts.get(i).copied().flatten() { Some((_, a, m, b)) => [a[0], a[1], m[0], m[1], b[0], b[1]], None => [0.0; 6] }).collect();
+        shape(unsafe { focc_outline_wire(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int, open as c_int) })
+    }
+    /// Turned by `angle` (radians) round the axis through `o` along `d`
+    /// (Revolve): a face makes a solid, a wire a sheet.
+    pub fn revolve(&self, o: [f64; 3], d: [f64; 3], angle: f64) -> Result<Shape, String> {
+        shape(unsafe { focc_revolve(self.0, o.as_ptr(), d.as_ptr(), angle) })
+    }
+    /// A loft through `secs` in order (wires, or faces: their outline): a
+    /// solid when `solid`, else a sheet; `ruled`: straight between them.
+    pub fn loft(secs: &[&Shape], solid: bool, ruled: bool) -> Result<Shape, String> {
+        let ptrs: Vec<*const FShape> = secs.iter().map(|s| s.0 as *const FShape).collect();
+        shape(unsafe { focc_loft(ptrs.as_ptr(), ptrs.len() as c_int, solid as c_int, ruled as c_int) })
     }
 
     /// A flat outline (Forme Rectify's Pen) through `pts` on the plane

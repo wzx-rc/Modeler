@@ -895,7 +895,12 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
 fn draw_sketch(p: &Painter, st: &AppState) {
     let Some(k) = &st.sketch else { return };
     if st.tool == Tool::Create(PrimKind::Surface) {
-        draw_surface_outline(p, st, k);
+        draw_surface_outline(p, st, k, false);
+        return;
+    }
+    // the Path tool's CURVE: the spline through the points as it will be
+    if st.tool == Tool::Create(PrimKind::Path) && st.surface_curve {
+        draw_surface_outline(p, st, k, true);
         return;
     }
     let path = st.tool == Tool::Create(PrimKind::Path);
@@ -967,7 +972,7 @@ fn draw_sketch(p: &Painter, st: &AppState) {
 /// The Surface tool's outline: straight sides through the points (on the
 /// plane, or on the scan "On scan"), the pointer as the next point, the side
 /// back to the first point dimmed.
-fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch) {
+fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch, path: bool) {
     let col = PATH;
     let hover = p.ctx().input(|i| i.pointer.hover_pos());
     let closing = hover.map(|h| st.sketch_on_first(p2(h))).unwrap_or(false);
@@ -979,14 +984,16 @@ fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch) {
             next = if st.surface_on_scan { st.reference_at(p2(h)).map(|x| x.0) } else { st.sketch_snap(p2(h)).map(|(q, _)| k.plane.at(q)) };
         }
     }
-    // the outline with its fillets, closed once it has 3 points
+    // the outline with its fillets, closed once it has 3 points (a path:
+    // open, closed only when the pointer is on its first point)
     let n = placed + next.is_some() as usize;
-    let line = st.surface_line(k, next, n >= 3);
+    let closed = if path { closing && placed >= 3 } else { n >= 3 };
+    let line = st.surface_line(k, next, closed);
     let sl: Vec<Option<Pos2>> = line.iter().map(|q| world(st, *q)).collect();
     let m = sl.len();
     for i in 0..m {
         let j = (i + 1) % m;
-        if j == 0 && n < 3 {
+        if j == 0 && (n < 3 || (path && !closed)) {
             continue;
         }
         let (Some(a), Some(b)) = (sl[i], sl[j]) else { continue };
@@ -1011,7 +1018,13 @@ fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch) {
     }
     if let Some(h) = hover {
         let on = if st.surface_on_scan { "on the scan" } else { k.plane.label() };
-        let txt = if closing { "close: fill it".to_string() } else { format!("{} point{} · {on}", placed, if placed == 1 { "" } else { "s" }) };
+        let txt = if closing {
+            if path { "close".to_string() } else { "close: fill it".to_string() }
+        } else if path && placed >= 2 {
+            format!("{placed} points · Enter: an open curve")
+        } else {
+            format!("{} point{} · {on}", placed, if placed == 1 { "" } else { "s" })
+        };
         chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, tint(col, 0.6), if closing { HOT } else { TEXT2() });
     }
 }
@@ -1407,6 +1420,7 @@ pub fn hint(st: &AppState) -> String {
             None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),
             None => "Click: the first point, on a face or the ground".into(),
             Some(k) if k.pts.len() < 2 => "Click or drag: a corner · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
+            Some(_) if st.surface_curve => "Enter: an open curve · First point: a closed one · Shift + click a point: sharp / smooth · Shift: 0°, 45°, 90°".into(),
             Some(_) => "Enter: an open path · First point: a closed one · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Create(PrimKind::Surface)) => match &st.sketch {

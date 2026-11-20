@@ -895,7 +895,7 @@ fn main() {
         // fillets and a chamfer (Romain 18 nov.: "Bevel fillet sur un path")
         let mut d = Doc::default();
         let id = d.add(Op::Add, Prim::Profile { x: 40.0, y: 6.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(id).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.0], [0.0, 0.0], [0.0, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false });
+        d.feature_mut(id).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.0], [0.0, 0.0], [0.0, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false, spline: false });
         h.reset(d, "Sketch");
         h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(25.0, 10.0, 20.0));
         h.steps(2);
@@ -3725,7 +3725,7 @@ fn main() {
         // ends), then chamfered; off, the whole tangent outline
         let mut d = Doc::default();
         let p = d.add(Op::Add, Prim::Profile { x: 60.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(p).unwrap().profile = Some(nurbs_kernel::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![10.0; 4], tension: vec![], open: false });
+        d.feature_mut(p).unwrap().profile = Some(nurbs_kernel::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![10.0; 4], tension: vec![], open: false, spline: false });
         h.reset(d, "Pill");
         h.st.camera.frame(Vec3::new(-32.0, 0.0, -12.0), Vec3::new(32.0, 22.0, 12.0));
         h.steps(2);
@@ -3926,6 +3926,194 @@ fn main() {
             h.st.doc.features.last().and_then(|f| f.tweak.as_ref()).map(|t| t.delta),
             h.st.model.as_ref().map(|m| m.errors.clone())
         );
+    }
+
+    if want("surf-curve") {
+        // a clean closed curve (Romain 20 nov., 13 h 05): the Path tool in
+        // CURVE, five points on the ground, one made sharp, closed on its
+        // first point; filled (Fill); a point moved with the gizmo in
+        // Vertex mode; the Surface tool on its plane: a curve filled
+        h.reset(Doc::default(), "Curves");
+        h.st.camera.frame(Vec3::new(-40.0, 0.0, -30.0), Vec3::new(60.0, 5.0, 30.0));
+        h.st.camera.pitch = 0.95;
+        h.steps(2);
+        h.key(egui::Key::P);
+        h.st.surface_curve = true;
+        h.steps(1);
+        let g = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 0.0, z));
+        let pts = [(-30.0, 10.0), (-10.0, -22.0), (15.0, -14.0), (12.0, 18.0), (-14.0, 22.0)];
+        for (x, z) in pts {
+            let q = g(&h, x, z);
+            h.move_to(q);
+            h.click(q);
+        }
+        // the second point made sharp (Shift + click on it)
+        h.hold(Modifiers::SHIFT);
+        let q = g(&h, -10.0, -22.0);
+        h.move_to(q);
+        h.click(q);
+        h.hold(Modifiers::NONE);
+        let q = g(&h, -30.0, 10.0);
+        h.move_to(q);
+        h.steps(2);
+        eprintln!("  sharp {:?}", h.st.sketch.as_ref().map(|k| k.sharp.clone()));
+        h.shot("zero-surf-curve-1-drawing");
+        h.click(q);
+        h.settle();
+        let id = h.st.doc.features.last().map(|f| f.id).unwrap();
+        eprintln!("  made: {:?}", h.st.doc.feature(id).map(|f| (f.name.clone(), f.profile.as_ref().map(|p| (p.spline, p.open, p.smooth.clone())))));
+        h.shot("zero-surf-curve-2-curve");
+        h.st.set_curve_make(id, nurbs_app::surfaces::CurveMake::Fill);
+        h.settle();
+        eprintln!("  filled: faces {:?} edges {:?} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.edges.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-curve-3-filled");
+        // Vertex mode: the fourth point picked and moved 12 mm along X
+        h.key(egui::Key::Num1);
+        h.steps(1);
+        let v = nurbs_app::surfaces::path_point_pos(h.st.doc.feature(id).unwrap(), 3).unwrap();
+        let q = h.screen_of(v.as_vec3());
+        h.click(q);
+        h.steps(2);
+        eprintln!("  picked {:?} path points {:?} pivot {:?}", h.st.vert_sel.len(), h.st.picked_path_points(), h.st.pivot());
+        let at = h.screen_of(h.st.pivot().unwrap().as_vec3());
+        h.st.begin_drag(nurbs_app::state::Handle::Axis(0), [at.x, at.y]);
+        let to = h.screen_of((v + DVec3::new(12.0, 0.0, 0.0)).as_vec3());
+        h.st.update_drag([to.x, to.y]);
+        h.st.end_drag();
+        h.settle();
+        eprintln!("  moved: point {:?} errors {:?}", nurbs_app::surfaces::path_point_pos(h.st.doc.feature(id).unwrap(), 3), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-curve-4-moved");
+        // the Surface tool on its plane, LINEAR, a corner filleted: a curve
+        // filled, editable
+        h.key(egui::Key::Num4);
+        h.st.selection.clear();
+        h.key(egui::Key::U);
+        h.st.surface_curve = false;
+        h.steps(1);
+        for (x, z) in [(30.0, -15.0), (55.0, -15.0), (55.0, 15.0), (30.0, 15.0)] {
+            let q = g(&h, x, z);
+            h.move_to(q);
+            h.click(q);
+        }
+        h.hold(Modifiers::CTRL);
+        h.drag(g(&h, 55.0, 15.0), g(&h, 55.0, 23.0), 8, false);
+        h.steps(2);
+        h.press(g(&h, 55.0, 23.0), false);
+        h.hold(Modifiers::NONE);
+        h.key(egui::Key::Enter);
+        h.settle();
+        let s = h.st.doc.features.last().cloned().unwrap();
+        eprintln!("  surface: {} fill {} makes {:?} corners {:?} errors {:?}", s.name, s.fill, h.st.doc.makes(&s), s.profile.as_ref().map(|p| p.corner.clone()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-curve-5-surface");
+    }
+
+    if want("surf-revolve") {
+        // Revolve (3ds Max's Lathe): a bottle's half profile drawn in
+        // CURVE, its two ends on the axis (the box's left side), turned
+        // into a solid; half a turn; its axis along X; a ring carved from
+        // a block
+        h.reset(Doc::default(), "Revolve");
+        h.st.camera.frame(Vec3::new(-10.0, 0.0, -45.0), Vec3::new(30.0, 5.0, 5.0));
+        h.st.camera.pitch = 1.3;
+        h.st.camera.yaw = 0.0;
+        h.steps(2);
+        h.key(egui::Key::P);
+        h.st.surface_curve = true;
+        h.steps(1);
+        let g = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 0.0, z));
+        let prof = [(0.0, 0.0), (10.0, 0.0), (10.0, -6.0), (6.0, -16.0), (7.0, -28.0), (4.0, -33.0), (4.0, -40.0), (0.0, -40.0)];
+        for (x, z) in prof {
+            let q = g(&h, x, z);
+            h.move_to(q);
+            h.click(q);
+        }
+        h.hold(Modifiers::SHIFT);
+        for (x, z) in [(10.0, 0.0), (4.0, -40.0)] {
+            let q = g(&h, x, z);
+            h.move_to(q);
+            h.click(q);
+        }
+        h.hold(Modifiers::NONE);
+        h.shot("zero-surf-revolve-1-profile");
+        h.key(egui::Key::Enter);
+        h.settle();
+        let id = h.st.doc.features.last().map(|f| f.id).unwrap();
+        h.st.set_curve_make(id, nurbs_app::surfaces::CurveMake::Revolve);
+        h.settle();
+        let f = h.st.doc.feature(id).cloned().unwrap();
+        eprintln!("  revolve: closes {} makes {:?} faces {:?} errors {:?}", f.revolve_closes(), h.st.doc.makes(&f), h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-revolve-2-top");
+        h.st.camera.yaw = 0.6;
+        h.st.camera.pitch = 0.35;
+        h.st.camera.frame(Vec3::new(-12.0, -12.0, -42.0), Vec3::new(12.0, 12.0, 2.0));
+        h.steps(2);
+        h.shot("zero-surf-revolve-3-solid");
+        let r = h.st.doc.feature(id).and_then(|f| f.revolve).unwrap();
+        h.st.set_revolve(id, nurbs_kernel::Revolve { angle: 200.0, ..r }, "Revolve angle", true);
+        h.st.end_live();
+        h.settle();
+        eprintln!("  200°: faces {:?} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-revolve-4-part");
+        h.st.set_revolve(id, nurbs_kernel::Revolve { angle: 360.0, along_x: true, align: 1 }, "Revolve axis", true);
+        h.st.end_live();
+        h.settle();
+        eprintln!("  axis X at its max side: makes {:?} faces {:?} errors {:?}", h.st.doc.makes(h.st.doc.feature(id).unwrap()), h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.st.camera.frame(Vec3::new(-15.0, -45.0, -50.0), Vec3::new(15.0, 45.0, 10.0));
+        h.steps(2);
+        h.shot("zero-surf-revolve-5-axis-x");
+    }
+
+    if want("surf-loft") {
+        // Loft: a rounded rectangle on the ground, a circle 20 mm up, a
+        // star 40 mm up: picked in that order, Loft (a solid); ruled; the
+        // circle made bigger (the loft follows)
+        use nurbs_kernel::doc::CurveKind;
+        h.reset(Doc::default(), "Loft");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -25.0), Vec3::new(25.0, 45.0, 25.0));
+        h.st.camera.pitch = 0.45;
+        h.st.camera.yaw = 0.6;
+        h.steps(2);
+        let w = |x: f32, z: f32| Vec3::new(x, 0.0, z);
+        let mut ids = vec![];
+        for (k, a, b) in [(CurveKind::Rectangle, w(-18.0, -12.0), w(18.0, 12.0)), (CurveKind::Circle, w(0.0, 0.0), w(10.0, 0.0)), (CurveKind::Star, w(0.0, 0.0), w(9.0, 0.0))] {
+            h.st.arm_curve(k);
+            h.steps(1);
+            let (pa, pb) = (h.screen_of(a), h.screen_of(b));
+            h.drag(pa, pb, 8, false);
+            h.steps(1);
+            h.press(pb, false);
+            h.steps(2);
+            ids.push(h.st.doc.features.last().unwrap().id);
+        }
+        h.st.edit("Lift", |d| {
+            if let Some(c) = d.feature_mut(ids[0]).and_then(|f| f.curve.as_mut()) {
+                c.corner = 4.0;
+            }
+            d.feature_mut(ids[1]).unwrap().origin.y = 20.0;
+            d.feature_mut(ids[2]).unwrap().origin.y = 40.0;
+        });
+        h.st.selection = ids.clone();
+        h.steps(3);
+        h.shot("zero-surf-loft-1-curves");
+        h.st.make_loft();
+        h.settle();
+        let l = h.st.selection[0];
+        eprintln!("  loft: makes {:?} faces {:?} errors {:?}", h.st.doc.makes(h.st.doc.feature(l).unwrap()), h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-loft-2-solid");
+        h.st.set_loft_ruled(l, true);
+        h.settle();
+        eprintln!("  ruled: faces {:?} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-loft-3-ruled");
+        h.st.set_loft_ruled(l, false);
+        h.st.edit("Radius", |d| {
+            let f = d.feature_mut(ids[1]).unwrap();
+            let (Some(c), nurbs_kernel::Prim::Path { .. }) = (f.curve, f.prim) else { return };
+            f.reshape_curve(c, 16.0);
+        });
+        h.st.selection = vec![l];
+        h.settle();
+        eprintln!("  circle grown: errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-loft-4-follows");
     }
 
     if want("curves") {
@@ -4361,7 +4549,7 @@ fn main() {
         h.shot("zero-comp-bend-2b-pentagon-side");
         let mut d = Doc::default();
         let l = d.add(Op::Add, Prim::Profile { x: 30.0, y: 10.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(l).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false });
+        d.feature_mut(l).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false, spline: false });
         h.reset(d, "L sketch");
         h.st.camera.frame(Vec3::new(-16.0, 0.0, -16.0), Vec3::new(16.0, 16.0, 16.0));
         h.steps(2);

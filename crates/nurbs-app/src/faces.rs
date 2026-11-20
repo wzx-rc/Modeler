@@ -272,16 +272,14 @@ impl AppState {
     /// (a cut corner by the middle of its cut).
     pub fn vertices(&self) -> Vec<Vec3> {
         let mut out = self.part_vertices();
-        for f in self.doc.features.iter().filter(|f| f.visible) {
-            let (Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { continue };
-            let m = f.matrix();
-            let cuts = pr.cuts(*x, *z);
-            for (i, q) in pr.scaled(*x, *z).iter().enumerate() {
-                if pr.smooth.get(i).copied().unwrap_or(false) && !(pr.open && (i == 0 || i + 1 == pr.points.len())) {
-                    continue;
+        // a curve's points, all of them (20 nov.: moved with the gizmo; a
+        // corner cut at its cut's middle)
+        for f in self.doc.features.iter().filter(|f| f.visible && f.is_path() && f.shape_bool.is_none()) {
+            let Some(pr) = &f.profile else { continue };
+            for i in 0..pr.points.len() {
+                if let Some(q) = crate::surfaces::path_point_pos(f, i) {
+                    out.push(q.as_vec3());
                 }
-                let q = cuts[i].map(|c| c.m).unwrap_or(*q);
-                out.push(m.transform_point3(DVec3::new(q[0], 0.0, q[1])).as_vec3());
             }
         }
         out
@@ -734,7 +732,7 @@ impl AppState {
         let (ro, rd) = self.ray(p);
         let Some(t) = closest_on_line(line.0, line.1, ro, rd) else { return };
         self.begin_live(f.kind_label());
-        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![], carried: Default::default(), pivot: line.0, custom: false, keep: vec![], cage: None });
+        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![], carried: Default::default(), pivot: line.0, custom: false, keep: vec![], cage: None, pts: vec![] });
     }
 
     pub(crate) fn update_push_drag(&mut self, d: &Drag, p: [f32; 2]) {
@@ -821,6 +819,10 @@ impl AppState {
     pub fn profile_corner(&self, v: DVec3) -> Option<(FeatureId, usize)> {
         for f in self.doc.features.iter().filter(|f| f.visible) {
             let (Prim::Profile { x, z, .. } | Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { continue };
+            // a spline's points are not cut
+            if pr.spline {
+                continue;
+            }
             let l = f.matrix().inverse().transform_point3(v);
             let h = f.prim.height();
             if !(l.y.abs() < 1e-3 || (l.y.abs() - h).abs() < 1e-3) {
@@ -990,6 +992,10 @@ impl AppState {
         if let Some(t) = self.selected_tweak().and_then(|f| f.tweak.as_ref()) {
             return Some(t.at() + t.delta);
         }
+        // curve points: their middle
+        if self.picked_path_points().is_some() {
+            return Some(self.vert_sel.iter().copied().sum::<DVec3>() / self.vert_sel.len() as f64);
+        }
         let comps = self.picked_comps();
         // a vertex that is gone (a sketch corner just cut): no gizmo
         if let [Comp::Vertex(v)] = comps.as_slice() {
@@ -1040,6 +1046,13 @@ impl AppState {
         if !matches!(h, Handle::Axis(_) | Handle::Plane(_) | Handle::Free | Handle::Scale(_) | Handle::ScaleAll | Handle::Cage(_)) {
             return;
         }
+        // curve points: moved in their plane, not a step on the part
+        if self.selected_tweak().is_none() {
+            if let Some(pts) = self.picked_path_points() {
+                self.begin_path_points_drag(h, p, pts);
+                return;
+            }
+        }
         let cage = if matches!(h, Handle::Cage(_)) { self.cage() } else { None };
         let Some(pivot) = self.pivot() else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
@@ -1084,7 +1097,7 @@ impl AppState {
             }
         };
         let Some(f) = self.doc.feature(id).cloned() else { return };
-        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried, pivot, custom, keep: vec![], cage });
+        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried, pivot, custom, keep: vec![], cage, pts: vec![] });
         // the move step now selected: the pivot put by hand goes on with it
         if custom {
             self.custom_pivot = Some((self.pivot_key(), pivot));

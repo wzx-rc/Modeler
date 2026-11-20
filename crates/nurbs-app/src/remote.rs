@@ -465,7 +465,7 @@ fn apply_spec(spec: &Value, base: Option<&Feature>) -> Result<(Op, Prim, DVec3, 
             origin += rot * DVec3::new(cx, 0.0, cz);
             let points: Vec<[f64; 2]> = pts.iter().map(|q| [(q[0] - cx) / sx, (q[1] - cz) / sz]).collect();
             let corner = if corner.iter().any(|c| *c != 0.0) { corner } else { vec![] };
-            let profile = Profile { points, smooth: vec![false; n], corner, tension: vec![], open: false };
+            let profile = Profile { points, smooth: vec![false; n], corner, tension: vec![], open: false, spline: false };
             Ok((op, Prim::Profile { x: sx, y: height, z: sz }, origin, rot, Some(profile)))
         }
         k => Err(format!("kind {k}: cube, cylinder or sketch")),
@@ -628,6 +628,10 @@ fn primary_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
             sheet: None,
             curve: None,
             shape_bool: None,
+            fill: false,
+            revolve: None,
+            loft: None,
+            form: None,
         };
         let mut v = spec_of(&f);
         if let Some(o) = v.as_object_mut() {

@@ -205,7 +205,7 @@ pub struct OutlineRead {
 
 impl OutlineRead {
     pub fn profile(&self) -> Profile {
-        Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![self.r; 4], tension: vec![], open: false }
+        Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![self.r; 4], tension: vec![], open: false, spline: false }
     }
 }
 
@@ -275,7 +275,7 @@ pub fn primary_step(p: &Primaries, s: &Primary) -> Option<PrimaryRead> {
     let n = points.len();
     // the corners read rounded (> 0, a radius) or chamfered (< 0)
     let corner = if s.corner.iter().any(|c| *c != 0.0) { s.corner.iter().copied().take(n).collect() } else { vec![] };
-    let profile = Profile { points, smooth: vec![false; n], corner, tension: vec![], open: false };
+    let profile = Profile { points, smooth: vec![false; n], corner, tension: vec![], open: false, spline: false };
     Some(PrimaryRead { prim: Prim::Profile { x: size.x, y: h, z: size.y }, profile: Some(profile), origin: p.at(centre, s.back), rot })
 }
 

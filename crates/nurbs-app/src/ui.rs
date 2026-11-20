@@ -1174,7 +1174,7 @@ enum OpPop {
 }
 
 fn op_pop(st: &AppState) -> Option<OpPop> {
-    if (st.tool == Tool::Create(PrimKind::Surface) || (st.tool == Tool::Slot && st.slot_draw.is_none())) && st.creation.is_none() {
+    if (st.tool == Tool::Create(PrimKind::Surface) || st.tool == Tool::Create(PrimKind::Path) || (st.tool == Tool::Slot && st.slot_draw.is_none())) && st.creation.is_none() {
         return Some(OpPop::Tool);
     }
     if st.creation.is_some() || st.sketch.is_some() || st.push.is_some() || st.curve_pull.is_some() || st.tool != Tool::Select {
@@ -1191,11 +1191,12 @@ fn op_pop(st: &AppState) -> Option<OpPop> {
             None
         };
     }
-    if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {
+    // two curves or more: a 2D boolean (closed) or a loft
+    if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.feature(*id).map(|f| f.is_path()).unwrap_or(false)) {
         return Some(OpPop::Curves);
     }
     let f = st.single()?;
-    Some(if !f.is_solid() || f.is_path() { OpPop::Step(f.id) } else { OpPop::Shape(f.id) })
+    Some(if !f.is_solid() || f.is_path() || f.loft.is_some() { OpPop::Step(f.id) } else { OpPop::Shape(f.id) })
 }
 
 /// Where the worked component is on screen: the box round its points.
@@ -1334,21 +1335,27 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                             st.selection = vec![b.0];
                         }
                     }
-                    if f.shape_bool.is_some() {
+                    if f.loft.is_some() {
+                        loft_card(ui, st, &f);
+                    } else if f.shape_bool.is_some() {
                         bool_card(ui, st, &f);
+                        curve_make_card(ui, st, &f);
                     } else if f.push.is_some() {
                         push_card(ui, st);
                     } else if f.tweak.is_some() {
                         tweak_card(ui, st, id);
                     } else if f.curve.is_some() {
                         curve_card(ui, st, &f);
+                        curve_make_card(ui, st, &f);
                     } else if f.is_path() {
                         path_card(ui, st, &f);
+                        curve_make_card(ui, st, &f);
                     } else {
                         round_card(ui, st);
                     }
                 }
                 OpPop::Tool if st.tool == Tool::Slot => slot_options(ui, st),
+                OpPop::Tool if st.tool == Tool::Create(PrimKind::Path) => path_options(ui, st),
                 OpPop::Tool => surface_options(ui, st),
                 OpPop::Shape(id) => {
                     let Some(f) = st.doc.feature(id).cloned() else { return };
@@ -1561,8 +1568,8 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 5] = [
         ("PRIMITIVES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }))),
         ("SHAPES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Profile { .. }))),
-        ("CURVES", Box::new(|f: &Feature| f.is_path())),
-        ("SURFACES", Box::new(|f: &Feature| f.is_sheet())),
+        ("CURVES", Box::new(|f: &Feature| f.is_path() && !f.fill && f.revolve.is_none())),
+        ("SURFACES", Box::new(|f: &Feature| f.is_sheet() || f.fill || f.revolve.is_some() || f.loft.is_some())),
         ("OPERATIONS", Box::new(|_: &Feature| false)),
     ];
     let focus = st.outline_element();
@@ -2271,11 +2278,140 @@ fn combine_card(ui: &mut Ui, st: &mut AppState) {
     let n = st.selection.len();
     let first = st.selection.first().and_then(|id| st.doc.feature(*id)).map(|f| f.name.clone()).unwrap_or_default();
     ui.label(egui::RichText::new(format!("{n} curves")).font(semibold(14.0)).color(TEXT()));
-    section(ui, "Combine");
-    if let Some(op) = bool_tiles(ui, None) {
-        st.make_curve_bool(op);
+    let closed = st.selection.iter().filter(|id| st.doc.is_closed_curve(**id)).count();
+    if closed == n {
+        section(ui, "Combine");
+        if let Some(op) = bool_tiles(ui, None) {
+            st.make_curve_bool(op);
+        }
+        ui.label(egui::RichText::new(format!("Base: {first}")).font(regular(12.0)).color(TEXT2()));
     }
-    ui.label(egui::RichText::new(format!("Base: {first}")).font(regular(12.0)).color(TEXT2()));
+    // a loft through them, in the order picked (20 nov.)
+    section(ui, "Loft");
+    if closed != 0 && closed != n {
+        ui.label(egui::RichText::new("A loft's curves are all closed or all open").font(regular(12.0)).color(TEXT2()));
+        return;
+    }
+    let what = if closed == n { "a solid (Add / Carve: the top bar)" } else { "a surface" };
+    let r = ui.add_sized(vec2(ui.available_width(), 30.0), egui::Button::new(egui::RichText::new("Loft").font(semibold(13.0)).color(on_accent())).fill(PATH).corner_radius(15.0));
+    if r.on_hover_text(format!("A surface through the curves in the order picked: {what}")).clicked() {
+        st.make_loft();
+    }
+    ui.label(egui::RichText::new(format!("Through {n} curves in the order picked: {what}")).font(regular(12.0)).color(TEXT2()));
+}
+
+/// The Path tool's options: straight sides or a smooth curve through the
+/// points (20 nov.: "créer proprement une courbe").
+fn path_options(ui: &mut Ui, st: &mut AppState) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Path").font(semibold(14.0)).color(TEXT()));
+        chip_label(ui, "Tool", RAISED(), LABEL());
+    });
+    ui.add_space(6.0);
+    let items = [(false, "LINEAR", PATH), (true, "CURVE", PATH)];
+    if let Some(c) = segmented(ui, &items, st.surface_curve, 28.0) {
+        st.surface_curve = c;
+    }
+    let tip = if st.surface_curve { "A smooth curve through the points, exact · Shift + click a point placed: sharp / smooth" } else { "Straight sides · Ctrl + drag a point placed: its fillet" };
+    ui.label(egui::RichText::new(tip).font(regular(12.0)).color(TEXT2()));
+}
+
+/// What a curve makes (20 nov.): its line straight or the spline through
+/// its points; nothing, a flat face (Fill), or a turn round an axis in its
+/// plane (Revolve: its angle, the axis along its X or Z, at its box's
+/// min side, middle or max side).
+fn curve_make_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    use crate::surfaces::CurveMake;
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let id = f.id;
+    if f.curve.is_none() && f.shape_bool.is_none() {
+        if let Some(pr) = &f.profile {
+            section(ui, "Line");
+            let items = [(false, "Linear", PATH), (true, "Curve", PATH)];
+            if let Some(c) = segmented(ui, &items, pr.spline, 36.0) {
+                st.set_spline(id, c);
+            }
+        }
+    }
+    section(ui, "Surface");
+    let now = if f.revolve.is_some() {
+        CurveMake::Revolve
+    } else if f.fill {
+        CurveMake::Fill
+    } else {
+        CurveMake::Nothing
+    };
+    let items = [(CurveMake::Nothing, "None", PATH), (CurveMake::Fill, "Fill", PATH), (CurveMake::Revolve, "Revolve", PATH)];
+    if let Some(k) = segmented(ui, &items, now, 36.0) {
+        if k != now {
+            st.set_curve_make(id, k);
+        }
+    }
+    if let Some(r) = f.revolve {
+        let mut a = r.angle as f32;
+        let (ch, start) = slider_row(ui, "Angle", &mut a, 1.0..=360.0, 1.0, "°");
+        if ch {
+            st.set_revolve(id, nurbs_kernel::Revolve { angle: (a as f64).clamp(1.0, 360.0), ..r }, "Revolve angle", start);
+        }
+        let axes = [(false, "Axis Z", PATH), (true, "Axis X", PATH)];
+        if let Some(x) = segmented(ui, &axes, r.along_x, 32.0) {
+            st.set_revolve(id, nurbs_kernel::Revolve { along_x: x, ..r }, "Revolve axis", true);
+            st.end_live();
+        }
+        let aligns = [(-1i8, "Min", PATH), (0, "Center", PATH), (1, "Max", PATH)];
+        if let Some(al) = segmented(ui, &aligns, r.align, 32.0) {
+            st.set_revolve(id, nurbs_kernel::Revolve { align: al, ..r }, "Revolve align", true);
+            st.end_live();
+        }
+        let solid = st.doc.makes(f) == nurbs_kernel::Makes::Solid;
+        let what = if solid { format!("A solid · {} (the top bar)", f.op.label()) } else { "A surface: an open curve whose ends are not both on the axis".to_string() };
+        ui.label(egui::RichText::new(what).font(regular(12.0)).color(TEXT2()));
+    } else if f.fill {
+        ui.label(egui::RichText::new("A flat face inside the curve, no thickness").font(regular(12.0)).color(TEXT2()));
+    }
+    if let Some(e) = st.feature_error(f) {
+        ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
+    }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+        st.end_live();
+    }
+}
+
+/// A loft: its curves in order (a click selects one, ↑ moves it earlier),
+/// smooth or ruled, what the kernel said.
+fn loft_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    let Some(l) = f.loft.clone() else { return };
+    let id = f.id;
+    section(ui, "Loft");
+    let items = [(false, "Smooth", PATH), (true, "Ruled", PATH)];
+    if let Some(r) = segmented(ui, &items, l.ruled, 36.0) {
+        if r != l.ruled {
+            st.set_loft_ruled(id, r);
+        }
+    }
+    let solid = st.doc.makes(f) == nurbs_kernel::Makes::Solid;
+    let what = if solid { format!("A solid · {} (the top bar)", f.op.label()) } else { "A surface (open curves)".to_string() };
+    ui.label(egui::RichText::new(what).font(regular(12.0)).color(TEXT2()));
+    section(ui, "Curves");
+    for (k, o) in l.sections.iter().enumerate() {
+        let Some(g) = st.doc.feature(*o).cloned() else { continue };
+        ui.horizontal(|ui| {
+            let r = ui.add(egui::Label::new(egui::RichText::new(format!("{}  {}", k + 1, g.name)).font(medium(13.0)).color(TEXT())).sense(Sense::click()));
+            if r.on_hover_text("Select this curve: its settings, its points (Vertex mode)").clicked() {
+                st.selection = vec![*o];
+            }
+            if k > 0 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(egui::Label::new(egui::RichText::new("↑").font(medium(14.0)).color(LABEL())).sense(Sense::click())).on_hover_text("Earlier in the loft").clicked() {
+                        st.loft_up(id, k);
+                    }
+                });
+            }
+        });
+    }
+    if let Some(e) = st.feature_error(f) {
+        ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
+    }
 }
 
 /// A 2D boolean: its operation, its curves (a click: that curve's own
@@ -2531,10 +2667,26 @@ fn tension_rows(ui: &mut Ui, cur: f64, circle: f64) -> Option<(f64, bool)> {
 /// Vertices picked: the arrows move them; at a corner of a thin plate, a
 /// radius rounds it in its plane (a fillet on the short edge there).
 fn vertex_card(ui: &mut Ui, st: &mut AppState) {
+    // a curve's points (20 nov.): moved by the gizmo in its plane; a
+    // spline's made sharp or smooth
+    if let Some(pts) = st.picked_path_points() {
+        let n = pts.len();
+        section(ui, if n > 1 { "Curve points" } else { "Curve point" });
+        let spline: Vec<(FeatureId, usize, bool)> = pts.iter().filter_map(|(id, i)| st.doc.feature(*id).and_then(|f| f.profile.as_ref()).filter(|p| p.spline).map(|p| (*id, *i, !p.smooth.get(*i).copied().unwrap_or(true)))).collect();
+        if !spline.is_empty() {
+            let sharp = spline.iter().all(|x| x.2);
+            let items = [(false, "Smooth", PATH), (true, "Sharp", PATH)];
+            if let Some(s) = segmented(ui, &items, sharp, 32.0) {
+                st.set_points_sharp(&pts, s);
+            }
+        }
+        ui.label(egui::RichText::new("W: the arrows move them in the curve's plane").font(regular(12.0)).color(TEXT2()));
+    }
     // a sketch's corner: cut in its outline (exact arc or chamfer), the
     // whole height follows
     if let Some((size, chamfer, max)) = st.profile_corner_state() {
         let n = st.picked_profile_corners().len();
+        // (fall through to the part's corners below otherwise)
         let on_path = st.picked_profile_corners().iter().all(|(id, _)| st.doc.feature(*id).map(|f| f.is_path()).unwrap_or(false));
         section(ui, match (on_path, n > 1) {
             (true, true) => "Path corners",
@@ -2572,6 +2724,10 @@ fn vertex_card(ui: &mut Ui, st: &mut AppState) {
         if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
             st.end_live();
         }
+        return;
+    }
+    // curve points only: nothing to round on the part
+    if st.picked_path_points().is_some() {
         return;
     }
     let corners = st.vert_sel.iter().filter(|v| !st.vertex_edges(**v).is_empty()).count();

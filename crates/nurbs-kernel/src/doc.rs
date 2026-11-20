@@ -154,6 +154,13 @@ pub struct Profile {
     /// to the first, and its two ends are plain points.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub open: bool,
+    /// A curve through its points (Romain 20 nov., 13 h 05: "créer
+    /// proprement une courbe… fermée, et que ça puisse faire une surface"):
+    /// the uniform Catmull-Rom of SplitIt's spec (the Surface tool's CURVE),
+    /// each span an exact cubic (`spline_spans`); `smooth[i]` false makes
+    /// point i sharp (the reflected control there). Corners are not cut.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spline: bool,
 }
 
 /// A corner of an outline cut by a fillet (an arc) or a chamfer (a straight
@@ -312,14 +319,27 @@ impl Profile {
         self.points.iter().map(|p| [p[0] * w, p[1] * d]).collect()
     }
     /// Its pieces, in a box of `w` × `d`, curves sampled (as the kernel
-    /// builds them: a curve between the middles of the two sides).
+    /// builds them: a curve between the middles of the two sides; a
+    /// spline's spans).
     pub fn pieces(&self, w: f64, d: f64) -> Vec<Piece> {
-        pieces_t(&self.scaled(w, d), &self.smooth, &self.corner, &self.tension, self.open)
+        let p = self.scaled(w, d);
+        if self.spline {
+            return spline_pieces(&p, &self.smooth, self.open);
+        }
+        pieces_t(&p, &self.smooth, &self.corner, &self.tension, self.open)
     }
-    /// Each point's cut, in a box of `w` × `d`.
+    /// Each point's cut, in a box of `w` × `d` (none on a spline).
     pub fn cuts(&self, w: f64, d: f64) -> Vec<Option<Cut>> {
         let p = self.scaled(w, d);
+        if self.spline {
+            return vec![None; p.len()];
+        }
         (0..p.len()).map(|i| corner_cut_t(&p, &self.smooth, &self.corner, &self.tension, i, self.open)).collect()
+    }
+    /// A spline's spans in a box of `w` × `d`: span i (point i to the next)
+    /// as its two inner Bezier controls.
+    pub fn spans(&self, w: f64, d: f64) -> Vec<([f64; 2], [f64; 2])> {
+        spline_spans(&self.scaled(w, d), &self.smooth, self.open)
     }
     /// The outline as one polyline (closed: last point = first).
     pub fn polyline(&self, w: f64, d: f64) -> Vec<[f64; 2]> {
@@ -342,11 +362,61 @@ impl Profile {
     /// Mirrored across its local Z axis (x → −x): with the frame turned
     /// half round its Z, the outline stays in place.
     pub fn mirrored(&self) -> Profile {
-        Profile { points: self.points.iter().map(|p| [-p[0], p[1]]).collect(), smooth: self.smooth.clone(), corner: self.corner.clone(), tension: self.tension.clone(), open: self.open }
+        Profile { points: self.points.iter().map(|p| [-p[0], p[1]]).collect(), smooth: self.smooth.clone(), corner: self.corner.clone(), tension: self.tension.clone(), open: self.open, spline: self.spline }
     }
     pub fn flipped(&self) -> Profile {
-        Profile { points: self.points.iter().map(|p| [p[0], -p[1]]).collect(), smooth: self.smooth.clone(), corner: self.corner.clone(), tension: self.tension.clone(), open: self.open }
+        Profile { points: self.points.iter().map(|p| [p[0], -p[1]]).collect(), smooth: self.smooth.clone(), corner: self.corner.clone(), tension: self.tension.clone(), open: self.open, spline: self.spline }
     }
+}
+
+/// The uniform Catmull-Rom through `p` (`Profile::spline`, SplitIt's
+/// spec, as the app's `catmull_rom`): for span i (point i to point i + 1)
+/// its cubic Bezier's two inner controls, P1 + (P2 − P0) / 6 and
+/// P2 − (P3 − P1) / 6; at a sharp point (`smooth[i]` false) and an open
+/// curve's ends the reflected control (P0 = 2 P1 − P2), so the curve leaves
+/// it along the chord.
+pub fn spline_spans(p: &[[f64; 2]], smooth: &[bool], open: bool) -> Vec<([f64; 2], [f64; 2])> {
+    let n = p.len();
+    if n < 2 || (!open && n < 3) {
+        return vec![];
+    }
+    let sharp = |i: usize| !smooth.get(i).copied().unwrap_or(true);
+    let spans = if open { n - 1 } else { n };
+    let (add, sub, mul) = (|a: [f64; 2], b: [f64; 2]| [a[0] + b[0], a[1] + b[1]], |a: [f64; 2], b: [f64; 2]| [a[0] - b[0], a[1] - b[1]], |a: [f64; 2], k: f64| [a[0] * k, a[1] * k]);
+    (0..spans)
+        .map(|i| {
+            let (p1, p2) = (p[i], p[(i + 1) % n]);
+            let mut p0 = if open { p[i.saturating_sub(1)] } else { p[(i + n - 1) % n] };
+            let mut p3 = if open { p[(i + 2).min(n - 1)] } else { p[(i + 2) % n] };
+            if sharp(i) || (open && i == 0) {
+                p0 = sub(mul(p1, 2.0), p2);
+            }
+            if sharp((i + 1) % n) || (open && i + 2 == n) {
+                p3 = sub(mul(p2, 2.0), p1);
+            }
+            (add(p1, mul(sub(p2, p0), 1.0 / 6.0)), sub(p2, mul(sub(p3, p1), 1.0 / 6.0)))
+        })
+        .collect()
+}
+
+/// A cubic Bezier at t.
+pub fn bezier3(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2], t: f64) -> [f64; 2] {
+    let u = 1.0 - t;
+    let (k0, k1, k2, k3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+    [k0 * a[0] + k1 * b[0] + k2 * c[0] + k3 * d[0], k0 * a[1] + k1 * b[1] + k2 * c[1] + k3 * d[1]]
+}
+
+/// A spline's pieces: span i is piece 2 i + 1 (a side), sampled.
+pub fn spline_pieces(p: &[[f64; 2]], smooth: &[bool], open: bool) -> Vec<Piece> {
+    let n = p.len();
+    spline_spans(p, smooth, open)
+        .into_iter()
+        .enumerate()
+        .map(|(i, (c1, c2))| {
+            let (a, d) = (p[i], p[(i + 1) % n]);
+            Piece { id: 2 * i + 1, pts: (0..=24).map(|k| bezier3(a, c1, c2, d, k as f64 / 24.0)).collect() }
+        })
+        .collect()
 }
 
 /// The pieces of a closed outline of points (corners or curve points).
@@ -566,7 +636,7 @@ impl Curve {
     /// The outline in a box of `x` × `z` (the unit square stretched).
     pub fn profile(&self, x: f64, z: f64) -> Profile {
         let square = vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]];
-        let plain = |points: Vec<[f64; 2]>, corner: Vec<f64>| { let n = points.len(); Profile { points, smooth: vec![false; n], corner, tension: vec![], open: false } };
+        let plain = |points: Vec<[f64; 2]>, corner: Vec<f64>| { let n = points.len(); Profile { points, smooth: vec![false; n], corner, tension: vec![], open: false, spline: false } };
         match self.kind {
             CurveKind::Rectangle => plain(square, vec![self.corner; 4]),
             CurveKind::Circle | CurveKind::Ellipse => {
@@ -576,7 +646,7 @@ impl Curve {
                 } else {
                     // an ellipse: four curve points, each a conic quarter
                     // between the sides' middles (a circle's, stretched)
-                    Profile { points: square, smooth: vec![true; 4], corner: vec![], tension: vec![circle_rho(std::f64::consts::FRAC_PI_2); 4], open: false }
+                    Profile { points: square, smooth: vec![true; 4], corner: vec![], tension: vec![circle_rho(std::f64::consts::FRAC_PI_2); 4], open: false, spline: false }
                 }
             }
             CurveKind::Polygon | CurveKind::Star => {
@@ -849,6 +919,85 @@ pub struct Feature {
     /// box, at its place): its outline is the kernel's (`Model.curves`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape_bool: Option<ShapeBool>,
+    /// A closed curve filled with a flat face (Fill; Romain 20 nov.,
+    /// 13 h 05: "une courbe… fermée, et que ça puisse faire une surface"):
+    /// still a curve to edit, its face built beside the part.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fill: bool,
+    /// The curve turned round an axis in its plane (Revolve, 3ds Max's
+    /// Lathe): closed, or open with both ends on the axis, a solid (Add /
+    /// Carve); else a sheet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revolve: Option<Revolve>,
+    /// A loft through curves (`Prim::Path` of their box, in the first
+    /// one's frame, as a 2D boolean): all closed, a solid; else a sheet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loft: Option<Loft>,
+    /// A form sculpted with brushes (Forms; Romain 20 nov., 13 h 05: "le
+    /// feeling… d'un Nomad ou un ZBrush… avec la propriété nurbs"): one
+    /// smooth BSpline surface, its poles in the unit box of `prim`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<Form>,
+}
+
+/// Revolve's settings.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Revolve {
+    /// Degrees (360: a full turn).
+    pub angle: f64,
+    /// The axis along the curve's local X (else its local Z).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub along_x: bool,
+    /// Where the axis lies across the curve's box: −1 its min side, 0 its
+    /// middle, 1 its max side.
+    #[serde(default)]
+    pub align: i8,
+}
+
+impl Default for Revolve {
+    fn default() -> Self {
+        Revolve { angle: 360.0, along_x: false, align: -1 }
+    }
+}
+
+/// Loft's settings: the curves in order (each a Path of the document).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Loft {
+    pub sections: Vec<FeatureId>,
+    /// Straight between the curves (else smooth through them).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ruled: bool,
+}
+
+/// What a form started as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FormKind {
+    Sphere,
+    Cylinder,
+}
+
+/// A sculpted form: a bicubic BSpline surface, periodic round (u, `nu`
+/// columns) and clamped from bottom to top (v, `nv` rows; its first and
+/// last rows each one point: the poles of a sphere, the middles of a
+/// cylinder's ends). `poles[j * nu + i]` in the unit box of its
+/// `Prim::Box` (x and z from −0.5 to 0.5, y from 0 to 1).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Form {
+    pub kind: FormKind,
+    pub nu: usize,
+    pub nv: usize,
+    pub poles: Vec<[f64; 3]>,
+}
+
+/// What the kernel makes of a feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Makes {
+    /// A path: nothing.
+    Nothing,
+    /// A solid (or a step) in the chain of booleans.
+    Solid,
+    /// A surface with no thickness, beside the part.
+    Sheet,
 }
 
 /// A surface's closed outline (straight sides) and the scan points it
@@ -872,7 +1021,28 @@ impl Feature {
     }
     /// A path: a curve with no thickness, nothing for the kernel.
     pub fn is_path(&self) -> bool {
-        matches!(self.prim, Prim::Path { .. }) && self.sheet.is_none()
+        matches!(self.prim, Prim::Path { .. }) && self.sheet.is_none() && self.loft.is_none()
+    }
+    /// The axis a Revolve turns round, in the curve's frame (a point on it
+    /// and its direction, in its plane).
+    pub fn revolve_axis(&self) -> Option<(DVec3, DVec3)> {
+        let r = self.revolve?;
+        let Prim::Path { x, z } = self.prim else { return None };
+        let a = r.align.clamp(-1, 1) as f64 * 0.5;
+        Some(if r.along_x { (DVec3::new(0.0, 0.0, a * z), DVec3::X) } else { (DVec3::new(a * x, 0.0, 0.0), DVec3::Z) })
+    }
+    /// An open curve turned whose two ends lie on the axis (2 % of its
+    /// box across it, at least 0.05 mm): it closes into a solid.
+    pub fn revolve_closes(&self) -> bool {
+        let (Some((o, d)), Some(pr), Prim::Path { x, z }) = (self.revolve_axis(), &self.profile, self.prim) else { return false };
+        if !pr.open || pr.points.len() < 2 {
+            return false;
+        }
+        let p = pr.scaled(x, z);
+        let across = if d.x.abs() > 0.5 { z } else { x };
+        let tol = (across * 0.02).max(0.05);
+        let off = |q: [f64; 2]| if d.x.abs() > 0.5 { (q[1] - o.z).abs() } else { (q[0] - o.x).abs() };
+        off(p[0]) < tol && off(p[p.len() - 1]) < tol
     }
     /// A curve of the Curves set (or a 2D boolean) pulled into a solid
     /// (step 3, 3ds Max's Extrude): a Profile that keeps its curve.
@@ -890,6 +1060,15 @@ impl Feature {
         }
         if self.sheet.is_some() {
             return "Surface";
+        }
+        if self.form.is_some() {
+            return "Form";
+        }
+        if self.loft.is_some() {
+            return "Loft";
+        }
+        if self.revolve.is_some() {
+            return "Revolve";
         }
         if let Some(c) = &self.curve {
             return c.kind.label();
@@ -1077,7 +1256,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -1087,7 +1266,7 @@ impl Doc {
         let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0, only: false };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None });
         id
     }
     /// Adds an inset or extrusion of a face at the end.
@@ -1096,7 +1275,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(push.label());
         let origin = push.face.at;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None });
         id
     }
     /// Adds a move of a face, edge or vertex at the end.
@@ -1105,7 +1284,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(tweak.label());
         let origin = tweak.at();
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None });
         id
     }
     /// Adds a Knife step (its first point) at the end.
@@ -1114,7 +1293,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(name);
         let origin = cut.pts.first().map(|p| p.at).or(cut.remove_faces.first().map(|r| r.at)).or(cut.remove_edges.first().map(|e| e.at)).unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None });
         id
     }
     /// The curves' outlines made again from their settings and boxes (a
@@ -1139,11 +1318,17 @@ impl Doc {
             }
         }
         // a 2D boolean's frame is its first operand's, its box all of its
-        // operands' (its operands come before it; twice for one of another)
+        // operands' (its operands come before it; twice for one of another);
+        // a loft's likewise, its middle half-way up its curves
         for _ in 0..2 {
             for k in 0..self.features.len() {
-                let Some(b) = self.features[k].shape_bool.clone() else { continue };
-                let ops: Vec<&Feature> = b.operands.iter().filter_map(|id| self.feature(*id)).collect();
+                let loft = self.features[k].loft.is_some();
+                let list = match (&self.features[k].shape_bool, &self.features[k].loft) {
+                    (Some(b), _) => b.operands.clone(),
+                    (_, Some(l)) => l.sections.clone(),
+                    _ => continue,
+                };
+                let ops: Vec<&Feature> = list.iter().filter_map(|id| self.feature(*id)).collect();
                 let Some(first) = ops.first() else { continue };
                 // extruded down: turned over round its own Z (its curves
                 // stay where they are)
@@ -1158,7 +1343,7 @@ impl Doc {
                         hi = hi.max(q);
                     }
                 }
-                let mid = first.matrix().transform_point3(DVec3::new((lo.x + hi.x) * 0.5, 0.0, (lo.z + hi.z) * 0.5));
+                let mid = first.matrix().transform_point3(DVec3::new((lo.x + hi.x) * 0.5, if loft { (lo.y + hi.y) * 0.5 } else { 0.0 }, (lo.z + hi.z) * 0.5));
                 let (bx, bz) = ((hi.x - lo.x).max(0.01), (hi.z - lo.z).max(0.01));
                 let prim = match self.features[k].prim {
                     Prim::Profile { y, .. } => Prim::Profile { x: bx, y, z: bz },
@@ -1183,6 +1368,30 @@ impl Doc {
     pub fn is_closed_curve(&self, id: FeatureId) -> bool {
         self.feature(id).map(|f| f.is_path() && (f.shape_bool.is_some() || f.profile.as_ref().map(|p| !p.open && p.points.len() >= 3).unwrap_or(false))).unwrap_or(false)
     }
+    /// What the kernel makes of it: nothing (a path), a solid in the chain
+    /// (primitives, steps, a curve turned closed, a loft of closed curves),
+    /// or a sheet beside the part (a surface, a curve filled, a curve
+    /// turned open, a loft of open curves).
+    pub fn makes(&self, f: &Feature) -> Makes {
+        if f.sheet.is_some() {
+            return Makes::Sheet;
+        }
+        if let Some(l) = &f.loft {
+            let closed = l.sections.len() >= 2 && l.sections.iter().all(|s| self.is_closed_curve(*s));
+            return if closed { Makes::Solid } else { Makes::Sheet };
+        }
+        if f.is_path() {
+            if f.revolve.is_some() {
+                return if self.is_closed_curve(f.id) || f.revolve_closes() { Makes::Solid } else { Makes::Sheet };
+            }
+            return if f.fill { Makes::Sheet } else { Makes::Nothing };
+        }
+        Makes::Solid
+    }
+    /// The loft that takes this curve in (the first, when several).
+    pub fn loft_of(&self, id: FeatureId) -> Option<FeatureId> {
+        self.features.iter().find(|f| f.loft.as_ref().map(|l| l.sections.contains(&id)).unwrap_or(false)).map(|f| f.id)
+    }
     /// "Cube", then "Cube 2", "Cube 3"…
     pub fn fresh_name(&self, base: &str) -> String {
         if !self.features.iter().any(|f| f.name == base) {
@@ -1195,7 +1404,9 @@ impl Doc {
     /// its boolean's list, a boolean left with none goes too.
     pub fn remove(&mut self, ids: &[FeatureId]) {
         let mut out: Vec<FeatureId> = ids.to_vec();
-        for id in self.with_operands(ids) {
+        // (a loft keeps its curves: they are the user's)
+        let booleans: Vec<FeatureId> = ids.iter().copied().filter(|id| self.feature(*id).map(|f| f.loft.is_none()).unwrap_or(false)).collect();
+        for id in self.with_operands(&booleans) {
             let others = self.features.iter().any(|f| !out.contains(&f.id) && f.shape_bool.as_ref().map(|b| b.operands.contains(&id)).unwrap_or(false));
             if !others && !out.contains(&id) {
                 out.push(id);
@@ -1207,8 +1418,11 @@ impl Doc {
                 if let Some(b) = f.shape_bool.as_mut() {
                     b.operands.retain(|o| !out.contains(o));
                 }
+                if let Some(l) = f.loft.as_mut() {
+                    l.sections.retain(|o| !out.contains(o));
+                }
             }
-            let empty: Vec<FeatureId> = self.features.iter().filter(|f| f.shape_bool.as_ref().map(|b| b.operands.is_empty()).unwrap_or(false)).map(|f| f.id).collect();
+            let empty: Vec<FeatureId> = self.features.iter().filter(|f| f.shape_bool.as_ref().map(|b| b.operands.is_empty()).unwrap_or(false) || f.loft.as_ref().map(|l| l.sections.len() < 2).unwrap_or(false)).map(|f| f.id).collect();
             if empty.is_empty() {
                 break;
             }
@@ -1245,6 +1459,13 @@ impl Doc {
                     }
                 }
             }
+            if let Some(l) = f.loft.as_mut() {
+                for o in l.sections.iter_mut() {
+                    if let Some(n) = map.get(o) {
+                        *o = *n;
+                    }
+                }
+            }
         }
         out
     }
@@ -1254,8 +1475,9 @@ impl Doc {
         let mut out: Vec<FeatureId> = ids.to_vec();
         let mut k = 0;
         while k < out.len() {
-            if let Some(b) = self.feature(out[k]).and_then(|f| f.shape_bool.as_ref()) {
-                for o in &b.operands {
+            if let Some(f) = self.feature(out[k]) {
+                let ops = f.shape_bool.iter().flat_map(|b| b.operands.iter()).chain(f.loft.iter().flat_map(|l| l.sections.iter()));
+                for o in ops {
                     if !out.contains(o) {
                         out.push(*o);
                     }
