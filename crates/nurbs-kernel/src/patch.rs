@@ -47,14 +47,129 @@ impl PatchState {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Patch {
-    /// The 16 control points in the mesh's unit box (as its points):
-    /// `cv[j * 4 + i]`, i along u, j along v.
+    /// The control points in the mesh's unit box (as its points). One
+    /// patch (a surface from a path): its 16, `cv[j * 4 + i]`, i along u, j
+    /// along v. Several (a closed object, `quads`): every patch's, those on
+    /// a seam shared.
     pub cv: Vec<[f32; 3]>,
     pub state: PatchState,
     /// Each point of the Poly layer on the surface: (u, v, a, b, h), its
     /// place and its offset a Tu + b Tv + h N there (mm).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bind: Vec<[f32; 5]>,
+    /// A closed object (a cube's 6 patches, a cylinder's 6): each patch's 16
+    /// control points as indices into `cv`, `[j * 4 + i]`; empty: one patch,
+    /// `cv` itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quads: Vec<[u32; 16]>,
+    /// The patch each point of `bind` lies on (empty: all on the first).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<u16>,
+    /// The Sculpt state's details, kept as offsets over the Poly layer made
+    /// smooth (so they ride on the contour and on the Poly layer's edits).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sculpt: Option<SculptLayer>,
+    /// In the Sculpt state: the Poly layer set aside (the mesh then holds
+    /// the clay).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep: Option<PolyKeep>,
+}
+
+/// The Sculpt state's details (Romain, 20 nov., 23 h: "faire aussi le lien
+/// avec le Sculpt mode"): the clay is the Poly layer subdivided `levels`
+/// times (Catmull-Clark: the base), each of its points moved by `disp`, in
+/// the base's own frame there (along its first edge, across, its normal; mm).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SculptLayer {
+    pub levels: u32,
+    /// The Poly layer's faces it was made on (`topo_key`): the same, the
+    /// offsets go on as they are; else they are carried over by place.
+    pub topo: u64,
+    pub disp: Vec<[f32; 3]>,
+    /// Where each base point sat on the surface (patch, u, v, a, b, h), to
+    /// carry the offsets over to a new base after the Poly layer's faces
+    /// changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_bind: Vec<[f32; 6]>,
+    /// The same offsets in the surface's frame at `base_bind` (Tu, Tv, N),
+    /// for that carrying over.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disp_s: Vec<[f32; 3]>,
+}
+
+/// Each point's nearest among others (a uniform grid of cells; brute force
+/// past a few rings): the index into `from` for each of `to`.
+pub fn nearest_of(from: &[Vec3], to: &[Vec3]) -> Vec<usize> {
+    if from.is_empty() {
+        return vec![0; to.len()];
+    }
+    let lo = from.iter().fold(Vec3::splat(f32::MAX), |a, p| a.min(*p));
+    let hi = from.iter().fold(Vec3::splat(f32::MIN), |a, p| a.max(*p));
+    let ext = (hi - lo).max(Vec3::splat(1e-3));
+    let cell = ((ext.x * ext.y * ext.z) / from.len() as f32).cbrt().max(ext.max_element() / 256.0) * 1.5;
+    let key = |p: Vec3| {
+        let q = (p - lo) / cell;
+        (q.x.floor() as i32, q.y.floor() as i32, q.z.floor() as i32)
+    };
+    let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+    for (i, p) in from.iter().enumerate() {
+        grid.entry(key(*p)).or_default().push(i as u32);
+    }
+    to.iter()
+        .map(|p| {
+            let c = key(*p);
+            let mut best: Option<(f32, usize)> = None;
+            for ring in 0..4i32 {
+                for dx in -ring..=ring {
+                    for dy in -ring..=ring {
+                        for dz in -ring..=ring {
+                            if dx.abs().max(dy.abs()).max(dz.abs()) != ring {
+                                continue;
+                            }
+                            if let Some(l) = grid.get(&(c.0 + dx, c.1 + dy, c.2 + dz)) {
+                                for &j in l {
+                                    let d = from[j as usize].distance_squared(*p);
+                                    if best.map(|b| d < b.0).unwrap_or(true) {
+                                        best = Some((d, j as usize));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // found within this ring: nothing nearer past the next one
+                if let Some((d, _)) = best {
+                    if d.sqrt() <= ring as f32 * cell {
+                        break;
+                    }
+                }
+            }
+            match best {
+                Some((_, j)) => j,
+                None => from.iter().enumerate().min_by(|a, b| a.1.distance_squared(*p).total_cmp(&b.1.distance_squared(*p))).map(|x| x.0).unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
+/// The Poly layer while the mesh holds the clay (Sculpt state): its points
+/// (unit box, kept in step by `remap`), faces, binding.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PolyKeep {
+    pub verts: Vec<[f32; 3]>,
+    pub faces: Vec<Vec<u32>>,
+    pub bind: Vec<[f32; 5]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<u16>,
+}
+
+/// A key of a polygon list (the Sculpt layer's base is the same while it
+/// holds).
+pub fn topo_key(faces: &[Vec<u32>]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    faces.hash(&mut h);
+    h.finish()
 }
 
 /// The contour's control points in order round the patch: the corners are
@@ -97,39 +212,153 @@ impl Patch {
             cv[at(k, 3)] = c[3].lerp(c[2], t);
             cv[at(0, k)] = c[0].lerp(c[3], t);
         }
-        let mut p = Patch { cv: cv.iter().map(|v| v.to_array()).collect(), state: PatchState::Nurbs, bind: vec![] };
+        let mut p = Patch { cv: cv.iter().map(|v| v.to_array()).collect(), state: PatchState::Nurbs, bind: vec![], quads: vec![], on: vec![], sculpt: None, keep: None };
         p.fill_inside();
         p
     }
 
-    /// The 4 inner control points made from the contour: the bilinearly
-    /// blended Coons patch of its four cubic sides, a bicubic itself.
-    pub fn fill_inside(&mut self) {
-        let p = |i: usize, j: usize| Vec3::from(self.cv[j * 4 + i]);
-        let mut inner = vec![];
-        for j in 1..3 {
-            for i in 1..3 {
-                let (s, t) = (i as f32 / 3.0, j as f32 / 3.0);
-                let q = p(i, 0) * (1.0 - t) + p(i, 3) * t + p(0, j) * (1.0 - s) + p(3, j) * s
-                    - (p(0, 0) * (1.0 - s) * (1.0 - t) + p(3, 0) * s * (1.0 - t) + p(0, 3) * (1.0 - s) * t + p(3, 3) * s * t);
-                inner.push((j * 4 + i, q));
+    /// A closed object of several patches, each given by its 16 control
+    /// points (mm or unit, as `cv`): the points on seams (the same place)
+    /// shared, so a contour point moved moves every patch that holds it.
+    pub fn closed(patches: &[[Vec3; 16]]) -> Patch {
+        let mut cv: Vec<Vec3> = vec![];
+        let mut quads = vec![];
+        let scale = patches.iter().flat_map(|q| q.iter()).fold(0.0f32, |a, v| a.max(v.abs().max_element())).max(1e-6);
+        let eps = scale * 1e-5;
+        for q in patches {
+            let mut idx = [0u32; 16];
+            for k in 0..16 {
+                let inner = matches!(k, 5 | 6 | 9 | 10);
+                let found = if inner { None } else { cv.iter().position(|c| c.distance(q[k]) < eps) };
+                idx[k] = match found {
+                    Some(i) => i as u32,
+                    None => {
+                        cv.push(q[k]);
+                        (cv.len() - 1) as u32
+                    }
+                };
             }
+            quads.push(idx);
         }
-        for (k, q) in inner {
-            self.cv[k] = q.to_array();
+        let mut p = Patch { cv: cv.iter().map(|v| v.to_array()).collect(), state: PatchState::Nurbs, bind: vec![], quads, on: vec![], sculpt: None, keep: None };
+        p.fill_inside();
+        p
+    }
+
+    /// Each patch's 16 control points (indices into `cv`).
+    pub fn patches(&self) -> Vec<[usize; 16]> {
+        if self.quads.is_empty() {
+            vec![std::array::from_fn(|k| k)]
+        } else {
+            self.quads.iter().map(|q| q.map(|k| k as usize)).collect()
         }
     }
 
-    /// The control points in mm (the feature's frame), for these sizes.
+    pub fn count(&self) -> usize {
+        self.quads.len().max(1)
+    }
+
+    /// The patch a point of the binding lies on.
+    pub fn on_of(&self, i: usize) -> usize {
+        self.on.get(i).copied().unwrap_or(0) as usize
+    }
+
+    /// The contour's control points (the ones edited: every patch's
+    /// border, each once), in order round each patch.
+    pub fn contour(&self) -> Vec<usize> {
+        let mut out = vec![];
+        for q in self.patches() {
+            for k in CONTOUR {
+                if !out.contains(&q[k]) {
+                    out.push(q[k]);
+                }
+            }
+        }
+        out
+    }
+
+    /// A control point at a corner of a patch (drawn as a square; moved, it
+    /// takes the tangent points next to it).
+    pub fn corner(&self, cv: usize) -> bool {
+        self.patches().iter().any(|q| [0, 3, 12, 15].iter().any(|k| q[*k] == cv))
+    }
+
+    /// The tangent points a corner carries (every patch that holds it).
+    pub fn handles(&self, cv: usize) -> Vec<usize> {
+        let mut out = vec![];
+        for q in self.patches() {
+            for (c, t) in [(0, [1, 4]), (3, [2, 7]), (15, [14, 11]), (12, [13, 8])] {
+                if q[c] == cv {
+                    for k in t {
+                        if !out.contains(&q[k]) {
+                            out.push(q[k]);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The pairs (corner, tangent point) of every patch's hull (the lines
+    /// drawn in Vertex mode), each once.
+    pub fn hull(&self) -> Vec<(usize, usize)> {
+        let mut out: Vec<(usize, usize)> = vec![];
+        for q in self.patches() {
+            for (c, t) in [(0, 1), (3, 2), (3, 7), (15, 11), (15, 14), (12, 13), (12, 8), (0, 4)] {
+                let e = (q[c], q[t]);
+                if !out.contains(&e) {
+                    out.push(e);
+                }
+            }
+        }
+        out
+    }
+
+    /// The 4 inner control points of each patch made from its contour: the
+    /// bilinearly blended Coons patch of its four cubic sides, a bicubic
+    /// itself.
+    pub fn fill_inside(&mut self) {
+        for q in self.patches() {
+            let p = |i: usize, j: usize| Vec3::from(self.cv[q[j * 4 + i]]);
+            let mut inner = vec![];
+            for j in 1..3 {
+                for i in 1..3 {
+                    let (s, t) = (i as f32 / 3.0, j as f32 / 3.0);
+                    let v = p(i, 0) * (1.0 - t) + p(i, 3) * t + p(0, j) * (1.0 - s) + p(3, j) * s
+                        - (p(0, 0) * (1.0 - s) * (1.0 - t) + p(3, 0) * s * (1.0 - t) + p(0, 3) * (1.0 - s) * t + p(3, 3) * s * t);
+                    inner.push((q[j * 4 + i], v));
+                }
+            }
+            for (k, v) in inner {
+                self.cv[k] = v.to_array();
+            }
+        }
+    }
+
+    /// The first patch's control points in mm (the feature's frame), for
+    /// these sizes.
     pub fn cvs(&self, size: Vec3) -> [Vec3; 16] {
-        std::array::from_fn(|k| Vec3::from(self.cv[k]) * size)
+        let q = self.patches()[0];
+        std::array::from_fn(|k| Vec3::from(self.cv[q[k]]) * size)
+    }
+
+    /// Every patch's control points in mm, for these sizes.
+    pub fn surfaces(&self, size: Vec3) -> Vec<[Vec3; 16]> {
+        self.patches().iter().map(|q| std::array::from_fn(|k| Vec3::from(self.cv[q[k]]) * size)).collect()
     }
 
     /// The unit box fitted again (`MeshData::renormalized`): the control
-    /// points stay where they are.
+    /// points (and the Poly layer set aside in the Sculpt state) stay where
+    /// they are.
     pub fn remap(&mut self, old: Vec3, base: Vec3, new: Vec3) {
         for c in self.cv.iter_mut() {
             *c = ((Vec3::from(*c) * old - base) / new).to_array();
+        }
+        if let Some(k) = self.keep.as_mut() {
+            for c in k.verts.iter_mut() {
+                *c = ((Vec3::from(*c) * old - base) / new).to_array();
+            }
         }
     }
 
@@ -162,6 +391,20 @@ pub fn frame(su: Vec3, sv: Vec3) -> (Vec3, Vec3, Vec3) {
     (tu, n.cross(tu), n)
 }
 
+/// The point and its frame at (u, v); where the patch folds flat (a disc's
+/// four corners, where two arcs meet tangent) the frame is read a hair
+/// inside, towards the middle.
+pub fn eval_frame(cv: &[Vec3; 16], u: f32, v: f32) -> (Vec3, (Vec3, Vec3, Vec3)) {
+    let (s, su, sv) = eval(cv, u, v);
+    let c = su.cross(sv);
+    if c.length() > 1e-6 * (su.length() * sv.length() + 1e-12) {
+        return (s, frame(su, sv));
+    }
+    let (u2, v2) = (u + (0.5 - u).signum() * 2e-3, v + (0.5 - v).signum() * 2e-3);
+    let (_, su2, sv2) = eval(cv, u2, v2);
+    (s, frame(su2, sv2))
+}
+
 /// An iso grid of nu × nv quads on the surface (mm), each counter-clockwise
 /// round Su × Sv, with each point's (u, v).
 pub fn grid(cv: &[Vec3; 16], nu: usize, nv: usize) -> (Vec<Vec3>, Vec<Vec<u32>>, Vec<[f32; 2]>) {
@@ -185,10 +428,7 @@ pub fn grid(cv: &[Vec3; 16], nu: usize, nv: usize) -> (Vec<Vec3>, Vec<Vec<u32>>,
 
 /// The surface's normal at each point of an iso grid (as `grid`).
 pub fn grid_normals(cv: &[Vec3; 16], uv: &[[f32; 2]]) -> Vec<Vec3> {
-    uv.iter().map(|t| {
-        let (_, su, sv) = eval(cv, t[0], t[1]);
-        frame(su, sv).2
-    }).collect()
+    uv.iter().map(|t| eval_frame(cv, t[0], t[1]).1 .2).collect()
 }
 
 /// Points of the surface to start the search for the nearest from.
@@ -220,17 +460,232 @@ pub fn bind(cv: &[Vec3; 16], p: Vec3, seeds: &[(Vec3, [f32; 2])]) -> [f32; 5] {
             break;
         }
     }
-    let (s, su, sv) = eval(cv, u, v);
-    let (tu, tv, n) = frame(su, sv);
+    let (s, (tu, tv, n)) = eval_frame(cv, u, v);
     let r = p - s;
     [u, v, r.dot(tu), r.dot(tv), r.dot(n)]
 }
 
 /// A bound point put back on the surface as it is now (mm).
 pub fn place(cv: &[Vec3; 16], b: [f32; 5]) -> Vec3 {
-    let (s, su, sv) = eval(cv, b[0], b[1]);
-    let (tu, tv, n) = frame(su, sv);
+    let (s, (tu, tv, n)) = eval_frame(cv, b[0], b[1]);
     s + tu * b[2] + tv * b[3] + n * b[4]
+}
+
+// ------------------------------------------------------- closed objects
+
+/// Seeds on every patch: (point, patch, (u, v)).
+pub fn seeds_multi(surfs: &[[Vec3; 16]], n: usize) -> Vec<(Vec3, usize, [f32; 2])> {
+    let mut out = vec![];
+    for (k, cv) in surfs.iter().enumerate() {
+        for (p, uv) in seeds(cv, n) {
+            out.push((p, k, uv));
+        }
+    }
+    out
+}
+
+/// Where a point sits on a closed object: the patch whose nearest point is
+/// nearest (tried on the patches of its nearest seeds), (u, v) and offset
+/// there.
+pub fn bind_multi(surfs: &[[Vec3; 16]], p: Vec3, seeds: &[(Vec3, usize, [f32; 2])]) -> (usize, [f32; 5]) {
+    if surfs.len() == 1 {
+        let s1: Vec<(Vec3, [f32; 2])> = seeds.iter().map(|s| (s.0, s.2)).collect();
+        return (0, bind(&surfs[0], p, &s1));
+    }
+    // the nearest seeds, a few patches
+    let mut near: Vec<(f32, usize, [f32; 2])> = seeds.iter().map(|s| (s.0.distance_squared(p), s.1, s.2)).collect();
+    near.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut tried: Vec<usize> = vec![];
+    let mut best: Option<(f32, usize, [f32; 5])> = None;
+    for (_, k, uv) in near.iter().take(24) {
+        if tried.contains(k) {
+            continue;
+        }
+        tried.push(*k);
+        let b = bind(&surfs[*k], p, &[(eval(&surfs[*k], uv[0], uv[1]).0, *uv)]);
+        // the tangent offsets count most: a point off the patch's border
+        // belongs to the patch past it
+        let d = b[2] * b[2] + b[3] * b[3] + 1e-3 * b[4] * b[4];
+        if best.map(|x| d < x.0).unwrap_or(true) {
+            best = Some((d, *k, b));
+        }
+        if tried.len() >= 3 {
+            break;
+        }
+    }
+    let (_, k, b) = best.unwrap_or((0.0, 0, [0.5, 0.5, 0.0, 0.0, 0.0]));
+    (k, b)
+}
+
+/// `settle_on` on a closed object: the cell from the layer's edges lying on
+/// one patch.
+pub fn settle_on_multi(surfs: &[[Vec3; 16]], bind: &mut [[f32; 5]], on: &[u16], faces: &[Vec<u32>]) -> usize {
+    let at = |i: usize| on.get(i).copied().unwrap_or(0) as usize;
+    let flat = |b: &[f32; 5]| b[2].abs() + b[3].abs() + b[4].abs() <= OFF;
+    let (mut du, mut dv) = (0.0f32, 0.0f32);
+    for f in faces {
+        for i in 0..f.len() {
+            let (a, b) = (f[i] as usize, f[(i + 1) % f.len()] as usize);
+            if a < bind.len() && b < bind.len() && at(a) == at(b) && flat(&bind[a]) && flat(&bind[b]) {
+                du = du.max((bind[a][0] - bind[b][0]).abs());
+                dv = dv.max((bind[a][1] - bind[b][1]).abs());
+            }
+        }
+    }
+    if du <= 0.0 || dv <= 0.0 {
+        return 0;
+    }
+    let mut n = 0;
+    for (i, b) in bind.iter_mut().enumerate() {
+        if flat(b) || b[2].abs() + b[3].abs() > OFF {
+            continue;
+        }
+        let cv = &surfs[at(i).min(surfs.len() - 1)];
+        if b[4].abs() <= OFF + 1.25 * sag(cv, b[0], b[1], du, dv) {
+            b[4] = 0.0;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// A cubic Bézier quarter (or any) arc of a circle in the XZ plane at
+/// height y, from angle a0 to a1 (radians; x = r cos, z = -r sin, so the
+/// angle grows counter-clockwise seen from +Y... towards -Z).
+fn arc(r: f32, y: f32, a0: f32, a1: f32) -> [Vec3; 4] {
+    let at = |a: f32| Vec3::new(r * a.cos(), y, -r * a.sin());
+    let tan = |a: f32| Vec3::new(-a.sin(), 0.0, -a.cos());
+    let k = 4.0 / 3.0 * ((a1 - a0) / 4.0).tan() * r;
+    [at(a0), at(a0) + tan(a0) * k, at(a1) - tan(a1) * k, at(a1)]
+}
+
+/// A patch whose (u, v) are swapped (its normal turned over).
+fn transposed(q: [Vec3; 16]) -> [Vec3; 16] {
+    std::array::from_fn(|k| q[(k % 4) * 4 + k / 4])
+}
+
+/// The patch facing `out` (its middle's normal), else turned over.
+fn facing(q: [Vec3; 16], out: Vec3) -> [Vec3; 16] {
+    let (_, (_, _, n)) = eval_frame(&q, 0.5, 0.5);
+    if n.dot(out) < 0.0 { transposed(q) } else { q }
+}
+
+/// A box's six patches (mm, its base's centre at the origin, y up), flat,
+/// their normals out.
+pub fn box_patches(size: Vec3) -> Vec<[Vec3; 16]> {
+    let h = size * 0.5;
+    let c = |x: f32, y: f32, z: f32| Vec3::new(x * h.x, (y + 1.0) * h.y, z * h.z);
+    // each face: its corners round it, and its outward normal
+    let faces: [([Vec3; 4], Vec3); 6] = [
+        ([c(1., -1., 1.), c(1., -1., -1.), c(1., 1., -1.), c(1., 1., 1.)], Vec3::X),
+        ([c(-1., -1., -1.), c(-1., -1., 1.), c(-1., 1., 1.), c(-1., 1., -1.)], -Vec3::X),
+        ([c(-1., 1., 1.), c(1., 1., 1.), c(1., 1., -1.), c(-1., 1., -1.)], Vec3::Y),
+        ([c(-1., -1., -1.), c(1., -1., -1.), c(1., -1., 1.), c(-1., -1., 1.)], -Vec3::Y),
+        ([c(-1., -1., 1.), c(1., -1., 1.), c(1., 1., 1.), c(-1., 1., 1.)], Vec3::Z),
+        ([c(1., -1., -1.), c(-1., -1., -1.), c(-1., 1., -1.), c(1., 1., -1.)], -Vec3::Z),
+    ];
+    faces.iter().map(|(k, n)| facing(Patch::new(*k).cvs(Vec3::ONE), *n)).collect()
+}
+
+/// A cylinder's six patches (mm, its base's centre at the origin, y up):
+/// its side in four quarters (each a quarter arc swept straight up), its
+/// two caps each a disc of the four quarter arcs; seams shared.
+pub fn cylinder_patches(r: f32, h: f32) -> Vec<[Vec3; 16]> {
+    use std::f32::consts::FRAC_PI_2;
+    let mut out = vec![];
+    for q in 0..4 {
+        let (a0, a1) = (q as f32 * FRAC_PI_2, (q + 1) as f32 * FRAC_PI_2);
+        let mut p = [Vec3::ZERO; 16];
+        for j in 0..4 {
+            let row = arc(r, h * j as f32 / 3.0, a0, a1);
+            for i in 0..4 {
+                p[j * 4 + i] = row[i];
+            }
+        }
+        out.push(facing(p, Vec3::new(((a0 + a1) * 0.5).cos(), 0.0, -((a0 + a1) * 0.5).sin())));
+    }
+    for (y, n) in [(h, Vec3::Y), (0.0, -Vec3::Y)] {
+        // corners at 0°, 90°, 180°, 270°: v = 0 runs 0° → 90°, u = 1 runs
+        // 90° → 180°, v = 1 runs 270° → 180°, u = 0 runs 0° → 270°
+        let s0 = arc(r, y, 0.0, FRAC_PI_2);
+        let s1 = arc(r, y, FRAC_PI_2, 2.0 * FRAC_PI_2);
+        let s2 = arc(r, y, 3.0 * FRAC_PI_2, 2.0 * FRAC_PI_2);
+        let s3 = arc(r, y, 4.0 * FRAC_PI_2, 3.0 * FRAC_PI_2);
+        let mut p = [Vec3::ZERO; 16];
+        for i in 0..4 {
+            p[i] = s0[i];
+            p[12 + i] = s2[i];
+            p[i * 4 + 3] = s1[i];
+            p[i * 4] = s3[i];
+        }
+        // the 4 corners exactly the arcs' ends (360° is 0°)
+        p[0] = s0[0];
+        let mut pp = Patch { cv: p.iter().map(|v| v.to_array()).collect(), state: PatchState::Nurbs, bind: vec![], quads: vec![], on: vec![], sculpt: None, keep: None };
+        pp.fill_inside();
+        out.push(facing(pp.cvs(Vec3::ONE), n));
+    }
+    out
+}
+
+/// The Poly layer of a closed object: an iso grid on each patch (`counts`
+/// its quads along u and v), the points on seams welded; each point's patch
+/// and (u, v). Patches sharing a side must have the same count along it.
+pub fn grid_closed(surfs: &[[Vec3; 16]], counts: &[(usize, usize)]) -> (Vec<Vec3>, Vec<Vec<u32>>, Vec<u16>, Vec<[f32; 2]>) {
+    let scale = surfs.iter().flat_map(|q| q.iter()).fold(0.0f32, |a, v| a.max(v.abs().max_element())).max(1e-6);
+    let eps = scale * 1e-4;
+    let (mut pts, mut on, mut uvs): (Vec<Vec3>, Vec<u16>, Vec<[f32; 2]>) = (vec![], vec![], vec![]);
+    let mut faces = vec![];
+    // a coarse hash of the points so far, for the welding
+    let cell = eps * 8.0;
+    let key = |p: Vec3| ((p.x / cell).round() as i64, (p.y / cell).round() as i64, (p.z / cell).round() as i64);
+    let mut hash: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+    for (k, cv) in surfs.iter().enumerate() {
+        let (nu, nv) = counts[k];
+        let (gp, gf, guv) = grid(cv, nu, nv);
+        let mut map = vec![0u32; gp.len()];
+        for (i, p) in gp.iter().enumerate() {
+            let c = key(*p);
+            let mut found = None;
+            'look: for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(l) = hash.get(&(c.0 + dx, c.1 + dy, c.2 + dz)) {
+                            for &j in l {
+                                if pts[j as usize].distance(*p) < eps {
+                                    found = Some(j);
+                                    break 'look;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            map[i] = match found {
+                Some(j) => j,
+                None => {
+                    pts.push(*p);
+                    on.push(k as u16);
+                    uvs.push(guv[i]);
+                    let j = (pts.len() - 1) as u32;
+                    hash.entry(c).or_default().push(j);
+                    j
+                }
+            };
+        }
+        for f in gf {
+            let q: Vec<u32> = f.iter().map(|v| map[*v as usize]).collect();
+            // a cap's corner cell folds to three points: kept as a triangle
+            let mut d = q.clone();
+            d.dedup();
+            if d.len() > 1 && d[0] == d[d.len() - 1] {
+                d.pop();
+            }
+            if d.len() >= 3 {
+                faces.push(d);
+            }
+        }
+    }
+    (pts, faces, on, uvs)
 }
 
 /// How far the surface leaves the chords of a cell `du` × `dv` (in
@@ -825,6 +1280,152 @@ mod tests {
     fn flat() -> Patch {
         // u along +X, v along -Z: the normal up
         Patch::new([Vec3::new(-30.0, 0.0, 20.0), Vec3::new(30.0, 0.0, 20.0), Vec3::new(30.0, 0.0, -20.0), Vec3::new(-30.0, 0.0, -20.0)])
+    }
+
+    /// Every edge of a polygon list held by exactly two polygons, each way
+    /// once (closed and oriented).
+    fn closed_and_oriented(faces: &[Vec<u32>]) -> bool {
+        let mut half: HashMap<(u32, u32), u32> = HashMap::new();
+        for f in faces {
+            for i in 0..f.len() {
+                *half.entry((f[i], f[(i + 1) % f.len()])).or_default() += 1;
+            }
+        }
+        half.iter().all(|((a, b), n)| *n == 1 && half.get(&(*b, *a)) == Some(&1))
+    }
+
+    #[test]
+    fn closed_objects_share_their_seams() {
+        // a cube: 8 corners and 2 tangent points per edge, shared
+        let surfs = box_patches(Vec3::new(20.0, 10.0, 16.0));
+        let p = Patch::closed(&surfs);
+        assert_eq!(p.count(), 6);
+        assert_eq!(p.contour().len(), 8 + 24);
+        assert_eq!(p.cv.len(), 8 + 24 + 24);
+        // each face's middle outwards, its normal the face's
+        let mid = Vec3::new(0.0, 5.0, 0.0);
+        for cv in p.surfaces(Vec3::ONE) {
+            let (s, (_, _, n)) = eval_frame(&cv, 0.5, 0.5);
+            assert!((s - mid).normalize().dot(n) > 0.99, "{s} {n}");
+        }
+        // a cylinder: two rings of 12 and 2 tangent points on each of its 4
+        // seams up the side
+        let surfs = cylinder_patches(10.0, 30.0);
+        let p = Patch::closed(&surfs);
+        assert_eq!(p.count(), 6);
+        assert_eq!(p.contour().len(), 24 + 8);
+        for (k, cv) in p.surfaces(Vec3::ONE).iter().enumerate() {
+            for (u, v) in [(0.5, 0.5), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.2, 0.7)] {
+                let (s, (_, _, n)) = eval_frame(cv, u, v);
+                if k < 4 {
+                    // the side: on the circle, its normal out from the axis
+                    let r = Vec3::new(s.x, 0.0, s.z);
+                    assert!((r.length() - 10.0).abs() < 0.03, "radius {}", r.length());
+                    assert!(r.normalize().dot(n) > 0.99, "side {k} at {u} {v}: {n}");
+                } else {
+                    // a cap: flat, its normal along the axis, out
+                    let want = if s.y > 15.0 { Vec3::Y } else { -Vec3::Y };
+                    assert!(n.dot(want) > 0.99, "cap {k} at {u} {v}: {n}");
+                    assert!(Vec3::new(s.x, 0.0, s.z).length() < 10.03);
+                }
+            }
+        }
+        // the cap's middle at the axis
+        let (s, _) = eval_frame(&p.surfaces(Vec3::ONE)[4], 0.5, 0.5);
+        assert!(Vec3::new(s.x, 0.0, s.z).length() < 0.05, "{s}");
+    }
+
+    #[test]
+    fn closed_layers_are_watertight() {
+        for (surfs, counts) in [
+            (box_patches(Vec3::new(20.0, 10.0, 16.0)), None),
+            (cylinder_patches(10.0, 30.0), Some(vec![(4, 6), (4, 6), (4, 6), (4, 6), (4, 4), (4, 4)])),
+        ] {
+            let c = counts.unwrap_or_else(|| surfs.iter().map(|_| (3, 3)).collect());
+            let (pts, faces, on, uv) = grid_closed(&surfs, &c);
+            assert_eq!(pts.len(), on.len());
+            assert_eq!(pts.len(), uv.len());
+            assert!(closed_and_oriented(&faces), "{} points, {} faces", pts.len(), faces.len());
+            // Euler: a sphere's
+            let edges = faces.iter().map(|f| f.len()).sum::<usize>() / 2;
+            assert_eq!(pts.len() as i64 - edges as i64 + faces.len() as i64, 2);
+            // the faces turn outwards (the solid's volume positive)
+            let vol: f32 = faces.iter().map(|f| (1..f.len() - 1).map(|k| pts[f[0] as usize].dot(pts[f[k] as usize].cross(pts[f[k + 1] as usize]))).sum::<f32>()).sum::<f32>() / 6.0;
+            assert!(vol > 0.0, "volume {vol}");
+        }
+        // the cube's 3 x 3 grids: 6 * 16 points less the seams'
+        let (pts, faces, _, _) = grid_closed(&box_patches(Vec3::splat(10.0)), &[(3, 3); 6]);
+        assert_eq!((pts.len(), faces.len()), (56, 54));
+    }
+
+    #[test]
+    fn a_seam_moved_stays_closed() {
+        // a cube's top corner raised, with its tangent points: every patch
+        // holding it follows, the layer's points on the seams stay on all of
+        // them
+        let surfs = box_patches(Vec3::new(20.0, 10.0, 16.0));
+        let mut p = Patch::closed(&surfs);
+        let (pts, faces, on, uv) = grid_closed(&surfs, &[(4, 4); 6]);
+        p.bind = uv.iter().map(|t| [t[0], t[1], 0.0, 0.0, 0.0]).collect();
+        p.on = on.clone();
+        let top = (0..p.cv.len()).find(|k| Vec3::from(p.cv[*k]).distance(Vec3::new(10.0, 10.0, 8.0)) < 1e-4).unwrap();
+        assert!(p.corner(top));
+        let hs = p.handles(top);
+        assert_eq!(hs.len(), 3);
+        for k in std::iter::once(top).chain(hs) {
+            p.cv[k][1] += 6.0;
+        }
+        p.fill_inside();
+        let s = p.surfaces(Vec3::ONE);
+        let now: Vec<Vec3> = p.bind.iter().enumerate().map(|(i, b)| place(&s[p.on_of(i)], *b)).collect();
+        // each seam point: where any other patch's border puts it too
+        for (i, q) in now.iter().enumerate() {
+            let b = p.bind[i];
+            let on_border = b[0] < 1e-4 || b[0] > 1.0 - 1e-4 || b[1] < 1e-4 || b[1] > 1.0 - 1e-4;
+            if !on_border {
+                continue;
+            }
+            let seeds = seeds_multi(&s, 12);
+            let (k, bb) = bind_multi(&s, *q, &seeds);
+            assert!(place(&s[k], bb).distance(*q) < 1e-3);
+            assert!(bb[4].abs() < 1e-3, "point {i} off the object by {}", bb[4]);
+        }
+        assert!(closed_and_oriented(&faces));
+        assert!(now.iter().zip(&pts).any(|(a, b)| a.distance(*b) > 1.0));
+    }
+
+    #[test]
+    fn bound_on_a_cylinder() {
+        // points on its side, its caps (their corners too) and 2 mm out of
+        // it: bound and placed back where they were
+        let s = cylinder_patches(10.0, 30.0);
+        let seeds = seeds_multi(&s, 12);
+        let mut tries = vec![];
+        for a in [0.1f32, 0.8, 1.6, 2.5, 3.9, 5.5] {
+            for y in [0.0, 4.0, 15.0, 29.0, 30.0] {
+                let r = if y == 0.0 || y == 30.0 { 6.0 } else { 10.0 };
+                tries.push(Vec3::new(r * a.cos(), y, -r * a.sin()));
+            }
+            tries.push(Vec3::new(12.0 * a.cos(), 12.0, -12.0 * a.sin()));
+            tries.push(Vec3::new(10.0 * a.cos(), 30.0, -10.0 * a.sin()));
+        }
+        tries.push(Vec3::new(0.0, 30.0, 0.0));
+        tries.push(Vec3::new(10.0, 30.0, 0.0));
+        for q in tries {
+            let (k, b) = bind_multi(&s, q, &seeds);
+            assert!(place(&s[k], b).distance(q) < 0.02, "{q}: patch {k} {b:?} gives {}", place(&s[k], b));
+        }
+    }
+
+    #[test]
+    fn nearest_points() {
+        let from: Vec<Vec3> = (0..500).map(|i| Vec3::new((i % 10) as f32, ((i / 10) % 10) as f32, (i / 100) as f32 * 3.0)).collect();
+        let to = vec![Vec3::new(4.2, 7.9, 6.1), Vec3::new(-5.0, 0.0, 0.0), Vec3::new(9.4, 9.6, 30.0)];
+        let got = nearest_of(&from, &to);
+        for (t, g) in to.iter().zip(&got) {
+            let best = from.iter().map(|f| f.distance(*t)).fold(f32::MAX, f32::min);
+            assert!((from[*g].distance(*t) - best).abs() < 1e-5);
+        }
     }
 
     #[test]

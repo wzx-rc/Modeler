@@ -389,13 +389,16 @@ impl Drawer {
         for f in st.shown_meshes().into_iter().filter(|f| st.selection.contains(&f.id) && crate::linked::shows_nurbs(f)) {
             let Some(p) = crate::linked::patch_of(f) else { continue };
             let Some(cv) = crate::linked::cvs_world(f) else { continue };
-            let pc = p.cvs(crate::meshes::size(f));
             let x = crate::linked::to_world(f);
-            let sides: Vec<Vec<[f32; 3]>> = (0..4).map(|k| nurbs_kernel::patch::side(&pc, k, 48).iter().map(|q| x.transform_point3(*q).to_array()).collect()).collect();
+            let sides: Vec<Vec<[f32; 3]>> = p
+                .surfaces(crate::meshes::size(f))
+                .iter()
+                .flat_map(|pc| (0..4).map(|k| nurbs_kernel::patch::side(pc, k, 48).iter().map(|q| x.transform_point3(*q).to_array()).collect::<Vec<_>>()).collect::<Vec<_>>())
+                .collect();
             line_vertices(&sides, [accent.r(), accent.g(), accent.b(), 240], 1.8, &mut over);
             if st.sel_mode == SelMode::Vertex {
                 let mut hull = vec![];
-                for (c, t) in [(0, 1), (3, 2), (3, 7), (15, 11), (15, 14), (12, 13), (12, 8), (0, 4)] {
+                for (c, t) in p.hull() {
                     hull.push(vec![cv[c].to_array(), cv[t].to_array()]);
                 }
                 line_vertices(&hull, [accent.r(), accent.g(), accent.b(), 150], 1.0, &mut over);
