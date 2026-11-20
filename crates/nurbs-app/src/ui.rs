@@ -198,6 +198,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     Tool::Point => "POINT ON EDGE".into(),
                     Tool::Slot if st.slot_on_scan => "SLOT · ON THE SCAN".into(),
                     Tool::Slot => format!("SLOT · {}", st.mode.label().to_uppercase()),
+                    Tool::Form => format!("FORMS · {}", st.form.brush.label().to_uppercase()),
                     Tool::Select => format!("SELECTION · {}", st.sel_mode.label().to_uppercase()),
                 };
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
@@ -478,6 +479,13 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 let tip = "Slot (Shift + S): drag from one end to the other on a face or the ground, move to set its width, click, then its height. ON SCAN (its options): read a slot of the scan instead";
                 if card(ui, Some(Icon::Scan), "SLOT", "SHAPE · Shift+S", st.tool == Tool::Slot, accent(), tip).clicked() {
                     st.arm_slot();
+                }
+            }
+            {
+                let tip = "Forms (M): a smooth surface (a sphere, a cylinder) pulled with brushes, like Nomad or ZBrush. Click the ground: a new form; press on a form and drag: the brush (Move, Inflate, Smooth, Flatten, Pinch, in its window); a plain Cube or Cylinder becomes a form";
+                let sub = format!("{} · M", st.form.brush.label().to_uppercase());
+                if card(ui, Some(Icon::Sphere), "FORMS", &sub, st.tool == Tool::Form, op_color(mode), tip).clicked() {
+                    st.arm_form();
                 }
             }
             divider(ui);
@@ -916,6 +924,7 @@ fn help_title(st: &AppState) -> String {
         Tool::Point => "Point on edge".into(),
         Tool::Slot if st.slot_on_scan => "Slot · on the scan".into(),
         Tool::Slot => format!("Slot · {}", st.mode.label()),
+        Tool::Form => format!("Forms · {}", st.form.brush.label()),
         Tool::Select => format!("{} · {}", st.gizmo.label(), st.sel_mode.label()),
     }
 }
@@ -1011,6 +1020,7 @@ fn help_box(ctx: &egui::Context, st: &mut AppState) {
         Tool::Push(_) => FACE_SEL,
         Tool::Knife | Tool::Point => EDGE_SEL,
         Tool::Slot => accent(),
+        Tool::Form => op_color(st.mode),
         Tool::Select if st.sel_mode == SelMode::Edge => EDGE_SEL,
         Tool::Select if st.sel_mode == SelMode::Face => FACE_SEL,
         Tool::Select => st.single().map(feature_color).unwrap_or(TEXT2()),
@@ -1174,7 +1184,7 @@ enum OpPop {
 }
 
 fn op_pop(st: &AppState) -> Option<OpPop> {
-    if (st.tool == Tool::Create(PrimKind::Surface) || st.tool == Tool::Create(PrimKind::Path) || (st.tool == Tool::Slot && st.slot_draw.is_none())) && st.creation.is_none() {
+    if (st.tool == Tool::Create(PrimKind::Surface) || st.tool == Tool::Create(PrimKind::Path) || st.tool == Tool::Form || (st.tool == Tool::Slot && st.slot_draw.is_none())) && st.creation.is_none() {
         return Some(OpPop::Tool);
     }
     if st.creation.is_some() || st.sketch.is_some() || st.push.is_some() || st.curve_pull.is_some() || st.tool != Tool::Select {
@@ -1355,6 +1365,7 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     }
                 }
                 OpPop::Tool if st.tool == Tool::Slot => slot_options(ui, st),
+                OpPop::Tool if st.tool == Tool::Form => form_options(ui, st),
                 OpPop::Tool if st.tool == Tool::Create(PrimKind::Path) => path_options(ui, st),
                 OpPop::Tool => surface_options(ui, st),
                 OpPop::Shape(id) => {
@@ -1404,6 +1415,52 @@ fn slot_options(ui: &mut Ui, st: &mut AppState) {
             }
         }
     });
+}
+
+/// The Forms tool's options: the brush, its radius (on screen) and
+/// intensity, the symmetry, what a click on the ground makes; the form
+/// selected: its poles and More detail.
+fn form_options(ui: &mut Ui, st: &mut AppState) {
+    use crate::forms::BRUSHES;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Forms").font(semibold(14.0)).color(TEXT()));
+        chip_label(ui, "Brush", RAISED(), LABEL());
+    });
+    ui.add_space(6.0);
+    let c = op_color(st.mode);
+    let items: Vec<(crate::forms::Brush, &str, Color32)> = BRUSHES.iter().map(|b| (*b, b.label(), c)).collect();
+    if let Some(b) = segmented(ui, &items, st.form.brush, 30.0) {
+        st.form.brush = b;
+    }
+    ui.label(egui::RichText::new(st.form.brush.tip()).font(regular(11.5)).color(TEXT2()));
+    ui.add_space(4.0);
+    let mut r = st.form.radius;
+    let _ = slider_row(ui, "Radius", &mut r, 8.0..=600.0, 1.0, "pt");
+    st.form.radius = r.clamp(8.0, 600.0);
+    let k = st.form.brush.index();
+    let mut i = (st.form.intensity[k] * 100.0) as f32;
+    let _ = slider_row(ui, "Intensity", &mut i, 1.0..=100.0, 1.0, "%");
+    st.form.intensity[k] = (i.clamp(1.0, 100.0) / 100.0) as f64;
+    section(ui, "Symmetry");
+    if let Some(m) = segmented(ui, &[(false, "Off", c), (true, "Mirror X", c)], st.form.mirror, 28.0) {
+        st.form.mirror = m;
+    }
+    section(ui, "New form (a click on the ground)");
+    let kinds = [(nurbs_kernel::FormKind::Sphere, "Sphere", c), (nurbs_kernel::FormKind::Cylinder, "Cylinder", c)];
+    if let Some(k) = segmented(ui, &kinds, st.form.new_kind, 28.0) {
+        st.form.new_kind = k;
+    }
+    if let Some(f) = st.single().filter(|f| f.form.is_some()).cloned() {
+        let fm = f.form.as_ref().unwrap();
+        section(ui, &format!("{} · {} × {} poles", f.name, fm.nu, fm.nv));
+        let r = ui.add(egui::Label::new(egui::RichText::new("More detail").font(medium(12.0)).color(LABEL())).sense(Sense::click()));
+        if r.on_hover_text("Twice the poles round and up, the same surface: smaller brushes take hold").clicked() {
+            st.form_detail(f.id);
+        }
+        if let Some(e) = st.feature_error(&f) {
+            ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
+        }
+    }
 }
 
 /// The Surface tool's options, in the operation window (Romain 19 nov.,
@@ -1565,8 +1622,9 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     // the second column, beside the panel
     let feats = st.doc.features.clone();
     let ops_of = |st: &AppState, id: FeatureId| feats.iter().filter(|g| !g.is_solid() && !g.is_path() && st.owner_of(g.id) == Some(id)).count();
-    let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 5] = [
-        ("PRIMITIVES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }))),
+    let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 6] = [
+        ("PRIMITIVES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && f.form.is_none() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }))),
+        ("FORMS", Box::new(|f: &Feature| f.form.is_some())),
         ("SHAPES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Profile { .. }))),
         ("CURVES", Box::new(|f: &Feature| f.is_path() && !f.fill && f.revolve.is_none())),
         ("SURFACES", Box::new(|f: &Feature| f.is_sheet() || f.fill || f.revolve.is_some() || f.loft.is_some())),
@@ -1582,10 +1640,10 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
         for (gi, (title, keep)) in groups.iter().enumerate() {
             // the last group: operations whose shape cannot be told
             // a 2D boolean's curves under it, not on their own
-            let members: Vec<&Feature> = if gi == 4 {
+            let members: Vec<&Feature> = if *title == "OPERATIONS" {
                 feats.iter().filter(|f| !f.is_solid() && !f.is_path() && st.owner_of(f.id).is_none()).collect()
             } else {
-                feats.iter().filter(|f| keep(f) && (gi != 2 || st.doc.boolean_of(f.id).is_none())).collect()
+                feats.iter().filter(|f| keep(f) && (*title != "CURVES" || st.doc.boolean_of(f.id).is_none())).collect()
             };
             if members.is_empty() {
                 continue;
@@ -3007,6 +3065,17 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     }
     if shift && pressed(Key::S) {
         st.arm_slot();
+    }
+    if pressed(Key::M) && !shift {
+        st.arm_form();
+    }
+    if st.tool == Tool::Form {
+        if pressed(Key::OpenBracket) {
+            st.form.radius = (st.form.radius / 1.2).max(8.0);
+        }
+        if pressed(Key::CloseBracket) {
+            st.form.radius = (st.form.radius * 1.2).min(600.0);
+        }
     }
     // Enter (Romain 20 nov., 11 h 54): what is under way kept, back to
     // Select (the Knife's cut, an extrusion, a shape's height, a slot's

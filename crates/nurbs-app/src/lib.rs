@@ -9,6 +9,7 @@ pub mod camera;
 pub mod draw;
 pub mod faces;
 pub mod files;
+pub mod forms;
 pub mod icons;
 pub mod knife;
 pub mod history;

@@ -355,6 +355,11 @@ fn deep_hash(doc: &Doc, f: &Feature) -> u64 {
 
 /// The feature's solid in the world, its faces tagged.
 fn tool(f: &Feature) -> Result<Shape, String> {
+    // a form: its BSpline through its poles (world), one face
+    if let Some(fm) = &f.form {
+        let poles: Vec<[f64; 3]> = f.form_poles().iter().map(|p| p.to_array()).collect();
+        return Ok(tag_all(Shape::form(&poles, fm.nu, fm.nv)?, f.id));
+    }
     let h = f.prim.height().max(0.01);
     let s = match f.prim {
         Prim::Box { x, z, .. } => Shape::cuboid(x.max(0.01), h, z.max(0.01))?,
@@ -396,7 +401,7 @@ const PAST: f64 = 0.1;
 /// it sits on (facing each other) put on it. None when nothing moves. Each
 /// face moves at most a quarter of the shape's size across it.
 fn settle(acc: &Shape, f: &Feature, t: &Shape) -> Option<Feature> {
-    if !f.is_solid() || f.is_path() || f.is_sheet() || f.shape_bool.is_some() {
+    if !f.is_solid() || f.is_path() || f.is_sheet() || f.shape_bool.is_some() || f.form.is_some() {
         return None;
     }
     let rot = f.rot;
@@ -2243,6 +2248,76 @@ mod tests {
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert_eq!(m.faces.len(), 2, "one face per span");
+    }
+
+    #[test]
+    fn forms() {
+        use crate::doc::{Form, Prim};
+        // a sphere, a cylinder and a soft box made from their poles; a
+        // pole ring pulled out; a form added to a block and carved
+        for (name, fm) in [("sphere", Form::sphere(24, 13)), ("cylinder", Form::cylinder(24, false)), ("box", Form::cylinder(24, true))] {
+            let mut d = Doc::default();
+            let id = d.add(Op::Add, Prim::Box { x: 30.0, y: 30.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            d.feature_mut(id).unwrap().form = Some(fm.clone());
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{name}: {:?}", m.errors);
+            let (lo, hi) = m.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])]));
+            eprintln!("{name}: {lo:?} {hi:?} faces {}", m.faces.len());
+            assert!((hi[1] - lo[1] - 30.0).abs() < 0.6 && (hi[0] - lo[0] - 30.0).abs() < 1.5, "{name}: {lo:?} {hi:?}");
+            // pulled: the poles of a ring half-way up moved out on one side
+            let f = d.feature(id).unwrap().clone();
+            let mut w = f.form_poles();
+            let j = fm.nv / 2;
+            for i in 0..3 {
+                w[j * fm.nu + i] += DVec3::new(8.0, 0.0, 0.0);
+            }
+            let mut g = f.clone();
+            g.set_form_poles(&w);
+            *d.feature_mut(id).unwrap() = g;
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{name} pulled: {:?}", m.errors);
+            let hx = m.positions.iter().map(|p| p[0]).fold(f32::MIN, f32::max);
+            assert!(hx > 17.0, "{name}: pulled out to {hx}");
+            // round the block
+            let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 10.0, z: 20.0 }, DVec3::new(20.0, 5.0, 0.0), DQuat::IDENTITY);
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{name} + block: {:?}", m.errors);
+            d.feature_mut(b).unwrap().op = Op::Carve;
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{name} − block: {:?}", m.errors);
+        }
+    }
+
+    #[test]
+    fn form_basis_matches_the_kernel() {
+        // the app's evaluation of a form (its preview while a brush pulls
+        // it) is the kernel's surface, refined too
+        use crate::doc::Form;
+        let mut fm = Form::sphere(12, 9);
+        fm.poles[4 * 12 + 2][0] += 0.4;
+        fm.poles[3 * 12 + 7][1] += 0.2;
+        for f in [fm.clone(), fm.refined()] {
+            let s = Shape::form(&f.poles, f.nu, f.nv).unwrap();
+            let (ru, rv) = f.range();
+            let uv: Vec<[f64; 2]> = (0..40).map(|k| [ru * ((k * 7) % 40) as f64 / 40.0 + 0.13, rv * (k as f64 + 0.5) / 40.0]).collect();
+            let occ = s.face_eval(0, &uv).unwrap();
+            let unit: Vec<DVec3> = f.poles.iter().map(|p| DVec3::from(*p)).collect();
+            let mut worst = 0.0f64;
+            for (q, (p, _)) in uv.iter().zip(&occ) {
+                let a = Form::point(&unit, f.nu, f.nv, q[0], q[1]);
+                worst = worst.max(a.distance(DVec3::from(*p)));
+            }
+            assert!(worst < 1e-6, "{} × {}: off by {worst}", f.nu, f.nv);
+        }
+        // refined: the same surface
+        let r = fm.refined();
+        let a: Vec<DVec3> = fm.poles.iter().map(|p| DVec3::from(*p)).collect();
+        let b: Vec<DVec3> = r.poles.iter().map(|p| DVec3::from(*p)).collect();
+        for k in 0..30 {
+            let (u, v) = (12.0 * k as f64 / 30.0 + 0.07, 6.0 * (k as f64 + 0.3) / 30.0);
+            let d = Form::point(&a, fm.nu, fm.nv, u, v).distance(Form::point(&b, r.nu, r.nv, u * 2.0, v * 2.0));
+            assert!(d < 1e-9, "refined off by {d} at {u} {v}");
+        }
     }
 
     #[test]

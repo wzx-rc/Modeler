@@ -4116,6 +4116,135 @@ fn main() {
         h.shot("zero-surf-loft-4-follows");
     }
 
+    if want("forms") {
+        // Forms (Romain 20 nov., 13 h 05: "le feeling… Nomad ou ZBrush…
+        // une move brush"): M, a click on the ground makes a sphere; the
+        // Move brush pulls its side out (shot during the stroke: the app's
+        // own drawing of it); Mirror X and Move up: two ears; Inflate the
+        // front; Shift: Smooth; a plain Cylinder pulled (it becomes a
+        // form); More detail and a small Pinch; a Cube added through a form
+        h.reset(Doc::default(), "Forms");
+        let view = |h: &mut Harness| {
+            h.st.camera.yaw = 0.35;
+            h.st.camera.pitch = 0.35;
+            h.st.camera.frame(Vec3::new(-24.0, 0.0, -20.0), Vec3::new(30.0, 38.0, 20.0));
+            h.steps(2);
+        };
+        view(&mut h);
+        h.key(egui::Key::M);
+        let o = h.screen_of(Vec3::ZERO);
+        h.move_to(o);
+        h.click(o);
+        h.settle();
+        let id = h.st.doc.features.last().map(|f| f.id).unwrap();
+        let info = |h: &Harness| {
+            let f = h.st.doc.feature(id).unwrap();
+            let fm = f.form.as_ref().unwrap();
+            format!("{} {:?} {}×{} box {:?} faces {:?} errors {:?}", f.name, f.op, fm.nu, fm.nv, f.prim, h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()))
+        };
+        eprintln!("  new: {}", info(&h));
+        // a point of the sphere (centre 0, 15, 0, radius 15) along a direction
+        let on = |h: &Harness, d: Vec3| h.screen_of(Vec3::new(0.0, 15.0, 0.0) + d.normalize() * 14.0);
+        let p = on(&h, Vec3::new(0.9, 0.0, 0.45));
+        h.move_to(p);
+        h.steps(2);
+        h.shot("zero-forms-1-sphere");
+        // Move: the right side pulled out
+        let t0 = Instant::now();
+        h.drag(p, p + vec2(150.0, -20.0), 10, false);
+        h.steps(1);
+        eprintln!("  stroke of 10 moves: {:?}, preview {}", t0.elapsed(), h.st.form_preview().is_some());
+        h.shot("zero-forms-2-move-live");
+        h.press(p + vec2(150.0, -20.0), false);
+        let t0 = Instant::now();
+        h.settle();
+        eprintln!("  move: {} · fine model after {:?}", info(&h), t0.elapsed());
+        h.shot("zero-forms-3-moved");
+        // Mirror X: a point up on the left pulled up, both sides follow
+        h.st.form.mirror = true;
+        h.st.form.radius = 60.0;
+        let p = on(&h, Vec3::new(-0.45, 0.8, 0.4));
+        h.move_to(p);
+        h.steps(2);
+        h.shot("zero-forms-4-mirror-ring");
+        h.drag(p, p + vec2(-10.0, -90.0), 10, true);
+        h.settle();
+        eprintln!("  mirror: {}", info(&h));
+        h.move_to(p + vec2(-200.0, 200.0));
+        h.steps(2);
+        h.shot("zero-forms-5-mirror");
+        // Inflate the front, then Shift: Smooth where the side was pulled
+        h.st.form.mirror = false;
+        h.st.form.radius = 70.0;
+        h.st.form.brush = nurbs_app::forms::Brush::Inflate;
+        let p = on(&h, Vec3::new(-0.2, -0.25, 1.0));
+        h.drag(p, p + vec2(0.0, -50.0), 8, true);
+        h.settle();
+        eprintln!("  inflate: {}", info(&h));
+        h.shot("zero-forms-6-inflate");
+        // on the pulled side, half-way to its tip (the first stroke's press
+        // moved along it, same view)
+        let p = on(&h, Vec3::new(0.9, 0.0, 0.45)) + vec2(80.0, -12.0);
+        h.st.form.radius = 110.0;
+        h.st.form.intensity[2] = 0.8;
+        h.hold(Modifiers::SHIFT);
+        h.drag(p, p + vec2(0.0, 300.0), 12, true);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  smooth: {} · undo: {:?}", info(&h), h.st.undo_labels().iter().rev().take(6).collect::<Vec<_>>());
+        h.shot("zero-forms-7-smooth");
+        // a plain Cylinder beside it: the Move brush makes it a form
+        let mut cyl = 0;
+        h.st.begin_live("Cylinder");
+        h.st.live(|d| cyl = d.add(Op::Add, nurbs_kernel::Prim::Cylinder { radius: 10.0, height: 30.0 }, DVec3::new(48.0, 0.0, 0.0), glam::DQuat::IDENTITY));
+        h.st.end_live();
+        h.st.camera.frame(Vec3::new(-24.0, 0.0, -20.0), Vec3::new(64.0, 45.0, 20.0));
+        h.st.form.brush = nurbs_app::forms::Brush::Move;
+        h.st.form.radius = 50.0;
+        h.settle();
+        let k = h.screen_of(Vec3::new(48.0, 27.0, 9.0));
+        h.drag(k, k + vec2(60.0, -50.0), 8, true);
+        h.settle();
+        let f = h.st.doc.feature(cyl).unwrap();
+        eprintln!("  cylinder: form {:?} errors {:?}", f.form.as_ref().map(|m| (m.kind, m.nu, m.nv)), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-forms-8-cylinder");
+        // More detail on the sphere, then a small Pinch across its top
+        h.st.selection = vec![id];
+        h.st.form_detail(id);
+        h.settle();
+        eprintln!("  detail: {}", info(&h));
+        h.st.form.brush = nurbs_app::forms::Brush::Flatten;
+        h.st.form.radius = 55.0;
+        h.st.form.intensity[3] = 1.0;
+        view(&mut h);
+        let p = on(&h, Vec3::new(-0.3, 0.0, 1.0));
+        h.drag(p, p + vec2(0.0, 160.0), 8, true);
+        h.settle();
+        eprintln!("  flatten: {}", info(&h));
+        h.st.form.brush = nurbs_app::forms::Brush::Pinch;
+        h.st.form.radius = 45.0;
+        let p = on(&h, Vec3::new(0.0, 0.75, 0.66));
+        h.drag(p, p + vec2(0.0, 150.0), 8, true);
+        h.settle();
+        eprintln!("  pinch: {}", info(&h));
+        h.st.camera.yaw = -0.25;
+        h.steps(2);
+        h.move_to(p + vec2(-300.0, 200.0));
+        h.steps(2);
+        h.shot("zero-forms-9-detail-flatten-pinch");
+        // a Cube added through the form: one part
+        h.key(egui::Key::Q);
+        let mut b = 0;
+        h.st.begin_live("Cube");
+        h.st.live(|d| b = d.add(Op::Add, nurbs_kernel::Prim::Box { x: 60.0, y: 8.0, z: 24.0 }, DVec3::new(5.0, 2.0, 0.0), glam::DQuat::IDENTITY));
+        h.st.end_live();
+        h.st.selection.clear();
+        h.st.camera.frame(Vec3::new(-35.0, 0.0, -30.0), Vec3::new(70.0, 45.0, 30.0));
+        h.settle();
+        eprintln!("  + cube {b}: faces {:?} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-forms-10-with-cube");
+    }
+
     if want("curves") {
         // the Curves set (Romain 20 nov. 8 h 08, 3ds Max's Shapes): each
         // shape dragged on the ground, then its settings changed

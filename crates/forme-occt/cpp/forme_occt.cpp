@@ -599,6 +599,76 @@ FShape* focc_region_cut(const double* xy, const int* smooth, const int* cut, con
         (FShape*)nullptr);
 }
 
+// A sculpted form (Forms): the bicubic BSpline surface through `poles`
+// (world, nu × nv, row major: poles[(j * nu + i) * 3]), periodic round
+// (u: nu columns, uniform knots), clamped from bottom to top (v: nv rows,
+// uniform inside); its first and last rows each one point, so it closes on
+// itself: made a solid, facing out.
+FShape* focc_form(const double* poles, int nu, int nv) {
+    return guard(
+        [&]() -> FShape* {
+            if (nu < 4 || nv < 4) {
+                set_err("a form needs 4 × 4 poles at least");
+                return nullptr;
+            }
+            TColgp_Array2OfPnt P(1, nu, 1, nv);
+            for (int j = 0; j < nv; j++)
+                for (int i = 0; i < nu; i++) {
+                    const double* q = poles + 3 * (j * nu + i);
+                    P(i + 1, j + 1) = gp_Pnt(q[0], q[1], q[2]);
+                }
+            // u: periodic, nu + 1 knots of multiplicity 1
+            TColStd_Array1OfReal uk(1, nu + 1);
+            TColStd_Array1OfInteger um(1, nu + 1);
+            for (int i = 0; i <= nu; i++) {
+                uk(i + 1) = i;
+                um(i + 1) = 1;
+            }
+            // v: clamped cubic, nv - 2 knots, the ends of multiplicity 4
+            int nk = nv - 2;
+            TColStd_Array1OfReal vk(1, nk);
+            TColStd_Array1OfInteger vm(1, nk);
+            for (int k = 0; k < nk; k++) {
+                vk(k + 1) = k;
+                vm(k + 1) = (k == 0 || k == nk - 1) ? 4 : 1;
+            }
+            opencascade::handle<Geom_BSplineSurface> srf = new Geom_BSplineSurface(P, uk, vk, um, vm, 3, 3, Standard_True, Standard_False);
+            BRepBuilderAPI_MakeFace mf(srf, 1e-6);
+            if (!mf.IsDone()) {
+                set_err("the form's surface could not be made");
+                return nullptr;
+            }
+            BRep_Builder b;
+            TopoDS_Shell sh;
+            b.MakeShell(sh);
+            b.Add(sh, mf.Face());
+            sh.Closed(Standard_True);
+            TopoDS_Solid so;
+            b.MakeSolid(so);
+            b.Add(so, sh);
+            ShapeFix_Solid fix(so);
+            fix.Perform();
+            TopoDS_Shape r = fix.Shape();
+            TopoDS_Shape one;
+            for (TopExp_Explorer x(r, TopAbs_SOLID); x.More(); x.Next()) one = x.Current();
+            if (one.IsNull()) {
+                set_err("the form does not close");
+                return nullptr;
+            }
+            // facing out
+            TopoDS_Solid sol = TopoDS::Solid(one);
+            BRepLib::OrientClosedSolid(sol);
+            one = sol;
+            if (!valid(one)) {
+                dump_check(one);
+                set_err("the form folds through itself");
+                return nullptr;
+            }
+            return wrap(one);
+        },
+        (FShape*)nullptr);
+}
+
 // The same outline as a wire in the XY plane, open (a path: from its first
 // point to its last) or closed.
 FShape* focc_outline_wire(const double* xy, const int* smooth, const int* cut, const double* abm, int n, int open) {

@@ -989,6 +989,181 @@ pub struct Form {
     pub poles: Vec<[f64; 3]>,
 }
 
+impl Form {
+    /// The v parameters of each row's pole (Greville), from 0 to 1, of a
+    /// clamped cubic with `nv` poles and uniform knots.
+    fn greville(nv: usize) -> Vec<f64> {
+        let l = (nv - 3) as f64;
+        let mut t = vec![0.0; 4];
+        for k in 1..nv - 3 {
+            t.push(k as f64);
+        }
+        t.extend([l; 4]);
+        (0..nv).map(|j| (t[j + 1] + t[j + 2] + t[j + 3]) / 3.0 / l).collect()
+    }
+
+    /// How much a ring of `nu` poles shrinks on the periodic cubic through
+    /// it (its points at the poles' parameters).
+    fn shrink(nu: usize) -> f64 {
+        (4.0 + 2.0 * (std::f64::consts::TAU / nu as f64).cos()) / 6.0
+    }
+
+    /// A ring of poles round the axis at height y: a circle of radius r
+    /// (`square`: the square of half side r), its curve that size.
+    fn ring(nu: usize, r: f64, y: f64, square: bool) -> Vec<[f64; 3]> {
+        let k = 1.0 / Self::shrink(nu);
+        (0..nu)
+            .map(|i| {
+                let a = std::f64::consts::TAU * i as f64 / nu as f64;
+                let (c, s) = (a.cos(), a.sin());
+                let f = if square { 1.0 / c.abs().max(s.abs()) } else { k };
+                [r * c * f, y, r * s * f]
+            })
+            .collect()
+    }
+
+    /// A sphere in the unit box (radius 0.5, from y 0 to 1): rows at the
+    /// Greville angles, the second and last but one in the poles' tangent
+    /// planes (smooth at the poles).
+    pub fn sphere(nu: usize, nv: usize) -> Form {
+        let nv = nv.max(5);
+        let g = Self::greville(nv);
+        let mut poles = vec![];
+        for (j, gj) in g.iter().enumerate() {
+            let phi = std::f64::consts::PI * gj;
+            let (r, y) = if j == 1 || j + 2 == nv {
+                // in the tangent plane at the pole
+                (0.5 * std::f64::consts::PI * g[1], if j == 1 { 0.0 } else { 1.0 })
+            } else {
+                (0.5 * phi.sin(), 0.5 - 0.5 * phi.cos())
+            };
+            poles.extend(Self::ring(nu, r.max(0.0), y, false));
+        }
+        Form { kind: FormKind::Sphere, nu, nv, poles }
+    }
+
+    /// A cylinder in the unit box (radius 0.5, from y 0 to 1), flat ends,
+    /// its rims rounded a little (`square`: a box, its sides and edges
+    /// soft).
+    pub fn cylinder(nu: usize, square: bool) -> Form {
+        let rows: [(f64, f64); 13] = [(0.0, 0.0), (0.2, 0.0), (0.42, 0.0), (0.5, 0.0), (0.5, 0.08), (0.5, 0.3), (0.5, 0.5), (0.5, 0.7), (0.5, 0.92), (0.5, 1.0), (0.42, 1.0), (0.2, 1.0), (0.0, 1.0)];
+        let mut poles = vec![];
+        for (r, y) in rows {
+            poles.extend(Self::ring(nu, r, y, square));
+        }
+        Form { kind: FormKind::Cylinder, nu, nv: rows.len(), poles }
+    }
+
+    /// Pole (i, j), i round (wrapping), j from bottom to top.
+    pub fn at(&self, i: i64, j: usize) -> [f64; 3] {
+        let i = i.rem_euclid(self.nu as i64) as usize;
+        self.poles[j * self.nu + i]
+    }
+
+    /// The parameters' ranges: u from 0 to `nu` (round), v from 0 to
+    /// `nv − 3` (bottom to top), as the kernel's surface has them.
+    pub fn range(&self) -> (f64, f64) {
+        (self.nu as f64, (self.nv - 3) as f64)
+    }
+
+    /// The 16 poles that make the point (u, v) and their weights (the
+    /// kernel's periodic cubic round: span [i, i + 1] from poles i to
+    /// i + 3; clamped cubic up).
+    pub fn basis(nu: usize, nv: usize, u: f64, v: f64) -> [(usize, f64); 16] {
+        let u = u.rem_euclid(nu as f64);
+        let i = (u.floor() as usize).min(nu - 1);
+        let t = u - i as f64;
+        let bu = [(1.0 - t).powi(3) / 6.0, (3.0 * t * t * t - 6.0 * t * t + 4.0) / 6.0, (-3.0 * t * t * t + 3.0 * t * t + 3.0 * t + 1.0) / 6.0, t * t * t / 6.0];
+        // clamped: knots 0 0 0 0 1 2 … L L L L
+        let l = (nv - 3) as f64;
+        let v = v.clamp(0.0, l);
+        let knot = |k: i64| -> f64 { ((k - 3).max(0) as f64).min(l) };
+        let span = ((v.floor() as i64).min(nv as i64 - 4) + 3) as i64;
+        // Cox-de Boor, degree 3 (The NURBS Book A2.2)
+        let mut n = [0.0f64; 4];
+        let (mut left, mut right) = ([0.0f64; 4], [0.0f64; 4]);
+        n[0] = 1.0;
+        for j in 1..=3usize {
+            left[j] = v - knot(span + 1 - j as i64);
+            right[j] = knot(span + j as i64) - v;
+            let mut saved = 0.0;
+            for r in 0..j {
+                let den = right[r + 1] + left[j - r];
+                let tmp = if den.abs() < 1e-12 { 0.0 } else { n[r] / den };
+                n[r] = saved + right[r + 1] * tmp;
+                saved = left[j - r] * tmp;
+            }
+            n[j] = saved;
+        }
+        let j0 = (span - 3) as usize;
+        let mut out = [(0usize, 0.0f64); 16];
+        for a in 0..4 {
+            for b in 0..4 {
+                out[a * 4 + b] = ((j0 + a) * nu + (i + b) % nu, n[a] * bu[b]);
+            }
+        }
+        out
+    }
+
+    /// The surface's point at (u, v) from poles (unit or world: the box is
+    /// affine).
+    pub fn point(poles: &[DVec3], nu: usize, nv: usize, u: f64, v: f64) -> DVec3 {
+        Self::basis(nu, nv, u, v).iter().map(|(k, w)| poles[*k] * *w).sum()
+    }
+
+    /// The same surface with twice the poles round and about twice up
+    /// (exact: the periodic cubic split at its knots' middles, the clamped
+    /// one by knot insertion), for finer brushes.
+    pub fn refined(&self) -> Form {
+        let (nu, nv) = (self.nu, self.nv);
+        let p = |i: usize, j: usize| DVec3::from(self.poles[j * nu + i % nu]);
+        // round: Q(2k − 1) = (P(k−1) + 6 P(k) + P(k+1)) / 8, Q(2k) = (P(k) + P(k+1)) / 2
+        let nu2 = nu * 2;
+        let mut rows: Vec<Vec<DVec3>> = vec![];
+        for j in 0..nv {
+            let mut r = vec![DVec3::ZERO; nu2];
+            for k in 0..nu {
+                r[(2 * k + nu2 - 1) % nu2] = (p(k + nu - 1, j) + p(k, j) * 6.0 + p(k + 1, j)) / 8.0;
+                r[2 * k] = (p(k, j) + p(k + 1, j)) / 2.0;
+            }
+            rows.push(r);
+        }
+        // up: each span's middle inserted (Boehm), then the knots doubled
+        let l = nv - 3;
+        let mut knots: Vec<f64> = vec![0.0; 4];
+        knots.extend((1..l).map(|k| k as f64));
+        knots.extend([l as f64; 4]);
+        let mut cols: Vec<Vec<DVec3>> = (0..nu2).map(|i| rows.iter().map(|r| r[i]).collect()).collect();
+        for s in 0..l {
+            let t = s as f64 + 0.5;
+            let k = knots.iter().rposition(|x| *x <= t).unwrap();
+            for c in cols.iter_mut() {
+                let mut q = Vec::with_capacity(c.len() + 1);
+                for i in 0..=c.len() {
+                    if i + 3 <= k {
+                        q.push(c[i]);
+                    } else if i <= k {
+                        let a = (t - knots[i]) / (knots[i + 3] - knots[i]);
+                        q.push(c[i - 1] * (1.0 - a) + c[i] * a);
+                    } else {
+                        q.push(c[i - 1]);
+                    }
+                }
+                *c = q;
+            }
+            knots.insert(k + 1, t);
+        }
+        let nv2 = nv + l;
+        let mut poles = Vec::with_capacity(nu2 * nv2);
+        for j in 0..nv2 {
+            for c in &cols {
+                poles.push(c[j].to_array());
+            }
+        }
+        Form { kind: self.kind, nu: nu2, nv: nv2, poles }
+    }
+}
+
 /// What the kernel makes of a feature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Makes {
@@ -1030,6 +1205,33 @@ impl Feature {
         let Prim::Path { x, z } = self.prim else { return None };
         let a = r.align.clamp(-1, 1) as f64 * 0.5;
         Some(if r.along_x { (DVec3::new(0.0, 0.0, a * z), DVec3::X) } else { (DVec3::new(a * x, 0.0, 0.0), DVec3::Z) })
+    }
+    /// A form's poles in the world (its unit box scaled and placed).
+    pub fn form_poles(&self) -> Vec<DVec3> {
+        let (Some(fm), Prim::Box { x, y, z }) = (&self.form, self.prim) else { return vec![] };
+        let m = self.matrix();
+        fm.poles.iter().map(|p| m.transform_point3(DVec3::new(p[0] * x, p[1] * y, p[2] * z))).collect()
+    }
+    /// A form's poles set from world points, its box made the one round
+    /// them, centred on its axis as before (its turn kept, its base moved
+    /// up or down only): the middle a brush's symmetry mirrors across
+    /// stays where it was.
+    pub fn set_form_poles(&mut self, world: &[DVec3]) {
+        if self.form.is_none() || world.is_empty() {
+            return;
+        }
+        let inv = self.matrix().inverse();
+        let local: Vec<DVec3> = world.iter().map(|w| inv.transform_point3(*w)).collect();
+        let lo = local.iter().fold(DVec3::splat(f64::MAX), |a, b| a.min(*b));
+        let hi = local.iter().fold(DVec3::splat(f64::MIN), |a, b| a.max(*b));
+        let half = lo.abs().max(hi.abs());
+        let size = DVec3::new(half.x * 2.0, hi.y - lo.y, half.z * 2.0).max(DVec3::splat(0.01));
+        let base = DVec3::new(0.0, lo.y, 0.0);
+        self.origin = self.matrix().transform_point3(base);
+        self.prim = Prim::Box { x: size.x, y: size.y, z: size.z };
+        if let Some(fm) = self.form.as_mut() {
+            fm.poles = local.iter().map(|q| [(q.x - base.x) / size.x, (q.y - base.y) / size.y, (q.z - base.z) / size.z]).collect();
+        }
     }
     /// An open curve turned whose two ends lie on the axis (2 % of its
     /// box across it, at least 0.05 mm): it closes into a solid.

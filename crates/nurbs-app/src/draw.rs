@@ -46,9 +46,11 @@ impl Drawer {
         let quads = st.quad_mesh();
         // whole shapes dragged in Object mode: their faces follow at once
         let preview = if quads.is_none() { st.drag_preview().filter(|p| !p.is_empty()) } else { None };
-        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() || preview.is_some() || self.previewed {
+        // a form pulled by a brush: drawn from its poles (`forms.rs`)
+        let form = if quads.is_none() { st.form_preview() } else { None };
+        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() || preview.is_some() || form.is_some() || self.previewed {
             self.model_gen = st.model_gen;
-            self.previewed = preview.is_some();
+            self.previewed = preview.is_some() || form.is_some();
             self.quads_shown = quads.is_some();
             let mut verts = vec![];
             let mut edges = vec![];
@@ -60,14 +62,19 @@ impl Drawer {
                 };
                 // the distance to the reference, when shown and measured on
                 // this model: its finer triangles instead
-                let dev = st.deviation_shown().filter(|_| quads.is_none());
+                let dev = st.deviation_shown().filter(|_| quads.is_none() && form.is_none());
+                // the form's own faces: drawn from its poles instead
+                let form_faces: std::collections::HashSet<u32> = match &form {
+                    Some((id, _)) => m.faces.iter().enumerate().filter(|(_, f)| f.tag.map(|t| t.feature == *id).unwrap_or(false)).map(|(i, _)| i as u32).collect(),
+                    None => Default::default(),
+                };
                 if let Some(d) = dev {
                     verts.extend_from_slice(d);
                 } else {
                     verts.reserve(m.triangles.len() * 3);
                     for (t, tri) in m.triangles.iter().enumerate() {
                         let face = m.tri_face[t];
-                        if !left.contains(&face) {
+                        if !left.contains(&face) || form_faces.contains(&face) {
                             continue;
                         }
                         for &v in tri {
@@ -106,9 +113,13 @@ impl Drawer {
                         }
                     }
                 }
+                if let (Some((_, tris)), Some(face)) = (&form, form_faces.iter().min()) {
+                    verts.extend(tris.iter().map(|(p, n)| MeshVertex { pos: *p, nrm: *n, face: *face, dev: NO_DEV }));
+                }
                 // the edges a person draws: dark and thin like a CAD view
                 let moved = |e: &nurbs_kernel::Edge| e.faces.iter().find_map(|f| usize::try_from(*f).ok().and_then(|f| face_m.get(f).copied().flatten()));
-                let lines: Vec<Vec<[f32; 3]>> = m.edges.iter().filter(|e| !e.seam).map(|e| match moved(e) {
+                let on_form = |e: &nurbs_kernel::Edge| e.faces.iter().any(|f| u32::try_from(*f).map(|f| form_faces.contains(&f)).unwrap_or(false));
+                let lines: Vec<Vec<[f32; 3]>> = m.edges.iter().filter(|e| !e.seam && !on_form(e)).map(|e| match moved(e) {
                     Some(x) => e.pts.iter().map(|p| x.transform_point3(glam::Vec3::from(*p)).to_array()).collect(),
                     None => e.pts.clone(),
                 }).collect();

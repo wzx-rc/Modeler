@@ -30,6 +30,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_vertices(p, st);
         draw_push(p, st);
         draw_knife(p, st, ctx.input(|i| i.pointer.hover_pos()));
+        draw_brush(p, st, ctx.input(|i| i.pointer.latest_pos()));
         if let (Some(g), Some(h)) = (&st.round_drag, ctx.input(|i| i.pointer.latest_pos())) {
             if g.size > 1e-9 {
                 let label = if g.chamfer { "Chamfer" } else { "Fillet" };
@@ -474,6 +475,30 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             if resp.double_clicked_by(PointerButton::Primary) {
                 if let Some(v) = resp.interact_pointer_pos().or(hover).map(p2).and_then(|p| st.pick_vertex(p)) {
                     st.pick_linked_vertices(v, shift || ctrl);
+                }
+            }
+        }
+        Tool::Form => {
+            // a brush stroke on a form (`forms.rs`)
+            if st.sculpt.is_some() {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.form_drag(p2(p));
+                }
+                if resp.drag_stopped() || !l {
+                    st.form_release();
+                }
+                return;
+            }
+            if resp.drag_started_by(PointerButton::Primary) {
+                let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                if st.form_press(p2(origin), shift, ctrl) {
+                    if let Some(p) = hover {
+                        st.form_drag(p2(p));
+                    }
+                }
+            } else if resp.clicked_by(PointerButton::Primary) {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    st.form_click(p2(p));
                 }
             }
         }
@@ -1209,6 +1234,64 @@ fn draw_vertices(p: &Painter, st: &AppState) {
 
 /// The Knife: the point the pointer catches on an edge (a diamond), the
 /// line from the cut's last point to it (or to the pointer, dashed).
+/// The Forms tool's brush: a ring of its radius laid on the surface under
+/// the pointer (on screen off the part), and its mirror with the symmetry.
+fn draw_brush(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
+    if st.tool != Tool::Form {
+        return;
+    }
+    let Some(at) = pointer else { return };
+    let light = Color32::from_rgba_unmultiplied(240, 242, 245, 230);
+    let dark = Color32::from_rgba_unmultiplied(10, 12, 16, 150);
+    let ring = |pts: Vec<Pos2>, strong: bool| {
+        let (w, c) = if strong { (1.4, light) } else { (1.0, Color32::from_rgba_unmultiplied(240, 242, 245, 120)) };
+        p.add(egui::Shape::closed_line(pts.clone(), Stroke::new(w + 2.0, dark)));
+        p.add(egui::Shape::closed_line(pts, Stroke::new(w, c)));
+    };
+    // on a stroke: the ring on screen round the pointer
+    let (hit, strong) = match &st.sculpt {
+        Some(_) => (None, true),
+        None => (st.hover_hit.and_then(|h| st.feature_of_face(h.face).map(|id| (h.point.as_dvec3(), h.normal.as_dvec3(), id))), true),
+    };
+    let r_pts = st.form.radius;
+    match hit {
+        Some((h, n, id)) => {
+            let r = r_pts as f64 * st.mm_per_point(h);
+            let n = n.normalize_or(DVec3::Y);
+            let u = n.any_orthonormal_vector();
+            let v = n.cross(u);
+            let circle = |c: DVec3, u: DVec3, v: DVec3| -> Vec<Pos2> { (0..48).filter_map(|k| { let a = std::f64::consts::TAU * k as f64 / 48.0; world(st, c + (u * a.cos() + v * a.sin()) * r) }).collect() };
+            let pts = circle(h, u, v);
+            if pts.len() > 8 {
+                ring(pts, strong);
+            }
+            if let Some(c) = world(st, h) {
+                p.circle_filled(c, 2.0, light);
+            }
+            // the mirror, across the form's middle
+            if st.form.mirror {
+                if let Some(f) = st.doc.feature(id).filter(|f| f.form.is_some()) {
+                    let m = f.matrix();
+                    let (o, ax) = (m.transform_point3(DVec3::ZERO), m.transform_vector3(DVec3::X).normalize_or(DVec3::X));
+                    let refl = |q: DVec3| q - ax * (2.0 * (q - o).dot(ax));
+                    let refv = |q: DVec3| q - ax * (2.0 * q.dot(ax));
+                    let pts = circle(refl(h), refv(u), refv(v));
+                    if pts.len() > 8 {
+                        ring(pts, false);
+                    }
+                }
+            }
+        }
+        None => {
+            let pts: Vec<Pos2> = (0..48).map(|k| { let a = std::f32::consts::TAU * k as f32 / 48.0; at + vec2(a.cos(), a.sin()) * r_pts }).collect();
+            ring(pts, st.sculpt.is_some());
+        }
+    }
+    if let Some(s) = &st.sculpt {
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, s.brush.label(), HOT, HOT);
+    }
+}
+
 fn draw_knife(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
     if !matches!(st.tool, Tool::Knife | Tool::Point) {
         return;
@@ -1436,6 +1519,11 @@ pub fn hint(st: &AppState) -> String {
             Some(k) if k.pts.len() < 3 => "Click or drag: a corner · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
             Some(_) => "First point or Enter: close it · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
+        (None, Tool::Form) if st.sculpt.is_some() => "Drag: the brush pulls the surface · Release: done (one undo step) · Esc: cancel".into(),
+        (None, Tool::Form) => format!(
+            "Press on a form and drag: {} · Shift + drag: Smooth · Ctrl: the other way · [ ]: radius · Click on the ground: a new form · A plain Cube or Cylinder becomes a form",
+            st.form.brush.label()
+        ),
         (None, Tool::Slot) if !st.slot_on_scan => match &st.slot_draw {
             Some(s) if s.width => "Move: its width · Click: on to its height · Esc: cancel".into(),
             Some(_) => "To its other end · Shift: 0°, 45°, 90° · Release: then its width".into(),

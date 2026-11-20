@@ -29,6 +29,8 @@ pub enum Tool {
     /// A curve of the Curves set (3ds Max's Shapes): Rectangle and Ellipse
     /// drawn corner to corner, Circle, Polygon and Star from their centre.
     Curve(CurveKind),
+    /// Forms (M): brushes that pull a form's surface (`forms.rs`).
+    Form,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -643,6 +645,11 @@ pub struct AppState {
     pub surface_on_scan: bool,
     /// The Slot tool reads the scan (ON SCAN) instead of drawing by hand.
     pub slot_on_scan: bool,
+    /// The Forms tool's brushes and their settings, the stroke under way,
+    /// the form drawn from its poles until the kernel's model of it comes.
+    pub form: crate::forms::FormSettings,
+    pub sculpt: Option<crate::forms::Sculpt>,
+    pub form_shown: Option<FeatureId>,
     /// The Slot drawn by hand.
     pub slot_draw: Option<crate::slot::SlotDraw>,
     /// A curve or 2D boolean being pulled into a solid (Curves, step 3).
@@ -831,6 +838,9 @@ impl AppState {
             round_only: false,
             surface_on_scan: false,
             slot_on_scan: false,
+            form: Default::default(),
+            sculpt: None,
+            form_shown: None,
             slot_draw: None,
             curve_pull: None,
             journal: Default::default(),
@@ -2211,7 +2221,7 @@ impl AppState {
 
     /// Cancels what is under way (creation, sketch, drag, inset).
     pub fn abort_gestures(&mut self) {
-        if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() || self.round_drag.take().is_some() || self.face_drag.take().is_some() || self.curve_pull.take().is_some() {
+        if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() || self.round_drag.take().is_some() || self.face_drag.take().is_some() || self.curve_pull.take().is_some() || self.sculpt.take().is_some() {
             self.cancel_live();
             self.clean_selection_ids();
         }
@@ -2238,6 +2248,9 @@ impl AppState {
     pub fn commit_gestures(&mut self, at: [f32; 2]) {
         if self.knife.is_some() {
             self.knife_end();
+        }
+        if self.sculpt.is_some() {
+            self.form_release();
         }
         if self.push.is_some() {
             self.finish_push();
@@ -2581,6 +2594,7 @@ impl AppState {
             Some(Tool::Push(k)) => self.arm_push(k, at),
             Some(t @ (Tool::Knife | Tool::Point)) => self.arm_knife(t),
             Some(Tool::Slot) => self.arm_slot(),
+            Some(Tool::Form) => self.arm_form(),
             _ => self.toast("No tool used yet", false),
         }
     }
@@ -3805,7 +3819,7 @@ impl AppState {
         for (id, t) in then {
             // a shape carved out is the part's hole: the kernel's model
             // shows it, its cage where the pointer takes it
-            let Some(now) = self.doc.feature(*id).filter(|f| f.op != Op::Carve) else { continue };
+            let Some(now) = self.doc.feature(*id).filter(|f| f.op != Op::Carve && Some(f.id) != self.form_shown) else { continue };
             let x = shape_frame(now) * t.inverse();
             if !x.abs_diff_eq(DMat4::IDENTITY, 1e-9) && x.is_finite() {
                 out.insert(*id, x);
@@ -3854,6 +3868,10 @@ impl AppState {
                 self.clamp_rounds();
                 self.check_build();
             }
+        }
+        // a form pulled by a brush: drawn by the app until its model comes
+        if self.sculpt.is_none() && self.form_shown.is_some() && self.model.as_ref().map(|m| m.serial / 4 == self.version).unwrap_or(true) {
+            self.form_shown = None;
         }
         // the journal: tool and mode changes
         let seen = (format!("{:?}", self.tool), format!("{:?}", self.sel_mode));

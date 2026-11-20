@@ -52,6 +52,7 @@ extern "C" {
     fn focc_region_cut(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int) -> *mut FShape;
     fn focc_outline_wire(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int, open: c_int) -> *mut FShape;
     fn focc_revolve(s: *const FShape, o: *const c_double, d: *const c_double, angle: c_double) -> *mut FShape;
+    fn focc_form(poles: *const c_double, nu: c_int, nv: c_int) -> *mut FShape;
     fn focc_loft(secs: *const *const FShape, n: c_int, solid: c_int, ruled: c_int) -> *mut FShape;
     fn focc_section_count(s: *const FShape) -> c_int;
     fn focc_section_edge(s: *const FShape, k: c_int) -> c_int;
@@ -490,6 +491,16 @@ impl Shape {
     /// (Revolve): a face makes a solid, a wire a sheet.
     pub fn revolve(&self, o: [f64; 3], d: [f64; 3], angle: f64) -> Result<Shape, String> {
         shape(unsafe { focc_revolve(self.0, o.as_ptr(), d.as_ptr(), angle) })
+    }
+    /// A sculpted form: the bicubic BSpline through `poles` (world, nu × nv
+    /// row major), periodic round, clamped bottom to top, its end rows
+    /// single points: a solid.
+    pub fn form(poles: &[[f64; 3]], nu: usize, nv: usize) -> Result<Shape, String> {
+        if poles.len() != nu * nv {
+            return Err("a form's poles do not match its grid".into());
+        }
+        let v: Vec<f64> = poles.iter().flatten().copied().collect();
+        shape(unsafe { focc_form(v.as_ptr(), nu as c_int, nv as c_int) })
     }
     /// A loft through `secs` in order (wires, or faces: their outline): a
     /// solid when `solid`, else a sheet; `ruled`: straight between them.
