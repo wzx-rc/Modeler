@@ -157,6 +157,54 @@ pub fn region(doc: &Doc, f: &Feature, depth: usize) -> Result<Shape, String> {
     s.transformed(rows(f.matrix()))
 }
 
+/// A 2D boolean pulled into a solid (step 3 of the Curves set): its region
+/// swept along its axis by its height, tagged as a sketch's (1 top, 2
+/// bottom, a side 3 + 1000 × its curve's place among the leaves + the
+/// piece of that curve nearest it).
+fn bool_tool(doc: &Doc, f: &Feature) -> Result<Shape, String> {
+    let h = f.prim.height().max(0.01);
+    let r = region(doc, f, 0)?;
+    let v = f.axis() * h;
+    let mut s = r.extrude(v.to_array())?;
+    let leaves: Vec<&Feature> = doc.with_operands(&[f.id]).iter().filter_map(|id| doc.feature(*id)).filter(|g| g.shape_bool.is_none() && g.profile.is_some()).collect();
+    let tags: Vec<i64> = (0..s.face_count())
+        .map(|i| {
+            let Some(fi) = s.face_info(i) else { return FaceTag { feature: f.id, sub: 0 }.pack() };
+            let n = f.rot.inverse() * DVec3::from_array(fi.normal);
+            let sub = if fi.kind == OccSurf::Plane && n.y > 0.5 {
+                1
+            } else if fi.kind == OccSurf::Plane && n.y < -0.5 {
+                2
+            } else {
+                let at = DVec3::from_array(fi.point);
+                let mut best = (f64::MAX, 3u16);
+                for (li, g) in leaves.iter().enumerate() {
+                    let (Some(pr), Prim::Path { x, z }) = (g.profile.as_ref(), g.prim) else { continue };
+                    let q = g.matrix().inverse().transform_point3(at);
+                    for pc in pr.pieces(x, z) {
+                        let d = pc.pts.windows(2).map(|w| seg_dist([q.x, q.z], w[0], w[1])).fold(f64::MAX, f64::min);
+                        if d < best.0 {
+                            best = (d, (3 + 1000 * li.min(60) + (pc.id as usize).min(999)) as u16);
+                        }
+                    }
+                }
+                best.1
+            };
+            FaceTag { feature: f.id, sub }.pack()
+        })
+        .collect();
+    s.set_tags(&tags);
+    Ok(s)
+}
+
+/// A feature's hash with its 2D boolean's curves' (they are built with it).
+fn deep_hash(doc: &Doc, f: &Feature) -> u64 {
+    if f.shape_bool.is_none() {
+        return f.hash();
+    }
+    doc.with_operands(&[f.id]).iter().filter_map(|id| doc.feature(*id)).fold(0u64, |h, g| hash2(h, g.hash()))
+}
+
 /// The feature's solid in the world, its faces tagged.
 fn tool(f: &Feature) -> Result<Shape, String> {
     let h = f.prim.height().max(0.01);
@@ -212,7 +260,7 @@ const PAST: f64 = 0.1;
 /// it sits on (facing each other) put on it. None when nothing moves. Each
 /// face moves at most a quarter of the shape's size across it.
 fn settle(acc: &Shape, f: &Feature, t: &Shape) -> Option<Feature> {
-    if !f.is_solid() || f.is_path() || f.is_sheet() {
+    if !f.is_solid() || f.is_path() || f.is_sheet() || f.shape_bool.is_some() {
         return None;
     }
     let rot = f.rot;
@@ -920,7 +968,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
     let mut befores: Vec<(&Feature, Stage)> = vec![];
     for (i, &f) in feats.iter().enumerate() {
         befores.push((f, stage.clone()));
-        let fh = f.hash();
+        let fh = deep_hash(doc, f);
         key = hash2(key, fh);
         let skipped = |what: &str| skip.iter().any(|s| *s == step(what, f));
         if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") || skipped("cut") {
@@ -1092,7 +1140,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
             Ok(t.clone())
         } else {
             mark(&step("tool", f));
-            tool(f).map(|t| {
+            if f.shape_bool.is_some() { bool_tool(doc, f) } else { tool(f) }.map(|t| {
                 let t = Rc::new(t);
                 cache.tools.insert(fh, t.clone());
                 t
@@ -1548,13 +1596,77 @@ mod tests {
     }
 
     #[test]
+    fn curves_extruded() {
+        // step 3: a 30 × 20 rectangle less a circle of radius 6 on its right
+        // side, pulled 10 up; the same pulled 4 down into a block (Carve);
+        // a star pulled on its own
+        use crate::doc::{CurveKind, CurveOp, Prim, ShapeBool};
+        let mut d = Doc::default();
+        let curve = |d: &mut Doc, kind: CurveKind, x: f64, z: f64, at: DVec3| {
+            let id = d.add(Op::Add, Prim::Path { x, z }, at, DQuat::IDENTITY);
+            d.feature_mut(id).unwrap().curve = Some(kind.new_curve());
+            id
+        };
+        let r = curve(&mut d, CurveKind::Rectangle, 30.0, 20.0, DVec3::ZERO);
+        let c = curve(&mut d, CurveKind::Circle, 12.0, 12.0, DVec3::new(15.0, 0.0, 0.0));
+        let b = d.add(Op::Add, Prim::Profile { x: 1.0, y: 10.0, z: 1.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(b).unwrap().shape_bool = Some(ShapeBool { op: CurveOp::Subtract, operands: vec![r, c] });
+        d.regen_curves();
+        let f = d.feature(b).unwrap();
+        assert!(f.is_extruded_curve() && !f.is_path());
+        assert_eq!(f.prim, Prim::Profile { x: 36.0, y: 10.0, z: 20.0 }, "its box: its curves'");
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((lo[0] + 15.0).abs() < 0.01 && (hi[0] - 15.0).abs() < 0.01 && lo[1].abs() < 0.01 && (hi[1] - 10.0).abs() < 0.01, "{lo:?} {hi:?}");
+        // its notch's wall is tagged by the circle (the second leaf)
+        assert!(m.faces.iter().any(|x| x.tag.is_some_and(|t| t.feature == b && t.sub >= 1003)), "{:?}", m.faces.iter().map(|x| x.tag).collect::<Vec<_>>());
+        assert!(m.faces.iter().any(|x| x.tag.is_some_and(|t| t.feature == b && t.sub == 1)) && m.faces.iter().any(|x| x.tag.is_some_and(|t| t.feature == b && t.sub == 2)));
+        // the circle grown: the solid follows
+        let mut e = d.clone();
+        if let Some(Prim::Path { x, z }) = e.feature_mut(c).map(|g| &mut g.prim) {
+            *x = 20.0;
+            *z = 20.0;
+        }
+        e.regen_curves();
+        let m2 = build(&e, true, false, &[], &mut Cache::default());
+        assert!(m2.errors.is_empty(), "{:?}", m2.errors);
+        assert!(m2.positions.len() != m.positions.len() || m2.faces.len() != m.faces.len() || m2.bounds() != m.bounds() || m2.edges.len() != m.edges.len());
+        // down into a block, as a Carve: turned over round its Z
+        let mut e = d.clone();
+        let blk = e.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 30.0 }, DVec3::new(0.0, -10.0, 0.0), DQuat::IDENTITY);
+        let pos = e.features.iter().position(|g| g.id == blk).unwrap();
+        let g = e.features.remove(pos);
+        e.features.insert(0, g);
+        {
+            let f = e.feature_mut(b).unwrap();
+            f.op = Op::Carve;
+            f.rot = DQuat::from_rotation_z(std::f64::consts::PI);
+            f.prim = Prim::Profile { x: 1.0, y: 4.0, z: 1.0 };
+        }
+        e.regen_curves();
+        assert!(e.feature(b).unwrap().axis().y < -0.99, "still down after regen");
+        let m3 = build(&e, true, false, &[], &mut Cache::default());
+        assert!(m3.errors.is_empty(), "{:?}", m3.errors);
+        // the pocket's floor at y = −4
+        assert!(m3.faces.iter().any(|x| x.tag.is_some_and(|t| t.feature == b) && (x.point[1] + 4.0).abs() < 0.01), "no floor at -4");
+        // a star curve pulled on its own: a Profile with its curve
+        let mut e = Doc::default();
+        let st = curve(&mut e, CurveKind::Star, 20.0, 20.0, DVec3::ZERO);
+        e.feature_mut(st).unwrap().prim = Prim::Profile { x: 20.0, y: 5.0, z: 20.0 };
+        e.regen_curves();
+        let m4 = build(&e, true, false, &[], &mut Cache::default());
+        assert!(m4.errors.is_empty() && m4.faces.len() >= 12, "{:?} {}", m4.errors, m4.faces.len());
+    }
+
+    #[test]
     fn curves_combined() {
         // a 30 × 20 rectangle less a circle of radius 6 on its right side
         // (a notch), with a circle inside (a hole), then their union and
         // their intersection
         use crate::doc::{CurveKind, CurveOp, Prim, ShapeBool};
         let mut d = Doc::default();
-        let mut curve = |d: &mut Doc, kind: CurveKind, x: f64, z: f64, at: DVec3| {
+        let curve = |d: &mut Doc, kind: CurveKind, x: f64, z: f64, at: DVec3| {
             let id = d.add(Op::Add, Prim::Path { x, z }, at, DQuat::IDENTITY);
             d.feature_mut(id).unwrap().curve = Some(kind.new_curve());
             id

@@ -339,6 +339,11 @@ impl Profile {
         out
     }
     /// Mirrored across local X (the feature turned over to grow downwards).
+    /// Mirrored across its local Z axis (x → −x): with the frame turned
+    /// half round its Z, the outline stays in place.
+    pub fn mirrored(&self) -> Profile {
+        Profile { points: self.points.iter().map(|p| [-p[0], p[1]]).collect(), smooth: self.smooth.clone(), corner: self.corner.clone(), tension: self.tension.clone(), open: self.open }
+    }
     pub fn flipped(&self) -> Profile {
         Profile { points: self.points.iter().map(|p| [p[0], -p[1]]).collect(), smooth: self.smooth.clone(), corner: self.corner.clone(), tension: self.tension.clone(), open: self.open }
     }
@@ -860,6 +865,11 @@ impl Feature {
     pub fn is_path(&self) -> bool {
         matches!(self.prim, Prim::Path { .. }) && self.sheet.is_none()
     }
+    /// A curve of the Curves set (or a 2D boolean) pulled into a solid
+    /// (step 3, 3ds Max's Extrude): a Profile that keeps its curve.
+    pub fn is_extruded_curve(&self) -> bool {
+        matches!(self.prim, Prim::Profile { .. }) && (self.curve.is_some() || self.shape_bool.is_some())
+    }
     /// A surface with no thickness (built apart, next to the part).
     pub fn is_sheet(&self) -> bool {
         self.sheet.is_some()
@@ -977,13 +987,17 @@ impl Feature {
     /// A curve given new settings (sides, points) and radius, its centre
     /// kept where it was (a pentagon's box is not round its centre).
     pub fn reshape_curve(&mut self, c: Curve, r: f64) {
-        let (Prim::Path { x, z }, Some(old)) = (self.prim, self.curve) else { return };
+        let (Prim::Path { x, z } | Prim::Profile { x, z, .. }, Some(old)) = (self.prim, self.curve) else { return };
         let r0 = old.radius(x, z);
         let (_, off0) = old.unit_box();
         let (b, off) = c.unit_box();
         let centre = self.origin + self.rot * DVec3::new(off0[0] * r0, 0.0, off0[1] * r0);
         self.origin = centre - self.rot * DVec3::new(off[0] * r, 0.0, off[1] * r);
-        self.prim = Prim::Path { x: (r * b[0]).max(0.01), z: (r * b[1]).max(0.01) };
+        let (nx, nz) = ((r * b[0]).max(0.01), (r * b[1]).max(0.01));
+        self.prim = match self.prim {
+            Prim::Profile { y, .. } => Prim::Profile { x: nx, y, z: nz },
+            _ => Prim::Path { x: nx, z: nz },
+        };
         self.curve = Some(c);
     }
     /// Content hash (the kernel's caches, and the name of a step to skip).
@@ -1099,7 +1113,12 @@ impl Doc {
     pub fn regen_curves(&mut self) -> bool {
         let mut changed = false;
         for f in self.features.iter_mut() {
-            let (Some(c), Prim::Path { x, z }) = (f.curve.as_mut(), f.prim) else { continue };
+            // flat, or extruded (step 3: a Profile of its height)
+            let (x, z) = match f.prim {
+                Prim::Path { x, z } | Prim::Profile { x, z, .. } => (x, z),
+                _ => continue,
+            };
+            let Some(c) = f.curve.as_mut() else { continue };
             if c.kind == CurveKind::Circle && (x - z).abs() > 1e-9 * x.abs().max(z.abs()).max(1.0) {
                 c.kind = CurveKind::Ellipse;
                 changed = true;
@@ -1117,7 +1136,10 @@ impl Doc {
                 let Some(b) = self.features[k].shape_bool.clone() else { continue };
                 let ops: Vec<&Feature> = b.operands.iter().filter_map(|id| self.feature(*id)).collect();
                 let Some(first) = ops.first() else { continue };
-                let rot = first.rot;
+                // extruded down: turned over round its own Z (its curves
+                // stay where they are)
+                let flip = self.features[k].axis().dot(first.axis()) < 0.0;
+                let rot = if flip { first.rot * DQuat::from_rotation_z(std::f64::consts::PI) } else { first.rot };
                 let inv = first.matrix().inverse();
                 let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
                 for g in &ops {
@@ -1128,7 +1150,11 @@ impl Doc {
                     }
                 }
                 let mid = first.matrix().transform_point3(DVec3::new((lo.x + hi.x) * 0.5, 0.0, (lo.z + hi.z) * 0.5));
-                let prim = Prim::Path { x: (hi.x - lo.x).max(0.01), z: (hi.z - lo.z).max(0.01) };
+                let (bx, bz) = ((hi.x - lo.x).max(0.01), (hi.z - lo.z).max(0.01));
+                let prim = match self.features[k].prim {
+                    Prim::Profile { y, .. } => Prim::Profile { x: bx, y, z: bz },
+                    _ => Prim::Path { x: bx, z: bz },
+                };
                 let f = &mut self.features[k];
                 if f.rot != rot || f.origin.distance(mid) > 1e-9 || f.prim != prim {
                     f.rot = rot;

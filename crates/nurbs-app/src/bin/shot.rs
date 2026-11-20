@@ -3464,6 +3464,96 @@ fn main() {
         eprintln!("  undone: {} features", h.st.doc.features.len());
     }
 
+    if want("curves-extrude") {
+        // step 3 of the Curves set: a Subtract pulled up beside a block
+        // (Add), a circle drawn on the block's top pulled down (Carve), a
+        // star pulled up then given more points
+        use nurbs_kernel::doc::{CurveKind, CurveOp};
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 40.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        h.reset(d, "Curves");
+        h.st.camera.frame(Vec3::new(-30.0, 0.0, -25.0), Vec3::new(95.0, 25.0, 25.0));
+        h.steps(2);
+        h.settle();
+        let w = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+        let draw = |h: &mut Harness, k: CurveKind, a: Vec3, b: Vec3| -> nurbs_kernel::FeatureId {
+            h.st.arm_curve(k);
+            h.steps(1);
+            let (pa, pb) = (h.screen_of(a), h.screen_of(b));
+            h.drag(pa, pb, 8, false);
+            h.steps(1);
+            h.press(pb, false);
+            h.steps(2);
+            *h.st.selection.first().unwrap()
+        };
+        let pull = |h: &mut Harness, base: Vec3, up: Vec3, by: f32| {
+            let s0 = h.screen_of(base);
+            h.move_to(s0);
+            h.hold(Modifiers::CTRL);
+            h.key(egui::Key::E);
+            h.hold(Modifiers::NONE);
+            let to = h.screen_of(base + up * by);
+            for i in 1..=8 {
+                h.move_to(s0 + (to - s0) * (i as f32 / 8.0));
+            }
+            h.steps(2);
+        };
+        let r = draw(&mut h, CurveKind::Rectangle, w(35.0, 0.0, -12.0), w(65.0, 0.0, 12.0));
+        let c = draw(&mut h, CurveKind::Circle, w(65.0, 0.0, 0.0), w(73.0, 0.0, 0.0));
+        h.st.selection = vec![r, c];
+        h.st.make_curve_bool(CurveOp::Subtract);
+        let b = h.st.selection[0];
+        h.settle();
+        pull(&mut h, w(54.0, 0.0, 0.0), Vec3::Y, 15.0);
+        h.settle();
+        h.shot("zero-curves-extrude-1-pulling");
+        h.click(h.st.view().project(w(54.0, 15.0, 0.0)).map(|p| pos2(p[0], p[1])).unwrap());
+        h.settle();
+        // the circle on the block's top, Carve, down 8
+        h.st.mode = Op::Carve;
+        let hole = draw(&mut h, CurveKind::Circle, w(0.0, 20.0, 0.0), w(8.0, 20.0, 0.0));
+        h.settle();
+        pull(&mut h, w(0.0, 20.0, 0.0), -Vec3::Y, 8.0);
+        h.st.finish_curve_pull();
+        h.settle();
+        h.st.mode = Op::Add;
+        // a star pulled 6 up, then 7 points
+        let star = draw(&mut h, CurveKind::Star, w(95.0, 0.0, 0.0), w(107.0, 0.0, 0.0));
+        pull(&mut h, w(95.0, 0.0, 0.0), Vec3::Y, 6.0);
+        h.st.finish_curve_pull();
+        h.st.edit("Points", |d| {
+            let f = d.feature_mut(star).unwrap();
+            let (Some(mut c), nurbs_kernel::Prim::Profile { x, z, .. }) = (f.curve, f.prim) else { return };
+            let r = c.radius(x, z);
+            c.sides = 7;
+            f.reshape_curve(c, r);
+        });
+        h.settle();
+        for id in [b, hole, star] {
+            let f = h.st.doc.feature(id).unwrap();
+            eprintln!("  {} {:?} {:?} axis {:?} at {:?}", f.name, f.op, f.prim, f.axis(), f.origin);
+        }
+        eprintln!("  errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.st.selection = vec![b];
+        h.steps(3);
+        h.shot("zero-curves-extrude-2-made");
+        // the circle of the Subtract grown: the solid follows
+        h.st.edit("Radius", |d| {
+            let f = d.feature_mut(c).unwrap();
+            let (Some(cv), nurbs_kernel::Prim::Path { x, z }) = (f.curve, f.prim) else { return };
+            let _ = (x, z);
+            f.reshape_curve(cv, 10.0);
+        });
+        h.settle();
+        h.st.selection = vec![hole];
+        h.steps(3);
+        h.shot("zero-curves-extrude-3-live");
+        h.st.selection.clear();
+        h.move_to(pos2(1500.0, 120.0));
+        h.steps(3);
+        h.shot("zero-curves-extrude-4-plain");
+    }
+
     if want("pivot-d") {
         // Romain (20 nov. 7 h 50): D held + click puts the pivot on a
         // point, the move then carries that point onto the points

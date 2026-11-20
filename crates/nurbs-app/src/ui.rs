@@ -1178,7 +1178,7 @@ fn op_pop(st: &AppState) -> Option<OpPop> {
     if (st.tool == Tool::Create(PrimKind::Surface) || (st.tool == Tool::Slot && st.slot_draw.is_none())) && st.creation.is_none() {
         return Some(OpPop::Tool);
     }
-    if st.creation.is_some() || st.sketch.is_some() || st.push.is_some() || st.tool != Tool::Select {
+    if st.creation.is_some() || st.sketch.is_some() || st.push.is_some() || st.curve_pull.is_some() || st.tool != Tool::Select {
         return None;
     }
     if st.selection.is_empty() {
@@ -1301,6 +1301,14 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
         let x = if anchor.max.x + 96.0 + full < right { anchor.max.x + 96.0 } else { anchor.min.x - 96.0 - full };
         pos2(x.clamp(left, (right - full).max(left)), y_by)
     } + panel_offset(ctx, "op-pop");
+    // not over the help box (bottom right): moved up above it
+    let mut at = at;
+    if let Some(hb) = ctx.memory(|m| m.area_rect(Id::new("help-box"))) {
+        let r = Rect::from_min_size(at, vec2(full, h));
+        if r.intersects(hb) && k != OpPop::Tool {
+            at.y = (hb.min.y - 8.0 - h).max(top);
+        }
+    }
     egui::Area::new(Id::new("op-pop")).order(Order::Foreground).fixed_pos(at).show(ctx, |ui| {
         island().inner_margin(Margin::same(10)).show(ui, |ui| {
             ui.set_width(W);
@@ -1329,14 +1337,17 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     }
                     if f.shape_bool.is_some() {
                         bool_card(ui, st, &f);
+                        extrude_button(ui, st, id);
                     } else if f.push.is_some() {
                         push_card(ui, st);
                     } else if f.tweak.is_some() {
                         tweak_card(ui, st, id);
                     } else if f.curve.is_some() {
                         curve_card(ui, st, &f);
+                        extrude_button(ui, st, id);
                     } else if f.is_path() {
                         path_card(ui, st, &f);
+                        extrude_button(ui, st, id);
                     } else {
                         round_card(ui, st);
                     }
@@ -2057,6 +2068,10 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
 
 /// The selected shape's sizes (the operation window).
 fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    if f.is_extruded_curve() {
+        extruded_card(ui, st, f);
+        return;
+    }
     let id = f.id;
     // a slider drag is one undo step: it ends when no pointer button is down
     let any_down = ui.input(|i| i.pointer.any_down());
@@ -2124,7 +2139,7 @@ fn fold_section(ui: &mut Ui, title: &str, key: &str) -> bool {
 fn curve_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     let any_down = ui.input(|i| i.pointer.any_down());
     let id = f.id;
-    let (Some(c), Prim::Path { x, z }) = (f.curve, f.prim) else { return };
+    let (Some(c), Prim::Path { x, z } | Prim::Profile { x, z, .. }) = (f.curve, f.prim) else { return };
     section(ui, "Parameters");
     let size_rows = |ui: &mut Ui, st: &mut AppState, names: [&str; 2]| {
         for (k, label, v) in [(0, names[0], x), (2, names[1], z)] {
@@ -2132,7 +2147,7 @@ fn curve_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
             let (ch, start) = slider_row(ui, label, &mut val, 0.01..=2000.0, 0.1, "mm");
             if ch {
                 feature_edit(st, id, "Size", start, |g| {
-                    if let Prim::Path { x, z } = &mut g.prim {
+                    if let Prim::Path { x, z } | Prim::Profile { x, z, .. } = &mut g.prim {
                         *(if k == 0 { x } else { z }) = val.max(0.01) as f64;
                     }
                 });
@@ -2194,6 +2209,50 @@ fn curve_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     }
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
         st.end_live();
+    }
+}
+
+/// A curve or 2D boolean pulled into a solid (Curves, step 3): its curve's
+/// settings, then its Amount, Flat again.
+fn extruded_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    let id = f.id;
+    let any_down = ui.input(|i| i.pointer.any_down());
+    if f.shape_bool.is_some() {
+        bool_card(ui, st, f);
+    } else if f.curve.is_some() {
+        curve_card(ui, st, f);
+    }
+    section(ui, "Extrude");
+    let mut h = f.prim.height() as f32;
+    let (ch, start) = slider_row(ui, "Amount", &mut h, 0.1..=2000.0, 0.1, "mm");
+    if ch {
+        feature_edit(st, id, "Amount", start, |g| {
+            if let Prim::Profile { y, .. } = &mut g.prim {
+                *y = h.max(0.1) as f64;
+            }
+        });
+    }
+    let r = ui.add(egui::Label::new(egui::RichText::new("Flat again").font(medium(12.0)).color(LABEL())).sense(Sense::click()));
+    if r.on_hover_text("Back to a curve (its settings kept)").clicked() {
+        st.flatten_curve(id);
+    }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+        st.end_live();
+    }
+}
+
+/// The Extrude button under a closed curve's settings (Curves, step 3):
+/// the pointer then pulls it into a solid, Add or Carve as the top bar.
+fn extrude_button(ui: &mut Ui, st: &mut AppState, id: FeatureId) {
+    if !st.doc.is_closed_curve(id) {
+        return;
+    }
+    ui.add_space(6.0);
+    let w = ui.available_width();
+    let r = primary_btn(ui, None, "Extrude", Some(w)).on_hover_text("Pull it into a solid: the pointer sets its height, a click keeps it (Ctrl + E)");
+    if r.clicked() {
+        let at = ui.input(|i| i.pointer.interact_pos()).map(|p| [p.x, p.y]).unwrap_or(st.principal());
+        st.begin_curve_pull(id, at);
     }
 }
 
@@ -2733,7 +2792,12 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         // Maya: Ctrl + E extrudes (E is the rotate gizmo)
         if pressed(Key::E) && st.push.is_none() {
             let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]);
-            st.arm_push(PushKind::Extrude, at);
+            // a closed curve selected: pulled into a solid (Curves, step 3)
+            if let (Some(id), Some(p)) = (st.pullable(), at) {
+                st.begin_curve_pull(id, p);
+            } else {
+                st.arm_push(PushKind::Extrude, at);
+            }
         }
         return;
     }
@@ -2758,7 +2822,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         } else if st.push.is_some() {
             st.abort_gestures();
             st.select_tool();
-        } else if st.creation.is_some() || st.drag.is_some() || st.sketch.is_some() || st.scan_round.is_some() || st.scan_slot.is_some() || st.slot_draw.is_some() {
+        } else if st.creation.is_some() || st.drag.is_some() || st.sketch.is_some() || st.scan_round.is_some() || st.scan_slot.is_some() || st.slot_draw.is_some() || st.curve_pull.is_some() {
             st.abort_gestures();
         } else if st.tool != Tool::Select {
             st.select_tool();

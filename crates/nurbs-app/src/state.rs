@@ -197,6 +197,22 @@ pub struct Creation {
     pub curve: Option<CurveKind>,
 }
 
+/// A closed curve or 2D boolean pulled into a solid (step 3 of the Curves
+/// set, 3ds Max's Extrude): the pointer sets its height along its normal
+/// (down: its frame turned half round its Z, the curve staying in place), a
+/// click keeps it, Esc drops it.
+#[derive(Clone, Debug)]
+pub struct CurvePull {
+    pub id: FeatureId,
+    /// The feature as it was (flat, or already pulled).
+    pub start: Feature,
+    /// Where the pointer was when it began (screen).
+    pub from: [f32; 2],
+    /// The height it began at (an extruded one pulled again).
+    pub h0: f64,
+    pub h: f64,
+}
+
 /// The Sketch tool's outline being drawn, on the flat face under its first
 /// point (else the ground): plane coordinates, each point a corner or a
 /// curve point.
@@ -554,6 +570,8 @@ pub struct AppState {
     pub slot_on_scan: bool,
     /// The Slot drawn by hand.
     pub slot_draw: Option<crate::slot::SlotDraw>,
+    /// A curve or 2D boolean being pulled into a solid (Curves, step 3).
+    pub curve_pull: Option<CurvePull>,
     /// The debug journal, newest last (at most `JOURNAL`).
     pub journal: std::collections::VecDeque<JournalEntry>,
     /// Where the journal is written as it goes, one JSON line per entry
@@ -727,6 +745,7 @@ impl AppState {
             surface_on_scan: false,
             slot_on_scan: false,
             slot_draw: None,
+            curve_pull: None,
             journal: Default::default(),
             journal_file: None,
             journal_seen: (String::new(), String::new()),
@@ -1669,7 +1688,7 @@ impl AppState {
 
     /// Cancels what is under way (creation, sketch, drag, inset).
     pub fn abort_gestures(&mut self) {
-        if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() || self.round_drag.take().is_some() || self.face_drag.take().is_some() {
+        if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() || self.round_drag.take().is_some() || self.face_drag.take().is_some() || self.curve_pull.take().is_some() {
             self.cancel_live();
             self.clean_selection_ids();
         }
@@ -2151,6 +2170,117 @@ impl AppState {
         });
     }
 
+    /// The curve (or 2D boolean) that Ctrl + E or Extrude pulls: the one
+    /// selected, closed, flat or already pulled.
+    pub fn pullable(&self) -> Option<FeatureId> {
+        let f = self.single().filter(|_| self.sel_mode == SelMode::Object)?;
+        (self.doc.is_closed_curve(f.id) || f.is_extruded_curve()).then_some(f.id)
+    }
+
+    /// Starts pulling the curve into a solid from the pointer at `p`.
+    pub fn begin_curve_pull(&mut self, id: FeatureId, p: [f32; 2]) {
+        let Some(f) = self.doc.feature(id).cloned() else { return };
+        if !(self.doc.is_closed_curve(id) || f.is_extruded_curve()) {
+            self.toast("Only a closed curve can be extruded", true);
+            return;
+        }
+        self.abort_gestures();
+        self.begin_live("Extrude");
+        let h0 = if f.is_extruded_curve() { f.prim.height() * if self.pull_down(&f) { -1.0 } else { 1.0 } } else { 0.0 };
+        self.curve_pull = Some(CurvePull { id, start: f, from: p, h0, h: h0 });
+        self.selection = vec![id];
+    }
+
+    /// Whether an extruded curve goes down from its curve: its frame is
+    /// turned over from its curve's (a 2D boolean: from its first curve's;
+    /// a curve of its own: from the plane it was drawn on is not known, so
+    /// it is the frame's own way, up).
+    fn pull_down(&self, f: &Feature) -> bool {
+        let first = f.shape_bool.as_ref().and_then(|b| b.operands.first()).and_then(|o| self.doc.feature(*o));
+        first.map(|g| g.axis().dot(f.axis()) < 0.0).unwrap_or(false)
+    }
+
+    /// The height follows the pointer, along the curve's normal.
+    pub fn update_curve_pull(&mut self, p: [f32; 2]) {
+        let Some(mut cp) = self.curve_pull.clone() else { return };
+        let st = &cp.start;
+        // the curve's plane and way up (an extruded one: from its base)
+        let down0 = cp.h0 < 0.0;
+        let up = if down0 { -st.axis() } else { st.axis() };
+        let base = st.origin;
+        let (ro, rd) = self.ray(p);
+        let mut skip = vec![cp.id];
+        skip.extend(self.doc.with_operands(&[cp.id]));
+        let h = if let Some((t, snapped)) = self.snap_height(base, up, p, &skip).filter(|(t, _)| t.abs() > 1e-3) {
+            self.snap_shown = Some(snapped);
+            t
+        } else if up.dot(rd).abs() > HEAD_ON {
+            self.snap_shown = None;
+            self.snap(cp.h0 + (cp.from[1] - p[1]) as f64 * self.mm_per_point(base))
+        } else {
+            self.snap_shown = None;
+            let (fo, fd) = self.ray(cp.from);
+            let t0 = closest_on_line(base, up, fo, fd).unwrap_or(0.0);
+            self.snap(cp.h0 + closest_on_line(base, up, ro, rd).map(|t| t - t0).unwrap_or(0.0))
+        };
+        cp.h = h;
+        let mode = self.mode;
+        let start = cp.start.clone();
+        let flip_of = |f: &Feature, down: bool| {
+            // the frame the curve was drawn in, then turned over for down
+            let drawn = if down0 { f.rot * DQuat::from_rotation_z(std::f64::consts::PI) } else { f.rot };
+            if down { drawn * DQuat::from_rotation_z(std::f64::consts::PI) } else { drawn }
+        };
+        self.live(|d| {
+            let Some(f) = d.feature_mut(cp.id) else { return };
+            *f = start.clone();
+            let down = h < 0.0;
+            // a curve with no settings of its own: its outline mirrored so
+            // it stays in place when the frame turns over
+            if down != down0 && f.curve.is_none() && f.shape_bool.is_none() {
+                f.profile = f.profile.as_ref().map(|p| p.mirrored());
+            }
+            f.rot = flip_of(&start, down);
+            let (x, z) = match f.prim {
+                Prim::Path { x, z } | Prim::Profile { x, z, .. } => (x, z),
+                _ => return,
+            };
+            if h.abs() < 1e-3 {
+                f.prim = Prim::Path { x, z };
+            } else {
+                f.prim = Prim::Profile { x, y: h.abs(), z };
+                if !start.is_extruded_curve() {
+                    f.op = mode;
+                }
+            }
+        });
+        self.curve_pull = Some(cp);
+    }
+
+    /// The pull kept (none: dropped).
+    pub fn finish_curve_pull(&mut self) {
+        self.snap_shown = None;
+        let Some(cp) = self.curve_pull.take() else { return };
+        if (cp.h - cp.h0).abs() < 1e-6 {
+            self.cancel_live();
+            return;
+        }
+        self.end_live();
+        self.selection = vec![cp.id];
+        self.tool = Tool::Select;
+    }
+
+    /// An extruded curve made flat again (a curve, its settings kept).
+    pub fn flatten_curve(&mut self, id: FeatureId) {
+        self.edit("Flat", |d| {
+            if let Some(f) = d.feature_mut(id) {
+                if let Prim::Profile { x, z, .. } = f.prim {
+                    f.prim = Prim::Path { x, z };
+                }
+            }
+        });
+    }
+
     /// The kernel's error about a feature ("name: why"), if any.
     pub fn feature_error(&self, f: &Feature) -> Option<String> {
         let head = format!("{}: ", f.name);
@@ -2602,6 +2732,18 @@ impl AppState {
         if f.shape_bool.is_some() {
             let Some(c) = self.model.as_ref().and_then(|m| m.curves.iter().find(|c| c.0 == f.id)) else { return vec![] };
             return c.1.iter().map(|l| l.iter().map(|p| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)).collect()).collect();
+        }
+        f.outline()
+    }
+
+    /// A solid's cage (world); a 2D boolean pulled into a solid: its
+    /// region's lines at its base and its top.
+    pub fn shape_outline(&self, f: &Feature) -> Vec<Vec<DVec3>> {
+        if f.shape_bool.is_some() && f.is_extruded_curve() {
+            let base = self.curve_lines(f);
+            let v = f.axis() * f.prim.height();
+            let top: Vec<Vec<DVec3>> = base.iter().map(|l| l.iter().map(|p| *p + v).collect()).collect();
+            return base.into_iter().chain(top).collect();
         }
         f.outline()
     }

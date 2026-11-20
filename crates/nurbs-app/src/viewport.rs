@@ -359,6 +359,21 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         return;
     }
 
+    // a curve pulled into a solid (Ctrl + E on a curve, or its window's
+    // Extrude): the pointer sets its height, a click keeps it
+    if st.curve_pull.is_some() {
+        if let Some(p) = hover.or(resp.interact_pointer_pos()).map(p2) {
+            st.update_curve_pull(p);
+            st.interacting = true;
+        }
+        if resp.clicked_by(PointerButton::Primary) || resp.drag_stopped() {
+            st.finish_curve_pull();
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            st.abort_gestures();
+        }
+        return;
+    }
+
     // Vertex, Edge and Face modes: the selected inset's dot and arrow, the
     // gizmo of the picked component (a drag moves it, Plasticity style)
     if st.tool == Tool::Select && st.sel_mode != SelMode::Object {
@@ -981,6 +996,13 @@ fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch) {
 }
 
 fn draw_creation(p: &Painter, st: &AppState) {
+    // a curve pulled into a solid: its height
+    if let Some(cp) = &st.curve_pull {
+        let col = if st.doc.feature(cp.id).map(|f| f.op == Op::Carve).unwrap_or(false) { carve() } else { accent() };
+        let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("H {} mm", fmt_mm(cp.h as f32)), col, col);
+        return;
+    }
     if st.sketch.is_some() {
         draw_sketch(p, st);
         return;
@@ -1394,6 +1416,7 @@ pub fn hint(st: &AppState) -> String {
             PushKind::Inset => "Click a flat face: 2 mm, then drag its dot · Press and drag: sized at once".into(),
             PushKind::Extrude => "Press on a face and drag: out adds, in carves · A round face goes along its normals".into(),
         },
+        (None, Tool::Select) if st.curve_pull.is_some() => "Move: its height along its normal (the other way goes into the face) · Click: keep it · Esc: drop it · Top bar: Add or Carve".into(),
         (None, Tool::Select) if st.pivot_edit => "D held · Click: the pivot jumps onto the nearest corner, edge middle or circle centre (the moves then put it on the points) · Far from any: back to its own".into(),
         (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => "Arrows: move it · D + click: pivot on a point · Window: X, Y, Z · Del: delete it".into(),
         (None, Tool::Knife) => {
@@ -1447,8 +1470,12 @@ pub fn hint(st: &AppState) -> String {
                 }
             } else if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {
                 "Window: Union, Subtract (the first picked less the others), Intersect: one curve, kept live · Shift + click: add a curve".into()
+            } else if st.single().is_some_and(|f| f.is_extruded_curve()) {
+                "Ctrl + E: its height again · Window: its curve's settings, Amount, Flat · Arrow: its height · Del: delete it".into()
             } else if st.single().is_some_and(|f| f.shape_bool.is_some()) {
-                "Click one of its curves again: that curve (its settings, moved alone; the result follows) · Window: the operation and its curves · Del: it and its curves".into()
+                "Ctrl + E: extrude it · Click one of its curves again: that curve (its settings, moved alone; the result follows) · Window: the operation and its curves · Del: it and its curves".into()
+            } else if st.pullable().is_some() && st.single().is_some_and(|f| st.curve_inside(f.id).is_none()) {
+                "Ctrl + E: extrude it (the pointer sets its height) · Window: its settings · Shift + click: add a curve (Union, Subtract, Intersect)".into()
             } else if st.single().is_some_and(|f| st.curve_inside(f.id).is_some()) {
                 "A curve of a 2D boolean: moved or set, the result follows · Window: back to the boolean · Click on empty: deselect".into()
             } else if st.selection.is_empty() {

@@ -181,7 +181,8 @@ impl Drawer {
             let selected = st.selection.contains(&f.id);
             let hovered = st.hover_feature == Some(f.id);
             let inside = st.curve_inside(f.id);
-            if inside.is_some_and(|b| !b.visible) && !selected {
+            // in a boolean pulled into a solid: only while it is open
+            if inside.is_some_and(|b| !b.visible || (b.is_extruded_curve() && !st.boolean_open(b))) && !selected {
                 continue;
             }
             let (c, a, w) = match (selected, hovered, inside) {
@@ -233,7 +234,7 @@ impl Drawer {
             }
             let c = if f.op == Op::Carve { carve } else { accent };
             let alpha = if selected || creating { 230 } else { 140 };
-            let lines: Vec<Vec<[f32; 3]>> = f.outline().iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
+            let lines: Vec<Vec<[f32; 3]>> = st.shape_outline(f).iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
             line_vertices(&lines, [c.r(), c.g(), c.b(), alpha], 1.2, &mut over);
         }
         // Object mode (Maya): the selected element drawn by all its edges in
