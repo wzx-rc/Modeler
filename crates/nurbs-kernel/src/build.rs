@@ -479,7 +479,17 @@ fn made_on(acc: &Shape, edges: &[i32], r: &Round, size: f64, fresh: i64) -> Resu
 /// fillet's. When `made`'s new faces all lie within the regions already
 /// (nothing carried along) it is kept as it is.
 fn only_selected(acc: &Shape, edges: &[i32], size: f64, fresh: i64, made: Shape) -> Result<Shape, String> {
-    let w = size * 3.0 + 1.0;
+    let w0 = size * 3.0 + 1.0;
+    // the borders of the faces made (along the whole tangent chain)
+    let is_fresh: Vec<bool> = (0..made.face_count()).map(|i| made.face_tag(i) == fresh).collect();
+    let mut fresh_pts: Vec<DVec3> = vec![];
+    for (k, f) in made.edge_faces().iter().enumerate() {
+        if f.iter().any(|&i| i >= 0 && is_fresh.get(i as usize).copied().unwrap_or(false)) {
+            if let Some(e) = made.edge(k as i32 + 1, 16) {
+                fresh_pts.extend(e.pts.iter().map(|p| DVec3::from_array(*p)));
+            }
+        }
+    }
     let mut boxes: Vec<(DVec3, DVec3)> = vec![];
     let mut region: Option<Shape> = None;
     let rows = |o: DVec3, x: DVec3, y: DVec3, z: DVec3| [[x.x, y.x, z.x, o.x], [x.y, y.y, z.y, o.y], [x.z, y.z, z.z, o.z]];
@@ -499,6 +509,14 @@ fn only_selected(acc: &Shape, edges: &[i32], size: f64, fresh: i64, made: Shape)
             return Ok(made);
         }
         let t = (b - a).normalize();
+        // as far round it as its own fillet reaches (its borders seen beside
+        // the edge, not past its ends), a little more: the fillet carried
+        // along the other side of a narrow pocket stays out (Romain 20 nov.,
+        // 10 h 47: a chamfer on a pocket's rim cut its other rim too)
+        let w = setback(&pts, &fresh_pts).map(|s| (s * 1.3 + 0.2).min(w0)).unwrap_or(w0);
+        if std::env::var("FORME_ONLY_DEBUG").is_ok() {
+            eprintln!("ONLY edge {e} {:?} -> {:?}: setback {:?} w {w} fresh pts {} faces {}", a, b, setback(&pts, &fresh_pts), fresh_pts.len(), is_fresh.iter().filter(|x| **x).count());
+        }
         let straight = pts.iter().all(|p| (*p - a - t * (*p - a).dot(t)).length() < 1e-4);
         let piece = if straight {
             slab(a, t, a.distance(b), w)?
@@ -540,6 +558,45 @@ fn only_selected(acc: &Shape, edges: &[i32], size: f64, fresh: i64, made: Shape)
     let inner = made.common(&region)?;
     let outer = acc.cut(&region)?;
     outer.fuse(&inner)
+}
+
+/// How far from an edge (a polyline) the nearest of `pts` lie beside it
+/// (seen square to it, not past its ends): a fillet's contact lines.
+fn setback(line: &[DVec3], pts: &[DVec3]) -> Option<f64> {
+    let n = line.len();
+    if n < 2 {
+        return None;
+    }
+    // past its ends: behind the plane square to it at either end, where
+    // its fillet's end sections lie (with a few degrees to spare: the
+    // samples' chords lean from the curve's tangent)
+    let (a, b) = (line[0], line[n - 1]);
+    let ta = (line[1] - a).normalize_or_zero();
+    let tb = (b - line[n - 2]).normalize_or_zero();
+    let mut best: Option<f64> = None;
+    for p in pts {
+        if (*p - a).dot(ta) < 1e-3 + 0.06 * p.distance(a) || (*p - b).dot(tb) > -1e-3 - 0.06 * p.distance(b) {
+            continue;
+        }
+        let mut near = (f64::MAX, false);
+        for (i, w) in line.windows(2).enumerate() {
+            let d = w[1] - w[0];
+            let l2 = d.length_squared();
+            if l2 < 1e-18 {
+                continue;
+            }
+            let u = ((*p - w[0]).dot(d) / l2).clamp(0.0, 1.0);
+            let dist = p.distance(w[0] + d * u);
+            if dist < near.0 {
+                let past = (i == 0 && u <= 1e-6) || (i + 2 == n && u >= 1.0 - 1e-6);
+                near = (dist, past);
+            }
+        }
+        if !near.1 && near.0 > 1e-4 && near.0 < best.unwrap_or(f64::MAX) {
+            best = Some(near.0);
+        }
+    }
+    best
 }
 
 /// The box round a run of points, `w` more each way.
@@ -997,7 +1054,7 @@ fn duplicate(acc: &Shape, f: &Feature, t: &Tweak) -> Result<Option<Shape>, Strin
     if faces.is_empty() {
         return Err("no face to copy".into());
     }
-    let c = t.at();
+    let c = t.about.unwrap_or_else(|| t.at());
     let m = DMat4::from_translation(c + t.delta) * DMat4::from_scale(t.scale) * DMat4::from_translation(-c);
     mark(&step("copy", f));
     let piece = acc.piece(&faces, rows(m), FaceTag { feature: f.id, sub: 0 }.pack())?;
@@ -1047,7 +1104,7 @@ fn tweak(acc: &Shape, f: &Feature, t: &Tweak) -> Result<Option<Shape>, String> {
     }
     let pts = acc.vertex_points();
     let at = |v: i32| DVec3::from_array(pts[(v - 1) as usize]);
-    let centre = vs.iter().map(|&v| at(v)).sum::<DVec3>() / vs.len() as f64;
+    let centre = t.about.unwrap_or_else(|| vs.iter().map(|&v| at(v)).sum::<DVec3>() / vs.len() as f64);
     let moves: Vec<(i32, [f64; 3])> = vs.iter().map(|&v| (v, (centre + (at(v) - centre) * t.scale + t.delta).to_array())).collect();
     mark(&step("tweak", f));
     // a whole piece moved (a copy's faces all picked, a lump beside the
@@ -2764,7 +2821,7 @@ mod tests {
             let mut d = Doc::default();
             d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
             d.add(Op::Add, Prim::Box { x: 36.0, y: 26.0, z: 36.0 }, DVec3::new(0.0, 0.0, -75.0), DQuat::IDENTITY);
-            d.add_tweak(Tweak { comp, delta: DVec3::new(5.0, 2.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false });
+            d.add_tweak(Tweak { comp, delta: DVec3::new(5.0, 2.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None });
             let m = build(&d, true, false, &[], &mut Cache::default());
             assert!(m.errors.is_empty(), "{:?}", m.errors);
             assert_eq!(m.faces.len(), 12);
@@ -3047,7 +3104,7 @@ mod tests {
             let (b, r) = block(&mut d);
             let side = tag(b, 4);
             d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(11.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(11.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
-            d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [side, side], at: DVec3::new(11.0, 16.7, 13.7) }), delta: DVec3::new(dx, 0.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false });
+            d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [side, side], at: DVec3::new(11.0, 16.7, 13.7) }), delta: DVec3::new(dx, 0.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None });
             cases.push((name, d));
         }
         {
@@ -3055,7 +3112,7 @@ mod tests {
             let (b, r) = block(&mut d);
             let side = tag(b, 4);
             d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(11.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(11.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
-            d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(30.0, 15.0, 0.0) }), delta: DVec3::new(3.0, 0.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false });
+            d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(30.0, 15.0, 0.0) }), delta: DVec3::new(3.0, 0.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None });
             cases.push(("+X end moved out after a cut", d));
         }
         // across the fillet: a half of the cut flank moved out, the top
@@ -3069,7 +3126,7 @@ mod tests {
             let (b, r) = block(&mut d);
             let side = tag(b, 4);
             d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(11.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(11.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
-            d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, face), at }), delta, more: vec![], scale: DVec3::ONE, copy: false });
+            d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, face), at }), delta, more: vec![], scale: DVec3::ONE, copy: false, about: None });
             cases.push((name, d));
         }
         {
@@ -3085,7 +3142,7 @@ mod tests {
             let mut d2 = d.clone();
             d2.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![EdgeRef { faces: [side, side], at: DVec3::new(-12.5, 16.7, 13.7) }] }, "Delete");
             cases.push(("diagonal cut from a corner deleted", d2));
-            d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [side, side], at: DVec3::new(-12.5, 16.7, 13.7) }), delta: DVec3::new(2.0, 0.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false });
+            d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [side, side], at: DVec3::new(-12.5, 16.7, 13.7) }), delta: DVec3::new(2.0, 0.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None });
             let m = build(&d, true, false, &[], &mut Cache::default());
             eprintln!("diagonal cut from a corner moved: {:?} (its corner cannot leave the fillet's end)", m.errors);
         }
@@ -3101,13 +3158,46 @@ mod tests {
     }
 
     #[test]
+    fn edges_on_an_open_part() {
+        // 20 nov., 11 h 48 (his Knife 2: "ne peut ni se supprimer ni se
+        // déplacer"): a face of the block deleted, the part open; the line
+        // a Knife cut across its front then deleted, or moved along it
+        let base = |d: &mut Doc| {
+            let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            let front = tag(b, 4);
+            let kp = |faces: [i64; 2], at: DVec3| KnifePoint { edge: EdgeRef { faces, at }, f: 0.5, at };
+            d.add_knife(Knife { pts: vec![kp([front, tag(b, 2)], DVec3::new(0.0, 20.0, 15.0)), kp([front, tag(b, 3)], DVec3::new(0.0, 0.0, 15.0))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+            d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![FaceRef { tag: tag(b, 1), at: DVec3::new(-20.0, 10.0, 0.0) }], remove_edges: vec![] }, "Delete faces");
+            front
+        };
+        let line = |front: i64| EdgeRef { faces: [front, front], at: DVec3::new(0.0, 10.0, 15.0) };
+        let mut d = Doc::default();
+        let front = base(&mut d);
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        let fronts = |m: &Model| m.faces.iter().filter(|f| f.tag.map(|t| t.pack()) == Some(front)).count();
+        assert_eq!(fronts(&m0), 2, "the front in two");
+        let mut d1 = d.clone();
+        d1.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![line(front)] }, "Delete edges");
+        let m1 = build(&d1, true, false, &[], &mut Cache::default());
+        assert!(m1.errors.is_empty(), "delete: {:?}", m1.errors);
+        assert_eq!(fronts(&m1), 1, "the front one again");
+        let mut d2 = d.clone();
+        d2.add_tweak(Tweak { comp: Comp::Edge(line(front)), delta: DVec3::new(-5.0, 0.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None });
+        let m2 = build(&d2, true, false, &[], &mut Cache::default());
+        assert!(m2.errors.is_empty(), "move: {:?}", m2.errors);
+        let at = m2.edges.iter().filter(|e| e.faces[0] >= 0 && e.faces[1] >= 0).filter(|e| e.faces.iter().all(|&f| m2.faces[f as usize].tag.map(|t| t.pack()) == Some(front))).map(|e| e.pts[0][0]).collect::<Vec<_>>();
+        assert!(at.iter().any(|x| (*x + 5.0).abs() < 1e-3), "the line at x -5: {at:?}");
+    }
+
+    #[test]
     fn tilted_faces_with_holes() {
         // a face with holes, bosses or pockets that tilts (an edge of it
         // raised or lowered, the face moved along its normal): their walls
         // run along to the new plane; what cannot is refused with a reason
         let block = |d: &mut Doc| d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        let left_edge = |b: u32, dy: f64| Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 1)], at: DVec3::new(-20.0, 20.0, 0.0) }), delta: DVec3::new(0.0, dy, 0.0) , more: vec![], scale: DVec3::ONE, copy: false };
-        let right_edge = |b: u32, dy: f64| Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 0)], at: DVec3::new(20.0, 20.0, 0.0) }), delta: DVec3::new(0.0, dy, 0.0) , more: vec![], scale: DVec3::ONE, copy: false };
+        let left_edge = |b: u32, dy: f64| Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 1)], at: DVec3::new(-20.0, 20.0, 0.0) }), delta: DVec3::new(0.0, dy, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None };
+        let right_edge = |b: u32, dy: f64| Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 0)], at: DVec3::new(20.0, 20.0, 0.0) }), delta: DVec3::new(0.0, dy, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None };
         let mut cases: Vec<(&str, Doc, Option<&str>)> = vec![];
         // a boss on the top, the top's -X edge up then down
         for dy in [3.0, -3.0] {
@@ -3121,7 +3211,7 @@ mod tests {
         let mut d = Doc::default();
         let b = block(&mut d);
         d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
-        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 2), at: DVec3::new(10.0, 20.0, 10.0) }), delta: DVec3::new(0.0, 3.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 2), at: DVec3::new(10.0, 20.0, 10.0) }), delta: DVec3::new(0.0, 3.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         cases.push(("hole, top moved up", d, None));
         // a square pocket 6 deep: the top's +X edge up; its -X edge down
         // 10 (the tilt would pass the pocket's floor)
@@ -3152,7 +3242,7 @@ mod tests {
         let mut d = Doc::default();
         let b = block(&mut d);
         let h = d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
-        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(6.0, 20.0, 15.0) }), delta: DVec3::new(0.0, 6.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(6.0, 20.0, 15.0) }), delta: DVec3::new(0.0, 6.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         d.add_round(1.5, true, vec![EdgeRef { faces: [tag(b, 2), tag(h, 0)], at: DVec3::new(0.0, 23.0, 0.0) }]);
         cases.push(("hole tilted, then chamfered", d, None));
         // the test part: the top's left half (the hole) tilted round the
@@ -3169,7 +3259,7 @@ mod tests {
         let mut d = Doc::default();
         block(&mut d);
         d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
-        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(20.0, 20.0, 15.0)), delta: DVec3::new(0.0, 3.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(20.0, 20.0, 15.0)), delta: DVec3::new(0.0, 3.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         cases.push(("hole, corner up (bends)", d, Some("cannot bend")));
 
         let mut bad = vec![];
@@ -3226,7 +3316,7 @@ mod tests {
             })
         };
         let push = |face: FaceRef, inset: f64, depth: f64| -> Op_ { Box::new(move |d: &mut Doc| { d.add_push(Push { face: face.clone(), inset, depth }); }) };
-        let tweak = |comp: Comp, delta: DVec3| -> Op_ { Box::new(move |d: &mut Doc| { d.add_tweak(Tweak { comp: comp.clone(), delta , more: vec![], scale: DVec3::ONE, copy: false }); }) };
+        let tweak = |comp: Comp, delta: DVec3| -> Op_ { Box::new(move |d: &mut Doc| { d.add_tweak(Tweak { comp: comp.clone(), delta , more: vec![], scale: DVec3::ONE, copy: false, about: None }); }) };
         let ops: Vec<(&str, Op_)> = vec![
             ("fillet top-front", round(2.0, false, 0.0, er(tag(b, 2), tag(b, 4), -12.0, 20.0, 15.0))),
             ("tension fillet top -X", round(3.0, false, 0.7, er(tag(b, 2), tag(b, 1), -20.0, 20.0, 0.0))),
@@ -3303,7 +3393,7 @@ mod tests {
                 EdgeRef { faces: [tag(b, 2), tag(b, 5)], at: DVec3::new(0.0, 20.0, -15.0) },
             ]
         };
-        let top = |b: u32, dy: f64| Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 2), at: DVec3::new(0.0, 20.0, 0.0) }), delta: DVec3::new(0.0, dy, 0.0) , more: vec![], scale: DVec3::ONE, copy: false };
+        let top = |b: u32, dy: f64| Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 2), at: DVec3::new(0.0, 20.0, 0.0) }), delta: DVec3::new(0.0, dy, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None };
         let mut cases: Vec<(&str, Doc, f64, u32)> = vec![];
         for (name, chamfer, tension, dy) in [("top up, filleted", false, 0.0, 5.0), ("top down, filleted", false, 0.0, -4.0), ("top up, chamfered", true, 0.0, 5.0), ("top up, fillet with tension", false, 0.7, 5.0)] {
             let mut d = Doc::default();
@@ -3317,19 +3407,19 @@ mod tests {
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let r = d.add_round(4.0, false, vec![EdgeRef { faces: [tag(b, 0), tag(b, 4)], at: DVec3::new(20.0, 10.0, 15.0) }]);
-        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 10.0, 0.0) }), delta: DVec3::new(5.0, 0.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 10.0, 0.0) }), delta: DVec3::new(5.0, 0.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         cases.push(("side out, vertical fillet", d, 20.0, r));
         // the same, the top front edge raised (the front tilts)
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let r = d.add_round(4.0, false, vec![EdgeRef { faces: [tag(b, 0), tag(b, 4)], at: DVec3::new(20.0, 10.0, 15.0) }]);
-        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }), delta: DVec3::new(0.0, 3.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }), delta: DVec3::new(0.0, 3.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         cases.push(("top front edge up, vertical fillet", d, 23.0, r));
         // the test part, its outer vertical edges filleted, its top moved
         // up (the hole, the boss, the slot follow)
         let (mut d, b, _) = test_part();
         let r = d.add_round(3.0, false, [(20.0, 15.0, 0, 4), (20.0, -15.0, 0, 5), (-20.0, 15.0, 1, 4), (-20.0, -15.0, 1, 5)].iter().map(|&(x, z, a, c)| EdgeRef { faces: [tag(b, a), tag(b, c)], at: DVec3::new(x, 10.0, z) }).collect());
-        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 10.0, 0.0) }), delta: DVec3::new(4.0, 0.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 10.0, 0.0) }), delta: DVec3::new(4.0, 0.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         cases.push(("test part, side out, filleted", d, 30.0, r));
         let mut bad = vec![];
         for (name, d, high, r) in &cases {
@@ -3371,7 +3461,7 @@ mod tests {
         ];
         for (t, at, dy, y) in cases {
             let mut d = d.clone();
-            d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: t, at }), delta: DVec3::new(0.0, dy, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+            d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: t, at }), delta: DVec3::new(0.0, dy, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
             let m = build(&d, true, false, &[], &mut Cache::default());
             assert!(m.errors.is_empty(), "{dy}: {:?}", m.errors);
             assert_eq!(m.faces.len(), m0.faces.len(), "{dy}");
@@ -3387,7 +3477,7 @@ mod tests {
         let mut d = d.clone();
         let r = d.add_round(1.0, false, vec![EdgeRef { faces: [tag(s, 0), tag(s, 1)], at: DVec3::new(17.0, 30.0, 0.0) }]);
         let before = build(&d, true, false, &[], &mut Cache::default()).positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
-        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(s, 1), at: DVec3::new(10.0, 30.0, 0.0) }), delta: DVec3::new(0.0, 2.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(s, 1), at: DVec3::new(10.0, 30.0, 0.0) }), delta: DVec3::new(0.0, 2.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let top = m.positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
@@ -3402,7 +3492,7 @@ mod tests {
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let h = d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
-        let mv = d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 10.0, 0.0) }), delta: DVec3::new(5.0, 0.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        let mv = d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 10.0, 0.0) }), delta: DVec3::new(5.0, 0.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         assert_eq!(d.feature(mv).unwrap().kind_label(), "Move face");
         let mut cache = Cache::default();
         let m = build(&d, true, false, &[], &mut cache);
@@ -3410,7 +3500,7 @@ mod tests {
         let side = m.faces.iter().find(|f| f.tag == Some(FaceTag { feature: b, sub: 0 })).unwrap();
         assert!((side.point[0] - 25.0).abs() < 1e-6, "{:?}", side.point);
         // the front top edge (top, +Z) raised 4 mm: the top tilts
-        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(2.5, 20.0, 15.0) }), delta: DVec3::new(0.0, 4.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(2.5, 20.0, 15.0) }), delta: DVec3::new(0.0, 4.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         let m = build(&d, true, false, &[], &mut cache);
         // the top has the hole: it tilts, the hole's wall runs up to it
         // (its top edge 22 mm high at z = 0, 22.67 at its front, z = 5)
@@ -3427,7 +3517,7 @@ mod tests {
         d.features.pop();
         d.features.pop();
         // the front face's bottom edge pushed forward 4 mm: the front tilts
-        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 3), tag(b, 4)], at: DVec3::new(2.5, 0.0, 15.0) }), delta: DVec3::new(0.0, 0.0, 4.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [tag(b, 3), tag(b, 4)], at: DVec3::new(2.5, 0.0, 15.0) }), delta: DVec3::new(0.0, 0.0, 4.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         let m = build(&d, true, false, &[], &mut cache);
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let front = m.faces.iter().find(|f| f.tag == Some(FaceTag { feature: b, sub: 4 })).unwrap();
@@ -3439,7 +3529,7 @@ mod tests {
         // a cube's top corner pulled up: three faces bend; a fillet after it
         let mut d = Doc::default();
         let c = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(10.0, 20.0, 10.0)), delta: DVec3::new(0.0, 4.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(10.0, 20.0, 10.0)), delta: DVec3::new(0.0, 4.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert!(m.positions.iter().any(|p| (p[1] - 24.0).abs() < 1e-4), "the corner is up");
@@ -3452,7 +3542,7 @@ mod tests {
         let mut d = Doc::default();
         let c = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
         d.add_round(3.0, true, vec![EdgeRef { faces: [tag(c, 2), tag(c, 4)], at: DVec3::new(0.0, 20.0, 10.0) }]);
-        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(10.0, 0.0, 10.0)), delta: DVec3::new(3.0, 0.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(10.0, 0.0, 10.0)), delta: DVec3::new(3.0, 0.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert!(m.positions.iter().any(|p| (p[0] - 13.0).abs() < 1e-3), "the corner is out");
@@ -3465,7 +3555,7 @@ mod tests {
         let mut d = Doc::default();
         let l = d.add(Op::Add, Prim::Profile { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
         d.feature_mut(l).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false });
-        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(10.0, 10.0, -10.0)), delta: DVec3::new(0.0, 3.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false });
+        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(10.0, 10.0, -10.0)), delta: DVec3::new(0.0, 3.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert!(m.positions.iter().any(|p| (p[1] - 13.0).abs() < 1e-3), "the corner is up");
@@ -3513,6 +3603,50 @@ mod tests {
                     } else {
                         assert!(lo < -25.0 && hi > 25.0, "the whole outline: {lo} {hi}");
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_selected_in_a_pocket() {
+        // Romain 20 nov., 10 h 47: "Only selected" on a pill pocket's rim:
+        // the chamfer carried round the rim was kept on the other rim too
+        // (it lay within the region), a slot-shaped hole there
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 60.0, y: 20.0, z: 40.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let c = d.add(Op::Carve, Prim::Profile { x: 40.0, y: 10.5, z: 15.0 }, DVec3::new(0.0, 10.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![7.5; 4], tension: vec![], open: false });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let at = DVec3::new(0.0, 20.0, 7.5);
+        let e = m
+            .edges
+            .iter()
+            .min_by(|a, b| {
+                let dist = |e: &Edge| {
+                    let p: Vec<DVec3> = e.pts.iter().map(|q| DVec3::from_array(q.map(|v| v as f64))).collect();
+                    p.windows(2).map(|w| at.distance(w[0] + (w[1] - w[0]) * ((at - w[0]).dot(w[1] - w[0]) / (w[1] - w[0]).length_squared().max(1e-12)).clamp(0.0, 1.0))).fold(f64::MAX, f64::min)
+                };
+                dist(a).partial_cmp(&dist(b)).unwrap()
+            })
+            .unwrap();
+        let rim = EdgeRef { faces: e.faces.map(|f| m.faces[f as usize].tag.unwrap().pack()), at };
+        for chamfer in [true, false] {
+            for only in [false, true] {
+                let mut d2 = d.clone();
+                let id = d2.add_round(5.2, chamfer, vec![rim.clone()]);
+                d2.feature_mut(id).unwrap().round.as_mut().unwrap().only = only;
+                let t0 = Instant::now();
+                let m2 = build(&d2, true, false, &[], &mut Cache::default());
+                assert!(m2.errors.is_empty(), "{:?}", m2.errors);
+                let zs: Vec<f32> = m2.triangles.iter().enumerate().filter(|(t, _)| m2.faces[m2.tri_face[*t] as usize].tag.map_or(false, |g| g.feature == id)).flat_map(|(_, tri)| tri.iter().map(|&v| m2.positions[v as usize][2])).collect();
+                let (lo, hi) = zs.iter().fold((f32::MAX, f32::MIN), |(a, b), z| (a.min(*z), b.max(*z)));
+                eprintln!("chamfer {chamfer} only {only}: z {lo} .. {hi}, {:.2} s", t0.elapsed().as_secs_f64());
+                if only {
+                    assert!(lo > 2.0, "the other rim left as it was: {lo}");
+                } else {
+                    assert!(lo < -7.0, "the whole rim: {lo}");
                 }
             }
         }
@@ -3834,6 +3968,8 @@ mod vertex4_probe {
                         "f" => r.chamfer = false,
                         "t0" => r.tension = 0.0,
                         "b0" => r.blend = false,
+                        "o0" => r.only = false,
+                        "o1" => r.only = true,
                         _ if w.starts_with('s') => r.size = w[1..].parse().unwrap(),
                         _ if w.starts_with('e') => {
                             let keep: Vec<usize> = w[1..].chars().map(|c| c.to_digit(10).unwrap() as usize).collect();

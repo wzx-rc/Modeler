@@ -269,6 +269,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 let cur = st.camera.preset_of();
                 let presets = [(ViewPreset::Perspective, "3D", ""), (ViewPreset::Front, "Front", ""), (ViewPreset::Right, "Right", ""), (ViewPreset::Top, "Top", "")];
                 if let Some(p) = seg_inline(ui, "isl-preset", &presets, cur) {
+                    st.stop_flight();
                     st.camera.preset(p);
                 }
                 island_sep(ui);
@@ -2794,6 +2795,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         return;
     }
     // the sketch under way: Enter closes it, Backspace removes its last point
+    let enter_closed = st.sketch.is_some() && pressed(Key::Enter);
     if st.sketch.is_some() {
         if pressed(Key::Enter) {
             let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]).unwrap_or(st.principal());
@@ -2850,9 +2852,19 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if shift && pressed(Key::S) {
         st.arm_slot();
     }
-    // the Knife's cut under way: Enter ends it
-    if matches!(st.tool, Tool::Knife | Tool::Point) && pressed(Key::Enter) {
-        st.knife_end();
+    // Enter (Romain 20 nov., 11 h 54): what is under way kept, back to
+    // Select (the Knife's cut, an extrusion, a shape's height, a slot's
+    // width); an outline is first closed (above), its height set next
+    if pressed(Key::Enter) && !enter_closed {
+        let under_way = matches!(st.tool, Tool::Knife | Tool::Point)
+            || st.push.is_some()
+            || st.curve_pull.is_some()
+            || st.creation.as_ref().map(|c| c.phase == Phase::Height).unwrap_or(false)
+            || st.slot_draw.as_ref().map(|s| s.width).unwrap_or(false);
+        if under_way {
+            let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]).unwrap_or(st.principal());
+            st.commit_gestures(at);
+        }
     }
     // Maya: Q select (no gizmo), W move, E rotate, R scale (rotate and
     // scale work on whole shapes: back to Object mode)

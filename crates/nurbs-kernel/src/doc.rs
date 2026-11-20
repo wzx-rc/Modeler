@@ -744,6 +744,10 @@ pub struct Tweak {
     /// itself does not change.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub copy: bool,
+    /// The point it is scaled about (the scale cage, R, 20 nov.: the side
+    /// facing the handle dragged stays): else its vertices' centre.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<DVec3>,
 }
 
 fn one3() -> DVec3 {
@@ -775,7 +779,7 @@ impl Tweak {
     pub fn new(comps: Vec<Comp>) -> Option<Tweak> {
         let mut it = comps.into_iter();
         let comp = it.next()?;
-        Some(Tweak { comp, delta: DVec3::ZERO, more: it.collect(), scale: DVec3::ONE, copy: false })
+        Some(Tweak { comp, delta: DVec3::ZERO, more: it.collect(), scale: DVec3::ONE, copy: false, about: None })
     }
     /// All its components.
     pub fn comps(&self) -> impl Iterator<Item = &Comp> {

@@ -306,11 +306,19 @@ impl AppState {
             return None;
         }
         let v = self.view();
+        // only the points near what moves, in space (Romain 20 nov., 11 h 53:
+        // "ne pas prendre en compte toute la scène", a block far behind
+        // lined up on screen along the eye's axis caught the move): within
+        // twice its size round it, at least 30 mm
+        let moved: Vec<DVec3> = carried.pts.iter().map(|(q, _)| *q + raw).chain(keys.iter().map(|k| *k + raw)).collect();
+        let (lo, hi) = moved.iter().fold((DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)), |(lo, hi), q| (lo.min(*q), hi.max(*q)));
+        let reach = ((hi - lo).length()).max(30.0);
+        let near = |q: DVec3| q.clamp(lo, hi).distance(q) <= reach;
         let targets: Vec<(usize, [f32; 2])> = self
             .snaps
             .iter()
             .enumerate()
-            .filter(|(i, s)| !carried.own.contains(i) && !s.features.iter().any(|f| skip.contains(f)))
+            .filter(|(i, s)| !carried.own.contains(i) && !s.features.iter().any(|f| skip.contains(f)) && (s.kind == SnapKind::Origin || near(s.pos)))
             .filter_map(|(i, s)| Some((i, v.project(s.pos.as_vec3())?)))
             .collect();
         // (score, the point moved, the move, the point of interest)
@@ -337,6 +345,10 @@ impl AppState {
                 // near on screen only, far in depth: the piece would jump
                 let Some(k) = v.project((*from + delta).as_vec3()) else { continue };
                 if (k[0] - m[0]).hypot(k[1] - m[1]) > CATCH * 1.5 {
+                    continue;
+                }
+                // lined up only from far off in space: not taken
+                if s.pos.distance(*from + delta) > reach {
                     continue;
                 }
                 // what the axis or plane leaves between them, in points

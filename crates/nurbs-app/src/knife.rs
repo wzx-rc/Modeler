@@ -20,11 +20,71 @@ use glam::{DVec3, Vec3};
 use nurbs_kernel::model::{Model, SurfKind};
 use nurbs_kernel::{FeatureId, Knife, KnifePoint};
 
+/// How near the pointer an edge's end or middle catches a Knife point
+/// (points on screen).
+pub const KNIFE_CATCH: f32 = 12.0;
+
 impl AppState {
+    /// Where a Knife click at `p` puts its point: an edge's end (a vertex)
+    /// or middle near the pointer first (`knife_point`), else the edge
+    /// under it at the place nearest the pointer. The edge's index, the
+    /// point, how far along it (0 to 1) and whether a point caught it.
+    pub fn knife_pick(&self, p: [f32; 2]) -> Option<(usize, DVec3, f64, bool)> {
+        if let Some((e, q, f)) = self.knife_point(p) {
+            return Some((e, q, f, true));
+        }
+        self.knife_pick_edge(p).map(|(e, q, f)| (e, q, f, false))
+    }
+
+    /// The points first (Romain 20 nov., 12 h 09: "Donne la priorité au
+    /// point avec un rayon d'accroche plus large"): the end of an edge (a
+    /// vertex) or its middle within `KNIFE_CATCH` points of the pointer,
+    /// the nearest (a vertex before a middle as near), not hidden by the
+    /// part; at a vertex, the edge under the pointer when it ends there.
+    pub fn knife_point(&self, p: [f32; 2]) -> Option<(usize, DVec3, f64)> {
+        let m = self.model.as_ref()?;
+        let v = self.view();
+        let mut found: Vec<(f32, usize, DVec3, f64)> = vec![];
+        for (i, e) in m.edges.iter().enumerate() {
+            if e.seam || e.pts.len() < 2 {
+                continue;
+            }
+            let pts: Vec<DVec3> = e.pts.iter().map(|q| Vec3::from_array(*q).as_dvec3()).collect();
+            let (a, b) = (pts[0], pts[pts.len() - 1]);
+            // a quick look at its ends and middle on screen first
+            let mid = at_frac(&pts, 0.5);
+            for (q, f, bias) in [(a, 0.0, 0.0f32), (b, 1.0, 0.0), (mid, 0.5, 2.0)] {
+                let Some(s) = v.project(q.as_vec3()) else { continue };
+                let d = (s[0] - p[0]).hypot(s[1] - p[1]);
+                if d <= KNIFE_CATCH {
+                    found.push((d + bias, i, q, f));
+                }
+            }
+        }
+        found.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let under = self.pick_edge(p);
+        for (_, i, q, f) in &found {
+            if !self.xray && self.hidden(q.as_vec3()) {
+                continue;
+            }
+            // a vertex: the edge under the pointer if it ends there
+            if let Some(u) = under.filter(|&u| u != *i && *f != 0.5) {
+                let ue = &m.edges[u].pts;
+                for (k, w) in [(0.0, ue.first()), (1.0, ue.last())] {
+                    if w.map(|w| Vec3::from_array(*w).as_dvec3().distance(*q) < 1e-4).unwrap_or(false) {
+                        return Some((u, *q, k));
+                    }
+                }
+            }
+            return Some((*i, *q, *f));
+        }
+        None
+    }
+
     /// The edge under the pointer for the Knife: its index, the point on it
     /// and how far along it (0 to 1, from its first point); its middle
     /// catches the pointer within 2.5 points.
-    pub fn knife_pick(&self, p: [f32; 2]) -> Option<(usize, DVec3, f64)> {
+    pub fn knife_pick_edge(&self, p: [f32; 2]) -> Option<(usize, DVec3, f64)> {
         let e = self.pick_edge(p)?;
         let m = self.model.as_ref()?;
         let pts: Vec<DVec3> = m.edges[e].pts.iter().map(|q| Vec3::from_array(*q).as_dvec3()).collect();
@@ -78,7 +138,7 @@ impl AppState {
     /// `all`: through every four-sided face round the part (Ctrl), else
     /// across the face under the pointer only.
     pub fn knife_loop_at(&self, p: [f32; 2], all: bool) -> Option<(Vec<LoopPt>, bool)> {
-        let (e, at, f) = self.knife_pick(p)?;
+        let (e, at, f) = self.knife_pick_edge(p)?;
         let m = self.model.as_ref()?;
         let size = m.bounds().map(|(lo, hi)| (Vec3::from(hi) - Vec3::from(lo)).length() as f64).unwrap_or(100.0);
         let tol = (size * 1e-4).max(1e-4) * 10.0;
@@ -180,7 +240,9 @@ impl AppState {
     }
 
     pub fn knife_hover_at(&mut self, p: [f32; 2]) {
-        self.knife_hover = self.knife_pick(p).map(|k| k.1);
+        let k = self.knife_pick(p);
+        self.knife_hover = k.map(|k| k.1);
+        self.knife_hover_point = k.map(|k| k.3).unwrap_or(false);
     }
 
     /// The cut under way, if its step is still the last one made (not the
@@ -211,7 +273,7 @@ impl AppState {
             }
             return;
         }
-        let Some((e, at, f)) = self.knife_pick(p) else {
+        let Some((e, at, f, _)) = self.knife_pick(p) else {
             self.knife_end();
             return;
         };

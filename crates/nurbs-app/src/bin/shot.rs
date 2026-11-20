@@ -111,6 +111,9 @@ impl Harness {
         self.settle();
         self.st.frame_all();
         self.steps(2);
+        // the camera's flight ended (a scenario's own camera set next is
+        // not taken back by it)
+        self.settle();
     }
 
     fn raw(&mut self) -> RawInput {
@@ -1339,6 +1342,196 @@ fn main() {
         eprintln!("  edge {:?} errors {:?}", h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| (f.name.clone(), t.delta))).collect::<Vec<_>>(), h.st.model.as_ref().map(|m| m.errors.clone()));
         h.shot("zero-direct-6-edge");
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
+    if want("quick-extrude") {
+        // Romain 20 nov., 11 h 54: "Une Edge ou une Face > Shift + Drag"
+        // (the move gizmo sits on the picked face: the press lands on it),
+        // and "Q, W ou Entrée valide l'opération et sort du tool"
+        h.reset(test_part(), "Test part");
+        h.settle();
+        h.key(egui::Key::W);
+        h.key(egui::Key::F11);
+        let side = h.screen_of(Vec3::new(20.0, 8.0, 2.0));
+        h.click(side);
+        h.settle();
+        eprintln!("  picked {:?} gizmo {:?} hot {:?}", h.st.face_sel.len(), h.st.gizmo, h.st.hot_handle);
+        let out = h.screen_of(Vec3::new(27.0, 8.0, 2.0));
+        h.hold(Modifiers::SHIFT);
+        h.drag(side, out, 10, false);
+        h.steps(2);
+        h.shot("zero-quick-1-shift-drag");
+        h.press(out, false);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let pushes = |h: &Harness| h.st.doc.features.iter().filter_map(|f| f.push.as_ref().map(|p| (f.name.clone(), (p.depth * 100.0).round() / 100.0))).collect::<Vec<_>>();
+        let tweaks = |h: &Harness| h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| (f.name.clone(), t.delta))).collect::<Vec<_>>();
+        eprintln!("  Shift drag on the gizmo: pushes {:?} moves {:?}", pushes(&h), tweaks(&h));
+        // Ctrl + E on the front face, then W: kept as it is, back to Select
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::F11);
+        let front = h.screen_of(Vec3::new(10.0, 7.0, 15.0));
+        h.click(front);
+        h.move_to(front);
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::E);
+        h.hold(Modifiers::NONE);
+        for i in 1..=8 {
+            h.move_to(front + egui::vec2(0.0, 6.0 * i as f32));
+        }
+        h.steps(2);
+        h.shot("zero-quick-2-extrude-live");
+        h.key(egui::Key::W);
+        h.settle();
+        eprintln!("  W during the extrusion: tool {:?} push {} pushes {:?}", h.st.tool, h.st.push.is_some(), pushes(&h));
+        h.shot("zero-quick-3-w-kept");
+        // a Sketch of three points, then Q: closed and made (no height
+        // yet: its base's smaller side)
+        h.key(egui::Key::L);
+        for at in [Vec3::new(-18.0, 20.0, -13.0), Vec3::new(-6.0, 20.0, -13.0), Vec3::new(-12.0, 20.0, -7.0)] {
+            let p = h.screen_of(at);
+            h.move_to(p);
+            h.click(p);
+        }
+        eprintln!("  sketch before Q: tool {:?} points {:?}", h.st.tool, h.st.sketch.as_ref().map(|k| k.pts.len()));
+        h.key(egui::Key::Q);
+        h.settle();
+        eprintln!("  Q in a sketch: tool {:?} sketch {} creation {} last {:?}", h.st.tool, h.st.sketch.is_some(), h.st.creation.is_some(), h.st.doc.features.last().map(|f| (f.name.clone(), f.prim.clone())));
+        h.shot("zero-quick-4-sketch-q");
+        // a Cube in its height phase, Enter: kept at that height
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::B);
+        let a = h.screen_of(Vec3::new(28.0, 0.0, -28.0));
+        let b = h.screen_of(Vec3::new(42.0, 0.0, -14.0));
+        h.drag(a, b, 8, true);
+        for i in 1..=6 {
+            h.move_to(b + egui::vec2(0.0, -8.0 * i as f32));
+        }
+        h.steps(2);
+        eprintln!("  before Enter: tool {:?} creation {:?} a {a:?} b {b:?}", h.st.tool, h.st.creation.as_ref().map(|c| (c.phase, c.height)));
+        h.key(egui::Key::Enter);
+        h.settle();
+        eprintln!("  Enter in the height: tool {:?} creation {} last {:?}", h.st.tool, h.st.creation.is_some(), h.st.doc.features.last().map(|f| (f.name.clone(), f.prim.clone())));
+        h.shot("zero-quick-5-cube-enter");
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
+    if want("cage") {
+        // R (Romain 20 nov., 11 h 44: "un Scale Tool en mode cage à
+        // poignées"): a face's grip scales one axis about the face across,
+        // a corner's with Shift all three alike; then picked faces
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(-45.0, 0.0, 0.0), DQuat::IDENTITY);
+        h.reset(d, "Cage");
+        h.settle();
+        h.st.selection = vec![b];
+        h.key(egui::Key::R);
+        h.settle();
+        let say = |h: &Harness, what: &str| {
+            let f = h.st.doc.feature(b).unwrap();
+            eprintln!("  {what}: {:?} at {:?} readout {:?}", f.prim, f.origin, h.st.gizmo_readout);
+        };
+        let c = h.st.cage().expect("a cage");
+        eprintln!("  cage {:?} grips {}", c, c.grips().len());
+        // the +Z face's grip (the +X side is under the shape's window here)
+        let g = h.screen_of(c.point([0, 0, 1]).as_vec3());
+        let out = h.screen_of((c.point([0, 0, 1]) + DVec3::Z * 10.0).as_vec3());
+        h.move_to(g);
+        h.steps(2);
+        eprintln!("  hot {:?}", h.st.hot_handle);
+        h.shot("zero-cage-1-hover");
+        h.drag(g, out, 10, false);
+        h.steps(2);
+        say(&h, "+Z grip dragged 10 out");
+        h.shot("zero-cage-2-face-grip");
+        h.press(out, false);
+        h.settle();
+        say(&h, "let go");
+        let c = h.st.cage().unwrap();
+        let (k0, k1) = (c.point([-1, -1, -1]), c.point([1, 1, 1]));
+        let g = h.screen_of(k1.as_vec3());
+        let to = h.screen_of((k1 + (k1 - k0) * 0.25).as_vec3());
+        h.hold(Modifiers::SHIFT);
+        h.drag(g, to, 10, false);
+        h.steps(2);
+        say(&h, "corner with Shift");
+        h.shot("zero-cage-3-corner-shift");
+        h.press(to, false);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        say(&h, "let go");
+        // Face mode: the block's top and its +Z side picked, the cage round
+        // them, the grip of their shared edge pulled up and out
+        h.key(egui::Key::F11);
+        let top = h.screen_of((k1 * DVec3::new(0.3, 1.0, 0.3)).as_vec3());
+        h.click(top);
+        h.hold(Modifiers::SHIFT);
+        let side = h.screen_of(Vec3::new((k0.x + k1.x) as f32 * 0.5, (k1.y * 0.5) as f32, k1.z as f32));
+        h.click(side);
+        h.hold(Modifiers::NONE);
+        h.key(egui::Key::R);
+        h.settle();
+        if let Some(c) = h.st.cage() {
+            eprintln!("  faces {} cage {:?}", h.st.face_sel.len(), c);
+            let g = h.screen_of(c.point([0, 1, 1]).as_vec3());
+            let to = h.screen_of((c.point([0, 1, 1]) + DVec3::new(0.0, 4.0, 8.0)).as_vec3());
+            h.move_to(g);
+            h.steps(2);
+            eprintln!("  hot {:?}", h.st.hot_handle);
+            h.drag(g, to, 10, false);
+            h.steps(2);
+            h.shot("zero-cage-4-faces-drag");
+            h.press(to, false);
+            h.settle();
+            eprintln!("  scale faces {:?} errors {:?}", h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| (f.name.clone(), t.scale, t.delta, t.about))).collect::<Vec<_>>(), h.st.model.as_ref().map(|m| m.errors.clone()));
+            h.shot("zero-cage-5-faces-done");
+        }
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
+    if want("knife-chain") {
+        // Romain 20 nov., 12 h 09: a point (an edge's end or middle) catches
+        // first within 12 points; the cut goes on from its last point
+        h.reset(test_part(), "Test part");
+        h.settle();
+        h.key(egui::Key::S);
+        let corner = h.screen_of(Vec3::new(-20.0, 20.0, 15.0));
+        h.move_to(corner + egui::vec2(7.0, 6.0));
+        h.steps(2);
+        eprintln!("  9 points from the corner: hover {:?} point {}", h.st.knife_hover, h.st.knife_hover_point);
+        let pp = corner + egui::vec2(7.0, 6.0);
+        if let Some(m) = h.st.model.clone() {
+            for (i, e) in m.edges.iter().enumerate() {
+                let (a, b) = (Vec3::from(e.pts[0]), Vec3::from(*e.pts.last().unwrap()));
+                if a.distance(Vec3::new(-20.0, 20.0, 15.0)) < 1.0 || b.distance(Vec3::new(-20.0, 20.0, 15.0)) < 1.0 {
+                    eprintln!("    edge {i} {a:?} -> {b:?} seam {} n {} screen {:?} {:?}", e.seam, e.pts.len(), h.st.view().project(a), h.st.view().project(b));
+                }
+            }
+        }
+        eprintln!("  knife_point {:?} hidden {} corner on screen {:?} pointer {:?}", h.st.knife_point([pp.x, pp.y]), h.st.hidden(Vec3::new(-20.0, 20.0, 15.0)), corner, pp);
+        h.shot("zero-knife-chain-1-catch");
+        let pts = [Vec3::new(-20.0, 15.0, 15.0), Vec3::new(-12.0, 0.0, 15.0), Vec3::new(20.0, 6.0, 15.0)];
+        for (i, at) in pts.iter().enumerate() {
+            let p = h.screen_of(*at);
+            h.move_to(p);
+            h.steps(2);
+            h.click(p);
+            h.settle();
+            let next = pts.get(i + 1).map(|q| h.screen_of(*q)).unwrap_or(p + egui::vec2(0.0, -60.0));
+            h.move_to(p + (next - p) * 0.6);
+            h.steps(2);
+            eprintln!("  click {i}: knife {:?} last {:?} tool {:?}", h.st.knife, h.st.knife_last(), h.st.tool);
+            h.shot(&format!("zero-knife-chain-{}-after-{i}", i + 2));
+        }
+        h.key(egui::Key::Enter);
+        h.settle();
+        for f in h.st.doc.features.iter().filter(|f| f.cut.is_some()) {
+            let k = f.cut.as_ref().unwrap();
+            eprintln!("  {} {} points {:?} lines", f.name, k.pts.len(), k.segs);
+        }
+        eprintln!("  Enter: tool {:?} faces {} errors {:?}", h.st.tool, h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-knife-chain-5-done");
     }
 
     if want("inset") {
@@ -2834,7 +3027,7 @@ fn main() {
             let p = h.screen_of(at);
             h.move_to(p);
             h.steps(2);
-            eprintln!("  pick at {at:?}: {:?}", h.st.knife_pick([p.x, p.y]).map(|k| (h.st.edge_ref(k.0).map(|r| r.faces), k.2)));
+            eprintln!("  pick at {at:?}: {:?}", h.st.knife_pick([p.x, p.y]).map(|k| (h.st.edge_ref(k.0).map(|r| r.faces), k.2, k.3)));
             h.click(p);
             h.settle();
         }
@@ -3555,6 +3748,32 @@ fn main() {
         h.shot("zero-only-4-off");
     }
 
+    if want("isopc") {
+        // his scene of 10 h 50 (FORME_DOC), his camera, the Pill picked,
+        // Ctrl + I with the pointer over the view
+        if let Ok(p) = std::env::var("FORME_DOC") {
+            let d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+            h.reset(d, "Scene");
+            h.st.camera.target = Vec3::new(37.909, 52.647, -120.267);
+            h.st.camera.dist = 511.876;
+            h.st.camera.pitch = 7.614f32.to_radians();
+            h.st.camera.yaw = 10.415f32.to_radians();
+            h.steps(2);
+            h.settle();
+            h.st.selection = vec![107];
+            h.move_to(pos2(900.0, 500.0));
+            let cam0 = h.st.camera;
+            for k in 0..4 {
+                h.hold(Modifiers::CTRL);
+                h.key(egui::Key::I);
+                h.hold(Modifiers::NONE);
+                for _ in 0..30 {
+                    h.move_to(pos2(900.0 + k as f32, 500.0));
+                }
+                eprintln!("  isolate {}: camera {:?} {} (from {:?} {}) anim {}", h.st.isolate.is_some(), h.st.camera.target, h.st.camera.dist, cam0.target, cam0.dist, h.st.cam_anim.is_some());
+            }
+        }
+    }
     if want("isolate") {
         // Isolate (Romain 20 nov., 9 h 38, Maya): a block beside the test
         // part picked, the top bar's icon: it alone, framed; again: all

@@ -123,18 +123,11 @@ fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
     match st.gizmo {
         GizmoMode::Select => return None,
         GizmoMode::Rotate if st.sel_mode == SelMode::Object => return ring_at(st, p),
-        GizmoMode::Scale => return scale_at(st, p),
+        GizmoMode::Scale => return cage_at(st, p),
         _ => {}
     }
-    if let Some(f) = st.single().filter(|_| st.sel_mode == SelMode::Object) {
-        for h in size_handles(f) {
-            if let Some(q) = size_handle_pos(f, h).and_then(|w| world(st, w)) {
-                if (q - p).length() < 9.0 {
-                    return Some(h);
-                }
-            }
-        }
-    }
+    // (the move gizmo has no size dots: Romain 20 nov., 11 h 44, "enlève
+    // les 4 points de scale avec le translate"; R's cage sizes)
     let (c, tips) = gizmo_points(st)?;
     // the centre (Maya): a move on all three axes
     if (p - c).length() < 9.0 {
@@ -198,31 +191,20 @@ fn ring_at(st: &AppState, p: Pos2) -> Option<Handle> {
     best.map(|(_, a)| Handle::Rot(a))
 }
 
-/// The scale gizmo: the pivot, the tips along the shape's own axes.
-fn scale_points(st: &AppState) -> Option<(Pos2, [Option<Pos2>; 3])> {
-    let pivot = st.pivot()?;
-    let frame = st.scale_frame()?;
-    let c = world(st, pivot)?;
-    let v = st.view();
-    let k = v.pixel_size_at((pivot.as_vec3() - v.eye).length()) as f64 * ARROW as f64;
-    Some((c, [0, 1, 2].map(|a| world(st, pivot + frame * DVec3::AXES[a] * k))))
-}
-
-fn scale_at(st: &AppState, p: Pos2) -> Option<Handle> {
-    let (c, tips) = scale_points(st)?;
-    if (p - c).length() < 10.0 {
-        return Some(Handle::ScaleAll);
-    }
-    let mut best: Option<(f32, usize)> = None;
-    for (a, t) in tips.iter().enumerate() {
-        if let Some(t) = t {
-            let d = dist_seg(p, c + (*t - c) * 0.2, *t).min((p - *t).length() - 3.0);
-            if d < 8.0 && best.map(|b| d < b.0).unwrap_or(true) {
-                best = Some((d, a));
-            }
+/// The scale cage's grip under the pointer (corners first, then edges,
+/// then faces, when they lie as near).
+fn cage_at(st: &AppState, p: Pos2) -> Option<Handle> {
+    let c = st.cage()?;
+    let mut best: Option<(f32, [i8; 3])> = None;
+    for s in c.grips() {
+        let Some(q) = world(st, c.point(s)) else { continue };
+        let n = s.iter().filter(|v| **v != 0).count() as f32;
+        let d = (q - p).length() - n * 0.5;
+        if d < 9.0 && best.map(|b| d < b.0).unwrap_or(true) {
+            best = Some((d, s));
         }
     }
-    best.map(|(_, a)| Handle::Scale(a))
+    best.map(|(_, s)| Handle::Cage(s))
 }
 
 fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, rect: Rect) {
@@ -243,6 +225,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     let in_base = st.creation.as_ref().map(|c| c.phase == Phase::Base).unwrap_or(false);
     if alt && (resp.hovered() || resp.dragged() || l || m || r) && !in_base && st.drag.is_none() {
         if (l || m || r) && d != egui::Vec2::ZERO {
+            st.stop_flight();
             if l {
                 st.camera.orbit(d.x, d.y);
             } else if m {
@@ -263,13 +246,16 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     if resp.hovered() {
         let (scroll, zoom) = ctx.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
         if (zoom - 1.0).abs() > 1e-4 {
+            st.stop_flight();
             st.camera.zoom(zoom);
         } else if scroll.y.abs() > 0.0 {
+            st.stop_flight();
             st.camera.zoom((scroll.y * 0.0022).exp());
         }
     }
     // the middle button alone pans too (no tool uses it)
     if m && !alt && d != egui::Vec2::ZERO && (resp.hovered() || resp.dragged()) {
+        st.stop_flight();
         st.camera.pan(d.x, d.y, rect.height());
         st.interacting = true;
         return;
@@ -279,6 +265,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     // Ctrl held: no snapping to the part's points
     st.snap_off = ctrl;
     st.shift_held = shift;
+    st.alt_held = ctx.input(|i| i.modifiers.alt);
     // D held (Maya): a click or a drag puts the gizmo's pivot on the point
     // under the pointer; the moves then carry that point onto the points
     // of interest
@@ -321,7 +308,14 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         st.hover_edge = if edges { hover.and_then(|h| st.pick_edge(p2(h))) } else { None };
         st.hover_vertex = if verts { hover.and_then(|h| st.pick_vertex(p2(h))) } else { None };
         st.hover_face = if faces { st.hover_hit.map(|h| h.face) } else { None };
-        st.knife_hover = if knife { hover.and_then(|h| st.knife_pick(p2(h))).map(|k| k.1) } else { None };
+        // Ctrl: a cut across the face from the edge under the pointer (no point catches)
+        let kp = match (knife, st.tool == Tool::Knife && ctrl) {
+            (false, _) => None,
+            (true, false) => hover.and_then(|h| st.knife_pick(p2(h))),
+            (true, true) => hover.and_then(|h| st.knife_pick_edge(p2(h))).map(|(e, q, f)| (e, q, f, false)),
+        };
+        st.knife_hover = kp.map(|k| k.1);
+        st.knife_hover_point = kp.map(|k| k.3).unwrap_or(false);
         st.knife_preview = if st.tool == Tool::Knife && ctrl {
             hover.and_then(|h| st.knife_loop_at(p2(h), shift)).map(|(v, closed)| (v.iter().map(|q| q.at).collect(), closed))
         } else {
@@ -383,7 +377,16 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     if st.tool == Tool::Select && st.sel_mode != SelMode::Object {
         if resp.drag_started_by(PointerButton::Primary) {
             let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
-            if let Some(h) = handle_at(st, origin) {
+            // quick extrude (Romain 20 nov., 11 h 54: "Une Edge ou une Face >
+            // Shift + Drag"): Shift on a picked face or edge wins over the
+            // move gizmo sitting on it (not over the scale cage, whose Shift
+            // keeps the proportions)
+            let quick = shift && !ctrl && st.gizmo != GizmoMode::Scale && st.begin_face_drag(p2(origin), true, false);
+            if quick {
+                if st.push.is_some() {
+                    return;
+                }
+            } else if let Some(h) = handle_at(st, origin) {
                 st.begin_drag(h, p2(origin));
             } else {
                 // Rectify: a drag on an edge, a fillet or a sketch corner
@@ -822,25 +825,6 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
             }
         }
     }
-    // size handles of the one selected shape
-    let Some(f) = st.single() else { return };
-    for h in size_handles(f) {
-        let Some(q) = size_handle_pos(f, h).and_then(|w| world(st, w)) else { continue };
-        let on = hot == Some(h);
-        if dragging.is_some() && dragging != Some(h) {
-            continue;
-        }
-        p.circle(q, if on { 4.0 } else { 3.0 }, if on { HOT } else { Color32::WHITE }, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
-        if on {
-            let (label, v) = match (h, f.prim) {
-                (Handle::Size(0), Prim::Box { x, .. } | Prim::Profile { x, .. } | Prim::Path { x, .. }) => ("W", x),
-                (Handle::Size(2), Prim::Box { z, .. } | Prim::Profile { z, .. } | Prim::Path { z, .. }) => ("D", z),
-                (Handle::Size(3), Prim::Cylinder { radius, .. }) => ("R", radius),
-                (_, pr) => ("H", pr.height()),
-            };
-            chip(p, q + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, &format!("{label} {} mm", fmt_mm(v as f32)), HOT, HOT);
-        }
-    }
 }
 
 /// E: three rings round the world axes; R: three axes with cubes and a
@@ -862,19 +846,43 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
             }
         }
     } else {
-        let Some((_, tips)) = scale_points(st) else { return };
-        for (a, t) in tips.iter().enumerate() {
-            if dragging.is_some() && dragging != Some(Handle::Scale(a)) && dragging != Some(Handle::ScaleAll) {
+        // the cage: its edges thin, a grip per face, edge and corner; the
+        // grip dragged alone in the accent, the value beside it
+        let Some(cg) = st.cage() else { return };
+        for (a, b) in cg.edges() {
+            if let (Some(a), Some(b)) = (world(st, a), world(st, b)) {
+                p.line_segment([a, b], Stroke::new(1.0, Color32::from_white_alpha(150)));
+            }
+        }
+        let dark = Color32::from_rgb(0x20, 0x22, 0x26);
+        let mut at_grip = None;
+        for s in cg.grips() {
+            let h = Handle::Cage(s);
+            if dragging.is_some() && dragging != Some(h) {
                 continue;
             }
-            let Some(t) = t else { continue };
-            let on = hot == Some(Handle::Scale(a)) || hot == Some(Handle::ScaleAll);
-            let col = if on { HOT } else { colors[a] };
-            p.line_segment([c + (*t - c) * 0.18, *t], Stroke::new(if on { 3.0 } else { 2.2 }, col));
-            p.rect_filled(Rect::from_center_size(*t, vec2(10.0, 10.0)), 2.0, col);
+            let Some(q) = world(st, cg.point(s)) else { continue };
+            let on = hot == Some(h) || dragging == Some(h);
+            let n = s.iter().filter(|v| **v != 0).count();
+            let r = match n {
+                1 => 4.5,
+                2 => 3.0,
+                _ => 3.5,
+            } + if on { 1.5 } else { 0.0 };
+            let fill = if on { HOT } else { Color32::WHITE };
+            if n == 2 {
+                p.circle(q, r, fill, Stroke::new(1.0, dark));
+            } else {
+                p.rect(Rect::from_center_size(q, vec2(r * 2.0, r * 2.0)), 1.0, fill, Stroke::new(1.0, dark), egui::StrokeKind::Middle);
+            }
+            if on {
+                at_grip = Some(q);
+            }
         }
-        let on = hot == Some(Handle::ScaleAll);
-        p.rect(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, if on { tint(HOT, 0.5) } else { tint(Color32::WHITE, 0.25) }, Stroke::new(1.5, if on { HOT } else { Color32::WHITE }), egui::StrokeKind::Middle);
+        if let (Some(q), Some(t)) = (at_grip, &st.gizmo_readout) {
+            chip(p, q + vec2(14.0, 14.0), Align2::LEFT_TOP, t, HOT, HOT);
+        }
+        return;
     }
     p.circle(c, 2.25, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
     if let Some(t) = &st.gizmo_readout {
@@ -1213,17 +1221,24 @@ fn draw_knife(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
         }
         return;
     }
+    // the cut goes on from its last point (Romain 20 nov., 12 h 09: the
+    // faint dashed line read as no preview): a plain line to the pointer,
+    // full when it would cut there
     if st.tool == Tool::Knife {
         if let (Some(a), Some(b)) = (st.knife_last().and_then(|q| world(st, q)), hot.or(pointer)) {
             if hot.is_some() {
-                p.line_segment([a, b], Stroke::new(1.6, col));
+                p.line_segment([a, b], Stroke::new(1.8, col));
             } else {
-                p.extend(egui::Shape::dashed_line(&[a, b], Stroke::new(1.2, tint(col, 0.6)), 5.0, 4.0));
+                p.line_segment([a, b], Stroke::new(1.5, tint(col, 0.9)));
             }
         }
     }
     if let Some(a) = st.knife_last().and_then(|q| world(st, q)) {
-        p.circle(a, 2.0, col, Stroke::new(1.0, chip_bg()));
+        p.circle(a, 3.0, col, Stroke::new(1.0, chip_bg()));
+    }
+    // a vertex or an edge's middle caught: a ring round the diamond
+    if let (Some(c), true) = (hot, st.knife_hover_point) {
+        p.circle_stroke(c, 7.0, Stroke::new(1.4, col));
     }
     if let Some(c) = hot {
         let r = 3.5;
@@ -1434,9 +1449,9 @@ pub fn hint(st: &AppState) -> String {
         (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => "Arrows: move it · Centre square: on all three axes · D + click: pivot on a point · Window: X, Y, Z · Del: delete it".into(),
         (None, Tool::Knife) => {
             if st.knife.is_some() {
-                "Click the next edge: a line across their face (a round one: along it) · Enter, Esc, right click: end the cut".into()
+                "Click the next edge: a line across their face (a round one: along it), the cut goes on · Corners and middles catch first · Esc, right click: end the cut · Enter, Q, W: done, back to Select".into()
             } else {
-                "Click an edge: a point, then the next edges · Ctrl + click: a cut across the face · Ctrl + Shift + click: a loop round the part".into()
+                "Click an edge: a point, then the next edges · Corners and middles catch first · Ctrl + click: a cut across the face · Ctrl + Shift + click: a loop round the part".into()
             }
         }
         (None, Tool::Point) => "Click an edge: a point cut into it (its middle catches) · Esc: Select".into(),
@@ -1479,6 +1494,7 @@ pub fn hint(st: &AppState) -> String {
                     Handle::Rot(_) => "Round the ring: turn · 15° steps while Snap is on · Release: keep it".into(),
                     Handle::Scale(_) => "Away from the centre: bigger · Release: keep it".into(),
                     Handle::ScaleAll => "To the right: bigger · To the left: smaller · Release: keep it".into(),
+                    Handle::Cage(_) => "The side facing the grip stays · Shift: proportions kept · Alt: from the middle · Ctrl: no snapping · Release: keep it".into(),
                     _ => "Moving: the kernel rebuilds the booleans live".into(),
                 }
             } else if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {
@@ -1500,9 +1516,9 @@ pub fn hint(st: &AppState) -> String {
             } else {
                 match st.gizmo {
                     GizmoMode::Select => "W: move · E: rotate · R: scale · Right button: menu · Del: delete · Esc: deselect".into(),
-                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Dots: resize · E: rotate · R: scale · Del: delete".into(),
+                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
-                    GizmoMode::Scale => "Cubes: along the shape's axes · Centre: all at once · W: move · E: rotate".into(),
+                    GizmoMode::Scale => "Cage: a face's grip one side, an edge's two, a corner all three · Shift: proportions kept · Alt: from the middle · W: move · E: rotate".into(),
                 }
             }
         }

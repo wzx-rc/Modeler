@@ -734,7 +734,7 @@ impl AppState {
         let (ro, rd) = self.ray(p);
         let Some(t) = closest_on_line(line.0, line.1, ro, rd) else { return };
         self.begin_live(f.kind_label());
-        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![], carried: Default::default(), pivot: line.0, custom: false, keep: vec![] });
+        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![], carried: Default::default(), pivot: line.0, custom: false, keep: vec![], cage: None });
     }
 
     pub(crate) fn update_push_drag(&mut self, d: &Drag, p: [f32; 2]) {
@@ -1037,9 +1037,10 @@ impl AppState {
     /// A drag on the gizmo in Vertex, Edge or Face mode: the selected move
     /// step changes, or a new one starts on the picked component.
     pub(crate) fn begin_tweak_drag(&mut self, h: Handle, p: [f32; 2]) {
-        if !matches!(h, Handle::Axis(_) | Handle::Plane(_) | Handle::Free | Handle::Scale(_) | Handle::ScaleAll) {
+        if !matches!(h, Handle::Axis(_) | Handle::Plane(_) | Handle::Free | Handle::Scale(_) | Handle::ScaleAll | Handle::Cage(_)) {
             return;
         }
+        let cage = if matches!(h, Handle::Cage(_)) { self.cage() } else { None };
         let Some(pivot) = self.pivot() else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
         let custom = self.custom_pivot_on();
@@ -1056,15 +1057,34 @@ impl AppState {
             }
             None => {
                 let Some(t) = Tweak::new(self.picked_comps()) else { return };
-                self.begin_live(t.label());
+                // R (the cage too): named a scale from the start
+                let scaling = matches!(h, Handle::Scale(_) | Handle::ScaleAll | Handle::Cage(_));
+                let label = if scaling {
+                    match t.comp {
+                        Comp::Face(_) => "Scale faces",
+                        Comp::Edge(_) => "Scale edges",
+                        Comp::Vertex(_) => "Scale vertices",
+                    }
+                } else {
+                    t.label()
+                };
+                self.begin_live(label);
                 let mut id = 0;
-                self.live(|d| id = d.add_tweak(t));
+                self.live(|d| {
+                    id = d.add_tweak(t);
+                    if scaling {
+                        let name = d.fresh_name(label);
+                        if let Some(f) = d.feature_mut(id) {
+                            f.name = name;
+                        }
+                    }
+                });
                 self.select(Some(id), false);
                 id
             }
         };
         let Some(f) = self.doc.feature(id).cloned() else { return };
-        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried, pivot, custom, keep: vec![] });
+        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried, pivot, custom, keep: vec![], cage });
         // the move step now selected: the pivot put by hand goes on with it
         if custom {
             self.custom_pivot = Some((self.pivot_key(), pivot));
@@ -1075,6 +1095,21 @@ impl AppState {
         let Some(t0) = d.start[0].tweak.clone() else { return };
         let id = d.start[0].id;
         let pivot0 = d.pivot;
+        // the scale cage: scaled about the side facing the grip (Alt: its
+        // middle), as the step's own scale and centre
+        if let (Handle::Cage(s), Some(c)) = (d.handle, d.cage) {
+            let Some((k, anchor)) = self.cage_scale(&c, s, p, &[]) else { return };
+            let (s0, d0) = (t0.scale, t0.delta);
+            let a0 = t0.about.unwrap_or_else(|| if (s0 - DVec3::ONE).abs().max_element() < 1e-9 { anchor - d0 } else { c.point([0, 0, 0]) - d0 });
+            self.live(|doc| {
+                if let Some(tw) = doc.feature_mut(id).and_then(|f| f.tweak.as_mut()) {
+                    tw.about = Some(a0);
+                    tw.scale = s0 * k;
+                    tw.delta = anchor + k * (a0 - anchor + d0) - a0;
+                }
+            });
+            return;
+        }
         let Some(now) = self.handle_param(d.handle, pivot0, p) else { return };
         let raw = now - d.grab;
         let mut delta = DVec3::new(self.snap(raw.x), self.snap(raw.y), self.snap(raw.z));

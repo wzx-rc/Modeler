@@ -1315,6 +1315,7 @@ fn capture_of(st: &mut AppState, p: &Value) -> Result<Capture, String> {
 
 /// The user's view and display changed (no picture).
 fn show(st: &mut AppState, p: &Value) -> Result<(), String> {
+    st.cam_anim = None;
     st.camera = camera_of(st, p)?;
     let (shown, ghost, dev) = display_of(st, p)?;
     st.ref_shown = shown;

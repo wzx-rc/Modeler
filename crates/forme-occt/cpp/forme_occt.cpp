@@ -3156,7 +3156,8 @@ static FShape* unify_across(FShape* res, const TopTools_MapOfShape& across, cons
     u.KeepShapes(keep);
     u.Build();
     TopoDS_Shape out = u.Shape();
-    if (out.IsNull() || !BRepCheck_Analyzer(out).IsValid()) return res;
+    // valid when what it was given was (a part already off, kept going)
+    if (out.IsNull() || (!BRepCheck_Analyzer(out).IsValid() && BRepCheck_Analyzer(res->s).IsValid())) return res;
     FShape* r2 = wrap(out);
     if (!r2) return res;
     TopTools_IndexedMapOfShape fin, fout;
@@ -5632,6 +5633,35 @@ FShape* focc_defeature(const FShape* s, const int* idx, int n) {
         (FShape*)nullptr);
 }
 
+// A solid whose shell no longer closes (faces taken out) made a sheet: its
+// shells on their own beside the rest. An open solid is an invalid one,
+// and every move or Delete edges after it was refused (20 nov., 11 h 48:
+// "ne peut ni se supprimer ni se déplacer").
+static TopoDS_Shape open_solids_as_sheets(const TopoDS_Shape& s) {
+    auto open = [](const TopoDS_Shape& so) {
+        for (TopExp_Explorer hx(so, TopAbs_SHELL); hx.More(); hx.Next())
+            if (!BRep_Tool::IsClosed(hx.Current())) return true;
+        return false;
+    };
+    bool any = false;
+    for (TopExp_Explorer sx(s, TopAbs_SOLID); sx.More(); sx.Next())
+        if (open(sx.Current())) any = true;
+    if (!any) return s;
+    BRep_Builder b;
+    TopoDS_Compound c;
+    b.MakeCompound(c);
+    for (TopExp_Explorer sx(s, TopAbs_SOLID); sx.More(); sx.Next()) {
+        if (!open(sx.Current())) {
+            b.Add(c, sx.Current());
+            continue;
+        }
+        for (TopExp_Explorer hx(sx.Current(), TopAbs_SHELL); hx.More(); hx.Next()) b.Add(c, hx.Current());
+    }
+    for (TopExp_Explorer hx(s, TopAbs_SHELL, TopAbs_SOLID); hx.More(); hx.Next()) b.Add(c, hx.Current());
+    for (TopExp_Explorer fx(s, TopAbs_FACE, TopAbs_SHELL); fx.More(); fx.Next()) b.Add(c, fx.Current());
+    return c;
+}
+
 FShape* focc_remove_faces(const FShape* s, const int* idx, int n) {
     return guard(
         [&]() -> FShape* {
@@ -5648,7 +5678,7 @@ FShape* focc_remove_faces(const FShape* s, const int* idx, int n) {
                 set_err("no face to delete");
                 return nullptr;
             }
-            TopoDS_Shape out = rs->Apply(s->s);
+            TopoDS_Shape out = open_solids_as_sheets(rs->Apply(s->s));
             FShape* r = wrap(out);
             if (!r) return nullptr;
             TopTools_IndexedMapOfShape fo;
