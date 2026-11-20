@@ -15,6 +15,7 @@ pub mod client;
 pub mod doc;
 pub mod model;
 pub mod proto;
+pub mod mesh;
 pub mod remesh;
 
 #[cfg(feature = "occ")]
@@ -23,4 +24,5 @@ pub mod build;
 pub mod quads;
 
 pub use doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Knife, KnifePoint, Op, Paint, Prim, Profile, Push, RefMesh, Round, Sheet, Tweak};
+pub use mesh::{MeshData, MeshKind, MeshRef};
 pub use model::{Edge, Face, FaceTag, Model, Quads};

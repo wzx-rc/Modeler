@@ -83,6 +83,26 @@ pub enum Icon {
     BoolUnion,
     BoolSubtract,
     BoolIntersect,
+    /// The workspaces (tabs): Forme (a filleted block), Sculpt (a lump of
+    /// clay), Poly (a cube's cage).
+    TabForme,
+    TabSculpt,
+    TabPoly,
+    /// The Sculpt brushes.
+    BrushDraw,
+    BrushClay,
+    BrushSmooth,
+    BrushGrab,
+    BrushInflate,
+    BrushFlatten,
+    BrushPinch,
+    /// Poly: a plane of quads, an edge loop across a cube, a quad cut in
+    /// four, a rounded cage, a cage sent to the clay.
+    PolyPlane,
+    EdgeLoop,
+    Subdivide,
+    SmoothMesh,
+    ToSculpt,
 }
 
 struct Pen<'a> {
@@ -467,6 +487,136 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.closed(&face);
             pen.line(&[(10.0, 13.5), (10.0, 2.5)]);
             pen.line(&[(7.0, 5.5), (10.0, 2.5), (13.0, 5.5)]);
+        }
+        Icon::TabForme => {
+            // a block drilled through its top (the B-rep part)
+            pen.closed(&[(10.0, 2.5), (16.5, 6.0), (16.5, 14.0), (10.0, 17.5), (3.5, 14.0), (3.5, 6.0)]);
+            pen.line(&[(3.5, 6.0), (10.0, 9.5), (16.5, 6.0)]);
+            pen.line(&[(10.0, 9.5), (10.0, 17.5)]);
+            pen.ellipse(10.0, 6.0, 3.0, 1.6);
+        }
+        Icon::TabSculpt => {
+            // a lump of clay, a thumb's dent
+            let pts: Vec<(f32, f32)> = (0..=40)
+                .map(|i| {
+                    let a = i as f32 / 40.0 * 2.0 * PI;
+                    let r = 6.6 + 0.9 * (3.0 * a).sin() + 0.5 * (5.0 * a + 1.0).cos();
+                    (10.0 + r * a.cos(), 10.5 + r * 0.92 * a.sin())
+                })
+                .collect();
+            pen.line(&pts);
+            pen.arc(8.5, 9.0, 2.6, 1.8, 0.2, PI - 0.2);
+        }
+        Icon::TabPoly => {
+            pen.closed(&[(10.0, 2.5), (16.5, 6.0), (16.5, 14.0), (10.0, 17.5), (3.5, 14.0), (3.5, 6.0)]);
+            pen.line(&[(3.5, 6.0), (10.0, 9.5), (16.5, 6.0)]);
+            pen.line(&[(10.0, 9.5), (10.0, 17.5)]);
+            pen.line(&[(6.75, 4.25), (13.25, 7.75), (13.25, 15.75)]);
+            pen.line(&[(3.5, 10.0), (10.0, 13.5), (16.5, 10.0)]);
+            for (x, y) in [(10.0, 2.5), (16.5, 6.0), (16.5, 14.0), (10.0, 17.5), (3.5, 14.0), (3.5, 6.0), (10.0, 9.5)] {
+                pen.dot(x, y, 1.0);
+            }
+        }
+        Icon::BrushDraw => {
+            // a stroke raised along a line
+            pen.line(&[(2.5, 15.5), (17.5, 15.5)]);
+            pen.arc(10.0, 15.5, 6.0, 7.0, PI, 2.0 * PI);
+            pen.line(&[(10.0, 6.0), (10.0, 2.5)]);
+        }
+        Icon::BrushClay => {
+            // strips laid flat, one over the other
+            pen.closed(&[(3.0, 12.0), (14.0, 12.0), (17.0, 15.5), (6.0, 15.5)]);
+            pen.closed(&[(5.0, 7.5), (13.0, 7.5), (15.5, 10.0), (7.5, 10.0)]);
+            pen.fill(&[(5.0, 7.5), (13.0, 7.5), (15.5, 10.0), (7.5, 10.0)], 0.4);
+            pen.line(&[(8.0, 3.5), (12.0, 3.5)]);
+        }
+        Icon::BrushSmooth => {
+            // a wave evened out
+            let wave: Vec<(f32, f32)> = (0..=24).map(|i| {
+                let x = 2.5 + 15.0 * i as f32 / 24.0;
+                (x, 7.0 + 2.2 * ((x - 2.5) * 0.9).sin())
+            }).collect();
+            pen.line(&wave);
+            pen.line(&[(10.0, 10.5), (10.0, 13.0)]);
+            pen.line(&[(8.5, 11.8), (10.0, 13.3), (11.5, 11.8)]);
+            pen.line(&[(2.5, 15.5), (17.5, 15.5)]);
+        }
+        Icon::BrushGrab => {
+            // a bump pulled up by its top
+            pen.line(&[(2.5, 16.0), (6.0, 16.0)]);
+            pen.line(&[(14.0, 16.0), (17.5, 16.0)]);
+            pen.line(&[(6.0, 16.0), (8.5, 9.0), (10.0, 7.5), (11.5, 9.0), (14.0, 16.0)]);
+            pen.line(&[(13.0, 6.5), (16.5, 3.0)]);
+            pen.line(&[(13.5, 3.0), (16.5, 3.0), (16.5, 6.0)]);
+        }
+        Icon::BrushInflate => {
+            pen.circle(10.0, 10.0, 4.0);
+            for a in [0.0f32, 0.5, 1.0, 1.5] {
+                let a = a * PI;
+                let (c, s) = (a.cos(), a.sin());
+                pen.line(&[(10.0 + c * 5.5, 10.0 + s * 5.5), (10.0 + c * 8.0, 10.0 + s * 8.0)]);
+            }
+        }
+        Icon::BrushFlatten => {
+            // a bump pressed flat by a plane
+            pen.line(&[(2.5, 16.0), (5.0, 16.0), (7.0, 11.0), (13.0, 11.0), (15.0, 16.0), (17.5, 16.0)]);
+            pen.line(&[(3.5, 8.5), (16.5, 8.5)]);
+            pen.line(&[(10.0, 2.5), (10.0, 6.5)]);
+            pen.line(&[(8.5, 5.0), (10.0, 6.5), (11.5, 5.0)]);
+        }
+        Icon::BrushPinch => {
+            // two sides drawn to a crease
+            pen.line(&[(2.5, 7.0), (10.0, 15.0), (17.5, 7.0)]);
+            pen.line(&[(3.0, 13.0), (6.5, 13.0)]);
+            pen.line(&[(5.0, 11.5), (6.5, 13.0), (5.0, 14.5)]);
+            pen.line(&[(17.0, 13.0), (13.5, 13.0)]);
+            pen.line(&[(15.0, 11.5), (13.5, 13.0), (15.0, 14.5)]);
+        }
+        Icon::PolyPlane => {
+            let q = [(2.5, 12.0), (10.0, 8.0), (17.5, 12.0), (10.0, 16.0)];
+            pen.closed(&q);
+            pen.line(&[(6.25, 10.0), (13.75, 14.0)]);
+            pen.line(&[(13.75, 10.0), (6.25, 14.0)]);
+        }
+        Icon::EdgeLoop => {
+            pen.closed(&[(10.0, 2.5), (16.5, 6.0), (16.5, 14.0), (10.0, 17.5), (3.5, 14.0), (3.5, 6.0)]);
+            pen.line(&[(3.5, 6.0), (10.0, 9.5), (16.5, 6.0)]);
+            pen.line(&[(10.0, 9.5), (10.0, 17.5)]);
+            pen.line(&[(3.5, 10.0), (10.0, 13.5), (16.5, 10.0)]);
+            pen.dot(3.5, 10.0, 1.1);
+            pen.dot(16.5, 10.0, 1.1);
+        }
+        Icon::Subdivide => {
+            pen.closed(&[(3.0, 3.0), (17.0, 3.0), (17.0, 17.0), (3.0, 17.0)]);
+            pen.line(&[(10.0, 3.0), (10.0, 17.0)]);
+            pen.line(&[(3.0, 10.0), (17.0, 10.0)]);
+            pen.dot(10.0, 10.0, 1.2);
+        }
+        Icon::SmoothMesh => {
+            // the cage, the smooth shape inside it
+            let cage = [(3.0, 3.0), (17.0, 3.0), (17.0, 17.0), (3.0, 17.0)];
+            for i in 0..4 {
+                let (a, b) = (cage[i], cage[(i + 1) % 4]);
+                for k in 0..4 {
+                    let t0 = k as f32 / 4.0 + 0.04;
+                    let t1 = t0 + 0.14;
+                    pen.line(&[(a.0 + (b.0 - a.0) * t0, a.1 + (b.1 - a.1) * t0), (a.0 + (b.0 - a.0) * t1, a.1 + (b.1 - a.1) * t1)]);
+                }
+            }
+            pen.circle(10.0, 10.0, 5.2);
+        }
+        Icon::ToSculpt => {
+            pen.closed(&[(2.5, 5.0), (8.5, 5.0), (8.5, 11.0), (2.5, 11.0)]);
+            pen.line(&[(9.5, 8.0), (12.0, 8.0)]);
+            pen.line(&[(11.0, 6.8), (12.2, 8.0), (11.0, 9.2)]);
+            let pts: Vec<(f32, f32)> = (0..=24)
+                .map(|i| {
+                    let a = i as f32 / 24.0 * 2.0 * PI;
+                    let r = 3.6 + 0.5 * (3.0 * a).sin();
+                    (14.5 + r * a.cos(), 12.0 + r * a.sin())
+                })
+                .collect();
+            pen.line(&pts);
         }
         Icon::Scale => {
             // a small square growing into a big one

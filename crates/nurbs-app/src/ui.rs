@@ -10,6 +10,7 @@ use crate::materials;
 use crate::state::*;
 use crate::theme::*;
 use crate::widgets::*;
+use crate::workspace::Workspace;
 use egui::{pos2, vec2, Align2, Color32, Id, Margin, Order, Rect, Response, Sense, Stroke, StrokeKind, Ui};
 use glam::{DQuat, DVec3, EulerRot};
 use nurbs_kernel::doc::{CurveKind, CurveOp, PrimKind};
@@ -19,6 +20,9 @@ use nurbs_kernel::{Feature, FeatureId, Op, Prim};
 const EDGE: f32 = 14.0;
 /// Height of the top islands.
 const ISLAND_H: f32 = 40.0;
+/// The tabs at the very top (Forme, Sculpt, Poly), then the islands' row.
+const TABS_H: f32 = 30.0;
+const TOP: f32 = 8.0 + TABS_H + 6.0;
 /// Width of the left inspector.
 const LEFT_W: f32 = 296.0;
 /// Width of the tool cards.
@@ -47,6 +51,12 @@ pub fn paint_op_glyph(p: &egui::Painter, c: egui::Pos2, op: Op, color: Color32, 
 
 /// A feature's icon: its primitive, or the fillet's.
 pub fn feature_icon(f: &Feature) -> Icon {
+    if let Some(m) = &f.mesh {
+        return match m.kind {
+            nurbs_kernel::mesh::MeshKind::Sculpt => Icon::TabSculpt,
+            nurbs_kernel::mesh::MeshKind::Poly => Icon::TabPoly,
+        };
+    }
     if let Some(k) = &f.cut {
         if k.is_delete() {
             return Icon::Trash;
@@ -94,6 +104,12 @@ fn fmt_signed(v: f64) -> String {
 
 /// A feature's colour: Add, Carve, or the edges' yellow for a fillet.
 pub fn feature_color(f: &Feature) -> Color32 {
+    if let Some(m) = &f.mesh {
+        return match m.kind {
+            nurbs_kernel::mesh::MeshKind::Sculpt => Workspace::Sculpt.swatch(),
+            nurbs_kernel::mesh::MeshKind::Poly => Workspace::Poly.swatch(),
+        };
+    }
     if f.is_solid() {
         op_color(f.op)
     } else if f.push.is_some() || f.tweak.is_some() {
@@ -125,7 +141,8 @@ pub fn prim_key(k: PrimKind) -> &'static str {
 pub fn show(ctx: &egui::Context, st: &mut AppState) {
     let screen = ctx.content_rect();
     let left = if st.panel_visible { 2.0 * EDGE + LEFT_W } else { EDGE };
-    st.view_rect = [left, EDGE + ISLAND_H, screen.width() - 2.0 * EDGE - CARDS_W, screen.height() - HISTORY_H];
+    st.view_rect = [left, TOP + ISLAND_H, screen.width() - 2.0 * EDGE - CARDS_W, screen.height() - HISTORY_H];
+    tabs(ctx, st, screen);
     top_bar(ctx, st, screen);
     rail(ctx, st, screen);
     materials_island(ctx, st);
@@ -149,7 +166,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
 
 fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     // left: the document
-    egui::Area::new(Id::new("isl-doc")).order(Order::Middle).fixed_pos(screen.min + vec2(EDGE, EDGE)).show(ctx, |ui| {
+    egui::Area::new(Id::new("isl-doc")).order(Order::Middle).fixed_pos(screen.min + vec2(EDGE, TOP)).show(ctx, |ui| {
         island().show(ui, |ui| {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
@@ -183,13 +200,15 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 
     // centre: the tool, ADD | CARVE, the helpers
     let cx = st.principal()[0];
-    egui::Area::new(Id::new("isl-modes")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(pos2(cx, screen.min.y + EDGE)).show(ctx, |ui| {
+    egui::Area::new(Id::new("isl-modes")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(pos2(cx, screen.min.y + TOP)).show(ctx, |ui| {
         island().show(ui, |ui| {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                mode_pill(ui, st);
-                island_sep(ui);
+                if st.workspace != Workspace::Sculpt {
+                    mode_pill(ui, st);
+                    island_sep(ui);
+                }
                 let tool = match st.tool {
                     Tool::Create(k) => k.label().to_uppercase(),
                     Tool::Curve(k) => format!("CURVE · {}", k.label().to_uppercase()),
@@ -198,50 +217,20 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     Tool::Point => "POINT ON EDGE".into(),
                     Tool::Slot if st.slot_on_scan => "SLOT · ON THE SCAN".into(),
                     Tool::Slot => format!("SLOT · {}", st.mode.label().to_uppercase()),
+                    Tool::Select if st.workspace == Workspace::Poly => format!("POLY · {}", st.sel_mode.label().to_uppercase()),
+                    // the Sculpt tab's island is wide (size, strength): short
+                    Tool::Select if st.workspace == Workspace::Sculpt => "SELECT".into(),
                     Tool::Select => format!("SELECTION · {}", st.sel_mode.label().to_uppercase()),
+                    Tool::Sculpt => st.sculpt.brush.label().to_uppercase(),
+                    Tool::PolyLoop => "INSERT EDGE LOOP".into(),
                 };
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
                 let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 20.0, 28.0), Sense::hover());
                 ui.painter().galley(pos2(r.min.x + 10.0, r.center().y - g.size().y * 0.5), g, TEXT());
-                let shown = shown_op(st);
-                let (well, _) = ui.allocate_exact_size(vec2(2.0 * 62.0 + 6.0, 28.0), Sense::hover());
-                ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
-                for (i, op) in [Op::Add, Op::Carve].into_iter().enumerate() {
-                    let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 62.0, 3.0), vec2(62.0, 22.0));
-                    let resp = ui.interact(r, Id::new(("isl-mode", i)), Sense::click());
-                    let on = shown == op;
-                    let c = op_color(op);
-                    if on {
-                        ui.painter().rect_filled(r, 11.0, c);
-                    } else if resp.hovered() {
-                        ui.painter().rect_filled(r, 11.0, RAISED());
-                    }
-                    ui.painter().text(r.center(), Align2::CENTER_CENTER, if op == Op::Add { "ADD" } else { "CARVE" }, mono(11.0), if on { on_accent() } else { TEXT2() });
-                    if resp.on_hover_text("New shapes add matter or carve it (X)").clicked() {
-                        set_op_from_ui(st, op);
-                    }
-                }
-                // Edge and Vertex modes: what a drag on an edge or a sharp
-                // corner makes (Rectify's option)
-                if st.tool == Tool::Select && matches!(st.sel_mode, SelMode::Edge | SelMode::Vertex) {
-                    island_sep(ui);
-                    let (well, _) = ui.allocate_exact_size(vec2(2.0 * 72.0 + 6.0, 28.0), Sense::hover());
-                    ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
-                    for (i, (c, name)) in [(false, "FILLET"), (true, "CHAMFER")].into_iter().enumerate() {
-                        let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 72.0, 3.0), vec2(72.0, 22.0));
-                        let resp = ui.interact(r, Id::new(("isl-cut", i)), Sense::click());
-                        let on = st.round_chamfer == c;
-                        if on {
-                            ui.painter().rect_filled(r, 11.0, EDGE_SEL);
-                        } else if resp.hovered() {
-                            ui.painter().rect_filled(r, 11.0, RAISED());
-                        }
-                        ui.painter().text(r.center(), Align2::CENTER_CENTER, name, mono(11.0), if on { on_accent() } else { TEXT2() });
-                        let tip = if c { "A drag on an edge or a sharp corner chamfers it (Ctrl + B: chamfer what is picked)" } else { "A drag on an edge or a sharp corner rounds it" };
-                        if resp.on_hover_text(tip).clicked() {
-                            st.round_chamfer = c;
-                        }
-                    }
+                match st.workspace {
+                    Workspace::Sculpt => sculpt_controls(ui, st),
+                    Workspace::Poly => poly_controls(ui, st),
+                    Workspace::Forme => forme_controls(ui, st),
                 }
                 island_sep(ui);
                 if icon_btn(ui, Icon::Magnet, st.settings.snap, &format!("Snap to {} mm", fmt_mm(st.settings.step as f32)), 28.0).clicked() {
@@ -261,7 +250,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     });
 
     // right: the view
-    egui::Area::new(Id::new("isl-view")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(screen.max.x - EDGE, screen.min.y + EDGE)).show(ctx, |ui| {
+    egui::Area::new(Id::new("isl-view")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(screen.max.x - EDGE, screen.min.y + TOP)).show(ctx, |ui| {
         island().show(ui, |ui| {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
@@ -314,6 +303,88 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             });
         });
     });
+}
+
+/// The Forme tab's part of the centre island: ADD | CARVE for new shapes
+/// (and the selected one), FILLET | CHAMFER in Edge and Vertex modes.
+fn forme_controls(ui: &mut Ui, st: &mut AppState) {
+    let shown = shown_op(st);
+    let (well, _) = ui.allocate_exact_size(vec2(2.0 * 62.0 + 6.0, 28.0), Sense::hover());
+    ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+    for (i, op) in [Op::Add, Op::Carve].into_iter().enumerate() {
+        let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 62.0, 3.0), vec2(62.0, 22.0));
+        let resp = ui.interact(r, Id::new(("isl-mode", i)), Sense::click());
+        let on = shown == op;
+        let c = op_color(op);
+        if on {
+            ui.painter().rect_filled(r, 11.0, c);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(r, 11.0, RAISED());
+        }
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, if op == Op::Add { "ADD" } else { "CARVE" }, mono(11.0), if on { on_accent() } else { TEXT2() });
+        if resp.on_hover_text("New shapes add matter or carve it (X)").clicked() {
+            set_op_from_ui(st, op);
+        }
+    }
+    // Edge and Vertex modes: what a drag on an edge or a sharp
+    // corner makes (Rectify's option)
+    if st.tool == Tool::Select && matches!(st.sel_mode, SelMode::Edge | SelMode::Vertex) {
+        island_sep(ui);
+        let (well, _) = ui.allocate_exact_size(vec2(2.0 * 72.0 + 6.0, 28.0), Sense::hover());
+        ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+        for (i, (c, name)) in [(false, "FILLET"), (true, "CHAMFER")].into_iter().enumerate() {
+            let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 72.0, 3.0), vec2(72.0, 22.0));
+            let resp = ui.interact(r, Id::new(("isl-cut", i)), Sense::click());
+            let on = st.round_chamfer == c;
+            if on {
+                ui.painter().rect_filled(r, 11.0, EDGE_SEL);
+            } else if resp.hovered() {
+                ui.painter().rect_filled(r, 11.0, RAISED());
+            }
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, name, mono(11.0), if on { on_accent() } else { TEXT2() });
+            let tip = if c { "A drag on an edge or a sharp corner chamfers it (Ctrl + B: chamfer what is picked)" } else { "A drag on an edge or a sharp corner rounds it" };
+            if resp.on_hover_text(tip).clicked() {
+                st.round_chamfer = c;
+            }
+        }
+    }
+}
+
+/// The Sculpt tab's part of the centre island: the brush's size (on
+/// screen) and strength, Mirror.
+fn sculpt_controls(ui: &mut Ui, st: &mut AppState) {
+    island_sep(ui);
+    let small = |ui: &mut Ui, t: &str| {
+        let g = ui.painter().layout_no_wrap(t.to_string(), mono(10.0), TEXT2());
+        let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 2.0, 28.0), Sense::hover());
+        ui.painter().galley(pos2(r.min.x, r.center().y - g.size().y * 0.5), g, TEXT2());
+    };
+    small(ui, "SIZE");
+    let mut r = st.sculpt.radius;
+    touch_slider(ui, Id::new("sculpt-size"), &mut r, 5.0, 300.0, false, 1.0, 72.0);
+    st.sculpt.radius = r.clamp(5.0, 300.0);
+    small(ui, &format!("{:.0}", st.sculpt.radius));
+    island_sep(ui);
+    small(ui, "STRENGTH");
+    let mut k = st.sculpt.strength;
+    touch_slider(ui, Id::new("sculpt-strength"), &mut k, 0.0, 1.0, false, 0.01, 72.0);
+    st.sculpt.strength = k.clamp(0.0, 1.0);
+    small(ui, &format!("{:.2}", st.sculpt.strength));
+    island_sep(ui);
+    if chip(ui, Some(Icon::Mirror), "MIRROR", st.sculpt.mirror, "Mirror (M): the brush works on both sides of the clay's own X").clicked() {
+        st.sculpt.mirror = !st.sculpt.mirror;
+    }
+}
+
+/// The Poly tab's part of the centre island: the smooth preview of the
+/// selected Poly meshes.
+fn poly_controls(ui: &mut Ui, st: &mut AppState) {
+    let ids = st.poly_ids();
+    let on = !ids.is_empty() && ids.iter().all(|id| st.doc.feature(*id).and_then(|f| f.mesh.as_ref()).map(|m| m.smooth).unwrap_or(false));
+    island_sep(ui);
+    if chip(ui, Some(Icon::SmoothMesh), "SMOOTH", on, "Smooth preview (Alt + S): the selected Poly mesh drawn subdivided, its cage kept").clicked() {
+        st.poly_toggle_smooth();
+    }
 }
 
 /// The component modes (like Plasticity): Vertex, Edge, Face, Object, the
@@ -390,8 +461,133 @@ fn card(ui: &mut Ui, icon: Option<Icon>, name: &str, sub: &str, on: bool, sub_co
     resp.on_hover_text(tip)
 }
 
+/// The tabs at the very top (Romain, 20 nov.: "tout en haut, créer des
+/// jolis tabs avec marqué Forme, Sculpt, Poly"): each one its icon, its
+/// name and a dot of its colour; the current one filled with it.
+fn tabs(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+    let cx = st.principal()[0];
+    egui::Area::new(Id::new("isl-tabs")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(pos2(cx, screen.min.y + 8.0)).show(ctx, |ui| {
+        island().inner_margin(Margin::same(3)).corner_radius(egui::CornerRadius::same(12)).show(ui, |ui| {
+            ui.set_height(TABS_H - 6.0);
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                for (i, w) in Workspace::ALL.into_iter().enumerate() {
+                    let on = st.workspace == w;
+                    let (r, resp) = ui.allocate_exact_size(vec2(116.0, TABS_H - 6.0), Sense::click());
+                    let p = ui.painter();
+                    let fg = if on { on_accent() } else if resp.hovered() { TEXT() } else { TEXT2() };
+                    if on {
+                        p.rect_filled(r, 9.0, accent());
+                    } else if resp.hovered() {
+                        p.rect_filled(r, 9.0, RAISED());
+                    }
+                    let ir = Rect::from_center_size(pos2(r.min.x + 22.0, r.center().y), vec2(15.0, 15.0));
+                    icons::paint(p, ir, w.icon(), fg);
+                    p.text(pos2(r.min.x + 36.0, r.center().y), Align2::LEFT_CENTER, w.label(), medium(13.0), fg);
+                    // its colour
+                    if !on {
+                        p.circle_filled(pos2(r.max.x - 14.0, r.center().y), 3.5, w.swatch());
+                    }
+                    if resp.on_hover_text(format!("{} (F{}) · Ctrl + Tab: the next tab", w.tip(), i + 1)).clicked() {
+                        st.set_workspace(w);
+                    }
+                }
+            });
+        });
+    });
+}
+
+/// The Sculpt tab's tools: new clay, the brushes, Convert a Poly mesh.
+fn sculpt_rail(ui: &mut Ui, st: &mut AppState) {
+    use crate::sculpt::Brush;
+    let tip = "Sphere (O): a clay sphere, 20 mm, on the view's centre (about 41 000 points)";
+    if card(ui, Some(Icon::Sphere), "CLAY SPHERE", "NEW · O", false, accent(), tip).clicked() {
+        st.add_sculpt(false);
+    }
+    let tip = "Block (B): a clay block with rounded edges, 20 mm";
+    if card(ui, Some(Icon::Box), "CLAY BLOCK", "NEW · B", false, accent(), tip).clicked() {
+        st.add_sculpt(true);
+    }
+    divider(ui);
+    let b = st.sculpt.brush;
+    let on = st.tool == Tool::Sculpt;
+    if card(ui, Some(b.icon()), "BRUSH", &format!("{} · {}", b.label().to_uppercase(), b.key_name()), on, accent(), b.tip()).clicked() {
+        st.abort_gestures();
+        st.tool = Tool::Sculpt;
+        st.sel_mode = SelMode::Object;
+    }
+    for row in [&Brush::ALL[..4], &Brush::ALL[4..]] {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let w = ((CARDS_W - 12.0 - 3.0 * 4.0) / 4.0).floor();
+            for k in row {
+                let r = icon_btn(ui, k.icon(), on && st.sculpt.brush == *k, k.tip(), w);
+                key_hint(ui, &r, k.key_name());
+                if r.clicked() {
+                    st.set_brush(*k);
+                }
+            }
+        });
+    }
+    if toggle_row(ui, "Mirror X", st.sculpt.mirror) {
+        st.sculpt.mirror = !st.sculpt.mirror;
+    }
+    // a Poly mesh selected: made clay in place
+    if st.selection.iter().any(|id| st.is_poly(*id)) {
+        divider(ui);
+        if card(ui, Some(Icon::ToSculpt), "TO CLAY", "FROM POLY", false, accent(), "The selected Poly mesh smoothed into clay, in place (the Poly mesh is kept, hidden)").clicked() {
+            st.poly_to_sculpt();
+        }
+    }
+}
+
+/// The Poly tab's tools: new meshes, the face and edge operations, the
+/// mesh's own (Subdivide, Smooth preview, Send to Sculpt).
+fn poly_rail(ui: &mut Ui, st: &mut AppState) {
+    use crate::poly::{PolyShape, PullKind};
+    section_small(ui, "CREATE");
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let w = ((CARDS_W - 12.0 - 3.0 * 4.0) / 4.0).floor();
+        for (k, icon, key) in [(PolyShape::Cube, Icon::Box, "B"), (PolyShape::Cylinder, Icon::Cylinder, "C"), (PolyShape::Sphere, Icon::Sphere, "O"), (PolyShape::Plane, Icon::PolyPlane, "P")] {
+            let r = icon_btn(ui, icon, false, &format!("Poly {} ({key}): 20 mm, on the view's centre", k.label().to_lowercase()), w);
+            key_hint(ui, &r, key);
+            if r.clicked() {
+                st.add_poly(k);
+            }
+        }
+    });
+    divider(ui);
+    let faces = st.sel_mode == SelMode::Face;
+    let at = st.principal();
+    if card(ui, Some(Icon::Extrude), "EXTRUDE", "FACES · CTRL+E", st.poly_pull.as_ref().map(|g| g.kind == PullKind::Extrude).unwrap_or(false), FACE_SEL, "Extrude (Ctrl + E): the picked faces pulled out along their normal; the pointer sets how far, a click keeps it").clicked() {
+        st.begin_poly_pull(PullKind::Extrude, at);
+    }
+    if card(ui, Some(Icon::Inset), "INSET", "FACES · I", st.poly_pull.as_ref().map(|g| g.kind == PullKind::Inset).unwrap_or(false), FACE_SEL, "Inset (I): a smaller face inside each picked face; the pointer sets how much, a click keeps it").clicked() {
+        st.begin_poly_pull(PullKind::Inset, at);
+    }
+    if card(ui, Some(Icon::EdgeLoop), "EDGE LOOP", "EDGES · CTRL+R", st.tool == Tool::PolyLoop, EDGE_SEL, "Insert Edge Loop (Ctrl + R): a click on an edge cuts a loop across its ring of quads").clicked() {
+        st.arm_poly_loop();
+    }
+    let _ = faces;
+    divider(ui);
+    if card(ui, Some(Icon::Subdivide), "SUBDIVIDE", "MESH · 4 × FACES", false, TEXT2(), "Subdivide: the selected Poly mesh's faces cut in four, smoothed (Catmull-Clark)").clicked() {
+        st.poly_subdivide();
+    }
+    if card(ui, Some(Icon::ToSculpt), "TO SCULPT", "MESH · CLAY", false, Workspace::Sculpt.swatch(), "Send to Sculpt: the selected Poly mesh smoothed into clay, in place (the Poly mesh is kept, hidden); then the Sculpt tab").clicked() {
+        st.poly_to_sculpt();
+        st.set_workspace(Workspace::Sculpt);
+    }
+}
+
+/// A small title in the rail.
+fn section_small(ui: &mut Ui, title: &str) {
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 14.0), Sense::hover());
+    ui.painter().text(pos2(r.min.x + 2.0, r.center().y), Align2::LEFT_CENTER, title, semibold(9.5), TEXT2());
+}
+
 fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
-    let top = EDGE + ISLAND_H + 10.0;
+    let top = TOP + ISLAND_H + 10.0;
     let off = panel_offset(ctx, "rail");
     egui::Area::new(Id::new("rail")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(screen.max.x - EDGE, top) + off).show(ctx, |ui| {
         island().inner_margin(Margin::same(6)).show(ui, |ui| {
@@ -428,75 +624,81 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 }
             });
             divider(ui);
-            let mode = st.mode;
-            let m = if mode == Op::Add { "ADD" } else { "CARVE" };
-            for k in PRIMS {
-                let key = prim_key(k);
-                let on = st.tool == Tool::Create(k);
-                let tip = format!("{} ({key}) · again, or Shift + {key}: a 20 mm {} at once, on top of the selection (Carve: through it)", k.label(), k.label().to_lowercase());
-                if card(ui, Some(prim_icon(k)), &k.label().to_uppercase(), &format!("{m} · {key}"), on, op_color(mode), &tip).clicked() {
-                    st.arm(k);
-                }
-            }
-            let sk = PrimKind::Profile;
-            let tip = "Sketch (L): on a face or the ground, click the corners, click the first point (or Enter) to close, then pull it up or down";
-            if card(ui, Some(Icon::Sketch), "SKETCH", &format!("{m} · L"), st.tool == Tool::Create(sk), op_color(mode), tip).clicked() {
-                st.arm(sk);
-            }
-            let pk = PrimKind::Path;
-            let tip = "Curves (P: a line): curves with no thickness, on a face or the ground. The line: click the corners; Enter ends it open, a click on the first point closes it; its corners take a fillet or a bevel in Vertex mode (1). Below, 3ds Max's shapes, dragged out, their settings in their window";
-            let on = st.tool == Tool::Create(pk) || matches!(st.tool, Tool::Curve(_));
-            let sub = match st.tool {
-                Tool::Curve(k) => k.label().to_uppercase(),
-                _ => "PATH · P".to_string(),
-            };
-            if card(ui, Some(Icon::Path), "CURVES", &sub, on, PATH, tip).clicked() {
-                st.arm(pk);
-            }
-            // 3ds Max's Shapes: the Curves set
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let w = ((CARDS_W - 12.0 - 4.0 * 4.0) / 5.0).floor();
-                for (k, icon, tip) in [
-                    (CurveKind::Rectangle, Icon::CurveRect, "Rectangle: drag corner to corner (Shift: a square); its width, length and corner radius in its window"),
-                    (CurveKind::Circle, Icon::CurveCircle, "Circle: drag from its centre out; its radius in its window"),
-                    (CurveKind::Ellipse, Icon::CurveEllipse, "Ellipse: drag corner to corner (Shift: a circle); its width and length in its window"),
-                    (CurveKind::Polygon, Icon::CurvePolygon, "Polygon: drag from its centre out; its radius, sides and corner radius in its window"),
-                    (CurveKind::Star, Icon::CurveStar, "Star: drag from its centre out; its points, inner radius and fillets in its window"),
-                ] {
-                    if icon_btn(ui, icon, st.tool == Tool::Curve(k), tip, w).clicked() {
-                        st.arm_curve(k);
+            match st.workspace {
+                Workspace::Sculpt => sculpt_rail(ui, st),
+                Workspace::Poly => poly_rail(ui, st),
+                Workspace::Forme => {
+                    let mode = st.mode;
+                    let m = if mode == Op::Add { "ADD" } else { "CARVE" };
+                    for k in PRIMS {
+                        let key = prim_key(k);
+                        let on = st.tool == Tool::Create(k);
+                        let tip = format!("{} ({key}) · again, or Shift + {key}: a 20 mm {} at once, on top of the selection (Carve: through it)", k.label(), k.label().to_lowercase());
+                        if card(ui, Some(prim_icon(k)), &k.label().to_uppercase(), &format!("{m} · {key}"), on, op_color(mode), &tip).clicked() {
+                            st.arm(k);
+                        }
                     }
-                }
-            });
-            let uk = PrimKind::Surface;
-            let tip = "Surface (U): a surface with no thickness. Click the outline's points (on a plane, or on the scan with ON SCAN in the top bar); a click on the first point (or Enter) fills it";
-            if card(ui, Some(Icon::Path), "SURFACE", "SHEET · U", st.tool == Tool::Create(uk), PATH, tip).clicked() {
-                st.arm(uk);
-            }
-            {
-                let tip = "Slot (Shift + S): drag from one end to the other on a face or the ground, move to set its width, click, then its height. ON SCAN (its options): read a slot of the scan instead";
-                if card(ui, Some(Icon::Scan), "SLOT", "SHAPE · Shift+S", st.tool == Tool::Slot, accent(), tip).clicked() {
-                    st.arm_slot();
-                }
-            }
-            divider(ui);
-            for (k, icon, tip) in [
-                (PushKind::Inset, Icon::Inset, "Inset (I): a flat face's outline moved in (2 mm), sized with its dot; its arrow raises or sinks it. Click a face, or pick a face (3) and press I"),
-                (PushKind::Extrude, Icon::Extrude, "Extrude (Ctrl + E): a face pulled out (adds) or pushed in (carves), a curved one along its normals; a closed curve pulled into a solid. Press on a face or a curve and drag, or pick it and press Ctrl + E"),
-            ] {
-                let on = st.tool == Tool::Push(k);
-                if card(ui, Some(icon), &k.label().to_uppercase(), &format!("FACE · {}", k.key()), on, FACE_SEL, tip).clicked() {
-                    st.arm_push(k, None);
-                }
-            }
-            divider(ui);
-            for (t, icon, name, key, tip) in [
-                (Tool::Knife, Icon::Knife, "KNIFE", "S", "Knife (S), like Maya's Multi-Cut: click points on the part's edges; each one after the first is joined to the one before across their face (flat or curved). Ctrl + click: a cut across the face; Ctrl + Shift + click: a loop round the part. Enter, Esc or a right click ends the cut"),
-                (Tool::Point, Icon::EdgePoint, "POINT", "J", "Point on edge (J): click on an edge to cut a point into it (the middle catches the pointer)"),
-            ] {
-                if card(ui, Some(icon), name, &format!("EDGE · {key}"), st.tool == t, EDGE_SEL, tip).clicked() {
-                    st.arm_knife(t);
+                    let sk = PrimKind::Profile;
+                    let tip = "Sketch (L): on a face or the ground, click the corners, click the first point (or Enter) to close, then pull it up or down";
+                    if card(ui, Some(Icon::Sketch), "SKETCH", &format!("{m} · L"), st.tool == Tool::Create(sk), op_color(mode), tip).clicked() {
+                        st.arm(sk);
+                    }
+                    let pk = PrimKind::Path;
+                    let tip = "Curves (P: a line): curves with no thickness, on a face or the ground. The line: click the corners; Enter ends it open, a click on the first point closes it; its corners take a fillet or a bevel in Vertex mode (1). Below, 3ds Max's shapes, dragged out, their settings in their window";
+                    let on = st.tool == Tool::Create(pk) || matches!(st.tool, Tool::Curve(_));
+                    let sub = match st.tool {
+                        Tool::Curve(k) => k.label().to_uppercase(),
+                        _ => "PATH · P".to_string(),
+                    };
+                    if card(ui, Some(Icon::Path), "CURVES", &sub, on, PATH, tip).clicked() {
+                        st.arm(pk);
+                    }
+                    // 3ds Max's Shapes: the Curves set
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let w = ((CARDS_W - 12.0 - 4.0 * 4.0) / 5.0).floor();
+                        for (k, icon, tip) in [
+                            (CurveKind::Rectangle, Icon::CurveRect, "Rectangle: drag corner to corner (Shift: a square); its width, length and corner radius in its window"),
+                            (CurveKind::Circle, Icon::CurveCircle, "Circle: drag from its centre out; its radius in its window"),
+                            (CurveKind::Ellipse, Icon::CurveEllipse, "Ellipse: drag corner to corner (Shift: a circle); its width and length in its window"),
+                            (CurveKind::Polygon, Icon::CurvePolygon, "Polygon: drag from its centre out; its radius, sides and corner radius in its window"),
+                            (CurveKind::Star, Icon::CurveStar, "Star: drag from its centre out; its points, inner radius and fillets in its window"),
+                        ] {
+                            if icon_btn(ui, icon, st.tool == Tool::Curve(k), tip, w).clicked() {
+                                st.arm_curve(k);
+                            }
+                        }
+                    });
+                    let uk = PrimKind::Surface;
+                    let tip = "Surface (U): a surface with no thickness. Click the outline's points (on a plane, or on the scan with ON SCAN in the top bar); a click on the first point (or Enter) fills it";
+                    if card(ui, Some(Icon::Path), "SURFACE", "SHEET · U", st.tool == Tool::Create(uk), PATH, tip).clicked() {
+                        st.arm(uk);
+                    }
+                    {
+                        let tip = "Slot (Shift + S): drag from one end to the other on a face or the ground, move to set its width, click, then its height. ON SCAN (its options): read a slot of the scan instead";
+                        if card(ui, Some(Icon::Scan), "SLOT", "SHAPE · Shift+S", st.tool == Tool::Slot, accent(), tip).clicked() {
+                            st.arm_slot();
+                        }
+                    }
+                    divider(ui);
+                    for (k, icon, tip) in [
+                        (PushKind::Inset, Icon::Inset, "Inset (I): a flat face's outline moved in (2 mm), sized with its dot; its arrow raises or sinks it. Click a face, or pick a face (3) and press I"),
+                        (PushKind::Extrude, Icon::Extrude, "Extrude (Ctrl + E): a face pulled out (adds) or pushed in (carves), a curved one along its normals; a closed curve pulled into a solid. Press on a face or a curve and drag, or pick it and press Ctrl + E"),
+                    ] {
+                        let on = st.tool == Tool::Push(k);
+                        if card(ui, Some(icon), &k.label().to_uppercase(), &format!("FACE · {}", k.key()), on, FACE_SEL, tip).clicked() {
+                            st.arm_push(k, None);
+                        }
+                    }
+                    divider(ui);
+                    for (t, icon, name, key, tip) in [
+                        (Tool::Knife, Icon::Knife, "KNIFE", "S", "Knife (S), like Maya's Multi-Cut: click points on the part's edges; each one after the first is joined to the one before across their face (flat or curved). Ctrl + click: a cut across the face; Ctrl + Shift + click: a loop round the part. Enter, Esc or a right click ends the cut"),
+                        (Tool::Point, Icon::EdgePoint, "POINT", "J", "Point on edge (J): click on an edge to cut a point into it (the middle catches the pointer)"),
+                    ] {
+                        if card(ui, Some(icon), name, &format!("EDGE · {key}"), st.tool == t, EDGE_SEL, tip).clicked() {
+                            st.arm_knife(t);
+                        }
+                    }
                 }
             }
             divider(ui);
@@ -917,6 +1119,8 @@ fn help_title(st: &AppState) -> String {
         Tool::Slot if st.slot_on_scan => "Slot · on the scan".into(),
         Tool::Slot => format!("Slot · {}", st.mode.label()),
         Tool::Select => format!("{} · {}", st.gizmo.label(), st.sel_mode.label()),
+        Tool::Sculpt => format!("Sculpt · {}", st.sculpt.brush.label()),
+        Tool::PolyLoop => "Insert edge loop".into(),
     }
 }
 
@@ -1014,6 +1218,7 @@ fn help_box(ctx: &egui::Context, st: &mut AppState) {
         Tool::Select if st.sel_mode == SelMode::Edge => EDGE_SEL,
         Tool::Select if st.sel_mode == SelMode::Face => FACE_SEL,
         Tool::Select => st.single().map(feature_color).unwrap_or(TEXT2()),
+        Tool::Sculpt | Tool::PolyLoop => accent(),
     };
     let vr = st.view_rect;
     let at = pos2(vr[2] - 12.0, vr[3] - 4.0);
@@ -1100,6 +1305,10 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
     if st.tool != Tool::Select || st.creation.is_some() || st.drag.is_some() || st.selection.is_empty() {
         return;
     }
+    // a Poly mesh's components picked or pulled: it would sit on them
+    if st.poly_comp() || st.poly_pull.is_some() || st.poly_drag.is_some() || st.stroke.is_some() {
+        return;
+    }
     // an inset or extrusion: its handles are there instead (Del deletes it)
     if st.selected_push().is_some() {
         return;
@@ -1177,7 +1386,7 @@ fn op_pop(st: &AppState) -> Option<OpPop> {
     if (st.tool == Tool::Create(PrimKind::Surface) || (st.tool == Tool::Slot && st.slot_draw.is_none())) && st.creation.is_none() {
         return Some(OpPop::Tool);
     }
-    if st.creation.is_some() || st.sketch.is_some() || st.push.is_some() || st.curve_pull.is_some() || st.tool != Tool::Select {
+    if st.creation.is_some() || st.sketch.is_some() || st.push.is_some() || st.curve_pull.is_some() || st.tool != Tool::Select || st.poly_comp() || st.poly_pull.is_some() {
         return None;
     }
     if st.selection.is_empty() {
@@ -1267,6 +1476,14 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
         for i in 0..8 {
             let c = glam::Vec3::new(if i & 1 == 0 { lo[0] } else { hi[0] }, if i & 2 == 0 { lo[1] } else { hi[1] }, if i & 4 == 0 { lo[2] } else { hi[2] });
             if let Some(p) = view.project(c) {
+                part = part.union(Rect::from_min_max(pos2(p[0], p[1]), pos2(p[0], p[1])));
+            }
+        }
+    }
+    // the Sculpt and Poly meshes: the kernel never sees them
+    for f in st.doc.features.iter().filter(|f| f.visible && f.is_mesh()) {
+        for q in f.corners() {
+            if let Some(p) = view.project(q.as_vec3()) {
                 part = part.union(Rect::from_min_max(pos2(p[0], p[1]), pos2(p[0], p[1])));
             }
         }
@@ -1463,20 +1680,24 @@ fn pop_note(ui: &mut Ui) {
 // ------------------------------------------------------------ inspector
 
 fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
-    let top = EDGE + ISLAND_H + 10.0;
+    let top = TOP + ISLAND_H + 10.0;
     let inner_w = LEFT_W - 24.0;
     let total = screen.max.y - EDGE - top;
     let rows = st.doc.features.len().max(1) as f32;
     // the groups' headers, and the reference's group (header and row)
     let fs = &st.doc.features;
+    let mesh_of = |f: &Feature, k: nurbs_kernel::mesh::MeshKind| f.mesh.as_ref().map(|m| m.kind == k).unwrap_or(false);
     let groups = [
-        fs.iter().any(|f| f.is_solid() && !f.is_path() && !matches!(f.prim, Prim::Profile { .. })),
+        fs.iter().any(|f| f.is_solid() && !f.is_path() && !f.is_mesh() && !matches!(f.prim, Prim::Profile { .. })),
         fs.iter().any(|f| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Profile { .. })),
         fs.iter().any(|f| f.is_path()),
         fs.iter().any(|f| !f.is_solid() && !f.is_path()),
+        fs.iter().any(|f| mesh_of(f, nurbs_kernel::mesh::MeshKind::Sculpt)),
+        fs.iter().any(|f| mesh_of(f, nurbs_kernel::mesh::MeshKind::Poly)),
     ];
-    let extra = groups.iter().filter(|g| **g).count() as f32 * 25.0 + if st.doc.reference.is_some() { 53.0 } else { 0.0 };
-    let tree_h = if st.settings.show_tree { (rows * 28.0 + 34.0 + extra).clamp(96.0, (total * 0.36).max(120.0)) } else { 0.0 };
+    // a header is 22 points, a row 28, each with 1 between, a group 3 after
+    let extra = groups.iter().filter(|g| **g).count() as f32 * 27.0 + if st.doc.reference.is_some() { 53.0 } else { 0.0 };
+    let tree_h = if st.settings.show_tree { (rows * 29.0 + 36.0 + extra).clamp(96.0, (total * 0.36).max(120.0)) } else { 0.0 };
     let off = panel_offset(ctx, "props");
     egui::Area::new(Id::new("props")).order(Order::Middle).fixed_pos(pos2(screen.min.x + EDGE, top) + off).show(ctx, |ui| {
         island().inner_margin(Margin::same(12)).show(ui, |ui| {
@@ -1558,12 +1779,14 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     // the second column, beside the panel
     let feats = st.doc.features.clone();
     let ops_of = |st: &AppState, id: FeatureId| feats.iter().filter(|g| !g.is_solid() && !g.is_path() && st.owner_of(g.id) == Some(id)).count();
-    let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 5] = [
-        ("PRIMITIVES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }))),
+    let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 7] = [
+        ("PRIMITIVES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && !f.is_mesh() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }))),
         ("SHAPES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Profile { .. }))),
         ("CURVES", Box::new(|f: &Feature| f.is_path())),
         ("SURFACES", Box::new(|f: &Feature| f.is_sheet())),
         ("OPERATIONS", Box::new(|_: &Feature| false)),
+        ("SCULPT", Box::new(|f: &Feature| f.mesh.as_ref().map(|m| m.kind == nurbs_kernel::mesh::MeshKind::Sculpt).unwrap_or(false))),
+        ("POLY", Box::new(|f: &Feature| f.mesh.as_ref().map(|m| m.kind == nurbs_kernel::mesh::MeshKind::Poly).unwrap_or(false))),
     ];
     let focus = st.outline_element();
     egui::ScrollArea::vertical().id_salt("tree-scroll").max_height(height - 32.0).min_scrolled_height(height - 32.0).auto_shrink([false, true]).show(ui, |ui| {
@@ -2071,7 +2294,32 @@ fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     let id = f.id;
     // a slider drag is one undo step: it ends when no pointer button is down
     let any_down = ui.input(|i| i.pointer.any_down());
-    section(ui, "Shape");
+    if let Some(m) = f.mesh.clone() {
+        let sculpt = m.kind == nurbs_kernel::mesh::MeshKind::Sculpt;
+        section(ui, if sculpt { "Clay" } else { "Poly mesh" });
+        let g = ui.painter().layout_no_wrap(format!("{} points · {} {}", m.verts.len(), m.faces.len(), if sculpt { "triangles" } else { "faces" }), regular(12.0), TEXT2());
+        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+        ui.painter().galley(pos2(r.min.x, r.center().y - g.size().y * 0.5), g, TEXT2());
+        if !sculpt {
+            if toggle_row(ui, "Smooth preview", m.smooth) {
+                st.selection = vec![id];
+                st.poly_toggle_smooth();
+            }
+            ui.horizontal(|ui| {
+                if secondary_btn(ui, "Subdivide", 110.0).clicked() {
+                    st.selection = vec![id];
+                    st.poly_subdivide();
+                }
+                if secondary_btn(ui, "Send to Sculpt", 120.0).clicked() {
+                    st.selection = vec![id];
+                    st.poly_to_sculpt();
+                }
+            });
+        }
+        section(ui, "Size");
+    } else {
+        section(ui, "Shape");
+    }
     match f.prim {
         Prim::Box { x, y, z } | Prim::Profile { x, y, z } => {
             for (k, label, v) in [(0, "Width", x), (1, "Height", y), (2, "Depth", z)] {
@@ -2754,6 +3002,35 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     use egui::Key;
     let (ctrl, shift) = ctx.input(|i| (i.modifiers.ctrl || i.modifiers.mac_cmd, i.modifiers.shift));
     let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
+    let space = st.workspace;
+    // the tabs: F1 Forme, F2 Sculpt, F3 Poly; Ctrl + Tab the next one
+    for (k, w) in [(Key::F1, Workspace::Forme), (Key::F2, Workspace::Sculpt), (Key::F3, Workspace::Poly)] {
+        if pressed(k) {
+            st.set_workspace(w);
+            return;
+        }
+    }
+    if ctrl && pressed(Key::Tab) {
+        let i = (space.index() + if shift { 2 } else { 1 }) % 3;
+        st.set_workspace(Workspace::from_index(i));
+        return;
+    }
+    let pointer = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]).unwrap_or(st.principal());
+    // the Poly tab: Ctrl + E extrudes the picked faces, Ctrl + R inserts an
+    // edge loop
+    if ctrl && space == Workspace::Poly {
+        if pressed(Key::E) {
+            // one under way is kept first
+            st.finish_poly_pull();
+            st.begin_poly_pull(crate::poly::PullKind::Extrude, pointer);
+            return;
+        }
+        if pressed(Key::R) {
+            st.finish_poly_pull();
+            st.arm_poly_loop();
+            return;
+        }
+    }
     // Ctrl + I: Isolate (Romain 20 nov., 10 h 57; Ctrl + 1, Maya's, too)
     if ctrl && (pressed(Key::I) || pressed(Key::Num1)) {
         st.toggle_isolate();
@@ -2779,11 +3056,12 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         if pressed(Key::S) {
             st.files_open = true;
         }
-        if pressed(Key::B) {
+        // Ctrl + B and Ctrl + E work on the NURBS part: the Forme tab's
+        if pressed(Key::B) && space == Workspace::Forme {
             st.make_bevel();
         }
         // Maya: Ctrl + E extrudes (E is the rotate gizmo)
-        if pressed(Key::E) && st.push.is_none() {
+        if pressed(Key::E) && st.push.is_none() && space == Workspace::Forme {
             let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]);
             // a closed curve selected: pulled into a solid (Curves, step 3)
             if let (Some(id), Some(p)) = (st.pullable(), at) {
@@ -2810,6 +3088,18 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             return;
         }
     }
+    if pressed(Key::Escape) && st.poly_pull.is_some() {
+        st.cancel_poly_pull();
+        return;
+    }
+    if pressed(Key::Escape) && st.poly_comp() && st.tool == Tool::Select && st.poly_sel.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+        if let Some(s) = st.poly_sel.as_mut() {
+            s.verts.clear();
+            s.edges.clear();
+            s.faces.clear();
+        }
+        return;
+    }
     if pressed(Key::Escape) {
         if st.knife.is_some() {
             st.knife_end();
@@ -2832,6 +3122,10 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     // the number row's & é " ' without Shift: & Object, é Edge, " Face,
     // ' Vertex (its 1 key would give Vertex through the key's place)
     let typed = |t: &str| ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(x) if x == t)));
+    if space != Workspace::Forme {
+        tab_keys(ctx, st, space, shift, pointer);
+        return;
+    }
     let azerty = !ctrl && typed("&");
     if azerty {
         st.set_sel_mode(SelMode::Object);
@@ -2908,4 +3202,82 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.delete_selected();
     }
     let _ = DVec3::ZERO;
+}
+
+/// The Sculpt and Poly tabs' keys (Ctrl's are above): what they share
+/// with Forme (Q W E R, F, Del, Enter, Alt + X), the modes in Poly, their
+/// own tools.
+fn tab_keys(ctx: &egui::Context, st: &mut AppState, space: Workspace, shift: bool, pointer: [f32; 2]) {
+    use crate::poly::{PolyShape, PullKind};
+    use crate::sculpt::Brush;
+    use egui::Key;
+    let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
+    let alt = ctx.input(|i| i.modifiers.alt);
+    for (k, g) in [(Key::Q, GizmoMode::Select), (Key::W, GizmoMode::Move), (Key::E, GizmoMode::Rotate), (Key::R, GizmoMode::Scale)] {
+        if pressed(k) {
+            st.set_gizmo(g);
+        }
+    }
+    if alt && pressed(Key::X) {
+        st.xray = !st.xray;
+        st.toast(if st.xray { "X-ray on" } else { "X-ray off" }, false);
+        return;
+    }
+    if pressed(Key::F) {
+        st.frame_current();
+    }
+    if pressed(Key::Enter) && (st.poly_pull.is_some() || st.tool == Tool::PolyLoop) {
+        st.commit_gestures(pointer);
+    }
+    if pressed(Key::Delete) || pressed(Key::Backspace) {
+        st.delete_selected();
+    }
+    match space {
+        Workspace::Sculpt => {
+            for b in Brush::ALL {
+                if pressed(b.key()) && !alt {
+                    st.set_brush(b);
+                }
+            }
+            if pressed(Key::O) {
+                st.add_sculpt(false);
+            }
+            if pressed(Key::B) {
+                st.add_sculpt(true);
+            }
+            if pressed(Key::M) {
+                st.sculpt.mirror = !st.sculpt.mirror;
+                st.toast(if st.sculpt.mirror { "Mirror on" } else { "Mirror off" }, false);
+            }
+            // [ ] the brush's size, Shift: its strength
+            let grow = pressed(Key::CloseBracket);
+            let shrink = pressed(Key::OpenBracket);
+            if grow || shrink {
+                if shift {
+                    st.sculpt.strength = (st.sculpt.strength + if grow { 0.1 } else { -0.1 }).clamp(0.0, 1.0);
+                } else {
+                    st.sculpt.radius = (st.sculpt.radius * if grow { 1.2 } else { 1.0 / 1.2 }).clamp(5.0, 300.0);
+                }
+            }
+        }
+        Workspace::Poly => {
+            for (k, m) in [(Key::Num1, SelMode::Vertex), (Key::Num2, SelMode::Edge), (Key::Num3, SelMode::Face), (Key::Num4, SelMode::Object), (Key::F8, SelMode::Object), (Key::F9, SelMode::Vertex), (Key::F10, SelMode::Edge), (Key::F11, SelMode::Face)] {
+                if pressed(k) {
+                    st.set_sel_mode(m);
+                }
+            }
+            for (k, shape) in [(Key::B, PolyShape::Cube), (Key::C, PolyShape::Cylinder), (Key::O, PolyShape::Sphere), (Key::P, PolyShape::Plane)] {
+                if pressed(k) {
+                    st.add_poly(shape);
+                }
+            }
+            if pressed(Key::I) && st.poly_pull.is_none() {
+                st.begin_poly_pull(PullKind::Inset, pointer);
+            }
+            if alt && pressed(Key::S) {
+                st.poly_toggle_smooth();
+            }
+        }
+        Workspace::Forme => {}
+    }
 }

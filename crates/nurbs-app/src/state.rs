@@ -29,6 +29,11 @@ pub enum Tool {
     /// A curve of the Curves set (3ds Max's Shapes): Rectangle and Ellipse
     /// drawn corner to corner, Circle, Polygon and Star from their centre.
     Curve(CurveKind),
+    /// The Sculpt tab's brush (`sculpt.rs`): a press on the clay sculpts it.
+    Sculpt,
+    /// The Poly tab's Insert Edge Loop (Ctrl + R): a click on an edge cuts
+    /// a loop across its ring.
+    PolyLoop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -801,6 +806,25 @@ pub struct AppState {
     pub dev_job: Option<std::sync::mpsc::Receiver<crate::scan::Deviation>>,
     /// The link with Claude (`remote.rs`, the MCP server's requests).
     pub link: crate::remote::Link,
+    /// The tab at the top (Romain, 20 nov. 2026): Forme (the NURBS part),
+    /// Sculpt or Poly; one scene for the three.
+    pub workspace: crate::workspace::Workspace,
+    /// The Sculpt tab's brush, the stroke under way, the clay's neighbours
+    /// (kept while its faces do not change).
+    pub sculpt: crate::sculpt::SculptSettings,
+    pub stroke: Option<crate::sculpt::Stroke>,
+    pub sculpt_nb: Option<(usize, Arc<Vec<Vec<u32>>>, usize)>,
+    /// The Poly tab: the components picked on a Poly mesh, the one under
+    /// the pointer, a gizmo drag on them, an Extrude / Inset following the
+    /// pointer, the loop Insert Edge Loop would cut.
+    pub poly_sel: Option<crate::poly::PolySel>,
+    pub poly_hover: Option<crate::poly::PolyHover>,
+    pub poly_drag: Option<crate::poly::PolyDrag>,
+    pub poly_pull: Option<crate::poly::PolyPull>,
+    pub poly_loop: Vec<(Vec3, Vec3)>,
+    /// Bumped when a mesh changes without a new document version (a
+    /// sculpt stroke): the renderer uploads the meshes again.
+    pub mesh_gen: u64,
 }
 
 impl AppState {
@@ -911,6 +935,16 @@ impl AppState {
             deviation: None,
             dev_job: None,
             link: Default::default(),
+            workspace: Default::default(),
+            sculpt: Default::default(),
+            stroke: None,
+            sculpt_nb: None,
+            poly_sel: None,
+            poly_hover: None,
+            poly_drag: None,
+            poly_pull: None,
+            poly_loop: vec![],
+            mesh_gen: 0,
         }
     }
 
@@ -936,6 +970,12 @@ impl AppState {
         if let Some(r) = self.reference.as_ref().filter(|_| self.ref_shown) {
             let (lo, hi) = (r.lo.as_vec3(), r.hi.as_vec3());
             b = Some(b.map(|(a, c)| (a.min(lo), c.max(hi))).unwrap_or((lo, hi)));
+        }
+        // the meshes (Sculpt, Poly) by their points
+        for f in self.shown_meshes() {
+            if let Some((lo, hi)) = crate::meshes::world_bounds(f) {
+                b = Some(b.map(|(a, c)| (a.min(lo), c.max(hi))).unwrap_or((lo, hi)));
+            }
         }
         match b {
             Some((lo, hi)) => self.fly_frame(lo, hi),
@@ -1115,7 +1155,10 @@ impl AppState {
         for f in self.doc.features.iter().filter(|f| ids.contains(&f.id)) {
             // a shape with no faces of its own on screen (a Carve, a curve)
             let shown = m.map(|m| m.faces.iter().any(|g| g.tag.map(|t| t.feature == f.id).unwrap_or(false))).unwrap_or(false);
-            if f.is_solid() && (!shown || f.op == Op::Carve) {
+            if let Some((lo, hi)) = f.mesh.as_ref().and_then(|_| crate::meshes::world_bounds(f)) {
+                pts.push(lo);
+                pts.push(hi);
+            } else if f.is_solid() && (!shown || f.op == Op::Carve) {
                 let (lo, hi) = f.bounds();
                 pts.push(lo.as_vec3());
                 pts.push(hi.as_vec3());
@@ -1128,6 +1171,9 @@ impl AppState {
     /// screen has them: the faces' triangles, the edges' polylines, the
     /// vertices.
     pub fn picked_points(&self) -> Vec<Vec3> {
+        if self.poly_comp() {
+            return self.poly_points();
+        }
         let mut pts: Vec<Vec3> = vec![];
         if let Some(m) = self.model.as_ref() {
             let mut faces = vec![false; m.faces.len()];
@@ -1171,13 +1217,13 @@ impl AppState {
             keep.extend(self.element_ops(*el));
         }
         // the Carve shapes that cut them, with their operations
-        let solid = |f: &&Feature| keep.contains(&f.id) && f.is_solid() && !f.is_path() && f.op == Op::Add;
+        let solid = |f: &&Feature| keep.contains(&f.id) && f.is_solid() && !f.is_path() && !f.is_mesh() && f.op == Op::Add;
         if let Some((lo, hi)) = self.doc.features.iter().filter(solid).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1))) {
             let cuts: Vec<FeatureId> = self
                 .doc
                 .features
                 .iter()
-                .filter(|f| f.op == Op::Carve && f.is_solid() && !f.is_path() && !keep.contains(&f.id))
+                .filter(|f| f.op == Op::Carve && f.is_solid() && !f.is_path() && !f.is_mesh() && !keep.contains(&f.id))
                 .filter(|f| {
                     let (a, b) = f.bounds();
                     a.cmple(hi).all() && b.cmpge(lo).all()
@@ -1198,7 +1244,7 @@ impl AppState {
     fn build_doc(&self) -> Option<Doc> {
         self.isolate.as_ref()?;
         let keep = self.isolated_ids();
-        let mut d = self.doc.clone();
+        let mut d = self.doc.for_kernel();
         d.features.retain(|f| keep.contains(&f.id));
         Some(d)
     }
@@ -1441,6 +1487,10 @@ impl AppState {
 
     pub fn undo(&mut self) {
         self.abort_gestures();
+        // a Poly mesh's picked components name its points and faces as
+        // they were: dropped
+        self.poly_sel = None;
+        self.mesh_gen += 1;
         if let Some(u) = self.undo.pop() {
             let back = self.step_back(u);
             let label = if back.doc.is_some() { back.label.clone() } else { "selection".into() };
@@ -1451,6 +1501,10 @@ impl AppState {
 
     pub fn redo(&mut self) {
         self.abort_gestures();
+        // a Poly mesh's picked components name its points and faces as
+        // they were: dropped
+        self.poly_sel = None;
+        self.mesh_gen += 1;
         if let Some(u) = self.redo.pop() {
             let back = self.step_back(u);
             let label = if back.doc.is_some() { back.label.clone() } else { "selection".into() };
@@ -1527,6 +1581,10 @@ impl AppState {
     }
 
     pub fn delete_selected(&mut self) {
+        // the Poly tab's components: the faces they hold taken out
+        if self.poly_comp() && self.poly_delete() {
+            return;
+        }
         // picked faces or edges: a Delete step (faces: a hole is left;
         // edges: their two faces made one)
         if self.sel_mode == SelMode::Face && !self.face_sel.is_empty() {
@@ -1704,7 +1762,7 @@ impl AppState {
         let (lo, hi) = self.doc.features[i].bounds();
         self.doc.features[i + 1..]
             .iter()
-            .filter(|g| g.is_solid() && !g.is_path() && !g.is_sheet() && g.op == Op::Add && g.visible && !g.suspended)
+            .filter(|g| g.is_solid() && !g.is_path() && !g.is_sheet() && !g.is_mesh() && g.op == Op::Add && g.visible && !g.suspended)
             .filter(|g| {
                 let (a, b) = g.bounds();
                 (lo - b).max_element() < -1e-3 && (a - hi).max_element() < -1e-3
@@ -1967,17 +2025,62 @@ impl AppState {
         self.tool = Tool::Select;
     }
 
+    /// The component modes of the Poly tab: they pick a Poly mesh's
+    /// points, edges and faces (the part's in the Forme tab).
+    pub fn poly_comp(&self) -> bool {
+        self.workspace == crate::workspace::Workspace::Poly && self.sel_mode != SelMode::Object
+    }
+
+    /// The tab at the top (Forme, Sculpt, Poly): its theme, its tools; the
+    /// scene, the selection, the view and the gizmo stay.
+    pub fn set_workspace(&mut self, w: crate::workspace::Workspace) {
+        use crate::workspace::Workspace;
+        if w == self.workspace {
+            return;
+        }
+        self.commit_gestures(self.principal());
+        let from = self.workspace;
+        self.workspace = w;
+        self.poly_sel = None;
+        self.poly_hover = None;
+        // the components picked in the Forme tab are the part's
+        if from == Workspace::Forme || w != Workspace::Forme {
+            self.edge_sel.clear();
+            self.face_sel.clear();
+            self.vert_sel.clear();
+        }
+        match w {
+            Workspace::Sculpt => {
+                // Sculpt works on whole clay meshes: the brush armed
+                self.sel_mode = SelMode::Object;
+                self.tool = Tool::Sculpt;
+            }
+            Workspace::Poly | Workspace::Forme => {
+                self.tool = Tool::Select;
+                if w == Workspace::Forme && self.sel_mode != SelMode::Object {
+                    // a Poly mesh's components are not the part's
+                    self.selection.retain(|id| !self.doc.feature(*id).map(|f| f.is_mesh()).unwrap_or(false));
+                }
+            }
+        }
+        self.record("workspace", w.label());
+    }
+
     /// Maya's Q W E R: back to Select with that gizmo. Rotate and Scale
     /// work on whole shapes, so they go back to Object mode.
     pub fn set_gizmo(&mut self, g: GizmoMode) {
         // what is under way is kept (Romain 20 nov., 11 h 54: "appuyer sur
         // Q, W ou Entrée valide l'opération et sort du tool")
-        if self.tool != Tool::Select || self.sketch.is_some() || self.creation.is_some() || self.drag.is_some() || self.push.is_some() || self.curve_pull.is_some() {
+        if (self.tool != Tool::Select && self.tool != Tool::Sculpt && self.tool != Tool::PolyLoop) || self.sketch.is_some() || self.creation.is_some() || self.drag.is_some() || self.push.is_some() || self.curve_pull.is_some() || self.poly_pull.is_some() || self.poly_drag.is_some() {
             self.commit_gestures(self.principal());
         }
         // rotate works on whole shapes; scale on components too
-        if g == GizmoMode::Rotate && self.sel_mode != SelMode::Object {
+        if g == GizmoMode::Rotate && self.sel_mode != SelMode::Object && !self.poly_comp() {
             self.set_sel_mode(SelMode::Object);
+        }
+        // the brush is put down: the gizmo works on what is selected
+        if self.tool == Tool::Sculpt || self.tool == Tool::PolyLoop {
+            self.tool = Tool::Select;
         }
         self.gizmo = g;
     }
@@ -1986,6 +2089,14 @@ impl AppState {
     pub fn set_sel_mode(&mut self, m: SelMode) {
         self.abort_gestures();
         self.tool = Tool::Select;
+        if let Some(s) = self.poly_sel.as_mut() {
+            if m != self.sel_mode {
+                s.verts.clear();
+                s.edges.clear();
+                s.faces.clear();
+            }
+        }
+        self.poly_hover = None;
         if m != self.sel_mode {
             self.sel_mode = m;
             self.edge_sel.clear();
@@ -2208,6 +2319,15 @@ impl AppState {
 
     /// Cancels what is under way (creation, sketch, drag, inset).
     pub fn abort_gestures(&mut self) {
+        // a stroke made is kept (its dabs are already on the clay)
+        if self.stroke.is_some() {
+            self.end_stroke();
+        }
+        if self.poly_drag.take().is_some() || self.poly_pull.take().is_some() {
+            self.cancel_live();
+            self.mesh_gen += 1;
+        }
+        self.poly_loop.clear();
         if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() || self.round_drag.take().is_some() || self.face_drag.take().is_some() || self.curve_pull.take().is_some() {
             self.cancel_live();
             self.clean_selection_ids();
@@ -2235,6 +2355,15 @@ impl AppState {
     pub fn commit_gestures(&mut self, at: [f32; 2]) {
         if self.knife.is_some() {
             self.knife_end();
+        }
+        if self.poly_pull.is_some() {
+            self.finish_poly_pull();
+        }
+        if self.poly_drag.is_some() {
+            self.end_poly_drag();
+        }
+        if self.stroke.is_some() {
+            self.end_stroke();
         }
         if self.push.is_some() {
             self.finish_push();
@@ -3454,6 +3583,9 @@ impl AppState {
     /// The selection's own pivot (centre of the selected shapes, or of the
     /// picked components).
     fn own_pivot(&self) -> Option<DVec3> {
+        if self.poly_comp() {
+            return self.poly_pivot();
+        }
         if self.sel_mode != SelMode::Object {
             return self.comp_pivot();
         }
@@ -3500,6 +3632,10 @@ impl AppState {
     pub fn begin_drag(&mut self, h: Handle, p: [f32; 2]) {
         if matches!(h, Handle::PushInset | Handle::PushDepth) {
             self.begin_push_drag(h, p);
+            return;
+        }
+        if self.poly_comp() {
+            self.begin_poly_drag(h, p);
             return;
         }
         if self.sel_mode != SelMode::Object {
@@ -3851,10 +3987,11 @@ impl AppState {
         // couper"), and until each of its models arrives the shapes added
         // are drawn moved from the model on screen (`drag_preview`)
         if want != self.submitted && self.kernel.status() != Status::Missing {
-            let iso = self.build_doc();
-            self.kernel.submit(want, iso.as_ref().unwrap_or(&self.doc), fine, quads);
+            // the meshes (Sculpt, Poly) are the app's alone
+            let kdoc = self.build_doc().unwrap_or_else(|| self.doc.for_kernel());
+            self.kernel.submit(want, &kdoc, fine, quads);
             self.submitted = want;
-            let frames = self.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()).map(|f| (f.id, shape_frame(f))).collect();
+            let frames = self.doc.features.iter().filter(|f| f.is_solid() && !f.is_path() && !f.is_mesh()).map(|f| (f.id, shape_frame(f))).collect();
             self.sent_frames.push((want, frames));
             if self.sent_frames.len() > 64 {
                 self.sent_frames.remove(0);

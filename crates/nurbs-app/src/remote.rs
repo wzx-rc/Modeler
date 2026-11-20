@@ -620,6 +620,7 @@ fn primary_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
             visible: true,
             material: 0,
             suspended: false,
+            mesh: None,
             round: None,
             profile: x.profile.clone(),
             push: None,

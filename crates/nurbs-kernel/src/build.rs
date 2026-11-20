@@ -1531,7 +1531,7 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let mut model = Model { fine, ..Default::default() };
     let mut used_tools = vec![];
     let mut used_stages = vec![];
-    let feats: Vec<&Feature> = doc.features.iter().filter(|f| f.visible && !f.suspended && !f.is_path() && !f.is_sheet()).collect();
+    let feats: Vec<&Feature> = doc.features.iter().filter(|f| f.visible && !f.suspended && !f.is_path() && !f.is_sheet() && !f.is_mesh()).collect();
     let mut stage = run(doc, &feats, skip, cache, &mut model, &mut used_tools, &mut used_stages);
     // the surfaces, beside the part (no boolean)
     for f in doc.features.iter().filter(|f| f.visible && !f.suspended && f.is_sheet()) {

@@ -849,6 +849,11 @@ pub struct Feature {
     /// box, at its place): its outline is the kernel's (`Model.curves`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape_bool: Option<ShapeBool>,
+    /// A sculpted or polygonal mesh (the Sculpt and Poly tabs, Romain 20
+    /// nov.): `prim` is a `Prim::Box` whose sizes scale its unit box (see
+    /// `mesh.rs`). The kernel builds nothing from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<crate::mesh::MeshRef>,
 }
 
 /// A surface's closed outline (straight sides) and the scan points it
@@ -870,6 +875,10 @@ impl Feature {
     pub fn is_solid(&self) -> bool {
         self.round.is_none() && self.push.is_none() && self.tweak.is_none() && self.cut.is_none()
     }
+    /// A sculpted or polygonal mesh (nothing for the kernel).
+    pub fn is_mesh(&self) -> bool {
+        self.mesh.is_some()
+    }
     /// A path: a curve with no thickness, nothing for the kernel.
     pub fn is_path(&self) -> bool {
         matches!(self.prim, Prim::Path { .. }) && self.sheet.is_none()
@@ -885,6 +894,9 @@ impl Feature {
     }
     /// What it is: "Cube", "Cylinder", "Fillet", "Chamfer", "Inset", "Extrude".
     pub fn kind_label(&self) -> &'static str {
+        if let Some(m) = &self.mesh {
+            return m.kind.label();
+        }
         if let Some(k) = &self.cut {
             return k.label();
         }
@@ -1077,8 +1089,29 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, mesh: None });
         id
+    }
+    /// Adds a sculpted or polygonal mesh: its points in millimetres in the
+    /// frame (`origin`, `rot`), standing anywhere; the feature's box is
+    /// fitted to them (see `mesh.rs`).
+    pub fn add_mesh(&mut self, kind: crate::mesh::MeshKind, pts: &[glam::Vec3], faces: Vec<Vec<u32>>, origin: DVec3, rot: DQuat, name: &str) -> FeatureId {
+        let (unit, size, base) = crate::mesh::normalize(pts);
+        let id = self.next_id;
+        self.next_id += 1;
+        let name = self.fresh_name(name);
+        let mesh = crate::mesh::MeshRef::new(crate::mesh::MeshData { kind, verts: unit, faces, smooth: false });
+        let prim = Prim::Box { x: size.x as f64, y: size.y as f64, z: size.z as f64 };
+        let origin = origin + rot * base.as_dvec3();
+        self.features.push(Feature { id, name, op: Op::Add, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, mesh: Some(mesh) });
+        id
+    }
+    /// The document as the kernel needs it: without the meshes (it builds
+    /// nothing from them, and they are big).
+    pub fn for_kernel(&self) -> Doc {
+        let mut d = Doc { version: self.version, features: Vec::with_capacity(self.features.len()), next_id: self.next_id, paint: self.paint.clone(), reference: self.reference.clone() };
+        d.features.extend(self.features.iter().filter(|f| !f.is_mesh()).cloned());
+        d
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
     pub fn add_round(&mut self, size: f64, chamfer: bool, edges: Vec<EdgeRef>) -> FeatureId {
@@ -1087,7 +1120,7 @@ impl Doc {
         let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0, only: false };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, mesh: None });
         id
     }
     /// Adds an inset or extrusion of a face at the end.
@@ -1096,7 +1129,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(push.label());
         let origin = push.face.at;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, mesh: None });
         id
     }
     /// Adds a move of a face, edge or vertex at the end.
@@ -1105,7 +1138,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(tweak.label());
         let origin = tweak.at();
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, mesh: None });
         id
     }
     /// Adds a Knife step (its first point) at the end.
@@ -1114,7 +1147,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(name);
         let origin = cut.pts.first().map(|p| p.at).or(cut.remove_faces.first().map(|r| r.at)).or(cut.remove_edges.first().map(|e| e.at)).unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false, mesh: None });
         id
     }
     /// The curves' outlines made again from their settings and boxes (a

@@ -25,6 +25,10 @@ pub struct Drawer {
     overlay: Vec<LineVertex>,
     /// The part was uploaded moved by a drag's preview.
     previewed: bool,
+    /// The meshes (Sculpt, Poly) uploaded with the part: what they were
+    /// keyed on, and each one's face slots (first, count) after the part's.
+    meshes_key: u64,
+    mesh_slots: Vec<(nurbs_kernel::FeatureId, u32, usize)>,
 }
 
 fn rgb(c: egui::Color32) -> [f32; 3] {
@@ -33,7 +37,7 @@ fn rgb(c: egui::Color32) -> [f32; 3] {
 
 impl Drawer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Drawer {
-        Drawer { r: Renderer::new(device, format), model_gen: u64::MAX, ref_gen: u64::MAX, quads_shown: false, flags: vec![], overlay: vec![], previewed: false }
+        Drawer { r: Renderer::new(device, format), model_gen: u64::MAX, ref_gen: u64::MAX, quads_shown: false, flags: vec![], overlay: vec![], previewed: false, meshes_key: u64::MAX, mesh_slots: vec![] }
     }
 
     fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, st: &AppState) {
@@ -46,8 +50,10 @@ impl Drawer {
         let quads = st.quad_mesh();
         // whole shapes dragged in Object mode: their faces follow at once
         let preview = if quads.is_none() { st.drag_preview().filter(|p| !p.is_empty()) } else { None };
-        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() || preview.is_some() || self.previewed {
+        let mkey = st.meshes_key();
+        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() || preview.is_some() || self.previewed || self.meshes_key != mkey {
             self.model_gen = st.model_gen;
+            self.meshes_key = mkey;
             self.previewed = preview.is_some();
             self.quads_shown = quads.is_some();
             let mut verts = vec![];
@@ -114,6 +120,24 @@ impl Drawer {
                 }).collect();
                 line_vertices(&lines, [24, 26, 30, 210], 1.0, &mut edges);
             }
+            // the meshes (Sculpt, Poly) in the same scene, their face slots
+            // after the part's; a Poly mesh's cage (in the Poly tab, or when
+            // it is not smoothed), its picked edges in the accent
+            let mut slot = st.model.as_ref().map(|m| m.faces.len() as u32).unwrap_or(0);
+            self.mesh_slots.clear();
+            let poly_tab = st.workspace == crate::workspace::Workspace::Poly;
+            let target = st.poly_target();
+            for f in st.shown_meshes() {
+                let n = crate::meshes::mesh_vertices(f, slot, &mut verts);
+                self.mesh_slots.push((f.id, slot, n));
+                slot += n as u32;
+                let smooth = f.mesh.as_ref().map(|m| m.smooth).unwrap_or(false);
+                if poly_tab || !smooth {
+                    let picked = st.poly_sel.as_ref().filter(|s| s.id == f.id).map(|s| s.edges.clone()).unwrap_or_default();
+                    let a = theme::accent();
+                    crate::meshes::cage_lines(f, &picked, poly_tab && target == Some(f.id), [a.r(), a.g(), a.b(), 245], &mut edges);
+                }
+            }
             self.r.upload_part(device, queue, &verts, &edges);
             self.flags.clear();
         }
@@ -125,7 +149,7 @@ impl Drawer {
         // its operations), a selected operation alone with its own faces
         let elements = st.model.as_ref().map(|m| element_map(st, m)).unwrap_or_default();
         let el = |t: nurbs_kernel::FaceTag| elements.get(&t.feature).copied().unwrap_or(t.feature);
-        let flags: Vec<FaceGpu> = match &st.model {
+        let mut flags: Vec<FaceGpu> = match &st.model {
             Some(m) => m
                 .faces
                 .iter()
@@ -164,6 +188,44 @@ impl Drawer {
                 .collect(),
             None => vec![],
         };
+        // the meshes' slots: the material of the mesh; lit as a whole in
+        // Object mode, face by face for a Poly mesh's picked faces; never
+        // while the brush sculpts
+        let poly_target = if st.poly_comp() { st.poly_target() } else { None };
+        for (id, _first, n) in &self.mesh_slots {
+            let Some(f) = st.doc.feature(*id) else { continue };
+            let mat = materials::get(f.material);
+            let (color, metal, rough) = match st.mat_drag.as_ref().filter(|d| d.target == Some(crate::state::DropTarget::Shape(*id))) {
+                Some(d) => {
+                    let m = materials::get(d.material);
+                    (m.color, m.metal, m.rough)
+                }
+                None => (mat.color, mat.metal, mat.rough),
+            };
+            for k in 0..*n as u32 {
+                let fl = if st.tool == Tool::Sculpt {
+                    0
+                } else if poly_target == Some(*id) {
+                    let picked = st.poly_sel.as_ref().map(|s| s.faces.contains(&k)).unwrap_or(false);
+                    if picked {
+                        FACE_SELECTED
+                    } else if st.poly_hover == Some(crate::poly::PolyHover::Face(*id, k)) && st.poly_drag.is_none() && st.hot_handle.is_none() {
+                        FACE_HOVERED
+                    } else {
+                        0
+                    }
+                } else if st.poly_comp() {
+                    0
+                } else if st.selection.contains(id) {
+                    FACE_SELECTED
+                } else if st.hover_feature == Some(*id) {
+                    FACE_HOVERED
+                } else {
+                    0
+                };
+                flags.push(FaceGpu { color: linear(color), flags: fl, metal, rough, pad: [0.0; 2] });
+            }
+        }
         if flags != self.flags || flags.is_empty() {
             self.r.upload_faces(device, queue, &flags);
             self.flags = flags;
@@ -235,7 +297,7 @@ impl Drawer {
             let lines: Vec<Vec<[f32; 3]>> = fs.arcs.iter().map(|a| a.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
             line_vertices(&lines, [accent.r(), accent.g(), accent.b(), 235], 1.8, &mut over);
         }
-        for f in st.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()) {
+        for f in st.doc.features.iter().filter(|f| f.is_solid() && !f.is_path() && !f.is_mesh()) {
             let creating = st.creation.as_ref().map(|c| c.id == f.id).unwrap_or(false);
             let selected = st.selection.contains(&f.id);
             // an Object-mode drag shows the faces themselves (no cage)
@@ -295,6 +357,11 @@ impl Drawer {
                     line_vertices(&[m.edges[i].pts.clone()], [y.r(), y.g(), y.b(), 150], 1.6, &mut over);
                 }
             }
+        }
+        // Insert Edge Loop: the loop a click would cut
+        if !st.poly_loop.is_empty() {
+            let lines: Vec<Vec<[f32; 3]>> = st.poly_loop.iter().map(|(a, b)| vec![a.to_array(), b.to_array()]).collect();
+            line_vertices(&lines, [accent.r(), accent.g(), accent.b(), 235], 1.8, &mut over);
         }
         if over.len() != self.overlay.len() || bytemuck::cast_slice::<_, u8>(&over) != bytemuck::cast_slice::<_, u8>(&self.overlay) {
             self.r.upload_overlay(device, queue, &over);

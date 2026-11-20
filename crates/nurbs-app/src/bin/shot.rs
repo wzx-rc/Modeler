@@ -314,6 +314,10 @@ fn main() {
     let want = |name: &str| only.is_empty() || only.iter().any(|o| name.starts_with(o.as_str()));
     let mut h = Harness::new(&out);
 
+    if want("multi") {
+        multi(&mut h);
+    }
+
     if want("empty") {
         h.reset(Doc::default(), "Untitled");
         h.shot("zero-empty");
@@ -4657,4 +4661,163 @@ fn main() {
         h.steps(2);
         h.shot("snap/snap-7-done");
     }
+}
+
+/// The three tabs (Romain, 20 nov.: Forme, Sculpt, Poly) in one scene: the
+/// test part in Forme, a clay sphere sculpted on top of it, a Poly cube
+/// beside it extruded, inset and cut by an edge loop.
+fn multi(h: &mut Harness) {
+    use egui::Key;
+    h.reset(test_part(), "Robot");
+    h.shot("multi-1-forme");
+    // --- Sculpt: F2, a clay sphere on the block, strokes
+    h.key(Key::F2);
+    h.steps(2);
+    h.st.camera.target = Vec3::new(-10.0, 33.0, 0.0);
+    h.key(Key::O);
+    h.settle();
+    h.st.frame_current();
+    h.settle();
+    h.shot("multi-2-sculpt-clay");
+    let c = Vec3::new(-10.0, 33.0, 0.0);
+    let centre = h.screen_of(c);
+    let v = h.st.view();
+    let k = 1.0 / v.pixel_size_at((c - v.eye).length());
+    eprintln!("clay radius on screen: {:.0} points", 10.0 * k);
+    h.st.sculpt.radius = (10.0 * k * 0.28).max(12.0);
+    h.st.sculpt.strength = 0.8;
+    // Draw: a ridge across the front
+    h.move_to(centre + vec2(-0.45, 0.1) * 10.0 * k);
+    h.steps(2);
+    h.shot("multi-3-brush-ring");
+    let along = |h: &mut Harness, a: (f32, f32), b: (f32, f32), n: usize| {
+        let pa = centre + vec2(a.0, a.1) * 10.0 * k;
+        let pb = centre + vec2(b.0, b.1) * 10.0 * k;
+        h.drag(pa, pb, n, true);
+        h.steps(2);
+    };
+    for _ in 0..2 {
+        along(h, (-0.6, 0.15), (0.6, 0.15), 24);
+    }
+    // Ctrl: dig eyes
+    h.hold(Modifiers::CTRL);
+    along(h, (-0.32, -0.25), (-0.22, -0.25), 6);
+    h.hold(Modifiers::NONE);
+    h.shot("multi-4-sculpt-draw");
+    // Grab: pull a horn up from the top
+    h.key(Key::G);
+    along(h, (0.15, -0.75), (0.35, -1.25), 12);
+    // Inflate the cheeks, Pinch the ridge, Smooth (Shift)
+    h.key(Key::I);
+    along(h, (-0.5, 0.45), (-0.3, 0.5), 10);
+    h.key(Key::P);
+    along(h, (-0.5, 0.15), (0.5, 0.15), 18);
+    h.hold(Modifiers::SHIFT);
+    along(h, (-0.2, 0.6), (0.3, 0.6), 10);
+    h.hold(Modifiers::NONE);
+    h.key(Key::X);
+    h.shot("multi-5-sculpt-more");
+    eprintln!("undo after the strokes: {:?}", h.st.undo_labels().iter().rev().take(8).collect::<Vec<_>>());
+    // --- Poly: F3, a cube beside the part
+    h.key(Key::F3);
+    h.steps(2);
+    h.st.camera.target = Vec3::new(40.0, 10.0, 0.0);
+    h.key(Key::B);
+    h.steps(2);
+    h.st.frame_current();
+    h.settle();
+    h.shot("multi-6-poly-cube");
+    // Face mode, the top face picked, Ctrl + E pulled up, a click
+    h.key(Key::Num3);
+    let top = h.screen_of(Vec3::new(40.0, 20.0, 0.0));
+    h.move_to(top);
+    h.steps(2);
+    h.click(top);
+    h.steps(2);
+    h.shot("multi-7-poly-face");
+    h.hold(Modifiers::CTRL);
+    h.key(Key::E);
+    h.hold(Modifiers::NONE);
+    let up = top + vec2(0.0, -70.0);
+    for i in 1..=10 {
+        h.move_to(top + (up - top) * (i as f32 / 10.0));
+    }
+    h.steps(2);
+    h.shot("multi-8-poly-extrude");
+    h.click(up);
+    h.steps(2);
+    // Inset (I): the pointer from outside towards the face's centre (the
+    // cube's top where the extrusion left it)
+    let top_y = |h: &Harness| h.st.doc.features.iter().find(|f| f.is_mesh() && f.name == "Cube").map(|f| f.bounds().1.y as f32).unwrap_or(20.0);
+    let cap = h.screen_of(Vec3::new(40.0, top_y(h), 0.0));
+    h.move_to(cap + vec2(90.0, 0.0));
+    h.key(Key::I);
+    for i in 1..=8 {
+        h.move_to(cap + vec2(90.0 - 45.0 * i as f32 / 8.0, 0.0));
+    }
+    h.click(cap + vec2(45.0, 0.0));
+    h.steps(2);
+    // and extruded again, up
+    let cap = h.screen_of(Vec3::new(40.0, top_y(h), 0.0));
+    h.hold(Modifiers::CTRL);
+    h.key(Key::E);
+    h.hold(Modifiers::NONE);
+    for i in 1..=8 {
+        h.move_to(cap + vec2(0.0, -45.0 * i as f32 / 8.0));
+    }
+    h.click(cap + vec2(0.0, -45.0));
+    h.steps(2);
+    h.shot("multi-9-poly-inset-extrude");
+    // Edge loop (Ctrl + R) across the cube's sides
+    h.hold(Modifiers::CTRL);
+    h.key(Key::R);
+    h.hold(Modifiers::NONE);
+    let side = h.screen_of(Vec3::new(50.0, 10.0, 0.0));
+    let e = h.screen_of(Vec3::new(50.0, 10.0, 10.0));
+    let at = side + (e - side) * 0.92;
+    h.move_to(at);
+    h.steps(2);
+    h.shot("multi-10-poly-loop-preview");
+    h.click(at);
+    h.steps(2);
+    // a point moved up (Vertex mode, the move gizmo)
+    h.key(Key::W);
+    h.key(Key::Num2);
+    h.shot("multi-11-poly-loop");
+    // smooth preview (Alt + S), Object mode
+    h.key(Key::Num4);
+    h.hold(Modifiers::ALT);
+    h.key(Key::S);
+    h.hold(Modifiers::NONE);
+    h.steps(2);
+    h.shot("multi-12-poly-smooth");
+    // --- the whole scene, in each tab
+    h.st.selection.clear();
+    h.st.frame_all();
+    h.settle();
+    h.key(Key::F1);
+    h.steps(3);
+    h.shot("multi-13-scene-forme");
+    h.key(Key::F2);
+    h.st.select_tool();
+    h.steps(3);
+    h.shot("multi-14-scene-sculpt");
+    h.key(Key::F3);
+    h.steps(3);
+    h.shot("multi-15-scene-poly");
+    // the Poly cube selected in Object mode, moved by the gizmo with the
+    // part's snapping, as any shape
+    let body = h.screen_of(Vec3::new(40.0, 10.0, 10.0));
+    h.click(body);
+    h.steps(2);
+    h.shot("multi-16-poly-selected");
+    let names: Vec<String> = h.st.doc.features.iter().map(|f| format!("{} ({})", f.name, f.kind_label())).collect();
+    eprintln!("scene: {names:?}");
+    eprintln!("model faces {:?}, kernel errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+    // light theme, Sculpt
+    h.st.settings.light = true;
+    h.key(Key::F2);
+    h.steps(3);
+    h.shot("multi-17-light-sculpt");
+    h.st.settings.light = false;
 }

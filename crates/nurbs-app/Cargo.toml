@@ -36,3 +36,7 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 image.workspace = true
+
+[build-dependencies]
+# the .exe's icon on Windows (rc.exe from the Windows SDK; a warning if missing)
+winresource = "0.1"
