@@ -410,8 +410,7 @@ fn resolve(shape: &Shape, refs: &[EdgeRef]) -> (Vec<i32>, usize) {
 /// to 0.1 mm, 0.01 under 1 mm: the fillet stops there instead of
 /// vanishing).
 /// `search`: when the size does not work, look for the largest that does
-/// (by halves, for at most about 2 s: next to a face curved tighter than the
-/// fillet, OpenCascade can take many seconds for each try near the limit).
+/// (`round_search`).
 fn round(acc: &Shape, f: &Feature, r: &Round, search: bool) -> (Option<Result<Shape, String>>, usize, Option<f64>) {
     let (edges, missing) = resolve(acc, &r.edges);
     if edges.is_empty() || r.size <= 1e-6 {
@@ -420,11 +419,40 @@ fn round(acc: &Shape, f: &Feature, r: &Round, search: bool) -> (Option<Result<Sh
     let fresh = FaceTag { feature: f.id, sub: 0 }.pack();
     mark(&step("round", f));
     let make = |size: f64| if r.chamfer { acc.chamfer(&edges, size, fresh) } else { acc.fillet(&edges, size, fresh) };
-    let res = make(r.size);
+    let mut res = make(r.size).map_err(|e| plain_error(&e));
+    // two or three of the edges meeting at a corner of four (Romain 20 nov.,
+    // a cap standing flush with a pocket's end): OpenCascade rounds one of
+    // them, or all four, but not two or three in one go; one at a time in
+    // some order it does
+    if res.is_err() && (2..=4).contains(&edges.len()) {
+        if let Some(s) = one_by_one(acc, r, fresh) {
+            res = Ok(s);
+        }
+    }
     if res.is_ok() || !search {
         return (Some(res), missing, None);
     }
-    // too big? the largest size that works, by halves
+    match round_search(acc, &edges, r, fresh) {
+        Some((s, size)) => (Some(Ok(s)), missing, Some(size)),
+        None => (Some(res), missing, None),
+    }
+}
+
+/// OpenCascade's words for a fillet it cannot make, put plainly when they say
+/// nothing to the user.
+fn plain_error(e: &str) -> String {
+    if e.contains("no suitable edges") {
+        "its edges are smooth (the faces meet tangent): there is nothing to round".to_string()
+    } else {
+        e.to_string()
+    }
+}
+
+/// The largest size that works for a fillet too big, by halves (for at most
+/// about 2 s: next to a face curved tighter than the fillet, OpenCascade can
+/// take many seconds for each try near the limit).
+fn round_search(acc: &Shape, edges: &[i32], r: &Round, fresh: i64) -> Option<(Shape, f64)> {
+    let make = |size: f64| if r.chamfer { acc.chamfer(edges, size, fresh) } else { acc.fillet(edges, size, fresh) };
     let (mut lo, mut hi) = (0.0, r.size);
     let t0 = std::time::Instant::now();
     for _ in 0..12 {
@@ -445,10 +473,46 @@ fn round(acc: &Shape, f: &Feature, r: &Round, search: bool) -> (Option<Result<Sh
     let size = (lo / q).floor() * q;
     if size >= 0.01 {
         if let Ok(s) = make(size) {
-            return (Some(Ok(s)), missing, Some(size));
+            return Some((s, size));
         }
     }
-    (Some(res), missing, None)
+    None
+}
+
+/// A fillet or chamfer of a few edges made one edge at a time, in the first
+/// order that makes them all at the size asked (depth first, so the orders
+/// share their first steps; at most about 3 s). An edge already rounded by
+/// one before it (OpenCascade carries a fillet along tangent edges) counts
+/// as made. All the faces made carry the step's tag.
+fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> Option<Shape> {
+    fn go(s: &Shape, left: &[EdgeRef], r: &Round, fresh: i64, t0: Instant) -> Option<Shape> {
+        for k in 0..left.len() {
+            if t0.elapsed().as_secs_f64() > 3.0 {
+                return None;
+            }
+            let rest: Vec<EdgeRef> = left.iter().enumerate().filter(|(j, _)| *j != k).map(|(_, e)| e.clone()).collect();
+            let (e, missing) = resolve(s, std::slice::from_ref(&left[k]));
+            let next = if missing > 0 || e.is_empty() {
+                continue;
+            } else if r.chamfer {
+                s.chamfer(&e, r.size, fresh)
+            } else {
+                s.fillet(&e, r.size, fresh)
+            };
+            if let Ok(n) = next {
+                // the edges left that this one's fillet took along with it
+                let rest: Vec<EdgeRef> = rest.into_iter().filter(|x| resolve(&n, std::slice::from_ref(x)).1 == 0).collect();
+                if rest.is_empty() {
+                    return Some(n);
+                }
+                if let Some(done) = go(&n, &rest, r, fresh, t0) {
+                    return Some(done);
+                }
+            }
+        }
+        None
+    }
+    go(acc, &r.edges, r, fresh, Instant::now())
 }
 
 /// A fillet that blends its corners: rebuilt in one operation with the run
@@ -1023,9 +1087,24 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                     }
                 }
                 if made.is_none() {
+                    let (mut res, missing, mut limit) = if skipped("round") { (Some(Err("skipped, it crashed the kernel".to_string())), 0, None) } else { round(&acc, f, r, false) };
                     // (with a blended result at hand, a smaller size made on
                     // its own would not be taken: no search for it)
-                    let (res, missing, limit) = if skipped("round") { (Some(Err("skipped, it crashed the kernel".to_string())), 0, None) } else { round(&acc, f, r, partial.is_none()) };
+                    if matches!(res, Some(Err(_))) && partial.is_none() && !skipped("round") {
+                        // next to fillets made just before it: made before
+                        // them, they made again on what it gives
+                        if let Some(s) = replay_round(doc, &feats[..i], f, r, &stage, skip, cache, model, used_tools, used_stages) {
+                            stage = s;
+                            cache.stages.insert(key, stage.clone());
+                            continue;
+                        }
+                        // too big? the largest size that works
+                        let (edges, _) = resolve(&acc, &r.edges);
+                        if let Some((s, size)) = round_search(&acc, &edges, r, FaceTag { feature: f.id, sub: 0 }.pack()) {
+                            res = Some(Ok(s));
+                            limit = Some(size);
+                        }
+                    }
                     if missing > 0 {
                         stage.errors.push(format!("{}: {missing} edge{} not found", f.name, if missing > 1 { "s" } else { "" }));
                     }
@@ -1057,7 +1136,17 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                             stage.tension_limits.extend(errs.1);
                             made = Some((t, full));
                         }
-                        (Some(Err(e)), None) => stage.errors.push(format!("{}: OpenCascade cannot make it at {} mm ({e})", f.name, r.size)),
+                        (Some(Err(e)), None) if e.starts_with("its edges are smooth") => stage.errors.push(format!("{}: {e}", f.name)),
+                        (Some(Err(e)), None) => {
+                            // at a corner of four edges or more: say so, and
+                            // what OpenCascade can do there
+                            let (edges, _) = resolve(&acc, &r.edges);
+                            let msg = match crowded(&acc, &edges) {
+                                Some((all, k)) => format!("{}: OpenCascade cannot round {k} of the {n} edges meeting at one corner here: try one of them, or all {n}", f.name, n = all.len()),
+                                None => format!("{}: OpenCascade cannot make it at {} mm ({e})", f.name, r.size),
+                            };
+                            stage.errors.push(msg)
+                        }
                         (None, None) => {}
                     }
                 }
@@ -1208,6 +1297,77 @@ fn replay<'a>(doc: &'a Doc, before: &[&'a Feature], f: &'a Feature, t: &Tweak, s
     let order: Vec<&Feature> = before[..j].iter().copied().chain(std::iter::once(f)).chain(before[j..].iter().copied()).collect();
     let s = run(doc, &order, skip, cache, model, used_tools, used_stages);
     (s.shape.is_some() && s.errors.len() <= stage.errors.len()).then_some(s)
+}
+
+thread_local! {
+    /// A round step being made again before the fillets it touches
+    /// (`replay_round`): no other is moved meanwhile.
+    static REPLAYING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A fillet or chamfer that cannot be made next to the fillets made just
+/// before it (Romain 20 nov.: the four edges round a cap standing flush with
+/// a pocket's end, after the cap's top edge was rounded): made before that
+/// run of round steps, which are then made again on what it gives (as
+/// `replay` does for a move; their edges found again by their faces' tags).
+/// Not before a step whose faces it names. The stage, when it brings no
+/// error and no step made smaller than before.
+#[allow(clippy::too_many_arguments)]
+fn replay_round<'a>(doc: &'a Doc, before: &[&'a Feature], f: &'a Feature, r: &Round, stage: &Stage, skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Option<Stage> {
+    if REPLAYING.with(|c| c.get()) {
+        return None;
+    }
+    let mut j = before.len();
+    while j > 0 && before[j - 1].round.is_some() {
+        j -= 1;
+    }
+    let names = |g: &Feature| r.edges.iter().any(|e| e.faces.iter().any(|t| FaceTag::unpack(*t).is_some_and(|x| x.feature == g.id)));
+    if let Some(k) = before[j..].iter().rposition(|g| names(g)) {
+        j += k + 1;
+    }
+    let tags: Vec<i64> = r.edges.iter().flat_map(|e| e.faces).collect();
+    let touches = before[j..].iter().any(|g| g.round.as_ref().is_some_and(|gr| gr.edges.iter().any(|e| e.faces.iter().any(|x| tags.contains(x)))));
+    if !touches {
+        return None;
+    }
+    let order: Vec<&Feature> = before[..j].iter().copied().chain(std::iter::once(f)).chain(before[j..].iter().copied()).collect();
+    REPLAYING.with(|c| c.set(true));
+    let s = run(doc, &order, skip, cache, model, used_tools, used_stages);
+    REPLAYING.with(|c| c.set(false));
+    let kept = s.shape.is_some() && s.errors.len() <= stage.errors.len() && s.limits.iter().all(|l| l.0 == f.id || stage.limits.contains(l));
+    kept.then_some(s)
+}
+
+/// A corner where four edges or more meet, some of a fillet's edges among
+/// them but not all (OpenCascade rounds one of them, or all together, but
+/// most often not two or three in one go): the edges there, and how many
+/// of the fillet's.
+fn crowded(acc: &Shape, edges: &[i32]) -> Option<(Vec<i32>, usize)> {
+    let adj = acc.edge_faces();
+    let ends: Vec<(i32, [DVec3; 2])> = (1..=adj.len() as i32)
+        .filter(|&i| {
+            let f = adj[i as usize - 1];
+            f[0] >= 0 && f[1] >= 0 && f[0] != f[1]
+        })
+        .filter_map(|i| {
+            let e = acc.edge(i, 2)?;
+            let (a, b) = (DVec3::from_array(*e.pts.first()?), DVec3::from_array(*e.pts.last()?));
+            (a.distance(b) > 1e-6).then_some((i, [a, b]))
+        })
+        .collect();
+    let mut best: Option<(Vec<i32>, usize)> = None;
+    for (_, pe) in ends.iter().filter(|(i, _)| edges.contains(i)) {
+        for p in pe {
+            let at: Vec<i32> = ends.iter().filter(|(_, q)| q.iter().any(|q| q.distance(*p) < 1e-4)).map(|(i, _)| *i).collect();
+            let k = at.iter().filter(|i| edges.contains(i)).count();
+            // the corner with the most of its edges (a fillet's other end
+            // may meet such a corner with one edge only, which works)
+            if at.len() >= 4 && k >= 2 && k < at.len() && best.as_ref().map_or(true, |b| (k, at.len()) > (b.1, b.0.len())) {
+                best = Some((at, k));
+            }
+        }
+    }
+    best
 }
 
 pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Cache) -> Model {
@@ -3213,6 +3373,73 @@ mod tests {
     }
 
     /// The test part of the app (block, hole, boss, slot).
+    #[test]
+    fn corner_of_four() {
+        // Romain 20 nov., 9 h 56: a pocket carved with the same outline as
+        // the cap standing on its end ("extrude en aller-retour"): the cap's
+        // flat face is the pocket's end wall, its round side tangent to the
+        // pocket's side wall, so four edges meet at a corner (the cap's foot,
+        // the cap's upright edge, the pocket's upright corner, the pocket's
+        // rim). OpenCascade rounds one or all four in one go, not two or
+        // three; one at a time in some order it does; and all four after
+        // the cap's top edge was rounded, made before that fillet.
+        let mut d = Doc::default();
+        let a = d.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, DVec3::new(15.0, 0.0, 0.0), DQuat::IDENTITY);
+        let c = d.add(Op::Add, Prim::Cylinder { radius: 2.0, height: 10.0 }, DVec3::new(30.0, 10.0, 0.0), DQuat::IDENTITY);
+        let k = d.add(Op::Carve, Prim::Box { x: 25.0, y: 18.0, z: 4.0 }, DVec3::new(17.5, 7.0, 0.0), DQuat::IDENTITY);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let foot = EdgeRef { faces: [tag(c, 0), tag(a, 2)], at: DVec3::new(32.0, 10.0, 0.0) };
+        let upright = EdgeRef { faces: [tag(k, 0), tag(c, 0)], at: DVec3::new(30.0, 15.0, -2.0) };
+        let corner = EdgeRef { faces: [tag(k, 0), tag(k, 5)], at: DVec3::new(30.0, 8.5, -2.0) };
+        let rim = EdgeRef { faces: [tag(k, 5), tag(a, 2)], at: DVec3::new(17.5, 10.0, -2.0) };
+        let top = EdgeRef { faces: [tag(k, 0), tag(c, 1)], at: DVec3::new(30.0, 20.0, 0.0) };
+        let made = |pre: &[(EdgeRef, f64)], edges: &[&EdgeRef], what: &str| {
+            let mut d = d.clone();
+            for (e, r) in pre {
+                d.add_round(*r, false, vec![e.clone()]);
+            }
+            let id = d.add_round(0.5, false, edges.iter().map(|e| (*e).clone()).collect());
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{what}: {:?}", m.errors);
+            assert!(!m.limits.iter().any(|l| l.0 == id), "{what}: made smaller {:?}", m.limits);
+            assert!(m.faces.iter().any(|f| f.tag.is_some_and(|t| t.feature == id)), "{what}: no fillet face");
+        };
+        made(&[], &[&foot, &upright, &corner, &rim], "all four");
+        made(&[], &[&foot], "the foot");
+        made(&[], &[&foot, &rim], "the foot and the rim");
+        made(&[], &[&upright, &corner], "the upright edge and the corner");
+        made(&[(top.clone(), 0.9)], &[&foot, &upright, &corner, &rim], "all four after the top's fillet");
+        // the top cut across first (as Romain's Loop cut): the rim in two
+        // pieces, the piece by the corner named
+        let mut d = Doc::default();
+        let a = d.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, DVec3::new(15.0, 0.0, 0.0), DQuat::IDENTITY);
+        let front = EdgeRef { faces: [tag(a, 2), tag(a, 5)], at: DVec3::new(15.0, 10.0, -10.0) };
+        let back = EdgeRef { faces: [tag(a, 2), tag(a, 4)], at: DVec3::new(15.0, 10.0, 10.0) };
+        d.add_knife(
+            Knife {
+                pts: vec![KnifePoint { edge: front, f: 0.4375, at: DVec3::new(17.5, 10.0, -10.0) }, KnifePoint { edge: back, f: 0.4375, at: DVec3::new(17.5, 10.0, 10.0) }],
+                segs: vec![[0, 1]],
+                remove_faces: vec![],
+                remove_edges: vec![],
+            },
+            "Knife",
+        );
+        let c = d.add(Op::Add, Prim::Cylinder { radius: 2.0, height: 10.0 }, DVec3::new(30.0, 10.0, 0.0), DQuat::IDENTITY);
+        let k = d.add(Op::Carve, Prim::Box { x: 25.0, y: 18.0, z: 4.0 }, DVec3::new(17.5, 7.0, 0.0), DQuat::IDENTITY);
+        let foot = EdgeRef { faces: [tag(c, 0), tag(a, 2)], at: DVec3::new(32.0, 10.0, 0.0) };
+        let upright = EdgeRef { faces: [tag(k, 0), tag(c, 0)], at: DVec3::new(30.0, 15.0, -2.0) };
+        let corner = EdgeRef { faces: [tag(k, 0), tag(k, 5)], at: DVec3::new(30.0, 8.5, -2.0) };
+        let rim = EdgeRef { faces: [tag(k, 5), tag(a, 2)], at: DVec3::new(23.75, 10.0, -2.0) };
+        for (what, es) in [("cut: all four", vec![&foot, &upright, &corner, &rim]), ("cut: the rim's piece and the foot", vec![&rim, &foot])] {
+            let mut d = d.clone();
+            let id = d.add_round(0.5, false, es.iter().map(|e| (*e).clone()).collect());
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{what}: {:?}", m.errors);
+            assert!(m.faces.iter().any(|f| f.tag.is_some_and(|t| t.feature == id)), "{what}: no fillet face");
+        }
+    }
+
     fn test_part() -> (Doc, u32, u32) {
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
@@ -3403,5 +3630,96 @@ mod tests {
         let (lo, hi) = m.bounds().unwrap();
         assert!((lo[0] + 15.0).abs() < 0.01 && (hi[0] - 15.0).abs() < 0.01, "{lo:?} {hi:?}");
         assert!((hi[1] - 25.0).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod vertex4_probe {
+    use super::*;
+    use crate::doc::*;
+    use glam::DVec3;
+
+    #[test]
+    #[ignore]
+    fn vertex4_probe() {
+        // FORME_DOC: the scene of 20 nov. 9 h 56; the four edges round the
+        // vertex (239.485, 33.17, -52.33), filleted in every subset.
+        let Ok(p) = std::env::var("FORME_DOC") else { return };
+        let mut d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+        let keep: u32 = std::env::var("FORME_KEEP").ok().and_then(|v| v.parse().ok()).unwrap_or(102);
+        d.features.retain(|f| f.id < keep);
+        let t = |f: u32, s: u32| ((f as i64) << 16) | s as i64;
+        let e = [
+            EdgeRef { faces: [t(83, 3), t(80, 1)], at: DVec3::new(241.837, 33.168, -50.061) },
+            EdgeRef { faces: [t(90, 5), t(83, 3)], at: DVec3::new(239.485, 38.718, -52.328) },
+            EdgeRef { faces: [t(90, 5), t(89, 4)], at: DVec3::new(239.485, 31.666, -52.328) },
+            EdgeRef { faces: [t(89, 4), t(80, 1)], at: DVec3::new(227.204, 33.168, -52.103) },
+            EdgeRef { faces: [t(90, 5), t(83, 1)], at: DVec3::new(239.52782, 45.167965, -50.01887) },
+        ];
+        let names = ["base arc", "cap vertical", "pocket corner", "pocket rim"];
+        let sizes: Vec<f64> = std::env::var("FORME_SIZES").ok().map(|s| s.split(',').map(|x| x.parse().unwrap()).collect()).unwrap_or(vec![0.3, 0.8]);
+        let mut cache = Cache::default();
+        if let Ok(plan) = std::env::var("FORME_PLAN") {
+            // steps "0123@0.5b;1@0.3": the edges by number, the size, b = blend
+            for case in plan.split('|') {
+                let mut d2 = d.clone();
+                let mut ids = vec![];
+                for st in case.split(';') {
+                    let (es, rest) = st.split_once('@').unwrap();
+                    let blend = rest.ends_with('b');
+                    let size: f64 = rest.trim_end_matches('b').parse().unwrap();
+                    let edges: Vec<EdgeRef> = es.chars().map(|c| e[c.to_digit(10).unwrap() as usize].clone()).collect();
+                    let id = d2.add_round(size, false, edges);
+                    d2.features.last_mut().unwrap().round.as_mut().unwrap().blend = blend;
+                    ids.push(id);
+                }
+                let t0 = std::time::Instant::now();
+                if std::env::var("FORME_FRESH").is_ok() {
+                    cache = Cache::default();
+                }
+                let m = build(&d2, true, false, &[], &mut cache);
+                eprintln!("PLAN time {:.2} s", t0.elapsed().as_secs_f64());
+                let n0 = d.features.len();
+                let errs: Vec<&String> = m.errors.iter().filter(|s| d2.features[n0..].iter().any(|f| s.starts_with(&format!("{}:", f.name)))).collect();
+                let lim: Vec<_> = m.limits.iter().filter(|l| ids.contains(&l.0)).collect();
+                let rounds = m.faces.iter().filter(|f| f.tag.map_or(false, |t| ids.contains(&t.feature))).count();
+                eprintln!("PLAN {case}: errors {:?} limits {:?} faces {} (fillet faces {rounds})", errs, lim, m.faces.len());
+            }
+            return;
+        }
+        if std::env::var("FORME_SEQ").is_ok() {
+            // each edge its own step, in every order of the subsets of two and more
+            let blend = std::env::var("FORME_BLEND").is_ok();
+            let orders: Vec<Vec<usize>> = vec![vec![0, 1], vec![1, 0], vec![0, 2], vec![2, 0], vec![0, 3], vec![3, 0], vec![1, 2], vec![2, 1], vec![1, 3], vec![3, 1], vec![2, 3], vec![3, 2], vec![0, 1, 2, 3], vec![3, 2, 1, 0], vec![1, 3, 0, 2], vec![0, 2, 1, 3]];
+            for o in orders {
+                for &size in &sizes {
+                    let mut d2 = d.clone();
+                    let mut ids = vec![];
+                    for &i in &o {
+                        let id = d2.add_round(size, false, vec![e[i].clone()]);
+                        d2.features.last_mut().unwrap().round.as_mut().unwrap().blend = blend;
+                        ids.push(id);
+                    }
+                    let m = build(&d2, true, false, &[], &mut cache);
+                    let errs: Vec<&String> = m.errors.iter().filter(|s| s.starts_with("Fillet") && !s.contains("not found") && !s.contains("Fillet 6")).collect();
+                    let lim: Vec<_> = m.limits.iter().filter(|l| ids.contains(&l.0)).collect();
+                    let set: Vec<&str> = o.iter().map(|&i| names[i]).collect();
+                    eprintln!("SEQ {:?} r {size}: errors {:?} limits {:?} faces {}", set, errs, lim, m.faces.len());
+                }
+            }
+            return;
+        }
+        for mask in 1u32..16 {
+            for &size in &sizes {
+                let mut d2 = d.clone();
+                let edges: Vec<EdgeRef> = (0..4).filter(|i| mask & (1 << i) != 0).map(|i| e[i].clone()).collect();
+                let id = d2.add_round(size, false, edges);
+                let m = build(&d2, true, false, &[], &mut cache);
+                let errs: Vec<&String> = m.errors.iter().filter(|s| s.starts_with("Fillet")).collect();
+                let lim = m.limits.iter().find(|l| l.0 == id).map(|l| l.1);
+                let set: Vec<&str> = (0..4).filter(|i| mask & (1 << i) != 0).map(|i| names[i]).collect();
+                eprintln!("{:?} r {size}: errors {:?} limit {:?} faces {}", set, errs, lim, m.faces.len());
+            }
+        }
     }
 }

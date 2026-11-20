@@ -1754,16 +1754,19 @@ impl AppState {
     }
 
     /// The model edge a reference names (the one nearest its point among
-    /// those joining the same two faces).
+    /// those joining the same two faces). Measured to the edge's segments:
+    /// a straight edge has only its two ends, and the middle of one cut in
+    /// two pieces (a Loop cut across a face) is as far from both pieces'
+    /// ends, so the other piece was drawn picked (Romain 20 nov.: "le 3e
+    /// n'arrive pas à sélectionner").
     pub fn model_edge_of(&self, r: &EdgeRef) -> Option<usize> {
         let m = self.model.as_ref()?;
         let want = r.key();
-        let at = r.at.as_vec3();
         m.edges
             .iter()
             .enumerate()
             .filter(|(i, _)| self.edge_ref(*i).map(|x| x.key() == want).unwrap_or(false))
-            .map(|(i, e)| (i, e.pts.iter().map(|p| Vec3::from(*p).distance(at)).fold(f32::MAX, f32::min)))
+            .map(|(i, e)| (i, polyline_distance(&e.pts, r.at)))
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(i, _)| i)
     }
@@ -3818,6 +3821,21 @@ pub fn basis_rotation(u: DVec3, n: DVec3) -> DQuat {
     let y = n.normalize();
     let z = x.cross(y);
     DQuat::from_mat3(&glam::DMat3::from_cols(x, y, z))
+}
+
+/// How far a point is from a polyline (its segments).
+pub fn polyline_distance(pts: &[[f32; 3]], at: DVec3) -> f64 {
+    let p: Vec<DVec3> = pts.iter().map(|q| DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64)).collect();
+    if p.len() == 1 {
+        return p[0].distance(at);
+    }
+    p.windows(2)
+        .map(|w| {
+            let d = w[1] - w[0];
+            let t = if d.length_squared() > 0.0 { ((at - w[0]).dot(d) / d.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+            (w[0] + d * t).distance(at)
+        })
+        .fold(f64::MAX, f64::min)
 }
 
 /// The point halfway along a polyline (a straight edge has only its two

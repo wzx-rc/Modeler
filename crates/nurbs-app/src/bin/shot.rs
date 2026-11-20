@@ -3390,6 +3390,80 @@ fn main() {
         h.shot("zero-undo-select-2-move-undone");
     }
 
+    if want("corner4") {
+        // Romain 20 nov., 9 h 56: a cap standing flush on a pocket's end
+        // (extrudes there and back): four edges at one corner. The top cut
+        // across first (his Loop cut), so the pocket's rim comes in two
+        // pieces: its piece by the corner picked is drawn picked (it was
+        // drawn on its other piece); the four edges filleted in one step,
+        // also after the cap's top edge was rounded
+        let tg = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        let mut d = Doc::default();
+        let a = d.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, glam::DVec3::new(15.0, 0.0, 0.0), DQuat::IDENTITY);
+        let front = EdgeRef { faces: [tg(a, 2), tg(a, 5)], at: glam::DVec3::new(15.0, 10.0, -10.0) };
+        let back = EdgeRef { faces: [tg(a, 2), tg(a, 4)], at: glam::DVec3::new(15.0, 10.0, 10.0) };
+        d.add_knife(
+            nurbs_kernel::doc::Knife {
+                pts: vec![
+                    nurbs_kernel::doc::KnifePoint { edge: front, f: 0.4375, at: glam::DVec3::new(17.5, 10.0, -10.0) },
+                    nurbs_kernel::doc::KnifePoint { edge: back, f: 0.4375, at: glam::DVec3::new(17.5, 10.0, 10.0) },
+                ],
+                segs: vec![[0, 1]],
+                remove_faces: vec![],
+                remove_edges: vec![],
+            },
+            "Knife",
+        );
+        let c = d.add(Op::Add, Prim::Cylinder { radius: 2.0, height: 10.0 }, glam::DVec3::new(30.0, 10.0, 0.0), DQuat::IDENTITY);
+        let k = d.add(Op::Carve, Prim::Box { x: 25.0, y: 18.0, z: 4.0 }, glam::DVec3::new(17.5, 7.0, 0.0), DQuat::IDENTITY);
+        let top = EdgeRef { faces: [tg(k, 0), tg(c, 1)], at: glam::DVec3::new(30.0, 20.0, 0.0) };
+        let mut d2 = d.clone();
+        d2.add_round(0.9, false, vec![top]);
+        for (n, doc) in [("", d), ("-after-top", d2)] {
+            h.reset(doc, "Corner");
+            let look = |h: &mut Harness, yaw: f32| {
+                h.st.camera.frame(Vec3::new(20.0, 6.0, -6.0), Vec3::new(34.0, 21.0, 2.0));
+                h.st.camera.yaw = yaw;
+                h.st.camera.pitch = 0.6;
+                h.steps(2);
+            };
+            look(&mut h, -1.3);
+            h.settle();
+            h.key(egui::Key::F10);
+            h.steps(1);
+            // seen from the pocket: the rim's piece by the corner, the
+            // corner's upright edges; from the other side: the cap's foot
+            let pts = [(Vec3::new(24.0, 10.0, -2.0), -1.3), (Vec3::new(30.0, 15.0, -2.0), -1.3), (Vec3::new(30.0, 8.5, -2.0), -1.3), (Vec3::new(31.414, 10.0, -1.414), 2.0)];
+            for (i, (p, yaw)) in pts.iter().enumerate() {
+                if h.st.camera.yaw != *yaw {
+                    look(&mut h, *yaw);
+                }
+                h.hold(if i == 0 { Modifiers::NONE } else { Modifiers::SHIFT });
+                h.click(h.screen_of(*p));
+                h.hold(Modifiers::NONE);
+                h.steps(1);
+            }
+            look(&mut h, -1.3);
+            let m = h.st.model.as_ref().unwrap();
+            let drawn: Vec<String> = h.st.edge_sel.iter().filter_map(|r| h.st.model_edge_of(r)).map(|i| {
+                let e = &m.edges[i];
+                format!("{:.1},{:.1},{:.1} → {:.1},{:.1},{:.1}", e.pts[0][0], e.pts[0][1], e.pts[0][2], e.pts.last().unwrap()[0], e.pts.last().unwrap()[1], e.pts.last().unwrap()[2])
+            }).collect();
+            eprintln!("  picked {}: drawn on {:?}", h.st.edge_sel.len(), drawn);
+            h.shot(&format!("zero-corner4{n}-1-picked"));
+            h.st.set_round(0.5, false, true);
+            h.st.end_live();
+            h.settle();
+            let m = h.st.model.as_ref().unwrap();
+            eprintln!("  fillet: errors {:?} limits {:?} faces {}", m.errors, m.limits, m.faces.len());
+            h.key(egui::Key::Escape);
+            h.steps(2);
+            h.shot(&format!("zero-corner4{n}-2-filleted"));
+            look(&mut h, 2.0);
+            h.shot(&format!("zero-corner4{n}-3-filleted-cap-side"));
+        }
+    }
+
     if want("isolate") {
         // Isolate (Romain 20 nov., 9 h 38, Maya): a block beside the test
         // part picked, the top bar's icon: it alone, framed; again: all
