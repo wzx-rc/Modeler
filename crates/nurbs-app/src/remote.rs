@@ -335,6 +335,27 @@ pub fn spec_of(f: &Feature) -> Value {
         o["keep"] = json!(if m.flip { "-" } else { "+" });
         return o;
     }
+    if let Some(a) = &f.array {
+        o["kind"] = json!("array");
+        o["sources"] = json!(a.sources);
+        o["layout"] = json!(a.kind_name());
+        o["count"] = json!(a.count);
+        match a.kind {
+            nurbs_kernel::ArrayKind::Circle => {
+                o["axis"] = json!(["X", "Y", "Z"][a.axis.min(2) as usize]);
+                o["centre"] = r3(a.centre);
+                o["angle"] = json!(r(a.angle));
+            }
+            k => {
+                o["step"] = r3(a.step);
+                if k == nurbs_kernel::ArrayKind::Grid {
+                    o["rows"] = json!(a.count2);
+                    o["row_step"] = r3(a.step2);
+                }
+            }
+        }
+        return o;
+    }
     o["origin"] = r3(f.origin);
     o["x_axis"] = r3(x_axis);
     o["up"] = r3(up);
@@ -640,6 +661,7 @@ fn primary_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
             loft: None,
             form: None,
             mirror: None,
+            array: None,
         };
         let mut v = spec_of(&f);
         if let Some(o) = v.as_object_mut() {

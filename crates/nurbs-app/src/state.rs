@@ -1240,6 +1240,10 @@ impl AppState {
         // the curves follow their settings and boxes
         self.doc.regen_curves();
         self.keep_markers();
+        // an operation made on an Array's copy: on every copy
+        if self.doc.keep_arrays() {
+            self.toast("Made on the original and every copy of its Array", false);
+        }
         self.version += 1;
     }
 
@@ -2368,6 +2372,9 @@ impl AppState {
                 }
             } else if let Some(k) = &f.cut {
                 k.pts.first().map(|p| p.edge.faces[0]).or(k.remove_faces.first().map(|r| r.tag)).or(k.remove_edges.first().map(|e| e.faces[0]))
+            } else if let Some(a) = &f.array {
+                // an Array: its first shape's
+                return a.sources.first().copied().filter(|s| self.doc.feature(*s).is_some());
             } else {
                 return None;
             };
@@ -3833,7 +3840,8 @@ impl AppState {
         }
         // after a Mirror the faces on both sides carry the same tags (one
         // side would move the wrong way): the kernel's model only
-        if self.doc.features.iter().any(|f| f.mirror.is_some() && f.visible && !f.suspended) {
+        // (an Array's copies too, each moved its own way round a circle)
+        if self.doc.features.iter().any(|f| (f.mirror.is_some() || f.array.is_some()) && f.visible && !f.suspended) {
             return None;
         }
         // the shapes' frames when the model on screen was asked for

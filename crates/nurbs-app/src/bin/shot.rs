@@ -1947,6 +1947,128 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("array") {
+        // Pattern / Array (Ctrl + Shift + D): a vent carved in a plate, its
+        // rim rounded, picked and repeated: 4 in a line as it comes, 8 a
+        // step of 10, a grid of 2 rows; the original made wider (the copies
+        // follow), an inset sunk in a copy's floor (made in every one);
+        // then a boss with its hole, 8 round a disc, then 5 over 180°
+        let mut d = Doc::default();
+        let plate = d.add(Op::Add, Prim::Box { x: 90.0, y: 8.0, z: 60.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(plate).unwrap().name = "Plate".into();
+        let vent = d.add(Op::Carve, Prim::Profile { x: 5.0, y: 10.0, z: 16.0 }, DVec3::new(-36.0, 5.0, -12.0), DQuat::IDENTITY);
+        d.feature_mut(vent).unwrap().name = "Vent".into();
+        d.feature_mut(vent).unwrap().profile = Some(nurbs_kernel::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![2.5; 4], tension: vec![], open: false, spline: false });
+        h.reset(d, "Array");
+        h.st.camera.dist *= 1.2;
+        h.st.camera.pitch += 0.25;
+        h.settle();
+        // the rim rounded (one edge: OpenCascade runs it round)
+        h.key(egui::Key::Num2);
+        h.click(h.screen_of(Vec3::new(-33.5, 8.0, -12.0)));
+        h.st.set_round(0.8, false, true);
+        h.st.end_live();
+        h.settle();
+        h.key(egui::Key::Num4);
+        h.st.select(None, false);
+        h.click(h.screen_of(Vec3::new(-36.0, 5.0, -12.0)));
+        h.settle();
+        eprintln!("  picked: {:?}", h.st.selection.iter().filter_map(|id| h.st.doc.feature(*id)).map(|f| f.name.clone()).collect::<Vec<_>>());
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-1-vent");
+        h.hold(Modifiers::CTRL | Modifiers::SHIFT);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-2-four");
+        let arr = |h: &Harness| h.st.selected_array().and_then(|f| f.array.clone()).unwrap();
+        eprintln!("  array: {:?}", arr(&h));
+        let a = arr(&h);
+        h.st.set_array(nurbs_kernel::Array { count: 8, step: DVec3::new(10.0, 0.0, 0.0), ..a }, true);
+        h.st.end_live();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-3-line");
+        let a = arr(&h);
+        h.st.set_array(nurbs_kernel::Array { kind: nurbs_kernel::ArrayKind::Grid, count2: 2, step2: DVec3::new(0.0, 0.0, 24.0), ..a }, true);
+        h.st.end_live();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-4-grid");
+        // the original wider: the copies follow
+        h.st.edit("Width", |d| {
+            let f = d.feature_mut(vent).unwrap();
+            f.prim = Prim::Profile { x: 6.0, y: 10.0, z: 16.0 };
+            f.profile.as_mut().unwrap().corner = vec![3.0; 4];
+        });
+        h.st.select(None, false);
+        h.settle();
+        // the floor of a copy (the second row's sixth) inset and sunk
+        h.key(egui::Key::Num3);
+        let floor = h.screen_of(Vec3::new(14.0, 5.0, 12.0));
+        h.click(floor);
+        h.settle();
+        h.move_to(floor);
+        h.key(egui::Key::I);
+        h.settle();
+        h.st.set_push(1.0, -1.5, true);
+        h.st.end_live();
+        h.settle();
+        eprintln!("  order: {:?}", h.st.doc.features.iter().map(|f| f.name.clone()).collect::<Vec<_>>());
+        h.key(egui::Key::Num4);
+        h.st.select(None, false);
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-5-follow");
+        eprintln!("  errors: {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        // round a disc: a boss and its hole, 8 times
+        let mut d = Doc::default();
+        let disc = d.add(Op::Add, Prim::Cylinder { radius: 40.0, height: 8.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(disc).unwrap().name = "Disc".into();
+        let boss = d.add(Op::Add, Prim::Cylinder { radius: 5.0, height: 6.0 }, DVec3::new(30.0, 8.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(boss).unwrap().name = "Boss".into();
+        let hole = d.add(Op::Carve, Prim::Cylinder { radius: 2.0, height: 20.0 }, DVec3::new(30.0, -2.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(hole).unwrap().name = "Hole".into();
+        h.reset(d, "Array round");
+        h.st.camera.dist *= 1.15;
+        h.st.camera.pitch += 0.2;
+        h.settle();
+        // the boss's foot rounded
+        h.key(egui::Key::Num2);
+        h.click(h.screen_of(Vec3::new(30.0, 8.0, 5.0)));
+        h.st.set_round(1.5, false, true);
+        h.st.end_live();
+        h.settle();
+        h.key(egui::Key::Num4);
+        h.st.selection = vec![boss, hole];
+        h.hold(Modifiers::CTRL | Modifiers::SHIFT);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let a = arr(&h);
+        h.st.set_array(nurbs_kernel::Array { kind: nurbs_kernel::ArrayKind::Circle, count: 8, ..a }, true);
+        h.st.end_live();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-6-circle");
+        eprintln!("  circle: {:?}", arr(&h));
+        let a = arr(&h);
+        h.st.set_array(nurbs_kernel::Array { count: 5, angle: 180.0, ..a }, true);
+        h.st.end_live();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-7-half");
+        eprintln!("  errors: {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
     if want("align-window") {
         // Align (3ds Max's, Alt + A): a bracket turned 30° to the right of
         // the block, picked, Align, the block clicked; centre on centre,

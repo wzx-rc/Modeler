@@ -19,6 +19,8 @@ pub enum Icon {
     Undo,
     Redo,
     Mirror,
+    /// Pattern / Array: one shape and its copies in a row.
+    Array,
     Magnet,
     Grid,
     Export,
@@ -213,6 +215,14 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
             pen.line(&[(7.0, 5.0), (3.0, 10.0), (7.0, 15.0)]);
             pen.line(&[(13.0, 5.0), (17.0, 10.0), (13.0, 15.0)]);
+        }
+        Icon::Array => {
+            // the original filled, its copies drawn
+            let sq = |x: f32, y: f32| [(x - 2.4, y - 2.4), (x + 2.4, y - 2.4), (x + 2.4, y + 2.4), (x - 2.4, y + 2.4)];
+            pen.fill(&sq(4.5, 13.0), 0.9);
+            pen.closed(&sq(4.5, 13.0));
+            pen.closed(&sq(10.0, 10.0));
+            pen.closed(&sq(15.5, 7.0));
         }
         Icon::Magnet => {
             pen.line(&[(6.0, 3.0), (6.0, 9.0)]);

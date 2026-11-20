@@ -30,6 +30,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_vertices(p, st);
         draw_push(p, st);
         draw_mirror(p, st);
+        draw_array(p, st);
         draw_knife(p, st, ctx.input(|i| i.pointer.hover_pos()));
         draw_brush(p, st, ctx.input(|i| i.pointer.latest_pos()));
         if let (Some(g), Some(h)) = (&st.round_drag, ctx.input(|i| i.pointer.latest_pos())) {
@@ -1433,6 +1434,67 @@ fn draw_mirror(p: &Painter, st: &AppState) {
     }
 }
 
+/// The selected Array's places: a dot at each copy's middle (the
+/// original's ringed), joined in order by a dashed line (round a circle,
+/// an arc on its axis), with its count.
+fn draw_array(p: &Painter, st: &AppState) {
+    let Some((a, pts)) = st.array_marks() else { return };
+    let col = accent();
+    let screen: Vec<Option<Pos2>> = pts.iter().map(|w| world(st, *w)).collect();
+    let dash = |p: &Painter, line: &[Pos2]| {
+        if line.len() >= 2 {
+            p.add(egui::Shape::dashed_line(line, Stroke::new(1.2, tint(col, 0.6)), 5.0, 4.0));
+        }
+    };
+    match a.kind {
+        nurbs_kernel::ArrayKind::Circle => {
+            // the arc through the copies' middles, on the axis
+            let n = a.axis_dir();
+            let c0 = pts[0];
+            let centre = a.centre + n * (c0 - a.centre).dot(n);
+            let r0 = c0 - centre;
+            let total = if a.angle.abs() >= 359.999 { 360.0 } else { a.step_angle() * (a.count.max(1) - 1) as f64 };
+            let steps = ((total.abs() / 4.0).ceil() as usize).max(2);
+            let arc: Vec<Pos2> = (0..=steps).filter_map(|i| world(st, centre + glam::DQuat::from_axis_angle(n, (total * i as f64 / steps as f64).to_radians()) * r0)).collect();
+            dash(p, &arc);
+            // the axis, a little past the arc
+            let reach = r0.length().max(5.0) * 0.35;
+            if let (Some(u), Some(v)) = (world(st, centre - n * reach), world(st, centre + n * reach)) {
+                p.line_segment([u, v], Stroke::new(1.2, tint(col, 0.8)));
+                p.circle_filled(world(st, centre).unwrap_or(u), 2.5, col);
+            }
+        }
+        nurbs_kernel::ArrayKind::Line | nurbs_kernel::ArrayKind::Grid => {
+            let n = a.count.max(1) as usize;
+            let rows = if a.kind == nurbs_kernel::ArrayKind::Grid { a.count2.max(1) as usize } else { 1 };
+            // the places in rows: row j holds i = 0..n (the original first)
+            let at = |i: usize, j: usize| -> Option<Pos2> {
+                let k = j * n + i;
+                screen.get(k).copied().flatten()
+            };
+            for j in 0..rows {
+                let row: Vec<Pos2> = (0..n).filter_map(|i| at(i, j)).collect();
+                dash(p, &row);
+            }
+            if rows > 1 {
+                let col0: Vec<Pos2> = (0..rows).filter_map(|j| at(0, j)).collect();
+                dash(p, &col0);
+            }
+        }
+    }
+    for (k, s) in screen.iter().enumerate() {
+        let Some(s) = s else { continue };
+        if k == 0 {
+            p.circle_stroke(*s, 5.0, Stroke::new(1.5, col));
+        }
+        p.circle_filled(*s, 2.6, col);
+    }
+    if let Some(Some(last)) = screen.last() {
+        let total = pts.len();
+        chip(p, *last + vec2(12.0, -8.0), Align2::LEFT_BOTTOM, &format!("Array · {} · {total}", a.kind_name()), col, col);
+    }
+}
+
 fn draw_marquee(p: &Painter, st: &AppState) {
     if let Some((a, b)) = st.marquee {
         let r = Rect::from_two_pos(pos2(a[0], a[1]), pos2(b[0], b[1]));
@@ -1646,6 +1708,8 @@ pub fn hint(st: &AppState) -> String {
                     Handle::Cage(_) => "The side facing the grip stays · Shift: proportions kept · Alt: from the middle · Ctrl: no snapping · Release: keep it".into(),
                     _ => "Moving: the kernel rebuilds the booleans live".into(),
                 }
+            } else if st.selected_array().is_some() {
+                "Window: Line, Grid or Circle, how many, how far · A copy clicked is the original: an operation on it is made on all · Del: delete it".into()
             } else if st.selected_mirror().is_some() {
                 "Window: the plane's axis, where it passes, the side kept · The steps after it are made on both sides · Del: delete it".into()
             } else if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {
@@ -1667,7 +1731,7 @@ pub fn hint(st: &AppState) -> String {
             } else {
                 match st.gizmo {
                     GizmoMode::Select => "W: move · E: rotate · R: scale · Right button: menu · Del: delete · Esc: deselect".into(),
-                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · Alt + M: mirror · E: rotate · R: scale · Del: delete".into(),
+                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · Alt + M: mirror · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
                     GizmoMode::Scale => "Cage: a face's grip one side, an edge's two, a corner all three · Shift: proportions kept · Alt: from the middle · W: move · E: rotate".into(),
                 }

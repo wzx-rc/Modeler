@@ -1375,6 +1375,9 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                     if icon_btn(ui, Icon::Mirror, false, "Mirror (Alt+M): the part made symmetric across X, the steps after it on both sides", 28.0).clicked() {
                         st.add_mirror(0);
                     }
+                    if icon_btn(ui, Icon::Array, false, "Array (Ctrl+Shift+D): copies in a line, in rows or round an axis, with their operations", 28.0).clicked() {
+                        st.add_array();
+                    }
                 }
                 if icon_btn(ui, Icon::Frame, false, "Frame (F)", 28.0).clicked() {
                     st.frame_selection();
@@ -1452,6 +1455,8 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
                 r.edges.iter().map(|e| e.at).collect()
             } else if let Some((_, q)) = st.mirror_plane().filter(|_| f.mirror.is_some()) {
                 q.to_vec()
+            } else if let Some((_, q)) = st.array_marks().filter(|_| f.array.is_some()) {
+                q
             } else {
                 vec![f.origin]
             }
@@ -1754,6 +1759,8 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                         curve_make_card(ui, st, &f);
                     } else if f.mirror.is_some() {
                         mirror_card(ui, st, &f);
+                    } else if f.array.is_some() {
+                        array_card(ui, st, &f);
                     } else {
                         round_card(ui, st);
                     }
@@ -1799,6 +1806,97 @@ fn mirror_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
         st.set_mirror(nurbs_kernel::Mirror { flip: !m.flip, ..m }, true);
         st.end_live();
     }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
+        st.end_live();
+    }
+}
+
+/// A Pattern / Array step: Line, Grid or Circle, how many and how far;
+/// what it repeats.
+fn array_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
+    use nurbs_kernel::ArrayKind;
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let Some(a) = f.array.clone() else { return };
+    let c = TEXT();
+    let kinds: Vec<(ArrayKind, &str, Color32)> = vec![(ArrayKind::Line, "Line", c), (ArrayKind::Grid, "Grid", c), (ArrayKind::Circle, "Circle", c)];
+    if let Some(k) = ui.push_id("array-kind", |ui| segmented(ui, &kinds, a.kind, 28.0)).inner {
+        if k != a.kind {
+            let mut b = a.clone();
+            b.kind = k;
+            if k == ArrayKind::Circle {
+                b.count = b.count.max(3);
+                if b.centre == DVec3::ZERO {
+                    b.centre = st.circle_centre(&b.sources);
+                }
+            }
+            st.set_array(b, true);
+            st.end_live();
+        }
+    }
+    let colors = [AXIS_X, AXIS_Y, AXIS_Z];
+    let mut count = a.count as f32;
+    let (ch, start) = slider_row(ui, "Count", &mut count, 1.0..=50.0, 1.0, "");
+    if ch {
+        st.set_array(nurbs_kernel::Array { count: count.round().max(1.0) as u32, ..a.clone() }, start || !st.is_live());
+    }
+    // a vector as X / Y / Z fields
+    let vec_row = |ui: &mut Ui, st: &mut AppState, title: &str, v: DVec3, set: &dyn Fn(&mut nurbs_kernel::Array, DVec3)| {
+        ui.label(egui::RichText::new(title).font(regular(12.0)).color(TEXT2()));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for k in 0..3 {
+                let mut x = v[k] as f32;
+                let r = axis_field(ui, ["X", "Y", "Z"][k], colors[k], &mut x, "");
+                if r.changed() {
+                    let mut w = v;
+                    w[k] = x as f64;
+                    let mut b = a.clone();
+                    set(&mut b, w);
+                    st.set_array(b, r.drag_started() || !st.is_live());
+                }
+            }
+        });
+    };
+    match a.kind {
+        ArrayKind::Line | ArrayKind::Grid => {
+            vec_row(ui, st, "Step (from one to the next, mm)", a.step, &|b, w| b.step = w);
+            if a.kind == ArrayKind::Grid {
+                let mut rows = a.count2 as f32;
+                let (ch, start) = slider_row(ui, "Rows", &mut rows, 1.0..=30.0, 1.0, "");
+                if ch {
+                    st.set_array(nurbs_kernel::Array { count2: rows.round().max(1.0) as u32, ..a.clone() }, start || !st.is_live());
+                }
+                vec_row(ui, st, "Row step (mm)", a.step2, &|b, w| b.step2 = w);
+            }
+        }
+        ArrayKind::Circle => {
+            let items: Vec<(u8, &str, Color32)> = vec![(0, "X", AXIS_X), (1, "Y", AXIS_Y), (2, "Z", AXIS_Z)];
+            ui.label(egui::RichText::new("Round the axis").font(regular(12.0)).color(TEXT2()));
+            if let Some(x) = ui.push_id("array-axis", |ui| segmented(ui, &items, a.axis, 26.0)).inner {
+                if x != a.axis {
+                    st.set_array(nurbs_kernel::Array { axis: x, ..a.clone() }, true);
+                    st.end_live();
+                }
+            }
+            vec_row(ui, st, "Through (mm)", a.centre, &|b, w| b.centre = w);
+            let mut ang = a.angle as f32;
+            let (ch, start) = slider_row(ui, "Angle", &mut ang, 1.0..=360.0, 1.0, "°");
+            if ch {
+                st.set_array(nurbs_kernel::Array { angle: ang as f64, ..a.clone() }, start || !st.is_live());
+            }
+            ui.label(egui::RichText::new(if a.angle >= 359.999 { "360°: evenly all round" } else { "The first and the last at the ends of the angle" }).font(regular(11.0)).color(TEXT2()));
+        }
+    }
+    section(ui, "Repeats");
+    let names: Vec<String> = a.sources.iter().filter_map(|id| st.doc.feature(*id)).map(|g| g.name.clone()).collect();
+    let ops = st.doc.features.iter().position(|x| x.id == f.id).map(|i| st.doc.array_pattern(i).iter().filter(|p| !p.is_solid()).count()).unwrap_or(0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(names.join(", ")).font(semibold(13.0)).color(TEXT()));
+        if ops > 0 {
+            chip_label(ui, &format!("+ {ops} operation{}", if ops == 1 { "" } else { "s" }), RAISED(), LABEL());
+        }
+    });
+    ui.label(egui::RichText::new("An operation on any copy is made on all of them").font(regular(11.0)).color(TEXT2()));
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
         st.end_live();
     }
@@ -2516,6 +2614,9 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         }
         if f.is_solid() && icon_btn(ui, Icon::Mirror, false, "Mirror (Alt+M): the part made symmetric across X, the steps after it on both sides", 30.0).clicked() {
             st.add_mirror(0);
+        }
+        if f.is_solid() && !f.is_path() && icon_btn(ui, Icon::Array, false, "Array (Ctrl+Shift+D): copies in a line, in rows or round an axis, with their operations", 30.0).clicked() {
+            st.add_array();
         }
         if icon_btn(ui, if f.visible { Icon::Eye } else { Icon::EyeOff }, false, "Hide", 30.0).clicked() {
             st.toggle_visible(id);
@@ -3448,7 +3549,12 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.redo();
         }
         if pressed(Key::D) {
-            st.duplicate_selected();
+            // Ctrl + Shift + D: Pattern / Array (Maya's Duplicate Special)
+            if shift {
+                st.add_array();
+            } else {
+                st.duplicate_selected();
+            }
         }
         if pressed(Key::S) {
             st.files_open = true;

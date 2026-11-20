@@ -1480,7 +1480,7 @@ fn mirrored_doc(doc: &Doc) -> Option<Doc> {
             let refl = |p: DVec3| m.reflect(p);
             let mut g = f.carried_by(&refl);
             if g != *f {
-                g.name = format!("{} (mirror side)", f.name);
+                g.name = format!("{}{MIRROR_SIDE}", f.name);
                 out.features.push(g);
             }
         } else {
@@ -1490,9 +1490,40 @@ fn mirrored_doc(doc: &Doc) -> Option<Doc> {
     Some(out)
 }
 
-/// The image of the step before it (`mirrored_doc`): the same id.
+/// The image of the step before it (`mirrored_doc`): the same id (an
+/// Array's copies have it too, but not the name).
 fn twin_of<'a>(feats: &[&'a Feature], i: usize) -> Option<&'a Feature> {
-    (i > 0 && feats[i - 1].id == feats[i].id).then(|| feats[i - 1])
+    (i > 0 && feats[i - 1].id == feats[i].id && feats[i].name.ends_with(MIRROR_SIDE)).then(|| feats[i - 1])
+}
+
+const MIRROR_SIDE: &str = " (mirror side)";
+
+/// The document with each Pattern / Array's shapes and operations made
+/// again at each copy's place, just after it (`Doc::array_pattern`), copy
+/// after copy: the same ids, so a copy's faces carry the original's tags
+/// (a click on a copy names the original's faces, and a fillet's edges are
+/// found again on each copy near its own points). None when there is no
+/// Array. (Before `mirrored_doc`: the copies after a Mirror are made on
+/// both sides.)
+fn arrayed_doc(doc: &Doc) -> Option<Doc> {
+    if !doc.features.iter().any(|f| f.array.is_some() && f.visible && !f.suspended) {
+        return None;
+    }
+    let mut out = doc.clone();
+    out.features.clear();
+    for (i, f) in doc.features.iter().enumerate() {
+        out.features.push(f.clone());
+        let Some(a) = f.array.as_ref().filter(|_| f.visible && !f.suspended) else { continue };
+        let pat = doc.array_pattern(i);
+        for (n, (_, m)) in a.copies().into_iter().enumerate() {
+            for p in &pat {
+                let mut g = if p.is_solid() { p.moved_by(m) } else { p.carried_by(&|q| m.transform_point3(q)) };
+                g.name = format!("{} (copy {})", p.name, n + 2);
+                out.features.push(g);
+            }
+        }
+    }
+    Some(out)
 }
 
 /// An image step that names what its step named on the solid before them
@@ -1954,7 +1985,9 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let mut model = Model { fine, ..Default::default() };
     let mut used_tools = vec![];
     let mut used_stages = vec![];
-    // after a Mirror, each step made on both sides
+    // each Array's copies, then after a Mirror each step on both sides
+    let arrayed = arrayed_doc(doc);
+    let doc = arrayed.as_ref().unwrap_or(doc);
     let mirrored = mirrored_doc(doc);
     let doc = mirrored.as_ref().unwrap_or(doc);
     let feats: Vec<&Feature> = doc.features.iter().filter(|f| f.visible && !f.suspended && doc.makes(f) == Makes::Solid).collect();
@@ -2023,6 +2056,15 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         cache.tools.retain(|k, _| used_tools.contains(k));
     }
     model.errors = stage.errors.clone();
+    // an Array's shapes it cannot repeat
+    for f in doc.features.iter().filter(|f| f.visible && !f.suspended) {
+        let Some(a) = &f.array else { continue };
+        for g in a.sources.iter().filter_map(|id| doc.feature(*id)) {
+            if g.shape_bool.is_some() || g.loft.is_some() {
+                model.errors.push(format!("{}: {} is not repeated (its curves are elsewhere)", f.name, g.name));
+            }
+        }
+    }
     // the Curves set's 2D booleans: made exactly, their edges sent back
     let mut regions = HashMap::new();
     for f in doc.features.iter().filter(|f| f.visible && !f.suspended && f.shape_bool.is_some()) {
@@ -2195,6 +2237,104 @@ mod tests {
         // the vertex at the −X end moved down too: the part stays symmetric
         let low: Vec<[f32; 3]> = m.positions.iter().filter(|q| q[2] < -13.9).copied().collect();
         assert!(low.iter().any(|q| q[0] > 29.0) && low.iter().any(|q| q[0] < -29.0), "{low:?}");
+    }
+
+    /// The edge whose polyline passes nearest `p` (its middle as `at`).
+    fn edge_through(m: &Model, p: DVec3) -> EdgeRef {
+        let d = |e: &crate::model::Edge| e.pts.iter().map(|q| DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64).distance(p)).fold(f64::MAX, f64::min);
+        let e = m.edges.iter().filter(|e| !e.seam && e.faces[0] >= 0 && e.faces[1] >= 0).min_by(|a, b| d(a).total_cmp(&d(b))).unwrap();
+        let t = |i: i32| m.faces[i as usize].tag.unwrap().pack();
+        let q = e.pts[e.pts.len() / 2];
+        EdgeRef { faces: [t(e.faces[0]), t(e.faces[1])], at: DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64) }
+    }
+
+    #[test]
+    fn array_live() {
+        use crate::doc::{Array, ArrayKind};
+        // a plate, a hole with a rounded rim: repeated 4 times along X
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 80.0, y: 10.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let h = d.add(Op::Carve, Prim::Cylinder { radius: 3.0, height: 20.0 }, DVec3::new(-30.0, -5.0, -7.0), DQuat::IDENTITY);
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        let r = d.add_round(1.0, false, vec![edge_through(&m, DVec3::new(-27.0, 10.0, -7.0))]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let one = 80.0 * 10.0 * 30.0 - mesh_volume(&m);
+        let a = d.add_array(Array { sources: vec![h], kind: ArrayKind::Line, count: 4, step: DVec3::new(20.0, 0.0, 0.0), count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 });
+        let fa = d.feature(a).unwrap();
+        assert_eq!(fa.kind_label(), "Array");
+        assert!(!fa.is_solid());
+        assert_eq!(d.array_pattern(3).iter().map(|f| f.id).collect::<Vec<_>>(), vec![h, r]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let holes = |m: &Model| {
+            let mut v = m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: h, sub: 0 })).map(|f| (f.axis_origin[0] * 10.0).round() / 10.0).collect::<Vec<_>>();
+            v.sort_by(f64::total_cmp);
+            v
+        };
+        assert_eq!(holes(&m), vec![-30.0, -10.0, 10.0, 30.0], "{:?}", holes(&m));
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 4);
+        let v4 = 80.0 * 10.0 * 30.0 - 4.0 * one;
+        assert!((mesh_volume(&m) - v4).abs() < 2.0, "{} {v4}", mesh_volume(&m));
+        // in a grid of 4 × 2: 8
+        let set = |d: &mut Doc, f: &dyn Fn(&mut Array)| f(d.feature_mut(a).unwrap().array.as_mut().unwrap());
+        set(&mut d, &|x| {
+            x.kind = ArrayKind::Grid;
+            x.count2 = 2;
+            x.step2 = DVec3::new(0.0, 0.0, 14.0);
+        });
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(holes(&m).len(), 8);
+        let v8 = 80.0 * 10.0 * 30.0 - 8.0 * one;
+        assert!((mesh_volume(&m) - v8).abs() < 3.0, "{} {v8}", mesh_volume(&m));
+        // the original moved: the copies follow
+        set(&mut d, &|x| x.kind = ArrayKind::Line);
+        d.feature_mut(h).unwrap().origin.x = -32.0;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(holes(&m), vec![-32.0, -12.0, 8.0, 28.0], "{:?}", holes(&m));
+        d.feature_mut(h).unwrap().origin.x = -30.0;
+        // a fillet made after the Array on the third copy's bottom rim:
+        // moved before it, brought back to the original, made on all four
+        let m = build(&d, true, false, &[], &mut cache);
+        let r2 = d.add_round(0.5, false, vec![edge_through(&m, DVec3::new(13.0, 0.0, -7.0))]);
+        assert!(d.keep_arrays());
+        let order: Vec<u32> = d.features.iter().map(|f| f.id).collect();
+        assert_eq!(order, vec![1, h, r, r2, a]);
+        let at = d.feature(r2).unwrap().round.as_ref().unwrap().edges[0].at;
+        assert!((at.x + 30.0).abs() < 3.5 && at.y.abs() < 1e-3, "{at:?}");
+        assert!(!d.keep_arrays());
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r2)).count(), 4);
+        // round a disc: a boss and its fillet 6 times round Y
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Cylinder { radius: 30.0, height: 8.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let b = d.add(Op::Add, Prim::Box { x: 6.0, y: 4.0, z: 6.0 }, DVec3::new(20.0, 8.0, 0.0), DQuat::IDENTITY);
+        let m = build(&d, true, false, &[], &mut cache);
+        d.add_round(1.0, false, vec![edge_through(&m, DVec3::new(23.0, 12.0, 0.0))]);
+        let a = d.add_array(Array { sources: vec![b], kind: ArrayKind::Circle, count: 6, step: DVec3::ZERO, count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 });
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let tops: Vec<[f64; 3]> = m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: b, sub: 2 })).map(|f| f.point).collect();
+        assert_eq!(tops.len(), 6);
+        // the copies' tops all 12 high, all 20 from the axis or so
+        assert!(tops.iter().all(|p| (p[1] - 12.0).abs() < 1e-3), "{tops:?}");
+        // half round: 4 over 180°, the last at −X
+        let fa = d.feature_mut(a).unwrap().array.as_mut().unwrap();
+        fa.count = 4;
+        fa.angle = 180.0;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, _) = m.bounds().unwrap();
+        assert!((lo[1] - 0.0).abs() < 1e-3);
+        let tops: Vec<[f64; 3]> = m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: b, sub: 2 })).map(|f| f.point).collect();
+        assert_eq!(tops.len(), 4);
+        // deleted, the original stays alone; the Array goes with its shape
+        d.remove(&[b]);
+        assert!(d.feature(a).is_none());
     }
 
     #[test]

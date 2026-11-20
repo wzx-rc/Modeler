@@ -943,6 +943,12 @@ pub struct Feature {
     /// symmetric, and every step after it is made on both sides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror: Option<Mirror>,
+    /// A Pattern / Array step (Romain 20 nov., 16 h 44, chosen among the
+    /// tools proposed: "une forme et ses opérations répétées en ligne ou en
+    /// cercle"): its shapes and their operations before it, made again at
+    /// each copy's place (`Doc::array_pattern`, the kernel's `arrayed_doc`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub array: Option<Array>,
 }
 
 /// Mirror's settings: a plane square to a world axis.
@@ -992,6 +998,114 @@ impl Mirror {
     }
     pub fn axis_name(&self) -> &'static str {
         ["X", "Y", "Z"][self.axis.min(2) as usize]
+    }
+}
+
+fn one_u() -> u32 {
+    1
+}
+fn is_one_u(x: &u32) -> bool {
+    *x == 1
+}
+fn full_turn() -> f64 {
+    360.0
+}
+fn up_axis() -> u8 {
+    1
+}
+
+/// How an Array lays its copies out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArrayKind {
+    /// In a line, `step` apart.
+    Line,
+    /// In rows: `count` along `step`, `count2` rows along `step2`.
+    Grid,
+    /// Round a world axis.
+    Circle,
+}
+
+/// Pattern / Array's settings.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Array {
+    /// The shapes repeated, each with its operations made before the step.
+    pub sources: Vec<FeatureId>,
+    pub kind: ArrayKind,
+    /// How many along the line or round the circle, the original counted.
+    pub count: u32,
+    /// From one to the next (Line, Grid).
+    #[serde(default)]
+    pub step: DVec3,
+    /// Grid: how many rows, the first counted, and from one to the next.
+    #[serde(default = "one_u", skip_serializing_if = "is_one_u")]
+    pub count2: u32,
+    #[serde(default)]
+    pub step2: DVec3,
+    /// Circle: the world axis turned round (0 X, 1 Y, 2 Z) and a point on it.
+    #[serde(default = "up_axis")]
+    pub axis: u8,
+    #[serde(default)]
+    pub centre: DVec3,
+    /// Circle: the angle the copies spread over (360: evenly all round).
+    #[serde(default = "full_turn")]
+    pub angle: f64,
+}
+
+/// At most this many copies (the booleans take time).
+pub const ARRAY_MAX: usize = 200;
+
+impl Array {
+    pub fn axis_dir(&self) -> DVec3 {
+        match self.axis {
+            0 => DVec3::X,
+            1 => DVec3::Y,
+            _ => DVec3::Z,
+        }
+    }
+    /// The angle from one copy to the next round the circle (degrees).
+    pub fn step_angle(&self) -> f64 {
+        let n = self.count.max(1) as f64;
+        if self.angle.abs() >= 359.999 {
+            self.angle / n
+        } else if n > 1.0 {
+            self.angle / (n - 1.0)
+        } else {
+            0.0
+        }
+    }
+    /// The copies' places (the original's left out): each its index along
+    /// the line or circle and its row, and the move from the original (a
+    /// move, or a turn round the axis).
+    pub fn copies(&self) -> Vec<([u32; 2], DMat4)> {
+        let mut out = vec![];
+        let n = self.count.clamp(1, ARRAY_MAX as u32);
+        match self.kind {
+            ArrayKind::Line | ArrayKind::Grid => {
+                let rows = if self.kind == ArrayKind::Grid { self.count2.clamp(1, ARRAY_MAX as u32) } else { 1 };
+                for j in 0..rows {
+                    for i in 0..n {
+                        if (i, j) != (0, 0) && out.len() < ARRAY_MAX {
+                            out.push(([i, j], DMat4::from_translation(self.step * i as f64 + self.step2 * j as f64)));
+                        }
+                    }
+                }
+            }
+            ArrayKind::Circle => {
+                let d = self.step_angle().to_radians();
+                for i in 1..n {
+                    let r = DMat4::from_axis_angle(self.axis_dir(), d * i as f64);
+                    out.push(([i, 0], DMat4::from_translation(self.centre) * r * DMat4::from_translation(-self.centre)));
+                }
+            }
+        }
+        out
+    }
+    pub fn kind_name(&self) -> &'static str {
+        match self.kind {
+            ArrayKind::Line => "Line",
+            ArrayKind::Grid => "Grid",
+            ArrayKind::Circle => "Circle",
+        }
     }
 }
 
@@ -1247,7 +1361,7 @@ impl Feature {
     /// A primitive (Add / Carve), not a step on the part (fillet,
     /// chamfer, inset, extrude).
     pub fn is_solid(&self) -> bool {
-        self.round.is_none() && self.push.is_none() && self.tweak.is_none() && self.cut.is_none() && self.mirror.is_none()
+        self.round.is_none() && self.push.is_none() && self.tweak.is_none() && self.cut.is_none() && self.mirror.is_none() && self.array.is_none()
     }
     /// An operation (a fillet, an inset, a move, the Knife, a Mirror)
     /// with its points mapped by `m` (an affine map, a mirror allowed):
@@ -1288,6 +1402,23 @@ impl Feature {
             }
         }
         f
+    }
+    /// A shape moved rigidly by `m` (a move and a turn): its base and
+    /// frame (its outline, poles and sheet points are in its own frame).
+    pub fn moved_by(&self, m: DMat4) -> Feature {
+        let mut f = self.clone();
+        let (_, q, _) = m.to_scale_rotation_translation();
+        f.origin = m.transform_point3(self.origin);
+        f.rot = (q * self.rot).normalize();
+        f
+    }
+    /// How far `p` lies from its box (0 inside).
+    pub fn box_distance(&self, p: DVec3) -> f64 {
+        let (hx, hz) = self.prim.half_xz();
+        let h = self.prim.height();
+        let l = self.matrix().inverse().transform_point3(p);
+        let d = DVec3::new((l.x.abs() - hx).max(0.0), (l.y - h).max(-l.y).max(0.0), (l.z.abs() - hz).max(0.0));
+        d.length()
     }
     /// A path: a curve with no thickness, nothing for the kernel.
     pub fn is_path(&self) -> bool {
@@ -1354,6 +1485,9 @@ impl Feature {
     pub fn kind_label(&self) -> &'static str {
         if self.mirror.is_some() {
             return "Mirror";
+        }
+        if self.array.is_some() {
+            return "Array";
         }
         if let Some(k) = &self.cut {
             return k.label();
@@ -1495,6 +1629,76 @@ impl Feature {
     }
 }
 
+/// A packed face tag made by one of `ids`.
+fn tag_in(tag: i64, ids: &[FeatureId]) -> bool {
+    tag >= 0 && ids.contains(&((tag >> 16) as FeatureId))
+}
+
+/// The features whose faces an operation names.
+fn named_features(f: &Feature) -> Vec<FeatureId> {
+    let mut tags: Vec<i64> = vec![];
+    if let Some(r) = &f.round {
+        tags.extend(r.edges.iter().flat_map(|e| e.faces));
+    }
+    if let Some(p) = &f.push {
+        tags.push(p.face.tag);
+    }
+    if let Some(t) = &f.tweak {
+        for c in t.comps() {
+            match c {
+                Comp::Face(r) => tags.push(r.tag),
+                Comp::Edge(e) => tags.extend(e.faces),
+                Comp::Vertex(_) => {}
+            }
+        }
+    }
+    if let Some(k) = &f.cut {
+        tags.extend(k.pts.iter().flat_map(|p| p.edge.faces));
+        tags.extend(k.remove_faces.iter().map(|r| r.tag));
+        tags.extend(k.remove_edges.iter().flat_map(|e| e.faces));
+    }
+    let mut ids: Vec<FeatureId> = tags.iter().filter(|t| **t >= 0).map(|t| (*t >> 16) as FeatureId).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// An operation as an Array repeats it, when it works on what the Array
+/// repeats (`ids`: its shapes and the operations taken so far): a fillet
+/// with only its edges touching them; an inset, a move or a Knife when all
+/// it names lies on them (a vertex inside one of the shapes' boxes).
+fn pattern_op(f: &Feature, ids: &[FeatureId], srcs: &[&Feature]) -> Option<Feature> {
+    if f.mirror.is_some() || f.array.is_some() {
+        return None;
+    }
+    if let Some(r) = &f.round {
+        let edges: Vec<EdgeRef> = r.edges.iter().filter(|e| e.faces.iter().any(|t| tag_in(*t, ids))).cloned().collect();
+        if edges.is_empty() {
+            return None;
+        }
+        let mut g = f.clone();
+        g.round.as_mut().unwrap().edges = edges;
+        return Some(g);
+    }
+    if let Some(p) = &f.push {
+        return tag_in(p.face.tag, ids).then(|| f.clone());
+    }
+    if let Some(t) = &f.tweak {
+        let on = |c: &Comp| match c {
+            Comp::Face(r) => tag_in(r.tag, ids),
+            Comp::Edge(e) => e.faces.iter().any(|t| tag_in(*t, ids)),
+            Comp::Vertex(v) => srcs.iter().any(|s| s.box_distance(*v) < 1e-3),
+        };
+        return t.comps().all(on).then(|| f.clone());
+    }
+    if let Some(k) = &f.cut {
+        let all = k.pts.iter().all(|p| p.edge.faces.iter().any(|t| tag_in(*t, ids))) && k.remove_faces.iter().all(|r| tag_in(r.tag, ids)) && k.remove_edges.iter().all(|e| e.faces.iter().any(|t| tag_in(*t, ids)));
+        let some = !k.pts.is_empty() || !k.remove_faces.is_empty() || !k.remove_edges.is_empty();
+        return (all && some).then(|| f.clone());
+    }
+    None
+}
+
 /// FNV-1a over bytes.
 pub fn fnv(bytes: &[u8]) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
@@ -1573,7 +1777,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -1583,7 +1787,7 @@ impl Doc {
         let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0, only: false };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None });
         id
     }
     /// Adds an inset or extrusion of a face at the end.
@@ -1592,7 +1796,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(push.label());
         let origin = push.face.at;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None });
         id
     }
     /// Adds a move of a face, edge or vertex at the end.
@@ -1601,7 +1805,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(tweak.label());
         let origin = tweak.at();
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None });
         id
     }
     /// Adds a Mirror step at the end.
@@ -1610,8 +1814,108 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name("Mirror");
         let origin = mirror.normal() * mirror.offset;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: Some(mirror) });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: Some(mirror), array: None });
         id
+    }
+    /// Adds a Pattern / Array step at the end.
+    pub fn add_array(&mut self, array: Array) -> FeatureId {
+        let id = self.next_id;
+        self.next_id += 1;
+        let name = self.fresh_name("Array");
+        let origin = array.sources.iter().filter_map(|s| self.feature(*s)).map(|f| f.centre()).next().unwrap_or(DVec3::ZERO);
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: Some(array) });
+        id
+    }
+    /// What the Array at `at` makes again at each copy's place, in history
+    /// order: its shapes, then the operations made before it on them (or
+    /// on those operations' faces): a fillet's or chamfer's edges that
+    /// touch them (the others left out), an inset or extrude of one of
+    /// their faces, a move or a Knife whose components all lie on them. A
+    /// 2D boolean or a loft is left out (its curves are elsewhere).
+    pub fn array_pattern(&self, at: usize) -> Vec<Feature> {
+        let Some(a) = self.features.get(at).and_then(|f| f.array.as_ref()) else { return vec![] };
+        let srcs: Vec<&Feature> = self.features[..at].iter().filter(|f| a.sources.contains(&f.id) && f.visible && !f.suspended && f.is_solid() && f.shape_bool.is_none() && f.loft.is_none()).collect();
+        let mut ids: Vec<FeatureId> = srcs.iter().map(|f| f.id).collect();
+        let mut out: Vec<Feature> = vec![];
+        for f in &self.features[..at] {
+            if !f.visible || f.suspended {
+                continue;
+            }
+            if f.is_solid() {
+                if ids.contains(&f.id) {
+                    out.push(f.clone());
+                }
+                continue;
+            }
+            if let Some(g) = pattern_op(f, &ids, &srcs) {
+                ids.push(f.id);
+                out.push(g);
+            }
+        }
+        out
+    }
+    /// An operation made after an Array on what it repeats (a click on a
+    /// copy names the original's faces): moved just before the Array, its
+    /// points brought back from the copy they were picked on to the
+    /// original, so every copy takes it. Not one that names a step made
+    /// after the Array. True when one moved.
+    pub fn keep_arrays(&mut self) -> bool {
+        let mut moved = false;
+        for _ in 0..64 {
+            let mut change: Option<(usize, usize, Feature)> = None;
+            'arrays: for (a, fa) in self.features.iter().enumerate() {
+                let Some(arr) = fa.array.as_ref().filter(|_| fa.visible && !fa.suspended) else { continue };
+                let pat = self.array_pattern(a);
+                let ids: Vec<FeatureId> = pat.iter().map(|f| f.id).collect();
+                let srcs: Vec<&Feature> = pat.iter().filter(|f| f.is_solid()).collect();
+                if srcs.is_empty() {
+                    continue;
+                }
+                let before: Vec<FeatureId> = self.features[..a].iter().map(|f| f.id).collect();
+                for (o, f) in self.features.iter().enumerate().skip(a + 1) {
+                    if !f.visible || f.suspended || f.is_solid() || f.mirror.is_some() || f.array.is_some() {
+                        continue;
+                    }
+                    let named = named_features(f);
+                    if named.is_empty() || !named.iter().all(|n| before.contains(n)) || pattern_op(f, &ids, &srcs).is_none() {
+                        continue;
+                    }
+                    // each point back to the original: of the copies' moves
+                    // undone, the one that brings it nearest the shapes
+                    let back = |p: DVec3| -> DMat4 {
+                        let mut best = (srcs.iter().map(|s| s.box_distance(p)).fold(f64::MAX, f64::min), DMat4::IDENTITY);
+                        for (_, m) in arr.copies() {
+                            let inv = m.inverse();
+                            let q = inv.transform_point3(p);
+                            let d = srcs.iter().map(|s| s.box_distance(q)).fold(f64::MAX, f64::min);
+                            if d < best.0 - 1e-6 {
+                                best = (d, inv);
+                            }
+                        }
+                        best.1
+                    };
+                    let mut g = f.clone();
+                    if let Some(r) = g.round.as_mut() {
+                        for e in r.edges.iter_mut().filter(|e| e.faces.iter().any(|t| tag_in(*t, &ids))) {
+                            e.at = back(e.at).transform_point3(e.at);
+                        }
+                    } else {
+                        let p = g.push.as_ref().map(|p| p.face.at).or(g.tweak.as_ref().map(|t| t.at())).or(g.cut.as_ref().and_then(|k| k.pts.first().map(|p| p.at).or(k.remove_faces.first().map(|r| r.at)).or(k.remove_edges.first().map(|e| e.at))));
+                        if let Some(p) = p {
+                            let m = back(p);
+                            g = g.carried_by(&|q| m.transform_point3(q));
+                        }
+                    }
+                    change = Some((o, a, g));
+                    break 'arrays;
+                }
+            }
+            let Some((o, a, g)) = change else { break };
+            self.features.remove(o);
+            self.features.insert(a, g);
+            moved = true;
+        }
+        moved
     }
     /// Adds a Knife step (its first point) at the end.
     pub fn add_knife(&mut self, cut: Knife, name: &str) -> FeatureId {
@@ -1619,7 +1923,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(name);
         let origin = cut.pts.first().map(|p| p.at).or(cut.remove_faces.first().map(|r| r.at)).or(cut.remove_edges.first().map(|e| e.at)).unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None });
         id
     }
     /// The curves' outlines made again from their settings and boxes (a
@@ -1699,6 +2003,9 @@ impl Doc {
     /// or a sheet beside the part (a surface, a curve filled, a curve
     /// turned open, a loft of open curves).
     pub fn makes(&self, f: &Feature) -> Makes {
+        if f.array.is_some() {
+            return Makes::Nothing;
+        }
         if f.sheet.is_some() {
             return Makes::Sheet;
         }
@@ -1747,8 +2054,11 @@ impl Doc {
                 if let Some(l) = f.loft.as_mut() {
                     l.sections.retain(|o| !out.contains(o));
                 }
+                if let Some(a) = f.array.as_mut() {
+                    a.sources.retain(|o| !out.contains(o));
+                }
             }
-            let empty: Vec<FeatureId> = self.features.iter().filter(|f| f.shape_bool.as_ref().map(|b| b.operands.is_empty()).unwrap_or(false) || f.loft.as_ref().map(|l| l.sections.len() < 2).unwrap_or(false)).map(|f| f.id).collect();
+            let empty: Vec<FeatureId> = self.features.iter().filter(|f| f.shape_bool.as_ref().map(|b| b.operands.is_empty()).unwrap_or(false) || f.loft.as_ref().map(|l| l.sections.len() < 2).unwrap_or(false) || f.array.as_ref().map(|a| a.sources.is_empty()).unwrap_or(false)).map(|f| f.id).collect();
             if empty.is_empty() {
                 break;
             }
