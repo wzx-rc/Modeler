@@ -45,7 +45,7 @@ impl PatchState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Patch {
     /// The control points in the mesh's unit box (as its points). One
     /// patch (a surface from a path): its 16, `cv[j * 4 + i]`, i along u, j
@@ -73,6 +73,27 @@ pub struct Patch {
     /// the clay).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep: Option<PolyKeep>,
+    /// A closed object's ends made of several patches round a rim (a
+    /// cylinder's caps, five each): their inside curves made from the rim,
+    /// not edited (`derive`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<Cap>,
+    /// The seams kept smooth (the side of two patches, by its 4 control
+    /// points, `curve_key`): a cylinder's side, an end's inside. The inner
+    /// points next to them are made to meet in line across them (G1), and
+    /// a tangent point moved there takes the one across its corner along.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub smooth: Vec<[u32; 4]>,
+}
+
+/// An end of a closed object made of five patches (`cap_patches`): its
+/// rim's 12 control points (indices into `cv`, corners at 0, 3, 6, 9) and
+/// its inside curves, each its 4 control points and its line in the rim's
+/// Coons square (s0, t0, s1, t1).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Cap {
+    pub rim: [u32; 12],
+    pub curves: Vec<([u32; 4], [f32; 4])>,
 }
 
 /// The Sculpt state's details (Romain, 20 nov., 23 h: "faire aussi le lien
@@ -176,6 +197,33 @@ pub fn topo_key(faces: &[Vec<u32>]) -> u64 {
 /// at 0, 3, 6 and 9, the two between each pair are its side's tangents.
 pub const CONTOUR: [usize; 12] = [0, 1, 2, 3, 7, 11, 15, 14, 13, 12, 8, 4];
 
+/// A patch's four sides' control points, each from its lower end: 0 v = 0,
+/// 1 u = 1, 2 v = 1, 3 u = 0 (as `side`).
+pub const SIDES: [[usize; 4]; 4] = [[0, 1, 2, 3], [3, 7, 11, 15], [12, 13, 14, 15], [0, 4, 8, 12]];
+
+/// The row of control points next to each side, inside the patch, in the
+/// side's order.
+const NEXT: [[usize; 4]; 4] = [[4, 5, 6, 7], [2, 6, 10, 14], [8, 9, 10, 11], [1, 5, 9, 13]];
+
+/// A side's control points in one order whichever way it is given.
+pub fn curve_key(c: [u32; 4]) -> [u32; 4] {
+    if c[0] > c[3] || (c[0] == c[3] && c[1] > c[2]) {
+        [c[3], c[2], c[1], c[0]]
+    } else {
+        c
+    }
+}
+
+/// A side's (u, v) at t along it.
+pub fn side_uv(s: usize, t: f32) -> (f32, f32) {
+    match s {
+        0 => (t, 0.0),
+        1 => (1.0, t),
+        2 => (t, 1.0),
+        _ => (0.0, t),
+    }
+}
+
 /// A control point of the contour that is a corner.
 pub fn is_corner(cv: usize) -> bool {
     matches!(cv, 0 | 3 | 12 | 15)
@@ -212,7 +260,7 @@ impl Patch {
             cv[at(k, 3)] = c[3].lerp(c[2], t);
             cv[at(0, k)] = c[0].lerp(c[3], t);
         }
-        let mut p = Patch { cv: cv.iter().map(|v| v.to_array()).collect(), state: PatchState::Nurbs, bind: vec![], quads: vec![], on: vec![], sculpt: None, keep: None };
+        let mut p = Patch { cv: cv.iter().map(|v| v.to_array()).collect(), ..Default::default() };
         p.fill_inside();
         p
     }
@@ -240,7 +288,9 @@ impl Patch {
             }
             quads.push(idx);
         }
-        let mut p = Patch { cv: cv.iter().map(|v| v.to_array()).collect(), state: PatchState::Nurbs, bind: vec![], quads, on: vec![], sculpt: None, keep: None };
+        let mut p = Patch { cv: cv.iter().map(|v| v.to_array()).collect(), quads, ..Default::default() };
+        p.fill_inside();
+        p.mark_smooth();
         p.fill_inside();
         p
     }
@@ -264,12 +314,14 @@ impl Patch {
     }
 
     /// The contour's control points (the ones edited: every patch's
-    /// border, each once), in order round each patch.
+    /// border, each once, those made from others aside: an end's inside),
+    /// in order round each patch.
     pub fn contour(&self) -> Vec<usize> {
+        let d = self.derived();
         let mut out = vec![];
         for q in self.patches() {
             for k in CONTOUR {
-                if !out.contains(&q[k]) {
+                if !d[q[k]] && !out.contains(&q[k]) {
                     out.push(q[k]);
                 }
             }
@@ -283,14 +335,16 @@ impl Patch {
         self.patches().iter().any(|q| [0, 3, 12, 15].iter().any(|k| q[*k] == cv))
     }
 
-    /// The tangent points a corner carries (every patch that holds it).
+    /// The tangent points a corner carries (every patch that holds it),
+    /// those made from others aside.
     pub fn handles(&self, cv: usize) -> Vec<usize> {
+        let d = self.derived();
         let mut out = vec![];
         for q in self.patches() {
             for (c, t) in [(0, [1, 4]), (3, [2, 7]), (15, [14, 11]), (12, [13, 8])] {
                 if q[c] == cv {
                     for k in t {
-                        if !out.contains(&q[k]) {
+                        if !d[q[k]] && !out.contains(&q[k]) {
                             out.push(q[k]);
                         }
                     }
@@ -300,14 +354,31 @@ impl Patch {
         out
     }
 
+    /// The corner a tangent point belongs to: its side's end next to it.
+    pub fn corner_of(&self, t: usize) -> Option<usize> {
+        for q in self.patches() {
+            for side in SIDES {
+                let c = side.map(|i| q[i]);
+                if c[1] == t {
+                    return Some(c[0]);
+                }
+                if c[2] == t {
+                    return Some(c[3]);
+                }
+            }
+        }
+        None
+    }
+
     /// The pairs (corner, tangent point) of every patch's hull (the lines
-    /// drawn in Vertex mode), each once.
+    /// drawn in Vertex mode), each once, those made from others aside.
     pub fn hull(&self) -> Vec<(usize, usize)> {
+        let d = self.derived();
         let mut out: Vec<(usize, usize)> = vec![];
         for q in self.patches() {
             for (c, t) in [(0, 1), (3, 2), (3, 7), (15, 11), (15, 14), (12, 13), (12, 8), (0, 4)] {
                 let e = (q[c], q[t]);
-                if !out.contains(&e) {
+                if !d[e.0] && !d[e.1] && !out.contains(&e) {
                     out.push(e);
                 }
             }
@@ -315,10 +386,55 @@ impl Patch {
         out
     }
 
+    /// The control points made from others: an end's inside curves (its
+    /// rim's own points aside).
+    pub fn derived(&self) -> Vec<bool> {
+        let mut d = vec![false; self.cv.len()];
+        for c in &self.caps {
+            for (cv, _) in &c.curves {
+                for i in cv {
+                    if let Some(x) = d.get_mut(*i as usize) {
+                        *x = true;
+                    }
+                }
+            }
+        }
+        for c in &self.caps {
+            for i in c.rim {
+                if let Some(x) = d.get_mut(i as usize) {
+                    *x = false;
+                }
+            }
+        }
+        d
+    }
+
+    /// The ends' inside curves made again from their rims (each the cubic
+    /// through the rim's Coons patch along its line).
+    pub fn derive(&mut self) {
+        for cap in self.caps.clone() {
+            if cap.rim.iter().any(|i| *i as usize >= self.cv.len()) {
+                continue;
+            }
+            let rim: [Vec3; 12] = cap.rim.map(|i| Vec3::from(self.cv[i as usize]));
+            for (cv, seg) in &cap.curves {
+                let c = cap_curve(&rim, *seg);
+                for k in 0..4 {
+                    if let Some(x) = self.cv.get_mut(cv[k] as usize) {
+                        *x = c[k].to_array();
+                    }
+                }
+            }
+        }
+    }
+
     /// The 4 inner control points of each patch made from its contour: the
     /// bilinearly blended Coons patch of its four cubic sides, a bicubic
-    /// itself.
+    /// itself; an end's inside made from its rim first (`derive`), the
+    /// smooth seams' inner points then put in line across them
+    /// (`smooth_seams`).
     pub fn fill_inside(&mut self) {
+        self.derive();
         for q in self.patches() {
             let p = |i: usize, j: usize| Vec3::from(self.cv[q[j * 4 + i]]);
             let mut inner = vec![];
@@ -334,6 +450,128 @@ impl Patch {
                 self.cv[k] = v.to_array();
             }
         }
+        self.smooth_seams();
+    }
+
+    /// The sides two patches share: (its control points as `curve_key`,
+    /// (patch, side), (patch, side)).
+    pub fn seams(&self) -> Vec<([u32; 4], (usize, usize), (usize, usize))> {
+        let mut at: HashMap<[u32; 4], Vec<(usize, usize)>> = HashMap::new();
+        let mut order = vec![];
+        for (k, q) in self.patches().iter().enumerate() {
+            for (s, side) in SIDES.iter().enumerate() {
+                let key = curve_key(side.map(|i| q[i] as u32));
+                let e = at.entry(key).or_default();
+                if e.is_empty() {
+                    order.push(key);
+                }
+                e.push((k, s));
+            }
+        }
+        order.into_iter().filter_map(|key| {
+            let l = &at[&key];
+            (l.len() == 2).then(|| (key, l[0], l[1]))
+        }).collect()
+    }
+
+    /// The seams whose two patches meet tangent now (their normals at the
+    /// seam's middle within 20°) marked smooth (`smooth`), the others not.
+    pub fn mark_smooth(&mut self) {
+        let surfs = self.surfaces(Vec3::ONE);
+        let mut out = vec![];
+        for (key, (pa, sa), (pb, sb)) in self.seams() {
+            let na = { let (u, v) = side_uv(sa, 0.5); eval_frame(&surfs[pa], u, v).1 .2 };
+            let nb = { let (u, v) = side_uv(sb, 0.5); eval_frame(&surfs[pb], u, v).1 .2 };
+            if na.dot(nb) > 20f32.to_radians().cos() {
+                out.push(key);
+            }
+        }
+        self.smooth = out;
+    }
+
+    /// Across each smooth seam the two patches' inner points next to it put
+    /// in line with its point between them (each keeping its distance to
+    /// it): the surface turns smoothly across (G1 inside; at the seam's ends
+    /// the tangent points across its corners say it, kept in line by
+    /// `move_points`).
+    fn smooth_seams(&mut self) {
+        if self.smooth.is_empty() {
+            return;
+        }
+        let quads = self.patches();
+        let seams: Vec<_> = self.seams().into_iter().filter(|s| self.smooth.contains(&s.0)).collect();
+        // an inner point next to two smooth seams (an end's middle patch):
+        // a few rounds
+        for _ in 0..3 {
+            for (_, (pa, sa), (pb, sb)) in &seams {
+                let (qa, qb) = (quads[*pa], quads[*pb]);
+                let ca = SIDES[*sa].map(|i| qa[i]);
+                let cb = SIDES[*sb].map(|i| qb[i]);
+                let same = ca == cb;
+                for k in 1..3 {
+                    let s = Vec3::from(self.cv[ca[k]]);
+                    let ia = qa[NEXT[*sa][k]];
+                    let ib = if same { qb[NEXT[*sb][k]] } else { qb[NEXT[*sb][3 - k]] };
+                    let (a, b) = (Vec3::from(self.cv[ia]), Vec3::from(self.cv[ib]));
+                    let (da, db) = (a - s, b - s);
+                    let dir = (da - db).normalize_or_zero();
+                    if dir == Vec3::ZERO {
+                        continue;
+                    }
+                    self.cv[ia] = (s + dir * da.length()).to_array();
+                    self.cv[ib] = (s - dir * db.length()).to_array();
+                }
+            }
+        }
+    }
+
+    /// Moves control points by `delta` (the unit box's), then makes the
+    /// inside again. A tangent point moved whose corner stays, in line with
+    /// another tangent point of that corner on the other side (a smooth
+    /// corner: round a cylinder's rim, across its side's seams), takes that
+    /// one along so they stay in line, each its own length (`size`: the
+    /// unit box's in mm, where "in line" is measured).
+    pub fn move_points(&mut self, cvs: &[usize], delta: Vec3, size: Vec3) {
+        let d = self.derived();
+        let mm = |i: usize| Vec3::from(self.cv[i]) * size;
+        let mut follow: Vec<(usize, usize, usize, f32)> = vec![];
+        for &t in cvs {
+            if t >= self.cv.len() || d[t] || self.corner(t) {
+                continue;
+            }
+            let Some(c) = self.corner_of(t) else { continue };
+            if cvs.contains(&c) {
+                continue;
+            }
+            let dt = mm(t) - mm(c);
+            if dt.length() < 1e-6 {
+                continue;
+            }
+            for t2 in self.handles(c) {
+                if t2 == t || cvs.contains(&t2) || follow.iter().any(|f| f.0 == t2) {
+                    continue;
+                }
+                let d2 = mm(t2) - mm(c);
+                if d2.length() > 1e-6 && dt.normalize().dot(d2.normalize()) < -0.996 {
+                    follow.push((t2, c, t, d2.length()));
+                }
+            }
+        }
+        for &k in cvs {
+            if k < self.cv.len() {
+                self.cv[k] = (Vec3::from(self.cv[k]) + delta).to_array();
+            }
+        }
+        // in line again: on the line through the corner, as far from it as
+        // before (mm)
+        for (t2, c, t, len) in follow {
+            let (c, t) = (Vec3::from(self.cv[c]), Vec3::from(self.cv[t]));
+            let way = ((c - t) * size).normalize_or_zero();
+            if way != Vec3::ZERO {
+                self.cv[t2] = (c + way * len / size).to_array();
+            }
+        }
+        self.fill_inside();
     }
 
     /// The first patch's control points in mm (the feature's frame), for
@@ -587,14 +825,106 @@ pub fn box_patches(size: Vec3) -> Vec<[Vec3; 16]> {
     faces.iter().map(|(k, n)| facing(Patch::new(*k).cvs(Vec3::ONE), *n)).collect()
 }
 
-/// A cylinder's six patches (mm, its base's centre at the origin, y up):
-/// its side in four quarters (each a quarter arc swept straight up), its
-/// two caps each a disc of the four quarter arcs; seams shared.
+/// Where the inner square of a cylinder's end sits in its rim's Coons
+/// square (its corners at (a, a) … (1 − a, 1 − a)).
+pub const CAP_A: f32 = 0.3;
+
+fn bez(c: [Vec3; 4], t: f32) -> Vec3 {
+    let b = bern(t);
+    c[0] * b[0] + c[1] * b[1] + c[2] * b[2] + c[3] * b[3]
+}
+
+/// The cubic through four points at 0, 1/3, 2/3 and 1.
+pub fn cubic_through(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3) -> [Vec3; 4] {
+    let a = p1 * 27.0 - p0 * 8.0 - p3;
+    let b = p2 * 27.0 - p0 - p3 * 8.0;
+    [p0, (a * 2.0 - b) / 18.0, (b * 2.0 - a) / 18.0, p3]
+}
+
+/// The Coons patch of a rim of four cubics (12 control points round it,
+/// corners at 0, 3, 6, 9): s along the first, t along the second.
+pub fn coons_rim(rim: &[Vec3; 12], s: f32, t: f32) -> Vec3 {
+    let c = |i: usize| [rim[3 * i], rim[3 * i + 1], rim[3 * i + 2], rim[(3 * i + 3) % 12]];
+    let (cb, cr, ct, cl) = (bez(c(0), s), bez(c(1), t), bez(c(2), 1.0 - s), bez(c(3), 1.0 - t));
+    let (p00, p10, p11, p01) = (rim[0], rim[3], rim[6], rim[9]);
+    cb * (1.0 - t) + ct * t + cl * (1.0 - s) + cr * s - (p00 * (1.0 - s) * (1.0 - t) + p10 * s * (1.0 - t) + p01 * (1.0 - s) * t + p11 * s * t)
+}
+
+/// A curve inside an end, along a line of its rim's Coons square: the
+/// cubic through the Coons patch there; from a corner of the rim (where its
+/// sides run on as one and the Coons patch has no direction) straight to
+/// its other end, square to the rim.
+pub fn cap_curve(rim: &[Vec3; 12], seg: [f32; 4]) -> [Vec3; 4] {
+    let at = |t: f32| coons_rim(rim, seg[0] + (seg[2] - seg[0]) * t, seg[1] + (seg[3] - seg[1]) * t);
+    let corner = |x: f32| x == 0.0 || x == 1.0;
+    if corner(seg[0]) && corner(seg[1]) {
+        let (a, b) = (at(0.0), at(1.0));
+        return [a, a.lerp(b, 1.0 / 3.0), a.lerp(b, 2.0 / 3.0), b];
+    }
+    cubic_through(at(0.0), at(1.0 / 3.0), at(2.0 / 3.0), at(1.0))
+}
+
+/// A patch from its four sides (`bottom` along u at v = 0, `top` along u
+/// at v = 1, `left` along v at u = 0, `right` along v at u = 1), its inside
+/// Coons.
+fn from_sides(bottom: [Vec3; 4], top: [Vec3; 4], left: [Vec3; 4], right: [Vec3; 4]) -> [Vec3; 16] {
+    let mut cv = [Vec3::ZERO; 16];
+    for i in 0..4 {
+        cv[i] = bottom[i];
+        cv[12 + i] = top[i];
+        cv[i * 4] = left[i];
+        cv[i * 4 + 3] = right[i];
+    }
+    let mut p = Patch { cv: cv.iter().map(|v| v.to_array()).collect(), ..Default::default() };
+    p.fill_inside();
+    p.cvs(Vec3::ONE)
+}
+
+fn rev(c: [Vec3; 4]) -> [Vec3; 4] {
+    [c[3], c[2], c[1], c[0]]
+}
+
+/// The five patches of an end on its rim (12 control points round it):
+/// the square in the middle, then the four round it, each between a quarter
+/// of the rim, a side of the square and two straight lines from the rim's
+/// corners to the square's (Romain's disc for the quads, plan point 4: no
+/// corner folds flat, no thin cells); with the curves inside (their
+/// control points and their line in the rim's Coons square).
+pub fn cap_patches(rim: &[Vec3; 12]) -> (Vec<[Vec3; 16]>, Vec<([Vec3; 4], [f32; 4])>) {
+    let a = CAP_A;
+    let b = 1.0 - a;
+    let line = |s0: f32, t0: f32, s1: f32, t1: f32| -> ([Vec3; 4], [f32; 4]) {
+        let seg = [s0, t0, s1, t1];
+        (cap_curve(rim, seg), seg)
+    };
+    let rc = |i: usize| [rim[3 * i], rim[3 * i + 1], rim[3 * i + 2], rim[(3 * i + 3) % 12]];
+    let (ib, ir, it, il) = (line(a, a, b, a), line(b, a, b, b), line(a, b, b, b), line(a, a, a, b));
+    let (d0, d1, d2, d3) = (line(0.0, 0.0, a, a), line(1.0, 0.0, b, a), line(1.0, 1.0, b, b), line(0.0, 1.0, a, b));
+    let patches = vec![
+        from_sides(ib.0, it.0, il.0, ir.0),
+        from_sides(rc(0), ib.0, d0.0, d1.0),
+        from_sides(rc(1), ir.0, d1.0, d2.0),
+        from_sides(rc(2), rev(it.0), d2.0, d3.0),
+        from_sides(rc(3), rev(il.0), d3.0, d0.0),
+    ];
+    (patches, vec![ib, ir, it, il, d0, d1, d2, d3])
+}
+
+/// A cylinder's 14 patches (mm, its base's centre at the origin, y up):
+/// its side in four quarters (each a quarter arc swept straight up, from
+/// 45°), each end five (`cap_patches`) on the same quarters; seams shared.
 pub fn cylinder_patches(r: f32, h: f32) -> Vec<[Vec3; 16]> {
-    use std::f32::consts::FRAC_PI_2;
+    cylinder_parts(r, h).0
+}
+
+/// The patches of `cylinder_patches`, with each end's rim and inside
+/// curves (mm).
+fn cylinder_parts(r: f32, h: f32) -> (Vec<[Vec3; 16]>, Vec<([Vec3; 12], Vec<([Vec3; 4], [f32; 4])>)>) {
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+    let ang = |q: usize| FRAC_PI_4 + q as f32 * FRAC_PI_2;
     let mut out = vec![];
     for q in 0..4 {
-        let (a0, a1) = (q as f32 * FRAC_PI_2, (q + 1) as f32 * FRAC_PI_2);
+        let (a0, a1) = (ang(q), ang(q + 1));
         let mut p = [Vec3::ZERO; 16];
         for j in 0..4 {
             let row = arc(r, h * j as f32 / 3.0, a0, a1);
@@ -604,27 +934,73 @@ pub fn cylinder_patches(r: f32, h: f32) -> Vec<[Vec3; 16]> {
         }
         out.push(facing(p, Vec3::new(((a0 + a1) * 0.5).cos(), 0.0, -((a0 + a1) * 0.5).sin())));
     }
+    let mut ends = vec![];
     for (y, n) in [(h, Vec3::Y), (0.0, -Vec3::Y)] {
-        // corners at 0°, 90°, 180°, 270°: v = 0 runs 0° → 90°, u = 1 runs
-        // 90° → 180°, v = 1 runs 270° → 180°, u = 0 runs 0° → 270°
-        let s0 = arc(r, y, 0.0, FRAC_PI_2);
-        let s1 = arc(r, y, FRAC_PI_2, 2.0 * FRAC_PI_2);
-        let s2 = arc(r, y, 3.0 * FRAC_PI_2, 2.0 * FRAC_PI_2);
-        let s3 = arc(r, y, 4.0 * FRAC_PI_2, 3.0 * FRAC_PI_2);
-        let mut p = [Vec3::ZERO; 16];
-        for i in 0..4 {
-            p[i] = s0[i];
-            p[12 + i] = s2[i];
-            p[i * 4 + 3] = s1[i];
-            p[i * 4] = s3[i];
-        }
-        // the 4 corners exactly the arcs' ends (360° is 0°)
-        p[0] = s0[0];
-        let mut pp = Patch { cv: p.iter().map(|v| v.to_array()).collect(), state: PatchState::Nurbs, bind: vec![], quads: vec![], on: vec![], sculpt: None, keep: None };
-        pp.fill_inside();
-        out.push(facing(pp.cvs(Vec3::ONE), n));
+        let rim: [Vec3; 12] = std::array::from_fn(|k| arc(r, y, ang(k / 3), ang(k / 3 + 1))[k % 3]);
+        let (ps, curves) = cap_patches(&rim);
+        out.extend(ps.into_iter().map(|q| facing(q, n)));
+        ends.push((rim, curves));
     }
-    out
+    (out, ends)
+}
+
+impl Patch {
+    /// A closed cylinder (mm, as `cylinder_patches`), its ends' insides
+    /// made from their rims.
+    pub fn cylinder(r: f32, h: f32) -> Patch {
+        let (list, ends) = cylinder_parts(r, h);
+        let mut p = Patch::closed(&list);
+        let pts: Vec<Vec3> = p.cv.iter().map(|c| Vec3::from(*c)).collect();
+        let find = |q: Vec3| -> u32 {
+            pts.iter().enumerate().min_by(|a, b| a.1.distance_squared(q).total_cmp(&b.1.distance_squared(q))).map(|x| x.0 as u32).unwrap_or(0)
+        };
+        p.caps = ends
+            .into_iter()
+            .map(|(rim, curves)| Cap { rim: rim.map(find), curves: curves.into_iter().map(|(c, seg)| (c.map(find), seg)).collect() })
+            .collect();
+        p.fill_inside();
+        p.mark_smooth();
+        p.fill_inside();
+        p
+    }
+
+    /// The quads along u and v of each patch for a Poly layer of cells
+    /// about `cell` (mm, at these sizes) across: a patch's opposite sides
+    /// and the patches on either side of a seam the same count, the
+    /// longest side of each such run saying it (2 to 24).
+    pub fn closed_counts(&self, size: Vec3, cell: f32) -> Vec<(usize, usize)> {
+        let surfs = self.surfaces(size);
+        let n = surfs.len();
+        let mut up: Vec<usize> = (0..2 * n).collect();
+        fn root(up: &mut [usize], mut i: usize) -> usize {
+            while up[i] != i {
+                up[i] = up[up[i]];
+                i = up[i];
+            }
+            i
+        }
+        // class 2k: patch k's u sides (0, 2); 2k + 1: its v sides (1, 3)
+        let class = |k: usize, s: usize| 2 * k + (s % 2);
+        for (_, (pa, sa), (pb, sb)) in self.seams() {
+            let (x, y) = (root(&mut up, class(pa, sa)), root(&mut up, class(pb, sb)));
+            up[x] = y;
+        }
+        let mut len = vec![0.0f32; 2 * n];
+        for (k, cv) in surfs.iter().enumerate() {
+            for s in 0..4 {
+                let l = side(cv, s, 24).windows(2).map(|w| w[0].distance(w[1])).sum::<f32>();
+                let r = root(&mut up, class(k, s));
+                len[r] = len[r].max(l);
+            }
+        }
+        let count = |l: f32| ((l / cell.max(1e-6) + 1e-3).round() as usize).clamp(2, 24);
+        (0..n)
+            .map(|k| {
+                let (ru, rv) = (root(&mut up, 2 * k), root(&mut up, 2 * k + 1));
+                (count(len[ru]), count(len[rv]))
+            })
+            .collect()
+    }
 }
 
 /// The Poly layer of a closed object: an iso grid on each patch (`counts`
@@ -1309,11 +1685,12 @@ mod tests {
             assert!((s - mid).normalize().dot(n) > 0.99, "{s} {n}");
         }
         // a cylinder: two rings of 12 and 2 tangent points on each of its 4
-        // seams up the side
-        let surfs = cylinder_patches(10.0, 30.0);
-        let p = Patch::closed(&surfs);
-        assert_eq!(p.count(), 6);
+        // seams up the side; each end five patches whose insides are made
+        // from the rim (not edited)
+        let p = Patch::cylinder(10.0, 30.0);
+        assert_eq!(p.count(), 14);
         assert_eq!(p.contour().len(), 24 + 8);
+        assert_eq!(p.caps.len(), 2);
         for (k, cv) in p.surfaces(Vec3::ONE).iter().enumerate() {
             for (u, v) in [(0.5, 0.5), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.2, 0.7)] {
                 let (s, (_, _, n)) = eval_frame(cv, u, v);
@@ -1329,17 +1706,115 @@ mod tests {
                     assert!(Vec3::new(s.x, 0.0, s.z).length() < 10.03);
                 }
             }
+            // no corner folds flat (a single patch per end had four): the
+            // sides meet at an angle everywhere
+            for (u, v) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+                let (_, su, sv) = eval(cv, u, v);
+                let sin = su.cross(sv).length() / (su.length() * sv.length()).max(1e-9);
+                assert!(sin > 0.5, "patch {k} corner {u} {v}: sin {sin}");
+            }
         }
-        // the cap's middle at the axis
+        // the end's middle patch round the axis
         let (s, _) = eval_frame(&p.surfaces(Vec3::ONE)[4], 0.5, 0.5);
         assert!(Vec3::new(s.x, 0.0, s.z).length() < 0.05, "{s}");
+        // a rim corner carries its two rim tangents and the one down the side
+        let c = (0..p.cv.len()).find(|k| p.corner(*k) && p.contour().contains(k)).unwrap();
+        assert_eq!(p.handles(c).len(), 3);
+        // smooth: the side's 4 seams, each end's 8 inside ones
+        assert_eq!(p.smooth.len(), 4 + 16);
+    }
+
+    /// The normals of the two patches on either side of each smooth seam,
+    /// along it: the least dot product.
+    fn seam_turn(p: &Patch) -> f32 {
+        let surfs = p.surfaces(Vec3::ONE);
+        let mut worst = 1.0f32;
+        for (key, (pa, sa), (pb, sb)) in p.seams() {
+            if !p.smooth.contains(&key) {
+                continue;
+            }
+            let ca = SIDES[sa].map(|i| p.patches()[pa][i]);
+            let cb = SIDES[sb].map(|i| p.patches()[pb][i]);
+            for k in 1..8 {
+                let t = k as f32 / 8.0;
+                let tb = if ca == cb { t } else { 1.0 - t };
+                let (ua, va) = side_uv(sa, t);
+                let (ub, vb) = side_uv(sb, tb);
+                let (xa, (_, _, na)) = eval_frame(&surfs[pa], ua, va);
+                let (xb, (_, _, nb)) = eval_frame(&surfs[pb], ub, vb);
+                assert!(xa.distance(xb) < 1e-3, "the seam opens: {xa} {xb}");
+                worst = worst.min(na.dot(nb));
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn smooth_seams_stay_smooth() {
+        // a barrel: the side's seams bulged out (their tangent points), the
+        // rim's corners pulled in: across every seam the side turns smoothly
+        let mut p = Patch::cylinder(10.0, 30.0);
+        let mids: Vec<usize> = p.contour().into_iter().filter(|k| { let y = p.cv[*k][1]; y > 2.0 && y < 28.0 }).collect();
+        assert_eq!(mids.len(), 8);
+        for k in &mids {
+            let c = Vec3::from(p.cv[*k]);
+            p.move_points(&[*k], Vec3::new(c.x, 0.0, c.z).normalize() * 4.0, Vec3::ONE);
+        }
+        let tops: Vec<usize> = p.contour().into_iter().filter(|k| p.corner(*k) && p.cv[*k][1] > 29.0).collect();
+        assert_eq!(tops.len(), 4);
+        for k in &tops {
+            let c = Vec3::from(p.cv[*k]);
+            let moved: Vec<usize> = std::iter::once(*k).chain(p.handles(*k)).collect();
+            p.move_points(&moved, -Vec3::new(c.x, 0.0, c.z).normalize() * 3.0, Vec3::ONE);
+        }
+        let smooth = seam_turn(&p);
+        assert!(smooth > 0.9995, "smooth seams turn: {smooth}");
+        // the same patches without the seams put in line: a crease
+        let mut q = p.clone();
+        q.smooth.clear();
+        q.fill_inside();
+        let creased = seam_turn(&Patch { smooth: p.smooth.clone(), ..q.clone() });
+        assert!(creased < smooth - 1e-3, "no crease to mend: {creased} {smooth}");
+        // the top end follows its rim: its middle went down with it, it
+        // stays flat at the rim's height
+        let top = p.surfaces(Vec3::ONE)[4];
+        let (s, (_, _, n)) = eval_frame(&top, 0.5, 0.5);
+        assert!((s.y - 30.0).abs() < 1e-3 && n.dot(Vec3::Y) > 0.999, "{s} {n}");
+    }
+
+    #[test]
+    fn a_tangent_moved_keeps_its_corner_smooth() {
+        // a rim tangent raised: the one across its corner goes down along
+        // the same line, so the rim stays smooth there; a cube's edges, at a
+        // right angle, take nothing along
+        let mut p = Patch::cylinder(10.0, 30.0);
+        let c = (0..p.cv.len()).find(|k| p.corner(*k) && p.contour().contains(k) && p.cv[*k][1] > 29.0).unwrap();
+        let hs = p.handles(c);
+        let rim: Vec<usize> = hs.iter().copied().filter(|t| (p.cv[*t][1] - 30.0).abs() < 1e-4).collect();
+        assert_eq!(rim.len(), 2);
+        let (t, t2) = (rim[0], rim[1]);
+        let before = Vec3::from(p.cv[t2]);
+        let len2 = (before - Vec3::from(p.cv[c])).length();
+        p.move_points(&[t], Vec3::new(0.0, 5.0, 0.0), Vec3::ONE);
+        let (cc, a, b) = (Vec3::from(p.cv[c]), Vec3::from(p.cv[t]), Vec3::from(p.cv[t2]));
+        assert!((a - cc).normalize().dot((b - cc).normalize()) < -0.9999, "not in line");
+        assert!(b.y < 30.0 - 1.0, "the other one stayed: {b}");
+        assert!(((b - cc).length() - len2).abs() < 1e-3);
+        let mut q = Patch::closed(&box_patches(Vec3::new(20.0, 10.0, 16.0)));
+        let k = (0..q.cv.len()).find(|k| q.corner(*k)).unwrap();
+        let hs = q.handles(k);
+        let keep: Vec<Vec3> = hs.iter().map(|h| Vec3::from(q.cv[*h])).collect();
+        q.move_points(&[hs[0]], Vec3::new(1.0, 2.0, 3.0), Vec3::ONE);
+        for (h, w) in hs.iter().zip(keep).skip(1) {
+            assert_eq!(Vec3::from(q.cv[*h]), w);
+        }
     }
 
     #[test]
     fn closed_layers_are_watertight() {
         for (surfs, counts) in [
             (box_patches(Vec3::new(20.0, 10.0, 16.0)), None),
-            (cylinder_patches(10.0, 30.0), Some(vec![(4, 6), (4, 6), (4, 6), (4, 6), (4, 4), (4, 4)])),
+            (cylinder_patches(10.0, 30.0), Some(Patch::cylinder(10.0, 30.0).closed_counts(Vec3::ONE, 3.0))),
         ] {
             let c = counts.unwrap_or_else(|| surfs.iter().map(|_| (3, 3)).collect());
             let (pts, faces, on, uv) = grid_closed(&surfs, &c);

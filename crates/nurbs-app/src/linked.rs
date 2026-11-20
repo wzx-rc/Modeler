@@ -2,7 +2,7 @@
 //! 2026, 18 h 12: "une surface… peut avoir les trois états à la fois"): one
 //! element that is a NURBS surface, a Poly mesh and a clay. Made from a
 //! closed path of four points (one patch), or from a Forme Cube or Cylinder
-//! (a closed object of six patches, Romain 23 h: "pousser le Link surface à
+//! (a closed object: a cube's six patches, a cylinder's fourteen, Romain 23 h: "pousser le Link surface à
 //! cylindre et cube"); its own window switches its state (NURBS, POLY,
 //! SCULPT), the tab following. In the NURBS state its contour's points are
 //! picked in Vertex mode (1) and moved with the gizmo, the Poly layer
@@ -310,6 +310,44 @@ pub fn sculpt_shown(f: &Feature) -> Option<(Vec<Vec3>, Vec<Vec<u32>>)> {
     Some((pts, bf))
 }
 
+thread_local! {
+    /// The clays last shown in the NURBS state, by what made them (the
+    /// drawing and the picking ask for the same one many times).
+    static SHOWN: std::cell::RefCell<Vec<(u64, std::sync::Arc<(Vec<Vec3>, Vec<Vec<u32>>)>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `sculpt_shown`, kept while its surface, layer and offsets stay as they
+/// are.
+pub fn sculpt_shown_cached(f: &Feature) -> Option<std::sync::Arc<(Vec<Vec3>, Vec<Vec<u32>>)>> {
+    use std::hash::{Hash, Hasher};
+    let m = f.mesh.as_ref()?;
+    let p = m.patch.as_ref()?;
+    let sl = p.sculpt.as_ref()?;
+    if p.state != PatchState::Nurbs {
+        return None;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut put = |x: &[f32]| x.iter().for_each(|v| v.to_bits().hash(&mut h));
+    put(&size(f).to_array());
+    p.cv.iter().for_each(|c| put(c));
+    p.bind.iter().for_each(|c| put(c));
+    m.verts.iter().for_each(|c| put(c));
+    sl.disp.iter().for_each(|c| put(c));
+    (sl.levels, sl.topo, patch::topo_key(&m.faces), p.on.len()).hash(&mut h);
+    p.on.hash(&mut h);
+    let key = h.finish();
+    if let Some(hit) = SHOWN.with(|c| c.borrow().iter().find(|e| e.0 == key).map(|e| e.1.clone())) {
+        return Some(hit);
+    }
+    let made = std::sync::Arc::new(sculpt_shown(f)?);
+    SHOWN.with(|c| {
+        let mut c = c.borrow_mut();
+        c.insert(0, (key, made.clone()));
+        c.truncate(4);
+    });
+    Some(made)
+}
+
 /// The Sculpt layer carried over to the Poly layer's new faces (after the
 /// Poly state changed them): by place, each new base point the offset of
 /// the old one nearest it.
@@ -438,16 +476,15 @@ fn leave_sculpt(f: &mut Feature, to: PatchState) {
 /// quads along its largest side, the same count on both patches of each
 /// seam) welded at the seams and bound to them.
 pub fn linked_solid(d: &mut nurbs_kernel::Doc, src: &Feature) -> Option<FeatureId> {
-    let (surfs, name) = match src.prim {
-        Prim::Box { x, y, z } => (patch::box_patches(Vec3::new(x as f32, y as f32, z as f32)), "Linked cube"),
-        Prim::Cylinder { radius, height } => (patch::cylinder_patches(radius as f32, height as f32), "Linked cylinder"),
+    let (mut p, name) = match src.prim {
+        Prim::Box { x, y, z } => (Patch::closed(&patch::box_patches(Vec3::new(x as f32, y as f32, z as f32))), "Linked cube"),
+        Prim::Cylinder { radius, height } => (Patch::cylinder(radius as f32, height as f32), "Linked cylinder"),
         _ => return None,
     };
-    let side_len = |cv: &[Vec3; 16], k: usize| patch::side(cv, k, 24).windows(2).map(|w| w[0].distance(w[1])).sum::<f32>();
+    let surfs = p.surfaces(Vec3::ONE);
     let ext = surfs.iter().flat_map(|q| q.iter()).fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), v| (a.min(*v), b.max(*v)));
     let cell = (ext.1 - ext.0).max_element() / 8.0;
-    let n = |l: f32| ((l / cell + 1e-3).round() as usize).clamp(2, 24);
-    let counts: Vec<(usize, usize)> = surfs.iter().map(|cv| (n(side_len(cv, 0)), n(side_len(cv, 3)))).collect();
+    let counts = p.closed_counts(Vec3::ONE, cell);
     let (pts, faces, on, uv) = patch::grid_closed(&surfs, &counts);
     let made = d.add_mesh(MeshKind::Poly, &pts, faces, src.origin, src.rot, name);
     let f = d.feature_mut(made)?;
@@ -458,7 +495,6 @@ pub fn linked_solid(d: &mut nurbs_kernel::Doc, src: &Feature) -> Option<FeatureI
         let hi = pts.iter().fold(Vec3::splat(f32::MIN), |a, p| a.max(*p));
         Vec3::new((lo.x + hi.x) * 0.5, lo.y, (lo.z + hi.z) * 0.5)
     };
-    let mut p = Patch::closed(&surfs);
     p.remap(Vec3::ONE, base, s);
     p.bind = uv.iter().map(|t| [t[0], t[1], 0.0, 0.0, 0.0]).collect();
     p.on = on;
@@ -839,13 +875,11 @@ impl AppState {
         }
         self.gizmo_readout = Some(format!("{:.2} mm", delta.length()));
         // the move in the frame's millimetres, then in its unit box
-        let local = (d.before.rot.inverse() * delta).as_vec3() / size(&d.before);
+        let s = size(&d.before);
+        let local = (d.before.rot.inverse() * delta).as_vec3() / s;
         let mut g = d.before.clone();
         if let Some(pp) = g.mesh.as_mut().and_then(|m| m.make_mut().patch.as_mut()) {
-            for k in &d.cvs {
-                pp.cv[*k] = (Vec3::from(pp.cv[*k]) + local).to_array();
-            }
-            pp.fill_inside();
+            pp.move_points(&d.cvs, local, s);
         }
         apply_binding(&mut g);
         let id = g.id;
@@ -872,17 +906,15 @@ impl AppState {
     pub fn move_patch_points(&mut self, id: FeatureId, cvs: &[usize], delta: Vec3) {
         let Some(f) = self.doc.feature(id).cloned() else { return };
         let cvs = self.patch_moved(&f, cvs);
-        let local = (f.rot.inverse().as_quat() * delta) / size(&f);
+        let s = size(&f);
+        let local = (f.rot.inverse().as_quat() * delta) / s;
         self.edit("Move contour points", |doc| {
             let Some(g) = doc.feature_mut(id) else { return };
             if bound_off(g) > 0.01 {
                 rebind(g);
             }
             if let Some(pp) = g.mesh.as_mut().and_then(|m| m.make_mut().patch.as_mut()) {
-                for k in &cvs {
-                    pp.cv[*k] = (Vec3::from(pp.cv[*k]) + local).to_array();
-                }
-                pp.fill_inside();
+                pp.move_points(&cvs, local, s);
             }
             apply_binding(g);
             refit(g);
@@ -928,6 +960,69 @@ mod tests {
         let pts = crate::meshes::world_points(f);
         let (lo, hi) = pts.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), q| (a.min(*q), b.max(*q)));
         assert!(lo.distance(Vec3::new(-20.0, 0.0, -15.0)) < 1e-3 && hi.distance(Vec3::new(20.0, 20.0, 15.0)) < 1e-3, "{lo} {hi}");
+    }
+
+    #[test]
+    fn a_cylinder_made_linked() {
+        let mut d = Doc::default();
+        let src = d.add(Op::Add, Prim::Cylinder { radius: 12.0, height: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let f = d.feature(src).unwrap().clone();
+        let id = linked_solid(&mut d, &f).unwrap();
+        let f = d.feature(id).unwrap();
+        let p = patch_of(f).unwrap();
+        // the side's four quarters, each end five patches round a square
+        assert_eq!(p.count(), 14);
+        assert_eq!(p.contour().len(), 32);
+        assert!(bound_off(f) < 1e-3, "{}", bound_off(f));
+        // the layer: closed, all quads, none thin
+        let m = f.mesh.as_ref().unwrap();
+        let pts = crate::meshes::world_points(f);
+        assert!(m.faces.iter().all(|q| q.len() == 4));
+        for q in &m.faces {
+            let e: Vec<f32> = (0..4).map(|i| pts[q[i] as usize].distance(pts[q[(i + 1) % 4] as usize])).collect();
+            let (lo, hi) = e.iter().fold((f32::MAX, 0.0f32), |(a, b), x| (a.min(*x), b.max(*x)));
+            assert!(lo > hi * 0.2, "a thin cell: {e:?}");
+        }
+        let mut count = std::collections::HashMap::new();
+        for q in &m.faces {
+            for i in 0..4 {
+                let (a, b) = (q[i], q[(i + 1) % 4]);
+                *count.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        assert!(count.values().all(|c| *c == 2), "the layer is open");
+        for q in &pts {
+            let r = Vec3::new(q.x, 0.0, q.z).length();
+            assert!(r < 12.03 && q.y > -1e-3 && q.y < 30.0 + 1e-3);
+        }
+    }
+
+    #[test]
+    fn the_clay_is_what_a_click_hits_in_nurbs() {
+        let (mut d, id) = cube();
+        let f = d.feature_mut(id).unwrap();
+        switch_state(f, PatchState::Sculpt);
+        // the clay on the top raised 3 mm round its middle
+        let mut pts = crate::meshes::world_points(f);
+        for q in pts.iter_mut() {
+            let r = Vec3::new(q.x, 0.0, q.z).length();
+            if q.y > 19.99 && r < 8.0 {
+                q.y += 3.0 * (1.0 - r / 8.0);
+            }
+        }
+        store(f, &pts);
+        switch_state(f, PatchState::Nurbs);
+        let f = d.feature(id).unwrap();
+        // straight down on the middle: the bump's top, not the surface
+        let hit = crate::meshes::ray_linked(f, &[], Vec3::new(0.0, 50.0, 0.0), -Vec3::Y).unwrap();
+        assert!((hit.point.y - 23.0).abs() < 0.1, "{}", hit.point);
+        // level with the bump, from the side: it is hit over the top face
+        let hit = crate::meshes::ray_linked(f, &[], Vec3::new(-60.0, 21.0, 0.0), Vec3::X).unwrap();
+        assert!(hit.point.x < 0.0 && hit.point.x > -8.0, "{}", hit.point);
+        // a Carve through the middle: the ray goes on through its hole
+        let s = Solid { to_local: Mat4::IDENTITY, kind: SolidKind::Cylinder { r: 3.0, h: 100.0 } };
+        let hit = crate::meshes::ray_linked(f, &[s], Vec3::new(0.0, 50.0, 0.0), -Vec3::Y);
+        assert!(hit.map(|h| h.point.y < 1.0).unwrap_or(true), "{:?}", hit.map(|h| h.point));
     }
 
     #[test]

@@ -2403,7 +2403,7 @@ fn linked_card(ui: &mut Ui, st: &mut AppState, f: &Feature, p: &nurbs_kernel::pa
         st.set_patch_state(id, s);
     }
     let off = p.off_surface().iter().filter(|o| **o).count();
-    let clay = crate::linked::sculpt_shown(f).is_some();
+    let clay = crate::linked::sculpt_shown_cached(f).is_some();
     let lines: Vec<String> = match p.state {
         PatchState::Poly => vec![
             "The mesh is yours: Vertex, Edge, Face modes, Extrude, Bevel, Cut.".into(),

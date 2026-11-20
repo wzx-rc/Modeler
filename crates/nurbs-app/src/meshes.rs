@@ -192,13 +192,14 @@ fn linked_vertices(f: &Feature, m: &MeshData, p: &Patch, base: u32, solids: &[So
     }
     if crate::linked::shows_nurbs(f) {
         // sculpted: the clay rides on the contour, shown as the surface
-        if let Some((cp, cf)) = crate::linked::sculpt_shown(f) {
+        if let Some(clay) = crate::linked::sculpt_shown_cached(f) {
+            let (cp, cf) = (&clay.0, &clay.1);
             let x = crate::linked::to_world(f);
             let wp: Vec<Vec3> = cp.iter().map(|q| x.transform_point3(*q)).collect();
             if solids.is_empty() {
-                smooth_out(&wp, &cf, out);
+                smooth_out(&wp, cf, out);
             } else {
-                let (pp, ff, _) = patch::cut_all(&wp, &cf, solids);
+                let (pp, ff, _) = patch::cut_all(&wp, cf, solids);
                 smooth_out(&pp, &ff, out);
             }
             return 2;
@@ -274,7 +275,7 @@ pub fn linked_lines(f: &Feature, solids: &[Solid], out: &mut Vec<LineVertex>) {
     line_vertices(&clipped(sides, solids), [24, 26, 30, 220], 1.1, out);
     // sculpted: the clay is shown, the surface's iso curves and the Poly
     // layer's own shapes would float in it
-    if crate::linked::sculpt_shown(f).is_some() {
+    if crate::linked::sculpt_shown_cached(f).is_some() {
         return;
     }
     let count = if surfs.len() > 1 { 1 } else { 3 };
@@ -428,6 +429,38 @@ pub fn ray_linked(f: &Feature, solids: &[Solid], ro: Vec3, rd: Vec3) -> Option<M
     // the clay, uncut: as any mesh (its box first)
     if p.state == nurbs_kernel::patch::PatchState::Sculpt && solids.is_empty() {
         return ray_mesh(f, ro, rd);
+    }
+    // sculpted, in the NURBS state: the clay shown in place of the surface
+    // (what lies in a Carve's hole left out)
+    if crate::linked::shows_nurbs(f) {
+        if let Some(clay) = crate::linked::sculpt_shown_cached(f) {
+            let x = crate::linked::to_world(f);
+            let wp: Vec<Vec3> = clay.0.iter().map(|q| x.transform_point3(*q)).collect();
+            let (lo, hi) = wp.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), q| (a.min(*q), b.max(*q)));
+            let pad = (hi - lo).max_element() * 0.01 + 1e-3;
+            let invd = Vec3::new(1.0 / rd.x, 1.0 / rd.y, 1.0 / rd.z);
+            let (t0, t1) = ((lo - pad - ro) * invd, (hi + pad - ro) * invd);
+            if t0.min(t1).max_element() > t0.max(t1).min_element() || t0.max(t1).min_element() < 0.0 {
+                return None;
+            }
+            let mut best: Option<(f32, Vec3)> = None;
+            for q in &clay.1 {
+                for k in 1..q.len().saturating_sub(1) {
+                    let (a, b, c) = (wp[q[0] as usize], wp[q[k] as usize], wp[q[k + 1] as usize]);
+                    if let Some(d) = ray_tri(ro, rd, a, b, c) {
+                        if best.map(|bb| d < bb.0).unwrap_or(true) && !solids.iter().any(|s| s.sdf(ro + rd * d) < 0.0) {
+                            best = Some((d, (b - a).cross(c - a)));
+                        }
+                    }
+                }
+            }
+            let (t, n) = best?;
+            let mut n = n.normalize_or(Vec3::Y);
+            if n.dot(rd) > 0.0 {
+                n = -n;
+            }
+            return Some(MeshHit { id: f.id, t, point: ro + rd * t, normal: n, face: 0 });
+        }
     }
     let (pts, faces, slot) = if crate::linked::shows_nurbs(f) {
         let (pts, faces, _) = surface_polys(f, p, solids, 20);

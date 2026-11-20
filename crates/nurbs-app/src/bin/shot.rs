@@ -5752,6 +5752,60 @@ fn linked_objects(h: &mut Harness) {
     h.steps(4);
     eprintln!("lobj: undone and redone {n} steps; clay shown {} {}", shown(h, lc), shown(h, ly));
     h.shot("lobj-18-redone");
+    // a cylinder's ends: five patches round a square (no corner folds
+    // flat), seen in Poly from above
+    let mut doc = Doc::default();
+    let c2 = doc.add(Op::Add, Prim::Cylinder { radius: 15.0, height: 24.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+    h.reset(doc, "Linked cylinder");
+    h.st.selection = vec![c2];
+    h.steps(2);
+    let lz = if h.st.make_linked_solid() { h.st.selection[0] } else {
+        eprintln!("lobj: cylinder 2 not made");
+        return;
+    };
+    {
+        let f = h.st.doc.feature(lz).unwrap();
+        let p = patch_of(f).unwrap();
+        eprintln!("lobj: cylinder 2: {} patches, {} contour points, {} smooth seams, layer {} faces", p.count(), p.contour().len(), p.smooth.len(), f.mesh.as_ref().unwrap().faces.len());
+    }
+    h.st.camera.yaw = 0.4;
+    h.st.camera.pitch = 0.85;
+    h.st.camera.target = Vec3::new(0.0, 10.0, 0.0);
+    h.st.camera.dist = 95.0;
+    h.st.set_patch_state(lz, PatchState::Poly);
+    h.st.selection.clear();
+    h.steps(4);
+    h.shot("lobj-19-cyl-ends-poly");
+    // NURBS: a rim tangent raised 8 mm; the one across its corner goes
+    // down in line, the rim stays smooth there
+    h.st.set_patch_state(lz, PatchState::Nurbs);
+    h.st.camera.pitch = 0.45;
+    h.st.camera.dist = 105.0;
+    let (k, k2) = {
+        let f = h.st.doc.feature(lz).unwrap();
+        let c = cvs_world(f).unwrap();
+        let p = patch_of(f).unwrap();
+        let eye = h.st.view().eye;
+        // the rim corner nearest the eye, and its tangent on the rim going
+        // to the right on screen
+        let corner = p.contour().into_iter().filter(|k| p.corner(*k) && c[*k].y > 23.0).min_by(|a, b| c[*a].distance(eye).total_cmp(&c[*b].distance(eye))).unwrap();
+        let rim: Vec<usize> = p.handles(corner).into_iter().filter(|t| (c[*t].y - 24.0).abs() < 1e-3).collect();
+        (rim[0], rim[1])
+    };
+    let before = cvs_world(h.st.doc.feature(lz).unwrap()).unwrap()[k2];
+    h.st.move_patch_points(lz, &[k], Vec3::new(0.0, 8.0, 0.0));
+    let after = cvs_world(h.st.doc.feature(lz).unwrap()).unwrap()[k2];
+    eprintln!("lobj: rim tangent raised 8: the one across its corner {:.2} → {:.2}", before.y, after.y);
+    h.st.selection = vec![lz];
+    h.key(Key::Num1);
+    h.st.selection = vec![lz];
+    h.st.patch_sel = Some(nurbs_app::linked::PatchSel { id: lz, cvs: vec![k] });
+    h.steps(4);
+    h.shot("lobj-20-rim-tangent");
+    h.key(Key::Num4);
+    h.st.selection.clear();
+    h.steps(4);
+    h.shot("lobj-21-rim-smooth");
 }
 
 /// The linked surface on a busier part (Romain, 20 nov., 20 h 58: "Test
