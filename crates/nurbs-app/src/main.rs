@@ -28,6 +28,9 @@ struct App {
     egui_state: Option<egui_winit::State>,
     t0: Instant,
     redraw_until: f64,
+    /// The session saved every few seconds while it changes (a crash
+    /// loses little): the version saved and when.
+    saved: (u64, f64),
     _proxy: EventLoopProxy<()>,
 }
 
@@ -43,6 +46,10 @@ impl App {
             Err(_) => AppState::new(Default::default(), "Untitled", kernel),
         };
         st.settings = nurbs_app::settings::Settings::load();
+        // the debug journal written as it goes (the last run's kept beside)
+        let jf = files::documents_dir().join("journal.jsonl");
+        let _ = std::fs::rename(&jf, files::documents_dir().join("journal-prev.jsonl"));
+        st.journal_file = Some(jf);
         if !st.doc.features.is_empty() {
             st.frame_all();
         }
@@ -61,7 +68,8 @@ impl App {
         })) {
             eprintln!("Claude link off: {e}");
         }
-        App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0, _proxy: proxy }
+        let saved = (st.version, 0.0);
+        App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0, saved, _proxy: proxy }
     }
 
     fn now(&self) -> f64 {
@@ -76,6 +84,10 @@ impl App {
         let now = self.t0.elapsed().as_secs_f64();
         self.st.tick(now);
         nurbs_app::remote::poll(&mut self.st);
+        if self.st.version != self.saved.0 && now - self.saved.1 > 10.0 && !self.st.is_live() {
+            let _ = files::save(&self.st.doc, files::SESSION);
+            self.saved = (self.st.version, now);
+        }
         let st = &mut self.st;
         let mut out = self.ctx.run_pass(raw, |ctx| nurbs_app::run(ctx, st));
         es.handle_platform_output(&window, std::mem::take(&mut out.platform_output));

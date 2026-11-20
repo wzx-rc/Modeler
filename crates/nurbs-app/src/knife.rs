@@ -183,11 +183,14 @@ impl AppState {
         self.knife_hover = self.knife_pick(p).map(|k| k.1);
     }
 
-    /// The cut under way, if its step is still the last one.
+    /// The cut under way, if its step is still the last one made (not the
+    /// last in the list: with an element's history marker back, a new step
+    /// goes in at the marker, before those left out; each click then made
+    /// a Knife of its own, 20 nov.).
     fn knife_going(&self) -> Option<(FeatureId, usize)> {
         let (id, last) = self.knife?;
-        let f = self.doc.features.last()?;
-        (f.id == id && f.cut.is_some()).then_some((id, last))
+        let f = self.doc.feature(id)?;
+        (id + 1 == self.doc.next_id && f.cut.is_some()).then_some((id, last))
     }
 
     /// A click with the Knife or Point on edge: a point cut into the edge
@@ -251,7 +254,7 @@ impl AppState {
         let size = m.bounds().map(|(lo, hi)| (Vec3::from(hi) - Vec3::from(lo)).length() as f64).unwrap_or(100.0);
         let tol = (size * 1e-4).max(1e-4) * 10.0;
         // the faces round `a`: those of the edges passing through it
-        let near = |pts: &[[f32; 3]]| {
+        let near = |pts: &[[f32; 3]], a: DVec3| {
             pts.windows(2).any(|w| {
                 let (p, q) = (DVec3::from(Vec3::from(w[0])), DVec3::from(Vec3::from(w[1])));
                 let d = q - p;
@@ -259,8 +262,14 @@ impl AppState {
                 (p + d * t).distance(a) < tol
             })
         };
-        let round_a: Vec<i32> = m.edges.iter().filter(|g| near(&g.pts)).flat_map(|g| g.faces).filter(|&f| f >= 0).collect();
-        m.edges[e].faces.iter().filter(|&&fi| fi >= 0).any(|&fi| {
+        let round_a: Vec<i32> = m.edges.iter().filter(|g| near(&g.pts, a)).flat_map(|g| g.faces).filter(|&f| f >= 0).collect();
+        // the faces `b` may lie on: its edge's, and at a corner those of
+        // every edge leaving it (a click there picks any one of them)
+        let mut faces: Vec<i32> = m.edges[e].faces.to_vec();
+        faces.extend(m.edges.iter().filter(|g| near(&g.pts, b)).flat_map(|g| g.faces));
+        faces.sort();
+        faces.dedup();
+        faces.iter().filter(|&&fi| fi >= 0).any(|&fi| {
             let fc = &m.faces[fi as usize];
             if fc.kind != SurfKind::Plane {
                 return round_a.contains(&fi);

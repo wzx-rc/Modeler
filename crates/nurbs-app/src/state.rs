@@ -544,6 +544,9 @@ pub struct AppState {
     pub slot_draw: Option<crate::slot::SlotDraw>,
     /// The debug journal, newest last (at most `JOURNAL`).
     pub journal: std::collections::VecDeque<JournalEntry>,
+    /// Where the journal is written as it goes, one JSON line per entry
+    /// (the app's `Documents/Forme NURBS/journal.jsonl`; a crash leaves it).
+    pub journal_file: Option<std::path::PathBuf>,
     journal_seen: (String, String),
     /// A change waiting for its build: (document version, the steps it
     /// made or changed, the errors before it).
@@ -708,6 +711,7 @@ impl AppState {
             slot_on_scan: false,
             slot_draw: None,
             journal: Default::default(),
+            journal_file: None,
             journal_seen: (String::new(), String::new()),
             pending_check: None,
             surface_curve: false,
@@ -913,6 +917,18 @@ impl AppState {
         while self.journal.len() > JOURNAL {
             self.journal.pop_front();
         }
+        if let Some(e) = self.journal.back() {
+            self.journal_write(e);
+        }
+    }
+
+    /// An entry appended to the journal file, when there is one.
+    fn journal_write(&self, e: &JournalEntry) {
+        let Some(path) = &self.journal_file else { return };
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            use std::io::Write;
+            let _ = writeln!(f, "{}", crate::remote::entry_json(e));
+        }
     }
 
     /// The build of a change kept has arrived: its new errors go in the
@@ -929,9 +945,16 @@ impl AppState {
             return;
         }
         self.pending_check = None;
+        // a change made since: its own check comes
+        if self.version != v {
+            return;
+        }
         let new: Vec<String> = m.errors.iter().filter(|e| !prev.contains(e)).cloned().collect();
         if let Some(e) = self.journal.iter_mut().rev().find(|e| e.kind == "edit") {
             e.errors = new.clone();
+        }
+        if !new.is_empty() {
+            self.record("errors", &new.join(" | "));
         }
         if self.is_live() {
             return;
@@ -2670,12 +2693,12 @@ impl AppState {
 
     /// Object mode is a transform (Romain, 20 nov. 5 h 52: "déplace le
     /// transform qui contient l'élément, du coup ce doit être fluide et
-    /// léger"): while whole shapes are dragged, each one's faces (its
+    /// léger"): while whole shapes are dragged, each added one's faces (its
     /// operations' too) shown at once where the pointer takes them, from
     /// where the model on screen has them, until the kernel's model of the
-    /// document as it is now arrives (the kernel builds when they are let
-    /// go). Each moved element with its matrix (model → now); None when the
-    /// model on screen is the document's.
+    /// document as it is now arrives (it rebuilds live, the latest request
+    /// winning). Each moved element with its matrix (model → now); None
+    /// when the model on screen is the document's.
     pub fn drag_preview(&self) -> Option<std::collections::HashMap<FeatureId, DMat4>> {
         let m = self.model.as_ref()?;
         if m.serial / 4 == self.version {
@@ -2685,7 +2708,9 @@ impl AppState {
         let (_, then) = self.sent_frames.iter().find(|(s, _)| *s == m.serial)?;
         let mut out = std::collections::HashMap::new();
         for (id, t) in then {
-            let Some(now) = self.doc.feature(*id) else { continue };
+            // a shape carved out is the part's hole: the kernel's model
+            // shows it, its cage where the pointer takes it
+            let Some(now) = self.doc.feature(*id).filter(|f| f.op != Op::Carve) else { continue };
             let x = shape_frame(now) * t.inverse();
             if !x.abs_diff_eq(DMat4::IDENTITY, 1e-9) && x.is_finite() {
                 out.insert(*id, x);
@@ -2736,16 +2761,16 @@ impl AppState {
         // quads only for a finished state (not while a gesture is live)
         let quads = self.quads && fine;
         let want = self.version * 4 + fine as u64 * 2 + quads as u64;
-        // whole shapes dragged in Object mode: a transform only, drawn
-        // from the model as it is (`drag_preview`); the kernel builds once
-        // they are let go (Romain, 20 nov. 6 h 11: "pas ultra fluide")
-        let dragging = self.dragged_shapes().is_some();
-        if want != self.submitted && self.kernel.status() != Status::Missing && !dragging {
+        // whole shapes dragged in Object mode: the kernel rebuilds live
+        // (Romain, 20 nov. 6 h 45: "remets l'aperçu au déplacement… sans
+        // couper"), and until each of its models arrives the shapes added
+        // are drawn moved from the model on screen (`drag_preview`)
+        if want != self.submitted && self.kernel.status() != Status::Missing {
             self.kernel.submit(want, &self.doc, fine, quads);
             self.submitted = want;
             let frames = self.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()).map(|f| (f.id, shape_frame(f))).collect();
             self.sent_frames.push((want, frames));
-            if self.sent_frames.len() > 16 {
+            if self.sent_frames.len() > 64 {
                 self.sent_frames.remove(0);
             }
         }

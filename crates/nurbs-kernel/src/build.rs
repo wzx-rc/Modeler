@@ -2213,6 +2213,34 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn drag_probe() {
+        // FORME_DOC=file.fnurbs FORME_DRAG=id: the coarse builds a drag of
+        // that shape makes (8 steps of 1 mm along X), timed
+        let Ok(p) = std::env::var("FORME_DOC") else { return };
+        let id: FeatureId = std::env::var("FORME_DRAG").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        let mut d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+        let mut cache = Cache::default();
+        let t = std::time::Instant::now();
+        let m = build(&d, false, false, &[], &mut cache);
+        eprintln!("first coarse build {:.0} ms, {} faces, cached {}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.cached);
+        let t = std::time::Instant::now();
+        let m = build(&d, true, false, &[], &mut cache);
+        eprintln!("fine build {:.0} ms, {} faces, cached {}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.cached);
+        for i in 0..8 {
+            if let Some(f) = d.features.iter_mut().find(|f| f.id == id) {
+                f.origin.x += 1.0;
+            }
+            let t = std::time::Instant::now();
+            let m = build(&d, false, false, &[], &mut cache);
+            eprintln!("drag {i}: {:.0} ms, cached {} of {}, errors {}", t.elapsed().as_secs_f64() * 1e3, m.cached, d.features.len(), m.errors.len());
+        }
+        if std::env::var("FORME_PROFILE").is_ok() {
+            let _ = build(&d, false, false, &[], &mut Cache::default());
+        }
+    }
+
+    #[test]
     fn moves_on_a_part_in_two_lumps() {
         // a cube added apart from the block (20 nov.): its top +X edge
         // pushed out, its top moved up

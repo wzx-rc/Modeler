@@ -2810,6 +2810,38 @@ fn main() {
         eprintln!("  edges {} errors {:?}", h.st.model.as_ref().map(|m| m.edges.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
     }
 
+    if want("knife-corner") {
+        // Romain's tab (20 nov. 6 h 45): the block's history marker back
+        // (its fillet left out), a Knife from corner to corner across the
+        // front face: one step, one line (each click made a Knife of its
+        // own, and a corner's edge could miss the face)
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        let t = |sub: u16| FaceTag { feature: b, sub }.pack();
+        d.add_round(3.0, false, vec![EdgeRef { faces: [t(2), t(5)], at: glam::DVec3::new(0.0, 20.0, -15.0) }]);
+        h.reset(d, "Corner");
+        h.settle();
+        h.st.set_marker(b, 0);
+        h.settle();
+        h.key(egui::Key::S);
+        for at in [Vec3::new(-20.0, 0.0, 15.0), Vec3::new(20.0, 20.0, 15.0)] {
+            let p = h.screen_of(at);
+            h.move_to(p);
+            h.steps(2);
+            eprintln!("  pick at {at:?}: {:?}", h.st.knife_pick([p.x, p.y]).map(|k| (h.st.edge_ref(k.0).map(|r| r.faces), k.2)));
+            h.click(p);
+            h.settle();
+        }
+        h.key(egui::Key::Enter);
+        h.settle();
+        for f in h.st.doc.features.iter().filter(|f| f.cut.is_some()) {
+            let k = f.cut.as_ref().unwrap();
+            eprintln!("  {} {} points {:?} lines, suspended {}", f.name, k.pts.len(), k.segs, f.suspended);
+        }
+        eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-knife-corner");
+    }
+
     if want("knife-loop") {
         // loop cuts (19 nov., 23 h): Ctrl over the top back edge of a box
         // whose top front edge is filleted: the loop round it, across the

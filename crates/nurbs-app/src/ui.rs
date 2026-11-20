@@ -2547,8 +2547,18 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.selection.clear();
         }
     }
+    // AZERTY (Romain, 20 nov. 6 h 45: "La touche & passe en Object Mode"):
+    // the number row's & é " ' without Shift: & Object, é Edge, " Face,
+    // ' Vertex (its 1 key would give Vertex through the key's place)
+    let typed = |t: &str| ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(x) if x == t)));
+    let azerty = !ctrl && typed("&");
+    if azerty {
+        st.set_sel_mode(SelMode::Object);
+    } else if !ctrl && typed("'") && !shift {
+        st.set_sel_mode(SelMode::Vertex);
+    }
     for (k, m) in [(Key::Num1, SelMode::Vertex), (Key::Num2, SelMode::Edge), (Key::Num3, SelMode::Face), (Key::Num4, SelMode::Object), (Key::F8, SelMode::Object), (Key::F9, SelMode::Vertex), (Key::F10, SelMode::Edge), (Key::F11, SelMode::Face)] {
-        if pressed(k) {
+        if pressed(k) && !(azerty && k == Key::Num1) {
             st.set_sel_mode(m);
         }
     }

@@ -513,6 +513,24 @@ fn document(st: &AppState) -> Value {
 /// tool, selection, what was picked, the pivot, the steps made and the
 /// build's new errors), and the state now; `document`: true adds the
 /// document as `document` gives it.
+/// One entry of the debug journal, as the `journal` request and the
+/// journal file on disk give it.
+pub fn entry_json(e: &crate::state::JournalEntry) -> Value {
+    json!({
+        "at_s": r(e.at),
+        "clock": e.clock,
+        "kind": e.kind,
+        "what": e.what,
+        "mode": e.mode,
+        "tool": e.tool,
+        "selection": e.selection,
+        "picked": e.picked,
+        "pivot": e.pivot.map(|p| r3(glam::DVec3::from_array(p))),
+        "steps": e.steps,
+        "errors": e.errors,
+    })
+}
+
 fn journal(st: &AppState, p: &Value) -> Value {
     let n = p.get("n").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     let lines: Vec<Value> = st
@@ -521,21 +539,7 @@ fn journal(st: &AppState, p: &Value) -> Value {
         .rev()
         .take(n)
         .rev()
-        .map(|e| {
-            json!({
-                "at_s": r(e.at),
-                "clock": e.clock,
-                "kind": e.kind,
-                "what": e.what,
-                "mode": e.mode,
-                "tool": e.tool,
-                "selection": e.selection,
-                "picked": e.picked,
-                "pivot": e.pivot.map(|p| r3(glam::DVec3::from_array(p))),
-                "steps": e.steps,
-                "errors": e.errors,
-            })
-        })
+        .map(entry_json)
         .collect();
     let m = st.model.as_ref();
     let mut out = json!({
