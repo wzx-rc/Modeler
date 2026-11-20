@@ -601,11 +601,49 @@ pub fn edge_ring(faces: &[Vec<u32>], start: (u32, u32)) -> (Vec<(u32, u32)>, boo
 /// ring cut in two; a face at the ring's end (not a quad) gets the new
 /// point in its side. Returns the new loop's edges.
 pub fn loop_cut(pts: &mut Vec<Vec3>, faces: &mut Vec<Vec<u32>>, start: (u32, u32)) -> Vec<(u32, u32)> {
-    let (ring, _closed) = edge_ring(faces, start);
+    loop_cut_at(pts, faces, start, 0.5)
+}
+
+/// The same at `t` along `start` (from its first point), each edge of the
+/// ring cut at the same fraction running the same way (Maya's Multi-Cut
+/// with Ctrl).
+pub fn loop_cut_at(pts: &mut Vec<Vec3>, faces: &mut Vec<Vec<u32>>, start: (u32, u32), t: f32) -> Vec<(u32, u32)> {
+    let (ring, closed) = edge_ring(faces, start);
+    // each ring edge the same way round as `start`: across a quad, its
+    // side x0 → x1 runs as the opposite side's x3 → x2
+    let mut sides: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (fi, f) in faces.iter().enumerate() {
+        for i in 0..f.len() {
+            sides.entry(edge_key(f[i], f[(i + 1) % f.len()])).or_default().push(fi);
+        }
+    }
+    let pos = ring.iter().position(|e| *e == edge_key(start.0, start.1)).unwrap_or(0);
+    let mut dirs: Vec<(u32, u32)> = ring.clone();
+    dirs[pos] = start;
+    let across = |from: (u32, u32), to: (u32, u32)| -> Option<(u32, u32)> {
+        let shared: Vec<usize> = sides.get(&edge_key(from.0, from.1))?.iter().copied().filter(|f| sides.get(&to).map(|v| v.contains(f)).unwrap_or(false)).collect();
+        let q = &faces[*shared.first()?];
+        if q.len() != 4 {
+            return None;
+        }
+        let i = (0..4).find(|&i| edge_key(q[i], q[(i + 1) % 4]) == edge_key(from.0, from.1))?;
+        Some(if q[i] == from.0 { (q[(i + 3) % 4], q[(i + 2) % 4]) } else { (q[(i + 2) % 4], q[(i + 3) % 4]) })
+    };
+    for i in pos + 1..dirs.len() {
+        if let Some(d) = across(dirs[i - 1], ring[i]) {
+            dirs[i] = d;
+        }
+    }
+    for i in (0..pos).rev() {
+        if let Some(d) = across(dirs[i + 1], ring[i]) {
+            dirs[i] = d;
+        }
+    }
+    let _ = closed;
     let mut cut: HashMap<(u32, u32), u32> = HashMap::new();
-    for e in &ring {
-        cut.insert(*e, pts.len() as u32);
-        pts.push((pts[e.0 as usize] + pts[e.1 as usize]) * 0.5);
+    for d in &dirs {
+        cut.insert(edge_key(d.0, d.1), pts.len() as u32);
+        pts.push(pts[d.0 as usize].lerp(pts[d.1 as usize], t));
     }
     let mut out = vec![];
     let mut new_faces: Vec<Vec<u32>> = vec![];
@@ -634,6 +672,59 @@ pub fn loop_cut(pts: &mut Vec<Vec3>, faces: &mut Vec<Vec<u32>>, start: (u32, u32
     }
     faces.extend(new_faces);
     out
+}
+
+/// A new point on the edge a–b at `t` from a, put in every face along it
+/// (Maya's Multi-Cut clicking an edge). Returns it.
+pub fn split_edge(pts: &mut Vec<Vec3>, faces: &mut [Vec<u32>], a: u32, b: u32, t: f32) -> u32 {
+    let id = pts.len() as u32;
+    pts.push(pts[a as usize].lerp(pts[b as usize], t));
+    for f in faces.iter_mut() {
+        let n = f.len();
+        if let Some(i) = (0..n).find(|&i| (f[i] == a && f[(i + 1) % n] == b) || (f[i] == b && f[(i + 1) % n] == a)) {
+            f.insert(i + 1, id);
+        }
+    }
+    id
+}
+
+/// The face holding both points, not as neighbours (a cut can join them).
+pub fn common_face(faces: &[Vec<u32>], a: u32, b: u32) -> Option<usize> {
+    if a == b {
+        return None;
+    }
+    faces.iter().position(|f| {
+        let n = f.len();
+        match (f.iter().position(|&x| x == a), f.iter().position(|&x| x == b)) {
+            (Some(i), Some(j)) => (i + 1) % n != j && (j + 1) % n != i,
+            _ => false,
+        }
+    })
+}
+
+/// The face holding a and b cut in two along a–b: it keeps the half from a
+/// to b, the other half is added. Returns that new face's index.
+pub fn split_face(faces: &mut Vec<Vec<u32>>, a: u32, b: u32) -> Option<usize> {
+    let fi = common_face(faces, a, b)?;
+    let f = faces[fi].clone();
+    let n = f.len();
+    let ia = f.iter().position(|&x| x == a)?;
+    let ib = f.iter().position(|&x| x == b)?;
+    let walk = |from: usize, to: usize| -> Vec<u32> {
+        let mut h = vec![];
+        let mut i = from;
+        loop {
+            h.push(f[i]);
+            if i == to {
+                break;
+            }
+            i = (i + 1) % n;
+        }
+        h
+    };
+    faces[fi] = walk(ia, ib);
+    faces.push(walk(ib, ia));
+    Some(faces.len() - 1)
 }
 
 #[cfg(test)]
@@ -707,6 +798,29 @@ mod tests {
         assert!(closed(&f) && outward(&p, &f));
         // the new points at mid-height
         assert!(p[8..].iter().all(|q| (q.y - 10.0).abs() < 1e-4));
+    }
+
+    #[test]
+    fn cut_across_faces() {
+        let (mut p, mut f) = poly_cube(20.0);
+        // a point on two edges of the front face (z = +10: 4 5 7 6 or so), joined
+        let front = f.iter().position(|q| q.iter().all(|v| p[*v as usize].z > 9.0)).unwrap();
+        let q = f[front].clone();
+        let a = split_edge(&mut p, &mut f, q[0], q[1], 0.3);
+        let b = split_edge(&mut p, &mut f, q[2], q[3], 0.6);
+        assert!(closed(&f));
+        let nf = split_face(&mut f, a, b).unwrap();
+        assert_eq!(f.len(), 7);
+        assert!(closed(&f) && outward(&p, &f));
+        assert_eq!(f[nf].len(), 4);
+        // neighbours cannot be joined
+        assert!(split_face(&mut f, a, q[1]).is_none());
+        // a loop at a quarter, the same way round
+        let (mut p, mut f) = poly_cube(20.0);
+        let new = loop_cut_at(&mut p, &mut f, (0, 2), 0.25);
+        assert_eq!(new.len(), 4);
+        assert!(closed(&f) && outward(&p, &f));
+        assert!(p[8..].iter().all(|q| (q.y - 5.0).abs() < 1e-4));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! The Sculpt tab (Romain, 20 nov. 2026: "dans Sculpt Mode, on va avoir un
 //! petit toolset de brush"): clay meshes made in the scene (a sphere, a
 //! block, or a Poly mesh sent here) and shaped with a few brushes, ZBrush
-//! / Blender style: Draw, Clay, Smooth, Grab, Inflate, Flatten, Pinch. The
+//! / Blender style: Draw, Clay, Clay Buildup, Smooth, Grab, Inflate,
+//! Flatten, Pinch. The
 //! brush acts on the clay under the pointer; Ctrl digs instead of raising,
 //! Shift smooths whatever the brush, X mirrors across the mesh's own X.
 //! The radius is on screen (points), as in ZBrush; [ and ] change it.
@@ -20,6 +21,10 @@ use std::sync::Arc;
 pub enum Brush {
     Draw,
     Clay,
+    /// ZBrush's Clay Buildup (Romain, 20 nov. 2026, 15 h 40: "ajouter en
+    /// sculpt… l'équivalent d'une clay buildup brush"): a square of clay
+    /// laid along the stroke, flat on top, stroke over stroke.
+    Buildup,
     Smooth,
     Grab,
     Inflate,
@@ -28,12 +33,13 @@ pub enum Brush {
 }
 
 impl Brush {
-    pub const ALL: [Brush; 7] = [Brush::Draw, Brush::Clay, Brush::Smooth, Brush::Grab, Brush::Inflate, Brush::Flatten, Brush::Pinch];
+    pub const ALL: [Brush; 8] = [Brush::Draw, Brush::Clay, Brush::Buildup, Brush::Smooth, Brush::Grab, Brush::Inflate, Brush::Flatten, Brush::Pinch];
 
     pub fn label(self) -> &'static str {
         match self {
             Brush::Draw => "Draw",
             Brush::Clay => "Clay",
+            Brush::Buildup => "Clay Buildup",
             Brush::Smooth => "Smooth",
             Brush::Grab => "Grab",
             Brush::Inflate => "Inflate",
@@ -47,6 +53,7 @@ impl Brush {
         match self {
             Brush::Draw => egui::Key::X,
             Brush::Clay => egui::Key::C,
+            Brush::Buildup => egui::Key::V,
             Brush::Smooth => egui::Key::S,
             Brush::Grab => egui::Key::G,
             Brush::Inflate => egui::Key::I,
@@ -59,6 +66,7 @@ impl Brush {
         match self {
             Brush::Draw => "X",
             Brush::Clay => "C",
+            Brush::Buildup => "V",
             Brush::Smooth => "S",
             Brush::Grab => "G",
             Brush::Inflate => "I",
@@ -72,6 +80,7 @@ impl Brush {
         match self {
             Brush::Draw => Icon::BrushDraw,
             Brush::Clay => Icon::BrushClay,
+            Brush::Buildup => Icon::BrushBuildup,
             Brush::Smooth => Icon::BrushSmooth,
             Brush::Grab => Icon::BrushGrab,
             Brush::Inflate => Icon::BrushInflate,
@@ -84,6 +93,7 @@ impl Brush {
         match self {
             Brush::Draw => "Draw (X): raises the clay along the surface (Ctrl: digs)",
             Brush::Clay => "Clay (C): lays flat strips of clay, builds forms up (Ctrl: carves)",
+            Brush::Buildup => "Clay Buildup (V): a square of clay along the stroke, flat on top, layer over layer (Ctrl: carves)",
             Brush::Smooth => "Smooth (S, or Shift with any brush): evens the surface out",
             Brush::Grab => "Grab (G): pulls the clay under the brush along with the pointer",
             Brush::Inflate => "Inflate (I): swells the clay along its own normals (Ctrl: deflates)",
@@ -130,6 +140,8 @@ pub struct Stroke {
     /// World radius (mm), fixed at the press.
     pub radius: f32,
     pub last: Vec3,
+    /// The way the stroke goes (Clay Buildup lays its square along it).
+    pub dir: Vec3,
     pub grab: Option<GrabSet>,
     pub nb: Arc<Vec<Vec<u32>>>,
     /// A step was made (the mesh changed).
@@ -147,9 +159,11 @@ fn falloff(x: f32) -> f32 {
 
 /// One dab of `brush` at `c` (world), radius `r`, on the points `p` (world).
 #[allow(clippy::too_many_arguments)]
-fn dab(brush: Brush, invert: bool, strength: f32, p: &mut [Vec3], n: &[Vec3], nb: &[Vec<u32>], c: Vec3, r: f32, changed: &mut [bool]) {
+fn dab(brush: Brush, invert: bool, strength: f32, p: &mut [Vec3], n: &[Vec3], nb: &[Vec<u32>], c: Vec3, r: f32, dir: Vec3, changed: &mut [bool]) {
     let sign = if invert { -1.0 } else { 1.0 };
-    let r2 = r * r;
+    // the square's corners reach a little past the radius
+    let reach = if brush == Brush::Buildup { r * 1.2 } else { r };
+    let r2 = reach * reach;
     let near: Vec<(usize, f32)> = p.iter().enumerate().filter_map(|(i, q)| {
         let d2 = (*q - c).length_squared();
         (d2 < r2).then(|| (i, falloff(d2.sqrt() / r)))
@@ -190,6 +204,37 @@ fn dab(brush: Brush, invert: bool, strength: f32, p: &mut [Vec3], n: &[Vec3], nb
                 let d = (p[i] - plane).dot(an) * sign;
                 if d < 0.0 {
                     p[i] -= an * (d * sign * (0.55 * s * w));
+                    changed[i] = true;
+                }
+            }
+        }
+        Brush::Buildup => {
+            // the square's frame: along the stroke, across it
+            let t = (dir - an * dir.dot(an)).normalize_or_zero();
+            let t = if t == Vec3::ZERO { an.any_orthonormal_vector() } else { t };
+            let bx = an.cross(t);
+            // a slab of clay over the area's plane (under it when carving):
+            // what lies below it comes up to it, flat, edges soft
+            let plane = ac + an * (r * 0.16 * s * sign);
+            for &(i, _) in &near {
+                let q = p[i] - c;
+                if q.dot(an).abs() > r {
+                    continue;
+                }
+                let (u, v) = (q.dot(t) / r, q.dot(bx) / r);
+                let x = (u.powi(4) + v.powi(4)).sqrt().sqrt();
+                if x >= 1.0 {
+                    continue;
+                }
+                let w = if x < 0.6 {
+                    1.0
+                } else {
+                    let y = (x - 0.6) / 0.4;
+                    1.0 - y * y * (3.0 - 2.0 * y)
+                };
+                let d = (p[i] - plane).dot(an) * sign;
+                if d < 0.0 {
+                    p[i] -= an * (d * sign * (0.6 * s.max(0.1) * w).min(1.0));
                     changed[i] = true;
                 }
             }
@@ -319,7 +364,8 @@ impl AppState {
         }
         drop(f);
         self.selection = vec![h.id];
-        self.stroke = Some(Stroke { id: h.id, brush, invert: ctrl, radius, last: h.point, grab, nb, dabs: 0 });
+        let dir = self.view().basis().1;
+        self.stroke = Some(Stroke { id: h.id, brush, invert: ctrl, radius, last: h.point, dir, grab, nb, dabs: 0 });
         // the press itself is a dab
         self.stroke_to(p, true);
         true
@@ -367,13 +413,19 @@ impl AppState {
             if count == 0 {
                 return;
             }
+            if !first && dist > 1e-6 {
+                s.dir = (h.point - s.last) / dist;
+            }
+            // the way mirrored across the mesh's X (in its frame)
+            let ld = inv.transform_vector3(s.dir);
+            let mdir = x.transform_vector3(Vec3::new(-ld.x, ld.y, ld.z));
             for k in 1..=count {
                 let c = if first { h.point } else { s.last.lerp(h.point, k as f32 / count as f32) };
-                dab(s.brush, s.invert, strength, &mut pts, &n, &s.nb, c, s.radius, &mut changed);
+                dab(s.brush, s.invert, strength, &mut pts, &n, &s.nb, c, s.radius, s.dir, &mut changed);
                 if self.sculpt.mirror {
                     let c2 = mirrored(x, inv, c);
                     if (c2 - c).length() > s.radius * 0.25 {
-                        dab(s.brush, s.invert, strength, &mut pts, &n, &s.nb, c2, s.radius, &mut changed);
+                        dab(s.brush, s.invert, strength, &mut pts, &n, &s.nb, c2, s.radius, mdir, &mut changed);
                     }
                 }
             }

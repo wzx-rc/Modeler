@@ -317,6 +317,15 @@ fn main() {
     if want("multi") {
         multi(&mut h);
     }
+    if want("pbevel") {
+        poly_bevel(&mut h);
+    }
+    if want("pcut") {
+        poly_cut(&mut h);
+    }
+    if want("buildup") {
+        buildup(&mut h);
+    }
 
     if want("empty") {
         h.reset(Doc::default(), "Untitled");
@@ -4820,4 +4829,250 @@ fn multi(h: &mut Harness) {
     h.steps(3);
     h.shot("multi-17-light-sculpt");
     h.st.settings.light = false;
+}
+
+/// The Poly tab's Bevel (Romain 20 nov., 15 h 40: "le bevel comme Maya,
+/// avec chamfer et bevel, et surtout en travaillant bien les coins"): a
+/// cube's every edge, the pointer widening it, 3 rounded segments, its
+/// corner close up; the 4 top edges (mitred corners); a chamfer of 1;
+/// a cylinder's top face.
+fn poly_bevel(h: &mut Harness) {
+    use egui::Key;
+    h.reset(Doc::default(), "Bevel");
+    h.key(Key::F3);
+    h.steps(2);
+    h.st.camera.target = Vec3::new(0.0, 10.0, 0.0);
+    h.key(Key::B);
+    h.steps(2);
+    h.st.camera.yaw = 0.6;
+    h.st.camera.pitch = 0.45;
+    h.st.frame_current();
+    h.settle();
+    h.shot("pbevel-0-cube");
+    // the whole cube (Object mode): Ctrl + B, the pointer to the right
+    let c = h.screen_of(Vec3::new(0.0, 10.0, 0.0));
+    let start = c + vec2(160.0, 60.0);
+    h.move_to(start);
+    h.hold(Modifiers::CTRL);
+    h.key(Key::B);
+    h.hold(Modifiers::NONE);
+    h.steps(2);
+    h.shot("pbevel-1-chamfer-live");
+    for i in 1..=10 {
+        h.move_to(start + vec2(4.0 * i as f32, 0.0));
+    }
+    h.key(Key::CloseBracket);
+    h.key(Key::CloseBracket);
+    h.key(Key::C);
+    h.steps(2);
+    h.shot("pbevel-2-round-live");
+    h.click(start + vec2(40.0, 0.0));
+    h.steps(3);
+    let b = h.st.poly_bevel.clone();
+    eprintln!("bevel: width {:?} made {:?} segments {:?} faces {:?}", b.as_ref().map(|b| b.width), b.as_ref().map(|b| b.made), b.as_ref().map(|b| b.segments), b.as_ref().map(|b| b.faces.len()));
+    h.shot("pbevel-3-kept");
+    // its corner, close, seen along the cube's diagonal (no gizmo, nothing
+    // tinted: the faces as they are)
+    h.key(Key::Q);
+    h.st.poly_sel = None;
+    h.move_to(pos2(1200.0, 700.0)); // over the help box: no face hovered
+    h.st.camera.target = Vec3::new(7.0, 17.0, 7.0);
+    h.st.camera.yaw = 0.785;
+    h.st.camera.pitch = 0.62;
+    h.st.camera.dist *= 0.55;
+    h.steps(3);
+    h.shot("pbevel-4-corner");
+    // 4 segments, then 5 (odd: a small polygon in the middle)
+    if let Some(b) = h.st.poly_bevel.clone() {
+        for (segs, chamfer, name) in [(4, false, "pbevel-5-corner-4"), (5, false, "pbevel-6-corner-5"), (1, true, "pbevel-7-corner-chamfer"), (3, true, "pbevel-7b-corner-chamfer-3")] {
+            h.st.set_poly_bevel(b.width, segs, chamfer, true);
+            h.st.end_live();
+            h.st.poly_sel = None;
+            h.steps(2);
+            h.shot(name);
+        }
+    }
+    h.key(Key::W);
+    eprintln!("undo: {:?}", h.st.undo_labels().iter().rev().take(6).collect::<Vec<_>>());
+    // back to the cube, its 4 top edges (Edge mode)
+    while h.st.undo_labels().last().map(|l| l.starts_with("Bevel")).unwrap_or(false) {
+        h.st.undo();
+        h.steps(1);
+    }
+    h.st.camera.target = Vec3::new(0.0, 10.0, 0.0);
+    h.st.frame_current();
+    h.st.camera.yaw = 0.6;
+    h.st.camera.pitch = 0.45;
+    h.settle();
+    h.key(Key::Num2);
+    let mids = [Vec3::new(0.0, 20.0, 10.0), Vec3::new(10.0, 20.0, 0.0), Vec3::new(0.0, 20.0, -10.0), Vec3::new(-10.0, 20.0, 0.0)];
+    for (i, m) in mids.iter().enumerate() {
+        let p = h.screen_of(*m);
+        if i > 0 {
+            h.hold(Modifiers::SHIFT);
+        }
+        h.move_to(p);
+        h.click(p);
+    }
+    h.hold(Modifiers::NONE);
+    eprintln!("picked edges: {:?}", h.st.poly_sel.as_ref().map(|s| s.edges.clone()));
+    h.shot("pbevel-8-top-edges");
+    h.move_to(start);
+    h.hold(Modifiers::CTRL);
+    h.key(Key::B);
+    h.hold(Modifiers::NONE);
+    h.key(Key::C);
+    h.key(Key::CloseBracket);
+    h.key(Key::CloseBracket);
+    for i in 1..=8 {
+        h.move_to(start + vec2(1.5 * i as f32, 0.0));
+    }
+    h.steps(2);
+    h.shot("pbevel-9a-top-live");
+    h.click(start + vec2(12.0, 0.0));
+    h.steps(2);
+    let b = h.st.poly_bevel.clone();
+    eprintln!("mitre: width {:?} made {:?} segments {:?}", b.as_ref().map(|b| b.width), b.as_ref().map(|b| b.made), b.as_ref().map(|b| b.segments));
+    h.shot("pbevel-9-top-mitre");
+    // a cylinder beside: its top face's edges, rounded
+    h.st.camera.target = Vec3::new(35.0, 10.0, 0.0);
+    h.key(Key::Num4);
+    h.key(Key::C);
+    h.steps(2);
+    h.st.camera.target = Vec3::new(17.0, 10.0, 0.0);
+    h.st.camera.dist *= 1.5;
+    h.steps(2);
+    h.key(Key::Num3);
+    let top = h.screen_of(Vec3::new(35.0, 20.0, 0.0));
+    h.move_to(top);
+    h.steps(2);
+    h.click(top);
+    h.steps(2);
+    eprintln!("cylinder: selection {:?} mode {:?} picked faces {:?}", h.st.selection, h.st.sel_mode, h.st.poly_sel.as_ref().map(|s| (s.id, s.faces.clone())));
+    let s0 = h.screen_of(Vec3::new(50.0, 10.0, 0.0));
+    h.move_to(s0);
+    h.hold(Modifiers::CTRL);
+    h.key(Key::B);
+    h.hold(Modifiers::NONE);
+    h.key(Key::CloseBracket);
+    h.key(Key::CloseBracket);
+    if h.st.poly_bevel.as_ref().map(|b| b.chamfer).unwrap_or(false) {
+        h.key(Key::C);
+    }
+    for i in 1..=6 {
+        h.move_to(s0 + vec2(1.5 * i as f32, 0.0));
+    }
+    h.click(s0 + vec2(9.0, 0.0));
+    h.steps(2);
+    h.shot("pbevel-10-cylinder");
+    // the smooth preview over the bevelled cube (the bevel holds its edges)
+    h.key(Key::Num4);
+    h.st.selection.clear();
+    h.steps(2);
+    h.shot("pbevel-11-both");
+}
+
+/// The Poly tab's Cut (Maya's Multi-Cut, K): points on edges joined across
+/// the faces, a vertex taken, Ctrl + click an edge loop at a quarter.
+fn poly_cut(h: &mut Harness) {
+    use egui::Key;
+    h.reset(Doc::default(), "Cut");
+    h.key(Key::F3);
+    h.steps(2);
+    h.st.camera.target = Vec3::new(0.0, 10.0, 0.0);
+    h.key(Key::B);
+    h.steps(2);
+    h.st.camera.yaw = 0.6;
+    h.st.camera.pitch = 0.45;
+    h.st.frame_current();
+    h.settle();
+    h.key(Key::K);
+    // the front face (z = +10): its top edge at a third, its bottom edge at
+    // two thirds; on round the right face to its far top corner
+    let a = h.screen_of(Vec3::new(-10.0 + 20.0 / 3.0, 20.0, 10.0));
+    h.move_to(a);
+    h.steps(2);
+    h.shot("pcut-1-hover");
+    h.click(a);
+    let b = h.screen_of(Vec3::new(10.0 - 20.0 / 3.0 - 1.0, 0.0, 10.0));
+    h.move_to(b);
+    h.steps(2);
+    h.shot("pcut-2-line");
+    h.click(b);
+    // the front right vertical edge, then the right face's far top corner
+    let c = h.screen_of(Vec3::new(10.0, 6.0, 10.0));
+    h.click(c);
+    let d = h.screen_of(Vec3::new(10.0, 20.0, -10.0));
+    h.move_to(d);
+    h.steps(2);
+    h.shot("pcut-3-to-vertex");
+    h.click(d);
+    h.key(Key::Enter);
+    h.steps(2);
+    eprintln!("cut: tool {:?}, picked {:?}, undo {:?}", h.st.tool, h.st.poly_sel.as_ref().map(|s| s.edges.clone()), h.st.undo_labels().iter().rev().take(3).collect::<Vec<_>>());
+    h.shot("pcut-4-done");
+    // Ctrl + click on the left part of the top's back edge: a loop at a quarter
+    h.key(Key::K);
+    let e = h.screen_of(Vec3::new(-5.0, 20.0, -10.0));
+    h.hold(Modifiers::CTRL);
+    h.move_to(e);
+    h.steps(2);
+    h.shot("pcut-5-loop-preview");
+    h.click(e);
+    h.hold(Modifiers::NONE);
+    h.key(Key::Enter);
+    h.steps(2);
+    h.shot("pcut-6-loop");
+}
+
+/// The Sculpt tab's Clay Buildup (V; Romain 20 nov., 15 h 40): square
+/// strokes of clay, layered, beside the Clay brush's.
+fn buildup(h: &mut Harness) {
+    use egui::Key;
+    h.reset(Doc::default(), "Buildup");
+    h.key(Key::F2);
+    h.steps(2);
+    h.st.camera.target = Vec3::new(0.0, 10.0, 0.0);
+    h.key(Key::B);
+    h.settle();
+    h.st.camera.yaw = 0.0;
+    h.st.camera.pitch = 0.0;
+    h.st.frame_current();
+    h.settle();
+    let c = Vec3::new(0.0, 10.0, 10.0);
+    let centre = h.screen_of(c);
+    let v = h.st.view();
+    let k = 1.0 / v.pixel_size_at((c - v.eye).length());
+    h.st.sculpt.radius = (10.0 * k * 0.22).max(12.0);
+    h.st.sculpt.strength = 0.7;
+    h.st.sculpt.mirror = false;
+    h.key(Key::V);
+    h.move_to(centre + vec2(-0.5, -0.45) * 10.0 * k);
+    h.steps(2);
+    h.shot("buildup-1-square");
+    let along = |h: &mut Harness, a: (f32, f32), b: (f32, f32), n: usize| {
+        let pa = centre + vec2(a.0, a.1) * 10.0 * k;
+        let pb = centre + vec2(b.0, b.1) * 10.0 * k;
+        h.drag(pa, pb, n, true);
+        h.steps(2);
+    };
+    // three layers along the top, two across, one diagonal
+    for _ in 0..3 {
+        along(h, (-0.65, -0.45), (0.65, -0.45), 26);
+    }
+    for _ in 0..2 {
+        along(h, (-0.45, -0.2), (-0.45, 0.6), 18);
+    }
+    along(h, (0.0, 0.0), (0.55, 0.55), 18);
+    // Clay (C) below for comparison
+    h.key(Key::C);
+    along(h, (-0.1, 0.55), (0.65, 0.55), 18);
+    h.key(Key::V);
+    h.move_to(centre + vec2(0.3, 0.2) * 10.0 * k);
+    h.steps(2);
+    h.shot("buildup-2-strokes");
+    h.st.camera.yaw = 0.7;
+    h.st.camera.pitch = 0.5;
+    h.steps(3);
+    h.shot("buildup-3-side");
 }

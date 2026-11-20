@@ -34,6 +34,9 @@ pub enum Tool {
     /// The Poly tab's Insert Edge Loop (Ctrl + R): a click on an edge cuts
     /// a loop across its ring.
     PolyLoop,
+    /// The Poly tab's Cut (K, Maya's Multi-Cut): clicks on edges and
+    /// points join across the faces (`poly.rs`).
+    PolyCut,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -822,6 +825,11 @@ pub struct AppState {
     pub poly_drag: Option<crate::poly::PolyDrag>,
     pub poly_pull: Option<crate::poly::PolyPull>,
     pub poly_loop: Vec<(Vec3, Vec3)>,
+    /// The Bevel under way or just made (its window), the cut under way and
+    /// what a click of the Cut tool would take.
+    pub poly_bevel: Option<crate::poly::PolyBevel>,
+    pub poly_cut: Option<crate::poly::PolyCut>,
+    pub poly_cut_hover: Option<crate::poly::CutAt>,
     /// Bumped when a mesh changes without a new document version (a
     /// sculpt stroke): the renderer uploads the meshes again.
     pub mesh_gen: u64,
@@ -943,6 +951,9 @@ impl AppState {
             poly_hover: None,
             poly_drag: None,
             poly_pull: None,
+            poly_bevel: None,
+            poly_cut: None,
+            poly_cut_hover: None,
             poly_loop: vec![],
             mesh_gen: 0,
         }
@@ -2071,7 +2082,7 @@ impl AppState {
     pub fn set_gizmo(&mut self, g: GizmoMode) {
         // what is under way is kept (Romain 20 nov., 11 h 54: "appuyer sur
         // Q, W ou Entrée valide l'opération et sort du tool")
-        if (self.tool != Tool::Select && self.tool != Tool::Sculpt && self.tool != Tool::PolyLoop) || self.sketch.is_some() || self.creation.is_some() || self.drag.is_some() || self.push.is_some() || self.curve_pull.is_some() || self.poly_pull.is_some() || self.poly_drag.is_some() {
+        if (self.tool != Tool::Select && self.tool != Tool::Sculpt && self.tool != Tool::PolyLoop) || self.sketch.is_some() || self.creation.is_some() || self.drag.is_some() || self.push.is_some() || self.curve_pull.is_some() || self.poly_pull.is_some() || self.poly_drag.is_some() || self.poly_bevel.as_ref().map(|b| b.live).unwrap_or(false) {
             self.commit_gestures(self.principal());
         }
         // rotate works on whole shapes; scale on components too
@@ -2079,7 +2090,8 @@ impl AppState {
             self.set_sel_mode(SelMode::Object);
         }
         // the brush is put down: the gizmo works on what is selected
-        if self.tool == Tool::Sculpt || self.tool == Tool::PolyLoop {
+        if self.tool == Tool::Sculpt || self.tool == Tool::PolyLoop || self.tool == Tool::PolyCut {
+            self.end_poly_cut();
             self.tool = Tool::Select;
         }
         self.gizmo = g;
@@ -2327,6 +2339,12 @@ impl AppState {
             self.cancel_live();
             self.mesh_gen += 1;
         }
+        if self.poly_bevel.as_ref().map(|b| b.live).unwrap_or(false) {
+            self.cancel_poly_bevel();
+        }
+        // a cut's points are kept (each one is already in the mesh)
+        self.end_poly_cut();
+        self.poly_cut_hover = None;
         self.poly_loop.clear();
         if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() || self.round_drag.take().is_some() || self.face_drag.take().is_some() || self.curve_pull.take().is_some() {
             self.cancel_live();
@@ -2359,6 +2377,10 @@ impl AppState {
         if self.poly_pull.is_some() {
             self.finish_poly_pull();
         }
+        if self.poly_bevel.as_ref().map(|b| b.live).unwrap_or(false) {
+            self.finish_poly_bevel();
+        }
+        self.end_poly_cut();
         if self.poly_drag.is_some() {
             self.end_poly_drag();
         }

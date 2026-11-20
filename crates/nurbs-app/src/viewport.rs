@@ -32,6 +32,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_brush(p, st, ctx.input(|i| i.pointer.hover_pos()), resp.hovered() || resp.dragged());
         draw_push(p, st);
         draw_knife(p, st, ctx.input(|i| i.pointer.hover_pos()));
+        draw_poly_cut(p, st, ctx.input(|i| i.pointer.hover_pos()));
         if let (Some(g), Some(h)) = (&st.round_drag, ctx.input(|i| i.pointer.latest_pos())) {
             if g.size > 1e-9 {
                 let label = if g.chamfer { "Chamfer" } else { "Fillet" };
@@ -429,6 +430,43 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         }
         return;
     }
+    // the Bevel following the pointer: its travel sets the width, a click
+    // keeps it, a right click drops it
+    if st.poly_bevel.as_ref().map(|b| b.live).unwrap_or(false) {
+        if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+            st.update_poly_bevel(p2(p));
+            st.interacting = true;
+        }
+        if resp.clicked_by(PointerButton::Primary) || resp.drag_stopped() {
+            st.finish_poly_bevel();
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            st.cancel_poly_bevel();
+        }
+        return;
+    }
+    // the Cut tool (Maya's Multi-Cut): the point a click would put, the
+    // line from the cut's last point; Ctrl: the loop it would insert
+    if st.tool == Tool::PolyCut {
+        st.poly_cut_hover = if over_ui { None } else { hover.and_then(|h| st.poly_cut_at(p2(h))) };
+        st.poly_loop = match (ctrl, st.poly_cut_hover) {
+            (true, Some(at)) => st.poly_cut_loop_preview(at),
+            _ => vec![],
+        };
+        if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.poly_cut_click(p2(p), ctrl);
+                st.poly_cut_hover = st.poly_cut_at(p2(p));
+                st.poly_loop.clear();
+            }
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            if st.poly_cut.is_some() {
+                st.end_poly_cut();
+            } else {
+                st.select_tool();
+            }
+        }
+        return;
+    }
     // Insert Edge Loop: the loop under the pointer, a click cuts it
     if st.tool == Tool::PolyLoop {
         st.poly_loop = if over_ui { vec![] } else { hover.map(|h| st.poly_loop_preview(p2(h))).unwrap_or_default() };
@@ -728,7 +766,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 st.select(id, shift || ctrl);
             }
         }
-        Tool::Sculpt | Tool::PolyLoop => {}
+        Tool::Sculpt | Tool::PolyLoop | Tool::PolyCut => {}
         Tool::Create(PrimKind::Profile | PrimKind::Path | PrimKind::Surface) if st.creation.is_none() => {
             // the outline: a click or a drag puts a corner;
             // Ctrl + drag from a point placed: its fillet
@@ -870,6 +908,13 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
     // shapes selected (Object mode), or a component picked (Vertex, Edge,
     // Face modes): `pivot` says where, if anywhere
     if st.tool != Tool::Select || st.creation.is_some() {
+        return;
+    }
+    // a bevel being sized: the pointer sets its width, no handles
+    if st.poly_bevel.as_ref().map(|b| b.live).unwrap_or(false) {
+        if let (Some(t), Some(h)) = (&st.gizmo_readout, p.ctx().input(|i| i.pointer.hover_pos())) {
+            chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, t, HOT, HOT);
+        }
         return;
     }
     let hot = st.hot_handle;
@@ -1358,6 +1403,45 @@ fn draw_poly(p: &Painter, st: &AppState) {
     }
 }
 
+/// The Cut tool: the point a click would put (a ring on a point, a diamond
+/// on an edge), the line from the cut's last point to it (full when it
+/// would cut across a face, dashed when it would start again there).
+fn draw_poly_cut(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
+    if st.tool != Tool::PolyCut {
+        return;
+    }
+    let col = EDGE_SEL;
+    let hot = st.poly_cut_hover;
+    let at = hot.and_then(|h| st.cut_point(h)).and_then(|q| world(st, q.as_dvec3()));
+    if let (Some(a), Some(b)) = (st.poly_cut_last().and_then(|q| world(st, q.as_dvec3())), at.or(pointer)) {
+        if hot.map(|h| st.poly_cut_joins(h)).unwrap_or(false) {
+            p.line_segment([a, b], Stroke::new(1.8, col));
+        } else {
+            let n = ((b - a).length() / 6.0).ceil().max(1.0) as usize;
+            for i in (0..n).step_by(2) {
+                let (t0, t1) = (i as f32 / n as f32, ((i + 1) as f32 / n as f32).min(1.0));
+                p.line_segment([a + (b - a) * t0, a + (b - a) * t1], Stroke::new(1.2, tint(col, 0.6)));
+            }
+        }
+        p.circle(a, 3.0, col, Stroke::new(1.0, chip_bg()));
+    }
+    if let (Some(c), Some(h)) = (at, hot) {
+        match h {
+            crate::poly::CutAt::Vert(..) => {
+                p.circle(c, 4.5, chip_bg(), Stroke::new(1.6, col));
+            }
+            crate::poly::CutAt::Edge(_, _, _, t) => {
+                let r = 4.0;
+                let d = [c + vec2(0.0, -r), c + vec2(r, 0.0), c + vec2(0.0, r), c + vec2(-r, 0.0)];
+                p.add(egui::Shape::convex_polygon(d.to_vec(), col, Stroke::new(1.2, chip_bg())));
+                if (t - 0.5).abs() < 1e-4 {
+                    chip(p, c + vec2(10.0, -10.0), Align2::LEFT_BOTTOM, "middle", HOT, HOT);
+                }
+            }
+        }
+    }
+}
+
 /// The Sculpt tab's brush: a ring of its radius round the pointer, full on
 /// the clay, dashed off it (ZBrush's draw size is on screen).
 fn draw_brush(p: &Painter, st: &AppState, pointer: Option<Pos2>, in_view: bool) {
@@ -1368,6 +1452,29 @@ fn draw_brush(p: &Painter, st: &AppState, pointer: Option<Pos2>, in_view: bool) 
     let on = st.stroke.is_some() || st.pick_mesh(p2(c), Some(nurbs_kernel::mesh::MeshKind::Sculpt)).is_some();
     let a = accent();
     let r = st.sculpt.radius;
+    // Clay Buildup: its square, along the stroke on screen
+    let brush = st.stroke.as_ref().map(|s| s.brush).unwrap_or(st.sculpt.brush);
+    if brush == crate::sculpt::Brush::Buildup {
+        let ang = st
+            .stroke
+            .as_ref()
+            .and_then(|s| {
+                let v = st.view();
+                let (q0, q1) = (v.project(s.last)?, v.project(s.last + s.dir * s.radius)?);
+                Some((q1[1] - q0[1]).atan2(q1[0] - q0[0]))
+            })
+            .unwrap_or(0.0);
+        let (cs, sn) = (ang.cos(), ang.sin());
+        let k = r * 0.84;
+        let sq: Vec<Pos2> = [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().map(|(x, y)| c + vec2(x * cs - y * sn, x * sn + y * cs) * k).collect();
+        let col = if on { a } else { tint(a, 0.6) };
+        p.add(egui::Shape::closed_line(sq, Stroke::new(if on { 1.6 } else { 1.2 }, col)));
+        if on {
+            p.circle_stroke(c, r * (0.15 + 0.5 * st.sculpt.strength), Stroke::new(1.0, tint(a, 0.55)));
+        }
+        p.circle_filled(c, 1.6, a);
+        return;
+    }
     if on {
         p.circle_stroke(c, r, Stroke::new(1.6, a));
         // the strength, as an inner ring
@@ -1595,7 +1702,7 @@ pub fn hint(st: &AppState) -> String {
             PrimKind::Cylinder => "Drag: the radius · Release: then the height".into(),
         },
         (Some(_), _) => "Move: the height (up +, down −) · Click: done · Esc: cancel".into(),
-        (None, Tool::Sculpt | Tool::PolyLoop) => String::new(),
+        (None, Tool::Sculpt | Tool::PolyLoop | Tool::PolyCut) => String::new(),
         (None, Tool::Create(PrimKind::Path)) => match &st.sketch {
             None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),
             None => "Click: the first point, on a face or the ground".into(),
@@ -1730,7 +1837,18 @@ fn sculpt_poly_hint(st: &AppState) -> Option<String> {
         } else {
             "O: a clay sphere · B: a clay block · Or a Poly mesh: Send to Sculpt".to_string()
         };
-        return Some(format!("{what} · X C S G I T P: brushes · [ ]: size · M: mirror {} · W E R: move, turn, scale", if st.sculpt.mirror { "off" } else { "on" }));
+        return Some(format!("{what} · X C V S G I T P: brushes · [ ]: size · M: mirror {} · W E R: move, turn, scale", if st.sculpt.mirror { "off" } else { "on" }));
+    }
+    if let Some(b) = st.poly_bevel.as_ref().filter(|b| b.live) {
+        let kind = if b.chamfer { "chamfer" } else { "bevel" };
+        return Some(format!("Move left / right: the width · [ ]: segments ({}) · C: {} (now) or the other · Click: keep it · Right click or Esc: drop it", b.segments, kind));
+    }
+    if st.tool == Tool::PolyCut {
+        return Some(if st.poly_cut.is_some() {
+            "Click an edge or a point: on across the face · Ctrl + click: an edge loop there · Right click or a click off the mesh: this cut done · Enter or Esc: done".into()
+        } else {
+            "Click an edge or a point of a Poly mesh: the cut starts (a point catches at 12 points, an edge's middle at 6) · Ctrl + click an edge: an edge loop there".into()
+        });
     }
     if st.tool == Tool::PolyLoop {
         return Some("Click an edge: a loop cut across its ring (shown under the pointer) · Esc or Q: done".into());
@@ -1750,7 +1868,7 @@ fn sculpt_poly_hint(st: &AppState) -> Option<String> {
         }
         return Some(match st.sel_mode {
             SelMode::Vertex => "Click: a point · Shift: add · Ctrl: take away · Drag on empty: a rectangle · W E R: move, turn, scale · Del: its faces".into(),
-            SelMode::Edge => "Click: an edge · Shift: add · Drag on empty: a rectangle · Ctrl + R: insert edge loop · W E R: move, turn, scale".into(),
+            SelMode::Edge => "Click: an edge · Shift: add · Drag on empty: a rectangle · Ctrl + B: bevel · Ctrl + R: insert edge loop · K: cut · W E R: move, turn, scale".into(),
             SelMode::Face => "Click: a face · Shift: add · Ctrl + E: extrude · I: inset · W E R: move, turn, scale · Del: delete".into(),
             SelMode::Object => String::new(),
         });
@@ -1759,7 +1877,7 @@ fn sculpt_poly_hint(st: &AppState) -> Option<String> {
         return Some("B: a cube · C: a cylinder · O: a sphere · P: a plane · Then 1 2 3: points, edges, faces · Alt + drag: orbit".into());
     }
     if st.workspace == Workspace::Sculpt && st.tool == Tool::Select && st.drag.is_none() {
-        return Some("X C S G I T P or a brush card: sculpt again · W E R: move, turn, scale the selection · O / B: new clay".into());
+        return Some("X C V S G I T P or a brush card: sculpt again · W E R: move, turn, scale the selection · O / B: new clay".into());
     }
     None
 }

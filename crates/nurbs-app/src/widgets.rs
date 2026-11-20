@@ -190,7 +190,9 @@ pub fn value_field(ui: &mut Ui, v: &mut f32, range: std::ops::RangeInclusive<f32
     let edit_key = resp.id.with("edit");
     let raw_key = resp.id.with("raw");
     let (lo, hi) = (*range.start(), *range.end());
-    let text_of = |x: f32| if suffix.is_empty() { fmt3(x as f64) } else { format!("{} {suffix}", fmt3(x as f64)) };
+    // a whole-number field (step 1 or more: segments, counts) shows no decimals
+    let num = |x: f32| if step >= 1.0 && x.fract() == 0.0 { format!("{}", x as i64) } else { fmt3(x as f64) };
+    let text_of = |x: f32| if suffix.is_empty() { num(x) } else { format!("{} {suffix}", num(x)) };
     let editing: Option<String> = ui.data(|d| d.get_temp(edit_key));
     if let Some(mut text) = editing {
         let tid = resp.id.with("text");

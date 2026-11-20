@@ -223,6 +223,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     Tool::Select => format!("SELECTION · {}", st.sel_mode.label().to_uppercase()),
                     Tool::Sculpt => st.sculpt.brush.label().to_uppercase(),
                     Tool::PolyLoop => "INSERT EDGE LOOP".into(),
+                    Tool::PolyCut => "CUT".into(),
                 };
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
                 let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 20.0, 28.0), Sense::hover());
@@ -568,6 +569,13 @@ fn poly_rail(ui: &mut Ui, st: &mut AppState) {
     }
     if card(ui, Some(Icon::EdgeLoop), "EDGE LOOP", "EDGES · CTRL+R", st.tool == Tool::PolyLoop, EDGE_SEL, "Insert Edge Loop (Ctrl + R): a click on an edge cuts a loop across its ring of quads").clicked() {
         st.arm_poly_loop();
+    }
+    let bev_on = st.poly_bevel.as_ref().map(|b| b.live).unwrap_or(false);
+    if card(ui, Some(Icon::PolyBevel), "BEVEL", "EDGES · CTRL+B", bev_on, EDGE_SEL, "Bevel (Ctrl + B, Maya's): the picked edges (a face's edges, or the whole mesh) cut into rows, flat (Chamfer) or rounded, the corners filled; the pointer sets the width, [ ] the segments, a click keeps it").clicked() {
+        st.begin_poly_bevel(at);
+    }
+    if card(ui, Some(Icon::PolyCut), "CUT", "MULTI-CUT · K", st.tool == Tool::PolyCut, EDGE_SEL, "Cut (K, Maya's Multi-Cut): clicks on edges or points join across the faces; Ctrl + click: an edge loop there; Enter or a right click ends the cut").clicked() {
+        st.arm_poly_cut();
     }
     let _ = faces;
     divider(ui);
@@ -1121,6 +1129,7 @@ fn help_title(st: &AppState) -> String {
         Tool::Select => format!("{} · {}", st.gizmo.label(), st.sel_mode.label()),
         Tool::Sculpt => format!("Sculpt · {}", st.sculpt.brush.label()),
         Tool::PolyLoop => "Insert edge loop".into(),
+        Tool::PolyCut => "Cut".into(),
     }
 }
 
@@ -1218,7 +1227,7 @@ fn help_box(ctx: &egui::Context, st: &mut AppState) {
         Tool::Select if st.sel_mode == SelMode::Edge => EDGE_SEL,
         Tool::Select if st.sel_mode == SelMode::Face => FACE_SEL,
         Tool::Select => st.single().map(feature_color).unwrap_or(TEXT2()),
-        Tool::Sculpt | Tool::PolyLoop => accent(),
+        Tool::Sculpt | Tool::PolyLoop | Tool::PolyCut => accent(),
     };
     let vr = st.view_rect;
     let at = pos2(vr[2] - 12.0, vr[3] - 4.0);
@@ -1306,7 +1315,7 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
         return;
     }
     // a Poly mesh's components picked or pulled: it would sit on them
-    if st.poly_comp() || st.poly_pull.is_some() || st.poly_drag.is_some() || st.stroke.is_some() {
+    if st.poly_comp() || st.poly_pull.is_some() || st.poly_drag.is_some() || st.stroke.is_some() || st.poly_bevel.is_some() || st.tool == Tool::PolyCut {
         return;
     }
     // an inset or extrusion: its handles are there instead (Del deletes it)
@@ -1380,9 +1389,14 @@ enum OpPop {
     Tool,
     /// Two closed curves or more picked: Union, Subtract, Intersect.
     Curves,
+    /// The Poly tab's Bevel under way or just made.
+    PolyBevel,
 }
 
 fn op_pop(st: &AppState) -> Option<OpPop> {
+    if st.poly_bevel_valid() {
+        return Some(OpPop::PolyBevel);
+    }
     if (st.tool == Tool::Create(PrimKind::Surface) || (st.tool == Tool::Slot && st.slot_draw.is_none())) && st.creation.is_none() {
         return Some(OpPop::Tool);
     }
@@ -1427,6 +1441,13 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
             }
         }
         OpPop::Shape(id) => vec![st.doc.feature(id)?.origin],
+        OpPop::PolyBevel => {
+            let b = st.poly_bevel.as_ref()?;
+            let f = st.doc.feature(b.id)?;
+            let m = f.mesh.as_ref()?;
+            let pts = crate::meshes::world_points(f);
+            b.faces.iter().filter_map(|fi| m.faces.get(*fi as usize)).flat_map(|q| q.iter().filter_map(|v| pts.get(*v as usize).map(|p| p.as_dvec3()))).collect()
+        }
         OpPop::Curves => st.selection.iter().filter_map(|id| st.doc.feature(*id)).flat_map(|f| st.curve_lines(f).concat()).collect(),
         OpPop::Tool => {
             let vr = st.view_rect;
@@ -1538,6 +1559,7 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     vertex_card(ui, st);
                 }
                 OpPop::Curves => combine_card(ui, st),
+                OpPop::PolyBevel => poly_bevel_card(ui, st),
                 OpPop::Step(id) => {
                     let Some(f) = st.doc.feature(id).cloned() else { return };
                     ui.horizontal(|ui| {
@@ -1578,6 +1600,63 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
             }
         });
     });
+}
+
+/// The Poly tab's Bevel (Maya's window): its width, segments, and Chamfer
+/// (flat rows) or Bevel (rounded); each change made again from the mesh
+/// before it.
+fn poly_bevel_card(ui: &mut Ui, st: &mut AppState) {
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let Some(b) = st.poly_bevel.clone() else { return };
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(if b.chamfer { "Chamfer" } else { "Bevel" }).font(semibold(14.0)).color(TEXT()));
+        chip_label(ui, &format!("{} edges", b.edges.len()), RAISED(), LABEL());
+    });
+    ui.add_space(6.0);
+    // Chamfer or Bevel (rounded)
+    ui.horizontal(|ui| {
+        let (well, _) = ui.allocate_exact_size(vec2(2.0 * 104.0 + 6.0, 28.0), Sense::hover());
+        ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+        for (i, (c, name)) in [(true, "CHAMFER"), (false, "BEVEL")].into_iter().enumerate() {
+            let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 104.0, 3.0), vec2(104.0, 22.0));
+            let resp = ui.interact(r, Id::new(("poly-bevel-kind", i)), Sense::click());
+            let on = b.chamfer == c;
+            if on {
+                ui.painter().rect_filled(r, 11.0, accent());
+            } else if resp.hovered() {
+                ui.painter().rect_filled(r, 11.0, RAISED());
+            }
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, name, semibold(10.5), if on { accent_text() } else { LABEL() });
+            let tip = if c { "Chamfer: flat rows across each edge" } else { "Bevel: rows on a rounded profile, tangent to both faces" };
+            if resp.on_hover_text(tip).clicked() && !on {
+                st.set_poly_bevel(b.width, b.segments, c, true);
+            }
+        }
+    });
+    ui.add_space(4.0);
+    let mut w = b.width;
+    let span = (b.width * 2.0).max(5.0).ceil();
+    let (ch, start) = slider_row(ui, "Width", &mut w, 0.0..=span.max(100.0), 0.05, "mm");
+    if ch {
+        st.set_poly_bevel(w, b.segments, b.chamfer, start || !st.is_live());
+    }
+    let mut segs = b.segments as f32;
+    let (ch, start) = slider_row(ui, "Segments", &mut segs, 1.0..=12.0, 1.0, "");
+    if ch {
+        st.set_poly_bevel(b.width, segs.round().max(1.0) as u32, b.chamfer, start || !st.is_live());
+    }
+    if b.clamped {
+        ui.label(egui::RichText::new(format!("Clamped at {} mm: wider, two rows would cross", fmt_mm(b.made))).font(regular(11.5)).color(LABEL()));
+    }
+    if b.live {
+        ui.label(egui::RichText::new("Move: width · [ ]: segments · C: chamfer / bevel · Click: keep").font(regular(11.5)).color(LABEL()));
+    }
+    if !any_down && st.is_live() && !b.live && st.poly_drag.is_none() && st.poly_pull.is_none() && st.poly_cut.is_none() {
+        st.end_live();
+        if let Some(bb) = st.poly_bevel.as_mut() {
+            bb.result = st.doc.feature(bb.id).cloned();
+        }
+    }
 }
 
 /// The Slot tool's options (Romain, 20 nov. 5 h 55: by hand by default,
@@ -3016,9 +3095,42 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         return;
     }
     let pointer = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]).unwrap_or(st.principal());
+    // a bevel made earlier whose mesh changed since: its window goes
+    if st.poly_bevel.is_some() && !st.poly_bevel_valid() {
+        st.poly_bevel = None;
+    }
+    // the Poly tab's Bevel following the pointer: its own keys only
+    if st.poly_bevel.as_ref().map(|b| b.live).unwrap_or(false) {
+        if pressed(Key::Escape) || (ctrl && pressed(Key::Z)) {
+            st.cancel_poly_bevel();
+        } else if pressed(Key::Enter) {
+            st.finish_poly_bevel();
+        } else if pressed(Key::OpenBracket) {
+            st.poly_bevel_segments(-1);
+        } else if pressed(Key::CloseBracket) {
+            st.poly_bevel_segments(1);
+        } else if pressed(Key::C) && !ctrl {
+            st.poly_bevel_toggle_chamfer();
+        } else if pressed(Key::Q) || pressed(Key::W) {
+            st.finish_poly_bevel();
+            st.set_gizmo(if pressed(Key::Q) { GizmoMode::Select } else { GizmoMode::Move });
+        }
+        return;
+    }
+    // the Cut tool: Esc or Enter ends the cut and the tool
+    if st.tool == Tool::PolyCut && (pressed(Key::Escape) || pressed(Key::Enter)) {
+        st.end_poly_cut();
+        st.select_tool();
+        return;
+    }
     // the Poly tab: Ctrl + E extrudes the picked faces, Ctrl + R inserts an
-    // edge loop
+    // edge loop, Ctrl + B bevels the picked edges
     if ctrl && space == Workspace::Poly {
+        if pressed(Key::B) {
+            st.finish_poly_pull();
+            st.begin_poly_bevel(pointer);
+            return;
+        }
         if pressed(Key::E) {
             // one under way is kept first
             st.finish_poly_pull();
@@ -3273,6 +3385,9 @@ fn tab_keys(ctx: &egui::Context, st: &mut AppState, space: Workspace, shift: boo
             }
             if pressed(Key::I) && st.poly_pull.is_none() {
                 st.begin_poly_pull(PullKind::Inset, pointer);
+            }
+            if pressed(Key::K) {
+                st.arm_poly_cut();
             }
             if alt && pressed(Key::S) {
                 st.poly_toggle_smooth();

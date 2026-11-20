@@ -725,3 +725,443 @@ pub fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     let t = (((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / l2).clamp(0.0, 1.0);
     (a[0] + abx * t - p[0]).hypot(a[1] + aby * t - p[1])
 }
+
+// ------------------------------------------------------------------ Bevel
+
+/// Maya's Bevel on the picked edges (Ctrl + B; Romain 20 nov., 15 h 40:
+/// "travaille le bevel comme Maya, avec chamfer et bevel, et surtout en
+/// travaillant bien les coins"): made at once at a first width, the
+/// pointer's travel left or right then sets it until a click, `[` `]` the
+/// segments, C Chamfer or rounded. Kept, its window keeps its settings
+/// until something else changes (made again from the mesh before it).
+#[derive(Clone, Debug)]
+pub struct PolyBevel {
+    pub id: FeatureId,
+    pub edges: Vec<(u32, u32)>,
+    pub before: Feature,
+    /// The pointer sets the width (until a click).
+    pub live: bool,
+    pub press: [f32; 2],
+    pub w0: f32,
+    pub mm_per_pt: f32,
+    pub width: f32,
+    pub segments: u32,
+    pub chamfer: bool,
+    /// What it made: the width (less when clamped), the new faces, the
+    /// feature (the window stays while it is still the document's).
+    pub made: f32,
+    pub clamped: bool,
+    pub faces: Vec<u32>,
+    pub result: Option<Feature>,
+}
+
+/// The Cut tool (Maya's Multi-Cut, K; Romain 20 nov., 15 h 40: "un cut
+/// tool"): each click puts a point on an edge (or takes a vertex) and joins
+/// it to the one before across the face they share; Ctrl + click inserts an
+/// edge loop there. One undo step per cut.
+#[derive(Clone, Debug)]
+pub struct PolyCut {
+    pub id: FeatureId,
+    pub last: Option<u32>,
+    pub made: Vec<(u32, u32)>,
+}
+
+/// What a click of the Cut tool would take.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CutAt {
+    Vert(FeatureId, u32),
+    /// An edge (its two points, from the first) at a fraction.
+    Edge(FeatureId, u32, u32, f32),
+}
+
+impl AppState {
+    /// The edges a Bevel works on: the picked edges; in Face mode the
+    /// picked faces' edges; in Vertex mode the edges between picked points;
+    /// a whole Poly mesh selected in Object mode: all its edges (Maya).
+    pub fn poly_bevel_edges(&self) -> Option<(FeatureId, Vec<(u32, u32)>)> {
+        if let Some(s) = self.poly_sel.as_ref().filter(|s| !s.is_empty() && self.sel_mode != SelMode::Object) {
+            let f = self.doc.feature(s.id)?;
+            let m = f.mesh.as_ref()?;
+            let mut e: Vec<(u32, u32)> = match self.sel_mode {
+                SelMode::Edge => s.edges.clone(),
+                SelMode::Face => s.faces.iter().filter_map(|fi| m.faces.get(*fi as usize)).flat_map(|q| (0..q.len()).map(move |i| edge_key(q[i], q[(i + 1) % q.len()]))).collect(),
+                SelMode::Vertex => m.edges().into_iter().filter(|e| s.verts.contains(&e.0) && s.verts.contains(&e.1)).collect(),
+                SelMode::Object => vec![],
+            };
+            e.sort();
+            e.dedup();
+            return (!e.is_empty()).then_some((s.id, e));
+        }
+        let id = self.poly_ids().into_iter().next()?;
+        let m = self.doc.feature(id)?.mesh.as_ref()?;
+        Some((id, m.edges()))
+    }
+
+    /// Ctrl + B in the Poly tab: the bevel made at a first width; the
+    /// pointer sets it until a click.
+    pub fn begin_poly_bevel(&mut self, p: [f32; 2]) -> bool {
+        let Some((id, edges)) = self.poly_bevel_edges() else {
+            self.toast("Bevel: pick edges (Edge mode, 2), faces, or select a Poly mesh", true);
+            return false;
+        };
+        let Some(f) = self.doc.feature(id).cloned() else { return false };
+        let pts = world_points(&f);
+        let lens: Vec<f32> = edges.iter().map(|e| (pts[e.0 as usize] - pts[e.1 as usize]).length()).collect();
+        let mean = lens.iter().sum::<f32>() / lens.len().max(1) as f32;
+        let c = edges.iter().map(|e| (pts[e.0 as usize] + pts[e.1 as usize]) * 0.5).sum::<Vec3>() / edges.len().max(1) as f32;
+        let v = self.view();
+        let mm_per_pt = v.pixel_size_at((c - v.eye).length()).max(1e-4);
+        // a tenth of the edges' mean length, on a round value
+        let w0 = (crate::faces::nice_round((mean * 0.1) as f64, 0.025) as f32).max(0.05);
+        let (segments, chamfer) = self.poly_bevel.as_ref().map(|b| (b.segments, b.chamfer)).unwrap_or((1, true));
+        self.abort_gestures();
+        self.begin_live("Bevel");
+        self.poly_bevel = Some(PolyBevel { id, edges, before: f, live: true, press: p, w0, mm_per_pt, width: w0, segments, chamfer, made: 0.0, clamped: false, faces: vec![], result: None });
+        self.apply_poly_bevel();
+        true
+    }
+
+    /// The pointer during a live bevel: its travel right widens it.
+    pub fn update_poly_bevel(&mut self, p: [f32; 2]) {
+        let Some(b) = self.poly_bevel.as_mut().filter(|b| b.live) else { return };
+        let mut w = (b.w0 + (p[0] - b.press[0]) * b.mm_per_pt).max(0.0);
+        if !self.snap_off {
+            w = crate::faces::nice_round(w as f64, b.mm_per_pt as f64) as f32;
+        }
+        if (w - b.width).abs() > 1e-6 {
+            b.width = w;
+            self.apply_poly_bevel();
+        }
+    }
+
+    /// Made again from the mesh before the bevel, with its settings.
+    pub fn apply_poly_bevel(&mut self) {
+        let Some(mut b) = self.poly_bevel.clone() else { return };
+        let before = b.before.clone();
+        let size = crate::meshes::size(&before);
+        let Some(bm) = before.mesh.clone() else { return };
+        let mut pts = bm.local(size);
+        let mut faces = bm.faces.clone();
+        let opts = nurbs_kernel::mesh_bevel::BevelOptions { width: b.width, segments: b.segments, chamfer: b.chamfer };
+        let res = if b.width > 1e-5 { nurbs_kernel::mesh_bevel::bevel(&mut pts, &mut faces, &b.edges, opts) } else { None };
+        let id = b.id;
+        match res {
+            Some(r) => {
+                b.made = r.width;
+                b.clamped = r.clamped;
+                b.faces = r.faces;
+                let (unit, s2, base) = nurbs_kernel::mesh::normalize(&pts);
+                self.live(|doc| {
+                    if let Some(f) = doc.feature_mut(id) {
+                        *f = before.clone();
+                        f.origin += f.rot * base.as_dvec3();
+                        f.prim = nurbs_kernel::Prim::Box { x: s2.x as f64, y: s2.y as f64, z: s2.z as f64 };
+                        if let Some(m) = f.mesh.as_mut() {
+                            let md = m.make_mut();
+                            md.verts = unit;
+                            md.faces = faces;
+                        }
+                    }
+                });
+            }
+            None => {
+                // no width: the mesh as it was
+                b.made = 0.0;
+                b.clamped = false;
+                b.faces.clear();
+                self.live(|doc| {
+                    if let Some(f) = doc.feature_mut(id) {
+                        *f = before.clone();
+                    }
+                });
+            }
+        }
+        b.result = self.doc.feature(id).cloned();
+        let kind = if b.chamfer { "Chamfer" } else { "Bevel" };
+        let segs = if b.segments == 1 { "1 segment".to_string() } else { format!("{} segments", b.segments) };
+        let clamp = if b.clamped { " · clamped" } else { "" };
+        self.gizmo_readout = b.live.then(|| format!("{kind} {} mm · {segs}{clamp}", crate::widgets::fmt_mm(b.made)));
+        if !b.faces.is_empty() {
+            self.poly_sel = Some(PolySel { id, faces: b.faces.clone(), ..Default::default() });
+        }
+        self.poly_bevel = Some(b);
+        self.mesh_gen += 1;
+    }
+
+    /// A click: the bevel kept (its faces picked, its window stays).
+    pub fn finish_poly_bevel(&mut self) {
+        let Some(b) = self.poly_bevel.as_mut() else { return };
+        if !b.live {
+            return;
+        }
+        b.live = false;
+        let faces = b.faces.clone();
+        let id = b.id;
+        self.gizmo_readout = None;
+        self.end_live();
+        if !faces.is_empty() {
+            self.sel_mode = SelMode::Face;
+            self.poly_sel = Some(PolySel { id, faces, ..Default::default() });
+        }
+        if let Some(b) = self.poly_bevel.as_mut() {
+            b.result = self.doc.feature(id).cloned();
+        }
+    }
+
+    pub fn cancel_poly_bevel(&mut self) {
+        if let Some(b) = self.poly_bevel.take() {
+            self.gizmo_readout = None;
+            if b.live {
+                self.cancel_live();
+            }
+            self.mesh_gen += 1;
+        }
+    }
+
+    /// Still the bevel just made (or being made): its window shows.
+    pub fn poly_bevel_valid(&self) -> bool {
+        match &self.poly_bevel {
+            Some(b) if b.live => true,
+            // kept while its mesh is still the one worked on and unchanged
+            Some(b) => {
+                b.result.is_some()
+                    && self.doc.feature(b.id) == b.result.as_ref()
+                    && (self.selection.contains(&b.id)
+                        || (self.sel_mode != SelMode::Object && self.poly_sel.as_ref().map(|s| s.id == b.id).unwrap_or(false)))
+            }
+            None => false,
+        }
+    }
+
+    /// The window's settings changed (one undo step per slider drag).
+    pub fn set_poly_bevel(&mut self, width: f32, segments: u32, chamfer: bool, start: bool) {
+        let Some(b) = self.poly_bevel.as_mut() else { return };
+        b.width = width.max(0.0);
+        b.segments = segments.clamp(1, 32);
+        b.chamfer = chamfer;
+        let live_pointer = b.live;
+        if !live_pointer {
+            if start {
+                if self.is_live() {
+                    self.end_live();
+                }
+                self.begin_live("Bevel");
+            } else if !self.is_live() {
+                self.begin_live("Bevel");
+            }
+        }
+        self.apply_poly_bevel();
+        if !live_pointer {
+            if let Some(b) = self.poly_bevel.as_ref() {
+                let (id, faces) = (b.id, b.faces.clone());
+                if !faces.is_empty() {
+                    self.poly_sel = Some(PolySel { id, faces, ..Default::default() });
+                }
+            }
+        }
+    }
+
+    /// `[` / `]` during a bevel: a segment less or more.
+    pub fn poly_bevel_segments(&mut self, by: i32) {
+        let Some(b) = self.poly_bevel.clone() else { return };
+        let s = (b.segments as i32 + by).clamp(1, 32) as u32;
+        self.set_poly_bevel(b.width, s, b.chamfer, true);
+    }
+
+    pub fn poly_bevel_toggle_chamfer(&mut self) {
+        let Some(b) = self.poly_bevel.clone() else { return };
+        self.set_poly_bevel(b.width, b.segments, !b.chamfer, true);
+    }
+
+    // -------------------------------------------------------------- Cut
+
+    /// K in the Poly tab: the Cut tool (Maya's Multi-Cut).
+    pub fn arm_poly_cut(&mut self) {
+        self.commit_gestures(self.principal());
+        self.tool = crate::state::Tool::PolyCut;
+    }
+
+    /// What a click would take: a point (within 12 points) before an edge
+    /// (its middle within 6 points, else where the pointer is along it).
+    pub fn poly_cut_at(&self, p: [f32; 2]) -> Option<CutAt> {
+        let hit = self.pick_mesh(p, Some(MeshKind::Poly));
+        let id = match (&self.poly_cut, hit) {
+            (Some(c), _) if self.doc.feature(c.id).is_some() => c.id,
+            (_, Some(h)) => h.id,
+            _ => return None,
+        };
+        let f = self.doc.feature(id)?;
+        let m = f.mesh.as_ref()?;
+        let v = self.view();
+        let pts = world_points(f);
+        let (ro, _) = v.ray(p[0], p[1]);
+        let seen = |q: Vec3| {
+            let d = q - ro;
+            let dist = d.length();
+            match crate::meshes::ray_mesh(f, ro, d / dist) {
+                Some(h) => h.t > dist - dist * 0.002 - 0.05,
+                None => true,
+            }
+        };
+        let mut best: Option<(f32, u32)> = None;
+        for (i, q) in pts.iter().enumerate() {
+            if let Some(s) = v.project(*q) {
+                let d = (s[0] - p[0]).hypot(s[1] - p[1]);
+                if d < 12.0 && best.map(|b| d < b.0).unwrap_or(true) && seen(*q) {
+                    best = Some((d, i as u32));
+                }
+            }
+        }
+        if let Some((_, i)) = best {
+            return Some(CutAt::Vert(id, i));
+        }
+        let mut be: Option<(f32, (u32, u32))> = None;
+        for e in m.edges() {
+            let (a, b) = (pts[e.0 as usize], pts[e.1 as usize]);
+            let (Some(sa), Some(sb)) = (v.project(a), v.project(b)) else { continue };
+            let d = seg_dist(p, sa, sb);
+            if d < 10.0 && be.map(|x| d < x.0).unwrap_or(true) && seen((a + b) * 0.5) {
+                be = Some((d, e));
+            }
+        }
+        let (_, e) = be?;
+        let (a, b) = (pts[e.0 as usize], pts[e.1 as usize]);
+        let (sa, sb) = (v.project(a)?, v.project(b)?);
+        let mid = v.project((a + b) * 0.5)?;
+        let t = if (mid[0] - p[0]).hypot(mid[1] - p[1]) < 6.0 {
+            0.5
+        } else {
+            // where the pointer's ray passes nearest the edge
+            let (ro, rd) = self.ray(p);
+            let len = (b - a).length().max(1e-6);
+            let s = crate::state::closest_on_line(a.as_dvec3(), ((b - a) / len).as_dvec3(), ro, rd).map(|s| s as f32 / len);
+            s.unwrap_or_else(|| {
+                let (abx, aby) = (sb[0] - sa[0], sb[1] - sa[1]);
+                ((p[0] - sa[0]) * abx + (p[1] - sa[1]) * aby) / (abx * abx + aby * aby).max(1e-6)
+            })
+            .clamp(0.03, 0.97)
+        };
+        Some(CutAt::Edge(id, e.0, e.1, t))
+    }
+
+    /// Where a cut point is (world).
+    pub fn cut_point(&self, c: CutAt) -> Option<Vec3> {
+        match c {
+            CutAt::Vert(id, i) => world_points(self.doc.feature(id)?).get(i as usize).copied(),
+            CutAt::Edge(id, a, b, t) => {
+                let pts = world_points(self.doc.feature(id)?);
+                Some(pts.get(a as usize)?.lerp(*pts.get(b as usize)?, t))
+            }
+        }
+    }
+
+    /// The cut's last point (world).
+    pub fn poly_cut_last(&self) -> Option<Vec3> {
+        let c = self.poly_cut.as_ref()?;
+        world_points(self.doc.feature(c.id)?).get(c.last? as usize).copied()
+    }
+
+    /// Would a click there join the last point across a face?
+    pub fn poly_cut_joins(&self, at: CutAt) -> bool {
+        let Some(c) = &self.poly_cut else { return false };
+        let Some(last) = c.last else { return false };
+        let Some(m) = self.doc.feature(c.id).and_then(|f| f.mesh.as_ref()) else { return false };
+        match at {
+            CutAt::Vert(id, v) => id == c.id && nurbs_kernel::mesh::common_face(&m.faces, last, v).is_some(),
+            CutAt::Edge(id, a, b, _) => {
+                // a face holding the last point and that edge as a side
+                id == c.id
+                    && m.faces.iter().any(|q| {
+                        let n = q.len();
+                        q.contains(&last) && (0..n).any(|i| edge_key(q[i], q[(i + 1) % n]) == edge_key(a, b)) && a != last && b != last
+                    })
+            }
+        }
+    }
+
+    /// A click with the Cut tool: the point put in (and joined to the one
+    /// before); Ctrl: an edge loop there. Nothing under it: the cut ends.
+    pub fn poly_cut_click(&mut self, p: [f32; 2], ctrl: bool) {
+        let Some(at) = self.poly_cut_at(p) else {
+            self.end_poly_cut();
+            return;
+        };
+        let id = match at {
+            CutAt::Vert(id, _) | CutAt::Edge(id, ..) => id,
+        };
+        if self.poly_cut.as_ref().map(|c| c.id != id).unwrap_or(false) {
+            self.end_poly_cut();
+        }
+        if self.poly_cut.is_none() {
+            self.begin_live("Cut");
+            self.poly_cut = Some(PolyCut { id, last: None, made: vec![] });
+        }
+        let Some(f) = self.doc.feature(id).cloned() else { return };
+        let size = crate::meshes::size(&f);
+        let Some(m) = f.mesh.clone() else { return };
+        let mut pts = m.local(size);
+        let mut faces = m.faces.clone();
+        let mut cut = self.poly_cut.clone().unwrap();
+        if ctrl {
+            if let CutAt::Edge(_, a, b, t) = at {
+                let made = nurbs_kernel::mesh::loop_cut_at(&mut pts, &mut faces, (a, b), t);
+                cut.made.extend(made);
+                cut.last = None;
+            } else {
+                return;
+            }
+        } else {
+            let v = match at {
+                CutAt::Vert(_, v) => v,
+                CutAt::Edge(_, a, b, t) => nurbs_kernel::mesh::split_edge(&mut pts, &mut faces, a, b, t),
+            };
+            if let Some(l) = cut.last {
+                if nurbs_kernel::mesh::split_face(&mut faces, l, v).is_some() {
+                    cut.made.push(edge_key(l, v));
+                }
+            }
+            cut.last = Some(v);
+        }
+        let (unit, s2, base) = nurbs_kernel::mesh::normalize(&pts);
+        self.live(|doc| {
+            if let Some(ft) = doc.feature_mut(id) {
+                ft.origin += ft.rot * base.as_dvec3();
+                ft.prim = nurbs_kernel::Prim::Box { x: s2.x as f64, y: s2.y as f64, z: s2.z as f64 };
+                if let Some(mr) = ft.mesh.as_mut() {
+                    let md = mr.make_mut();
+                    md.verts = unit;
+                    md.faces = faces;
+                }
+            }
+        });
+        if !self.selection.contains(&id) {
+            self.selection = vec![id];
+        }
+        self.poly_sel = Some(PolySel { id, edges: cut.made.clone(), ..Default::default() });
+        self.poly_cut = Some(cut);
+        self.mesh_gen += 1;
+    }
+
+    /// The cut ends (Enter, a right click, a click off the mesh): one undo
+    /// step; the tool stays for the next one.
+    pub fn end_poly_cut(&mut self) {
+        if let Some(c) = self.poly_cut.take() {
+            self.end_live();
+            if !c.made.is_empty() {
+                self.sel_mode = SelMode::Edge;
+                self.poly_sel = Some(PolySel { id: c.id, edges: c.made, ..Default::default() });
+            }
+        }
+    }
+
+    /// Ctrl held over an edge: the loop a click would insert there.
+    pub fn poly_cut_loop_preview(&self, at: CutAt) -> Vec<(Vec3, Vec3)> {
+        let CutAt::Edge(id, a, b, t) = at else { return vec![] };
+        let Some(f) = self.doc.feature(id) else { return vec![] };
+        let Some(m) = f.mesh.as_ref() else { return vec![] };
+        let mut pts = world_points(f);
+        let mut faces = m.faces.clone();
+        let made = nurbs_kernel::mesh::loop_cut_at(&mut pts, &mut faces, (a, b), t);
+        made.iter().map(|e| (pts[e.0 as usize], pts[e.1 as usize])).collect()
+    }
+}

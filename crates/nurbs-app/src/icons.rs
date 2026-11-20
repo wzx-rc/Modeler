@@ -91,6 +91,7 @@ pub enum Icon {
     /// The Sculpt brushes.
     BrushDraw,
     BrushClay,
+    BrushBuildup,
     BrushSmooth,
     BrushGrab,
     BrushInflate,
@@ -99,6 +100,10 @@ pub enum Icon {
     /// Poly: a plane of quads, an edge loop across a cube, a quad cut in
     /// four, a rounded cage, a cage sent to the clay.
     PolyPlane,
+    /// Poly: an edge bevelled into rows (a corner cut round), the Cut tool's
+    /// line across a quad.
+    PolyBevel,
+    PolyCut,
     EdgeLoop,
     Subdivide,
     SmoothMesh,
@@ -530,6 +535,15 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.fill(&[(5.0, 7.5), (13.0, 7.5), (15.5, 10.0), (7.5, 10.0)], 0.4);
             pen.line(&[(8.0, 3.5), (12.0, 3.5)]);
         }
+        Icon::BrushBuildup => {
+            // square slabs laid one over the other, the top one filled
+            pen.closed(&[(2.5, 14.5), (13.0, 14.5), (17.5, 17.5), (7.0, 17.5)]);
+            pen.closed(&[(4.0, 10.0), (12.5, 10.0), (16.0, 12.8), (7.5, 12.8)]);
+            let top = [(5.5, 5.5), (12.0, 5.5), (14.5, 8.2), (8.0, 8.2)];
+            pen.closed(&top);
+            pen.fill(&top, 0.45);
+            pen.line(&[(10.0, 1.5), (10.0, 4.0)]);
+        }
         Icon::BrushSmooth => {
             // a wave evened out
             let wave: Vec<(f32, f32)> = (0..=24).map(|i| {
@@ -577,6 +591,25 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.closed(&q);
             pen.line(&[(6.25, 10.0), (13.75, 14.0)]);
             pen.line(&[(13.75, 10.0), (6.25, 14.0)]);
+        }
+        Icon::PolyBevel => {
+            // a block whose corner is rounded in three rows
+            let o = [(3.0, 17.0), (3.0, 10.0), (3.9, 6.6), (6.6, 3.9), (10.0, 3.0), (17.0, 3.0), (17.0, 17.0)];
+            pen.closed(&o);
+            pen.line(&[(3.9, 6.6), (8.0, 8.4)]);
+            pen.line(&[(6.6, 3.9), (8.4, 8.0)]);
+            pen.line(&[(3.0, 10.0), (8.0, 10.0)]);
+            pen.line(&[(10.0, 3.0), (10.0, 8.0)]);
+            for (x, y) in [(3.9, 6.6), (6.6, 3.9)] {
+                pen.dot(x, y, 0.9);
+            }
+        }
+        Icon::PolyCut => {
+            // a quad cut across by a line of points
+            pen.closed(&[(3.0, 4.0), (17.0, 4.0), (17.0, 16.0), (3.0, 16.0)]);
+            pen.line(&[(7.0, 4.0), (12.5, 16.0)]);
+            pen.dot(7.0, 4.0, 1.4);
+            pen.dot(12.5, 16.0, 1.4);
         }
         Icon::EdgeLoop => {
             pen.closed(&[(10.0, 2.5), (16.5, 6.0), (16.5, 14.0), (10.0, 17.5), (3.5, 14.0), (3.5, 6.0)]);
