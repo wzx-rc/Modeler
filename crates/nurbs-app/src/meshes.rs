@@ -7,7 +7,7 @@
 use crate::render::{line_vertices, LineVertex, MeshVertex, NO_DEV};
 use crate::state::AppState;
 use glam::{Mat4, Vec3};
-use nurbs_kernel::mesh::{catmull_clark, poly_normal, MeshData, MeshKind};
+use nurbs_kernel::mesh::{catmull_clark, MeshData, MeshKind};
 use nurbs_kernel::{Feature, FeatureId, Prim};
 
 /// Its unit box to the world: its frame and its box's sizes.
@@ -91,7 +91,7 @@ pub fn mesh_vertices(f: &Feature, base: u32, out: &mut Vec<MeshVertex>) -> usize
         MeshKind::Poly => {
             if m.smooth {
                 let (p, fs, parent) = smoothed(&pts, &m.faces, 2);
-                let tmp = MeshData { kind: MeshKind::Poly, verts: vec![], faces: fs.clone(), smooth: false };
+                let tmp = MeshData { kind: MeshKind::Poly, verts: vec![], faces: fs.clone(), smooth: false, angle: m.angle };
                 let n = tmp.vertex_normals(&p);
                 for (i, q) in fs.iter().enumerate() {
                     for k in 1..q.len().saturating_sub(1) {
@@ -101,12 +101,14 @@ pub fn mesh_vertices(f: &Feature, base: u32, out: &mut Vec<MeshVertex>) -> usize
                     }
                 }
             } else {
-                // flat: a normal per polygon (a cage reads its facets)
-                for (i, q) in m.faces.iter().enumerate() {
-                    let n = poly_normal(&pts, q).normalize_or(Vec3::Y).to_array();
+                // Maya's normal angle: edges whose faces meet within the
+                // mesh's angle shade smooth (a bevel's rows, a sphere), the
+                // others stay hard (a cube's); 0 shows every facet
+                let cn = m.corner_normals(&pts, m.angle);
+                for (i, (q, ns)) in m.faces.iter().zip(&cn).enumerate() {
                     for k in 1..q.len().saturating_sub(1) {
-                        for v in [q[0], q[k], q[k + 1]] {
-                            out.push(MeshVertex { pos: pts[v as usize].to_array(), nrm: n, face: base + i as u32, dev: NO_DEV });
+                        for c in [0, k, k + 1] {
+                            out.push(MeshVertex { pos: pts[q[c] as usize].to_array(), nrm: ns[c].to_array(), face: base + i as u32, dev: NO_DEV });
                         }
                     }
                 }

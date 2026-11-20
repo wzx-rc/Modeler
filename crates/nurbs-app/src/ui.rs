@@ -2272,6 +2272,16 @@ fn defaults(ui: &mut Ui, st: &mut AppState) {
     }
 }
 
+/// A Poly mesh's smoothing angle set (one undo step per slider drag).
+fn poly_angle_edit(st: &mut AppState, id: FeatureId, a: f32, started: bool) {
+    feature_edit(st, id, "Smooth angle", started, |g| {
+        if let Some(m) = g.mesh.as_mut() {
+            m.make_mut().angle = a.clamp(0.0, 180.0);
+        }
+    });
+    st.mesh_gen += 1;
+}
+
 /// One edit of a feature from the panel (sliders: one undo step per drag).
 fn feature_edit(st: &mut AppState, id: FeatureId, label: &str, started: bool, f: impl FnOnce(&mut Feature)) {
     if started {
@@ -2384,6 +2394,25 @@ fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
                 st.selection = vec![id];
                 st.poly_toggle_smooth();
             }
+            // Maya's normal angle: edges under it shade smooth
+            let mut a = m.angle;
+            let (ch, start) = slider_row(ui, "Smooth angle", &mut a, 0.0..=180.0, 1.0, "°");
+            if ch {
+                poly_angle_edit(st, id, a.round(), start);
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                for (label, v, tip) in [
+                    ("Hard", 0.0, "Harden edges (Maya): every edge hard, the facets shown (angle 0°)"),
+                    ("30°", nurbs_kernel::mesh::DEFAULT_ANGLE, "Maya's default normal angle: smooth under 30°, hard over it"),
+                    ("Soft", 180.0, "Soften edges (Maya): every edge smooth (angle 180°)"),
+                ] {
+                    if secondary_btn(ui, label, 64.0).on_hover_text(tip).clicked() && m.angle != v {
+                        poly_angle_edit(st, id, v, true);
+                        st.end_live();
+                    }
+                }
+            });
             ui.horizontal(|ui| {
                 if secondary_btn(ui, "Subdivide", 110.0).clicked() {
                     st.selection = vec![id];

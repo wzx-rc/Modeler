@@ -47,6 +47,24 @@ pub struct MeshData {
     /// the cage over it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub smooth: bool,
+    /// Poly: the smoothing angle in degrees (Maya's Set Normal Angle, Romain
+    /// 20 nov., 17 h 15): two faces meeting at an edge within it are shaded
+    /// as one smooth surface (a bevel's rows, a sphere, a cylinder's side),
+    /// past it the edge stays hard (a cube's). 0: every edge hard (facets),
+    /// 180: every edge soft.
+    #[serde(default = "default_angle", skip_serializing_if = "is_default_angle")]
+    pub angle: f32,
+}
+
+/// Maya's default normal angle.
+pub const DEFAULT_ANGLE: f32 = 30.0;
+
+fn default_angle() -> f32 {
+    DEFAULT_ANGLE
+}
+
+fn is_default_angle(a: &f32) -> bool {
+    *a == DEFAULT_ANGLE
 }
 
 /// The mesh of a feature, shared until changed.
@@ -166,6 +184,75 @@ impl MeshData {
             }
         }
         n.iter().map(|v| v.normalize_or(Vec3::Y)).collect()
+    }
+
+    /// Each polygon corner's shading normal (Maya's normal angle): a corner
+    /// takes the faces round its point that are joined to its own face
+    /// through soft edges, those whose two faces meet within `angle`
+    /// degrees (half a degree of slack, so a 90° bevel in 3 rows of 30°
+    /// is smooth at 30); a hard edge, an open one or one of three faces
+    /// or more parts them. Area-weighted. One list per polygon, in its
+    /// corners' order.
+    pub fn corner_normals(&self, pts: &[Vec3], angle: f32) -> Vec<Vec<Vec3>> {
+        let fnorm: Vec<Vec3> = self.faces.iter().map(|f| poly_normal(pts, f)).collect();
+        let unit: Vec<Vec3> = fnorm.iter().map(|n| n.normalize_or_zero()).collect();
+        let mut off = Vec::with_capacity(self.faces.len());
+        let mut total = 0usize;
+        for f in &self.faces {
+            off.push(total);
+            total += f.len();
+        }
+        let mut parent: Vec<usize> = (0..total).collect();
+        fn root(p: &mut [usize], mut i: usize) -> usize {
+            while p[i] != i {
+                p[i] = p[p[i]];
+                i = p[i];
+            }
+            i
+        }
+        let cos = (angle.clamp(0.0, 180.0) + 0.5).min(180.0).to_radians().cos();
+        let mut edges: std::collections::HashMap<(u32, u32), Vec<(usize, usize)>> = std::collections::HashMap::new();
+        for (i, f) in self.faces.iter().enumerate() {
+            for k in 0..f.len() {
+                edges.entry(edge_key(f[k], f[(k + 1) % f.len()])).or_default().push((i, k));
+            }
+        }
+        for (e, fs) in &edges {
+            if fs.len() != 2 {
+                continue;
+            }
+            let ((f, _), (g, _)) = (fs[0], fs[1]);
+            if f == g || unit[f] == Vec3::ZERO || unit[g] == Vec3::ZERO || unit[f].dot(unit[g]) < cos {
+                continue;
+            }
+            for v in [e.0, e.1] {
+                let (Some(a), Some(b)) = (self.faces[f].iter().position(|x| *x == v), self.faces[g].iter().position(|x| *x == v)) else { continue };
+                let (ra, rb) = (root(&mut parent, off[f] + a), root(&mut parent, off[g] + b));
+                if ra != rb {
+                    parent[ra] = rb;
+                }
+            }
+        }
+        let mut sum = vec![Vec3::ZERO; total];
+        for (i, f) in self.faces.iter().enumerate() {
+            for k in 0..f.len() {
+                let r = root(&mut parent, off[i] + k);
+                sum[r] += fnorm[i];
+            }
+        }
+        self.faces
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                (0..f.len())
+                    .map(|k| {
+                        let r = root(&mut parent, off[i] + k);
+                        let n = sum[r].normalize_or_zero();
+                        if n == Vec3::ZERO { unit[i].normalize_or(Vec3::Y) } else { n }
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     /// Each point's neighbours (along the polygons' sides).
@@ -746,6 +833,71 @@ mod tests {
         faces.iter().all(|f| poly_normal(pts, f).dot(poly_centre(pts, f) - c) > 0.0)
     }
 
+    /// The largest angle (degrees) between the shading normals of one point.
+    fn spread(m: &MeshData, pts: &[Vec3], angle: f32) -> f32 {
+        let cn = m.corner_normals(pts, angle);
+        let mut at: HashMap<u32, Vec<Vec3>> = HashMap::new();
+        for (f, ns) in m.faces.iter().zip(&cn) {
+            for (v, n) in f.iter().zip(ns) {
+                at.entry(*v).or_default().push(*n);
+            }
+        }
+        let mut worst = 0.0f32;
+        for ns in at.values() {
+            for a in ns {
+                for b in ns {
+                    worst = worst.max(a.dot(*b).clamp(-1.0, 1.0).acos().to_degrees());
+                }
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn smoothing_angle() {
+        let data = |p: &[Vec3], f: Vec<Vec<u32>>| MeshData { kind: MeshKind::Poly, verts: p.iter().map(|v| v.to_array()).collect(), faces: f, smooth: false, angle: DEFAULT_ANGLE };
+        // a cube: hard at 30 (each corner its face's normal), soft at 180
+        let (p, f) = poly_cube(20.0);
+        let m = data(&p, f);
+        for (q, ns) in m.faces.iter().zip(m.corner_normals(&p, 30.0)) {
+            let n = poly_normal(&p, q).normalize();
+            assert!(ns.iter().all(|c| c.dot(n) > 0.9999));
+        }
+        assert!(spread(&m, &p, 180.0) < 0.1);
+        assert!((spread(&m, &p, 0.0) - 90.0).abs() < 0.1);
+        // a cylinder of 16: its side soft (22.5°), its caps hard
+        let (p, f) = poly_cylinder(20.0, 16);
+        let m = data(&p, f);
+        let cn = m.corner_normals(&p, 30.0);
+        for (q, ns) in m.faces.iter().zip(&cn) {
+            let n = poly_normal(&p, q).normalize();
+            if n.y.abs() > 0.99 {
+                assert!(ns.iter().all(|c| c.dot(n) > 0.9999), "a cap shaded flat");
+            } else {
+                assert!(ns.iter().all(|c| c.y.abs() < 1e-4), "the side shaded round, square to the axis");
+            }
+        }
+        // a sphere: one normal per point
+        let (p, f) = quad_sphere(20.0, 4, 1.0);
+        let m = data(&p, f);
+        assert!(spread(&m, &p, 30.0) < 0.1);
+        // a cube bevelled round in 4 rows: smooth all over at 30, hard at 10
+        let (mut p, mut f) = poly_cube(20.0);
+        let mut all = vec![];
+        for q in &f {
+            for i in 0..q.len() {
+                let e = edge_key(q[i], q[(i + 1) % q.len()]);
+                if !all.contains(&e) {
+                    all.push(e);
+                }
+            }
+        }
+        crate::mesh_bevel::bevel(&mut p, &mut f, &all, crate::mesh_bevel::BevelOptions { width: 3.0, segments: 4, chamfer: false }).unwrap();
+        let m = data(&p, f);
+        assert!(spread(&m, &p, 30.0) < 0.1, "{}", spread(&m, &p, 30.0));
+        assert!(spread(&m, &p, 10.0) > 10.0);
+    }
+
     #[test]
     fn shapes_closed_and_outward() {
         for (p, f) in [poly_cube(20.0), poly_cylinder(20.0, 16), quad_sphere(20.0, 4, 1.0), icosphere(20.0, 2)] {
@@ -779,7 +931,7 @@ mod tests {
         assert!((top.y - 30.0).abs() < 1e-4);
         inset_faces(&mut p, &mut f, &[3], 0.25);
         assert!(closed(&f) && outward(&p, &f));
-        let mut m = MeshData { kind: MeshKind::Poly, verts: p.iter().map(|v| v.to_array()).collect(), faces: f, smooth: false };
+        let mut m = MeshData { kind: MeshKind::Poly, verts: p.iter().map(|v| v.to_array()).collect(), faces: f, smooth: false, angle: DEFAULT_ANGLE };
         delete_faces(&mut m, &[3]);
         assert_eq!(m.faces.len(), 13);
         assert_eq!(m.verts.len(), 16);

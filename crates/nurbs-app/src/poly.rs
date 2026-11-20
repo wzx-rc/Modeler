@@ -550,7 +550,7 @@ impl AppState {
             return true;
         }
         self.poly_edit("Delete faces", s.id, |pts, faces, md| {
-            let mut tmp = MeshData { kind: MeshKind::Poly, verts: pts.iter().map(|p| p.to_array()).collect(), faces: faces.clone(), smooth: md.smooth };
+            let mut tmp = MeshData { kind: MeshKind::Poly, verts: pts.iter().map(|p| p.to_array()).collect(), faces: faces.clone(), smooth: md.smooth, angle: md.angle };
             delete_faces(&mut tmp, &gone);
             *pts = tmp.verts.iter().map(|v| Vec3::from(*v)).collect();
             *faces = tmp.faces;

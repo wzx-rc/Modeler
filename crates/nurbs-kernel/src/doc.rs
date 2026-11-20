@@ -1100,7 +1100,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(name);
-        let mesh = crate::mesh::MeshRef::new(crate::mesh::MeshData { kind, verts: unit, faces, smooth: false });
+        let mesh = crate::mesh::MeshRef::new(crate::mesh::MeshData { kind, verts: unit, faces, smooth: false, angle: crate::mesh::DEFAULT_ANGLE });
         let prim = Prim::Box { x: size.x as f64, y: size.y as f64, z: size.z as f64 };
         let origin = origin + rot * base.as_dvec3();
         self.features.push(Feature { id, name, op: Op::Add, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, mesh: Some(mesh) });

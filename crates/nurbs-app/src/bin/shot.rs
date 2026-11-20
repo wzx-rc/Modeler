@@ -326,6 +326,9 @@ fn main() {
     if want("buildup") {
         buildup(&mut h);
     }
+    if want("pangle") {
+        poly_angle(&mut h);
+    }
 
     if want("empty") {
         h.reset(Doc::default(), "Untitled");
@@ -5075,4 +5078,74 @@ fn buildup(h: &mut Harness) {
     h.st.camera.pitch = 0.5;
     h.steps(3);
     h.shot("buildup-3-side");
+}
+
+/// The Poly tab's smoothing angle (Maya's normal angle; Romain 20 nov.,
+/// 17 h 15): a cube bevelled round in 3 rows, a cylinder and a sphere,
+/// every edge hard, then at 30° (the rows, the side, the sphere smooth;
+/// the cube's faces and the caps hard).
+fn poly_angle(h: &mut Harness) {
+    use egui::Key;
+    h.reset(Doc::default(), "Smooth angle");
+    h.key(Key::F3);
+    h.steps(2);
+    h.st.camera.target = Vec3::new(0.0, 10.0, 0.0);
+    h.key(Key::B);
+    h.steps(2);
+    let cube = h.st.selection.clone();
+    h.st.camera.yaw = 0.6;
+    h.st.camera.pitch = 0.45;
+    h.st.frame_current();
+    h.settle();
+    let start = h.screen_of(Vec3::new(0.0, 10.0, 0.0)) + vec2(160.0, 60.0);
+    h.move_to(start);
+    h.hold(Modifiers::CTRL);
+    h.key(Key::B);
+    h.hold(Modifiers::NONE);
+    h.key(Key::C);
+    h.key(Key::CloseBracket);
+    h.key(Key::CloseBracket);
+    h.move_to(start + vec2(3.0, 0.0));
+    h.click(start + vec2(3.0, 0.0));
+    h.steps(2);
+    if let Some(b) = h.st.poly_bevel.clone() {
+        h.st.set_poly_bevel(3.0, 3, false, true);
+        h.st.end_live();
+        eprintln!("bevel {} mm, {} segments, round {}", b.width, b.segments, !b.chamfer);
+    }
+    h.key(Key::Num4);
+    h.st.camera.target = Vec3::new(28.0, 10.0, 0.0);
+    h.key(Key::C);
+    h.steps(2);
+    h.st.camera.target = Vec3::new(56.0, 10.0, 0.0);
+    h.key(Key::O);
+    h.steps(2);
+    h.st.selection.clear();
+    h.st.poly_sel = None;
+    h.key(Key::Q);
+    h.st.camera.target = Vec3::new(33.0, 8.0, 0.0);
+    h.st.camera.yaw = 0.35;
+    h.st.camera.pitch = 0.42;
+    h.st.camera.dist = 128.0;
+    h.move_to(pos2(1200.0, 700.0));
+    h.steps(3);
+    let set = |h: &mut Harness, a: f32| {
+        h.st.edit("Smooth angle", |d| {
+            for f in d.features.iter_mut() {
+                if let Some(m) = f.mesh.as_mut() {
+                    m.make_mut().angle = a;
+                }
+            }
+        });
+        h.st.mesh_gen += 1;
+        h.steps(2);
+    };
+    set(h, 0.0);
+    h.shot("pangle-1-hard");
+    set(h, 30.0);
+    h.shot("pangle-2-angle-30");
+    // the cube's window: Smooth angle, Hard / 30° / Soft
+    h.st.selection = cube;
+    h.steps(14);
+    h.shot("pangle-3-window");
 }
