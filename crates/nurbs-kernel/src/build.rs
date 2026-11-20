@@ -2045,6 +2045,25 @@ mod tests {
     }
 
     #[test]
+    fn moves_on_a_part_in_two_lumps() {
+        // a cube added apart from the block (20 nov.): its top +X edge
+        // pushed out, its top moved up
+        for comp in [
+            Comp::Edge(EdgeRef { faces: [tag(2, 0), tag(2, 2)], at: DVec3::new(18.0, 26.0, -75.0) }),
+            Comp::Face(FaceRef { tag: tag(2, 2), at: DVec3::new(0.0, 26.0, -75.0) }),
+        ] {
+            let mut d = Doc::default();
+            d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            d.add(Op::Add, Prim::Box { x: 36.0, y: 26.0, z: 36.0 }, DVec3::new(0.0, 0.0, -75.0), DQuat::IDENTITY);
+            d.add_tweak(Tweak { comp, delta: DVec3::new(5.0, 2.0, 0.0), more: vec![], scale: DVec3::ONE });
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{:?}", m.errors);
+            assert_eq!(m.faces.len(), 12);
+            assert!(m.faces.iter().all(|f| f.tag.is_some()));
+        }
+    }
+
+    #[test]
     fn knife_kept_by_later_booleans() {
         // a Knife's line on a side, then a cube added apart and a boss on
         // the cut side: the side stays in two pieces (20 nov.: the

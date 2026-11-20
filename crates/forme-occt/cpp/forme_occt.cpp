@@ -3591,8 +3591,17 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                     if (!ne.IsNull()) enew.Bind(ef, ne);
                 }
             }
-            TopoDS_Shell shell;
-            bb.MakeShell(shell);
+            // one new shell per shell of the part, one solid per solid (a
+            // part of several lumps: a cube added apart, 20 nov.)
+            TopTools_IndexedMapOfShape shm;
+            TopExp::MapShapes(src, TopAbs_SHELL, shm);
+            std::vector<TopoDS_Shell> shells(std::max(1, shm.Extent()));
+            for (TopoDS_Shell& sh : shells) bb.MakeShell(sh);
+            TopTools_DataMapOfShapeInteger shell_of;
+            for (int k = 1; k <= shm.Extent(); k++)
+                for (TopExp_Explorer x(shm(k), TopAbs_FACE); x.More(); x.Next())
+                    if (!shell_of.IsBound(x.Current())) shell_of.Bind(x.Current(), k - 1);
+            auto shell_for = [&](const TopoDS_Shape& f) -> TopoDS_Shell& { return shells[shell_of.IsBound(f) ? shell_of(f) : 0]; };
             std::vector<long long> tags;
             for (int i = 1; i <= fm.Extent(); i++) {
                 TopoDS_Face f = TopoDS::Face(fm(i));
@@ -3603,7 +3612,7 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                     slides_here = slides_here || slide_of.IsBound(x.Current());
                 }
                 if (!touched) {
-                    bb.Add(shell, f);
+                    bb.Add(shell_for(f), f);
                     tags.push_back(tag);
                     continue;
                 }
@@ -3761,7 +3770,7 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                         if (dmax > BRep_Tool::Tolerance(e)) bb.UpdateEdge(e, 1.5 * dmax);
                     }
                     nf.Orientation(f.Orientation());
-                    bb.Add(shell, nf);
+                    bb.Add(shell_for(f), nf);
                     tags.push_back(tag);
                     continue;
                 }
@@ -3859,7 +3868,7 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                         if (dmax > BRep_Tool::Tolerance(e)) bb.UpdateEdge(e, 1.5 * dmax);
                     }
                     nf.Orientation(f.Orientation());
-                    bb.Add(shell, nf);
+                    bb.Add(shell_for(f), nf);
                     tags.push_back(tag);
                     continue;
                 }
@@ -4101,14 +4110,52 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                     }
                 }
                 nf.Orientation(f.Orientation());
-                bb.Add(shell, nf);
+                bb.Add(shell_for(f), nf);
                 tags.push_back(tag);
             }
-            shell.Closed(BRep_Tool::IsClosed(shell));
-            TopoDS_Solid solid;
-            bb.MakeSolid(solid);
-            bb.Add(solid, shell);
-            BRepLib::OrientClosedSolid(solid);
+            // the solids again, each with its shells
+            std::vector<TopoDS_Solid> solids;
+            TopTools_MapOfShape placed;
+            auto shell_new = [&](const TopoDS_Shape& old) -> TopoDS_Shell& { return shells[shm.FindIndex(old) - 1]; };
+            for (TopExp_Explorer x(src, TopAbs_SOLID); x.More(); x.Next()) {
+                TopoDS_Solid so;
+                bb.MakeSolid(so);
+                for (TopExp_Explorer y(x.Current(), TopAbs_SHELL); y.More(); y.Next()) {
+                    if (placed.Contains(y.Current())) continue;
+                    placed.Add(y.Current());
+                    TopoDS_Shell& sh = shell_new(y.Current());
+                    sh.Closed(BRep_Tool::IsClosed(sh));
+                    bb.Add(so, sh);
+                }
+                BRepLib::OrientClosedSolid(so);
+                solids.push_back(so);
+            }
+            for (int k = 1; k <= shm.Extent(); k++)
+                if (!placed.Contains(shm(k))) {
+                    TopoDS_Solid so;
+                    bb.MakeSolid(so);
+                    shells[k - 1].Closed(BRep_Tool::IsClosed(shells[k - 1]));
+                    bb.Add(so, shells[k - 1]);
+                    BRepLib::OrientClosedSolid(so);
+                    solids.push_back(so);
+                }
+            if (solids.empty()) {
+                TopoDS_Solid so;
+                bb.MakeSolid(so);
+                shells[0].Closed(BRep_Tool::IsClosed(shells[0]));
+                bb.Add(so, shells[0]);
+                BRepLib::OrientClosedSolid(so);
+                solids.push_back(so);
+            }
+            TopoDS_Shape solid;
+            if (solids.size() == 1) {
+                solid = solids[0];
+            } else {
+                TopoDS_Compound c;
+                bb.MakeCompound(c);
+                for (const TopoDS_Solid& so : solids) bb.Add(c, so);
+                solid = c;
+            }
             if (!valid(solid)) {
                 if (getenv("FORME_OCCT_DEBUG")) {
                     BRepCheck_Analyzer an(solid);
