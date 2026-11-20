@@ -131,14 +131,21 @@ pub struct BasePlane {
     /// On the reference: Some(true) its flat face, Some(false) its tangent
     /// plane (no flat face there).
     pub scan: Option<bool>,
+    /// On a linked surface: the plane through the point under the pointer,
+    /// square to the world axis nearest its normal; a Carve made on it goes
+    /// through it (as far below as above).
+    pub sheet: bool,
 }
 
 impl BasePlane {
     pub fn ground() -> BasePlane {
-        BasePlane { origin: DVec3::ZERO, u: DVec3::X, n: DVec3::Y, v: DVec3::Z, face: None, scan: None }
+        BasePlane { origin: DVec3::ZERO, u: DVec3::X, n: DVec3::Y, v: DVec3::Z, face: None, scan: None, sheet: false }
     }
     /// Where it lies, for the pointer's chip.
     pub fn label(&self) -> &'static str {
+        if self.sheet {
+            return "on the surface";
+        }
         match (self.face, self.scan) {
             (Some(_), _) => "on the face",
             (None, Some(true)) => "on the scan's face",
@@ -157,7 +164,7 @@ impl BasePlane {
         let pick = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Z };
         let u = (pick - n * pick.dot(n)).normalize();
         // (u, n, v) right-handed like (X, Y, Z)
-        BasePlane { origin, u, n, v: u.cross(n), face, scan: None }
+        BasePlane { origin, u, n, v: u.cross(n), face, scan: None, sheet: false }
     }
     pub fn to_plane(&self, p: DVec3) -> [f64; 2] {
         let d = p - self.origin;
@@ -2457,6 +2464,21 @@ impl AppState {
             return Some(r);
         }
         let (ro, rd) = self.ray(p);
+        // a linked surface in front of the part: the plane through the point
+        // under the pointer, square to the world axis nearest its normal
+        let part_t = self.pick_at(p).map(|h| h.t as f64).unwrap_or(f64::MAX);
+        if let Some(h) = self.pick_mesh(p, None) {
+            let linked = self.doc.feature(h.id).map(|f| crate::linked::patch_of(f).is_some()).unwrap_or(false);
+            if linked && (h.t as f64) < part_t {
+                let n = h.normal.as_dvec3();
+                let k = (0..3).max_by(|a, b| n[*a].abs().total_cmp(&n[*b].abs())).unwrap_or(1);
+                let mut axis = DVec3::ZERO;
+                axis[k] = n[k].signum();
+                let mut plane = BasePlane::new(h.point.as_dvec3(), axis, None);
+                plane.sheet = true;
+                return plane.hit(ro, rd).map(|q| (plane, q));
+            }
+        }
         if let (Some(m), Some(h)) = (&self.model, self.pick_at(p)) {
             let f = &m.faces[h.face];
             if f.kind == nurbs_kernel::model::SurfKind::Plane {
@@ -2724,9 +2746,25 @@ impl AppState {
             return;
         }
         let id = c.id;
+        let through = c.plane.sheet && c.curve.is_none();
         self.live(|d| {
             if let Some(f) = d.feature_mut(id) {
                 f.visible = true;
+                // a Carve made on a linked surface goes through it: as far
+                // below the point as above
+                if through && f.op == Op::Carve {
+                    let up = f.rot * DVec3::Y;
+                    let h = match &mut f.prim {
+                        Prim::Box { y, .. } | Prim::Profile { y, .. } => Some(y),
+                        Prim::Cylinder { height, .. } => Some(height),
+                        _ => None,
+                    };
+                    if let Some(h) = h {
+                        let t = *h;
+                        *h = 2.0 * t;
+                        f.origin -= up * t;
+                    }
+                }
             }
         });
         self.end_live();

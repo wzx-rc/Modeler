@@ -100,12 +100,30 @@ pub fn rebind(f: &mut Feature) {
     }
 }
 
+/// How far (mm) the layer's points are from where their binding puts
+/// them: about 0 unless something else moved them (an Object-mode scale,
+/// a resize), which a contour move must not undo.
+pub fn bound_off(f: &Feature) -> f32 {
+    let s = size(f);
+    let Some(m) = f.mesh.as_ref() else { return 0.0 };
+    let Some(p) = m.patch.as_ref() else { return 0.0 };
+    let pts = m.local(s);
+    if p.bind.len() != pts.len() {
+        return f32::INFINITY;
+    }
+    let cv = p.cvs(s);
+    pts.iter().zip(&p.bind).map(|(q, b)| patch::place(&cv, *b).distance(*q)).fold(0.0, f32::max)
+}
+
 impl AppState {
     /// The closed path of four points selected, if any.
     pub fn four_point_path(&self) -> Option<&Feature> {
         let f = self.single()?;
         let pr = f.profile.as_ref()?;
-        (f.is_path() && !pr.open && pr.points.len() == 4 && f.curve.is_none() && f.shape_bool.is_none()).then_some(f)
+        // a Path or a curve (a Rectangle, a 4-sided Polygon) of four sharp
+        // corners
+        let sharp = !pr.smooth.iter().any(|s| *s) && pr.corner.iter().all(|c| *c == 0.0);
+        (f.is_path() && !pr.open && pr.points.len() == 4 && sharp && f.shape_bool.is_none()).then_some(f)
     }
 
     /// The linked surface on the selected closed path of four points: a
@@ -333,7 +351,11 @@ impl AppState {
             return;
         }
         let Some(id) = self.linked_target() else { return };
-        let Some(f) = self.doc.feature(id).cloned() else { return };
+        let Some(mut f) = self.doc.feature(id).cloned() else { return };
+        // scaled or resized since it was bound: bound again where it is
+        if bound_off(&f) > 0.01 {
+            rebind(&mut f);
+        }
         let picked = self.patch_picked();
         if picked.is_empty() {
             return;
@@ -400,6 +422,9 @@ impl AppState {
         let local = (f.rot.inverse().as_quat() * delta) / size(&f);
         self.edit("Move contour points", |doc| {
             let Some(g) = doc.feature_mut(id) else { return };
+            if bound_off(g) > 0.01 {
+                rebind(g);
+            }
             if let Some(pp) = g.mesh.as_mut().and_then(|m| m.make_mut().patch.as_mut()) {
                 for k in cvs {
                     pp.cv[*k] = (Vec3::from(pp.cv[*k]) + local).to_array();

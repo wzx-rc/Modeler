@@ -2398,12 +2398,8 @@ fn linked_card(ui: &mut Ui, st: &mut AppState, f: &Feature, p: &nurbs_kernel::pa
     use nurbs_kernel::patch::PatchState;
     let id = f.id;
     section(ui, "State");
-    let items = [
-        (PatchState::Nurbs, "NURBS", Workspace::Forme.swatch()),
-        (PatchState::Poly, "POLY", Workspace::Poly.swatch()),
-        (PatchState::Sculpt, "SCULPT", Workspace::Sculpt.swatch()),
-    ];
-    if let Some(s) = segmented(ui, &items, p.state, 32.0) {
+    let items = [(PatchState::Nurbs, "NURBS", Workspace::Forme), (PatchState::Poly, "POLY", Workspace::Poly), (PatchState::Sculpt, "SCULPT", Workspace::Sculpt)];
+    if let Some(s) = state_buttons(ui, &items, p.state) {
         st.set_patch_state(id, s);
     }
     let (verts, faces) = f.mesh.as_ref().map(|m| (m.verts.len(), m.faces.len())).unwrap_or((0, 0));
@@ -2432,6 +2428,50 @@ fn linked_card(ui: &mut Ui, st: &mut AppState, f: &Feature, p: &nurbs_kernel::pa
     if !cuts.is_empty() {
         ui.label(egui::RichText::new(format!("Cut by {} (live, both states)", cuts.join(", "))).font(regular(12.0)).color(LABEL()));
     }
+}
+
+/// The linked surface's three states, each in its tab's colour and icon:
+/// the one it is in filled with it (as the tabs' lit pill), the others
+/// their icon and name in it.
+fn state_buttons(ui: &mut Ui, items: &[(nurbs_kernel::patch::PatchState, &str, Workspace)], current: nurbs_kernel::patch::PatchState) -> Option<nurbs_kernel::patch::PatchState> {
+    let height = 30.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    ui.painter().rect_filled(rect, 11.0, WELL());
+    let n = items.len() as f32;
+    let inner = rect.shrink(3.0);
+    let w = (inner.width() - 3.0 * (n - 1.0)) / n;
+    let mut picked = None;
+    for (i, (v, label, ws)) in items.iter().enumerate() {
+        let r = Rect::from_min_size(inner.min + vec2(i as f32 * (w + 3.0), 0.0), vec2(w, inner.height()));
+        let resp = ui.interact(r, ui.id().with(("state", i)), Sense::click());
+        let on = *v == current;
+        // its tab's colour (darker on the light theme, where the pastels fade)
+        let c = match ws {
+            Workspace::Forme => pick(ws.swatch(), Color32::from_rgb(0x2A, 0x2D, 0x33)),
+            Workspace::Sculpt => pick(ws.swatch(), Color32::from_rgb(0xB8, 0x69, 0x3A)),
+            Workspace::Poly => pick(ws.swatch(), Color32::from_rgb(0x2F, 0x86, 0xC0)),
+        };
+        let p = ui.painter();
+        let fg = if on {
+            p.rect_filled(r, 8.0, c);
+            pick(Color32::from_rgb(0x15, 0x17, 0x1A), Color32::WHITE)
+        } else {
+            if resp.hovered() {
+                p.rect_filled(r, 8.0, RAISED());
+            }
+            p.rect_stroke(r, 8.0, Stroke::new(1.0, tint(c, 0.35)), StrokeKind::Inside);
+            if resp.hovered() { c } else { tint(c, 0.85) }
+        };
+        let font = semibold(11.5);
+        let tw = ui.painter().layout_no_wrap(label.to_string(), font.clone(), fg).size().x;
+        let x0 = r.center().x - (13.0 + 5.0 + tw) * 0.5;
+        icons::paint(p, Rect::from_min_size(pos2(x0, r.center().y - 6.5), vec2(13.0, 13.0)), ws.icon(), fg);
+        p.text(pos2(x0 + 18.0, r.center().y), Align2::LEFT_CENTER, *label, font, fg);
+        if resp.on_hover_text(format!("{} state", label)).clicked() && !on {
+            picked = Some(*v);
+        }
+    }
+    picked
 }
 
 /// The selected shape's sizes (the operation window).
@@ -2628,6 +2668,25 @@ fn curve_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
         st.end_live();
     }
+    if f.is_path() {
+        linked_button(ui, st, id);
+    }
+}
+
+/// Four sharp corners, closed (a Path, a Rectangle): the button that makes
+/// a linked surface on them (NURBS and Poly at once). True when made.
+fn linked_button(ui: &mut Ui, st: &mut AppState, id: FeatureId) -> bool {
+    if st.single().map(|f| f.id) != Some(id) || st.four_point_path().is_none() {
+        return false;
+    }
+    ui.add_space(4.0);
+    if primary_btn(ui, None, "Linked surface", Some(ui.available_width()))
+        .on_hover_text("A NURBS surface on these 4 points, edited by its contour, that is also a Poly mesh: switch its state in its window (NURBS, POLY; SCULPT next)")
+        .clicked()
+    {
+        return st.make_linked_surface();
+    }
+    false
 }
 
 /// A curve or 2D boolean pulled into a solid (Curves, step 3): its curve's
@@ -2764,17 +2823,8 @@ fn path_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
             st.end_live();
         }
     }
-    // four points, closed: a linked surface on them (NURBS and Poly at once)
-    if !pr.open && pr.points.len() == 4 && f.curve.is_none() {
-        ui.add_space(4.0);
-        if primary_btn(ui, None, "Linked surface", Some(ui.available_width()))
-            .on_hover_text("A NURBS surface on these 4 points, edited by its contour, that is also a Poly mesh: switch its state in its window (NURBS, POLY; SCULPT next)")
-            .clicked()
-        {
-            st.selection = vec![id];
-            st.make_linked_surface();
-            return;
-        }
+    if linked_button(ui, st, id) {
+        return;
     }
     section(ui, "Size");
     for (k, label, v) in [(0, "Width", x), (2, "Depth", z)] {

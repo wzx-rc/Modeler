@@ -121,9 +121,41 @@ pub fn layer_polys(f: &Feature, p: &Patch, solids: &[Solid], only_off: bool) -> 
     if solids.is_empty() {
         return (pts, faces, of);
     }
-    let (cp, cf, parent) = patch::cut_all(&pts, &faces, solids);
-    let parent = parent.iter().map(|k| of[*k as usize]).collect();
+    // finer near the solids first: the cut then follows their curves
+    // across big faces (an extrusion's walls)
+    let (rp, rf, rpar) = patch::refine_near(&pts, &faces, solids);
+    let (cp, cf, parent) = patch::cut_all(&rp, &rf, solids);
+    let parent = parent.iter().map(|k| of[rpar[*k as usize] as usize]).collect();
     (cp, cf, parent)
+}
+
+/// A linked surface's Poly layer edges (world, `only_off`: its own shapes'
+/// only) less their pieces inside the Carves, and the rims the Carves cut;
+/// the edges picked apart (`picked`, by the layer's points).
+fn layer_edges(f: &Feature, p: &Patch, solids: &[Solid], only_off: bool, picked: &[(u32, u32)]) -> (Vec<Vec<[f32; 3]>>, Vec<Vec<[f32; 3]>>) {
+    let Some(m) = &f.mesh else { return (vec![], vec![]) };
+    let pts = world_points(f);
+    let off = p.off_surface();
+    let keep = |q: &Vec<u32>| !only_off || (off.len() == pts.len() && q.iter().any(|v| off[*v as usize]));
+    let mut seen = std::collections::HashSet::new();
+    let (mut plain, mut lit) = (vec![], vec![]);
+    for q in m.faces.iter().filter(|q| keep(q)) {
+        for i in 0..q.len() {
+            let (a, b) = (q[i], q[(i + 1) % q.len()]);
+            let e = (a.min(b), a.max(b));
+            if seen.insert(e) {
+                let seg = (pts[e.0 as usize], pts[e.1 as usize]);
+                if picked.contains(&e) { lit.push(seg) } else { plain.push(seg) }
+            }
+        }
+    }
+    let arr = |l: Vec<Vec<Vec3>>| -> Vec<Vec<[f32; 3]>> { l.into_iter().map(|q| q.into_iter().map(|v| v.to_array()).collect()).collect() };
+    let mut plain = arr(patch::clip_segments(&plain, solids));
+    if !solids.is_empty() {
+        let (lp, lf, _) = layer_polys(f, p, solids, only_off);
+        plain.extend(patch::rims(&lp, &lf, solids).into_iter().map(|(a, b)| vec![a.to_array(), b.to_array()]));
+    }
+    (plain, arr(patch::clip_segments(&lit, solids)))
 }
 
 /// A linked surface's triangles: in NURBS its surface (slot `base`) and the
@@ -207,27 +239,10 @@ pub fn linked_lines(f: &Feature, solids: &[Solid], out: &mut Vec<LineVertex>) {
         // the trim: where the Carves cut the surface, the border of what is
         // left (the edges of one face only, the sides again among them)
         let (cp, cf, _) = surface_polys(f, p, solids, 40);
-        let mut count: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
-        for q in &cf {
-            for i in 0..q.len() {
-                let (a, b) = (q[i], q[(i + 1) % q.len()]);
-                *count.entry((a.min(b), a.max(b))).or_default() += 1;
-            }
-        }
-        let trim: Vec<Vec<[f32; 3]>> = count.into_iter().filter(|(_, n)| *n == 1).map(|((a, b), _)| vec![cp[a as usize].to_array(), cp[b as usize].to_array()]).collect();
+        let trim: Vec<Vec<[f32; 3]>> = patch::rims(&cp, &cf, solids).into_iter().map(|(a, b)| vec![a.to_array(), b.to_array()]).collect();
         line_vertices(&trim, [24, 26, 30, 220], 1.1, out);
     }
-    let (lp, lf, _) = layer_polys(f, p, solids, true);
-    let mut seen = std::collections::HashSet::new();
-    let mut ghost = vec![];
-    for q in &lf {
-        for i in 0..q.len() {
-            let (a, b) = (q[i], q[(i + 1) % q.len()]);
-            if seen.insert((a.min(b), a.max(b))) {
-                ghost.push(vec![lp[a as usize].to_array(), lp[b as usize].to_array()]);
-            }
-        }
-    }
+    let (ghost, _) = layer_edges(f, p, solids, true, &[]);
     let c = crate::workspace::Workspace::Poly.swatch();
     line_vertices(&ghost, [c.r() / 2, c.g() / 2, c.b() / 2, 200], 1.0, out);
 }
@@ -291,24 +306,23 @@ pub fn cage_lines(f: &Feature, solids: &[Solid], picked: &[(u32, u32)], strong: 
     if m.kind != MeshKind::Poly {
         return;
     }
-    let (pts, edges) = match &m.patch {
-        Some(p) if !solids.is_empty() => {
-            let (lp, lf, _) = layer_polys(f, p, solids, false);
-            let tmp = MeshData { kind: MeshKind::Poly, verts: vec![], faces: lf, smooth: false, angle: m.angle, patch: None };
-            (lp, tmp.edges())
+    let (plain, lit) = match &m.patch {
+        Some(p) if !solids.is_empty() => layer_edges(f, p, solids, false, picked),
+        _ => {
+            let pts = world_points(f);
+            let mut plain = vec![];
+            let mut lit = vec![];
+            for e in m.edges() {
+                let l = vec![pts[e.0 as usize].to_array(), pts[e.1 as usize].to_array()];
+                if picked.contains(&e) {
+                    lit.push(l);
+                } else {
+                    plain.push(l);
+                }
+            }
+            (plain, lit)
         }
-        _ => (world_points(f), m.edges()),
     };
-    let mut plain = vec![];
-    let mut lit = vec![];
-    for e in edges {
-        let l = vec![pts[e.0 as usize].to_array(), pts[e.1 as usize].to_array()];
-        if picked.contains(&e) {
-            lit.push(l);
-        } else {
-            plain.push(l);
-        }
-    }
     let c = if strong { [20, 24, 30, 230] } else { [24, 26, 30, 150] };
     line_vertices(&plain, c, if strong { 1.0 } else { 0.8 }, out);
     line_vertices(&lit, accent, 2.2, out);

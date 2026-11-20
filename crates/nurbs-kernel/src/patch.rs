@@ -539,6 +539,175 @@ pub fn cut_all(pts: &[Vec3], faces: &[Vec<u32>], solids: &[Solid]) -> (Vec<Vec3>
     (p, f, parent)
 }
 
+impl Solid {
+    /// A step fine enough to follow its border: a cut drawn through
+    /// polygons smaller than it follows the solid's curve.
+    pub fn grain(&self) -> f32 {
+        match self.kind {
+            SolidKind::Box { half } => (half.min_element() / 3.0).max(0.05),
+            SolidKind::Cylinder { r, h } => (r / 6.0).min(h / 4.0).max(0.05),
+        }
+    }
+}
+
+/// The polygons near the solids cut in finer quads before a cut (a quad
+/// into k × k by its bilinear map, k the same for all so neighbours share
+/// their points), so the cut follows the solids' curves across big faces
+/// (an extrusion's walls); each with the polygon it comes from. Polygons
+/// other than quads, and those far from every solid, stay as they are.
+pub fn refine_near(pts: &[Vec3], faces: &[Vec<u32>], solids: &[Solid]) -> (Vec<Vec3>, Vec<Vec<u32>>, Vec<u32>) {
+    let id: Vec<u32> = (0..faces.len() as u32).collect();
+    if solids.is_empty() {
+        return (pts.to_vec(), faces.to_vec(), id);
+    }
+    let grain = solids.iter().map(|s| s.grain()).fold(f32::MAX, f32::min);
+    let near: Vec<bool> = faces
+        .iter()
+        .map(|f| {
+            if f.len() != 4 {
+                return false;
+            }
+            let c = f.iter().map(|v| pts[*v as usize]).sum::<Vec3>() / 4.0;
+            let rad = f.iter().map(|v| pts[*v as usize].distance(c)).fold(0.0f32, f32::max);
+            solids.iter().any(|s| s.sdf(c) < rad + grain)
+        })
+        .collect();
+    let longest = faces
+        .iter()
+        .zip(&near)
+        .filter(|(_, n)| **n)
+        .map(|(f, _)| (0..4).map(|k| pts[f[k] as usize].distance(pts[f[(k + 1) % 4] as usize])).fold(0.0f32, f32::max))
+        .fold(0.0f32, f32::max);
+    let k = ((longest / grain).ceil() as usize).clamp(1, 24);
+    if k == 1 {
+        return (pts.to_vec(), faces.to_vec(), id);
+    }
+    let mut out = pts.to_vec();
+    // the points along an edge (a to b, inside ones only), shared
+    let mut along: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+    let mut edge_pts = |a: u32, b: u32, out: &mut Vec<Vec3>| -> Vec<u32> {
+        let key = (a.min(b), a.max(b));
+        let l = along.entry(key).or_insert_with(|| {
+            let (p, q) = (out[key.0 as usize], out[key.1 as usize]);
+            (1..k)
+                .map(|i| {
+                    out.push(p.lerp(q, i as f32 / k as f32));
+                    (out.len() - 1) as u32
+                })
+                .collect()
+        });
+        if a == key.0 { l.clone() } else { l.iter().rev().copied().collect() }
+    };
+    let (mut nf, mut parent) = (vec![], vec![]);
+    for (fi, f) in faces.iter().enumerate() {
+        if !near[fi] {
+            nf.push(f.clone());
+            parent.push(fi as u32);
+            continue;
+        }
+        // the grid's points: g[j][i], i along f0 → f1, j along f0 → f3
+        let mut g = vec![vec![0u32; k + 1]; k + 1];
+        let bottom = edge_pts(f[0], f[1], &mut out);
+        let right = edge_pts(f[1], f[2], &mut out);
+        let top = edge_pts(f[3], f[2], &mut out);
+        let left = edge_pts(f[0], f[3], &mut out);
+        g[0][0] = f[0];
+        g[0][k] = f[1];
+        g[k][k] = f[2];
+        g[k][0] = f[3];
+        for i in 1..k {
+            g[0][i] = bottom[i - 1];
+            g[k][i] = top[i - 1];
+            g[i][0] = left[i - 1];
+            g[i][k] = right[i - 1];
+        }
+        let (p0, p1, p2, p3) = (pts[f[0] as usize], pts[f[1] as usize], pts[f[2] as usize], pts[f[3] as usize]);
+        for j in 1..k {
+            for i in 1..k {
+                let (u, v) = (i as f32 / k as f32, j as f32 / k as f32);
+                out.push(p0.lerp(p1, u).lerp(p3.lerp(p2, u), v));
+                g[j][i] = (out.len() - 1) as u32;
+            }
+        }
+        for j in 0..k {
+            for i in 0..k {
+                nf.push(vec![g[j][i], g[j][i + 1], g[j + 1][i + 1], g[j + 1][i]]);
+                parent.push(fi as u32);
+            }
+        }
+    }
+    (out, nf, parent)
+}
+
+/// Segments less their pieces inside the solids: each cut where it
+/// crosses a solid's border (found by halves), as polylines.
+pub fn clip_segments(segs: &[(Vec3, Vec3)], solids: &[Solid]) -> Vec<Vec<Vec3>> {
+    if solids.is_empty() {
+        return segs.iter().map(|(a, b)| vec![*a, *b]).collect();
+    }
+    let grain = solids.iter().map(|s| s.grain()).fold(f32::MAX, f32::min);
+    let inside = |p: Vec3| solids.iter().any(|s| s.sdf(p) < 0.0);
+    let mut out = vec![];
+    for (a, b) in segs {
+        let n = ((a.distance(*b) / grain).ceil() as usize).clamp(1, 400);
+        let at = |t: f32| a.lerp(*b, t);
+        let mut cur: Vec<Vec3> = vec![];
+        let mut t0 = 0.0;
+        let mut in0 = inside(*a);
+        if !in0 {
+            cur.push(*a);
+        }
+        for i in 1..=n {
+            let t1 = i as f32 / n as f32;
+            let in1 = inside(at(t1));
+            if in0 != in1 {
+                let (mut lo, mut hi) = (t0, t1);
+                for _ in 0..30 {
+                    let m = 0.5 * (lo + hi);
+                    if inside(at(m)) == in0 {
+                        lo = m;
+                    } else {
+                        hi = m;
+                    }
+                }
+                let x = at(0.5 * (lo + hi));
+                if in0 {
+                    cur = vec![x];
+                } else {
+                    cur.push(x);
+                    if cur.len() >= 2 {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                    cur.clear();
+                }
+            }
+            t0 = t1;
+            in0 = in1;
+        }
+        if !in0 {
+            cur.push(*b);
+            if cur.len() >= 2 {
+                out.push(cur);
+            }
+        }
+    }
+    out
+}
+
+/// The rims a cut leaves: the edges of one polygon only whose two ends lie
+/// on a solid's border.
+pub fn rims(pts: &[Vec3], faces: &[Vec<u32>], solids: &[Solid]) -> Vec<(Vec3, Vec3)> {
+    let mut count: HashMap<(u32, u32), u32> = HashMap::new();
+    for q in faces {
+        for i in 0..q.len() {
+            let (a, b) = (q[i], q[(i + 1) % q.len()]);
+            *count.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let on = |p: Vec3| solids.iter().any(|s| s.sdf(p).abs() < 1e-3 + 1e-4 * s.grain());
+    count.into_iter().filter(|(_, n)| *n == 1).map(|((a, b), _)| (pts[a as usize], pts[b as usize])).filter(|(a, b)| on(*a) && on(*b)).collect()
+}
+
 /// A polygon as triangles: a fan when convex, else ear clipping in its
 /// plane (a polygon a cut bit into is not convex).
 pub fn triangulate(pts: &[Vec3], f: &[u32]) -> Vec<[u32; 3]> {
@@ -605,6 +774,26 @@ mod tests {
     }
 
     #[test]
+    fn saved_and_read_again() {
+        // a document with a linked surface: its patch, state and binding
+        // come back from the .fnurbs as they were
+        let mut d = crate::doc::Doc::default();
+        let pts = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Vec3::new(10.0, 0.0, -10.0), Vec3::new(0.0, 0.0, -10.0)];
+        let id = d.add_mesh(crate::mesh::MeshKind::Poly, &pts, vec![vec![0, 1, 2, 3]], glam::DVec3::ZERO, glam::DQuat::IDENTITY, "Surface");
+        let mut p = flat();
+        p.state = PatchState::Poly;
+        p.bind = vec![[0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0, 2.5], [1.0, 1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.1, -0.2, 0.0]];
+        d.feature_mut(id).unwrap().mesh.as_mut().unwrap().make_mut().patch = Some(p.clone());
+        let back = crate::doc::Doc::from_json(&d.to_json()).unwrap();
+        let m = back.feature(id).unwrap().mesh.as_ref().unwrap();
+        assert_eq!(m.patch.as_ref(), Some(&p));
+        // a mesh without one saves no patch field
+        let mut d2 = crate::doc::Doc::default();
+        d2.add_mesh(crate::mesh::MeshKind::Poly, &pts, vec![vec![0, 1, 2, 3]], glam::DVec3::ZERO, glam::DQuat::IDENTITY, "Plane");
+        assert!(!d2.to_json().contains("patch"));
+    }
+
+    #[test]
     fn contour_makes_the_inside() {
         let mut p = flat();
         let cv = p.cvs(Vec3::ONE);
@@ -648,6 +837,52 @@ mod tests {
         assert!(((q1 - q0).length() - 3.0).abs() < 1e-3);
         assert!((q1 - q0).normalize().dot(frame(su, sv).2) > 0.999);
         assert!(q0.y > 1.0);
+    }
+
+    #[test]
+    fn a_big_face_cut_follows_the_curve() {
+        // one leaning wall (10 × 10, 2 mm out at its top) bitten at its foot
+        // by an upright cylinder: refined first, the cut follows the curve
+        let pts = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Vec3::new(10.0, 10.0, 2.0), Vec3::new(0.0, 10.0, 2.0)];
+        let faces = vec![vec![0u32, 1, 2, 3]];
+        let s = Solid { to_local: Mat4::from_translation(Vec3::new(0.0, 10.0, 1.0)), kind: SolidKind::Cylinder { r: 3.0, h: 40.0 } };
+        let (rp, rf, rpar) = refine_near(&pts, &faces, &[s]);
+        assert!(rf.len() > 1 && rpar.iter().all(|k| *k == 0));
+        let (out, cf, _) = cut(&rp, &rf, &s);
+        let mut area = 0.0;
+        for f in &cf {
+            for t in triangulate(&out, f) {
+                let (a, b, c) = (out[t[0] as usize], out[t[1] as usize], out[t[2] as usize]);
+                area += 0.5 * (b - a).cross(c - a).length();
+            }
+        }
+        // the area outside, counted on a fine grid of the wall
+        let n = 1000;
+        let mut kept = 0;
+        for j in 0..n {
+            for i in 0..n {
+                let (u, v) = ((i as f32 + 0.5) / n as f32, (j as f32 + 0.5) / n as f32);
+                let q = pts[0].lerp(pts[1], u).lerp(pts[3].lerp(pts[2], u), v);
+                if s.sdf(q) >= 0.0 {
+                    kept += 1;
+                }
+            }
+        }
+        let want = kept as f32 / (n * n) as f32 * 10.0 * (104.0f32).sqrt();
+        assert!((area - want).abs() < want * 0.003, "{area} vs {want}");
+        // the rim on the cylinder, from the foot up to the wall's side
+        let rim = rims(&out, &cf, &[s]);
+        assert!(rim.len() >= 6, "{} rim edges", rim.len());
+        for (a, b) in &rim {
+            assert!(s.sdf(*a).abs() < 1e-3 && s.sdf(*b).abs() < 1e-3);
+        }
+        // the wall's edges clipped: the foot and the side start on the rim
+        let segs = vec![(pts[0], pts[1]), (pts[0], pts[3])];
+        let kept = clip_segments(&segs, &[s]);
+        assert_eq!(kept.len(), 2);
+        for l in &kept {
+            assert!(s.sdf(l[0]).abs() < 1e-3);
+        }
     }
 
     #[test]

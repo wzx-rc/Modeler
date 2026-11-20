@@ -5225,10 +5225,20 @@ fn linked(h: &mut Harness) {
     h.move_to(pos2(1200.0, 700.0));
     h.steps(14);
     h.shot("lsurf-01-path");
-    // 2. its window's Linked surface button
-    if !h.st.make_linked_surface() {
-        eprintln!("linked: not made");
-        return;
+    // 2. its window's Linked surface button, clicked
+    let made = |h: &Harness| h.st.single().and_then(|f| nurbs_app::linked::patch_of(f)).is_some();
+    h.move_to(pos2(1206.0, 552.0));
+    h.steps(2);
+    h.click(pos2(1206.0, 552.0));
+    h.steps(3);
+    if made(h) {
+        eprintln!("linked: made by its window's button");
+    } else {
+        eprintln!("linked: the button was not hit, made directly");
+        if !h.st.make_linked_surface() {
+            eprintln!("linked: not made");
+            return;
+        }
     }
     let id = h.st.selection[0];
     h.steps(14);
@@ -5267,8 +5277,18 @@ fn linked(h: &mut Harness) {
     h.st.selection = vec![id];
     h.steps(14);
     h.shot("lsurf-04-wave-object");
-    // 4. POLY in its window: the Poly tab, the layer as a mesh
-    h.st.set_patch_state(id, PatchState::Poly);
+    // 4. POLY in its window, clicked: the Poly tab, the layer as a mesh
+    h.move_to(pos2(993.0, 455.0));
+    h.steps(2);
+    h.click(pos2(993.0, 455.0));
+    h.steps(3);
+    let now = nurbs_app::linked::state_of(h.st.doc.feature(id).unwrap());
+    if now == Some(PatchState::Poly) {
+        eprintln!("linked: POLY clicked in its window");
+    } else {
+        eprintln!("linked: POLY not hit ({now:?}), switched directly");
+        h.st.set_patch_state(id, PatchState::Poly);
+    }
     h.steps(14);
     h.shot("lsurf-05-poly");
     // 5. Face mode: four faces (two by two, from the middle), Ctrl + E
@@ -5359,10 +5379,14 @@ fn linked(h: &mut Harness) {
     h.st.selection.clear();
     h.st.mode = Op::Carve;
     h.st.tool = Tool::Create(PrimKind::Cylinder);
-    let a = g(h, centre.x, centre.z);
-    let b = g(h, centre.x + r, centre.z);
+    // pressed on the surface (its plane there, square to Y), dragged out to
+    // its radius, then its height: a Carve made there goes through it
+    let a = h.screen_of(centre);
+    let b = h.screen_of(centre + Vec3::new(r, 0.0, 0.0));
+    h.move_to(a);
+    h.steps(2);
     h.drag(a, b, 8, true);
-    let top = h.screen_of(Vec3::new(centre.x, 20.0, centre.z));
+    let top = h.screen_of(centre + Vec3::new(0.0, 20.0, 0.0));
     h.move_to(top);
     h.settle();
     h.click(top);
@@ -5373,14 +5397,6 @@ fn linked(h: &mut Harness) {
         eprintln!("linked: no cylinder");
         return;
     };
-    h.st.edit("Size", |d| {
-        if let Some(c) = d.feature_mut(cyl) {
-            c.origin.y = -30.0;
-            if let Prim::Cylinder { height, .. } = &mut c.prim {
-                *height = 70.0;
-            }
-        }
-    });
     let cf = h.st.doc.feature(cyl).unwrap();
     eprintln!("linked: cylinder {:?} {:?} at {:?}", cf.op, cf.prim, cf.origin);
     h.st.selection = vec![cyl];
@@ -5435,10 +5451,41 @@ fn linked(h: &mut Harness) {
     h.st.selection.clear();
     h.steps(14);
     h.shot("lsurf-18-close-poly");
+    if std::env::var("FORME_LSURF_CORNER").is_ok() {
+        h.st.camera.target = centre + Vec3::new(2.0, 0.0, r);
+        h.st.camera.dist = 30.0;
+        h.steps(6);
+        h.shot("lsurf-19-corner-poly");
+        h.st.camera.yaw = 0.35 + 0.9;
+        h.steps(6);
+        h.shot("lsurf-19-corner-poly-side");
+        h.st.camera.yaw = 0.35;
+        h.st.set_patch_state(id, PatchState::Nurbs);
+        h.st.selection.clear();
+        h.steps(10);
+        h.shot("lsurf-19-corner-nurbs");
+    }
     h.st.set_patch_state(id, PatchState::Nurbs);
     h.st.selection.clear();
     h.steps(4);
     let f = h.st.doc.feature(id).unwrap();
     let m = f.mesh.as_ref().unwrap();
     eprintln!("linked: layer {} points, {} faces, {} off the surface; state {:?}", m.verts.len(), m.faces.len(), m.patch.as_ref().unwrap().off_surface().iter().filter(|o| **o).count(), m.patch.as_ref().unwrap().state);
+    // 12. scaled 1.5 times in Object mode, then a contour point moved: the
+    // extrusion keeps its new height (bound again where it is)
+    let tall = |h: &Harness| h.st.doc.feature(id).unwrap().mesh.as_ref().unwrap().patch.as_ref().unwrap().bind.iter().map(|b| b[4]).fold(0.0f32, f32::max);
+    let before = tall(h);
+    h.st.edit("Scale", |d| {
+        if let Some(g) = d.feature_mut(id) {
+            if let Prim::Box { x, y, z } = &mut g.prim {
+                *x *= 1.5;
+                *y *= 1.5;
+                *z *= 1.5;
+            }
+        }
+    });
+    h.st.move_patch_points(id, &[0], Vec3::new(0.0, 2.0, 0.0));
+    eprintln!("linked: extrusion {:.2} mm, scaled 1.5 then a point moved: {:.2} mm", before, tall(h));
+    h.st.undo();
+    h.st.undo();
 }
