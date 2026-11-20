@@ -77,6 +77,11 @@ pub enum Icon {
     CurveEllipse,
     CurvePolygon,
     CurveStar,
+    /// The 2D booleans: two circles side by side, the result drawn, the
+    /// rest dotted.
+    BoolUnion,
+    BoolSubtract,
+    BoolIntersect,
 }
 
 struct Pen<'a> {
@@ -257,6 +262,29 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::CurveStar => {
             let v: Vec<(f32, f32)> = (0..10).map(|k| { let a = -PI / 2.0 + PI / 5.0 * k as f32; let r = if k % 2 == 0 { 7.5 } else { 3.3 }; (10.0 + r * a.cos(), 10.6 + r * a.sin()) }).collect();
             pen.closed(&v);
+        }
+        Icon::BoolUnion | Icon::BoolSubtract | Icon::BoolIntersect => {
+            // circles of radius 5.5 at x 7.5 and 12.5: they cross at ±1.14
+            // rad on the left one, π ∓ 1.14 on the right one
+            let (r, a, b, c) = (5.5, 7.5, 12.5, 1.141);
+            let dotted = |cx: f32, a0: f32, a1: f32| {
+                for i in 0..=6 {
+                    let t = a0 + (a1 - a0) * i as f32 / 6.0;
+                    pen.dot(cx + r * t.cos(), 10.0 + r * t.sin(), 0.55);
+                }
+            };
+            let (a_out, a_in, b_out, b_in) = ((c, 2.0 * PI - c), (-c, c), (PI + c, 3.0 * PI - c), (PI - c, PI + c));
+            let (solid, dots): (Vec<(f32, (f32, f32))>, Vec<(f32, (f32, f32))>) = match icon {
+                Icon::BoolUnion => (vec![(a, a_out), (b, b_out)], vec![(a, a_in), (b, b_in)]),
+                Icon::BoolSubtract => (vec![(a, a_out), (b, b_in)], vec![(b, b_out)]),
+                _ => (vec![(a, a_in), (b, b_in)], vec![(a, a_out), (b, b_out)]),
+            };
+            for (cx, (a0, a1)) in solid {
+                pen.arc(cx, 10.0, r, r, a0, a1);
+            }
+            for (cx, (a0, a1)) in dots {
+                dotted(cx, a0, a1);
+            }
         }
         Icon::Quads => {
             // a flat run that bends down: three rows of quads

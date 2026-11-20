@@ -439,6 +439,34 @@ pub struct Curve {
     pub inner: f64,
 }
 
+/// The Curves set's 2D booleans (step 2, 3ds Max's Shape Boolean): closed
+/// curves on one plane combined, kept live (a curve changed, the result
+/// follows). The first operand is the base: Subtract takes the others away
+/// from it. The kernel makes it exactly (`build::region`) and sends its
+/// edges back (`Model.curves`); the operands stay, drawn dimmer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShapeBool {
+    pub op: CurveOp,
+    pub operands: Vec<FeatureId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CurveOp {
+    Union,
+    Subtract,
+    Intersect,
+}
+
+impl CurveOp {
+    pub fn label(self) -> &'static str {
+        match self {
+            CurveOp::Union => "Union",
+            CurveOp::Subtract => "Subtract",
+            CurveOp::Intersect => "Intersect",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CurveKind {
     Rectangle,
@@ -803,6 +831,10 @@ pub struct Feature {
     /// outline follows them (`Doc::regen_curves`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub curve: Option<Curve>,
+    /// A 2D boolean of closed curves (`Prim::Path` of its first operand's
+    /// box, at its place): its outline is the kernel's (`Model.curves`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_bool: Option<ShapeBool>,
 }
 
 /// A surface's closed outline (straight sides) and the scan points it
@@ -842,6 +874,9 @@ impl Feature {
         }
         if let Some(c) = &self.curve {
             return c.kind.label();
+        }
+        if let Some(b) = &self.shape_bool {
+            return b.op.label();
         }
         match (&self.round, &self.push, &self.tweak) {
             (Some(r), _, _) => r.label(),
@@ -1019,7 +1054,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, suspended: false });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -1029,7 +1064,7 @@ impl Doc {
         let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0 };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });
         id
     }
     /// Adds an inset or extrusion of a face at the end.
@@ -1038,7 +1073,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(push.label());
         let origin = push.face.at;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });
         id
     }
     /// Adds a move of a face, edge or vertex at the end.
@@ -1047,7 +1082,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(tweak.label());
         let origin = tweak.at();
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false });
         id
     }
     /// Adds a Knife step (its first point) at the end.
@@ -1056,7 +1091,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(name);
         let origin = cut.pts.first().map(|p| p.at).or(cut.remove_faces.first().map(|r| r.at)).or(cut.remove_edges.first().map(|e| e.at)).unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, suspended: false });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false });
         id
     }
     /// The curves' outlines made again from their settings and boxes (a
@@ -1075,7 +1110,43 @@ impl Doc {
                 changed = true;
             }
         }
+        // a 2D boolean's frame is its first operand's, its box all of its
+        // operands' (its operands come before it; twice for one of another)
+        for _ in 0..2 {
+            for k in 0..self.features.len() {
+                let Some(b) = self.features[k].shape_bool.clone() else { continue };
+                let ops: Vec<&Feature> = b.operands.iter().filter_map(|id| self.feature(*id)).collect();
+                let Some(first) = ops.first() else { continue };
+                let rot = first.rot;
+                let inv = first.matrix().inverse();
+                let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+                for g in &ops {
+                    for c in g.corners() {
+                        let q = inv.transform_point3(c);
+                        lo = lo.min(q);
+                        hi = hi.max(q);
+                    }
+                }
+                let mid = first.matrix().transform_point3(DVec3::new((lo.x + hi.x) * 0.5, 0.0, (lo.z + hi.z) * 0.5));
+                let prim = Prim::Path { x: (hi.x - lo.x).max(0.01), z: (hi.z - lo.z).max(0.01) };
+                let f = &mut self.features[k];
+                if f.rot != rot || f.origin.distance(mid) > 1e-9 || f.prim != prim {
+                    f.rot = rot;
+                    f.origin = mid;
+                    f.prim = prim;
+                    changed = true;
+                }
+            }
+        }
         changed
+    }
+    /// The 2D boolean that takes this curve in (the first, when several).
+    pub fn boolean_of(&self, id: FeatureId) -> Option<FeatureId> {
+        self.features.iter().find(|f| f.shape_bool.as_ref().map(|b| b.operands.contains(&id)).unwrap_or(false)).map(|f| f.id)
+    }
+    /// A closed curve, or a 2D boolean: what a 2D boolean can take in.
+    pub fn is_closed_curve(&self, id: FeatureId) -> bool {
+        self.feature(id).map(|f| f.is_path() && (f.shape_bool.is_some() || f.profile.as_ref().map(|p| !p.open && p.points.len() >= 3).unwrap_or(false))).unwrap_or(false)
     }
     /// "Cube", then "Cube 2", "Cube 3"…
     pub fn fresh_name(&self, base: &str) -> String {
@@ -1084,22 +1155,78 @@ impl Doc {
         }
         (2..).map(|i| format!("{base} {i}")).find(|n| !self.features.iter().any(|f| &f.name == n)).unwrap()
     }
+    /// Takes these features out. A 2D boolean takes its operands with it
+    /// (those no other boolean left takes in); an operand taken out leaves
+    /// its boolean's list, a boolean left with none goes too.
     pub fn remove(&mut self, ids: &[FeatureId]) {
-        self.features.retain(|f| !ids.contains(&f.id));
+        let mut out: Vec<FeatureId> = ids.to_vec();
+        for id in self.with_operands(ids) {
+            let others = self.features.iter().any(|f| !out.contains(&f.id) && f.shape_bool.as_ref().map(|b| b.operands.contains(&id)).unwrap_or(false));
+            if !others && !out.contains(&id) {
+                out.push(id);
+            }
+        }
+        self.features.retain(|f| !out.contains(&f.id));
+        loop {
+            for f in self.features.iter_mut() {
+                if let Some(b) = f.shape_bool.as_mut() {
+                    b.operands.retain(|o| !out.contains(o));
+                }
+            }
+            let empty: Vec<FeatureId> = self.features.iter().filter(|f| f.shape_bool.as_ref().map(|b| b.operands.is_empty()).unwrap_or(false)).map(|f| f.id).collect();
+            if empty.is_empty() {
+                break;
+            }
+            out.extend(empty.iter().copied());
+            self.features.retain(|f| !empty.contains(&f.id));
+        }
     }
     /// Copies of the shapes (after the last feature), with fresh ids; returns
     /// the new ids. Fillets and chamfers are not copied (their edges belong
     /// to the original).
     pub fn duplicate(&mut self, ids: &[FeatureId], offset: DVec3) -> Vec<FeatureId> {
-        let src: Vec<Feature> = self.features.iter().filter(|f| ids.contains(&f.id) && f.is_solid()).cloned().collect();
+        // a 2D boolean takes its operands with it
+        let all = self.with_operands(ids);
+        let src: Vec<Feature> = self.features.iter().filter(|f| all.contains(&f.id) && f.is_solid()).cloned().collect();
         let mut out = vec![];
+        let mut map = std::collections::HashMap::new();
         for mut f in src {
+            let old = f.id;
             f.id = self.next_id;
             self.next_id += 1;
+            map.insert(old, f.id);
             f.name = self.fresh_name(f.kind_label());
             f.origin += offset;
-            out.push(f.id);
+            if ids.contains(&old) {
+                out.push(f.id);
+            }
             self.features.push(f);
+        }
+        for f in self.features.iter_mut().filter(|f| map.values().any(|v| *v == f.id)) {
+            if let Some(b) = f.shape_bool.as_mut() {
+                for o in b.operands.iter_mut() {
+                    if let Some(n) = map.get(o) {
+                        *o = *n;
+                    }
+                }
+            }
+        }
+        out
+    }
+    /// The features with the operands of the 2D booleans among them (and
+    /// theirs), each once.
+    pub fn with_operands(&self, ids: &[FeatureId]) -> Vec<FeatureId> {
+        let mut out: Vec<FeatureId> = ids.to_vec();
+        let mut k = 0;
+        while k < out.len() {
+            if let Some(b) = self.feature(out[k]).and_then(|f| f.shape_bool.as_ref()) {
+                for o in &b.operands {
+                    if !out.contains(o) {
+                        out.push(*o);
+                    }
+                }
+            }
+            k += 1;
         }
         out
     }

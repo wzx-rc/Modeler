@@ -175,12 +175,24 @@ impl Drawer {
         let accent = theme::accent();
         let moving = st.drag.is_some();
         // paths: always drawn (they have no faces), white when selected
+        // a 2D boolean's operands dimmer (hidden with it), the boolean as
+        // the kernel made it
         for f in st.doc.features.iter().filter(|f| f.visible && f.is_path()) {
             let selected = st.selection.contains(&f.id);
             let hovered = st.hover_feature == Some(f.id);
-            let (c, w) = if selected { (theme::accent(), 2.2) } else if hovered { (theme::PATH, 2.2) } else { (theme::PATH, 1.6) };
-            let lines: Vec<Vec<[f32; 3]>> = f.outline().iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
-            line_vertices(&lines, [c.r(), c.g(), c.b(), 240], w, &mut over);
+            let inside = st.curve_inside(f.id);
+            if inside.is_some_and(|b| !b.visible) && !selected {
+                continue;
+            }
+            let (c, a, w) = match (selected, hovered, inside) {
+                (true, _, _) => (theme::accent(), 240, 2.2),
+                (_, true, Some(_)) => (theme::PATH, 170, 1.6),
+                (_, false, Some(b)) => (theme::PATH, if st.boolean_open(b) { 120 } else { 70 }, 1.2),
+                (_, true, None) => (theme::PATH, 240, 2.2),
+                _ => (theme::PATH, 240, 1.6),
+            };
+            let lines: Vec<Vec<[f32; 3]>> = st.curve_lines(f).iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
+            line_vertices(&lines, [c.r(), c.g(), c.b(), a], w, &mut over);
         }
         // the Slot dragged along a slot of the reference: the drag, and a
         // tick across each end on the scan's face

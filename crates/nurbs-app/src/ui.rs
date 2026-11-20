@@ -12,7 +12,7 @@ use crate::theme::*;
 use crate::widgets::*;
 use egui::{pos2, vec2, Align2, Color32, Id, Margin, Order, Rect, Response, Sense, Stroke, StrokeKind, Ui};
 use glam::{DQuat, DVec3, EulerRot};
-use nurbs_kernel::doc::{CurveKind, PrimKind};
+use nurbs_kernel::doc::{CurveKind, CurveOp, PrimKind};
 use nurbs_kernel::{Feature, FeatureId, Op, Prim};
 
 /// Margin between the islands and the screen edges.
@@ -1170,6 +1170,8 @@ enum OpPop {
     Shape(FeatureId),
     /// A drawing tool's own options (the Surface's On plane / On scan).
     Tool,
+    /// Two closed curves or more picked: Union, Subtract, Intersect.
+    Curves,
 }
 
 fn op_pop(st: &AppState) -> Option<OpPop> {
@@ -1190,6 +1192,9 @@ fn op_pop(st: &AppState) -> Option<OpPop> {
             None
         };
     }
+    if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {
+        return Some(OpPop::Curves);
+    }
     let f = st.single()?;
     Some(if !f.is_solid() || f.is_path() { OpPop::Step(f.id) } else { OpPop::Shape(f.id) })
 }
@@ -1203,7 +1208,8 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
         OpPop::Step(id) => {
             let f = st.doc.feature(id)?;
             if f.is_path() {
-                f.outline().concat()
+                let l = st.curve_lines(f).concat();
+                if l.is_empty() { f.corners().to_vec() } else { l }
             } else if let Some(t) = &f.tweak {
                 vec![t.at() + t.delta]
             } else if let Some(r) = &f.round {
@@ -1213,6 +1219,7 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
             }
         }
         OpPop::Shape(id) => vec![st.doc.feature(id)?.origin],
+        OpPop::Curves => st.selection.iter().filter_map(|id| st.doc.feature(*id)).flat_map(|f| st.curve_lines(f).concat()).collect(),
         OpPop::Tool => {
             let vr = st.view_rect;
             let q = pos2(vr[2] - 300.0, vr[1] + 160.0);
@@ -1267,7 +1274,7 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
     }
     // the paths too: they have no mesh
     for f in st.doc.features.iter().filter(|f| f.visible && f.is_path()) {
-        for q in f.outline().concat() {
+        for q in st.curve_lines(f).concat() {
             if let Some(p) = view.project(q.as_vec3()) {
                 part = part.union(Rect::from_min_max(pos2(p[0], p[1]), pos2(p[0], p[1])));
             }
@@ -1306,13 +1313,23 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     ui.label(egui::RichText::new(if n > 1 { format!("{n} vertices") } else { "Vertex".to_string() }).font(semibold(14.0)).color(TEXT()));
                     vertex_card(ui, st);
                 }
+                OpPop::Curves => combine_card(ui, st),
                 OpPop::Step(id) => {
                     let Some(f) = st.doc.feature(id).cloned() else { return };
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(&f.name).font(semibold(14.0)).color(TEXT()));
                         chip_label(ui, f.kind_label(), RAISED(), LABEL());
                     });
-                    if f.push.is_some() {
+                    // a curve of a 2D boolean: back to it
+                    if let Some(b) = st.curve_inside(f.id).map(|b| (b.id, b.name.clone())) {
+                        let r = ui.add(egui::Label::new(egui::RichText::new(format!("‹ In {}", b.1)).font(medium(12.0)).color(LABEL())).sense(Sense::click()));
+                        if r.on_hover_text("Select the 2D boolean it is in").clicked() {
+                            st.selection = vec![b.0];
+                        }
+                    }
+                    if f.shape_bool.is_some() {
+                        bool_card(ui, st, &f);
+                    } else if f.push.is_some() {
                         push_card(ui, st);
                     } else if f.tweak.is_some() {
                         tweak_card(ui, st, id);
@@ -1550,7 +1567,12 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
         reference_rows(ui, st);
         for (gi, (title, keep)) in groups.iter().enumerate() {
             // the last group: operations whose shape cannot be told
-            let members: Vec<&Feature> = if gi == 4 { feats.iter().filter(|f| !f.is_solid() && !f.is_path() && st.owner_of(f.id).is_none()).collect() } else { feats.iter().filter(|f| keep(f)).collect() };
+            // a 2D boolean's curves under it, not on their own
+            let members: Vec<&Feature> = if gi == 4 {
+                feats.iter().filter(|f| !f.is_solid() && !f.is_path() && st.owner_of(f.id).is_none()).collect()
+            } else {
+                feats.iter().filter(|f| keep(f) && (gi != 2 || st.doc.boolean_of(f.id).is_none())).collect()
+            };
             if members.is_empty() {
                 continue;
             }
@@ -1570,10 +1592,28 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             for f in members {
                 let n = if gi < 3 { ops_of(st, f.id) } else { 0 };
                 tree_row(ui, st, f, n, focus == Some(f.id));
+                if f.shape_bool.is_some() {
+                    operand_rows(ui, st, f, 1);
+                }
             }
             ui.add_space(3.0);
         }
     });
+}
+
+/// A 2D boolean's curves in the outliner, under it, indented.
+fn operand_rows(ui: &mut Ui, st: &mut AppState, b: &Feature, depth: usize) {
+    let Some(sb) = b.shape_bool.clone() else { return };
+    for o in sb.operands {
+        let Some(g) = st.doc.feature(o).cloned() else { continue };
+        ui.horizontal(|ui| {
+            ui.add_space(14.0 * depth as f32);
+            ui.vertical(|ui| tree_row(ui, st, &g, 0, false));
+        });
+        if g.shape_bool.is_some() && depth < 8 {
+            operand_rows(ui, st, &g, depth + 1);
+        }
+    }
 }
 
 /// The outliner's REFERENCE group: the mesh to model on (dropped on the
@@ -2154,6 +2194,83 @@ fn curve_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     }
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
         st.end_live();
+    }
+}
+
+/// Union, Subtract, Intersect as three tiles (an icon over its name); the
+/// one picked.
+fn bool_tiles(ui: &mut Ui, current: Option<CurveOp>) -> Option<CurveOp> {
+    let items = [(CurveOp::Union, Icon::BoolUnion, "Union joins them"), (CurveOp::Subtract, Icon::BoolSubtract, "Subtract: the first curve less the others"), (CurveOp::Intersect, Icon::BoolIntersect, "Intersect: what they all share")];
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 54.0), Sense::hover());
+    let w = (width - 8.0) / 3.0;
+    let mut picked = None;
+    for (i, (op, icon, tip)) in items.iter().enumerate() {
+        let r = Rect::from_min_size(rect.min + vec2(i as f32 * (w + 4.0), 0.0), vec2(w, rect.height()));
+        let resp = ui.interact(r, ui.id().with(("bool-tile", i)), Sense::click()).on_hover_text(*tip);
+        let on = current == Some(*op);
+        let p = ui.painter();
+        if on {
+            p.rect(r, 9.0, tint(PATH, 0.16), Stroke::new(1.5, PATH), StrokeKind::Inside);
+        } else {
+            p.rect(r.shrink(0.5), 9.0, if resp.hovered() { RAISED() } else { Color32::TRANSPARENT }, Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+        }
+        let c = if on { TEXT_STRONG() } else { LABEL() };
+        icons::paint(p, Rect::from_center_size(r.center() - vec2(0.0, 8.0), vec2(22.0, 22.0)), *icon, c);
+        p.text(r.center() + vec2(0.0, 15.0), Align2::CENTER_CENTER, op.label(), semibold(11.5), c);
+        if resp.clicked() {
+            picked = Some(*op);
+        }
+    }
+    picked
+}
+
+/// Two closed curves or more picked: made one 2D boolean (step 2 of the
+/// Curves set, 3ds Max's Shape Boolean), the first picked as its base.
+fn combine_card(ui: &mut Ui, st: &mut AppState) {
+    let n = st.selection.len();
+    let first = st.selection.first().and_then(|id| st.doc.feature(*id)).map(|f| f.name.clone()).unwrap_or_default();
+    ui.label(egui::RichText::new(format!("{n} curves")).font(semibold(14.0)).color(TEXT()));
+    section(ui, "Combine");
+    if let Some(op) = bool_tiles(ui, None) {
+        st.make_curve_bool(op);
+    }
+    ui.label(egui::RichText::new(format!("Base: {first}")).font(regular(12.0)).color(TEXT2()));
+}
+
+/// A 2D boolean: its operation, its curves (a click: that curve's own
+/// settings; the first is the base), what the kernel said.
+fn bool_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    let Some(b) = f.shape_bool.clone() else { return };
+    let id = f.id;
+    section(ui, "Operation");
+    if let Some(op) = bool_tiles(ui, Some(b.op)) {
+        if op != b.op {
+            st.set_curve_bool_op(id, op);
+        }
+    }
+    section(ui, "Curves");
+    for (k, o) in b.operands.iter().enumerate() {
+        let Some(g) = st.doc.feature(*o).cloned() else { continue };
+        ui.horizontal(|ui| {
+            let r = ui.add(egui::Label::new(egui::RichText::new(&g.name).font(medium(13.0)).color(TEXT())).sense(Sense::click()));
+            if r.on_hover_text("Select this curve: its settings, moved alone").clicked() {
+                st.selection = vec![*o];
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Label::new(egui::RichText::new("×").font(medium(14.0)).color(LABEL())).sense(Sense::click())).on_hover_text("Take it out (it stays, on its own)").clicked() {
+                    st.take_out_operand(id, *o);
+                }
+                if k == 0 {
+                    chip_label(ui, "base", RAISED(), LABEL());
+                } else if b.op == CurveOp::Subtract && ui.add(egui::Label::new(egui::RichText::new("set base").font(regular(11.5)).color(TEXT2())).sense(Sense::click())).on_hover_text("Make it the base: the others are taken from it").clicked() {
+                    st.make_base_operand(id, *o);
+                }
+            });
+        });
+    }
+    if let Some(e) = st.feature_error(f) {
+        ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
     }
 }
 

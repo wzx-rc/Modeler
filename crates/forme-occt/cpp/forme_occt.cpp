@@ -14,6 +14,7 @@
 #include <BRepLProp_SLProps.hxx>
 #include <BRepTools.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
@@ -422,6 +423,106 @@ FShape* focc_prism(const double* xy, const int* smooth, int n, double h) { retur
 // conic (a fillet with tension: start, a point of it, end; the corner is its
 // middle pole); on a smooth point, 4 its curve the conic of rho abm[6 i + 2]
 // (an ellipse's quarter) instead of the quadratic.
+// The outline of focc_prism_cut as a flat face at height z0 (XY plane);
+// a null face (and the error set) when it cannot be made.
+static TopoDS_Face outline_face(const double* xy, const int* smooth, const int* cut, const double* abm, int n, double z0) {
+    std::vector<gp_Pnt> p(n);
+    for (int i = 0; i < n; i++) p[i] = gp_Pnt(xy[2 * i], xy[2 * i + 1], z0);
+    auto mid = [](const gp_Pnt& a, const gp_Pnt& b) { return gp_Pnt((a.X() + b.X()) / 2, (a.Y() + b.Y()) / 2, (a.Z() + b.Z()) / 2); };
+    // where each point's piece starts and ends (the point itself for a corner)
+    std::vector<TopoDS_Vertex> vin(n), vout(n);
+    for (int i = 0; i < n; i++) {
+        const gp_Pnt& prev = p[(i + n - 1) % n];
+        const gp_Pnt& next = p[(i + 1) % n];
+        bool round = smooth[i] && prev.Distance(p[i]) > 1e-6 && next.Distance(p[i]) > 1e-6;
+        int ck = cut && !round && cut[i] != 4 ? cut[i] : 0;
+        if (ck) {
+            vin[i] = BRepBuilderAPI_MakeVertex(gp_Pnt(abm[6 * i], abm[6 * i + 1], z0));
+            vout[i] = BRepBuilderAPI_MakeVertex(gp_Pnt(abm[6 * i + 4], abm[6 * i + 5], z0));
+        } else if (round) {
+            vin[i] = BRepBuilderAPI_MakeVertex(mid(prev, p[i]));
+            vout[i] = BRepBuilderAPI_MakeVertex(mid(p[i], next));
+        } else {
+            vin[i] = vout[i] = BRepBuilderAPI_MakeVertex(p[i]);
+        }
+    }
+    // two smooth points in a row meet at the middle of their edge: one vertex
+    for (int i = 0; i < n; i++) {
+        int j = (i + 1) % n;
+        if (BRep_Tool::Pnt(vout[i]).Distance(BRep_Tool::Pnt(vin[j])) < 1e-7) {
+            bool corner = vin[j].IsSame(vout[j]);
+            vin[j] = vout[i];
+            if (corner) vout[j] = vout[i];
+        }
+    }
+    BRepBuilderAPI_MakeWire mw;
+    for (int i = 0; i < n; i++) {
+        int ck = cut ? cut[i] : 0;
+        if (!vin[i].IsSame(vout[i]) && ck == 2) {
+            mw.Add(BRepBuilderAPI_MakeEdge(vin[i], vout[i]).Edge());
+        } else if (!vin[i].IsSame(vout[i]) && ck == 3) {
+            // a conic (a fillet with tension): the rational quadratic
+            // through start and end, the corner its middle pole, the
+            // weight from where its middle lies (rho / (1 - rho))
+            gp_Pnt a = BRep_Tool::Pnt(vin[i]), b = BRep_Tool::Pnt(vout[i]);
+            gp_Pnt m(abm[6 * i + 2], abm[6 * i + 3], z0);
+            gp_Pnt mid((a.X() + b.X()) / 2, (a.Y() + b.Y()) / 2, z0);
+            double full = mid.Distance(p[i]);
+            double rho = full > 1e-12 ? mid.Distance(m) / full : 0.5;
+            if (rho < 0.02) rho = 0.02;
+            if (rho > 0.98) rho = 0.98;
+            TColgp_Array1OfPnt poles(1, 3);
+            poles(1) = a;
+            poles(2) = p[i];
+            poles(3) = b;
+            TColStd_Array1OfReal weights(1, 3);
+            weights(1) = 1.0;
+            weights(2) = rho / (1.0 - rho);
+            weights(3) = 1.0;
+            opencascade::handle<Geom_BezierCurve> c = new Geom_BezierCurve(poles, weights);
+            mw.Add(BRepBuilderAPI_MakeEdge(c, vin[i], vout[i]).Edge());
+        } else if (!vin[i].IsSame(vout[i]) && ck == 1) {
+            GC_MakeArcOfCircle arc(BRep_Tool::Pnt(vin[i]), gp_Pnt(abm[6 * i + 2], abm[6 * i + 3], z0), BRep_Tool::Pnt(vout[i]));
+            if (!arc.IsDone()) {
+                set_err("a rounded corner could not be made");
+                return TopoDS_Face();
+            }
+            mw.Add(BRepBuilderAPI_MakeEdge(arc.Value(), vin[i], vout[i]).Edge());
+        } else if (!vin[i].IsSame(vout[i])) {
+            TColgp_Array1OfPnt poles(1, 3);
+            poles(1) = BRep_Tool::Pnt(vin[i]);
+            poles(2) = p[i];
+            poles(3) = BRep_Tool::Pnt(vout[i]);
+            opencascade::handle<Geom_BezierCurve> c;
+            double rho = ck == 4 ? abm[6 * i + 2] : 0.0;
+            if (rho > 1e-6) {
+                if (rho < 0.02) rho = 0.02;
+                if (rho > 0.98) rho = 0.98;
+                TColStd_Array1OfReal weights(1, 3);
+                weights(1) = 1.0;
+                weights(2) = rho / (1.0 - rho);
+                weights(3) = 1.0;
+                c = new Geom_BezierCurve(poles, weights);
+            } else {
+                c = new Geom_BezierCurve(poles);
+            }
+            mw.Add(BRepBuilderAPI_MakeEdge(c, vin[i], vout[i]).Edge());
+        }
+        int j = (i + 1) % n;
+        if (!vout[i].IsSame(vin[j])) mw.Add(BRepBuilderAPI_MakeEdge(vout[i], vin[j]).Edge());
+    }
+    if (!mw.IsDone()) {
+        set_err("the outline is not a closed line");
+        return TopoDS_Face();
+    }
+    BRepBuilderAPI_MakeFace mf(mw.Wire(), Standard_True);
+    if (!mf.IsDone()) {
+        set_err("the outline is not flat and closed");
+        return TopoDS_Face();
+    }
+    return mf.Face();
+}
+
 FShape* focc_prism_cut(const double* xy, const int* smooth, const int* cut, const double* abm, int n, double h) {
     return guard(
         [&]() -> FShape* {
@@ -429,107 +530,35 @@ FShape* focc_prism_cut(const double* xy, const int* smooth, const int* cut, cons
                 set_err("a profile needs 3 points and a thickness");
                 return nullptr;
             }
-            std::vector<gp_Pnt> p(n);
-            for (int i = 0; i < n; i++) p[i] = gp_Pnt(xy[2 * i], xy[2 * i + 1], -h);
-            auto mid = [](const gp_Pnt& a, const gp_Pnt& b) { return gp_Pnt((a.X() + b.X()) / 2, (a.Y() + b.Y()) / 2, (a.Z() + b.Z()) / 2); };
-            // where each point's piece starts and ends (the point itself for a corner)
-            std::vector<TopoDS_Vertex> vin(n), vout(n);
-            for (int i = 0; i < n; i++) {
-                const gp_Pnt& prev = p[(i + n - 1) % n];
-                const gp_Pnt& next = p[(i + 1) % n];
-                bool round = smooth[i] && prev.Distance(p[i]) > 1e-6 && next.Distance(p[i]) > 1e-6;
-                int ck = cut && !round && cut[i] != 4 ? cut[i] : 0;
-                if (ck) {
-                    vin[i] = BRepBuilderAPI_MakeVertex(gp_Pnt(abm[6 * i], abm[6 * i + 1], -h));
-                    vout[i] = BRepBuilderAPI_MakeVertex(gp_Pnt(abm[6 * i + 4], abm[6 * i + 5], -h));
-                } else if (round) {
-                    vin[i] = BRepBuilderAPI_MakeVertex(mid(prev, p[i]));
-                    vout[i] = BRepBuilderAPI_MakeVertex(mid(p[i], next));
-                } else {
-                    vin[i] = vout[i] = BRepBuilderAPI_MakeVertex(p[i]);
-                }
-            }
-            // two smooth points in a row meet at the middle of their edge: one vertex
-            for (int i = 0; i < n; i++) {
-                int j = (i + 1) % n;
-                if (BRep_Tool::Pnt(vout[i]).Distance(BRep_Tool::Pnt(vin[j])) < 1e-7) {
-                    bool corner = vin[j].IsSame(vout[j]);
-                    vin[j] = vout[i];
-                    if (corner) vout[j] = vout[i];
-                }
-            }
-            BRepBuilderAPI_MakeWire mw;
-            for (int i = 0; i < n; i++) {
-                int ck = cut ? cut[i] : 0;
-                if (!vin[i].IsSame(vout[i]) && ck == 2) {
-                    mw.Add(BRepBuilderAPI_MakeEdge(vin[i], vout[i]).Edge());
-                } else if (!vin[i].IsSame(vout[i]) && ck == 3) {
-                    // a conic (a fillet with tension): the rational quadratic
-                    // through start and end, the corner its middle pole, the
-                    // weight from where its middle lies (rho / (1 - rho))
-                    gp_Pnt a = BRep_Tool::Pnt(vin[i]), b = BRep_Tool::Pnt(vout[i]);
-                    gp_Pnt m(abm[6 * i + 2], abm[6 * i + 3], -h);
-                    gp_Pnt mid((a.X() + b.X()) / 2, (a.Y() + b.Y()) / 2, -h);
-                    double full = mid.Distance(p[i]);
-                    double rho = full > 1e-12 ? mid.Distance(m) / full : 0.5;
-                    if (rho < 0.02) rho = 0.02;
-                    if (rho > 0.98) rho = 0.98;
-                    TColgp_Array1OfPnt poles(1, 3);
-                    poles(1) = a;
-                    poles(2) = p[i];
-                    poles(3) = b;
-                    TColStd_Array1OfReal weights(1, 3);
-                    weights(1) = 1.0;
-                    weights(2) = rho / (1.0 - rho);
-                    weights(3) = 1.0;
-                    opencascade::handle<Geom_BezierCurve> c = new Geom_BezierCurve(poles, weights);
-                    mw.Add(BRepBuilderAPI_MakeEdge(c, vin[i], vout[i]).Edge());
-                } else if (!vin[i].IsSame(vout[i]) && ck == 1) {
-                    GC_MakeArcOfCircle arc(BRep_Tool::Pnt(vin[i]), gp_Pnt(abm[6 * i + 2], abm[6 * i + 3], -h), BRep_Tool::Pnt(vout[i]));
-                    if (!arc.IsDone()) {
-                        set_err("a rounded corner could not be made");
-                        return nullptr;
-                    }
-                    mw.Add(BRepBuilderAPI_MakeEdge(arc.Value(), vin[i], vout[i]).Edge());
-                } else if (!vin[i].IsSame(vout[i])) {
-                    TColgp_Array1OfPnt poles(1, 3);
-                    poles(1) = BRep_Tool::Pnt(vin[i]);
-                    poles(2) = p[i];
-                    poles(3) = BRep_Tool::Pnt(vout[i]);
-                    opencascade::handle<Geom_BezierCurve> c;
-                    double rho = ck == 4 ? abm[6 * i + 2] : 0.0;
-                    if (rho > 1e-6) {
-                        if (rho < 0.02) rho = 0.02;
-                        if (rho > 0.98) rho = 0.98;
-                        TColStd_Array1OfReal weights(1, 3);
-                        weights(1) = 1.0;
-                        weights(2) = rho / (1.0 - rho);
-                        weights(3) = 1.0;
-                        c = new Geom_BezierCurve(poles, weights);
-                    } else {
-                        c = new Geom_BezierCurve(poles);
-                    }
-                    mw.Add(BRepBuilderAPI_MakeEdge(c, vin[i], vout[i]).Edge());
-                }
-                int j = (i + 1) % n;
-                if (!vout[i].IsSame(vin[j])) mw.Add(BRepBuilderAPI_MakeEdge(vout[i], vin[j]).Edge());
-            }
-            if (!mw.IsDone()) {
-                set_err("the outline is not a closed line");
-                return nullptr;
-            }
-            BRepBuilderAPI_MakeFace mf(mw.Wire(), Standard_True);
-            if (!mf.IsDone()) {
-                set_err("the outline is not flat and closed");
-                return nullptr;
-            }
-            BRepPrimAPI_MakePrism prism(mf.Face(), gp_Vec(0, 0, 2 * h));
+            TopoDS_Face face = outline_face(xy, smooth, cut, abm, n, -h);
+            if (face.IsNull()) return nullptr;
+            BRepPrimAPI_MakePrism prism(face, gp_Vec(0, 0, 2 * h));
             TopoDS_Shape r = prism.Shape();
             if (!valid(r)) {
                 set_err("the outline crosses itself");
                 return nullptr;
             }
             return wrap(r);
+        },
+        (FShape*)nullptr);
+}
+
+// The same outline as a flat face in the XY plane (a closed curve's region,
+// the Curves set's 2D booleans).
+FShape* focc_region_cut(const double* xy, const int* smooth, const int* cut, const double* abm, int n) {
+    return guard(
+        [&]() -> FShape* {
+            if (n < 3) {
+                set_err("a region needs 3 points");
+                return nullptr;
+            }
+            TopoDS_Face face = outline_face(xy, smooth, cut, abm, n, 0.0);
+            if (face.IsNull()) return nullptr;
+            if (!valid(face)) {
+                set_err("the outline crosses itself");
+                return nullptr;
+            }
+            return wrap(face);
         },
         (FShape*)nullptr);
 }
@@ -657,6 +686,20 @@ FShape* focc_cut(const FShape* a, const FShape* b) {
             op.SetArguments(args);
             op.SetTools(tools);
             return boolean(op, "subtraction", a, b);
+        },
+        (FShape*)nullptr);
+}
+
+FShape* focc_common(const FShape* a, const FShape* b) {
+    return guard(
+        [&] {
+            BRepAlgoAPI_Common op;
+            TopTools_ListOfShape args, tools;
+            args.Append(a->s);
+            tools.Append(b->s);
+            op.SetArguments(args);
+            op.SetTools(tools);
+            return boolean(op, "intersection", a, b);
         },
         (FShape*)nullptr);
 }

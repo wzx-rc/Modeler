@@ -104,6 +104,59 @@ fn seg_dist(q: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     ((q[0] - a[0] - t * dx).powi(2) + (q[1] - a[1] - t * dy).powi(2)).sqrt()
 }
 
+/// A closed curve's region (a flat face, world), or a 2D boolean's
+/// (`Feature::shape_bool`: its operands' regions combined, in order). The
+/// operands must lie on one plane.
+pub fn region(doc: &Doc, f: &Feature, depth: usize) -> Result<Shape, String> {
+    if depth > 16 {
+        return Err("a boolean of itself".into());
+    }
+    if let Some(b) = &f.shape_bool {
+        let ops: Vec<&Feature> = b.operands.iter().map(|id| doc.feature(*id).ok_or_else(|| "one of its curves was deleted".to_string())).collect::<Result<_, _>>()?;
+        if ops.is_empty() {
+            return Err("it has no curves left".into());
+        }
+        // one plane: the first's
+        let (n0, o0) = (ops[0].axis(), ops[0].origin);
+        for g in &ops[1..] {
+            let n = g.axis();
+            if n.cross(n0).length() > 1e-6 || (g.origin - o0).dot(n0).abs() > 1e-4 {
+                return Err(format!("{} is not on the plane of {}", g.name, ops[0].name));
+            }
+        }
+        let mut acc = region(doc, ops[0], depth + 1).map_err(|e| format!("{}: {e}", ops[0].name))?;
+        for g in &ops[1..] {
+            let r = region(doc, g, depth + 1).map_err(|e| format!("{}: {e}", g.name))?;
+            acc = match b.op {
+                crate::doc::CurveOp::Union => acc.fuse(&r)?,
+                crate::doc::CurveOp::Subtract => acc.cut(&r)?,
+                crate::doc::CurveOp::Intersect => acc.common(&r)?,
+            };
+        }
+        return Ok(acc);
+    }
+    let (Prim::Path { x, z }, Some(pr)) = (f.prim, f.profile.as_ref()) else { return Err("not a curve".into()) };
+    if pr.open || pr.points.len() < 3 {
+        return Err("an open curve has no inside".into());
+    }
+    let (x, z) = (x.max(0.01), z.max(0.01));
+    // as `tool` does for a sketch: local (x, z) is OpenCascade's (x, −z),
+    // then turned so its Z is local Y
+    let pts: Vec<[f64; 2]> = pr.scaled(x, z).iter().map(|p| [p[0], -p[1]]).collect();
+    let flip = |q: [f64; 2]| [q[0], -q[1]];
+    let kind = |c: &crate::doc::Cut| if c.chamfer { CutKind::Chamfer } else if c.rho > 0.0 { CutKind::Conic } else { CutKind::Arc };
+    let mut cuts: Vec<_> = pr.cuts(x, z).into_iter().map(|c| c.map(|c| (kind(&c), flip(c.a), flip(c.m), flip(c.b)))).collect();
+    for (i, c) in cuts.iter_mut().enumerate() {
+        let rho = pr.tension.get(i).copied().unwrap_or(0.0);
+        if c.is_none() && pr.smooth.get(i).copied().unwrap_or(false) && rho > 1e-6 {
+            *c = Some((CutKind::Curve, [0.0; 2], [rho, 0.0], [0.0; 2]));
+        }
+    }
+    let s = Shape::region_cuts(&pts, &pr.smooth, &cuts)?;
+    let s = s.transformed(rows(DMat4::from_rotation_x(-std::f64::consts::FRAC_PI_2)))?;
+    s.transformed(rows(f.matrix()))
+}
+
 /// The feature's solid in the world, its faces tagged.
 fn tool(f: &Feature) -> Result<Shape, String> {
     let h = f.prim.height().max(0.01);
@@ -1155,6 +1208,15 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         cache.tools.retain(|k, _| used_tools.contains(k));
     }
     model.errors = stage.errors.clone();
+    // the Curves set's 2D booleans: made exactly, their edges sent back
+    for f in doc.features.iter().filter(|f| f.visible && !f.suspended && f.shape_bool.is_some()) {
+        mark(&format!("region:{}:0", f.id));
+        match region(doc, f, 0).and_then(|r| r.edge_lines(0.01, 0.05)) {
+            Ok(lines) if lines.is_empty() => model.errors.push(format!("{}: nothing left (the curves share nothing)", f.name)),
+            Ok(lines) => model.curves.push((f.id, lines.iter().map(|l| l.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect()).collect())),
+            Err(e) => model.errors.push(format!("{}: {e}", f.name)),
+        }
+    }
     model.limits = stage.limits.clone();
     model.tension_limits = stage.tension_limits.clone();
     if let Some(s) = &stage.shape {
@@ -1483,6 +1545,45 @@ mod tests {
                 assert!(near < 0.05, "no point near the ellipse at 45°: {near}");
             }
         }
+    }
+
+    #[test]
+    fn curves_combined() {
+        // a 30 × 20 rectangle less a circle of radius 6 on its right side
+        // (a notch), with a circle inside (a hole), then their union and
+        // their intersection
+        use crate::doc::{CurveKind, CurveOp, Prim, ShapeBool};
+        let mut d = Doc::default();
+        let mut curve = |d: &mut Doc, kind: CurveKind, x: f64, z: f64, at: DVec3| {
+            let id = d.add(Op::Add, Prim::Path { x, z }, at, DQuat::IDENTITY);
+            d.feature_mut(id).unwrap().curve = Some(kind.new_curve());
+            id
+        };
+        let r = curve(&mut d, CurveKind::Rectangle, 30.0, 20.0, DVec3::ZERO);
+        let c = curve(&mut d, CurveKind::Circle, 12.0, 12.0, DVec3::new(15.0, 0.0, 0.0));
+        let h = curve(&mut d, CurveKind::Circle, 6.0, 6.0, DVec3::new(-6.0, 0.0, 0.0));
+        d.regen_curves();
+        for (op, operands, edges) in [(CurveOp::Subtract, vec![r, c, h], 7), (CurveOp::Union, vec![r, c], 5), (CurveOp::Intersect, vec![r, c], 2)] {
+            let mut e = d.clone();
+            let b = e.add(Op::Add, Prim::Path { x: 30.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            e.feature_mut(b).unwrap().shape_bool = Some(ShapeBool { op, operands });
+            let m = build(&e, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{op:?}: {:?}", m.errors);
+            let lines = &m.curves.iter().find(|c| c.0 == b).expect("its edges").1;
+            assert!(lines.len() >= edges, "{op:?}: {} edges", lines.len());
+            assert!(lines.iter().flatten().all(|p| p[1].abs() < 1e-4), "{op:?}: off the ground");
+            let xs = lines.iter().flatten().map(|p| p[0]);
+            let (lo, hi) = xs.fold((f32::MAX, f32::MIN), |(a, b), x| (a.min(x), b.max(x)));
+            let want = match op { CurveOp::Subtract => (-15.0, 15.0), CurveOp::Union => (-15.0, 21.0), CurveOp::Intersect => (9.0, 15.0) };
+            assert!((lo - want.0).abs() < 0.01 && (hi - want.1).abs() < 0.01, "{op:?}: x from {lo} to {hi}");
+        }
+        // not on one plane: said
+        let mut e = d.clone();
+        e.feature_mut(c).unwrap().origin.y = 5.0;
+        let b = e.add(Op::Add, Prim::Path { x: 30.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        e.feature_mut(b).unwrap().shape_bool = Some(ShapeBool { op: CurveOp::Union, operands: vec![r, c] });
+        let m = build(&e, true, false, &[], &mut Cache::default());
+        assert!(m.errors.iter().any(|x| x.contains("plane")), "{:?}", m.errors);
     }
 
     #[test]

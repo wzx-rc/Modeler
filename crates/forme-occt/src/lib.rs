@@ -48,6 +48,8 @@ extern "C" {
     fn focc_transform(s: *const FShape, m: *const c_double) -> *mut FShape;
     fn focc_fuse(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_cut(a: *const FShape, b: *const FShape) -> *mut FShape;
+    fn focc_common(a: *const FShape, b: *const FShape) -> *mut FShape;
+    fn focc_region_cut(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int) -> *mut FShape;
     fn focc_section_count(s: *const FShape) -> c_int;
     fn focc_section_edge(s: *const FShape, k: c_int) -> c_int;
     fn focc_edge_count(s: *const FShape) -> c_int;
@@ -459,6 +461,16 @@ impl Shape {
         shape(unsafe { focc_prism_cut(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int, h) })
     }
 
+    /// The outline of `prism_cuts` as a flat face in the XY plane (a closed
+    /// curve's region, the Curves set's 2D booleans).
+    pub fn region_cuts(points: &[[f64; 2]], smooth: &[bool], cuts: &[Option<(CutKind, [f64; 2], [f64; 2], [f64; 2])>]) -> Result<Shape, String> {
+        let xy: Vec<f64> = points.iter().flat_map(|p| [p[0], p[1]]).collect();
+        let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
+        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some(_) => 1, None => 0 }).collect();
+        let abm: Vec<f64> = (0..points.len()).flat_map(|i| match cuts.get(i).copied().flatten() { Some((_, a, m, b)) => [a[0], a[1], m[0], m[1], b[0], b[1]], None => [0.0; 6] }).collect();
+        shape(unsafe { focc_region_cut(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int) })
+    }
+
     /// A flat outline (Forme Rectify's Pen) through `pts` on the plane
     /// through `o` facing `n`: closed, a face facing `n`; open, a line (its
     /// edges free). Corner i cut by an arc through `cuts[i]` (its start,
@@ -552,6 +564,11 @@ impl Shape {
     }
     pub fn cut(&self, tool: &Shape) -> Result<Shape, String> {
         self.solid_boolean(tool, focc_cut)
+    }
+    /// What the two have in common (the Curves set's Intersect: two flat
+    /// regions).
+    pub fn common(&self, other: &Shape) -> Result<Shape, String> {
+        shape(unsafe { focc_common(self.0, other.0) })
     }
 
     /// Junction edges made by the boolean that produced this shape.

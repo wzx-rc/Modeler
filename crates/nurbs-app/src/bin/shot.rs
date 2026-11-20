@@ -3379,6 +3379,91 @@ fn main() {
         h.shot("zero-curves-3-set");
     }
 
+    if want("curves-bool") {
+        // step 2 of the Curves set (Romain 20 nov. 8 h 08: "une soustraction
+        // des 2"): a rectangle less two circles, kept live
+        use nurbs_kernel::doc::{CurveKind, CurveOp};
+        h.reset(Doc::default(), "Curves");
+        h.st.camera.frame(Vec3::new(-35.0, 0.0, -22.0), Vec3::new(45.0, 5.0, 22.0));
+        h.st.camera.pitch = 1.1;
+        h.steps(2);
+        let w = |x: f32, z: f32| Vec3::new(x, 0.0, z);
+        for (k, a, b) in [(CurveKind::Rectangle, w(-25.0, -12.0), w(15.0, 12.0)), (CurveKind::Circle, w(15.0, 0.0), w(25.0, 0.0)), (CurveKind::Circle, w(-10.0, 0.0), w(-4.0, 0.0))] {
+            h.st.arm_curve(k);
+            h.steps(1);
+            let (pa, pb) = (h.screen_of(a), h.screen_of(b));
+            h.drag(pa, pb, 8, false);
+            h.steps(1);
+            h.press(pb, false);
+            h.steps(2);
+        }
+        let ids: Vec<_> = h.st.doc.features.iter().map(|f| f.id).collect();
+        // picked by clicks: the rectangle's left side, then Shift: the
+        // circles' far sides
+        h.click(h.screen_of(w(-25.0, 4.0)));
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(w(25.0, 0.0)));
+        h.click(h.screen_of(w(-4.0, 0.0)));
+        h.hold(Modifiers::NONE);
+        h.steps(3);
+        eprintln!("  picked {:?} (curves {ids:?})", h.st.selection);
+        h.shot("zero-curves-bool-1-picked");
+        h.st.make_curve_bool(CurveOp::Subtract);
+        h.settle();
+        let b = *h.st.selection.first().unwrap();
+        let say = |h: &Harness, what: &str| {
+            let f = h.st.doc.feature(b).unwrap();
+            let lines = h.st.curve_lines(f);
+            let (lo, hi) = lines.iter().flatten().fold((glam::DVec3::splat(1e9), glam::DVec3::splat(-1e9)), |(a, c), p| (a.min(*p), c.max(*p)));
+            eprintln!("  {what}: {} {:?} {} lines, x {:.2} to {:.2}, z {:.2} to {:.2}, errors {:?}", f.name, f.shape_bool.as_ref().map(|s| s.op), lines.len(), lo.x, hi.x, lo.z, hi.z, h.st.model.as_ref().map(|m| m.errors.clone()));
+        };
+        say(&h, "subtract");
+        h.shot("zero-curves-bool-2-subtract");
+        // a click again on its line: the curve under it (the small circle)
+        h.click(h.screen_of(w(-4.0, 0.0)));
+        eprintln!("  drilled into {:?}", h.st.selection);
+        // moved: the result follows
+        h.st.edit("Move", |d| {
+            if let Some(f) = d.feature_mut(ids[2]) {
+                f.origin.z += 4.0;
+            }
+        });
+        h.settle();
+        say(&h, "small circle moved");
+        h.shot("zero-curves-bool-3-operand");
+        for op in [CurveOp::Union, CurveOp::Intersect] {
+            h.st.selection = vec![b];
+            h.st.set_curve_bool_op(b, op);
+            h.settle();
+            say(&h, op.label());
+            h.shot(&format!("zero-curves-bool-4-{}", op.label().to_lowercase()));
+        }
+        // the boolean moved with the gizmo: its curves go with it
+        h.st.set_curve_bool_op(b, CurveOp::Subtract);
+        h.st.selection = vec![b];
+        h.st.gizmo = nurbs_app::state::GizmoMode::Move;
+        h.steps(2);
+        let c = h.st.pivot().expect("a gizmo").as_vec3();
+        let s0 = h.screen_of(c);
+        let dir = (h.screen_of(c + Vec3::X) - s0).normalized();
+        let grab = s0 + dir * 55.0;
+        let to = h.screen_of(c + Vec3::X * 20.0) - s0;
+        h.drag(grab, grab + to, 10, true);
+        h.settle();
+        for id in &ids {
+            let f = h.st.doc.feature(*id).unwrap();
+            eprintln!("  after the move: {} at ({:.2}, {:.2})", f.name, f.origin.x, f.origin.z);
+        }
+        say(&h, "moved");
+        h.shot("zero-curves-bool-5-moved");
+        // deleted: its curves go too; undone
+        h.st.delete_selected();
+        eprintln!("  deleted: {} features left", h.st.doc.features.len());
+        h.st.undo();
+        h.settle();
+        eprintln!("  undone: {} features", h.st.doc.features.len());
+    }
+
     if want("pivot-d") {
         // Romain (20 nov. 7 h 50): D held + click puts the pivot on a
         // point, the move then carries that point onto the points

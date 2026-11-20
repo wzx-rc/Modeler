@@ -111,6 +111,9 @@ pub struct Model {
     /// Fillets whose tension was too full or too flat for a fillet running
     /// round them: (feature, the tension they were made at).
     pub tension_limits: Vec<(u32, f64)>,
+    /// The Curves set's 2D booleans (`Feature::shape_bool`): each one's
+    /// edges as polylines (world), made exactly by the kernel.
+    pub curves: Vec<(u32, Vec<Vec<[f32; 3]>>)>,
 }
 
 /// The part as quads (`quads.rs`): positions shared by the faces along
@@ -224,6 +227,19 @@ impl Model {
             w.u32(*id);
             w.f64(*t);
         }
+        w.u32(self.curves.len() as u32);
+        for (id, lines) in &self.curves {
+            w.u32(*id);
+            w.u32(lines.len() as u32);
+            for l in lines {
+                w.u32(l.len() as u32);
+                for p in l {
+                    for v in p {
+                        w.f32(*v);
+                    }
+                }
+            }
+        }
         w.0
     }
 
@@ -304,6 +320,21 @@ impl Model {
         let n = r.u32()? as usize;
         for _ in 0..n {
             m.tension_limits.push((r.u32()?, r.f64()?));
+        }
+        let n = r.u32()? as usize;
+        for _ in 0..n {
+            let id = r.u32()?;
+            let nl = r.u32()? as usize;
+            let mut lines = Vec::with_capacity(nl.min(4096));
+            for _ in 0..nl {
+                let np = r.u32()? as usize;
+                let mut l = Vec::with_capacity(np.min(1 << 16));
+                for _ in 0..np {
+                    l.push([r.f32()?, r.f32()?, r.f32()?]);
+                }
+                lines.push(l);
+            }
+            m.curves.push((id, lines));
         }
         Some(m)
     }
@@ -394,6 +425,7 @@ mod tests {
             quads: None,
             limits: vec![(4, 2.35)],
             tension_limits: vec![(5, 0.54)],
+            curves: vec![(7, vec![vec![[0.0; 3], [1.0, 2.0, 3.0]], vec![[4.0, 5.0, 6.0]]])],
         };
         assert_eq!(Model::decode(&m.encode()).unwrap(), m);
         let q = Model { quads: Some(Quads { positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], quads: vec![[0, 1, 2, 3]], quad_face: vec![0], skipped: vec![(2, "a face with a hole".into())] }), ..m.clone() };

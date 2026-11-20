@@ -1445,6 +1445,12 @@ pub fn hint(st: &AppState) -> String {
                     Handle::ScaleAll => "To the right: bigger · To the left: smaller · Release: keep it".into(),
                     _ => "Moving: the kernel rebuilds the booleans live".into(),
                 }
+            } else if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {
+                "Window: Union, Subtract (the first picked less the others), Intersect: one curve, kept live · Shift + click: add a curve".into()
+            } else if st.single().is_some_and(|f| f.shape_bool.is_some()) {
+                "Click one of its curves again: that curve (its settings, moved alone; the result follows) · Window: the operation and its curves · Del: it and its curves".into()
+            } else if st.single().is_some_and(|f| st.curve_inside(f.id).is_some()) {
+                "A curve of a 2D boolean: moved or set, the result follows · Window: back to the boolean · Click on empty: deselect".into()
             } else if st.selection.is_empty() {
                 if st.doc.features.is_empty() {
                     "B: a cube · C: a cylinder · L: a sketch · Then: drag in the view".into()

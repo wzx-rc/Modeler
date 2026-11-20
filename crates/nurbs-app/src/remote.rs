@@ -627,6 +627,7 @@ fn primary_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
             cut: None,
             sheet: None,
             curve: None,
+            shape_bool: None,
         };
         let mut v = spec_of(&f);
         if let Some(o) = v.as_object_mut() {

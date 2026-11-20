@@ -9,7 +9,7 @@ use crate::settings::Settings;
 use crate::view::View;
 use glam::{DMat4, DQuat, DVec3, Vec3};
 use nurbs_kernel::client::{Kernel, Status};
-use nurbs_kernel::doc::{CurveKind, PrimKind};
+use nurbs_kernel::doc::{CurveKind, CurveOp, PrimKind, ShapeBool};
 use nurbs_kernel::{Doc, EdgeRef, FaceRef, FaceTag, Feature, FeatureId, Knife, Model, Op, Prim, Profile};
 use std::sync::Arc;
 
@@ -2077,6 +2077,86 @@ impl AppState {
         self.tool = Tool::Select;
     }
 
+    /// The selected closed curves (Object mode) made one 2D boolean, kept
+    /// live (3ds Max's Shape Boolean): the first picked is the base,
+    /// Subtract takes the others from it. They must lie on one plane.
+    pub fn make_curve_bool(&mut self, op: CurveOp) {
+        let ids: Vec<FeatureId> = self.selection.iter().copied().filter(|id| self.doc.is_closed_curve(*id)).collect();
+        if ids.len() < 2 {
+            self.toast("Pick two closed curves or more", true);
+            return;
+        }
+        let Some(first) = self.doc.feature(ids[0]).cloned() else { return };
+        let n0 = first.axis();
+        if let Some(g) = ids[1..].iter().filter_map(|id| self.doc.feature(*id)).find(|g| g.axis().cross(n0).length() > 1e-6 || (g.origin - first.origin).dot(n0).abs() > 1e-4) {
+            let msg = format!("{} is not on the plane of {}", g.name, first.name);
+            self.toast(&msg, true);
+            return;
+        }
+        let mut id = 0;
+        self.edit(op.label(), |d| {
+            let name = d.fresh_name(op.label());
+            id = d.add(Op::Add, first.prim, first.origin, first.rot);
+            if let Some(f) = d.feature_mut(id) {
+                f.name = name;
+                f.shape_bool = Some(ShapeBool { op, operands: ids.clone() });
+            }
+        });
+        self.selection = vec![id];
+        self.sel_mode = SelMode::Object;
+    }
+
+    /// A 2D boolean's operation changed.
+    /// A 2D boolean's operation changed (its name too while it is the
+    /// operation's own, "Subtract 2" → "Union 2").
+    pub fn set_curve_bool_op(&mut self, id: FeatureId, op: CurveOp) {
+        self.edit(op.label(), |d| {
+            let Some(old) = d.feature(id).and_then(|f| f.shape_bool.as_ref()).map(|b| b.op) else { return };
+            let named = d.feature(id).map(|f| f.name == old.label() || f.name.strip_prefix(old.label()).map(|r| r.starts_with(' ') && r[1..].parse::<u32>().is_ok()).unwrap_or(false)).unwrap_or(false);
+            let name = if named && old != op { Some(d.fresh_name(op.label())) } else { None };
+            if let Some(f) = d.feature_mut(id) {
+                if let Some(b) = f.shape_bool.as_mut() {
+                    b.op = op;
+                }
+                if let Some(n) = name {
+                    f.name = n;
+                }
+            }
+        });
+    }
+
+    /// One curve taken out of a 2D boolean (it stays, on its own); the
+    /// last one takes the boolean away.
+    pub fn take_out_operand(&mut self, id: FeatureId, operand: FeatureId) {
+        let Some(n) = self.doc.feature(id).and_then(|f| f.shape_bool.as_ref()).map(|b| b.operands.len()) else { return };
+        self.edit("Take out", |d| {
+            if n <= 1 {
+                d.features.retain(|f| f.id != id);
+            } else if let Some(b) = d.feature_mut(id).and_then(|f| f.shape_bool.as_mut()) {
+                b.operands.retain(|o| *o != operand);
+            }
+        });
+        self.selection = vec![operand];
+    }
+
+    /// A curve of a 2D boolean made its base (first).
+    pub fn make_base_operand(&mut self, id: FeatureId, operand: FeatureId) {
+        self.edit("Base curve", |d| {
+            if let Some(b) = d.feature_mut(id).and_then(|f| f.shape_bool.as_mut()) {
+                if let Some(k) = b.operands.iter().position(|o| *o == operand) {
+                    let o = b.operands.remove(k);
+                    b.operands.insert(0, o);
+                }
+            }
+        });
+    }
+
+    /// The kernel's error about a feature ("name: why"), if any.
+    pub fn feature_error(&self, f: &Feature) -> Option<String> {
+        let head = format!("{}: ", f.name);
+        self.model.as_ref()?.errors.iter().find(|e| e.starts_with(&head)).map(|e| e[head.len()..].to_string())
+    }
+
     pub fn cancel_creation(&mut self) {
         self.snap_shown = None;
         if self.creation.take().is_some() {
@@ -2516,13 +2596,43 @@ impl AppState {
         self.sel_mode = SelMode::Object;
     }
 
+    /// A curve's lines (world): a 2D boolean's as the kernel made them,
+    /// else its own outline.
+    pub fn curve_lines(&self, f: &Feature) -> Vec<Vec<DVec3>> {
+        if f.shape_bool.is_some() {
+            let Some(c) = self.model.as_ref().and_then(|m| m.curves.iter().find(|c| c.0 == f.id)) else { return vec![] };
+            return c.1.iter().map(|l| l.iter().map(|p| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)).collect()).collect();
+        }
+        f.outline()
+    }
+
+    /// The 2D boolean (in use) that takes this curve in.
+    pub fn curve_inside(&self, id: FeatureId) -> Option<&Feature> {
+        self.doc.boolean_of(id).and_then(|b| self.doc.feature(b)).filter(|b| !b.suspended)
+    }
+
+    /// Whether a 2D boolean is open: it or one of its operands selected,
+    /// so a click picks its operands.
+    pub fn boolean_open(&self, b: &Feature) -> bool {
+        self.selection.contains(&b.id) || b.shape_bool.as_ref().map(|s| s.operands.iter().any(|o| self.selection.contains(o))).unwrap_or(false)
+    }
+
     /// The path drawn under the pointer (within a few points), in Object
-    /// mode: paths have no faces for the picker.
+    /// mode: paths have no faces for the picker. A 2D boolean's operands
+    /// only once it is open (it selected, a click again: the operand under
+    /// the pointer, as 3ds Max's operands level); they win over it there.
     pub fn pick_path(&self, p: [f32; 2]) -> Option<FeatureId> {
         let v = self.view();
         let mut best: Option<(FeatureId, f32)> = None;
         for f in self.doc.features.iter().filter(|f| f.visible && f.is_path()) {
-            for line in f.outline() {
+            let mut bias = 0.0;
+            if let Some(b) = self.curve_inside(f.id) {
+                if !b.visible || !self.boolean_open(b) {
+                    continue;
+                }
+                bias = 1.0;
+            }
+            for line in self.curve_lines(f) {
                 let s: Vec<Option<[f32; 2]>> = line.iter().map(|q| v.project(q.as_vec3())).collect();
                 for w in s.windows(2) {
                     let (Some(a), Some(b)) = (w[0], w[1]) else { continue };
@@ -2530,8 +2640,8 @@ impl AppState {
                     let l = dx * dx + dy * dy;
                     let t = if l > 0.0 { (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l).clamp(0.0, 1.0) } else { 0.0 };
                     let d = (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy);
-                    if d < 7.0 && best.map(|b| d < b.1).unwrap_or(true) {
-                        best = Some((f.id, d));
+                    if d < 7.0 && best.map(|b| d - bias < b.1).unwrap_or(true) {
+                        best = Some((f.id, d - bias));
                     }
                 }
             }
@@ -2656,7 +2766,9 @@ impl AppState {
         }
         let Some(pivot) = self.handle_pivot(h) else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
-        let start: Vec<Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).cloned().collect();
+        // a 2D boolean's operands go with it
+        let ids = self.doc.with_operands(&self.selection);
+        let start: Vec<Feature> = self.doc.features.iter().filter(|f| ids.contains(&f.id) && f.is_solid()).cloned().collect();
         let custom = !matches!(h, Handle::Size(_)) && self.custom_pivot_on();
         // the elements' points (their operations' faces too) go with them;
         // a pivot put by hand alone
@@ -3495,7 +3607,8 @@ pub fn size_handle_pos(f: &Feature, h: Handle) -> Option<DVec3> {
 
 /// The size handles of a shape.
 pub fn size_handles(f: &Feature) -> Vec<Handle> {
-    if !f.is_solid() || f.is_sheet() {
+    // a 2D boolean's box is its operands' (Scale, R, sizes them)
+    if !f.is_solid() || f.is_sheet() || f.shape_bool.is_some() {
         return vec![];
     }
     match f.prim {
