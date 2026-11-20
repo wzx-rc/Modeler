@@ -1818,6 +1818,149 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("looks") {
+        // the slots under the balls (Romain 20 nov., 15 h 42): a colour
+        // picked, the specular up, a material made see-through
+        h.reset(test_part(), "Test part");
+        let ball = |h: &Harness, i: usize| h.ctx.data(|d| d.get_temp::<Pos2>(egui::Id::new(("mat-ball", i)))).expect("ball drawn");
+        let slot = |h: &Harness, k: usize| h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(("look-slot", k)))).expect("slot drawn");
+        h.st.select(Some(1), false);
+        h.steps(3);
+        h.click(ball(&h, 2));
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(2);
+        h.shot("zero-looks-1-slots");
+        // the colour row opens the picker; a teal in the square, the hue bar
+        h.click(slot(&h, 0).center());
+        h.steps(3);
+        let hb = slot(&h, 4);
+        h.drag(hb.center(), pos2(hb.min.x + hb.width() * 0.53, hb.center().y), 6, true);
+        h.steps(2);
+        let sq = slot(&h, 3);
+        h.drag(sq.center(), pos2(sq.min.x + sq.width() * 0.62, sq.min.y + sq.height() * 0.3), 6, true);
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(2);
+        h.shot("zero-looks-2-color");
+        eprintln!("  looks {:?}", h.st.doc.looks);
+        // the picker closed, the specular to 100 %
+        h.click(slot(&h, 0).center());
+        h.steps(3);
+        let sp = slot(&h, 1);
+        h.drag(sp.center(), pos2(sp.max.x - 1.0, sp.center().y), 6, true);
+        h.settle();
+        // nothing selected, Orange for the new shapes: its slots stay shown
+        h.st.select(None, false);
+        h.steps(2);
+        h.click(ball(&h, 2));
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(2);
+        h.shot("zero-looks-3-specular");
+        // the boss in Steel, Steel at 65 % transparency
+        h.st.select(Some(3), false);
+        h.steps(3);
+        h.click(ball(&h, 4));
+        h.settle();
+        let tr = slot(&h, 2);
+        h.drag(tr.min + vec2(4.0, tr.height() / 2.0), pos2(tr.min.x + 2.0 + (tr.width() - 4.0) * 0.65, tr.center().y), 8, true);
+        h.settle();
+        h.st.select(None, false);
+        h.steps(2);
+        h.click(ball(&h, 4));
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-looks-4-transparent");
+        eprintln!("  looks {:?}", h.st.doc.looks);
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+        // one undo of the document: the transparency back
+        h.st.undo_doc();
+        h.settle();
+        eprintln!("  after undo {:?}", h.st.doc.looks);
+    }
+
+    if want("align-window") {
+        // Align (3ds Max's, Alt + A): a bracket turned 30° to the right of
+        // the block, picked, Align, the block clicked; centre on centre,
+        // then on the ground along Y with the block's orientation (Apply),
+        // its Min against the block's Max along X (Apply), centred along Z
+        // (OK)
+        let mut d = test_part();
+        let b = d.add(Op::Add, Prim::Box { x: 12.0, y: 8.0, z: 10.0 }, DVec3::new(48.0, 6.0, -26.0), DQuat::from_rotation_y(30f64.to_radians()));
+        d.feature_mut(b).unwrap().name = "Bracket".into();
+        h.reset(d, "Test part");
+        h.st.camera.dist *= 1.35;
+        h.settle();
+        let rect = |h: &Harness, k: &str, i: usize| h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new((k, i)))).expect("drawn");
+        h.click(h.screen_of(Vec3::new(48.0, 14.0, -26.0)));
+        h.settle();
+        h.st.begin_align();
+        let block = h.screen_of(Vec3::new(-12.0, 8.0, 15.0));
+        h.move_to(block);
+        h.steps(3);
+        h.shot("zero-alignwin-1-pick");
+        h.click(block);
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-alignwin-2-center");
+        // first square with the block and on the ground: Y only, Min on
+        // Min, the block's orientation (Apply)
+        h.click(rect(&h, "align-axis", 0).center());
+        h.click(rect(&h, "align-axis", 2).center());
+        if let Some(a) = h.st.align.as_mut() {
+            a.cur = nurbs_app::align::AlignPoint::Min;
+            a.tgt = nurbs_app::align::AlignPoint::Min;
+            a.orient = true;
+        }
+        h.st.align_update();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-alignwin-3-orient");
+        h.click(rect(&h, "align-btn", 1).center());
+        h.settle();
+        // X: the bracket's Min on the block's Max (Apply)
+        h.click(rect(&h, "align-axis", 0).center());
+        if let Some(a) = h.st.align.as_mut() {
+            a.cur = nurbs_app::align::AlignPoint::Min;
+            a.tgt = nurbs_app::align::AlignPoint::Max;
+        }
+        h.st.align_update();
+        h.settle();
+        h.click(rect(&h, "align-btn", 1).center());
+        h.settle();
+        // Z: centre on centre (OK)
+        h.click(rect(&h, "align-axis", 2).center());
+        if let Some(a) = h.st.align.as_mut() {
+            a.cur = nurbs_app::align::AlignPoint::Center;
+            a.tgt = nurbs_app::align::AlignPoint::Center;
+        }
+        h.st.align_update();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-alignwin-4-x-z");
+        h.click(rect(&h, "align-btn", 2).center());
+        h.settle();
+        h.st.select(None, false);
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-alignwin-5-done");
+        let f = h.st.doc.feature(b).unwrap();
+        eprintln!("  bracket origin {:?} rot {:?}", f.origin, f.rot.to_euler(glam::EulerRot::YXZ));
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+        // Cancel puts it back
+        h.st.selection = vec![b];
+        h.st.begin_align();
+        h.click(block);
+        h.settle();
+        let moved = h.st.doc.feature(b).unwrap().origin;
+        h.click(rect(&h, "align-btn", 0).center());
+        h.settle();
+        eprintln!("  cancel: moved to {:?}, back to {:?}", moved, h.st.doc.feature(b).unwrap().origin);
+    }
+
     if want("marking") {
         // the marking menu (right button): on a shape, its material arc, a
         // quick flick, on a picked edge, in empty space

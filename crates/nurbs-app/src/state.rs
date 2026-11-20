@@ -31,6 +31,9 @@ pub enum Tool {
     Curve(CurveKind),
     /// Forms (M): brushes that pull a form's surface (`forms.rs`).
     Form,
+    /// Align (Alt + A): the click on the shape to align the selection to
+    /// (`align.rs`).
+    Align,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -650,6 +653,14 @@ pub struct AppState {
     pub form: crate::forms::FormSettings,
     pub sculpt: Option<crate::forms::Sculpt>,
     pub form_shown: Option<FeatureId>,
+    /// Counts the changes of the balls' looks (they do not go to the
+    /// kernel, so `version` does not move; the session save reads it).
+    pub looks_rev: u64,
+    /// A look being changed (a slider held, the colour picker open): one
+    /// undo step when it ends (`end_look`).
+    pub look_live: Option<(String, Doc, SelState)>,
+    /// Align (`align.rs`): the target to click, then its window.
+    pub align: Option<crate::align::Align>,
     /// The Slot drawn by hand.
     pub slot_draw: Option<crate::slot::SlotDraw>,
     /// A curve or 2D boolean being pulled into a solid (Curves, step 3).
@@ -841,6 +852,9 @@ impl AppState {
             form: Default::default(),
             sculpt: None,
             form_shown: None,
+            looks_rev: 0,
+            look_live: None,
+            align: None,
             slot_draw: None,
             curve_pull: None,
             journal: Default::default(),
@@ -1222,7 +1236,7 @@ impl AppState {
 
     // ------------------------------------------------------------- history
 
-    fn touched(&mut self) {
+    pub(crate) fn touched(&mut self) {
         // the curves follow their settings and boxes
         self.doc.regen_curves();
         self.keep_markers();
@@ -1280,7 +1294,7 @@ impl AppState {
 
     /// A change kept: written in the journal, and its build checked when it
     /// arrives (`check_build`).
-    fn after_change(&mut self, label: &str, before: &Doc) {
+    pub(crate) fn after_change(&mut self, label: &str, before: &Doc) {
         let steps: Vec<FeatureId> = self.doc.features.iter().filter(|f| before.feature(f.id) != Some(*f)).map(|f| f.id).collect();
         self.record("edit", label);
         if let Some(e) = self.journal.back_mut() {
@@ -2221,6 +2235,10 @@ impl AppState {
 
     /// Cancels what is under way (creation, sketch, drag, inset).
     pub fn abort_gestures(&mut self) {
+        self.end_look();
+        if self.align.is_some() {
+            self.align_cancel();
+        }
         if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() || self.round_drag.take().is_some() || self.face_drag.take().is_some() || self.curve_pull.take().is_some() || self.sculpt.take().is_some() {
             self.cancel_live();
             self.clean_selection_ids();
@@ -3881,6 +3899,7 @@ impl AppState {
             self.record("tool", &what);
         }
         self.refresh_snaps();
+        self.align_tick();
         self.remesh_tick();
         self.reference_tick();
         self.deviation_tick();

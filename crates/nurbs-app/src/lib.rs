@@ -4,6 +4,7 @@
 //! own process): the app shows its mesh, picks its B-rep faces, and edits a
 //! document of features. Same look as the first Forme NURBS.
 
+pub mod align;
 pub mod cage;
 pub mod camera;
 pub mod draw;

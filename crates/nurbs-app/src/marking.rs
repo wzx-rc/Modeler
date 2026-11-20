@@ -434,7 +434,8 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
     if let (Some(t0), Ctx::Shape(id)) = (m.arc, m.ctx) {
         let cur = st.doc.feature(id).map(|f| f.material as usize);
         let n = MATERIALS.len();
-        for (k, mat) in MATERIALS.iter().enumerate() {
+        for k in 0..n {
+            let mat = st.look(k as u32);
             let e = ease_out(((now - t0 - k as f64 * 0.0125) / 0.09) as f32);
             if e <= 0.0 {
                 continue;
@@ -444,11 +445,11 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
             let hot = m.ball == Some(k);
             let r = BALL * e * if hot { 1.3 } else { 1.0 };
             p.circle_filled(q + vec2(0.0, 1.5), r + 1.5, Color32::from_black_alpha((90.0 * e) as u8));
-            crate::ui::material_ball(&p, q, r, mat);
+            crate::ui::material_ball(&p, q, r, &mat);
             let ring = if hot { LIT } else if cur == Some(k) { Color32::WHITE } else { Color32::from_rgba_unmultiplied(110, 114, 124, 200) };
             p.circle_stroke(q, r, Stroke::new(if hot || cur == Some(k) { 2.0 } else { 1.0 }, ring.gamma_multiply(e)));
             if hot {
-                p.text(q + vec2(0.0, -r - 6.0), Align2::CENTER_BOTTOM, mat.name, medium(12.0), Color32::from_rgb(236, 236, 226));
+                p.text(q + vec2(0.0, -r - 6.0), Align2::CENTER_BOTTOM, MATERIALS[k].name, medium(12.0), Color32::from_rgb(236, 236, 226));
             }
         }
     }

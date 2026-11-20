@@ -30,7 +30,7 @@ struct App {
     redraw_until: f64,
     /// The session saved every few seconds while it changes (a crash
     /// loses little): the version saved and when.
-    saved: (u64, f64),
+    saved: ((u64, u64), f64),
     _proxy: EventLoopProxy<()>,
 }
 
@@ -68,7 +68,7 @@ impl App {
         })) {
             eprintln!("Claude link off: {e}");
         }
-        let saved = (st.version, 0.0);
+        let saved = ((st.version, st.looks_rev), 0.0);
         App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0, saved, _proxy: proxy }
     }
 
@@ -88,9 +88,10 @@ impl App {
         let now = self.t0.elapsed().as_secs_f64();
         self.st.tick(now);
         nurbs_app::remote::poll(&mut self.st);
-        if self.st.version != self.saved.0 && now - self.saved.1 > 10.0 && !self.st.is_live() {
+        let stamp = (self.st.version, self.st.looks_rev);
+        if stamp != self.saved.0 && now - self.saved.1 > 10.0 && !self.st.is_live() && self.st.look_live.is_none() {
             let _ = files::save(&self.st.doc, files::SESSION);
-            self.saved = (self.st.version, now);
+            self.saved = (stamp, now);
         }
     }
 

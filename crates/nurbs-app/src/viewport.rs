@@ -322,7 +322,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         } else {
             None
         };
-        let by_feature = select && matches!(st.sel_mode, SelMode::Object | SelMode::Edge);
+        let by_feature = (select && matches!(st.sel_mode, SelMode::Object | SelMode::Edge)) || st.tool == Tool::Align;
         st.hover_feature = if st.hot_handle.is_none() && by_feature { hover.and_then(|h| st.pick_path(p2(h))).or_else(|| st.hover_hit.and_then(|h| st.feature_of_face(h.face))) } else { None };
         // Object mode (Maya): the whole element, its operations' faces too
         if st.sel_mode == SelMode::Object {
@@ -370,6 +370,22 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         } else if resp.clicked_by(PointerButton::Secondary) {
             st.abort_gestures();
         }
+        return;
+    }
+
+    // Align (`align.rs`): the click on the target; its window open, the
+    // view only turns (the window's buttons end it)
+    if st.tool == Tool::Align {
+        if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.align_pick(p2(p));
+            }
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            st.align_cancel();
+        }
+        return;
+    }
+    if st.align_open() {
         return;
     }
 
@@ -478,6 +494,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 }
             }
         }
+        Tool::Align => {}
         Tool::Form => {
             // a brush stroke on a form (`forms.rs`)
             if st.sculpt.is_some() {
@@ -1519,6 +1536,8 @@ pub fn hint(st: &AppState) -> String {
             Some(k) if k.pts.len() < 3 => "Click or drag: a corner · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
             Some(_) => "First point or Enter: close it · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
+        (None, Tool::Align) => "Click: the shape to align the selection to · Esc or right click: cancel".into(),
+        (None, Tool::Select) if st.align_open() => "Min / Max: the box's sides · Center: its middle · Pivot: the base's centre (or the one put with D) · Apply: keep and go on · Enter: OK · Esc: cancel".into(),
         (None, Tool::Form) if st.sculpt.is_some() => "Drag: the brush pulls the surface · Release: done (one undo step) · Esc: cancel".into(),
         (None, Tool::Form) => format!(
             "Press on a form and drag: {} · Shift + drag: Smooth · Ctrl: the other way · [ ]: radius · Click on the ground: a new form · A plain Cube or Cylinder becomes a form",
@@ -1618,7 +1637,7 @@ pub fn hint(st: &AppState) -> String {
             } else {
                 match st.gizmo {
                     GizmoMode::Select => "W: move · E: rotate · R: scale · Right button: menu · Del: delete · Esc: deselect".into(),
-                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · E: rotate · R: scale · Del: delete".into(),
+                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
                     GizmoMode::Scale => "Cage: a face's grip one side, an edge's two, a corner all three · Shift: proportions kept · Alt: from the middle · W: move · E: rotate".into(),
                 }

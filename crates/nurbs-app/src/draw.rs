@@ -144,8 +144,7 @@ impl Drawer {
                 .map(|(i, f)| {
                     // a material ball dragged over it: shown on it already
                     if let Some(d) = st.mat_drag.as_ref().filter(|d| d.target.map(|t| st.face_in_target(i, &t)).unwrap_or(false)) {
-                        let mat = materials::get(d.material);
-                        return FaceGpu { color: linear(mat.color), flags: 0, metal: mat.metal, rough: mat.rough, pad: [0.0; 2] };
+                        return face_gpu(&st.look(d.material), 0);
                     }
                     let flags = if by_face {
                         if picked.contains(&i) || f.tag.map(|t| st.selection.contains(&t.feature)).unwrap_or(false) {
@@ -164,13 +163,13 @@ impl Drawer {
                     };
                     let sheet = f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| st.doc.makes(x) == nurbs_kernel::Makes::Sheet).unwrap_or(false);
                     let flags = if sheet { flags | crate::render::FACE_SHEET } else { flags };
-                    let mat = materials::get(st.face_material(i));
+                    let mat = st.look(st.face_material(i));
                     // Quads view: the fillet and chamfer bands in orange
                     let band = self.quads_shown && f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| x.round.is_some()).unwrap_or(false);
                     if band {
-                        return FaceGpu { color: linear(BAND), flags, metal: 0.0, rough: 0.6, pad: [0.0; 2] };
+                        return FaceGpu { color: linear(BAND), flags, metal: 0.0, rough: 0.6, spec: materials::SPECULAR, alpha: 1.0 };
                     }
-                    FaceGpu { color: linear(mat.color), flags, metal: mat.metal, rough: mat.rough, pad: [0.0; 2] }
+                    face_gpu(&mat, flags)
                 })
                 .collect(),
             None => vec![],
@@ -390,4 +389,9 @@ fn quad_vertices(q: &nurbs_kernel::Quads, out: &mut Vec<MeshVertex>) {
             out.push(MeshVertex { pos: q.positions[v as usize], nrm: n.to_array(), face: *f, dev: NO_DEV });
         }
     }
+}
+
+/// A face as the shader reads it, from its material's look.
+fn face_gpu(l: &materials::Look, flags: u32) -> FaceGpu {
+    FaceGpu { color: linear(l.color), flags, metal: l.metal, rough: l.rough, spec: l.specular, alpha: l.opacity() }
 }

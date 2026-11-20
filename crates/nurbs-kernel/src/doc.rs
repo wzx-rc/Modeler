@@ -1422,6 +1422,23 @@ pub struct Doc {
     /// not use it; the app loads it and its tools read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<RefMesh>,
+    /// The material balls changed from how they come (Romain, 20 nov.,
+    /// 15 h 42: base colour, specular, transparency under the balls). The
+    /// kernel does not use it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub looks: Vec<MaterialLook>,
+}
+
+/// A material ball's look as the document has it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MaterialLook {
+    pub material: u32,
+    /// sRGB 0..1.
+    pub color: [f32; 3],
+    /// The highlights' strength, 0..1 (0.5: as the ball comes).
+    pub specular: f32,
+    /// 0 opaque .. 1 clear.
+    pub transparency: f32,
 }
 
 /// The reference mesh: its file (.obj).
@@ -1439,7 +1456,7 @@ pub struct Paint {
 
 impl Default for Doc {
     fn default() -> Self {
-        Doc { version: VERSION, features: vec![], next_id: 1, paint: vec![], reference: None }
+        Doc { version: VERSION, features: vec![], next_id: 1, paint: vec![], reference: None, looks: vec![] }
     }
 }
 

@@ -136,6 +136,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         inspector(ctx, st, screen);
     }
     context_bar(ctx, st);
+    align_window(ctx, st);
     op_window(ctx, st);
     files_dialog(ctx, st, screen);
     toast(ctx, st, screen);
@@ -199,6 +200,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     Tool::Slot if st.slot_on_scan => "SLOT · ON THE SCAN".into(),
                     Tool::Slot => format!("SLOT · {}", st.mode.label().to_uppercase()),
                     Tool::Form => format!("FORMS · {}", st.form.brush.label().to_uppercase()),
+                    Tool::Align => "ALIGN · PICK THE TARGET".into(),
                     Tool::Select => format!("SELECTION · {}", st.sel_mode.label().to_uppercase()),
                 };
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
@@ -562,7 +564,7 @@ fn materials_island(ctx: &egui::Context, st: &mut AppState) {
                 } else if resp.hovered() || dragging {
                     p.circle_stroke(c, 10.5, Stroke::new(1.0, DIVIDER()));
                 }
-                material_ball(p, c, 8.0, m);
+                material_ball(p, c, 8.0, &st.look(i as u32));
                 if resp.hovered() || dragging {
                     hovered = Some(i);
                 }
@@ -577,7 +579,7 @@ fn materials_island(ctx: &egui::Context, st: &mut AppState) {
                         d.target = target;
                     }
                     if let Some(q) = pos {
-                        drag_ball(ctx, st, q, m);
+                        drag_ball(ctx, st, q, &st.look(i as u32));
                     }
                 }
                 if resp.drag_stopped() {
@@ -593,7 +595,21 @@ fn materials_island(ctx: &egui::Context, st: &mut AppState) {
             let p = ui.painter();
             p.text(pos2(hr.min.x + 2.0, hr.center().y), Align2::LEFT_CENTER, "MATERIAL", mono(10.0), LABEL());
             let name = hovered.or(cur.map(|c| c as usize)).map(|i| materials::get(i as u32).name).unwrap_or("–");
-            p.text(pos2(hr.max.x - 2.0, hr.center().y), Align2::RIGHT_CENTER, name, regular(10.5), TEXT2());
+            // a ball changed: a small reset by its name
+            let mi = cur.unwrap_or(st.material);
+            let changed = materials::changed(&st.doc, mi);
+            p.text(pos2(hr.max.x - if changed { 18.0 } else { 2.0 }, hr.center().y), Align2::RIGHT_CENTER, name, regular(10.5), TEXT2());
+            if changed {
+                let rr = Rect::from_center_size(pos2(hr.max.x - 7.0, hr.center().y), vec2(14.0, 14.0));
+                let resp = ui.interact(rr, Id::new("look-reset"), Sense::click());
+                ui.painter().text(rr.center(), Align2::CENTER_CENTER, "↺", regular(12.0), if resp.hovered() { TEXT_STRONG() } else { LABEL() });
+                if resp.on_hover_text(format!("{} back as it comes", materials::get(mi).name)).clicked() {
+                    st.reset_look(mi);
+                }
+            }
+            // the current ball's settings (Romain, 20 nov., 15 h 42: "quelques
+            // petits slots basiques": base colour, specular, transparency)
+            look_slots(ui, st, cur.unwrap_or(st.material), w);
         });
     });
     // a drag that ended elsewhere (the button let go off the ball's
@@ -603,8 +619,206 @@ fn materials_island(ctx: &egui::Context, st: &mut AppState) {
     }
 }
 
+/// The settings of the ball shown as current, under the balls: its colour
+/// (a click on the row opens a small picker below it), its specular and
+/// its transparency (a press or a drag on the bar sets it, a double-click
+/// puts it back as the ball comes). They change every face of that
+/// material at once; each gesture is one undo step.
+fn look_slots(ui: &mut Ui, st: &mut AppState, mi: u32, w: f32) {
+    let look = st.look(mi);
+    let mut held = false;
+    let (sr, _) = ui.allocate_exact_size(vec2(w, 7.0), Sense::hover());
+    ui.painter().hline(sr.x_range(), sr.center().y, Stroke::new(1.0, DIVIDER()));
+    let ctx = ui.ctx().clone();
+    let open_id = Id::new("look-color-open");
+    let open = ctx.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    // colour
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 18.0), Sense::click());
+    ctx.data_mut(|d| d.insert_temp(Id::new(("look-slot", 0usize)), r));
+    let hot = resp.hovered() || open;
+    slot_frame(ui, r, hot);
+    let p = ui.painter();
+    p.text(pos2(r.min.x + 7.0, r.center().y), Align2::LEFT_CENTER, "Color", regular(10.5), LABEL());
+    let c8 = look.color.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let sw = Rect::from_min_size(pos2(r.max.x - 7.0 - 24.0, r.center().y - 5.0), vec2(24.0, 10.0));
+    p.rect(sw, 3.0, Color32::from_rgb(c8[0], c8[1], c8[2]), Stroke::new(1.0, tint(Color32::WHITE, 0.28)), StrokeKind::Outside);
+    p.text(pos2(sw.min.x - 6.0, r.center().y), Align2::RIGHT_CENTER, format!("#{:02X}{:02X}{:02X}", c8[0], c8[1], c8[2]), mono(9.5), TEXT2());
+    if resp.clicked() {
+        ctx.data_mut(|d| d.insert_temp(open_id, !open));
+    }
+    resp.on_hover_text("Base color: click to open the picker");
+    if open {
+        // the picker beside the island, on its left (it closes on a click
+        // anywhere else)
+        // its foot level with the island's
+        let foot = ctx.memory(|m| m.area_rect(Id::new("materials"))).map(|a| a.max.y).unwrap_or(r.max.y + 60.0);
+        let pr = egui::Area::new(Id::new("look-picker")).order(Order::Foreground).pivot(Align2::RIGHT_BOTTOM).fixed_pos(pos2(r.min.x - 16.0, foot)).show(&ctx, |ui| {
+            island().inner_margin(Margin::same(8)).show(ui, |ui| color_picker(ui, st, mi, 176.0)).inner
+        });
+        held |= pr.inner;
+        let away = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().map(|q| !pr.response.rect.contains(q) && !r.contains(q)).unwrap_or(false));
+        if away || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            ctx.data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
+    ui.add_space(3.0);
+    // specular and transparency
+    let rows: [(&str, f32, f32, &str); 2] = [("Specular", look.specular, materials::SPECULAR, "Material specular"), ("Transparency", look.transparency, 0.0, "Material transparency")];
+    for (k, (label, v, default, step)) in rows.into_iter().enumerate() {
+        let (r, resp) = ui.allocate_exact_size(vec2(w, 18.0), Sense::click_and_drag());
+        ctx.data_mut(|d| d.insert_temp(Id::new(("look-slot", k + 1)), r));
+        let down = resp.is_pointer_button_down_on() || resp.dragged();
+        held |= down;
+        let mut nv = None;
+        if down {
+            if let Some(q) = resp.interact_pointer_pos() {
+                nv = Some((((q.x - r.min.x - 2.0) / (r.width() - 4.0)).clamp(0.0, 1.0) * 100.0).round() / 100.0);
+            }
+        }
+        if resp.double_clicked() {
+            nv = Some(default);
+        }
+        let shown = nv.unwrap_or(v);
+        slot_frame(ui, r, resp.hovered() || down);
+        let p = ui.painter();
+        let fill = Rect::from_min_max(r.min, pos2(r.min.x + 2.0 + (r.width() - 4.0) * shown, r.max.y)).shrink(1.5);
+        if fill.width() > 0.5 {
+            p.rect_filled(fill, 4.0, tint(TEXT_STRONG(), if down { 0.2 } else { 0.13 }));
+        }
+        p.text(pos2(r.min.x + 7.0, r.center().y), Align2::LEFT_CENTER, label, regular(10.5), LABEL());
+        p.text(pos2(r.max.x - 7.0, r.center().y), Align2::RIGHT_CENTER, format!("{} %", (shown * 100.0).round() as i32), regular(10.5), TEXT_STRONG());
+        if let Some(x) = nv {
+            st.edit_look(mi, step, |l| if k == 0 { l.specular = x } else { l.transparency = x });
+        }
+        resp.on_hover_text(if k == 0 { "Specular: the highlights' strength (50 % as the ball comes). Drag; double-click: back" } else { "Transparency: 0 % solid. Drag; double-click: back" });
+        if k == 0 {
+            ui.add_space(3.0);
+        }
+    }
+    // the gesture let go: one undo step
+    if !held && st.look_live.is_some() {
+        st.end_look();
+    }
+}
+
+/// A slot's well: rounded, a fine border lighter when hovered.
+fn slot_frame(ui: &Ui, r: Rect, hot: bool) {
+    ui.painter().rect(r, 5.0, WELL(), Stroke::new(1.0, if hot { TEXT2() } else { DIVIDER() }), StrokeKind::Inside);
+}
+
+/// The small colour picker under the Color row: saturation / value in a
+/// square, the hue on a bar. Returns whether it is held.
+fn color_picker(ui: &mut Ui, st: &mut AppState, mi: u32, w: f32) -> bool {
+    use egui::ecolor::{hsv_from_rgb, rgb_from_hsv};
+    ui.set_width(w);
+    let (tr, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
+    ui.painter().text(tr.left_center(), Align2::LEFT_CENTER, "COLOR", mono(10.0), LABEL());
+    ui.painter().text(tr.right_center(), Align2::RIGHT_CENTER, materials::get(mi).name, regular(10.5), TEXT2());
+    // a few hard-surface finishes, one click each
+    const SWATCHES: [(&str, [f32; 3]); 8] = [
+        ("Anodized black", [0.10, 0.10, 0.11]),
+        ("Gunmetal", [0.29, 0.31, 0.34]),
+        ("Aluminium", [0.72, 0.73, 0.75]),
+        ("Off-white", [0.88, 0.87, 0.83]),
+        ("Olive drab", [0.36, 0.38, 0.22]),
+        ("Desert tan", [0.72, 0.60, 0.43]),
+        ("Safety orange", [0.93, 0.40, 0.10]),
+        ("Signal red", [0.70, 0.12, 0.10]),
+    ];
+    let (row, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
+    let sw = (w - 7.0 * 4.0) / 8.0;
+    let mut clicked = false;
+    for (k, (name, c)) in SWATCHES.iter().enumerate() {
+        let r = Rect::from_min_size(pos2(row.min.x + k as f32 * (sw + 4.0), row.min.y + 2.0), vec2(sw, 14.0));
+        let resp = ui.interact(r, Id::new(("look-swatch", k)), Sense::click());
+        let c8 = c.map(|x| (x * 255.0) as u8);
+        ui.painter().rect(r, 3.0, Color32::from_rgb(c8[0], c8[1], c8[2]), Stroke::new(1.0, if resp.hovered() { TEXT_STRONG() } else { tint(Color32::WHITE, 0.18) }), StrokeKind::Inside);
+        if resp.clicked() {
+            st.edit_look(mi, "Material color", |l| l.color = *c);
+            clicked = true;
+        }
+        resp.on_hover_text(*name);
+    }
+    if clicked {
+        st.end_look();
+    }
+    let look = st.look(mi);
+    // the hue kept while it cannot be read from the colour (a grey)
+    let hue_id = Id::new(("look-hue", mi));
+    let (mut h, s0, v0) = hsv_from_rgb(look.color);
+    if s0 < 1e-3 || v0 < 1e-3 {
+        h = ui.ctx().data(|d| d.get_temp::<f32>(hue_id)).unwrap_or(h);
+    }
+    let (mut s, mut v) = (s0, v0);
+    ui.add_space(4.0);
+    let (sq, sresp) = ui.allocate_exact_size(vec2(w, 104.0), Sense::click_and_drag());
+    ui.add_space(4.0);
+    let (hb, hresp) = ui.allocate_exact_size(vec2(w, 11.0), Sense::click_and_drag());
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(Id::new(("look-slot", 3usize)), sq);
+        d.insert_temp(Id::new(("look-slot", 4usize)), hb);
+    });
+    let sdown = sresp.is_pointer_button_down_on() || sresp.dragged();
+    let hdown = hresp.is_pointer_button_down_on() || hresp.dragged();
+    let mut changed = false;
+    if sdown {
+        if let Some(q) = sresp.interact_pointer_pos() {
+            s = ((q.x - sq.min.x) / sq.width()).clamp(0.0, 1.0);
+            v = 1.0 - ((q.y - sq.min.y) / sq.height()).clamp(0.0, 1.0);
+            changed = true;
+        }
+    }
+    if hdown {
+        if let Some(q) = hresp.interact_pointer_pos() {
+            h = ((q.x - hb.min.x) / hb.width()).clamp(0.0, 0.9999);
+            changed = true;
+        }
+    }
+    if changed {
+        ui.ctx().data_mut(|d| d.insert_temp(hue_id, h));
+        let rgb = rgb_from_hsv((h, s, v));
+        st.edit_look(mi, "Material color", |l| l.color = rgb);
+    }
+    let c32 = |rgb: [f32; 3]| Color32::from_rgb((rgb[0] * 255.0) as u8, (rgb[1] * 255.0) as u8, (rgb[2] * 255.0) as u8);
+    let p = ui.painter();
+    // the square: white to the hue across, black down (exact by corners)
+    let pure = c32(rgb_from_hsv((h, 1.0, 1.0)));
+    let mut m = egui::Mesh::default();
+    m.colored_vertex(sq.left_top(), Color32::WHITE);
+    m.colored_vertex(sq.right_top(), pure);
+    m.colored_vertex(sq.right_bottom(), Color32::BLACK);
+    m.colored_vertex(sq.left_bottom(), Color32::BLACK);
+    m.add_triangle(0, 1, 2);
+    m.add_triangle(0, 2, 3);
+    p.add(m);
+    p.rect_stroke(sq, 3.0, Stroke::new(1.0, DIVIDER()), StrokeKind::Outside);
+    let at = pos2(sq.min.x + s * sq.width(), sq.min.y + (1.0 - v) * sq.height());
+    p.circle_stroke(at, 4.0, Stroke::new(1.5, Color32::WHITE));
+    p.circle_stroke(at, 5.2, Stroke::new(1.0, Color32::from_black_alpha(140)));
+    // the hue bar
+    let mut m = egui::Mesh::default();
+    let n = 12;
+    for k in 0..=n {
+        let t = k as f32 / n as f32;
+        let c = c32(rgb_from_hsv((t.min(0.9999), 1.0, 1.0)));
+        let x = hb.min.x + t * hb.width();
+        m.colored_vertex(pos2(x, hb.min.y), c);
+        m.colored_vertex(pos2(x, hb.max.y), c);
+        if k > 0 {
+            let i = (k * 2) as u32;
+            m.add_triangle(i - 2, i - 1, i);
+            m.add_triangle(i - 1, i + 1, i);
+        }
+    }
+    p.add(m);
+    p.rect_stroke(hb, 2.0, Stroke::new(1.0, DIVIDER()), StrokeKind::Outside);
+    let hx = hb.min.x + h * hb.width();
+    p.rect(Rect::from_center_size(pos2(hx, hb.center().y), vec2(4.0, hb.height() + 4.0)), 2.0, Color32::WHITE, Stroke::new(1.0, Color32::from_black_alpha(160)), StrokeKind::Outside);
+    sdown || hdown
+}
+
 /// The ball carried by the pointer, with what it would land on.
-fn drag_ball(ctx: &egui::Context, st: &AppState, at: egui::Pos2, m: &materials::Material) {
+fn drag_ball(ctx: &egui::Context, st: &AppState, at: egui::Pos2, m: &materials::Look) {
     let p = ctx.layer_painter(egui::LayerId::new(Order::Tooltip, Id::new("mat-drag")));
     let c = at + vec2(14.0, -14.0);
     p.circle_filled(c + vec2(0.0, 1.5), 12.0, Color32::from_black_alpha(70));
@@ -925,6 +1139,8 @@ fn help_title(st: &AppState) -> String {
         Tool::Slot if st.slot_on_scan => "Slot · on the scan".into(),
         Tool::Slot => format!("Slot · {}", st.mode.label()),
         Tool::Form => format!("Forms · {}", st.form.brush.label()),
+        Tool::Align => "Align · pick the target".into(),
+        Tool::Select if st.align_open() => "Align".into(),
         Tool::Select => format!("{} · {}", st.gizmo.label(), st.sel_mode.label()),
     }
 }
@@ -1021,6 +1237,7 @@ fn help_box(ctx: &egui::Context, st: &mut AppState) {
         Tool::Knife | Tool::Point => EDGE_SEL,
         Tool::Slot => accent(),
         Tool::Form => op_color(st.mode),
+        Tool::Align => TEXT2(),
         Tool::Select if st.sel_mode == SelMode::Edge => EDGE_SEL,
         Tool::Select if st.sel_mode == SelMode::Face => FACE_SEL,
         Tool::Select => st.single().map(feature_color).unwrap_or(TEXT2()),
@@ -1152,6 +1369,9 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                     if icon_btn(ui, Icon::Duplicate, false, "Duplicate (Ctrl+D)", 28.0).clicked() {
                         st.duplicate_selected();
                     }
+                    if icon_btn(ui, Icon::Align, st.tool == Tool::Align, "Align (Alt+A): then click the shape to align to", 28.0).clicked() {
+                        st.begin_align();
+                    }
                 }
                 if icon_btn(ui, Icon::Frame, false, "Frame (F)", 28.0).clicked() {
                     st.frame_selection();
@@ -1184,6 +1404,9 @@ enum OpPop {
 }
 
 fn op_pop(st: &AppState) -> Option<OpPop> {
+    if st.align.is_some() {
+        return None;
+    }
     if (st.tool == Tool::Create(PrimKind::Surface) || st.tool == Tool::Create(PrimKind::Path) || st.tool == Tool::Form || (st.tool == Tool::Slot && st.slot_draw.is_none())) && st.creation.is_none() {
         return Some(OpPop::Tool);
     }
@@ -1245,6 +1468,170 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
         }
     }
     r
+}
+
+/// The Align window (3ds Max's Align, `align.rs`): what lines up with
+/// what, the axes, the point of each, the orientation; the part shows it
+/// live. Apply keeps it and goes on, OK keeps it, Cancel puts it back.
+fn align_window(ctx: &egui::Context, st: &mut AppState) {
+    if !st.align_open() || st.marking.is_open() {
+        return;
+    }
+    let Some(a) = st.align.clone() else { return };
+    const W: f32 = 236.0;
+    let vr = st.view_rect;
+    let full = W + 20.0;
+    let h = ctx.memory(|m| m.area_rect(Id::new("align-pop"))).map(|r| r.height()).unwrap_or(300.0);
+    // beside the part (as it was when the window opened), on its right,
+    // else on its left, else by the click on the target
+    let view = st.view();
+    let mut part = Rect::from_min_max(pos2(a.at[0], a.at[1]), pos2(a.at[0], a.at[1]));
+    let mut corners: Vec<DVec3> = a.boxes.iter().flat_map(|(_, b)| [b.lo, b.hi]).collect();
+    if let Some(t) = &a.tbox {
+        corners.extend([t.lo, t.hi]);
+    }
+    if let Some((lo, hi)) = st.model.as_ref().and_then(|m| m.bounds()) {
+        corners.extend([DVec3::from(lo.map(|x| x as f64)), DVec3::from(hi.map(|x| x as f64))]);
+    }
+    for w in corners.chunks(2) {
+        for i in 0..8 {
+            let c = DVec3::new(if i & 1 == 0 { w[0].x } else { w[1].x }, if i & 2 == 0 { w[0].y } else { w[1].y }, if i & 4 == 0 { w[0].z } else { w[1].z });
+            if let Some(q) = view.project(c.as_vec3()) {
+                part = part.union(Rect::from_min_max(pos2(q[0], q[1]), pos2(q[0], q[1])));
+            }
+        }
+    }
+    let gap = 28.0;
+    let (left, right) = (vr[0] + 8.0, vr[2] - 8.0);
+    let x = if part.max.x + gap + full < right {
+        part.max.x + gap
+    } else if part.min.x - gap - full > left {
+        part.min.x - gap - full
+    } else if a.at[0] + 70.0 + full < right {
+        a.at[0] + 70.0
+    } else {
+        (a.at[0] - 70.0 - full).max(left)
+    };
+    let top = vr[1] + 48.0;
+    let mut y = (a.at[1] - 110.0).clamp(top, (vr[3] - 8.0 - h).max(top));
+    // not over the help box (bottom right): above it
+    if let Some(hb) = ctx.memory(|m| m.area_rect(Id::new("help-box"))) {
+        if Rect::from_min_size(pos2(x, y), vec2(full, h)).intersects(hb) {
+            y = (hb.min.y - 8.0 - h).max(top);
+        }
+    }
+    let at = pos2(x, y) + panel_offset(ctx, "align-pop");
+    let (what, target) = st.align_names();
+    let mut changed = false;
+    let mut close: Option<bool> = None;
+    let mut apply = false;
+    egui::Area::new(Id::new("align-pop")).order(Order::Foreground).fixed_pos(at).show(ctx, |ui| {
+        island().inner_margin(Margin::same(10)).show(ui, |ui| {
+            ui.set_width(W);
+            grip(ui, "align-pop");
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Align").font(semibold(14.0)).color(TEXT()));
+                chip_label(ui, "Alt + A", RAISED(), LABEL());
+            });
+            // what moves, and onto what
+            let (r, _) = ui.allocate_exact_size(vec2(W, 20.0), Sense::hover());
+            let p = ui.painter();
+            let g1 = p.layout_no_wrap(what.clone(), medium(12.0), TEXT_STRONG());
+            let g2 = p.layout_no_wrap(target.clone(), medium(12.0), accent());
+            let x1 = r.min.x + g1.size().x;
+            p.galley(pos2(r.min.x, r.center().y - g1.size().y / 2.0), g1, TEXT_STRONG());
+            p.text(pos2(x1 + 8.0, r.center().y), Align2::LEFT_CENTER, "→", regular(12.0), LABEL());
+            p.galley(pos2(x1 + 24.0, r.center().y - g2.size().y / 2.0), g2, accent());
+            ui.add_space(4.0);
+            let label = |ui: &mut Ui, t: &str| {
+                let (r, _) = ui.allocate_exact_size(vec2(W, 16.0), Sense::hover());
+                ui.painter().text(r.left_center(), Align2::LEFT_CENTER, t, mono(10.0), LABEL());
+            };
+            // the axes (3ds Max's X / Y / Z Position)
+            label(ui, "POSITION");
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let bw = (W - 12.0) / 3.0;
+                for (k, (n, c)) in [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AXIS_Z)].into_iter().enumerate() {
+                    let on = a.axes[k];
+                    let (r, resp) = ui.allocate_exact_size(vec2(bw, 24.0), Sense::click());
+                    ui.ctx().data_mut(|d| d.insert_temp(Id::new(("align-axis", k)), r));
+                    let p = ui.painter();
+                    p.rect(r, 6.0, if on { RAISED() } else { WELL() }, Stroke::new(1.0, if on { c } else if resp.hovered() { TEXT2() } else { DIVIDER() }), StrokeKind::Inside);
+                    // a tick box and the axis
+                    let b = Rect::from_center_size(pos2(r.center().x - 9.0, r.center().y), vec2(11.0, 11.0));
+                    p.rect(b, 3.0, if on { c } else { Color32::TRANSPARENT }, Stroke::new(1.0, if on { c } else { LABEL() }), StrokeKind::Inside);
+                    if on {
+                        p.line_segment([b.left_center() + vec2(2.5, 0.0), b.center_bottom() + vec2(-0.5, -2.5)], Stroke::new(1.4, Color32::BLACK));
+                        p.line_segment([b.center_bottom() + vec2(-0.5, -2.5), b.right_top() + vec2(-2.5, 2.5)], Stroke::new(1.4, Color32::BLACK));
+                    }
+                    p.text(pos2(r.center().x + 3.0, r.center().y), Align2::LEFT_CENTER, n, semibold(12.0), if on { c } else { TEXT2() });
+                    if resp.clicked() {
+                        if let Some(al) = st.align.as_mut() {
+                            al.axes[k] = !al.axes[k];
+                        }
+                        changed = true;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            let items: Vec<(crate::align::AlignPoint, &str, Color32)> = crate::align::AlignPoint::ALL.iter().map(|p| (*p, p.label(), TEXT2())).collect();
+            label(ui, &format!("CURRENT · {}", what.to_uppercase()));
+            if let Some(v) = ui.push_id("align-cur", |ui| segmented(ui, &items, a.cur, 26.0)).inner {
+                if let Some(al) = st.align.as_mut() {
+                    al.cur = v;
+                }
+                changed = true;
+            }
+            ui.add_space(2.0);
+            label(ui, &format!("TARGET · {}", target.to_uppercase()));
+            if let Some(v) = ui.push_id("align-tgt", |ui| segmented(ui, &items, a.tgt, 26.0)).inner {
+                if let Some(al) = st.align.as_mut() {
+                    al.tgt = v;
+                }
+                changed = true;
+            }
+            ui.add_space(2.0);
+            label(ui, "ORIENTATION");
+            if toggle_row(ui, "Match the target's", a.orient) {
+                if let Some(al) = st.align.as_mut() {
+                    al.orient = !al.orient;
+                }
+                changed = true;
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let bw = (W - 12.0) / 3.0;
+                let r = secondary_btn(ui, "Cancel", bw);
+                ui.ctx().data_mut(|d| d.insert_temp(Id::new(("align-btn", 0usize)), r.rect));
+                if r.on_hover_text("Esc: everything back as it was").clicked() {
+                    close = Some(false);
+                }
+                let r = secondary_btn(ui, "Apply", bw);
+                ui.ctx().data_mut(|d| d.insert_temp(Id::new(("align-btn", 1usize)), r.rect));
+                if r.on_hover_text("Keep it and go on (the axes cleared, as in 3ds Max)").clicked() {
+                    apply = true;
+                }
+                let r = primary_btn(ui, None, "OK", Some(bw));
+                ui.ctx().data_mut(|d| d.insert_temp(Id::new(("align-btn", 2usize)), r.rect));
+                if r.on_hover_text("Enter: keep it").clicked() {
+                    close = Some(true);
+                }
+            });
+        });
+    });
+    if changed {
+        st.align_update();
+    }
+    if apply {
+        st.align_apply();
+    }
+    match close {
+        Some(true) => st.align_ok(),
+        Some(false) => st.align_cancel(),
+        None => {}
+    }
 }
 
 /// The settings of the operation under way, in a small window next to the
@@ -2088,6 +2475,9 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         if f.is_solid() && icon_btn(ui, Icon::Duplicate, false, "Duplicate", 30.0).clicked() {
             st.duplicate_selected();
         }
+        if icon_btn(ui, Icon::Align, st.tool == Tool::Align, "Align (Alt+A): then click the shape to align to", 30.0).clicked() {
+            st.begin_align();
+        }
         if icon_btn(ui, if f.visible { Icon::Eye } else { Icon::EyeOff }, false, "Hide", 30.0).clicked() {
             st.toggle_visible(id);
         }
@@ -2829,16 +3219,27 @@ fn tweak_card(ui: &mut Ui, st: &mut AppState, id: FeatureId) {
 
 /// A material as a small shaded ball: discs shrinking toward the light, a
 /// rim, a highlight sharper on metals.
-pub fn material_ball(p: &egui::Painter, c: egui::Pos2, r: f32, m: &materials::Material) {
+pub fn material_ball(p: &egui::Painter, c: egui::Pos2, r: f32, m: &materials::Look) {
+    // a see-through ball shows two lines behind it
+    let a = 0.25 + 0.75 * m.opacity();
+    if m.transparency > 0.01 {
+        let st = Stroke::new(1.2, tint(Color32::WHITE, 0.35));
+        p.line_segment([c + vec2(-0.9, 0.35) * r, c + vec2(0.9, -0.35) * r], st);
+        p.line_segment([c + vec2(-0.6, 0.85) * r, c + vec2(0.95, 0.25) * r], st);
+    }
     let steps = 18;
     for k in 0..steps {
         let t = k as f32 / (steps - 1) as f32;
         let lum = 0.45 + 0.75 * t;
         let ch = |x: f32| ((x * lum).clamp(0.0, 1.0) * 255.0) as u8;
-        p.circle_filled(c + vec2(-0.3, -0.34) * r * t, r * (1.0 - 0.7 * t), Color32::from_rgb(ch(m.color[0]), ch(m.color[1]), ch(m.color[2])));
+        let al = if k == 0 { a } else { (a * 0.5).min(1.0) };
+        p.circle_filled(c + vec2(-0.3, -0.34) * r * t, r * (1.0 - 0.7 * t), Color32::from_rgba_unmultiplied(ch(m.color[0]), ch(m.color[1]), ch(m.color[2]), (al * 255.0) as u8));
     }
-    let spec = 0.22 + 0.45 * m.metal * (1.0 - m.rough);
-    p.circle_filled(c + vec2(-0.36, -0.4) * r, r * (0.24 - 0.08 * m.metal), Color32::from_white_alpha((spec * 255.0) as u8));
+    // the highlight follows the specular (0.5 as the balls come)
+    let k = m.specular * 2.0;
+    let spec = ((0.22 + 0.45 * m.metal * (1.0 - m.rough)) * k).min(1.0);
+    let size = (0.24 - 0.08 * m.metal) * (1.0 - 0.25 * (k - 1.0).max(0.0));
+    p.circle_filled(c + vec2(-0.36, -0.4) * r, r * size, Color32::from_white_alpha((spec * 255.0) as u8));
     p.circle_stroke(c, r, Stroke::new(1.0, tint(Color32::WHITE, 0.22)));
 }
 
@@ -2968,6 +3369,21 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     use egui::Key;
     let (ctrl, shift) = ctx.input(|i| (i.modifiers.ctrl || i.modifiers.mac_cmd, i.modifiers.shift));
     let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
+    // Align (3ds Max's Alt + A); its window: Enter OK, Esc Cancel
+    if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::A) {
+        st.begin_align();
+        return;
+    }
+    if st.align.is_some() {
+        if pressed(Key::Escape) {
+            st.align_cancel();
+            return;
+        }
+        if pressed(Key::Enter) && st.align_open() {
+            st.align_ok();
+            return;
+        }
+    }
     // Ctrl + I: Isolate (Romain 20 nov., 10 h 57; Ctrl + 1, Maya's, too)
     if ctrl && (pressed(Key::I) || pressed(Key::Num1)) {
         st.toggle_isolate();

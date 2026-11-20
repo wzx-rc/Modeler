@@ -4,6 +4,8 @@ use egui::{epaint::PathStroke, pos2, vec2, Color32, Painter, Pos2, Rect, Shape, 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
+    /// Align (3ds Max's): two bars lined up on a line.
+    Align,
     Select,
     Box,
     Cylinder,
@@ -336,6 +338,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(10.0, 13.0), (10.0, 3.0)]);
             pen.line(&[(6.0, 7.0), (10.0, 3.0), (14.0, 7.0)]);
             pen.line(&[(4.0, 12.0), (4.0, 16.0), (16.0, 16.0), (16.0, 12.0)]);
+        }
+        Icon::Align => {
+            pen.line(&[(4.0, 2.5), (4.0, 17.5)]);
+            pen.closed(&[(6.5, 5.0), (16.5, 5.0), (16.5, 9.0), (6.5, 9.0)]);
+            pen.closed(&[(6.5, 11.5), (12.5, 11.5), (12.5, 15.5), (6.5, 15.5)]);
         }
         Icon::Duplicate => {
             pen.closed(&[(7.0, 7.0), (17.0, 7.0), (17.0, 17.0), (7.0, 17.0)]);
