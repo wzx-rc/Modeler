@@ -842,6 +842,15 @@ pub struct AppState {
     pub poly_bevel: Option<crate::poly::PolyBevel>,
     pub poly_cut: Option<crate::poly::PolyCut>,
     pub poly_cut_hover: Option<crate::poly::CutAt>,
+    /// The SDF tab (`sdf.rs`): the settings of the next shapes, the shape
+    /// picked (its object, its node), a gizmo drag on it, each object's
+    /// mesh state (what it was made from, fine or not), the fine meshings
+    /// under way.
+    pub sdf: crate::sdf::SdfSettings,
+    pub sdf_sel: Option<(FeatureId, forme_core::NodeId)>,
+    pub sdf_drag: Option<crate::sdf::SdfDrag>,
+    pub sdf_meshed: std::collections::HashMap<FeatureId, (u64, bool)>,
+    pub sdf_jobs: Vec<crate::sdf::SdfJob>,
     /// Bumped when a mesh changes without a new document version (a
     /// sculpt stroke): the renderer uploads the meshes again.
     pub mesh_gen: u64,
@@ -969,6 +978,11 @@ impl AppState {
             poly_bevel: None,
             poly_cut: None,
             poly_cut_hover: None,
+            sdf: Default::default(),
+            sdf_sel: None,
+            sdf_drag: None,
+            sdf_meshed: Default::default(),
+            sdf_jobs: vec![],
             poly_loop: vec![],
             mesh_gen: 0,
         }
@@ -1611,6 +1625,10 @@ impl AppState {
         if self.poly_comp() && self.poly_delete() {
             return;
         }
+        // the SDF tab: the picked shape leaves its object
+        if self.sdf_comp() && self.sdf_delete() {
+            return;
+        }
         // picked faces or edges: a Delete step (faces: a hole is left;
         // edges: their two faces made one)
         if self.sel_mode == SelMode::Face && !self.face_sel.is_empty() {
@@ -1664,6 +1682,9 @@ impl AppState {
     }
 
     pub fn duplicate_selected(&mut self) {
+        if self.sdf_duplicate() {
+            return;
+        }
         // picked faces, edges or vertices (Romain 19 nov. 23 h 18: "dupliquer
         // ce morceau pour le déplacer devant, toujours mergé à l'entité"):
         // the elements they belong to, copied in place with their
@@ -2069,6 +2090,7 @@ impl AppState {
         self.workspace = w;
         self.poly_sel = None;
         self.poly_hover = None;
+        self.sdf_sel = None;
         // the components picked in the Forme tab are the part's
         if from == Workspace::Forme || w != Workspace::Forme {
             self.edge_sel.clear();
@@ -2080,6 +2102,15 @@ impl AppState {
                 // Sculpt works on whole clay meshes: the brush armed
                 self.sel_mode = SelMode::Object;
                 self.tool = Tool::Sculpt;
+            }
+            Workspace::Sdf => {
+                // the SDF tab picks shapes inside SDF objects (Object mode)
+                self.sel_mode = SelMode::Object;
+                self.tool = Tool::Select;
+                if self.selection.len() == 1 && self.doc.feature(self.selection[0]).map(crate::sdf::is_sdf).unwrap_or(false) {
+                    let id = self.selection[0];
+                    self.sdf_sel = self.doc.feature(id).and_then(crate::sdf::scene_of).and_then(|s| crate::sdf::shapes(s).last().copied()).map(|n| (id, n));
+                }
             }
             Workspace::Poly | Workspace::Forme => {
                 self.tool = Tool::Select;
@@ -2357,7 +2388,7 @@ impl AppState {
         if self.stroke.is_some() {
             self.end_stroke();
         }
-        if self.poly_drag.take().is_some() || self.poly_pull.take().is_some() || self.patch_drag.take().is_some() {
+        if self.poly_drag.take().is_some() || self.poly_pull.take().is_some() || self.patch_drag.take().is_some() || self.sdf_drag.take().is_some() {
             self.cancel_live();
             self.mesh_gen += 1;
         }
@@ -2403,6 +2434,9 @@ impl AppState {
             self.finish_poly_bevel();
         }
         self.end_poly_cut();
+        if self.sdf_drag.is_some() {
+            self.end_sdf_drag();
+        }
         if self.poly_drag.is_some() {
             self.end_poly_drag();
         }
@@ -3667,6 +3701,9 @@ impl AppState {
         if self.poly_comp() {
             return self.poly_pivot();
         }
+        if self.sdf_comp() {
+            return self.sdf_pivot();
+        }
         if self.sel_mode != SelMode::Object {
             return self.comp_pivot();
         }
@@ -3721,6 +3758,10 @@ impl AppState {
         }
         if self.poly_comp() {
             self.begin_poly_drag(h, p);
+            return;
+        }
+        if self.sdf_comp() {
+            self.begin_sdf_drag(h, p);
             return;
         }
         if self.sel_mode != SelMode::Object {
@@ -4061,6 +4102,7 @@ impl AppState {
         }
         self.refresh_snaps();
         self.remesh_tick();
+        self.sdf_tick();
         self.reference_tick();
         self.deviation_tick();
         let fine = !self.is_live();

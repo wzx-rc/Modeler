@@ -23,6 +23,7 @@ path = "src/bin/mcp.rs"
 
 [dependencies]
 nurbs-kernel = { path = "../nurbs-kernel" }
+forme-core = { path = "../forme-core" }
 rectify-core = { path = "../rectify-core" }
 glam.workspace = true
 bytemuck.workspace = true

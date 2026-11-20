@@ -77,7 +77,7 @@ fn ease_out(t: f32) -> f32 {
 }
 
 /// The tabs' lit pill: from the old tab's place to the new one's.
-pub fn pill(ctx: &Context, rects: &[Rect; 3], now: Workspace) -> Rect {
+pub fn pill(ctx: &Context, rects: &[Rect; 4], now: Workspace) -> Rect {
     let to = rects[now.index() as usize];
     match progress(ctx) {
         Some((from, _, k)) => {
@@ -111,7 +111,7 @@ pub fn enter<R>(ui: &mut Ui, slide: egui::Vec2, add: impl FnOnce(&mut Ui) -> R) 
 
 /// A soft streak of the new accent under the tabs, swept from the old tab
 /// to the new one and fading out (drawn on the view, under the islands).
-pub fn streak(ctx: &Context, rects: &[Rect; 3]) {
+pub fn streak(ctx: &Context, rects: &[Rect; 4]) {
     let Some((from, to, k)) = progress(ctx) else { return };
     let a = rects[from.index() as usize].center();
     let b = rects[to.index() as usize].center();

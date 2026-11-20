@@ -230,10 +230,11 @@ pub fn set_theme(ctx: &egui::Context, on: bool, space: crate::workspace::Workspa
 // orange. The Sculpt tab's accent is a light pastel copper, the Poly tab's a
 // pastel sky blue (Romain 20 nov.).
 
-/// One colour per workspace and theme: (Forme, Sculpt, Poly) × (dark, light).
-fn ws(c: [(u32, u32); 3]) -> Color32 {
+/// One colour per workspace and theme: (Forme, Sculpt, Poly, SDF) × (dark,
+/// light). The SDF tab's is a pastel green (Romain 20 nov., 23 h 47).
+fn ws(c: [(u32, u32); 4]) -> Color32 {
     let of = |i: usize| {
-        let (d, l) = c[i.min(2)];
+        let (d, l) = c[i.min(3)];
         let v = if light() { l } else { d };
         Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
     };
@@ -246,23 +247,23 @@ fn ws(c: [(u32, u32); 3]) -> Color32 {
 }
 
 pub fn accent() -> Color32 {
-    ws([(0xF2F3F5, 0x2B2F35), (0xECB48E, 0xB0643A), (0x9CD2F4, 0x2D7FB8)])
+    ws([(0xF2F3F5, 0x2B2F35), (0xECB48E, 0xB0643A), (0x9CD2F4, 0x2D7FB8), (0x9EE09A, 0x2E8B3E)])
 }
 pub fn accent_light() -> Color32 {
-    ws([(0xFFFFFF, 0x5A6069), (0xF7D3BA, 0xC9845C), (0xC6E6FA, 0x5A9FCF)])
+    ws([(0xFFFFFF, 0x5A6069), (0xF7D3BA, 0xC9845C), (0xC6E6FA, 0x5A9FCF), (0xC8F0C4, 0x5BAF66)])
 }
 pub fn accent_bg() -> Color32 {
-    ws([(0x2E3238, 0xE4E7EB), (0x3B2E27, 0xF6E6DC), (0x24313C, 0xDDEBF5)])
+    ws([(0x2E3238, 0xE4E7EB), (0x3B2E27, 0xF6E6DC), (0x24313C, 0xDDEBF5), (0x253626, 0xDFF1E0)])
 }
 pub fn accent_border() -> Color32 {
-    ws([(0x6A707A, 0x9AA1AB), (0x93705A, 0xD3A587), (0x5B8098, 0x8DB8D6)])
+    ws([(0x6A707A, 0x9AA1AB), (0x93705A, 0xD3A587), (0x5B8098, 0x8DB8D6), (0x5F9A5D, 0x8FC897)])
 }
 pub fn accent_text() -> Color32 {
-    ws([(0xFFFFFF, 0x111316), (0xFFE6D5, 0x5A2D14), (0xE2F3FF, 0x123A57)])
+    ws([(0xFFFFFF, 0x111316), (0xFFE6D5, 0x5A2D14), (0xE2F3FF, 0x123A57), (0xE4FBE2, 0x123F1A)])
 }
 /// Text and icons drawn on a filled accent.
 pub fn on_accent() -> Color32 {
-    ws([(0x15171A, 0xFFFFFF), (0x24160E, 0xFFFFFF), (0x0E1A24, 0xFFFFFF)])
+    ws([(0x15171A, 0xFFFFFF), (0x24160E, 0xFFFFFF), (0x0E1A24, 0xFFFFFF), (0x0F1F10, 0xFFFFFF)])
 }
 pub fn carve() -> Color32 {
     pick(Color32::from_rgb(0xF0, 0x8A, 0x3C), Color32::from_rgb(0xD9, 0x66, 0x1A))

@@ -16,16 +16,20 @@ pub enum Workspace {
     Sculpt,
     /// Polygonal meshes edited by vertices, edges and faces.
     Poly,
+    /// SDF objects: shapes blended and carved live (Forme SDF's engine,
+    /// Romain 20 nov. 2026, 23 h 47: "la couleur serait le vert").
+    Sdf,
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 3] = [Workspace::Forme, Workspace::Sculpt, Workspace::Poly];
+    pub const ALL: [Workspace; 4] = [Workspace::Forme, Workspace::Sculpt, Workspace::Poly, Workspace::Sdf];
 
     pub fn label(self) -> &'static str {
         match self {
             Workspace::Forme => "Forme",
             Workspace::Sculpt => "Sculpt",
             Workspace::Poly => "Poly",
+            Workspace::Sdf => "SDF",
         }
     }
 
@@ -34,6 +38,7 @@ impl Workspace {
             Workspace::Forme => 0,
             Workspace::Sculpt => 1,
             Workspace::Poly => 2,
+            Workspace::Sdf => 3,
         }
     }
 
@@ -41,6 +46,7 @@ impl Workspace {
         match i {
             1 => Workspace::Sculpt,
             2 => Workspace::Poly,
+            3 => Workspace::Sdf,
             _ => Workspace::Forme,
         }
     }
@@ -51,6 +57,8 @@ impl Workspace {
             Workspace::Forme => Color32::from_rgb(0xF2, 0xF3, 0xF5),
             Workspace::Sculpt => Color32::from_rgb(0xEC, 0xB4, 0x8E),
             Workspace::Poly => Color32::from_rgb(0x9C, 0xD2, 0xF4),
+            // a pastel green, as light as the others
+            Workspace::Sdf => Color32::from_rgb(0x9E, 0xE0, 0x9A),
         }
     }
 
@@ -60,6 +68,7 @@ impl Workspace {
             Workspace::Forme => Icon::TabForme,
             Workspace::Sculpt => Icon::TabSculpt,
             Workspace::Poly => Icon::TabPoly,
+            Workspace::Sdf => Icon::TabSdf,
         }
     }
 
@@ -68,6 +77,7 @@ impl Workspace {
             Workspace::Forme => "Forme: hard-surface NURBS shapes (OpenCascade), fillets, operations",
             Workspace::Sculpt => "Sculpt: clay meshes shaped with brushes (draw, clay, smooth, grab…)",
             Workspace::Poly => "Poly: polygonal meshes edited by vertices, edges and faces",
+            Workspace::Sdf => "SDF: shapes blended and carved live (Add, Carve, Intersect with a blend radius), Forme SDF's engine",
         }
     }
 }

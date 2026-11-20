@@ -34,6 +34,7 @@ pub mod sculpt;
 pub mod poly;
 pub mod linked;
 pub mod tab_anim;
+pub mod sdf;
 
 pub use state::AppState;
 

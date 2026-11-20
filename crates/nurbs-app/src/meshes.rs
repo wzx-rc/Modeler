@@ -184,7 +184,7 @@ fn linked_vertices(f: &Feature, m: &MeshData, p: &Patch, base: u32, solids: &[So
         return 2;
     }
     let (lp, lf, parent) = layer_polys(f, p, solids, false);
-    let tmp = MeshData { kind: MeshKind::Poly, verts: vec![], faces: lf.clone(), smooth: false, angle: m.angle, patch: None };
+    let tmp = MeshData { kind: MeshKind::Poly, verts: vec![], faces: lf.clone(), smooth: false, angle: m.angle, patch: None, sdf: None };
     let cn = tmp.corner_normals(&lp, m.angle);
     for (i, (q, ns)) in lf.iter().zip(&cn).enumerate() {
         for t in patch::triangulate(&lp, q) {
@@ -269,10 +269,22 @@ pub fn mesh_vertices(f: &Feature, base: u32, solids: &[Solid], out: &mut Vec<Mes
             }
             1
         }
+        MeshKind::Sdf => {
+            // dual contouring keeps hard-surface edges: smooth within 40°,
+            // hard past it (a cube's edges, a carve's rim); one face slot
+            let cn = m.corner_normals(&pts, 40.0);
+            out.reserve(m.faces.len() * 3);
+            for (q, ns) in m.faces.iter().zip(&cn) {
+                for c in 0..3.min(q.len()) {
+                    out.push(MeshVertex { pos: pts[q[c] as usize].to_array(), nrm: ns[c].to_array(), face: base, dev: NO_DEV });
+                }
+            }
+            1
+        }
         MeshKind::Poly => {
             if m.smooth {
                 let (p, fs, parent) = smoothed(&pts, &m.faces, 2);
-                let tmp = MeshData { kind: MeshKind::Poly, verts: vec![], faces: fs.clone(), smooth: false, angle: m.angle, patch: None };
+                let tmp = MeshData { kind: MeshKind::Poly, verts: vec![], faces: fs.clone(), smooth: false, angle: m.angle, patch: None, sdf: None };
                 let n = tmp.vertex_normals(&p);
                 for (i, q) in fs.iter().enumerate() {
                     for k in 1..q.len().saturating_sub(1) {

@@ -126,7 +126,7 @@ fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
     // Q: no gizmo; E and R: rings and scale handles (shapes only)
     match st.gizmo {
         GizmoMode::Select => return None,
-        GizmoMode::Rotate if st.sel_mode == SelMode::Object || st.poly_comp() => return ring_at(st, p),
+        GizmoMode::Rotate if st.sel_mode == SelMode::Object || st.poly_comp() || st.sdf_comp() => return ring_at(st, p),
         GizmoMode::Scale => return cage_at(st, p),
         _ => {}
     }
@@ -566,6 +566,37 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         return;
     }
 
+    // the SDF tab: a click picks the shape under the pointer inside its SDF
+    // object; the gizmo then works on that shape (`sdf.rs`)
+    if st.workspace == crate::workspace::Workspace::Sdf && st.tool == Tool::Select {
+        if st.sdf_comp() || st.sdf_drag.is_some() {
+            if resp.drag_started_by(PointerButton::Primary) {
+                let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                if let Some(h) = handle_at(st, origin) {
+                    st.begin_drag(h, p2(origin));
+                }
+            }
+            if resp.dragged_by(PointerButton::Primary) && st.sdf_drag.is_some() {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.update_sdf_drag(p2(p));
+                    st.interacting = true;
+                }
+            }
+            if resp.drag_stopped() && st.sdf_drag.is_some() {
+                st.end_sdf_drag();
+            }
+        }
+        if st.sdf_drag.is_none() && st.drag.is_none() && resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.sdf_click(p2(p));
+            }
+            return;
+        }
+        if st.sdf_comp() || st.sdf_drag.is_some() {
+            return;
+        }
+    }
+
     // Vertex, Edge and Face modes: the selected inset's dot and arrow, the
     // gizmo of the picked component (a drag moves it, Plasticity style)
     if st.tool == Tool::Select && st.sel_mode != SelMode::Object {
@@ -965,7 +996,7 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
         return;
     }
     let hot = st.hot_handle;
-    let dragging = st.drag.as_ref().map(|d| d.handle).or(st.poly_drag.as_ref().map(|d| d.handle)).or(st.patch_drag.as_ref().map(|d| d.handle));
+    let dragging = st.drag.as_ref().map(|d| d.handle).or(st.poly_drag.as_ref().map(|d| d.handle)).or(st.sdf_drag.as_ref().map(|d| d.handle)).or(st.patch_drag.as_ref().map(|d| d.handle));
     if st.gizmo == GizmoMode::Select {
         return;
     }
@@ -1959,6 +1990,16 @@ fn sculpt_poly_hint(st: &AppState) -> Option<String> {
     }
     if st.workspace == Workspace::Poly && st.tool == Tool::Select && st.drag.is_none() && st.selection.is_empty() {
         return Some("B: a cube · C: a cylinder · O: a sphere · P: a plane · Then 1 2 3: points, edges, faces · Alt + drag: orbit".into());
+    }
+    if st.sdf_drag.is_some() {
+        return Some("Release: keep it · the blend follows live · Ctrl: no snapping".into());
+    }
+    if st.workspace == Workspace::Sdf && st.tool == Tool::Select {
+        return Some(if st.sdf_comp() {
+            "Click: another shape · W E R: move, turn, size the shape · A X I: Add, Carve, Intersect · [ ]: blend · B C O P T: a shape more · Ctrl + D: copy · Del: delete".into()
+        } else {
+            "B C O P T: cube, cylinder, sphere, capsule, torus (a new SDF object, or into the selected one) · Click an SDF object: its shape under the pointer".into()
+        });
     }
     if st.workspace == Workspace::Sculpt && st.tool == Tool::Select && st.drag.is_none() {
         return Some("X C V S G I T P or a brush card: sculpt again · W E R: move, turn, scale the selection · O / B: new clay".into());

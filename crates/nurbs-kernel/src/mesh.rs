@@ -25,6 +25,9 @@ pub enum MeshKind {
     Sculpt,
     /// Components (Poly tab): quads and n-gons.
     Poly,
+    /// The SDF tab: the mesh is the surface of its `sdf` scene, made
+    /// again by dual contouring at each change of it (never edited itself).
+    Sdf,
 }
 
 impl MeshKind {
@@ -32,6 +35,7 @@ impl MeshKind {
         match self {
             MeshKind::Sculpt => "Sculpt",
             MeshKind::Poly => "Poly",
+            MeshKind::Sdf => "SDF",
         }
     }
 }
@@ -58,6 +62,86 @@ pub struct MeshData {
     /// the NURBS patch kept here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch: Option<crate::patch::Patch>,
+    /// An SDF object (the SDF tab, Romain 20 nov. 2026: "reprendre le
+    /// moteur SDF… la couleur serait le vert"): its shapes, combined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdf: Option<SdfModel>,
+}
+
+/// An SDF object's shapes (Forme SDF's scene) and where they sit in the
+/// feature's frame. The scene is in millimetres; `offset` is where its
+/// origin is in the feature's frame (the unit box is fitted to the surface
+/// at each meshing, which moves the frame's base: `offset` keeps the shapes
+/// where they are); `size` the box's sizes when it was last meshed (a scale
+/// of the box since is taken into the shapes at the next meshing).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SdfModel {
+    pub scene: forme_core::Scene,
+    pub offset: [f32; 3],
+    pub size: [f32; 3],
+}
+
+impl SdfModel {
+    /// A scene with nothing in it yet, its origin at the frame's.
+    pub fn new() -> SdfModel {
+        SdfModel { scene: forme_core::Scene::new(), offset: [0.0; 3], size: [0.0; 3] }
+    }
+
+    /// The scene's point to the feature's frame (mm).
+    pub fn to_frame(&self, p: Vec3) -> Vec3 {
+        p + Vec3::from(self.offset)
+    }
+
+    /// The feature's frame (mm) to the scene.
+    pub fn to_scene(&self, p: Vec3) -> Vec3 {
+        p - Vec3::from(self.offset)
+    }
+
+    /// The box's sizes changed by a scale since the last meshing (`now`):
+    /// the shapes scaled with it (positions along each axis, sizes by the
+    /// mean when the shape is turned, else along its axes), so the next
+    /// meshing gives what the stretched mesh showed.
+    pub fn take_scale(&mut self, now: Vec3) {
+        let was = Vec3::from(self.size);
+        if was.min_element() <= 1e-4 {
+            self.size = now.to_array();
+            return;
+        }
+        let r = now / was;
+        if (r - Vec3::ONE).abs().max_element() < 1e-4 {
+            return;
+        }
+        let mean = (r.x * r.y * r.z).cbrt();
+        self.offset = (Vec3::from(self.offset) * r).to_array();
+        for n in self.scene.nodes.values_mut() {
+            n.transform.pos *= r;
+            let turned = n.transform.rot.angle_between(glam::Quat::IDENTITY) > 1e-3;
+            if let forme_core::NodeKind::Shape(sh) = &mut n.kind {
+                use forme_core::PrimKind as K;
+                let k = if turned { Vec3::splat(mean) } else { r };
+                match sh.kind {
+                    K::Box => sh.size *= k,
+                    K::Sphere => sh.size *= mean,
+                    // radius across (x, z), height along y
+                    K::Cylinder | K::Capsule | K::Cone | K::Tube | K::Prism => {
+                        let across = (k.x * k.z).sqrt();
+                        sh.size = Vec3::new(sh.size.x * across, sh.size.y * k.y, sh.size.z * across);
+                    }
+                    _ => sh.size *= mean,
+                }
+                sh.round *= mean;
+                sh.chamfer *= mean;
+            }
+            n.combine.blend *= mean;
+        }
+        self.size = now.to_array();
+    }
+}
+
+impl Default for SdfModel {
+    fn default() -> Self {
+        SdfModel::new()
+    }
 }
 
 /// Maya's default normal angle.
@@ -960,7 +1044,7 @@ mod tests {
 
     #[test]
     fn smoothing_angle() {
-        let data = |p: &[Vec3], f: Vec<Vec<u32>>| MeshData { kind: MeshKind::Poly, verts: p.iter().map(|v| v.to_array()).collect(), faces: f, smooth: false, angle: DEFAULT_ANGLE, patch: None };
+        let data = |p: &[Vec3], f: Vec<Vec<u32>>| MeshData { kind: MeshKind::Poly, verts: p.iter().map(|v| v.to_array()).collect(), faces: f, smooth: false, angle: DEFAULT_ANGLE, patch: None, sdf: None };
         // a cube: hard at 30 (each corner its face's normal), soft at 180
         let (p, f) = poly_cube(20.0);
         let m = data(&p, f);
@@ -1036,7 +1120,7 @@ mod tests {
         assert!((top.y - 30.0).abs() < 1e-4);
         inset_faces(&mut p, &mut f, &[3], 0.25);
         assert!(closed(&f) && outward(&p, &f));
-        let mut m = MeshData { kind: MeshKind::Poly, verts: p.iter().map(|v| v.to_array()).collect(), faces: f, smooth: false, angle: DEFAULT_ANGLE, patch: None };
+        let mut m = MeshData { kind: MeshKind::Poly, verts: p.iter().map(|v| v.to_array()).collect(), faces: f, smooth: false, angle: DEFAULT_ANGLE, patch: None, sdf: None };
         delete_faces(&mut m, &[3]);
         assert_eq!(m.faces.len(), 13);
         assert_eq!(m.verts.len(), 16);

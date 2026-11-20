@@ -80,6 +80,9 @@ impl AppState {
     /// The scale cage round what is selected: the shapes (Object mode, in
     /// the active one's frame) or the picked components (the world's).
     pub fn cage(&self) -> Option<CageBox> {
+        if self.sdf_comp() {
+            return self.sdf_cage();
+        }
         let (frame, pts): (DQuat, Vec<DVec3>) = if self.sel_mode == SelMode::Object {
             let ids = self.doc.with_operands(&self.selection);
             let fs: Vec<&nurbs_kernel::Feature> = self.doc.features.iter().filter(|f| ids.contains(&f.id) && f.is_solid()).collect();

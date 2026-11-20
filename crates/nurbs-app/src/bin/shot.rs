@@ -320,6 +320,9 @@ fn main() {
     if want("multi") {
         multi(&mut h);
     }
+    if want("sdf") {
+        sdf_tab(&mut h);
+    }
     if want("pbevel") {
         poly_bevel(&mut h);
     }
@@ -4690,6 +4693,113 @@ fn main() {
 /// The three tabs (Romain, 20 nov.: Forme, Sculpt, Poly) in one scene: the
 /// test part in Forme, a clay sphere sculpted on top of it, a Poly cube
 /// beside it extruded, inset and cut by an edge loop.
+/// The SDF tab (Romain 20 nov., 23 h 47: the SDF engine back, green): a
+/// cube, a sphere blended on it and moved by the gizmo (live), a cylinder
+/// carved through, a capsule and a torus, sizes and fillet from the window.
+fn sdf_tab(h: &mut Harness) {
+    use egui::Key;
+    use nurbs_app::state::{GizmoMode, Handle};
+    h.reset(Doc::default(), "SDF");
+    h.key(Key::F4);
+    h.steps(3);
+    h.shot("sdf-01-tab");
+    // B: a new SDF object, a 20 mm cube standing on the ground
+    h.key(Key::B);
+    h.st.sdf_settle();
+    h.steps(2);
+    h.st.sdf_edit_node("Fillet", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::new(16.0, 8.0, 12.0);
+            s.round = 1.5;
+        }
+    });
+    h.st.sdf_settle();
+    h.st.frame_current();
+    h.settle();
+    h.st.camera.dist *= 2.2;
+    h.steps(3);
+    h.shot("sdf-02-cube");
+    // O: a sphere on top of it, blended 4 mm
+    h.st.sdf.blend = 4.0;
+    h.key(Key::O);
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("sdf-03-sphere-blend");
+    // the gizmo moves the sphere along X: live (coarse), then fine
+    let pv = h.st.sdf_pivot().unwrap().as_vec3();
+    let a = h.screen_of(pv);
+    let b = h.screen_of(pv + Vec3::new(9.0, 0.0, 0.0));
+    h.st.set_gizmo(GizmoMode::Move);
+    h.st.begin_drag(Handle::Axis(0), [a.x, a.y]);
+    for i in 1..=8 {
+        let q = a + (b - a) * (i as f32 / 8.0);
+        h.st.update_sdf_drag([q.x, q.y]);
+        h.steps(1);
+    }
+    h.shot("sdf-04-move-live");
+    eprintln!("sphere at {:?} (from {pv:?})", h.st.sdf_pivot());
+    h.st.end_sdf_drag();
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("sdf-05-moved");
+    // X then C: a cylinder carved from the sphere's top, down through the cube
+    h.st.sdf.mode = forme_core::CombineMode::Carve;
+    h.st.sdf.blend = 1.0;
+    h.key(Key::C);
+    h.st.sdf_edit_node("Size", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::new(4.0, 30.0, 0.0);
+        }
+    });
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("sdf-06-carve");
+    // the cube picked by a click on its side, a capsule and a torus added
+    let cube = h.screen_of(Vec3::new(-12.0, 8.0, 12.0));
+    h.click(cube);
+    h.steps(2);
+    eprintln!("picked: {:?}", h.st.sdf_sel);
+    h.key(Key::A);
+    h.st.sdf.blend = 2.0;
+    h.key(Key::T);
+    h.st.sdf_edit_node("Move", |n| n.transform.pos = Vec3::new(-8.0, 16.0, 0.0));
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("sdf-07-torus");
+    h.st.set_gizmo(GizmoMode::Rotate);
+    h.key(Key::P);
+    h.st.sdf_edit_node("Move", |n| {
+        n.transform.pos = Vec3::new(0.0, 8.0, 12.0);
+        n.transform.rot = glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    });
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("sdf-08-capsule");
+    // the window: the picked shape's settings and the list
+    h.st.set_gizmo(GizmoMode::Scale);
+    h.steps(2);
+    h.shot("sdf-09-cage");
+    // the whole object in the Forme tab, beside nothing: a mesh like any
+    h.key(Key::F1);
+    h.steps(2);
+    h.shot("sdf-10-forme-tab");
+    // undo all the way back, redo
+    let n = h.st.undo_labels().len();
+    eprintln!("undo list: {:?}", h.st.undo_labels());
+    for _ in 0..3 {
+        h.st.undo();
+    }
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("sdf-11-undo3");
+    let _ = n;
+    // the light theme
+    h.key(Key::F4);
+    h.st.settings.light = true;
+    h.steps(3);
+    h.shot("sdf-12-light");
+}
+
 fn multi(h: &mut Harness) {
     use egui::Key;
     h.reset(test_part(), "Robot");

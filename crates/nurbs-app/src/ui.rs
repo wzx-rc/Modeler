@@ -55,6 +55,7 @@ pub fn feature_icon(f: &Feature) -> Icon {
         return match m.kind {
             nurbs_kernel::mesh::MeshKind::Sculpt => Icon::TabSculpt,
             nurbs_kernel::mesh::MeshKind::Poly => Icon::TabPoly,
+            nurbs_kernel::mesh::MeshKind::Sdf => Icon::TabSdf,
         };
     }
     if let Some(k) = &f.cut {
@@ -108,6 +109,7 @@ pub fn feature_color(f: &Feature) -> Color32 {
         return match m.kind {
             nurbs_kernel::mesh::MeshKind::Sculpt => Workspace::Sculpt.swatch(),
             nurbs_kernel::mesh::MeshKind::Poly => Workspace::Poly.swatch(),
+            nurbs_kernel::mesh::MeshKind::Sdf => Workspace::Sdf.swatch(),
         };
     }
     if f.is_solid() {
@@ -205,7 +207,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                if st.workspace != Workspace::Sculpt {
+                if st.workspace != Workspace::Sculpt && st.workspace != Workspace::Sdf {
                     mode_pill(ui, st);
                     island_sep(ui);
                 }
@@ -220,6 +222,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     Tool::Select if st.workspace == Workspace::Poly => format!("POLY · {}", st.sel_mode.label().to_uppercase()),
                     // the Sculpt tab's island is wide (size, strength): short
                     Tool::Select if st.workspace == Workspace::Sculpt => "SELECT".into(),
+                    Tool::Select if st.workspace == Workspace::Sdf => "SDF".into(),
                     Tool::Select => format!("SELECTION · {}", st.sel_mode.label().to_uppercase()),
                     Tool::Sculpt => st.sculpt.brush.label().to_uppercase(),
                     Tool::PolyLoop => "INSERT EDGE LOOP".into(),
@@ -232,6 +235,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 crate::tab_anim::enter(ui, vec2(0.0, -6.0), |ui| match st.workspace {
                     Workspace::Sculpt => sculpt_controls(ui, st),
                     Workspace::Poly => poly_controls(ui, st),
+                    Workspace::Sdf => sdf_controls(ui, st),
                     Workspace::Forme => forme_controls(ui, st),
                 });
                 island_sep(ui);
@@ -389,6 +393,47 @@ fn poly_controls(ui: &mut Ui, st: &mut AppState) {
     }
 }
 
+/// The SDF tab's part of the centre island: Add / Carve / Intersect and the
+/// blend radius, for the next shapes and the picked one.
+fn sdf_controls(ui: &mut Ui, st: &mut AppState) {
+    use forme_core::CombineMode;
+    island_sep(ui);
+    let picked = st.sdf_picked().and_then(|(f, n)| crate::sdf::scene_of(f).and_then(|s| s.node(n)).map(|nd| (nd.combine.mode, nd.combine.blend)));
+    let (mode, blend) = picked.unwrap_or((st.sdf.mode, st.sdf.blend));
+    for (m, icon, label, tip) in [
+        (CombineMode::Add, Icon::BoolUnion, "ADD", "Add: the shape joins the object, blended with what is before it"),
+        (CombineMode::Carve, Icon::BoolSubtract, "CARVE", "Carve: the shape cuts into what is before it, its rim blended"),
+        (CombineMode::Intersect, Icon::BoolIntersect, "INTERSECT", "Intersect: only what is inside both stays"),
+    ] {
+        if chip(ui, Some(icon), label, mode == m, tip).clicked() {
+            st.sdf.mode = m;
+            if picked.is_some() {
+                st.sdf_edit_node(&format!("Make it {}", m.label()), |n| n.combine.mode = m);
+            }
+        }
+    }
+    island_sep(ui);
+    let small = |ui: &mut Ui, t: &str| {
+        let g = ui.painter().layout_no_wrap(t.to_string(), mono(10.0), TEXT2());
+        let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 2.0, 28.0), Sense::hover());
+        ui.painter().galley(pos2(r.min.x, r.center().y - g.size().y * 0.5), g, TEXT2());
+    };
+    small(ui, "BLEND");
+    let mut b = blend;
+    let (changed, _) = touch_slider(ui, Id::new("sdf-blend"), &mut b, 0.0, 10.0, false, 0.1, 80.0);
+    let b = b.clamp(0.0, 30.0);
+    if changed && (b - blend).abs() > 1e-4 {
+        st.sdf.blend = b;
+        if picked.is_some() {
+            st.sdf_live_node("Blend", |n| n.combine.blend = b);
+        }
+    }
+    if !ui.input(|i| i.pointer.any_down()) && st.is_live() && st.sdf_drag.is_none() {
+        st.end_live();
+    }
+    small(ui, &format!("{} mm", fmt_mm(b)));
+}
+
 /// The component modes (like Plasticity): Vertex, Edge, Face, Object, the
 /// current one lit (with the Select tool).
 fn mode_pill(ui: &mut Ui, st: &mut AppState) {
@@ -474,7 +519,7 @@ fn tabs(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 let tabs: Vec<(Rect, egui::Response)> = Workspace::ALL.iter().map(|_| ui.allocate_exact_size(vec2(116.0, TABS_H - 6.0), Sense::click())).collect();
-                let rects = [tabs[0].0, tabs[1].0, tabs[2].0];
+                let rects = [tabs[0].0, tabs[1].0, tabs[2].0, tabs[3].0];
                 let p = ui.painter().clone();
                 for (w, (r, resp)) in Workspace::ALL.into_iter().zip(&tabs) {
                     if st.workspace != w && resp.hovered() {
@@ -599,6 +644,161 @@ fn poly_rail(ui: &mut Ui, st: &mut AppState) {
     }
 }
 
+/// The SDF tab's tools: the five shapes (into the SDF object worked on,
+/// else a new one), the operation of the next ones.
+fn sdf_rail(ui: &mut Ui, st: &mut AppState) {
+    use crate::sdf::{prim_icon, prim_key, prim_label, SDF_PRIMS};
+    use forme_core::CombineMode;
+    let into = st.sdf_target().and_then(|id| st.doc.feature(id)).map(|f| f.name.clone());
+    section_small(ui, if into.is_some() { "ADD A SHAPE" } else { "NEW SDF OBJECT" });
+    for row in SDF_PRIMS.chunks(3) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let w = ((CARDS_W - 12.0 - 2.0 * 4.0) / 3.0).floor();
+            for k in row {
+                let key = prim_key(*k);
+                let tip = match &into {
+                    Some(n) => format!("{} ({key}): into {n}, {} with a blend of {} mm", prim_label(*k), st.sdf.mode.label().to_lowercase(), fmt_mm(st.sdf.blend)),
+                    None => format!("{} ({key}): a new SDF object on the view's centre, standing on the ground", prim_label(*k)),
+                };
+                let r = icon_btn(ui, prim_icon(*k), false, &tip, w);
+                key_hint(ui, &r, key);
+                if r.clicked() {
+                    st.sdf_add(*k);
+                }
+            }
+        });
+    }
+    divider(ui);
+    let picked = st.sdf_picked().and_then(|(f, n)| crate::sdf::scene_of(f).and_then(|s| s.node(n)).map(|nd| nd.combine.mode));
+    let mode = picked.unwrap_or(st.sdf.mode);
+    for (m, icon, key, sub) in [(CombineMode::Add, Icon::BoolUnion, "A", "UNION · BLEND"), (CombineMode::Carve, Icon::BoolSubtract, "X", "CUT · BLEND"), (CombineMode::Intersect, Icon::BoolIntersect, "I", "COMMON PART")] {
+        let c = if m == CombineMode::Carve { carve() } else { accent() };
+        if card(ui, Some(icon), &m.label().to_uppercase(), &format!("{sub} · {key}"), mode == m, c, &format!("{} ({key}): the next shapes, and the picked one", m.label())).clicked() {
+            st.sdf.mode = m;
+            if picked.is_some() {
+                st.sdf_edit_node(&format!("Make it {}", m.label()), |n| n.combine.mode = m);
+            }
+        }
+    }
+}
+
+/// An SDF object's window: its shapes in order (a click picks one), the
+/// picked one's operation, blend, sizes and fillet.
+fn sdf_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    use forme_core::{CombineMode, PrimKind};
+    let Some(scene) = crate::sdf::scene_of(f).cloned() else { return };
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let list = crate::sdf::shapes(&scene);
+    let tris = f.mesh.as_ref().map(|m| m.faces.len()).unwrap_or(0);
+    let fine = st.sdf_meshed.get(&f.id).map(|s| s.1).unwrap_or(false);
+    let g = ui.painter().layout_no_wrap(format!("{} shape{} · {} triangles{}", list.len(), if list.len() > 1 { "s" } else { "" }, tris, if fine { "" } else { " · meshing…" }), regular(12.0), TEXT2());
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+    ui.painter().galley(pos2(r.min.x, r.center().y - g.size().y * 0.5), g, TEXT2());
+    section(ui, "Shapes");
+    let picked = st.sdf_sel.filter(|(id, _)| *id == f.id).map(|(_, n)| n);
+    for n in &list {
+        let Some(nd) = scene.node(*n) else { continue };
+        let Some(sh) = nd.shape() else { continue };
+        let on = picked == Some(*n);
+        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+        let p = ui.painter();
+        if on {
+            p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+        } else if resp.hovered() {
+            p.rect_filled(r, 6.0, RAISED());
+        }
+        let c = match nd.combine.mode {
+            CombineMode::Carve => carve(),
+            CombineMode::Add => accent(),
+            _ => TEXT2(),
+        };
+        icons::paint(p, Rect::from_min_size(pos2(r.min.x + 6.0, r.center().y - 7.0), vec2(14.0, 14.0)), crate::sdf::prim_icon(sh.kind), c);
+        p.text(pos2(r.min.x + 28.0, r.center().y), Align2::LEFT_CENTER, &nd.name, regular(12.5), if on { accent_text() } else { TEXT() });
+        let info = if nd.combine.blend > 0.0 { format!("{} · {}", nd.combine.mode.label(), fmt_mm(nd.combine.blend)) } else { nd.combine.mode.label().to_string() };
+        p.text(pos2(r.max.x - 6.0, r.center().y), Align2::RIGHT_CENTER, info, mono(10.0), c);
+        if resp.clicked() {
+            st.sdf_sel = Some((f.id, *n));
+            st.selection = vec![f.id];
+            if st.workspace != Workspace::Sdf {
+                st.set_workspace(Workspace::Sdf);
+                st.sdf_sel = Some((f.id, *n));
+            }
+        }
+    }
+    let Some(n) = picked else {
+        let g = ui.painter().layout_no_wrap("Click a shape (here or in the view) to edit it".to_string(), regular(11.5), TEXT2());
+        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+        ui.painter().galley(pos2(r.min.x, r.center().y - g.size().y * 0.5), g, TEXT2());
+        return;
+    };
+    let Some(nd) = scene.node(n).cloned() else { return };
+    let Some(sh) = nd.shape().cloned() else { return };
+    section(ui, &nd.name);
+    if let Some(m) = segmented(ui, &[(CombineMode::Add, "Add", accent()), (CombineMode::Carve, "Carve", carve()), (CombineMode::Intersect, "Intersect", TEXT())], nd.combine.mode, 28.0) {
+        st.sdf.mode = m;
+        st.sdf_edit_node(&format!("Make it {}", m.label()), |x| x.combine.mode = m);
+    }
+    let mut live = false;
+    let mut b = nd.combine.blend;
+    if slider_row(ui, "Blend", &mut b, 0.0..=30.0, 0.1, "mm").0 && (b - nd.combine.blend).abs() > 1e-5 {
+        st.sdf_live_node("Blend", |x| x.combine.blend = b);
+        live = true;
+    }
+    // sizes are half sizes in the engine: shown whole
+    let rows: Vec<(&str, usize)> = match sh.kind {
+        PrimKind::Box => vec![("Width", 0), ("Height", 1), ("Depth", 2)],
+        PrimKind::Cylinder | PrimKind::Capsule => vec![("Diameter", 0), ("Height", 1)],
+        PrimKind::Sphere => vec![("Diameter", 0)],
+        PrimKind::Torus => vec![("Diameter", 0), ("Thickness", 2)],
+        _ => vec![("Size", 0)],
+    };
+    for (label, a) in rows {
+        let was = sh.size[a] * 2.0;
+        let mut v = was;
+        if slider_row(ui, label, &mut v, 0.2..=500.0, 0.1, "mm").0 && (v - was).abs() > 1e-5 {
+            let k = sh.kind;
+            st.sdf_live_node("Size", |x| {
+                if let Some(s) = x.shape_mut() {
+                    if k == PrimKind::Sphere {
+                        s.size = glam::Vec3::splat(v * 0.5);
+                    } else {
+                        s.size[a] = v * 0.5;
+                    }
+                }
+            });
+            live = true;
+        }
+    }
+    if matches!(sh.kind, PrimKind::Box | PrimKind::Cylinder) {
+        let was = sh.round;
+        let mut v = was;
+        if slider_row(ui, "Fillet", &mut v, 0.0..=50.0, 0.1, "mm").0 && (v - was).abs() > 1e-5 {
+            st.sdf_live_node("Fillet", |x| {
+                if let Some(s) = x.shape_mut() {
+                    s.round = v;
+                    s.edges.clear();
+                }
+            });
+            live = true;
+        }
+    }
+    if !any_down && !live && st.is_live() && st.sdf_drag.is_none() {
+        st.end_live();
+    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if secondary_btn(ui, "Duplicate", 96.0).clicked() {
+            st.sdf_duplicate();
+        }
+        if secondary_btn(ui, "Delete shape", 110.0).clicked() {
+            if !st.sdf_delete() {
+                st.delete_selected();
+            }
+        }
+    });
+}
+
 /// A small title in the rail.
 fn section_small(ui: &mut Ui, title: &str) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 14.0), Sense::hover());
@@ -647,6 +847,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             crate::tab_anim::enter(ui, vec2(14.0, 0.0), |ui| match st.workspace {
                 Workspace::Sculpt => sculpt_rail(ui, st),
                 Workspace::Poly => poly_rail(ui, st),
+                Workspace::Sdf => sdf_rail(ui, st),
                 Workspace::Forme => {
                     let mode = st.mode;
                     let m = if mode == Op::Add { "ADD" } else { "CARVE" };
@@ -2450,6 +2651,7 @@ fn state_buttons(ui: &mut Ui, items: &[(nurbs_kernel::patch::PatchState, &str, W
             Workspace::Forme => pick(ws.swatch(), Color32::from_rgb(0x2A, 0x2D, 0x33)),
             Workspace::Sculpt => pick(ws.swatch(), Color32::from_rgb(0xB8, 0x69, 0x3A)),
             Workspace::Poly => pick(ws.swatch(), Color32::from_rgb(0x2F, 0x86, 0xC0)),
+            Workspace::Sdf => pick(ws.swatch(), Color32::from_rgb(0x2E, 0x8B, 0x3E)),
         };
         let p = ui.painter();
         let fg = if on {
@@ -2488,6 +2690,10 @@ fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
         if p.state != nurbs_kernel::patch::PatchState::Poly {
             return;
         }
+    }
+    if crate::sdf::is_sdf(f) {
+        sdf_card(ui, st, f);
+        return;
     }
     if let Some(m) = f.mesh.clone() {
         let sculpt = m.kind == nurbs_kernel::mesh::MeshKind::Sculpt;
@@ -3239,15 +3445,16 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     let (ctrl, shift) = ctx.input(|i| (i.modifiers.ctrl || i.modifiers.mac_cmd, i.modifiers.shift));
     let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
     let space = st.workspace;
-    // the tabs: F1 Forme, F2 Sculpt, F3 Poly; Ctrl + Tab the next one
-    for (k, w) in [(Key::F1, Workspace::Forme), (Key::F2, Workspace::Sculpt), (Key::F3, Workspace::Poly)] {
+    // the tabs: F1 Forme, F2 Sculpt, F3 Poly, F4 SDF; Ctrl + Tab the next one
+    for (k, w) in [(Key::F1, Workspace::Forme), (Key::F2, Workspace::Sculpt), (Key::F3, Workspace::Poly), (Key::F4, Workspace::Sdf)] {
         if pressed(k) {
             st.set_workspace(w);
             return;
         }
     }
     if ctrl && pressed(Key::Tab) {
-        let i = (space.index() + if shift { 2 } else { 1 }) % 3;
+        let n = Workspace::ALL.len() as u8;
+        let i = (space.index() + if shift { n - 1 } else { 1 }) % n;
         st.set_workspace(Workspace::from_index(i));
         return;
     }
@@ -3548,6 +3755,41 @@ fn tab_keys(ctx: &egui::Context, st: &mut AppState, space: Workspace, shift: boo
             }
             if alt && pressed(Key::S) {
                 st.poly_toggle_smooth();
+            }
+        }
+        Workspace::Sdf => {
+            use crate::sdf::{prim_key, SDF_PRIMS};
+            for k in SDF_PRIMS {
+                let key = match prim_key(k) {
+                    "B" => Key::B,
+                    "C" => Key::C,
+                    "O" => Key::O,
+                    "P" => Key::P,
+                    _ => Key::T,
+                };
+                if pressed(key) && !alt {
+                    st.sdf_add(k);
+                }
+            }
+            for (key, m) in [(Key::A, forme_core::CombineMode::Add), (Key::X, forme_core::CombineMode::Carve), (Key::I, forme_core::CombineMode::Intersect)] {
+                if pressed(key) && !alt {
+                    st.sdf.mode = m;
+                    if st.sdf_comp() {
+                        st.sdf_edit_node(&format!("Make it {}", m.label()), |n| n.combine.mode = m);
+                    }
+                }
+            }
+            // [ ] the picked shape's blend (or the next ones')
+            let grow = pressed(Key::CloseBracket);
+            let shrink = pressed(Key::OpenBracket);
+            if grow || shrink {
+                let cur = st.sdf_picked().and_then(|(f, n)| crate::sdf::scene_of(f).and_then(|s| s.node(n)).map(|nd| nd.combine.blend)).unwrap_or(st.sdf.blend);
+                let b = if grow { (cur + 0.5).min(30.0) } else { (cur - 0.5).max(0.0) };
+                st.sdf.blend = b;
+                if st.sdf_comp() {
+                    st.sdf_edit_node("Blend", |n| n.combine.blend = b);
+                }
+                st.toast(&format!("Blend {} mm", fmt_mm(b)), false);
             }
         }
         Workspace::Forme => {}

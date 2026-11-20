@@ -88,6 +88,12 @@ pub enum Icon {
     TabForme,
     TabSculpt,
     TabPoly,
+    TabSdf,
+    SdfSphere,
+    SdfCapsule,
+    SdfTorus,
+    SdfIntersect,
+    SdfBlend,
     /// The Sculpt brushes.
     BrushDraw,
     BrushClay,
@@ -521,6 +527,50 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             for (x, y) in [(10.0, 2.5), (16.5, 6.0), (16.5, 14.0), (10.0, 17.5), (3.5, 14.0), (3.5, 6.0), (10.0, 9.5)] {
                 pen.dot(x, y, 1.0);
             }
+        }
+        Icon::TabSdf => {
+            // two balls melted into one (a smooth union), the neck's curves
+            pen.arc(7.0, 10.5, 5.0, 5.0, 0.95, 2.0 * PI - 0.95);
+            pen.arc(13.5, 9.5, 4.5, 4.5, -PI + 1.05, PI - 1.05);
+            pen.arc(10.2, 3.6, 2.6, 2.4, 0.35, PI - 0.35);
+            pen.arc(10.2, 16.6, 2.6, 2.4, PI + 0.35, 2.0 * PI - 0.35);
+        }
+        Icon::SdfSphere => {
+            pen.circle(10.0, 10.0, 7.0);
+            pen.ellipse(10.0, 10.0, 7.0, 2.4);
+        }
+        Icon::SdfCapsule => {
+            pen.arc(10.0, 6.0, 4.5, 4.5, PI, 2.0 * PI);
+            pen.arc(10.0, 14.0, 4.5, 4.5, 0.0, PI);
+            pen.line(&[(5.5, 6.0), (5.5, 14.0)]);
+            pen.line(&[(14.5, 6.0), (14.5, 14.0)]);
+        }
+        Icon::SdfTorus => {
+            pen.ellipse(10.0, 10.0, 7.5, 4.5);
+            pen.ellipse(10.0, 9.4, 3.2, 1.5);
+        }
+        Icon::SdfIntersect => {
+            // two discs, their common part filled
+            pen.circle(7.5, 10.0, 5.0);
+            pen.circle(12.5, 10.0, 5.0);
+            let lens: Vec<(f32, f32)> = (0..=24)
+                .map(|i| {
+                    let a = -1.05 + 2.1 * i as f32 / 24.0;
+                    (7.5 + 5.0 * a.cos(), 10.0 + 5.0 * a.sin())
+                })
+                .chain((0..=24).map(|i| {
+                    let a = PI - 1.05 + 2.1 * i as f32 / 24.0;
+                    (12.5 + 5.0 * a.cos(), 10.0 + 5.0 * a.sin())
+                }))
+                .collect();
+            pen.fill(&lens, 0.5);
+        }
+        Icon::SdfBlend => {
+            // a corner rounded where two blocks meet
+            pen.line(&[(3.0, 16.5), (17.0, 16.5)]);
+            pen.line(&[(3.0, 16.5), (3.0, 12.0), (8.0, 12.0)]);
+            pen.arc(8.0, 7.0, 5.0, 5.0, PI * 0.5, PI * 0.0);
+            pen.line(&[(13.0, 7.0), (13.0, 3.0), (17.0, 3.0), (17.0, 16.5)]);
         }
         Icon::BrushDraw => {
             // a stroke raised along a line

@@ -337,6 +337,22 @@ impl Drawer {
             let lines: Vec<Vec<[f32; 3]>> = st.shape_outline(f).iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
             line_vertices(&lines, [c.r(), c.g(), c.b(), alpha], 1.2, &mut over);
         }
+        // the SDF tab: the shapes of the SDF object worked on, the picked one
+        // bright (a Carve's in orange: it is a hole, its outline shows it)
+        if st.workspace == crate::workspace::Workspace::Sdf {
+            if let Some(f) = st.sdf_target().and_then(|id| st.doc.feature(id)).filter(|f| f.visible) {
+                if let Some(scene) = crate::sdf::scene_of(f) {
+                    let picked = st.sdf_sel.map(|(_, n)| n);
+                    for n in crate::sdf::shapes(scene) {
+                        let carve_mode = scene.node(n).map(|x| x.combine.mode != forme_core::CombineMode::Add).unwrap_or(false);
+                        let c = if carve_mode { carve } else { accent };
+                        let on = picked == Some(n);
+                        let (alpha, w) = if on { (240, 1.6) } else { (70, 1.0) };
+                        line_vertices(&crate::sdf::node_lines(f, scene, n), [c.r(), c.g(), c.b(), alpha], w, &mut over);
+                    }
+                }
+            }
+        }
         // Object mode (Maya): the selected element drawn by all its edges in
         // the accent, its faces only lightly tinted; the one under the
         // pointer fainter. Components are never drawn in this mode.

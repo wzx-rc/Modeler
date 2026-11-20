@@ -722,6 +722,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "forme-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "image",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "forme-occt"
 version = "0.1.0"
 dependencies = [
@@ -1424,6 +1435,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "forme-core",
  "glam",
  "image",
  "log",
@@ -1441,6 +1453,7 @@ dependencies = [
 name = "nurbs-kernel"
 version = "0.1.0"
 dependencies = [
+ "forme-core",
  "forme-occt",
  "glam",
  "serde",

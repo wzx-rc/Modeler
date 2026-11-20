@@ -1,8 +1,8 @@
 [workspace]
-members = ["crates/nurbs-app", "crates/nurbs-kernel", "crates/forme-occt", "crates/rectify-core", "crates/rectify-app"]
+members = ["crates/forme-core", "crates/nurbs-app", "crates/nurbs-kernel", "crates/forme-occt", "crates/rectify-core", "crates/rectify-app"]
 # forme-occt (and nurbs-kernel's `occ` feature) build or link OpenCascade:
 # only with `-p`, never by a bare `cargo build`
-default-members = ["crates/nurbs-app", "crates/nurbs-kernel", "crates/rectify-core", "crates/rectify-app"]
+default-members = ["crates/forme-core", "crates/nurbs-app", "crates/nurbs-kernel", "crates/rectify-core", "crates/rectify-app"]
 resolver = "2"
 
 [workspace.package]

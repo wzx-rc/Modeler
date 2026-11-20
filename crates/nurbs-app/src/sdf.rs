@@ -1,0 +1,675 @@
+//! The SDF tab (Romain, 20 nov. 2026, 23 h 47: "reprendre le moteur SDF
+//! qu'on avait développé puis stoppé… avec l'UI et outils actuels… la
+//! couleur serait le vert"): Forme SDF's engine (`forme-core`: its scene,
+//! its compiler, its dual contouring) brought back as a fourth tab.
+//!
+//! An SDF object is a mesh feature (`MeshKind::Sdf`) whose `MeshData.sdf`
+//! holds its shapes (Cube, Cylinder, Sphere, Capsule, Torus) combined in
+//! order (Add, Carve, Intersect, each with a blend radius). Its mesh is the
+//! surface of that scene, made again at each change: coarse at once (also
+//! while a drag is live), fine in a thread when nothing moves. So the
+//! object moves, turns, scales, copies, hides, takes materials and sits in
+//! the outliner like any mesh; the kernel never sees it.
+//!
+//! In the SDF tab a click on an SDF object picks the shape under the pointer
+//! (`pick_node`, Carves first on their walls), the gizmo then works on that
+//! shape: W moves it, E turns it, R its cage sizes it; the blend follows
+//! live. The rail adds shapes (into the picked object, else a new one) and
+//! shows the picked shape's settings.
+
+use crate::meshes::size;
+use crate::state::{AppState, Handle, Tool};
+use forme_core::{CombineMode, NodeId, NodeKind, NodeSpec, PrimKind, Scene, Shape};
+use glam::{DQuat, DVec3, Mat4, Quat, Vec3};
+use nurbs_kernel::mesh::{MeshKind, SdfModel};
+use nurbs_kernel::{Feature, FeatureId, Prim};
+use std::sync::mpsc::{channel, Receiver};
+
+/// The shapes the tab offers (Romain, 10 nov.: Cube, Cylinder + Sphere,
+/// Capsule, Torus; the engine keeps the others).
+pub const SDF_PRIMS: [PrimKind; 5] = [PrimKind::Box, PrimKind::Cylinder, PrimKind::Sphere, PrimKind::Capsule, PrimKind::Torus];
+
+/// The operations the tab offers for a shape.
+pub const SDF_MODES: [CombineMode; 3] = [CombineMode::Add, CombineMode::Carve, CombineMode::Intersect];
+
+pub fn prim_label(k: PrimKind) -> &'static str {
+    match k {
+        PrimKind::Box => "Cube",
+        PrimKind::Cylinder => "Cylinder",
+        PrimKind::Sphere => "Sphere",
+        PrimKind::Capsule => "Capsule",
+        PrimKind::Torus => "Torus",
+        _ => "Shape",
+    }
+}
+
+pub fn prim_key(k: PrimKind) -> &'static str {
+    match k {
+        PrimKind::Box => "B",
+        PrimKind::Cylinder => "C",
+        PrimKind::Sphere => "O",
+        PrimKind::Capsule => "P",
+        PrimKind::Torus => "T",
+        _ => "",
+    }
+}
+
+pub fn prim_icon(k: PrimKind) -> crate::icons::Icon {
+    use crate::icons::Icon;
+    match k {
+        PrimKind::Box => Icon::Box,
+        PrimKind::Cylinder => Icon::Cylinder,
+        PrimKind::Sphere => Icon::SdfSphere,
+        PrimKind::Capsule => Icon::SdfCapsule,
+        _ => Icon::SdfTorus,
+    }
+}
+
+/// The tab's settings for the next shapes.
+#[derive(Clone, Debug)]
+pub struct SdfSettings {
+    pub mode: CombineMode,
+    /// The blend radius of a new shape with what is before it (mm).
+    pub blend: f32,
+}
+
+impl Default for SdfSettings {
+    fn default() -> Self {
+        SdfSettings { mode: CombineMode::Add, blend: 2.0 }
+    }
+}
+
+/// A gizmo drag on a picked shape.
+#[derive(Clone, Debug)]
+pub struct SdfDrag {
+    pub handle: Handle,
+    pub id: FeatureId,
+    pub node: NodeId,
+    pub grab: DVec3,
+    pub pivot: DVec3,
+    /// The object and the shape's world frame when the drag began.
+    pub before: Feature,
+    pub cage: Option<crate::cage::CageBox>,
+}
+
+/// A fine meshing under way in a thread.
+pub struct SdfJob {
+    pub id: FeatureId,
+    pub key: u64,
+    pub rx: Receiver<Meshed>,
+}
+
+/// A scene meshed: the model it was made from (its scale taken in), the
+/// points in the feature's frame, the triangles.
+pub struct Meshed {
+    pub model: SdfModel,
+    pub pts: Vec<Vec3>,
+    pub faces: Vec<Vec<u32>>,
+}
+
+/// What the mesh was made from: the scene and the box's sizes.
+pub fn key_of(f: &Feature) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let md = f.mesh.as_ref()?.sdf.as_ref()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(&md.scene).unwrap_or_default().hash(&mut h);
+    for v in size(f).to_array() {
+        v.to_bits().hash(&mut h);
+    }
+    Some(h.finish())
+}
+
+/// The cell for a scene this big: coarse while it moves, fine after.
+fn cell_for(lo: Vec3, hi: Vec3, fine: bool) -> f32 {
+    let d = (hi - lo).length().max(1.0);
+    if fine {
+        (d / 200.0).max(0.1)
+    } else {
+        (d / 80.0).max(0.25)
+    }
+}
+
+/// The scene meshed (its box's scale since the last meshing taken into
+/// its shapes first).
+pub fn mesh_model(model: &SdfModel, now: Vec3, fine: bool) -> Meshed {
+    let mut model = model.clone();
+    model.take_scale(now);
+    let (lo, hi) = model.scene.bounds();
+    if !(lo.x <= hi.x) {
+        return Meshed { model, pts: vec![], faces: vec![] };
+    }
+    let prog = forme_core::compile(&model.scene);
+    let m = forme_core::mesh::dual_contour(&prog, lo, hi, cell_for(lo, hi, fine));
+    let pts = m.positions.iter().map(|p| model.to_frame(*p)).collect();
+    let faces = m.indices.chunks(3).map(|t| t.to_vec()).collect();
+    Meshed { model, pts, faces }
+}
+
+/// A meshing put into the feature: the unit box fitted to the surface, the
+/// frame's base moved there, the shapes kept where they were.
+pub fn apply(f: &mut Feature, m: Meshed) {
+    let now = size(f);
+    let Some(mesh) = f.mesh.as_mut() else { return };
+    let md = mesh.make_mut();
+    let mut model = m.model;
+    if m.pts.is_empty() {
+        // nothing to show (all carved away): the box kept, empty
+        md.verts.clear();
+        md.faces.clear();
+        model.size = now.to_array();
+        md.sdf = Some(model);
+        return;
+    }
+    md.faces = m.faces;
+    let (s2, base) = md.store(&m.pts, now);
+    model.offset = (Vec3::from(model.offset) - base).to_array();
+    model.size = s2.to_array();
+    md.sdf = Some(model);
+    f.origin += f.rot * base.as_dvec3();
+    f.prim = Prim::Box { x: s2.x as f64, y: s2.y as f64, z: s2.z as f64 };
+}
+
+/// The feature's frame with its box's stretch since the last meshing, from
+/// the scene to the world.
+pub fn frame_matrix(f: &Feature) -> Mat4 {
+    let Some(md) = f.mesh.as_ref().and_then(|m| m.sdf.as_ref()) else { return Mat4::IDENTITY };
+    let was = Vec3::from(md.size);
+    let stretch = if was.min_element() > 1e-4 { size(f) / was } else { Vec3::ONE };
+    Mat4::from_scale_rotation_translation(stretch, f.rot.as_quat(), f.origin.as_vec3()) * Mat4::from_translation(Vec3::from(md.offset))
+}
+
+/// A shape's frame in the world (its centre, its turn).
+pub fn node_world(f: &Feature, scene: &Scene, id: NodeId) -> Mat4 {
+    frame_matrix(f) * scene.world_matrix(id)
+}
+
+pub fn scene_of(f: &Feature) -> Option<&Scene> {
+    f.mesh.as_ref()?.sdf.as_ref().map(|m| &m.scene)
+}
+
+pub fn is_sdf(f: &Feature) -> bool {
+    f.mesh.as_ref().map(|m| m.kind == MeshKind::Sdf).unwrap_or(false)
+}
+
+/// The shapes of a scene in order (no groups).
+pub fn shapes(scene: &Scene) -> Vec<NodeId> {
+    scene.rows().into_iter().map(|(id, _)| id).filter(|id| scene.node(*id).map(|n| n.shape().is_some()).unwrap_or(false)).collect()
+}
+
+/// A shape's outline as lines in the world: its box's 12 edges, and for a
+/// round shape its rings.
+pub fn node_lines(f: &Feature, scene: &Scene, id: NodeId) -> Vec<Vec<[f32; 3]>> {
+    let Some(n) = scene.node(id) else { return vec![] };
+    let Some(sh) = n.shape() else { return vec![] };
+    let m = node_world(f, scene, id);
+    let p = |v: Vec3| m.transform_point3(v).to_array();
+    let ring = |r: f32, y: f32| -> Vec<[f32; 3]> { (0..=48).map(|i| i as f32 / 48.0 * std::f32::consts::TAU).map(|a| p(Vec3::new(r * a.cos(), y, r * a.sin()))).collect() };
+    let s = sh.size;
+    match sh.kind {
+        PrimKind::Box => {
+            let c = |i: usize| Vec3::new(if i & 1 == 0 { -s.x } else { s.x }, if i & 2 == 0 { -s.y } else { s.y }, if i & 4 == 0 { -s.z } else { s.z });
+            let mut out = vec![];
+            for (a, b) in [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)] {
+                out.push(vec![p(c(a)), p(c(b))]);
+            }
+            out
+        }
+        PrimKind::Cylinder => {
+            let mut out = vec![ring(s.x, s.y), ring(s.x, -s.y)];
+            for a in [0.0f32, 0.5, 1.0, 1.5] {
+                let a = a * std::f32::consts::PI;
+                out.push(vec![p(Vec3::new(s.x * a.cos(), s.y, s.x * a.sin())), p(Vec3::new(s.x * a.cos(), -s.y, s.x * a.sin()))]);
+            }
+            out
+        }
+        PrimKind::Sphere => {
+            let r = s.x;
+            let mut out = vec![ring(r, 0.0)];
+            out.push((0..=48).map(|i| i as f32 / 48.0 * std::f32::consts::TAU).map(|a| p(Vec3::new(r * a.cos(), r * a.sin(), 0.0))).collect());
+            out.push((0..=48).map(|i| i as f32 / 48.0 * std::f32::consts::TAU).map(|a| p(Vec3::new(0.0, r * a.sin(), r * a.cos()))).collect());
+            out
+        }
+        PrimKind::Capsule => {
+            let (r, h) = (s.x, s.y);
+            let mut out = vec![ring(r, h), ring(r, -h)];
+            for k in [0.0f32, 0.5] {
+                let a = k * std::f32::consts::PI;
+                let (cx, cz) = (a.cos(), a.sin());
+                let mut l = vec![];
+                for i in 0..=24 {
+                    let t = i as f32 / 24.0 * std::f32::consts::PI;
+                    l.push(p(Vec3::new(r * t.cos() * cx, h + r * t.sin(), r * t.cos() * cz)));
+                }
+                for i in 0..=24 {
+                    let t = std::f32::consts::PI + i as f32 / 24.0 * std::f32::consts::PI;
+                    l.push(p(Vec3::new(r * t.cos() * cx, -h + r * t.sin(), r * t.cos() * cz)));
+                }
+                l.push(l[0]);
+                out.push(l);
+            }
+            out
+        }
+        PrimKind::Torus => vec![ring(s.x + s.z, 0.0), ring(s.x - s.z, 0.0), ring(s.x, s.z), ring(s.x, -s.z)],
+        _ => {
+            let (lo, hi) = sh.local_bounds();
+            let c = |i: usize| Vec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z });
+            [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)].iter().map(|(a, b)| vec![p(c(*a)), p(c(*b))]).collect()
+        }
+    }
+}
+
+/// A new shape of this kind, about 20 mm (sizes are half sizes).
+fn new_shape(k: PrimKind) -> Shape {
+    let mut s = Shape::new(k);
+    match k {
+        PrimKind::Box => s.size = Vec3::splat(10.0),
+        PrimKind::Cylinder => s.size = Vec3::new(8.0, 10.0, 0.0),
+        PrimKind::Sphere => s.size = Vec3::splat(10.0),
+        PrimKind::Capsule => s.size = Vec3::new(5.0, 6.0, 0.0),
+        PrimKind::Torus => s.size = Vec3::new(8.0, 0.0, 3.0),
+        _ => {}
+    }
+    s
+}
+
+/// A shape's half height along its Y (to stand it on something).
+fn half_height(s: &Shape) -> f32 {
+    s.local_half_extents().y
+}
+
+impl AppState {
+    /// The SDF tab with a shape picked: the gizmo works on it.
+    pub fn sdf_comp(&self) -> bool {
+        self.workspace == crate::workspace::Workspace::Sdf
+            && self.sdf_sel.map(|(id, n)| self.doc.feature(id).and_then(scene_of).map(|s| s.node(n).is_some()).unwrap_or(false)).unwrap_or(false)
+    }
+
+    /// The picked shape and its object.
+    pub fn sdf_picked(&self) -> Option<(&Feature, NodeId)> {
+        let (id, n) = self.sdf_sel?;
+        let f = self.doc.feature(id)?;
+        scene_of(f)?.node(n)?;
+        Some((f, n))
+    }
+
+    /// The SDF object worked on: the picked shape's, else the one selected.
+    pub fn sdf_target(&self) -> Option<FeatureId> {
+        if let Some((f, _)) = self.sdf_picked() {
+            return Some(f.id);
+        }
+        match self.selection.as_slice() {
+            [id] if self.doc.feature(*id).map(is_sdf).unwrap_or(false) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The picked shape's centre in the world (the gizmo's place).
+    pub fn sdf_pivot(&self) -> Option<DVec3> {
+        let (f, n) = self.sdf_picked()?;
+        let m = node_world(f, scene_of(f)?, n);
+        Some(m.transform_point3(Vec3::ZERO).as_dvec3())
+    }
+
+    /// The picked shape's cage: its box in its own frame.
+    pub fn sdf_cage(&self) -> Option<crate::cage::CageBox> {
+        let (f, n) = self.sdf_picked()?;
+        let scene = scene_of(f)?;
+        let sh = scene.node(n)?.shape()?;
+        let m = node_world(f, scene, n);
+        let (_, rot, _) = m.to_scale_rotation_translation();
+        let frame = rot.as_dquat();
+        let (lo, hi) = sh.local_bounds();
+        let back = frame.inverse();
+        let mut l = DVec3::splat(f64::MAX);
+        let mut h = DVec3::splat(f64::MIN);
+        for i in 0..8 {
+            let c = Vec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z });
+            let q = back * m.transform_point3(c).as_dvec3();
+            l = l.min(q);
+            h = h.max(q);
+        }
+        Some(crate::cage::CageBox { frame, lo: l, hi: h })
+    }
+
+    /// The SDF object and shape under the pointer (in front of the part
+    /// and the other meshes).
+    pub fn sdf_pick_at(&self, p: [f32; 2]) -> Option<(FeatureId, NodeId)> {
+        let hit = self.pick_mesh(p, None)?;
+        if let Some(k) = self.pick_at(p) {
+            if k.t < hit.t {
+                return None;
+            }
+        }
+        let f = self.doc.feature(hit.id)?;
+        let scene = scene_of(f)?;
+        let q = frame_matrix(f).inverse().transform_point3(hit.point);
+        let d = (size(f).length() * 0.04).clamp(0.3, 4.0);
+        let n = forme_core::pick_node(scene, q, d)?;
+        Some((f.id, n))
+    }
+
+    /// A click in the SDF tab: the shape under the pointer, else the
+    /// element as in Object mode, else nothing.
+    pub fn sdf_click(&mut self, p: [f32; 2]) {
+        if let Some((id, n)) = self.sdf_pick_at(p) {
+            self.sdf_sel = Some((id, n));
+            self.selection = vec![id];
+            return;
+        }
+        self.sdf_sel = None;
+        self.selection = self.pick_object(p).map(|id| vec![id]).unwrap_or_default();
+    }
+
+    /// A shape of this kind added: into the SDF object worked on (on top of
+    /// the picked shape, or at its middle for a Carve or Intersect), else a
+    /// new SDF object on the view's centre, standing on the ground.
+    pub fn sdf_add(&mut self, k: PrimKind) {
+        self.commit_gestures(self.principal());
+        self.tool = Tool::Select;
+        let mode = self.sdf.mode;
+        let blend = self.sdf.blend;
+        let sh = new_shape(k);
+        let name = prim_label(k);
+        if let Some(id) = self.sdf_target() {
+            let picked = self.sdf_sel.filter(|(f, _)| *f == id).map(|(_, n)| n);
+            let mut made = 0;
+            self.edit(&format!("Add {name}"), |d| {
+                let Some(f) = d.feature_mut(id) else { return };
+                let Some(md) = f.mesh.as_mut().and_then(|m| m.make_mut().sdf.as_mut()) else { return };
+                let s = &mut md.scene;
+                // where: on the picked shape's top (Add), in its middle (the others)
+                let pos = match picked.and_then(|n| s.node(n).map(|nd| (nd, s.world_matrix(n)))) {
+                    Some((nd, w)) => {
+                        let top = nd.shape().map(half_height).unwrap_or(0.0);
+                        let c = w.transform_point3(Vec3::ZERO);
+                        if mode == CombineMode::Add {
+                            c + Vec3::Y * (top + half_height(&sh) * 0.6)
+                        } else {
+                            c + Vec3::Y * top
+                        }
+                    }
+                    None => {
+                        let (lo, hi) = s.bounds();
+                        if lo.x <= hi.x {
+                            Vec3::new((lo.x + hi.x) * 0.5, hi.y, (lo.z + hi.z) * 0.5)
+                        } else {
+                            Vec3::Y * half_height(&sh)
+                        }
+                    }
+                };
+                let label = d_name(s, name);
+                made = s.add(s.root, NodeSpec::shape(&label, sh.clone()).at(pos).mode(mode).blend(if mode == CombineMode::Add || mode == CombineMode::Carve { blend } else { blend.min(1.0) }));
+            });
+            if made != 0 {
+                self.sdf_sel = Some((id, made));
+                self.selection = vec![id];
+                self.set_gizmo(crate::state::GizmoMode::Move);
+            }
+            return;
+        }
+        // a new object, its first shape an Add
+        let at = self.camera.target.as_dvec3();
+        let at = DVec3::new(at.x, 0.0, at.z);
+        let mut fid = 0;
+        let mut node = 0;
+        self.edit(&format!("New SDF {}", name.to_lowercase()), |d| {
+            fid = d.add_mesh(MeshKind::Sdf, &[], vec![], at, DQuat::IDENTITY, "SDF object");
+            if let Some(f) = d.feature_mut(fid) {
+                // the frame's base at `at` (add_mesh with no points puts it there)
+                f.origin = at;
+                if let Some(m) = f.mesh.as_mut() {
+                    let mut model = SdfModel::new();
+                    node = model.scene.add(model.scene.root, NodeSpec::shape(name, sh.clone()).at(Vec3::Y * half_height(&sh)));
+                    m.make_mut().sdf = Some(model);
+                }
+            }
+        });
+        self.sdf_sel = Some((fid, node));
+        self.selection = vec![fid];
+        self.sdf_tick();
+        self.set_gizmo(crate::state::GizmoMode::Move);
+    }
+
+    /// Changes the picked shape (its node), one undo step.
+    pub fn sdf_edit_node(&mut self, label: &str, f: impl FnOnce(&mut forme_core::Node)) {
+        let Some((id, n)) = self.sdf_sel else { return };
+        self.edit(label, |d| {
+            if let Some(node) = d.feature_mut(id).and_then(|ft| ft.mesh.as_mut()).and_then(|m| m.make_mut().sdf.as_mut()).and_then(|md| md.scene.node_mut(n)) {
+                f(node);
+            }
+        });
+    }
+
+    /// The same as a live edit (a slider): one undo step when it ends.
+    pub fn sdf_live_node(&mut self, label: &str, f: impl FnOnce(&mut forme_core::Node)) {
+        let Some((id, n)) = self.sdf_sel else { return };
+        self.begin_live(label);
+        self.live(|d| {
+            if let Some(node) = d.feature_mut(id).and_then(|ft| ft.mesh.as_mut()).and_then(|m| m.make_mut().sdf.as_mut()).and_then(|md| md.scene.node_mut(n)) {
+                f(node);
+            }
+        });
+    }
+
+    /// Del on a picked shape: it leaves its object (the last one: the object).
+    pub fn sdf_delete(&mut self) -> bool {
+        let Some((f, n)) = self.sdf_picked() else { return false };
+        let id = f.id;
+        let left = scene_of(f).map(|s| shapes(s).len()).unwrap_or(0);
+        if left <= 1 {
+            self.sdf_sel = None;
+            self.selection = vec![id];
+            return false;
+        }
+        self.edit("Delete shape", |d| {
+            if let Some(md) = d.feature_mut(id).and_then(|ft| ft.mesh.as_mut()).and_then(|m| m.make_mut().sdf.as_mut()) {
+                md.scene.remove(n);
+            }
+        });
+        self.sdf_sel = None;
+        true
+    }
+
+    /// Ctrl + D on a picked shape: a copy beside it, picked.
+    pub fn sdf_duplicate(&mut self) -> bool {
+        let Some((id, n)) = self.sdf_sel else { return false };
+        if !self.sdf_comp() {
+            return false;
+        }
+        let mut made = None;
+        self.edit("Duplicate shape", |d| {
+            if let Some(md) = d.feature_mut(id).and_then(|ft| ft.mesh.as_mut()).and_then(|m| m.make_mut().sdf.as_mut()) {
+                made = md.scene.duplicate(n);
+            }
+        });
+        if let Some(m) = made {
+            self.sdf_sel = Some((id, m));
+            self.set_gizmo(crate::state::GizmoMode::Move);
+        }
+        true
+    }
+
+    // ------------------------------------------------------- gizmo drags
+
+    pub fn begin_sdf_drag(&mut self, h: Handle, p: [f32; 2]) {
+        let Some((f, n)) = self.sdf_picked() else { return };
+        let before = f.clone();
+        let cage = if matches!(h, Handle::Cage(_)) { self.sdf_cage() } else { None };
+        let Some(pivot) = (match h {
+            Handle::Cage(g) => cage.as_ref().map(|c| c.point(g)),
+            _ => self.pivot(),
+        }) else {
+            return;
+        };
+        let Some(grab) = self.handle_param(h, pivot, p) else { return };
+        self.begin_live(match h {
+            Handle::Rot(_) => "Rotate shape",
+            Handle::Cage(_) => "Size shape",
+            _ => "Move shape",
+        });
+        self.sdf_drag = Some(SdfDrag { handle: h, id: before.id, node: n, grab, pivot, before, cage });
+    }
+
+    pub fn update_sdf_drag(&mut self, p: [f32; 2]) {
+        let Some(d) = self.sdf_drag.clone() else { return };
+        let Some(now) = self.handle_param(d.handle, d.pivot, p) else { return };
+        let Some(scene0) = scene_of(&d.before).cloned() else { return };
+        let Some(node0) = scene0.node(d.node).cloned() else { return };
+        // the scene's parent frame of the shape, in the world
+        let parent = frame_matrix(&d.before) * scene0.parent_matrix(d.node);
+        let inv = parent.inverse();
+        let w0 = node_world(&d.before, &scene0, d.node);
+        let (_, wrot, wpos) = w0.to_scale_rotation_translation();
+        let mut node = node0.clone();
+        match d.handle {
+            Handle::Rot(a) => {
+                let ax = DVec3::AXES[a];
+                let (u, w) = (d.grab - d.pivot, now - d.pivot);
+                let (u, w) = (u - ax * u.dot(ax), w - ax * w.dot(ax));
+                let mut ang = u.cross(w).dot(ax).atan2(u.dot(w));
+                if self.settings.snap {
+                    let st = 15f64.to_radians();
+                    ang = (ang / st).round() * st;
+                }
+                self.gizmo_readout = Some(format!("{:.0}°", ang.to_degrees()));
+                let q = Quat::from_axis_angle(ax.as_vec3(), ang as f32);
+                let (_, prot, _) = parent.to_scale_rotation_translation();
+                node.transform.rot = (prot.inverse() * q * wrot).normalize();
+            }
+            Handle::Cage(g) => {
+                let Some(c) = d.cage else { return };
+                let Some((k, about)) = self.cage_scale(&c, g, p, &[]) else { return };
+                let kf = k.as_vec3();
+                if let NodeKind::Shape(sh) = &mut node.kind {
+                    scale_shape(sh, kf);
+                }
+                // the centre moves with the side across from the grip kept
+                let c0 = wpos.as_dvec3();
+                let local = c.frame.inverse() * (c0 - about);
+                let c1 = about + c.frame * (local * k);
+                node.transform.pos = inv.transform_point3(c1.as_vec3());
+            }
+            h => {
+                let Some(mask) = crate::state::move_mask(h) else { return };
+                let mut delta = (now - d.grab) * mask;
+                if self.settings.snap && !self.snap_off {
+                    delta = delta.map(|x| self.snap(x));
+                }
+                node.transform.pos = inv.transform_point3(wpos + delta.as_vec3());
+                self.gizmo_readout = Some(format!("{} mm", crate::widgets::fmt_mm(delta.length() as f32)));
+            }
+        }
+        let (id, nid) = (d.id, d.node);
+        self.live(|doc| {
+            if let Some(n) = doc.feature_mut(id).and_then(|ft| ft.mesh.as_mut()).and_then(|m| m.make_mut().sdf.as_mut()).and_then(|md| md.scene.node_mut(nid)) {
+                *n = node;
+            }
+        });
+        // the surface follows at once (coarse)
+        self.sdf_tick();
+    }
+
+    pub fn end_sdf_drag(&mut self) {
+        if self.sdf_drag.take().is_none() {
+            return;
+        }
+        self.gizmo_readout = None;
+        self.end_live();
+        self.mesh_gen += 1;
+    }
+
+    // ------------------------------------------------------- meshing
+
+    /// Each SDF object's mesh kept in step with its shapes: coarse at once
+    /// when they changed, fine in a thread when nothing moves.
+    pub fn sdf_tick(&mut self) {
+        let live = self.is_live() || self.sdf_drag.is_some();
+        // the fine meshings done
+        let mut done = vec![];
+        self.sdf_jobs.retain(|j| match j.rx.try_recv() {
+            Ok(m) => {
+                done.push((j.id, j.key, m));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(_) => false,
+        });
+        for (id, key, m) in done {
+            let Some(f) = self.doc.feature_mut(id) else { continue };
+            if key_of(f) != Some(key) {
+                continue;
+            }
+            apply(f, m);
+            let k = key_of(f).unwrap_or(0);
+            self.sdf_meshed.insert(id, (k, true));
+            self.mesh_gen += 1;
+        }
+        let ids: Vec<FeatureId> = self.doc.features.iter().filter(|f| is_sdf(f) && f.mesh.as_ref().map(|m| m.sdf.is_some()).unwrap_or(false)).map(|f| f.id).collect();
+        for id in ids {
+            let Some(f) = self.doc.feature(id) else { continue };
+            let Some(key) = key_of(f) else { continue };
+            let state = self.sdf_meshed.get(&id).copied();
+            if state.map(|s| s.0) != Some(key) {
+                // changed (or never meshed here): coarse now
+                let m = mesh_model(f.mesh.as_ref().unwrap().sdf.as_ref().unwrap(), size(f), false);
+                let f = self.doc.feature_mut(id).unwrap();
+                apply(f, m);
+                let k = key_of(f).unwrap_or(0);
+                self.sdf_meshed.insert(id, (k, false));
+                self.mesh_gen += 1;
+                continue;
+            }
+            if live || state.map(|s| s.1).unwrap_or(false) || self.sdf_jobs.iter().any(|j| j.id == id && j.key == key) {
+                continue;
+            }
+            let model = f.mesh.as_ref().unwrap().sdf.clone().unwrap();
+            let now = size(f);
+            let (tx, rx) = channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(mesh_model(&model, now, true));
+            });
+            self.sdf_jobs.push(SdfJob { id, key, rx });
+        }
+        self.sdf_meshed.retain(|id, _| self.doc.feature(*id).is_some());
+        if self.sdf_sel.is_some() && !self.sdf_comp() && self.workspace == crate::workspace::Workspace::Sdf {
+            self.sdf_sel = None;
+        }
+    }
+
+    /// Waits for the fine meshings under way (the capture harness).
+    pub fn sdf_settle(&mut self) {
+        for _ in 0..400 {
+            self.sdf_tick();
+            if self.sdf_jobs.is_empty() && self.doc.features.iter().filter(|f| is_sdf(f)).all(|f| self.sdf_meshed.get(&f.id).map(|s| s.1 && Some(s.0) == key_of(f)).unwrap_or(false)) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+/// A shape's sizes times `k` along its own axes.
+pub fn scale_shape(sh: &mut Shape, k: Vec3) {
+    let across = (k.x * k.z).sqrt();
+    let mean = (k.x * k.y * k.z).cbrt();
+    match sh.kind {
+        PrimKind::Box => sh.size *= k,
+        PrimKind::Sphere => sh.size *= mean,
+        PrimKind::Cylinder | PrimKind::Capsule | PrimKind::Cone | PrimKind::Tube | PrimKind::Prism => {
+            sh.size = Vec3::new(sh.size.x * across, sh.size.y * k.y, sh.size.z * across);
+        }
+        PrimKind::Torus => {
+            sh.size = Vec3::new(sh.size.x * across, sh.size.y, sh.size.z * k.y);
+        }
+        _ => sh.size *= mean,
+    }
+}
+
+/// A fresh name in the scene: "Cube", "Cube 2"…
+fn d_name(s: &Scene, base: &str) -> String {
+    let taken = |n: &str| s.nodes.values().any(|x| x.name == n);
+    if !taken(base) {
+        return base.to_string();
+    }
+    (2..).map(|i| format!("{base} {i}")).find(|n| !taken(n)).unwrap()
+}
