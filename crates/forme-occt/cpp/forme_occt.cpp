@@ -4134,30 +4134,34 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                 BRepLib::OrientClosedSolid(so);
                 solids.push_back(so);
             }
-            for (int k = 1; k <= shm.Extent(); k++)
-                if (!placed.Contains(shm(k))) {
-                    TopoDS_Solid so;
-                    bb.MakeSolid(so);
-                    shells[k - 1].Closed(BRep_Tool::IsClosed(shells[k - 1]));
-                    bb.Add(so, shells[k - 1]);
-                    BRepLib::OrientClosedSolid(so);
-                    solids.push_back(so);
+            // a shell of no solid: a solid when it closes, else it stays an
+            // open sheet (a copy of some faces, 20 nov.: made a solid, it was
+            // invalid and no face or edge of the copy could be moved)
+            std::vector<TopoDS_Shape> sheets;
+            auto place = [&](TopoDS_Shell& sh) {
+                bool closed = BRep_Tool::IsClosed(sh);
+                sh.Closed(closed);
+                if (!closed) {
+                    sheets.push_back(sh);
+                    return;
                 }
-            if (solids.empty()) {
                 TopoDS_Solid so;
                 bb.MakeSolid(so);
-                shells[0].Closed(BRep_Tool::IsClosed(shells[0]));
-                bb.Add(so, shells[0]);
+                bb.Add(so, sh);
                 BRepLib::OrientClosedSolid(so);
                 solids.push_back(so);
-            }
+            };
+            for (int k = 1; k <= shm.Extent(); k++)
+                if (!placed.Contains(shm(k))) place(shells[k - 1]);
+            if (shm.Extent() == 0) place(shells[0]);
             TopoDS_Shape solid;
-            if (solids.size() == 1) {
+            if (solids.size() == 1 && sheets.empty()) {
                 solid = solids[0];
             } else {
                 TopoDS_Compound c;
                 bb.MakeCompound(c);
                 for (const TopoDS_Solid& so : solids) bb.Add(c, so);
+                for (const TopoDS_Shape& sh : sheets) bb.Add(c, sh);
                 solid = c;
             }
             if (!valid(solid)) {
@@ -5298,6 +5302,19 @@ FShape* focc_lumps_of(const FShape* s, int solids) {
         (FShape*)nullptr);
 }
 
+// Whether a 3 x 4 matrix (rows) is a turn and a move with one scale (a
+// gp_Trsf, which keeps planes planes and circles circles). gp_GTrsf's Form()
+// is always gp_Other once its vectorial part is set, and GTransform makes
+// every surface a BSpline (20 nov.: a copy moved apart then had no flat
+// face, so none of its faces or edges could be moved).
+static bool similarity(const double* m) {
+    gp_Vec c0(m[0], m[4], m[8]), c1(m[1], m[5], m[9]), c2(m[2], m[6], m[10]);
+    double s = c0.SquareMagnitude();
+    if (s < 1e-24) return false;
+    auto near = [&](double a, double b) { return std::abs(a - b) <= 1e-9 * s; };
+    return near(c1.SquareMagnitude(), s) && near(c2.SquareMagnitude(), s) && near(c0.Dot(c1), 0) && near(c0.Dot(c2), 0) && near(c1.Dot(c2), 0) && c0.Crossed(c1).Dot(c2) > 0;
+}
+
 // The lumps (solids, shells or faces side by side in a compound) whose
 // vertices are all among `vidx` (1-based) moved whole by the 3 × 4 matrix
 // `m` (rows); the others kept. Null when a lump has only some of its
@@ -5346,7 +5363,7 @@ FShape* focc_move_lumps(const FShape* s, const int* vidx, int n, const double* m
                     return nullptr;
                 }
                 TopoDS_Shape nl;
-                if (g.Form() == gp_Other) {
+                if (!similarity(m)) {
                     BRepBuilderAPI_GTransform gt(L, g, Standard_True);
                     if (!gt.IsDone()) {
                         set_err("the piece could not be scaled");
@@ -5479,7 +5496,7 @@ FShape* focc_piece(const FShape* s, const int* idx, int n, const double* m, long
             g.SetVectorialPart(gp_Mat(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]));
             g.SetTranslationPart(gp_XYZ(m[3], m[7], m[11]));
             TopoDS_Shape moved;
-            if (g.Form() == gp_Other) {
+            if (!similarity(m)) {
                 BRepBuilderAPI_GTransform gt(out, g, Standard_True);
                 if (!gt.IsDone()) {
                     set_err("the copy could not be scaled");

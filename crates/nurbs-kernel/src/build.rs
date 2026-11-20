@@ -2300,6 +2300,96 @@ mod tests {
     }
 
     #[test]
+    fn copy_parts_moved() {
+        // Romain, 20 nov. 6 h 57: a cube, three faces copied and moved
+        // apart, then one face of the copy moved, then one of its edges
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let fr = |sub: u16, at: DVec3| Comp::Face(FaceRef { tag: tag(b, sub), at });
+        let mut t = Tweak::new(vec![fr(2, DVec3::new(0.0, 20.0, 0.0)), fr(0, DVec3::new(20.0, 10.0, 0.0)), fr(4, DVec3::new(0.0, 10.0, 15.0))]).unwrap();
+        t.copy = true;
+        t.delta = DVec3::new(50.0, 0.0, 0.0);
+        d.add_tweak(t);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let cid = d.features.last().unwrap().id;
+        let copy: Vec<(FaceTag, DVec3)> = m.faces.iter().enumerate().filter(|(_, f)| f.tag.map(|t| t.feature) == Some(cid)).map(|(i, f)| {
+            let t = m.tri_face.iter().position(|&x| x as usize == i).unwrap();
+            let c = m.triangles[t].iter().map(|&v| DVec3::from_array(m.positions[v as usize].map(|x| x as f64))).sum::<DVec3>() / 3.0;
+            (f.tag.unwrap(), c)
+        }).collect();
+        eprintln!("copy: {} faces, part {} faces", copy.len(), m.faces.len());
+        assert!(m.faces.iter().all(|f| f.kind == crate::model::SurfKind::Plane), "a copy moved keeps its planes");
+        // its top (the face highest up) moved up 5
+        let (tt, at) = copy.iter().copied().max_by(|a, b| a.1.y.total_cmp(&b.1.y)).unwrap();
+        let mut f1 = d.clone();
+        let mut t = Tweak::new(vec![Comp::Face(FaceRef { tag: tt.pack(), at })]).unwrap();
+        t.delta = DVec3::new(0.0, 5.0, 0.0);
+        f1.add_tweak(t);
+        let m1 = build(&f1, true, false, &[], &mut Cache::default());
+        eprintln!("face moved: errors {:?}, bounds {:?}", m1.errors, m1.bounds());
+        // one of its edges: the top's edge along +X... between the top and
+        // the front of the copy
+        let ed = m.edges.iter().find(|e| {
+            let tags: Vec<Option<FaceTag>> = e.faces.iter().map(|&f| if f >= 0 { m.faces[f as usize].tag } else { None }).collect();
+            tags.iter().all(|t| t.map(|t| t.feature == cid).unwrap_or(false)) && e.faces[0] != e.faces[1]
+        });
+        let ed = ed.expect("an edge between two faces of the copy");
+        let at = {
+            let p = &ed.pts[ed.pts.len() / 2];
+            DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)
+        };
+        let er = EdgeRef { faces: [m.faces[ed.faces[0] as usize].tag.unwrap().pack(), m.faces[ed.faces[1] as usize].tag.unwrap().pack()], at };
+        let mut f2 = d.clone();
+        let mut t = Tweak::new(vec![Comp::Edge(er)]).unwrap();
+        t.delta = DVec3::new(0.0, 3.0, 3.0);
+        f2.add_tweak(t);
+        let m2 = build(&f2, true, false, &[], &mut Cache::default());
+        eprintln!("edge moved: errors {:?}, bounds {:?}", m2.errors, m2.bounds());
+        assert!(m1.errors.is_empty(), "{:?}", m1.errors);
+        assert!(m2.errors.is_empty(), "{:?}", m2.errors);
+        // the cube's own top moved up with the copy beside it
+        let mut f3 = d.clone();
+        let mut t = Tweak::new(vec![fr(2, DVec3::new(0.0, 20.0, 0.0))]).unwrap();
+        t.delta = DVec3::new(0.0, 4.0, 0.0);
+        f3.add_tweak(t);
+        let m3 = build(&f3, true, false, &[], &mut Cache::default());
+        assert!(m3.errors.is_empty(), "{:?}", m3.errors);
+        assert_eq!(m3.faces.len(), 9);
+        // the copy's three faces then moved again together, then one alone
+        let mut f4 = f1.clone();
+        let comps: Vec<Comp> = copy.iter().map(|(t, at)| Comp::Face(FaceRef { tag: t.pack(), at: *at + if t.pack() == tt.pack() { DVec3::new(0.0, 5.0, 0.0) } else { DVec3::ZERO } })).collect();
+        let mut t = Tweak::new(comps).unwrap();
+        t.delta = DVec3::new(0.0, 0.0, -10.0);
+        f4.add_tweak(t);
+        let m4 = build(&f4, true, false, &[], &mut Cache::default());
+        eprintln!("all moved after one: errors {:?}, bounds {:?}", m4.errors, m4.bounds());
+        assert!(m4.errors.is_empty(), "{:?}", m4.errors);
+        // a closed copy (the five faces but the bottom: closed by a face,
+        // a solid) moved apart, then its top alone moved up
+        let mut d5 = Doc::default();
+        let b5 = d5.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let fr5 = |sub: u16, at: DVec3| Comp::Face(FaceRef { tag: tag(b5, sub), at });
+        let mut t = Tweak::new(vec![fr5(2, DVec3::new(0.0, 20.0, 0.0)), fr5(0, DVec3::new(20.0, 10.0, 0.0)), fr5(1, DVec3::new(-20.0, 10.0, 0.0)), fr5(4, DVec3::new(0.0, 10.0, 15.0)), fr5(5, DVec3::new(0.0, 10.0, -15.0))]).unwrap();
+        t.copy = true;
+        t.delta = DVec3::new(50.0, 0.0, 0.0);
+        d5.add_tweak(t);
+        let m5 = build(&d5, true, false, &[], &mut Cache::default());
+        let c5 = d5.features.last().unwrap().id;
+        let top = m5.faces.iter().enumerate().filter(|(_, f)| f.tag.map(|t| t.feature) == Some(c5)).map(|(i, f)| {
+            let t = m5.tri_face.iter().position(|&x| x as usize == i).unwrap();
+            (f.tag.unwrap(), m5.triangles[t].iter().map(|&v| DVec3::from_array(m5.positions[v as usize].map(|x| x as f64))).sum::<DVec3>() / 3.0)
+        }).max_by(|a, b| a.1.y.total_cmp(&b.1.y)).unwrap();
+        let mut t = Tweak::new(vec![Comp::Face(FaceRef { tag: top.0.pack(), at: top.1 })]).unwrap();
+        t.delta = DVec3::new(0.0, 6.0, 0.0);
+        d5.add_tweak(t);
+        let m6 = build(&d5, true, false, &[], &mut Cache::default());
+        eprintln!("closed copy's top moved: errors {:?}, bounds {:?}", m6.errors, m6.bounds());
+        assert!(m6.errors.is_empty(), "{:?}", m6.errors);
+        assert!((m6.bounds().unwrap().1[1] - 26.0).abs() < 1e-3);
+    }
+
+    #[test]
     fn faces_duplicated() {
         // Ctrl + D on picked faces (20 nov.): a block's top and its four
         // sides copied, closed by a bottom, moved out 30 along X (a second

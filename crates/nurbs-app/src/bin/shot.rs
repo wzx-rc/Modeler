@@ -3193,6 +3193,57 @@ fn main() {
         eprintln!("  vertex {v:?} double-clicked: {} vertices", h.st.vert_sel.len());
     }
 
+    if want("dup-move") {
+        // Romain's steps (20 nov. 6 h 57): a cube, three faces picked,
+        // duplicated, the copy moved, deselected, then one face of the copy
+        // moved, then one of its edges
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        h.reset(d, "Cube");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(75.0, 25.0, 20.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(20.0, 10.0, 0.0)));
+        h.click(h.screen_of(Vec3::new(0.0, 10.0, 15.0)));
+        h.hold(Modifiers::NONE);
+        eprintln!("  picked {}", h.st.face_sel.len());
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let arrow = |h: &mut Harness, axis: Vec3, by: f32| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + axis) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let to = h.screen_of(c + axis * by) - s0;
+            h.drag(grab, grab + to, 10, true);
+            h.settle();
+        };
+        arrow(&mut h, Vec3::X, 50.0);
+        eprintln!("  copy moved: {:?} errors {:?}", h.st.doc.features.last().and_then(|f| f.tweak.as_ref()).map(|t| t.delta), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.key(egui::Key::Escape);
+        h.steps(30);
+        // the copy's top
+        h.click(h.screen_of(Vec3::new(50.0, 20.0, 0.0)));
+        eprintln!("  picked {:?}", h.st.face_sel.iter().map(|r| r.tag).collect::<Vec<_>>());
+        arrow(&mut h, Vec3::Y, 6.0);
+        eprintln!("  face moved: {:?} {:?} errors {:?} toast {:?}", h.st.doc.features.last().map(|f| f.name.clone()), h.st.doc.features.last().and_then(|f| f.tweak.as_ref()).map(|t| t.delta), h.st.model.as_ref().map(|m| m.errors.clone()), h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.shot("zero-dup-move-1-face");
+        // an edge of the copy: its top front one
+        h.key(egui::Key::F10);
+        h.key(egui::Key::Escape);
+        h.steps(30);
+        h.click(h.screen_of(Vec3::new(50.0, 26.0, 15.0)));
+        eprintln!("  edges picked {:?}", h.st.edge_sel.iter().map(|e| e.faces).collect::<Vec<_>>());
+        arrow(&mut h, Vec3::Z, 5.0);
+        eprintln!("  edge moved: {:?} {:?} errors {:?} toast {:?}", h.st.doc.features.last().map(|f| f.name.clone()), h.st.doc.features.last().and_then(|f| f.tweak.as_ref()).map(|t| t.delta), h.st.model.as_ref().map(|m| m.errors.clone()), h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.shot("zero-dup-move-2-edge");
+    }
+
     if want("knife-diag") {
         // Romain's flank (20 nov.): a block with filleted top edges, a
         // diagonal knife cut from the flank's top corner; the cut picked in
