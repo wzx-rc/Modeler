@@ -51,4 +51,8 @@ pub fn run(ctx: &egui::Context, st: &mut AppState) {
     }
     viewport::show(ctx, st);
     ui::show(ctx, st);
+    // the camera on its way: the next frame soon
+    if st.cam_anim.is_some() {
+        ctx.request_repaint();
+    }
 }

@@ -437,6 +437,9 @@ pub struct Drag {
     /// by hand (D: it goes with the move).
     pub pivot: DVec3,
     pub custom: bool,
+    /// The Carves moved and the shapes made after them they overlapped
+    /// when it began: those stay as they are at its end (`carve_plan`).
+    pub keep: Vec<(FeatureId, FeatureId)>,
 }
 
 /// A fillet or chamfer sized by a drag on screen (Rectify's Radius
@@ -560,6 +563,11 @@ pub struct Isolate {
     pub from: FeatureId,
     /// Whether the scan was shown (put back after).
     pub ref_shown: bool,
+    /// The view and the whole part's model then: both come back at once
+    /// when it ends (the model if the document did not change meanwhile).
+    pub camera: OrbitCamera,
+    pub model: Option<Arc<Model>>,
+    pub version: u64,
 }
 
 /// The selection as the undo steps keep it: Ctrl + Z goes back through
@@ -678,6 +686,8 @@ pub struct AppState {
     pub marquee: Option<([f32; 2], [f32; 2])>,
 
     pub camera: OrbitCamera,
+    /// The camera on its way to a view (F, Isolate), see `CamAnim`.
+    pub cam_anim: Option<crate::camera::CamAnim>,
     /// Screen size and the free 3D area (min x, min y, max x, max y), points.
     pub screen: [f32; 2],
     pub view_rect: [f32; 4],
@@ -832,6 +842,7 @@ impl AppState {
             hot_handle: None,
             marquee: None,
             camera: OrbitCamera { target: Vec3::new(0.0, 10.0, 0.0), yaw: 0.62, pitch: 0.42, dist: 160.0, ..Default::default() },
+            cam_anim: None,
             screen: [1600.0, 900.0],
             view_rect: [0.0, 0.0, 1600.0, 900.0],
             kernel,
@@ -911,8 +922,8 @@ impl AppState {
             b = Some(b.map(|(a, c)| (a.min(lo), c.max(hi))).unwrap_or((lo, hi)));
         }
         match b {
-            Some((lo, hi)) => self.camera.frame(lo, hi),
-            None => self.camera.frame(Vec3::new(-20.0, 0.0, -20.0), Vec3::new(20.0, 20.0, 20.0)),
+            Some((lo, hi)) => self.fly_frame(lo, hi),
+            None => self.fly_frame(Vec3::new(-20.0, 0.0, -20.0), Vec3::new(20.0, 20.0, 20.0)),
         }
     }
 
@@ -937,11 +948,17 @@ impl AppState {
         out
     }
 
-    /// Isolate on (what is picked shown alone, framed) or off.
+    /// Isolate on (what is picked shown alone, framed) or off (the view
+    /// and the whole part back at once: Romain 20 nov., 10 h 57, "ça met
+    /// 1 s à ré-afficher toute la scène").
     pub fn toggle_isolate(&mut self) {
         if let Some(iso) = self.isolate.take() {
             self.ref_shown = iso.ref_shown;
             self.version += 1;
+            if let Some(m) = iso.model.filter(|_| iso.version + 1 == self.version) {
+                self.show_model(&m);
+            }
+            self.fly_to(iso.camera);
             self.toast("Isolate off: everything shown", false);
             return;
         }
@@ -950,15 +967,157 @@ impl AppState {
             self.toast("Isolate: select what to show alone first", true);
             return;
         }
-        self.isolate = Some(Isolate { ids, from: self.doc.next_id, ref_shown: self.ref_shown });
+        self.isolate = Some(Isolate { ids, from: self.doc.next_id, ref_shown: self.ref_shown, camera: self.camera, model: self.model.clone(), version: self.version });
         self.ref_shown = false;
-        self.version += 1;
         let keep = self.isolated_ids();
+        self.version += 1;
+        // at once its faces from the whole part's model, until the kernel
+        // sends the isolated part
+        if let Some(m) = self.filtered_model(&keep) {
+            self.show_model(&m);
+        }
+        // the version the whole model stands for, once Isolate began
+        if let Some(i) = self.isolate.as_mut() {
+            i.version = self.version;
+        }
         let b = self.doc.features.iter().filter(|f| keep.contains(&f.id) && f.is_solid() && f.op != Op::Carve).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
         if let Some((lo, hi)) = b {
-            self.camera.frame(lo.as_vec3(), hi.as_vec3());
+            self.fly_frame(lo.as_vec3(), hi.as_vec3());
         }
-        self.toast("Isolate: the selection alone (its icon again: everything)", false);
+        self.toast("Isolate: the selection alone (Ctrl + I again: everything)", false);
+    }
+
+    /// A model put on screen at once (not from the kernel), standing for
+    /// the current version: the kernel's answers to the requests before
+    /// it, still on their way, are not taken.
+    fn show_model(&mut self, m: &Model) {
+        let mut m = m.clone();
+        m.serial = self.version * 4;
+        self.picker = Picker::new(&m);
+        self.model = Some(Arc::new(m));
+        self.model_gen += 1;
+    }
+
+    /// The model on screen with only the faces of features `keep` (and the
+    /// edges between them).
+    fn filtered_model(&self, keep: &[FeatureId]) -> Option<Model> {
+        let m = self.model.as_ref()?;
+        let on: Vec<bool> = m.faces.iter().map(|f| f.tag.map(|t| keep.contains(&t.feature)).unwrap_or(false)).collect();
+        let mut out = Model { serial: m.serial, fine: m.fine, positions: m.positions.clone(), normals: m.normals.clone(), faces: m.faces.clone(), ..Default::default() };
+        for (t, tri) in m.triangles.iter().enumerate() {
+            let f = m.tri_face[t] as usize;
+            if on.get(f).copied().unwrap_or(false) {
+                out.triangles.push(*tri);
+                out.tri_face.push(f as u32);
+            }
+        }
+        out.edges = m.edges.iter().filter(|e| e.faces.iter().all(|&f| f < 0 || on.get(f as usize).copied().unwrap_or(false))).cloned().collect();
+        Some(out)
+    }
+
+    // ------------------------------------------------------------- framing
+
+    /// The camera eased to `to` (a quarter of a second).
+    pub fn fly_to(&mut self, to: OrbitCamera) {
+        self.cam_anim = Some(crate::camera::CamAnim { from: self.camera, to, t0: self.now, dur: 0.28, last: self.camera });
+    }
+
+    /// The camera eased to frame a box.
+    pub fn fly_frame(&mut self, lo: Vec3, hi: Vec3) {
+        let mut c = self.cam_anim.map(|a| a.to).unwrap_or(self.camera);
+        c.frame(lo, hi);
+        self.fly_to(c);
+    }
+
+    /// Once per frame: the camera on its way (a navigation meanwhile stops it).
+    fn cam_tick(&mut self) {
+        let Some(mut a) = self.cam_anim else { return };
+        if self.camera != a.last {
+            self.cam_anim = None;
+            return;
+        }
+        let s = ((self.now - a.t0) / a.dur).clamp(0.0, 1.0) as f32;
+        if s >= 1.0 {
+            self.camera = a.to;
+            self.cam_anim = None;
+            return;
+        }
+        // ease out: quick, then settling
+        let e = 1.0 - (1.0 - s).powi(3);
+        self.camera = a.from.lerp(&a.to, e);
+        a.last = self.camera;
+        self.cam_anim = Some(a);
+    }
+
+    /// What F frames (Romain 20 nov., 10 h 43, "le F pour framing sur la
+    /// sélection en cours"): in a component mode the picked faces, edges or
+    /// vertices; else the selected shapes (their faces in the part, with
+    /// their operations'; a Carve or a curve its box) or operations (their
+    /// faces); none: the whole part.
+    pub fn selection_bounds(&self) -> Option<(Vec3, Vec3)> {
+        let bounds = |pts: &[Vec3]| pts.iter().fold(None, |b: Option<(Vec3, Vec3)>, p| Some(b.map(|(lo, hi)| (lo.min(*p), hi.max(*p))).unwrap_or((*p, *p))));
+        let mut pts: Vec<Vec3> = vec![];
+        let m = self.model.as_ref();
+        let face_pts = |faces: &[bool], pts: &mut Vec<Vec3>| {
+            if let Some(m) = m {
+                for (t, tri) in m.triangles.iter().enumerate() {
+                    if faces.get(m.tri_face[t] as usize).copied().unwrap_or(false) {
+                        pts.extend(tri.iter().map(|&v| Vec3::from(m.positions[v as usize])));
+                    }
+                }
+            }
+        };
+        if self.sel_mode != SelMode::Object {
+            if let Some(m) = m {
+                let mut faces = vec![false; m.faces.len()];
+                for r in &self.face_sel {
+                    if let Some(f) = self.model_face_of(r) {
+                        faces[f] = true;
+                    }
+                }
+                face_pts(&faces, &mut pts);
+                for r in &self.edge_sel {
+                    if let Some(e) = self.model_edge_of(r) {
+                        pts.extend(m.edges[e].pts.iter().map(|p| Vec3::from(*p)));
+                    }
+                }
+            }
+            pts.extend(self.vert_sel.iter().map(|v| v.as_vec3()));
+            if !pts.is_empty() {
+                return bounds(&pts);
+            }
+        }
+        let ids = self.doc.with_operands(&self.selection);
+        if let Some(m) = m {
+            let faces: Vec<bool> = m
+                .faces
+                .iter()
+                .map(|f| f.tag.map(|t| ids.contains(&t.feature) || ids.contains(&self.element_of(t.feature))).unwrap_or(false))
+                .collect();
+            face_pts(&faces, &mut pts);
+        }
+        for f in self.doc.features.iter().filter(|f| ids.contains(&f.id)) {
+            // a shape with no faces of its own on screen (a Carve, a curve)
+            let shown = m.map(|m| m.faces.iter().any(|g| g.tag.map(|t| t.feature == f.id).unwrap_or(false))).unwrap_or(false);
+            if f.is_solid() && (!shown || f.op == Op::Carve) {
+                let (lo, hi) = f.bounds();
+                pts.push(lo.as_vec3());
+                pts.push(hi.as_vec3());
+            }
+        }
+        bounds(&pts)
+    }
+
+    /// F: the current selection framed, eased (nothing: everything).
+    pub fn frame_current(&mut self) {
+        match self.selection_bounds() {
+            Some((lo, hi)) => {
+                // a vertex or a short edge: some room round it
+                let pad = Vec3::splat((5.0 - (hi - lo).length() * 0.5).max(0.0));
+                self.fly_frame(lo - pad, hi + pad);
+            }
+            None => self.frame_all(),
+        }
     }
 
     /// The features the kernel builds while Isolate is on.
@@ -1002,11 +1161,7 @@ impl AppState {
     }
 
     pub fn frame_selection(&mut self) {
-        let b = self.doc.features.iter().filter(|f| self.selection.contains(&f.id)).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
-        match b {
-            Some((lo, hi)) => self.camera.frame(lo.as_vec3(), hi.as_vec3()),
-            None => self.frame_all(),
-        }
+        self.frame_current();
     }
 
     // ------------------------------------------------------------- history
@@ -1477,11 +1632,76 @@ impl AppState {
     }
 
     pub fn set_op(&mut self, id: FeatureId, op: Op) {
+        self.set_ops(&[id], op);
+    }
+
+    /// Makes shapes Add or Carve (one undo step). A Carve over a shape made
+    /// after it goes last in the history (`carve_plan`).
+    pub fn set_ops(&mut self, ids: &[FeatureId], op: Op) {
+        let (last, cut) = if op == Op::Carve { self.carve_plan(ids, &[]) } else { (vec![], vec![]) };
         self.edit(op.label(), |d| {
-            if let Some(f) = d.feature_mut(id) {
-                f.op = op;
+            for id in ids {
+                if let Some(f) = d.feature_mut(*id) {
+                    f.op = op;
+                }
             }
+            put_last(d, &last);
         });
+        self.carve_toast(&cut);
+    }
+
+    /// The shapes made after `id` in the history that its box overlaps
+    /// (visible, built, Add).
+    pub fn later_overlaps(&self, id: FeatureId) -> Vec<FeatureId> {
+        let Some(i) = self.doc.index_of(id) else { return vec![] };
+        let (lo, hi) = self.doc.features[i].bounds();
+        self.doc.features[i + 1..]
+            .iter()
+            .filter(|g| g.is_solid() && !g.is_path() && !g.is_sheet() && g.op == Op::Add && g.visible && !g.suspended)
+            .filter(|g| {
+                let (a, b) = g.bounds();
+                (lo - b).max_element() < -1e-3 && (a - hi).max_element() < -1e-3
+            })
+            .map(|g| g.id)
+            .collect()
+    }
+
+    /// A Carve over a shape made after it cut nothing (Romain 20 nov.,
+    /// 10 h 47: a Sketch set to Carve over a Pill made later). The Carves
+    /// among `ids` that overlap a shape made after them (`keep`: pairs
+    /// (carve, shape) left as they are, a boss standing in a pocket made
+    /// before it) go last in the history with their own operations, so
+    /// each cuts what it touches as a Carve just made would. Gives the
+    /// features to put last, and the names of the shapes now cut.
+    pub fn carve_plan(&self, ids: &[FeatureId], keep: &[(FeatureId, FeatureId)]) -> (Vec<FeatureId>, Vec<String>) {
+        let mut last = vec![];
+        let mut cut = vec![];
+        for &id in ids {
+            let Some(f) = self.doc.feature(id) else { continue };
+            if !f.is_solid() || f.is_path() || f.is_sheet() {
+                continue;
+            }
+            let hits: Vec<FeatureId> = self.later_overlaps(id).into_iter().filter(|h| !keep.contains(&(id, *h))).collect();
+            if hits.is_empty() {
+                continue;
+            }
+            for h in hits {
+                if let Some(g) = self.doc.feature(h) {
+                    if !cut.contains(&g.name) {
+                        cut.push(g.name.clone());
+                    }
+                }
+            }
+            last.push(id);
+            last.extend(self.element_ops(id));
+        }
+        (last, cut)
+    }
+
+    fn carve_toast(&mut self, cut: &[String]) {
+        if !cut.is_empty() {
+            self.toast(&format!("Carve moved after {} in the history: it cuts it now", cut.join(", ")), false);
+        }
     }
 
     /// Moves a feature one step earlier (-1) or later (+1) in the history.
@@ -3189,7 +3409,8 @@ impl AppState {
             .iter()
             .flat_map(|s| self.element_ops(s.id).into_iter().filter_map(|o| self.doc.feature(o).cloned()).map(move |o| (o, s.id)).collect::<Vec<_>>())
             .collect();
-        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom });
+        let keep: Vec<(FeatureId, FeatureId)> = start.iter().filter(|s| s.op == Op::Carve).flat_map(|s| self.later_overlaps(s.id).into_iter().map(move |h| (s.id, h))).collect();
+        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom, keep });
     }
 
     /// The point a handle sits on.
@@ -3433,7 +3654,15 @@ impl AppState {
         self.snap_shown = None;
         self.gizmo_readout = None;
         if let Some(d) = self.drag.take() {
+            // a Carve brought onto a shape made after it goes last, so it
+            // cuts it (one undo step with the move)
+            let carves: Vec<FeatureId> = d.start.iter().filter(|s| s.op == Op::Carve).map(|s| s.id).collect();
+            let (last, cut) = self.carve_plan(&carves, &d.keep);
+            if !last.is_empty() {
+                self.live(|doc| put_last(doc, &last));
+            }
             self.end_live();
+            self.carve_toast(&cut);
             // the pivot put by hand stays with what was moved
             if let (true, Some(c)) = (d.custom, self.custom_pivot) {
                 self.custom_pivot = Some((self.pivot_key(), c.1));
@@ -3447,6 +3676,7 @@ impl AppState {
     /// it changed (coarse meshing while a gesture is live, fine after).
     pub fn tick(&mut self, now: f64) {
         self.now = now;
+        self.cam_tick();
         self.sync_selection();
         if self.toast.as_ref().map(|t| now > t.until).unwrap_or(false) {
             self.toast = None;
@@ -3878,6 +4108,16 @@ pub fn closest_on_line(o: DVec3, d: DVec3, ro: DVec3, rd: DVec3) -> Option<f64> 
 /// its X and Z).
 /// An operation's face tags moved onto copied features (`map`: old id →
 /// new id).
+/// The features `ids` moved to the end of the history, in their order.
+pub fn put_last(d: &mut Doc, ids: &[FeatureId]) {
+    if ids.is_empty() {
+        return;
+    }
+    let (moved, mut rest): (Vec<Feature>, Vec<Feature>) = d.features.drain(..).partition(|f| ids.contains(&f.id));
+    rest.extend(moved);
+    d.features = rest;
+}
+
 fn retag(f: &mut Feature, map: &std::collections::HashMap<FeatureId, FeatureId>) {
     let t = |tag: &mut i64| {
         if let Some(ft) = FaceTag::unpack(*tag) {

@@ -147,7 +147,7 @@ impl Harness {
         let end = Instant::now() + Duration::from_secs(20);
         while Instant::now() < end {
             self.step();
-            if !self.st.building() {
+            if !self.st.building() && self.st.cam_anim.is_none() {
                 self.steps(2);
                 return;
             }
@@ -3464,6 +3464,63 @@ fn main() {
         }
     }
 
+    if want("carve-order") {
+        // a Carve over a shape made after it (Romain 20 nov., 10 h 47: a
+        // Sketch made first, a Pill after it, the Sketch set to Carve cut
+        // nothing): set to Carve, it goes last and cuts; a Carve made first
+        // beside, a block after it, the Carve moved onto it: likewise; a
+        // boss standing in a pocket made before it, the pocket moved: kept
+        let mut d = Doc::default();
+        let a = d.add(Op::Add, Prim::Box { x: 40.0, y: 12.0, z: 12.0 }, DVec3::new(0.0, 14.0, 4.0), DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Box { x: 50.0, y: 20.0, z: 16.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let c = d.add(Op::Carve, Prim::Box { x: 10.0, y: 30.0, z: 10.0 }, DVec3::new(0.0, -5.0, 40.0), DQuat::IDENTITY);
+        let e = d.add(Op::Add, Prim::Box { x: 30.0, y: 10.0, z: 20.0 }, DVec3::new(0.0, 0.0, -30.0), DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::new(70.0, 0.0, 0.0), DQuat::IDENTITY);
+        let pocket = d.add(Op::Carve, Prim::Box { x: 16.0, y: 7.0, z: 12.0 }, DVec3::new(70.0, 14.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Box { x: 4.0, y: 4.0, z: 4.0 }, DVec3::new(70.0, 14.0, 0.0), DQuat::IDENTITY);
+        h.reset(d, "Carves");
+        h.st.camera.frame(Vec3::new(-30.0, -5.0, -45.0), Vec3::new(95.0, 30.0, 50.0));
+        h.st.camera.dist *= 1.3;
+        h.steps(2);
+        h.settle();
+        let order = |h: &Harness| h.st.doc.features.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(", ");
+        let faces = |h: &Harness| h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0);
+        eprintln!("  before: {} · faces {}", order(&h), faces(&h));
+        h.shot("zero-carve-order-1-before");
+        h.st.selection = vec![a];
+        h.st.set_ops(&[a], Op::Carve);
+        h.settle();
+        eprintln!("  {a} set to Carve: {} · faces {} · toast {:?}", order(&h), faces(&h), h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.shot("zero-carve-order-2-set");
+        // the Carve made first, moved onto the block made after it
+        h.st.selection = vec![c];
+        h.steps(2);
+        // the gizmo's Z arrow dragged 70 mm towards the block (the drag
+        // itself: begin, the shape moved live, end)
+        let at = h.screen_of(h.st.pivot().unwrap().as_vec3());
+        h.st.begin_drag(nurbs_app::state::Handle::Axis(2), [at.x, at.y]);
+        h.st.live(|d| d.feature_mut(c).unwrap().origin.z -= 70.0);
+        h.st.end_drag();
+        h.settle();
+        eprintln!("  {c} moved: {} · faces {} · toast {:?} · origin {:?}", order(&h), faces(&h), h.st.toast.as_ref().map(|t| t.text.clone()), h.st.doc.feature(c).map(|f| f.origin));
+        h.shot("zero-carve-order-3-moved");
+        let _ = e;
+        // the pocket moved: the boss made in it after it stays
+        h.st.selection = vec![pocket];
+        h.steps(2);
+        let at = h.screen_of(h.st.pivot().unwrap().as_vec3());
+        h.st.begin_drag(nurbs_app::state::Handle::Axis(0), [at.x, at.y]);
+        h.st.live(|d| d.feature_mut(pocket).unwrap().origin.x += 3.0);
+        h.st.end_drag();
+        h.settle();
+        eprintln!("  pocket {pocket} moved: {} · faces {} · toast {:?}", order(&h), faces(&h), h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.shot("zero-carve-order-4-pocket");
+        h.st.undo();
+        h.st.undo();
+        h.settle();
+        eprintln!("  undo ×2: {} · faces {}", order(&h), faces(&h));
+    }
+
     if want("isolate") {
         // Isolate (Romain 20 nov., 9 h 38, Maya): a block beside the test
         // part picked, the top bar's icon: it alone, framed; again: all
@@ -3475,10 +3532,15 @@ fn main() {
         h.settle();
         h.click(h.screen_of(Vec3::new(70.0, 15.0, 0.0)));
         eprintln!("  selected {:?} (block {b})", h.st.selection);
+        let cam0 = h.st.camera;
         h.hold(Modifiers::CTRL);
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::I);
         h.hold(Modifiers::NONE);
+        eprintln!("  at once: faces {} (animating {})", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.cam_anim.is_some());
+        h.steps(6);
+        h.shot("zero-isolate-0-flying");
         h.settle();
+        eprintln!("  camera {:?} {} → {:?} {}", cam0.target, cam0.dist, h.st.camera.target, h.st.camera.dist);
         eprintln!("  isolated {:?}: faces {}", h.st.isolate.as_ref().map(|i| i.ids.clone()), h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0));
         h.shot("zero-isolate-1-on");
         // the part's block picked by a face (Face mode), isolated with its hole, boss, slot
@@ -3497,11 +3559,27 @@ fn main() {
         eprintln!("  isolated {:?}: faces {}", h.st.isolated_ids(), h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0));
         h.shot("zero-isolate-2-part");
         h.hold(Modifiers::CTRL);
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::I);
         h.hold(Modifiers::NONE);
+        eprintln!("  off at once: faces {}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0));
         h.settle();
         eprintln!("  off: faces {}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0));
         h.shot("zero-isolate-3-off");
+        eprintln!("  camera back {:?} {}", h.st.camera.target, h.st.camera.dist);
+        // F in Edge mode: the edge picked framed
+        h.key(egui::Key::Num2);
+        h.click(h.screen_of(Vec3::new(80.0, 20.0, 0.0)));
+        eprintln!("  edges picked {}", h.st.edge_sel.len());
+        h.key(egui::Key::F);
+        h.settle();
+        eprintln!("  F on the edge: {:?} {}", h.st.camera.target, h.st.camera.dist);
+        h.shot("zero-isolate-4-f-edge");
+        h.key(egui::Key::Num4);
+        h.key(egui::Key::Escape);
+        h.st.selection.clear();
+        h.key(egui::Key::F);
+        h.settle();
+        eprintln!("  F on nothing: {:?} {}", h.st.camera.target, h.st.camera.dist);
     }
 
     if want("edges-depth") {

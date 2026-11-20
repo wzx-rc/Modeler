@@ -46,6 +46,9 @@ struct Stage {
 pub struct Cache {
     tools: HashMap<u64, Rc<Shape>>,
     stages: HashMap<u64, Stage>,
+    /// The stages the build before used: kept one build more, so a
+    /// document asked again after another (Isolate on, then off) is found.
+    prev: Vec<u64>,
 }
 
 fn rows(m: DMat4) -> [[f64; 4]; 3] {
@@ -1411,7 +1414,9 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     }
     // keep what this document uses (the next request is most often the same
     // document with one feature changed)
-    cache.stages.retain(|k, _| used_stages.contains(k));
+    let prev = std::mem::take(&mut cache.prev);
+    cache.stages.retain(|k, _| used_stages.contains(k) || prev.contains(k));
+    cache.prev = used_stages;
     if cache.tools.len() > 256 {
         cache.tools.retain(|k, _| used_tools.contains(k));
     }
@@ -3646,6 +3651,37 @@ mod vertex4_probe {
         // vertex (239.485, 33.17, -52.33), filleted in every subset.
         let Ok(p) = std::env::var("FORME_DOC") else { return };
         let mut d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+        if let Ok(modes) = std::env::var("FORME_LAST") {
+            // the last step as it is, made a chamfer (c) or a fillet (f), with or
+            // without tension (t0), blend (b0), at a size (s0.5): "c,f,c s0.2"
+            for m in modes.split(',') {
+                let mut d2 = d.clone();
+                let r = d2.features.last_mut().unwrap().round.as_mut().unwrap();
+                for w in m.split_whitespace() {
+                    match w {
+                        "c" => r.chamfer = true,
+                        "f" => r.chamfer = false,
+                        "t0" => r.tension = 0.0,
+                        "b0" => r.blend = false,
+                        _ if w.starts_with('s') => r.size = w[1..].parse().unwrap(),
+                        _ if w.starts_with('e') => {
+                            let keep: Vec<usize> = w[1..].chars().map(|c| c.to_digit(10).unwrap() as usize).collect();
+                            r.edges = keep.iter().map(|&i| r.edges[i].clone()).collect();
+                        }
+                        _ => {}
+                    }
+                }
+                let last = d2.features.last().unwrap().clone();
+                let t0 = std::time::Instant::now();
+                let mut cache = Cache::default();
+                let m2 = build(&d2, true, false, &[], &mut cache);
+                let errs: Vec<&String> = m2.errors.iter().filter(|s| s.starts_with(&format!("{}:", last.name)) || s.starts_with("Chamfer") || s.starts_with("Fillet 8")).collect();
+                let lim: Vec<_> = m2.limits.iter().filter(|l| l.0 == last.id).collect();
+                let faces = m2.faces.iter().filter(|f| f.tag.map_or(false, |t| t.feature == last.id)).count();
+                eprintln!("LAST [{m}] {:.2} s: errors {:?} limits {:?} faces {faces}", t0.elapsed().as_secs_f64(), errs, lim);
+            }
+            return;
+        }
         let keep: u32 = std::env::var("FORME_KEEP").ok().and_then(|v| v.parse().ok()).unwrap_or(102);
         d.features.retain(|f| f.id < keep);
         let t = |f: u32, s: u32| ((f as i64) << 16) | s as i64;

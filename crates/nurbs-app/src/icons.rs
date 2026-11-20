@@ -426,14 +426,22 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
         }
         Icon::Isolate => {
-            // a block alone, framed by four corners (Maya's Isolate Select)
-            let b = [(7.0, 7.0), (13.0, 7.0), (13.0, 13.0), (7.0, 13.0)];
-            pen.fill(&b, 0.5);
-            pen.closed(&b);
-            pen.line(&[(2.5, 6.0), (2.5, 2.5), (6.0, 2.5)]);
-            pen.line(&[(14.0, 2.5), (17.5, 2.5), (17.5, 6.0)]);
-            pen.line(&[(17.5, 14.0), (17.5, 17.5), (14.0, 17.5)]);
-            pen.line(&[(6.0, 17.5), (2.5, 17.5), (2.5, 14.0)]);
+            // one block alone in front, the others faded behind it (Romain
+            // 20 nov., 10 h 57: the four corners read as a focus)
+            let ghost = Pen { p, r: rect, s: Stroke::new(pen.s.width * 0.75, pen.s.color.gamma_multiply(0.32)) };
+            for cx in [4.2, 15.8] {
+                let h = [(cx, 2.5), (cx + 3.2, 4.3), (cx + 3.2, 8.3), (cx, 10.1), (cx - 3.2, 8.3), (cx - 3.2, 4.3)];
+                ghost.closed(&h);
+                ghost.line(&[(cx - 3.2, 4.3), (cx, 6.1), (cx + 3.2, 4.3)]);
+                ghost.line(&[(cx, 6.1), (cx, 10.1)]);
+            }
+            let hex = [(10.0, 6.0), (15.4, 9.0), (15.4, 15.0), (10.0, 18.0), (4.6, 15.0), (4.6, 9.0)];
+            let top = [(10.0, 6.0), (15.4, 9.0), (10.0, 12.0), (4.6, 9.0)];
+            pen.fill(&hex, 0.45);
+            pen.fill(&top, 0.5);
+            pen.closed(&hex);
+            pen.line(&[(4.6, 9.0), (10.0, 12.0), (15.4, 9.0)]);
+            pen.line(&[(10.0, 12.0), (10.0, 18.0)]);
         }
         Icon::Xray => {
             let hex = [(10.0, 2.5), (16.5, 6.0), (16.5, 14.0), (10.0, 17.5), (3.5, 14.0), (3.5, 6.0)];

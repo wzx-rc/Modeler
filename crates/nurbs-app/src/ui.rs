@@ -252,7 +252,7 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     st.settings.grid = !st.settings.grid;
                     st.save_settings();
                 }
-                let tip = if st.isolate.is_some() { "Isolate on: click to show everything again (Ctrl + 1)" } else { "Isolate: show the selection alone (Ctrl + 1, Maya)" };
+                let tip = if st.isolate.is_some() { "Isolate on: click to show everything again (Ctrl + I)" } else { "Isolate: show the selection alone (Ctrl + I)" };
                 if icon_btn(ui, Icon::Isolate, st.isolate.is_some(), tip, 28.0).clicked() {
                     st.toggle_isolate();
                 }
@@ -364,13 +364,7 @@ fn set_op_from_ui(st: &mut AppState, op: Op) {
     if st.tool == Tool::Select {
         let ids: Vec<FeatureId> = st.selection.iter().copied().filter(|id| st.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false)).collect();
         if !ids.is_empty() {
-            st.edit(op.label(), |d| {
-                for id in &ids {
-                    if let Some(f) = d.feature_mut(*id) {
-                        f.op = op;
-                    }
-                }
-            });
+            st.set_ops(&ids, op);
         }
     }
 }
@@ -1712,7 +1706,7 @@ fn reference_rows(ui: &mut Ui, st: &mut AppState) {
         if ui.button("Frame").clicked() {
             if let Some(m) = &st.reference {
                 let (lo, hi) = (m.lo.as_vec3(), m.hi.as_vec3());
-                st.camera.frame(lo, hi);
+                st.fly_frame(lo, hi);
             }
             ui.close();
         }
@@ -2752,8 +2746,8 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     use egui::Key;
     let (ctrl, shift) = ctx.input(|i| (i.modifiers.ctrl || i.modifiers.mac_cmd, i.modifiers.shift));
     let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
-    // Ctrl + 1: Isolate (Maya)
-    if ctrl && pressed(Key::Num1) {
+    // Ctrl + I: Isolate (Romain 20 nov., 10 h 57; Ctrl + 1, Maya's, too)
+    if ctrl && (pressed(Key::I) || pressed(Key::Num1)) {
         st.toggle_isolate();
         return;
     }
@@ -2889,11 +2883,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         set_op_from_ui(st, op);
     }
     if pressed(Key::F) {
-        if st.selection.is_empty() {
-            st.frame_all();
-        } else {
-            st.frame_selection();
-        }
+        st.frame_current();
     }
     if pressed(Key::Delete) || pressed(Key::Backspace) {
         st.delete_selected();
