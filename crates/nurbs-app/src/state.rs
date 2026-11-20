@@ -398,6 +398,10 @@ pub struct Drag {
     /// The points it carries, any of which lands on a point of interest
     /// it passes near (moves along an axis or in a plane).
     pub carried: crate::snap::Carried,
+    /// Where the gizmo was when it began, and whether it was a pivot put
+    /// by hand (D: it goes with the move).
+    pub pivot: DVec3,
+    pub custom: bool,
 }
 
 /// A fillet or chamfer sized by a drag on screen (Rectify's Radius
@@ -640,6 +644,11 @@ pub struct AppState {
     pub snaps_gen: u64,
     /// What the pointer snapped to this frame (drawn by the viewport).
     pub snap_shown: Option<crate::snap::Snapped>,
+    /// The gizmo's pivot put by hand (Maya's D, Romain 20 nov. 7 h 50: "via
+    /// un pivot avec D"): for the selection whose key it holds, where.
+    pub custom_pivot: Option<(u64, DVec3)>,
+    /// D held: a click puts the pivot on a point.
+    pub pivot_edit: bool,
     /// Ctrl held: no snapping to points.
     pub snap_off: bool,
     /// Shift held (the Sketch and Path lock their sides to 0°, 45°, 90°).
@@ -765,6 +774,8 @@ impl AppState {
             snaps: vec![],
             snaps_gen: 0,
             snap_shown: None,
+            custom_pivot: None,
+            pivot_edit: false,
             snap_off: false,
             shift_held: false,
             acquired: vec![],
@@ -993,6 +1004,7 @@ impl AppState {
             self.redo.push((label.clone(), now));
             self.touched();
             self.clean_selection();
+            self.custom_pivot = None;
             self.toast(&format!("Undo: {label}"), false);
         }
     }
@@ -1004,6 +1016,7 @@ impl AppState {
             self.undo.push((label.clone(), now));
             self.touched();
             self.clean_selection();
+            self.custom_pivot = None;
             self.toast(&format!("Redo: {label}"), false);
         }
     }
@@ -2425,8 +2438,75 @@ impl AppState {
 
     // --------------------------------------------------------------- moves
 
-    /// Pivot of the selection (centre of the selected shapes).
+    /// Where the gizmo sits: the pivot put by hand (D) for this selection,
+    /// else the selection's own.
     pub fn pivot(&self) -> Option<DVec3> {
+        let p = self.own_pivot()?;
+        Some(self.custom_pivot.filter(|c| c.0 == self.pivot_key()).map(|c| c.1).unwrap_or(p))
+    }
+
+    /// Whether the gizmo sits on a pivot put by hand.
+    pub fn custom_pivot_on(&self) -> bool {
+        self.own_pivot().is_some() && self.custom_pivot.map(|c| c.0 == self.pivot_key()).unwrap_or(false)
+    }
+
+    /// What the pivot put by hand belongs to: the mode, the selection and
+    /// what is picked (another selection drops it).
+    pub fn pivot_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let bits = |v: DVec3| v.to_array().map(f64::to_bits);
+        (self.sel_mode as u8).hash(&mut h);
+        self.selection.hash(&mut h);
+        for r in &self.face_sel {
+            (r.tag, bits(r.at)).hash(&mut h);
+        }
+        for r in &self.edge_sel {
+            (r.faces, bits(r.at)).hash(&mut h);
+        }
+        for v in &self.vert_sel {
+            bits(*v).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// D held, a click or a drag (Maya): the pivot jumps onto the nearest
+    /// vertex or point of an edge (its ends, its middle, a circle's
+    /// centre) on screen, the piece's own too, whatever the Snap setting
+    /// (Romain, 7 h 56: "ça saute / snap sur des points ou points repère
+    /// des edges"); none near: back to the selection's own.
+    pub fn put_pivot(&mut self, p: [f32; 2]) {
+        if self.own_pivot().is_none() {
+            return;
+        }
+        let at = self.pivot_target(p);
+        self.custom_pivot = at.map(|s| (self.pivot_key(), s.pos));
+    }
+
+    /// The point D would put the pivot on (drawn while D is held): the
+    /// nearest on screen within 40 points, corners and centres first.
+    pub fn pivot_target(&self, p: [f32; 2]) -> Option<crate::snap::Snapped> {
+        use crate::snap::SnapKind;
+        const JUMP: f32 = 40.0;
+        let v = self.view();
+        let mut cands: Vec<(f32, &crate::snap::SnapPoint)> = self
+            .snaps
+            .iter()
+            .filter(|s| matches!(s.kind, SnapKind::End | SnapKind::Mid | SnapKind::Center | SnapKind::Origin))
+            .filter_map(|s| {
+                let q = v.project(s.pos.as_vec3())?;
+                let d = (q[0] - p[0]).hypot(q[1] - p[1]);
+                (d < JUMP).then_some((d + s.kind.rank(), s))
+            })
+            .collect();
+        cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let s = cands.into_iter().take(12).map(|c| c.1).find(|s| s.kind == SnapKind::Origin || !self.hidden_but(s.pos.as_vec3(), &[]))?;
+        Some(crate::snap::Snapped { pos: s.pos, kind: s.kind, source: None, guides: vec![] })
+    }
+
+    /// The selection's own pivot (centre of the selected shapes, or of the
+    /// picked components).
+    fn own_pivot(&self) -> Option<DVec3> {
         if self.sel_mode != SelMode::Object {
             return self.comp_pivot();
         }
@@ -2474,11 +2554,17 @@ impl AppState {
         let Some(pivot) = self.handle_pivot(h) else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
         let start: Vec<Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).cloned().collect();
-        // the elements' points (their operations' faces too) go with them
+        let custom = !matches!(h, Handle::Size(_)) && self.custom_pivot_on();
+        // the elements' points (their operations' faces too) go with them;
+        // a pivot put by hand alone
         let carried = match h {
             Handle::Axis(_) | Handle::Plane(_) => {
                 let feats: Vec<FeatureId> = start.iter().flat_map(|s| std::iter::once(s.id).chain(self.element_ops(s.id))).collect();
-                self.carried(&feats, &[], &[])
+                let mut c = self.carried(&feats, &[], &[]);
+                if custom {
+                    c.pts = vec![(pivot, crate::snap::SnapKind::End)];
+                }
+                c
             }
             _ => Default::default(),
         };
@@ -2492,7 +2578,7 @@ impl AppState {
             .iter()
             .flat_map(|s| self.element_ops(s.id).into_iter().filter_map(|o| self.doc.feature(o).cloned()).map(move |o| (o, s.id)).collect::<Vec<_>>())
             .collect();
-        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried });
+        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom });
     }
 
     /// The point a handle sits on.
@@ -2546,7 +2632,7 @@ impl AppState {
         }
         let pivot0 = match d.handle {
             Handle::Size(_) => d.start.first().and_then(|f| size_handle_pos(f, d.handle)),
-            _ => Some(d.start.iter().map(|f| f.centre()).sum::<DVec3>() / d.start.len().max(1) as f64),
+            _ => Some(d.pivot),
         };
         let Some(pivot0) = pivot0 else { return };
         let Some(now) = self.handle_param(d.handle, pivot0, p) else { return };
@@ -2563,13 +2649,16 @@ impl AppState {
                 // or top lines up with it (whichever is the closest to where
                 // the pointer took it), along the axis or in the plane
                 let keys: Vec<DVec3> = match d.start.as_slice() {
-                    [f] => vec![f.centre(), f.origin, f.origin + f.axis() * f.prim.height()],
+                    [f] if !d.custom => vec![f.centre(), f.origin, f.origin + f.axis() * f.prim.height()],
                     _ => vec![pivot0],
                 };
                 let mask = if matches!(d.handle, Handle::Axis(_)) { DVec3::AXES[a] } else { DVec3::ONE - DVec3::AXES[a] };
                 if let Some((best, shown)) = self.align_move(p, raw, mask, &keys, &d.carried, &skip) {
                     delta = best;
                     self.snap_shown = Some(shown);
+                }
+                if d.custom {
+                    self.custom_pivot = Some((self.pivot_key(), pivot0 + delta));
                 }
                 let start = d.start.clone();
                 self.live(|doc| {
@@ -2732,8 +2821,12 @@ impl AppState {
     pub fn end_drag(&mut self) {
         self.snap_shown = None;
         self.gizmo_readout = None;
-        if self.drag.take().is_some() {
+        if let Some(d) = self.drag.take() {
             self.end_live();
+            // the pivot put by hand stays with what was moved
+            if let (true, Some(c)) = (d.custom, self.custom_pivot) {
+                self.custom_pivot = Some((self.pivot_key(), c.1));
+            }
         }
     }
 

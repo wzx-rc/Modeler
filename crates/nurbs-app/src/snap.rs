@@ -44,7 +44,7 @@ impl SnapKind {
         }
     }
     /// Lower wins when two points are as close on screen.
-    fn rank(self) -> f32 {
+    pub fn rank(self) -> f32 {
         match self {
             SnapKind::End | SnapKind::Center | SnapKind::Origin => 0.0,
             SnapKind::Mid => 2.0,
@@ -233,6 +233,11 @@ impl AppState {
         if !self.snapping() {
             return None;
         }
+        self.nearest_snap(p, skip)
+    }
+
+    /// The point of interest under the pointer, whatever the Snap setting.
+    fn nearest_snap(&self, p: [f32; 2], skip: &[FeatureId]) -> Option<&SnapPoint> {
         let v = self.view();
         let mut cands: Vec<(f32, &SnapPoint)> = self
             .snaps

@@ -194,6 +194,12 @@ impl Harness {
         self.step();
     }
 
+    /// A key pressed (true) or let go (false), held in between.
+    fn key_hold(&mut self, k: egui::Key, pressed: bool) {
+        self.pending.push(Event::Key { key: k, physical_key: None, pressed, repeat: false, modifiers: self.mods });
+        self.step();
+    }
+
     fn key(&mut self, k: egui::Key) {
         for pressed in [true, false] {
             self.pending.push(Event::Key { key: k, physical_key: None, pressed, repeat: false, modifiers: self.mods });
@@ -3296,6 +3302,67 @@ fn main() {
         eprintln!(
             "  copy moved by {:?} (want x 44.63), errors {:?}",
             h.st.doc.features.last().and_then(|f| f.tweak.as_ref()).map(|t| t.delta),
+            h.st.model.as_ref().map(|m| m.errors.clone())
+        );
+    }
+
+    if want("pivot-d") {
+        // Romain (20 nov. 7 h 50): D held + click puts the pivot on a
+        // point, the move then carries that point onto the points
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        let b = d.add(Op::Add, Prim::Box { x: 10.0, y: 20.0, z: 30.0 }, glam::DVec3::new(69.63, 0.0, 0.0), glam::DQuat::IDENTITY);
+        h.reset(d, "Cube");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(80.0, 25.0, 20.0));
+        h.steps(2);
+        h.settle();
+        let arrow = |h: &mut Harness, axis: Vec3, by: f32, name: &str| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + axis) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let to = h.screen_of(c + axis * by) - s0;
+            h.drag(grab, grab + to, 10, false);
+            h.steps(3);
+            eprintln!("  snapped {:?}", h.st.snap_shown.as_ref().map(|s| (s.kind, s.pos, s.source)));
+            h.shot(name);
+            h.press(grab + to, false);
+            h.steps(2);
+            h.settle();
+        };
+        // Object mode: the small block, its pivot on its top front -X
+        // corner, along -X onto the big one's top front +X corner
+        h.click(h.screen_of(Vec3::new(69.63, 20.0, 0.0)));
+        h.key_hold(egui::Key::D, true);
+        h.move_to(h.screen_of(Vec3::new(64.63, 20.0, 15.0)) + egui::vec2(3.0, 2.0));
+        h.steps(2);
+        h.shot("zero-pivot-d-1-hover");
+        h.click(h.screen_of(Vec3::new(64.63, 20.0, 15.0)) + egui::vec2(3.0, 2.0));
+        h.key_hold(egui::Key::D, false);
+        h.steps(2);
+        eprintln!("  pivot {:?} custom {}", h.st.pivot(), h.st.custom_pivot_on());
+        h.shot("zero-pivot-d-2-set");
+        arrow(&mut h, Vec3::X, -47.0, "zero-pivot-d-3-move");
+        eprintln!("  block at x {:?} (want 25), pivot {:?}", h.st.doc.feature(b).map(|f| f.origin.x), h.st.pivot());
+        // Face mode: the small block's top, its pivot on its top front +X
+        // corner, down along Y onto the middle of the vertical edge below
+        // it (y 10)
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::F11);
+        h.steps(30);
+        h.click(h.screen_of(Vec3::new(25.0, 20.0, 0.0)));
+        eprintln!("  faces {:?}", h.st.face_sel.iter().map(|r| r.tag).collect::<Vec<_>>());
+        h.key_hold(egui::Key::D, true);
+        // 15 points off the corner: the pivot jumps onto it
+        h.click(h.screen_of(Vec3::new(30.0, 20.0, 15.0)) + egui::vec2(12.0, 9.0));
+        h.key_hold(egui::Key::D, false);
+        eprintln!("  pivot {:?} custom {}", h.st.pivot(), h.st.custom_pivot_on());
+        arrow(&mut h, Vec3::Y, -10.5, "zero-pivot-d-4-face");
+        eprintln!(
+            "  face moved by {:?} (want y -10), pivot {:?} custom {}, errors {:?}",
+            h.st.doc.features.last().and_then(|f| f.tweak.as_ref()).map(|t| t.delta),
+            h.st.pivot(),
+            h.st.custom_pivot_on(),
             h.st.model.as_ref().map(|m| m.errors.clone())
         );
     }

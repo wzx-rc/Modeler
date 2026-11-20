@@ -717,7 +717,7 @@ impl AppState {
         let (ro, rd) = self.ray(p);
         let Some(t) = closest_on_line(line.0, line.1, ro, rd) else { return };
         self.begin_live(f.kind_label());
-        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![], carried: Default::default() });
+        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![], carried: Default::default(), pivot: line.0, custom: false });
     }
 
     pub(crate) fn update_push_drag(&mut self, d: &Drag, p: [f32; 2]) {
@@ -1023,9 +1023,14 @@ impl AppState {
         if !matches!(h, Handle::Axis(_) | Handle::Plane(_) | Handle::Scale(_) | Handle::ScaleAll) {
             return;
         }
-        let Some(pivot) = self.comp_pivot() else { return };
+        let Some(pivot) = self.pivot() else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
-        let carried = if matches!(h, Handle::Axis(_) | Handle::Plane(_)) { self.tweak_carried() } else { Default::default() };
+        let custom = self.custom_pivot_on();
+        let mut carried = if matches!(h, Handle::Axis(_) | Handle::Plane(_)) { self.tweak_carried() } else { Default::default() };
+        // a pivot put by hand (D): it alone lands on points
+        if custom {
+            carried.pts = vec![(pivot, crate::snap::SnapKind::End)];
+        }
         let id = match self.selected_tweak() {
             Some(f) => {
                 let id = f.id;
@@ -1042,13 +1047,17 @@ impl AppState {
             }
         };
         let Some(f) = self.doc.feature(id).cloned() else { return };
-        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried });
+        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried, pivot, custom });
+        // the move step now selected: the pivot put by hand goes on with it
+        if custom {
+            self.custom_pivot = Some((self.pivot_key(), pivot));
+        }
     }
 
     pub(crate) fn update_tweak_drag(&mut self, d: &Drag, p: [f32; 2]) {
         let Some(t0) = d.start[0].tweak.clone() else { return };
         let id = d.start[0].id;
-        let pivot0 = t0.at() + t0.delta;
+        let pivot0 = d.pivot;
         let Some(now) = self.handle_param(d.handle, pivot0, p) else { return };
         let raw = now - d.grab;
         let mut delta = DVec3::new(self.snap(raw.x), self.snap(raw.y), self.snap(raw.z));
@@ -1091,6 +1100,9 @@ impl AppState {
         if let Some((best, shown)) = self.align_move(p, raw, mask, &[pivot0], &d.carried, &[]) {
             delta = best;
             self.snap_shown = Some(shown);
+        }
+        if d.custom {
+            self.custom_pivot = Some((self.pivot_key(), pivot0 + delta));
         }
         self.live(|doc| {
             if let Some(tw) = doc.feature_mut(id).and_then(|f| f.tweak.as_mut()) {

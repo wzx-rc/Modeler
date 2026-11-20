@@ -275,6 +275,26 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     // Ctrl held: no snapping to the part's points
     st.snap_off = ctrl;
     st.shift_held = shift;
+    // D held (Maya): a click or a drag puts the gizmo's pivot on the point
+    // under the pointer; the moves then carry that point onto the points
+    // of interest
+    let d_held = !ctrl && !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_down(egui::Key::D));
+    let editing = d_held && st.tool == Tool::Select && st.drag.is_none() && st.push.is_none() && st.pivot().is_some();
+    if st.pivot_edit && !editing {
+        st.snap_shown = None;
+    }
+    st.pivot_edit = editing;
+    if editing {
+        let at = hover.or(resp.interact_pointer_pos()).map(p2);
+        st.snap_shown = at.and_then(|p| st.pivot_target(p));
+        if resp.clicked_by(PointerButton::Primary) || resp.dragged_by(PointerButton::Primary) {
+            if let Some(p) = at {
+                st.put_pivot(p);
+            }
+        }
+        st.hot_handle = None;
+        return;
+    }
     // the points of interest the pointer passes over: the guides line up
     // with them
     let placing = matches!(st.tool, Tool::Create(_)) || st.drag.as_ref().map(|d| matches!(d.handle, Handle::Axis(_) | Handle::Plane(_) | Handle::Size(_))).unwrap_or(false);
@@ -731,6 +751,10 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
         }
     }
     p.circle(c, 2.5, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
+    // a pivot put by hand (D): ringed
+    if st.custom_pivot_on() {
+        p.circle_stroke(c, 6.5, Stroke::new(1.3, HOT));
+    }
     // the move under way
     if let Some(d) = &st.drag {
         if matches!(d.handle, Handle::Axis(_) | Handle::Plane(_)) {
@@ -1337,7 +1361,8 @@ pub fn hint(st: &AppState) -> String {
             PushKind::Inset => "Click a flat face: 2 mm, then drag its dot · Press and drag: sized at once".into(),
             PushKind::Extrude => "Press on a face and drag: out adds, in carves · A round face goes along its normals".into(),
         },
-        (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => "Arrows: move it · Window: X, Y, Z · Del: delete it".into(),
+        (None, Tool::Select) if st.pivot_edit => "D held · Click: the pivot jumps onto the nearest corner, edge middle or circle centre (the moves then put it on the points) · Far from any: back to its own".into(),
+        (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => "Arrows: move it · D + click: pivot on a point · Window: X, Y, Z · Del: delete it".into(),
         (None, Tool::Knife) => {
             if st.knife.is_some() {
                 "Click the next edge: a line across their face (a round one: along it) · Enter, Esc, right click: end the cut".into()
@@ -1354,7 +1379,7 @@ pub fn hint(st: &AppState) -> String {
             } else if !st.picked_profile_corners().is_empty() {
                 "Drag the corner: its fillet · Ctrl held: chamfer · Shift held: tension · Arrows: move it · Esc: deselect".into()
             } else {
-                "Arrows: move it · Shift + click or rectangle: add · Ctrl + rectangle: take away · Esc: deselect".into()
+                "Arrows: move it · D + click: pivot on a point · Shift + click or rectangle: add · Ctrl + rectangle: take away · Esc: deselect".into()
             }
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Face => {
@@ -1367,7 +1392,7 @@ pub fn hint(st: &AppState) -> String {
             } else if st.face_sel.is_empty() {
                 "Click: a face · Double-click: its linked faces · Drag on empty: a rectangle · Shift + click: add · I: inset · Ctrl + E: extrude".into()
             } else {
-                "Double-click: its linked faces · Shift + drag the face: extrude · Ctrl + drag: inset · Arrows: move it · I: inset · Ctrl + E: extrude · Esc: deselect".into()
+                "Double-click: its linked faces · Shift + drag the face: extrude · Ctrl + drag: inset · Arrows: move it · D + click: pivot on a point · I: inset · Ctrl + E: extrude · Esc: deselect".into()
             }
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Edge => {
@@ -1376,7 +1401,7 @@ pub fn hint(st: &AppState) -> String {
             } else if st.edge_sel.is_empty() {
                 "Click: an edge · Double-click: its loop · Drag on one: a fillet · Ctrl held: chamfer · Shift held: tension · Drag on empty: a rectangle · Ctrl + B: chamfer".into()
             } else {
-                "Drag an edge: a fillet · Shift + drag a picked edge: pull it · Arrows: move it · Ctrl + B: chamfer · Esc: deselect".into()
+                "Drag an edge: a fillet · Shift + drag a picked edge: pull it · Arrows: move it · D + click: pivot on a point · Ctrl + B: chamfer · Esc: deselect".into()
             }
         }
         (None, Tool::Select) => {
@@ -1396,7 +1421,7 @@ pub fn hint(st: &AppState) -> String {
             } else {
                 match st.gizmo {
                     GizmoMode::Select => "W: move · E: rotate · R: scale · Right button: menu · Del: delete · Esc: deselect".into(),
-                    GizmoMode::Move => "Arrows and squares: move · Dots: resize · E: rotate · R: scale · Del: delete".into(),
+                    GizmoMode::Move => "Arrows and squares: move · D + click: pivot on a point · Dots: resize · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
                     GizmoMode::Scale => "Cubes: along the shape's axes · Centre: all at once · W: move · E: rotate".into(),
                 }
