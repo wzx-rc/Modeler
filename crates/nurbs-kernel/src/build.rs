@@ -6,7 +6,7 @@
 //! result after each feature (by the content of everything up to it). While
 //! one feature moves, only the booleans from it onwards are made again.
 
-use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Knife, Op, Prim, Push, Round, Tweak};
+use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Knife, Makes, Mirror, Op, Prim, Push, Round, Shell, Tweak};
 use crate::model::{Edge, EdgeKind, Face, FaceTag, Model, SurfKind};
 use crate::proto::step;
 use forme_occt::{CutKind, Shape, SurfKind as OccSurf};
@@ -23,6 +23,19 @@ const COARSE: (f64, f64) = (0.08, 0.35);
 /// Writes the step on stderr before an operation that could crash the process.
 fn mark(s: &str) {
     let mut e = std::io::stderr();
+    // FORME_STAGE_MS=1: how long the step before took (the time from its
+    // mark to this one; "mesh" ends a build, the next build's first mark
+    // gives the meshing's)
+    if std::env::var_os("FORME_STAGE_MS").is_some() {
+        thread_local! { static LAST: std::cell::RefCell<Option<(Instant, String)>> = const { std::cell::RefCell::new(None) }; }
+        LAST.with(|l| {
+            let mut l = l.borrow_mut();
+            if let Some((t, what)) = l.take() {
+                let _ = writeln!(e, "TIME {what} {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+            }
+            *l = Some((Instant::now(), s.to_string()));
+        });
+    }
     let _ = writeln!(e, "STEP {s}");
     let _ = e.flush();
 }
@@ -40,6 +53,9 @@ struct Stage {
     /// Fillets whose tension was too full or too flat for a fillet running
     /// round them, made at the nearest that works.
     tension_limits: Vec<(u32, f64)>,
+    /// The move just made took its mirror image with it (one move of
+    /// both: a face across the plane bends once): the image step is done.
+    paired: bool,
 }
 
 #[derive(Default)]
@@ -49,6 +65,10 @@ pub struct Cache {
     /// The stages the build before used: kept one build more, so a
     /// document asked again after another (Isolate on, then off) is found.
     prev: Vec<u64>,
+    /// The Curves set's 2D booleans by their own hash and their curves'
+    /// (they do not depend on the part, so a drag of a shape does not make
+    /// them again).
+    regions: HashMap<u64, Result<Vec<Vec<[f32; 3]>>, String>>,
 }
 
 fn rows(m: DMat4) -> [[f64; 4]; 3] {
@@ -107,6 +127,146 @@ fn seg_dist(q: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     ((q[0] - a[0] - t * dx).powi(2) + (q[1] - a[1] - t * dy).powi(2)).sqrt()
 }
 
+/// What the C layer takes for a profile in a box of `x` × `z`: its points in
+/// OpenCascade's XY plane (local (x, z) is (x, −z); the caller turns it so
+/// that Z is local Y), whether each is a curve point, and each corner's cut
+/// (a fillet, a chamfer, a conic; a curve point with tension its conic, an
+/// ellipse's quarter; a spline's spans their cubics).
+type OccCut = Option<(CutKind, [f64; 2], [f64; 2], [f64; 2])>;
+fn occ_outline(pr: &crate::doc::Profile, x: f64, z: f64) -> (Vec<[f64; 2]>, Vec<bool>, Vec<OccCut>) {
+    let flip = |q: [f64; 2]| [q[0], -q[1]];
+    let pts: Vec<[f64; 2]> = pr.scaled(x, z).into_iter().map(flip).collect();
+    if pr.spline {
+        // (an open one: its n − 1 spans, the last point's side straight
+        // when closed by the caller)
+        let mut cuts: Vec<OccCut> = vec![None; pts.len()];
+        for (i, (c1, c2)) in pr.spans(x, z).into_iter().enumerate() {
+            cuts[i] = Some((CutKind::Span, flip(c1), flip(c2), [0.0; 2]));
+        }
+        return (pts.clone(), vec![false; pts.len()], cuts);
+    }
+    let kind = |c: &crate::doc::Cut| if c.chamfer { CutKind::Chamfer } else if c.rho > 0.0 { CutKind::Conic } else { CutKind::Arc };
+    let mut cuts: Vec<OccCut> = pr.cuts(x, z).into_iter().map(|c| c.map(|c| (kind(&c), flip(c.a), flip(c.m), flip(c.b)))).collect();
+    for (i, c) in cuts.iter_mut().enumerate() {
+        let rho = pr.tension.get(i).copied().unwrap_or(0.0);
+        if c.is_none() && pr.smooth.get(i).copied().unwrap_or(false) && rho > 1e-6 {
+            *c = Some((CutKind::Curve, [0.0; 2], [rho, 0.0], [0.0; 2]));
+        }
+    }
+    let mut smooth = pr.smooth.clone();
+    if pr.open && !smooth.is_empty() {
+        // an open path's ends are plain points
+        let n = smooth.len();
+        smooth[0] = false;
+        smooth[n - 1] = false;
+        cuts[0] = None;
+        if let Some(c) = cuts.get_mut(n - 1) {
+            *c = None;
+        }
+    }
+    (pts, smooth, cuts)
+}
+
+/// A path's line (world): its outline as a wire, open or closed.
+fn path_wire(f: &Feature, pr: &crate::doc::Profile, close: bool) -> Result<Shape, String> {
+    let Prim::Path { x, z } = f.prim else { return Err("not a curve".into()) };
+    let (pts, smooth, cuts) = occ_outline(pr, x.max(0.01), z.max(0.01));
+    let w = Shape::outline_wire(&pts, &smooth, &cuts, pr.open && !close)?;
+    let w = w.transformed(rows(DMat4::from_rotation_x(-std::f64::consts::FRAC_PI_2)))?;
+    w.transformed(rows(f.matrix()))
+}
+
+/// A path's region (world) when it is closed, else its line.
+fn section(doc: &Doc, f: &Feature) -> Result<Shape, String> {
+    if doc.is_closed_curve(f.id) {
+        return region(doc, f, 0);
+    }
+    let pr = f.profile.as_ref().ok_or("a curve without its points")?;
+    if pr.points.len() < 2 {
+        return Err("a curve needs 2 points".into());
+    }
+    path_wire(f, pr, false)
+}
+
+/// Each face of a shape made whole from a curve (a revolve, a loft, a fill)
+/// tagged by its place: (feature, 0), (feature, 1)…
+fn tag_all(mut s: Shape, id: FeatureId) -> Shape {
+    let tags: Vec<i64> = (0..s.face_count()).map(|i| FaceTag { feature: id, sub: i.min(60000) as u16 }.pack()).collect();
+    s.set_tags(&tags);
+    s
+}
+
+/// A curve turned round its axis (Revolve): its region (closed) or its line
+/// closed along the axis (both ends on it) turned into a solid, else its
+/// line turned into a sheet.
+fn revolve_tool(doc: &Doc, f: &Feature) -> Result<Shape, String> {
+    let rv = f.revolve.ok_or("not a revolve")?;
+    let (o, d) = f.revolve_axis().ok_or("a revolve needs a curve")?;
+    let m = f.matrix();
+    let (wo, wd) = (m.transform_point3(o), f.rot * d);
+    let angle = rv.angle.clamp(1.0, 360.0).to_radians();
+    let profile = if doc.is_closed_curve(f.id) {
+        region(doc, f, 0)?
+    } else {
+        let pr = f.profile.as_ref().ok_or("a curve without its points")?;
+        if pr.points.len() < 2 {
+            return Err("a curve needs 2 points".into());
+        }
+        if f.revolve_closes() {
+            // both ends put on the axis exactly, closed along it
+            let Prim::Path { x, z } = f.prim else { unreachable!() };
+            let mut pr = pr.clone();
+            let n = pr.points.len();
+            for k in [0, n - 1] {
+                if d.x.abs() > 0.5 {
+                    pr.points[k][1] = o.z / z.max(0.01);
+                } else {
+                    pr.points[k][0] = o.x / x.max(0.01);
+                }
+            }
+            let (pts, smooth, cuts) = occ_outline(&pr, x.max(0.01), z.max(0.01));
+            let face = Shape::region_cuts(&pts, &smooth, &cuts)?;
+            let face = face.transformed(rows(DMat4::from_rotation_x(-std::f64::consts::FRAC_PI_2)))?;
+            face.transformed(rows(m))?
+        } else {
+            path_wire(f, pr, false)?
+        }
+    };
+    Ok(tag_all(profile.revolve(wo.to_array(), wd.to_array(), angle)?, f.id))
+}
+
+/// A loft through its curves in order (closed: their regions' outlines,
+/// a solid; else their lines, a sheet).
+fn loft_tool(doc: &Doc, f: &Feature) -> Result<Shape, String> {
+    let l = f.loft.as_ref().ok_or("not a loft")?;
+    let secs: Vec<&Feature> = l.sections.iter().filter_map(|id| doc.feature(*id)).collect();
+    if secs.len() < 2 {
+        return Err("a loft needs 2 curves at least".into());
+    }
+    let closed = secs.iter().all(|g| doc.is_closed_curve(g.id));
+    if !closed && secs.iter().any(|g| doc.is_closed_curve(g.id)) {
+        return Err("its curves must be all closed or all open".into());
+    }
+    let shapes: Vec<Shape> = secs.iter().map(|g| section(doc, g)).collect::<Result<_, _>>()?;
+    let refs: Vec<&Shape> = shapes.iter().collect();
+    Ok(tag_all(Shape::loft(&refs, closed, l.ruled)?, f.id))
+}
+
+/// What a sheet-making feature makes (not the Surface tool's sheets): a
+/// curve filled, turned open, a loft of open curves.
+fn sheet_tool(doc: &Doc, f: &Feature) -> Result<Shape, String> {
+    if f.loft.is_some() {
+        return loft_tool(doc, f);
+    }
+    if f.revolve.is_some() {
+        return revolve_tool(doc, f);
+    }
+    if !doc.is_closed_curve(f.id) {
+        return Err("only a closed curve can be filled".into());
+    }
+    Ok(tag_all(region(doc, f, 0)?, f.id))
+}
+
 /// A closed curve's region (a flat face, world), or a 2D boolean's
 /// (`Feature::shape_bool`: its operands' regions combined, in order). The
 /// operands must lie on one plane.
@@ -142,20 +302,8 @@ pub fn region(doc: &Doc, f: &Feature, depth: usize) -> Result<Shape, String> {
     if pr.open || pr.points.len() < 3 {
         return Err("an open curve has no inside".into());
     }
-    let (x, z) = (x.max(0.01), z.max(0.01));
-    // as `tool` does for a sketch: local (x, z) is OpenCascade's (x, −z),
-    // then turned so its Z is local Y
-    let pts: Vec<[f64; 2]> = pr.scaled(x, z).iter().map(|p| [p[0], -p[1]]).collect();
-    let flip = |q: [f64; 2]| [q[0], -q[1]];
-    let kind = |c: &crate::doc::Cut| if c.chamfer { CutKind::Chamfer } else if c.rho > 0.0 { CutKind::Conic } else { CutKind::Arc };
-    let mut cuts: Vec<_> = pr.cuts(x, z).into_iter().map(|c| c.map(|c| (kind(&c), flip(c.a), flip(c.m), flip(c.b)))).collect();
-    for (i, c) in cuts.iter_mut().enumerate() {
-        let rho = pr.tension.get(i).copied().unwrap_or(0.0);
-        if c.is_none() && pr.smooth.get(i).copied().unwrap_or(false) && rho > 1e-6 {
-            *c = Some((CutKind::Curve, [0.0; 2], [rho, 0.0], [0.0; 2]));
-        }
-    }
-    let s = Shape::region_cuts(&pts, &pr.smooth, &cuts)?;
+    let (pts, smooth, cuts) = occ_outline(pr, x.max(0.01), z.max(0.01));
+    let s = Shape::region_cuts(&pts, &smooth, &cuts)?;
     let s = s.transformed(rows(DMat4::from_rotation_x(-std::f64::consts::FRAC_PI_2)))?;
     s.transformed(rows(f.matrix()))
 }
@@ -202,7 +350,7 @@ fn bool_tool(doc: &Doc, f: &Feature) -> Result<Shape, String> {
 
 /// A feature's hash with its 2D boolean's curves' (they are built with it).
 fn deep_hash(doc: &Doc, f: &Feature) -> u64 {
-    if f.shape_bool.is_none() {
+    if f.shape_bool.is_none() && f.loft.is_none() {
         return f.hash();
     }
     doc.with_operands(&[f.id]).iter().filter_map(|id| doc.feature(*id)).fold(0u64, |h, g| hash2(h, g.hash()))
@@ -210,26 +358,19 @@ fn deep_hash(doc: &Doc, f: &Feature) -> u64 {
 
 /// The feature's solid in the world, its faces tagged.
 fn tool(f: &Feature) -> Result<Shape, String> {
+    // a form: its BSpline through its poles (world), one face
+    if let Some(fm) = &f.form {
+        let poles: Vec<[f64; 3]> = f.form_poles().iter().map(|p| p.to_array()).collect();
+        return Ok(tag_all(Shape::form(&poles, fm.nu, fm.nv)?, f.id));
+    }
     let h = f.prim.height().max(0.01);
     let s = match f.prim {
         Prim::Box { x, z, .. } => Shape::cuboid(x.max(0.01), h, z.max(0.01))?,
         Prim::Cylinder { radius, .. } => Shape::cylinder(radius.max(0.01), h)?,
         Prim::Profile { x, z, .. } => {
             let pr = f.profile.as_ref().ok_or("a sketch without its outline")?;
-            // OpenCascade extrudes an outline of its XY plane along Z: local
-            // (x, z) is OCC (x, -z), then turned so OCC Z is local Y
-            let pts: Vec<[f64; 2]> = pr.scaled(x.max(0.01), z.max(0.01)).iter().map(|p| [p[0], -p[1]]).collect();
-            let flip = |q: [f64; 2]| [q[0], -q[1]];
-            let kind = |c: &crate::doc::Cut| if c.chamfer { CutKind::Chamfer } else if c.rho > 0.0 { CutKind::Conic } else { CutKind::Arc };
-            let mut cuts: Vec<_> = pr.cuts(x.max(0.01), z.max(0.01)).into_iter().map(|c| c.map(|c| (kind(&c), flip(c.a), flip(c.m), flip(c.b)))).collect();
-            // a curve point with tension: its conic (an ellipse's quarter)
-            for (i, c) in cuts.iter_mut().enumerate() {
-                let rho = pr.tension.get(i).copied().unwrap_or(0.0);
-                if c.is_none() && pr.smooth.get(i).copied().unwrap_or(false) && rho > 1e-6 {
-                    *c = Some((CutKind::Curve, [0.0; 2], [rho, 0.0], [0.0; 2]));
-                }
-            }
-            let s = if cuts.iter().any(|c| c.is_some()) { Shape::prism_cuts(&pts, &pr.smooth, &cuts, h * 0.5)? } else { Shape::prism(&pts, &pr.smooth, h * 0.5)? };
+            let (pts, smooth, cuts) = occ_outline(pr, x.max(0.01), z.max(0.01));
+            let s = if cuts.iter().any(|c| c.is_some()) { Shape::prism_cuts(&pts, &smooth, &cuts, h * 0.5)? } else { Shape::prism(&pts, &smooth, h * 0.5)? };
             s.transformed(rows(DMat4::from_rotation_x(-std::f64::consts::FRAC_PI_2)))?
         }
         Prim::Path { .. } => return Err("a path has no solid".into()),
@@ -263,7 +404,7 @@ const PAST: f64 = 0.1;
 /// it sits on (facing each other) put on it. None when nothing moves. Each
 /// face moves at most a quarter of the shape's size across it.
 fn settle(acc: &Shape, f: &Feature, t: &Shape) -> Option<Feature> {
-    if !f.is_solid() || f.is_path() || f.is_sheet() || f.shape_bool.is_some() {
+    if !f.is_solid() || f.is_path() || f.is_sheet() || f.shape_bool.is_some() || f.form.is_some() {
         return None;
     }
     let rot = f.rot;
@@ -606,15 +747,16 @@ fn piece_box(pts: &[DVec3], w: f64) -> (DVec3, DVec3) {
     (lo, hi)
 }
 
-/// The largest size that works for a fillet too big, by halves (for at most
-/// about 2 s: next to a face curved tighter than the fillet, OpenCascade can
-/// take many seconds for each try near the limit).
+/// The largest size that works for a fillet too big, by halves: at most 12
+/// tries (a count, so the same document gives the same size whatever the
+/// load), and a last stop after 6 s (next to a face curved tighter than the
+/// fillet, OpenCascade can take many seconds for each try near the limit).
 fn round_search(acc: &Shape, edges: &[i32], r: &Round, fresh: i64) -> Option<(Shape, f64)> {
     let make = |size: f64| made_on(acc, edges, r, size, fresh);
     let (mut lo, mut hi) = (0.0, r.size);
     let t0 = std::time::Instant::now();
     for _ in 0..12 {
-        if t0.elapsed().as_secs_f64() > 2.0 {
+        if t0.elapsed().as_secs_f64() > SEARCH_STOP {
             break;
         }
         let mid = (lo + hi) * 0.5;
@@ -639,13 +781,14 @@ fn round_search(acc: &Shape, edges: &[i32], r: &Round, fresh: i64) -> Option<(Sh
 
 /// A fillet or chamfer of a few edges made one edge at a time, in the first
 /// order that makes them all at the size asked (depth first, so the orders
-/// share their first steps; at most about 3 s). An edge already rounded by
-/// one before it (OpenCascade carries a fillet along tangent edges) counts
-/// as made. All the faces made carry the step's tag.
+/// share their first steps; at most 40 tries, a count so that the answer
+/// does not depend on the load, and a last stop after 6 s). An edge already
+/// rounded by one before it (OpenCascade carries a fillet along tangent
+/// edges) counts as made. All the faces made carry the step's tag.
 fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> Option<Shape> {
-    fn go(s: &Shape, left: &[EdgeRef], r: &Round, fresh: i64, t0: Instant) -> Option<Shape> {
+    fn go(s: &Shape, left: &[EdgeRef], r: &Round, fresh: i64, t0: Instant, tries: &mut u32) -> Option<Shape> {
         for k in 0..left.len() {
-            if t0.elapsed().as_secs_f64() > 3.0 {
+            if *tries >= 40 || t0.elapsed().as_secs_f64() > SEARCH_STOP {
                 return None;
             }
             let rest: Vec<EdgeRef> = left.iter().enumerate().filter(|(j, _)| *j != k).map(|(_, e)| e.clone()).collect();
@@ -653,6 +796,7 @@ fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> Option<Shape> {
             let next = if missing > 0 || e.is_empty() {
                 continue;
             } else {
+                *tries += 1;
                 made_on(s, &e, r, r.size, fresh)
             };
             if let Ok(n) = next {
@@ -661,15 +805,20 @@ fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> Option<Shape> {
                 if rest.is_empty() {
                     return Some(n);
                 }
-                if let Some(done) = go(&n, &rest, r, fresh, t0) {
+                if let Some(done) = go(&n, &rest, r, fresh, t0, tries) {
                     return Some(done);
                 }
             }
         }
         None
     }
-    go(acc, &r.edges, r, fresh, Instant::now())
+    go(acc, &r.edges, r, fresh, Instant::now(), &mut 0)
 }
+
+/// The last stop of the fillet searches (`round_search`, `one_by_one`): they
+/// end on their count of tries first, this only keeps a pathological case
+/// from holding the kernel.
+const SEARCH_STOP: f64 = 6.0;
 
 /// A fillet that blends its corners: rebuilt in one operation with the run
 /// of fillets just before it (from the first one it touches, through shared
@@ -1131,6 +1280,39 @@ fn tweak(acc: &Shape, f: &Feature, t: &Tweak) -> Result<Option<Shape>, String> {
     Err(err)
 }
 
+/// A move and its mirror image (after a Mirror) made in one go, each
+/// vertex by its own move (a face across the plane whose two corners move
+/// bends once, not twice: a bent face cannot follow a second move).
+fn tweak_pair(acc: &Shape, f: &Feature, t: &Tweak, u: &Tweak) -> Result<Option<Shape>, String> {
+    if t.copy || u.copy {
+        return Err("copies one at a time".into());
+    }
+    let pts = acc.vertex_points();
+    let at = |v: i32| DVec3::from_array(pts[(v - 1) as usize]);
+    let mut moves: Vec<(i32, [f64; 3])> = vec![];
+    for tw in [t, u] {
+        let mut vs: Vec<i32> = vec![];
+        for c in tw.comps() {
+            for v in comp_vertices(acc, c)? {
+                if !vs.contains(&v) {
+                    vs.push(v);
+                }
+            }
+        }
+        if vs.is_empty() {
+            return Err("nothing to move".into());
+        }
+        let centre = tw.about.unwrap_or_else(|| vs.iter().map(|&v| at(v)).sum::<DVec3>() / vs.len() as f64);
+        for &v in &vs {
+            if !moves.iter().any(|(w, _)| *w == v) {
+                moves.push((v, (centre + (at(v) - centre) * tw.scale + tw.delta).to_array()));
+            }
+        }
+    }
+    mark(&step("tweak", f));
+    acc.move_vertices(&moves).map(Some)
+}
+
 /// The Knife: its points found on the edges (the fraction from the end
 /// nearer where each was put), cut into them with its lines. None when it
 /// has no point.
@@ -1173,6 +1355,274 @@ fn knife(acc: &Shape, f: &Feature, k: &Knife) -> Result<Option<Shape>, String> {
     acc.split(&p3, &segs).map(Some)
 }
 
+// ----------------------------------------------------------------- shell
+
+/// The part hollowed (`doc::Shell`): its faces found again (by tag and
+/// nearest point), taken away as openings, the walls made as thick as
+/// asked, the faces grown sharp to meet (else filled round, which is what
+/// works next to a fillet beside an opening). Too thick, the thickest that
+/// works by halves (`limit`; at most 12 tries or 6 s). Also the count of
+/// faces not found.
+fn shell(acc: &Shape, f: &Feature, sh: &Shell, limit: &mut Option<f64>) -> (Result<Option<Shape>, String>, usize) {
+    if sh.thickness < 1e-3 {
+        return (Ok(None), 0);
+    }
+    let mut faces = vec![];
+    let mut missing = 0;
+    for r in &sh.faces {
+        match find_face(acc, r) {
+            Some(i) if !faces.contains(&i) => faces.push(i),
+            Some(_) => {}
+            None => missing += 1,
+        }
+    }
+    if !sh.faces.is_empty() && faces.is_empty() {
+        return (Err("its faces are gone".into()), missing);
+    }
+    let base = FaceTag { feature: f.id, sub: 0 }.pack();
+    mark(&step("shell", f));
+    let make = |t: f64| acc.shell(&faces, t, sh.outward, base, false).or_else(|e| acc.shell(&faces, t, sh.outward, base, true).map_err(|_| e));
+    let e = match make(sh.thickness) {
+        Ok(s) => return (Ok(Some(s)), missing),
+        Err(e) => e,
+    };
+    // too thick? (a thin one must work first, else it is not the thickness)
+    if make((sh.thickness * 0.05).min(0.1)).is_err() {
+        return (Err(e), missing);
+    }
+    let (mut lo, mut hi) = ((sh.thickness * 0.05).min(0.1), sh.thickness);
+    let t0 = Instant::now();
+    for _ in 0..12 {
+        if t0.elapsed().as_secs_f64() > SEARCH_STOP {
+            break;
+        }
+        let mid = (lo + hi) * 0.5;
+        if make(mid).is_ok() {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        if hi - lo < 0.02 {
+            break;
+        }
+    }
+    let q = if lo >= 1.0 { 0.1 } else { 0.01 };
+    let size = (lo / q).floor() * q;
+    match (size >= 0.01).then(|| make(size)) {
+        Some(Ok(s)) => {
+            *limit = Some(size);
+            (Ok(Some(s)), missing)
+        }
+        _ => (Err(e), missing),
+    }
+}
+
+// ---------------------------------------------------------------- mirror
+
+/// The box round a shape (its faces' boxes).
+fn shape_box(s: &Shape) -> Option<(DVec3, DVec3)> {
+    let mut b: Option<(DVec3, DVec3)> = None;
+    for i in 0..s.face_count() {
+        let Some((lo, hi)) = s.face_box(i) else { continue };
+        let (lo, hi) = (DVec3::from_array(lo), DVec3::from_array(hi));
+        b = Some(match b {
+            Some((a, c)) => (a.min(lo), c.max(hi)),
+            None => (lo, hi),
+        });
+    }
+    b
+}
+
+/// What is built so far made symmetric across the Mirror's plane: its
+/// solids cut at the plane (the side kept), mirrored and joined to it (the
+/// faces of one surface across the plane made one by the union); the
+/// sheets beside them mirrored whole. Faces keep their tags on both sides,
+/// so a click on either side names the same shape.
+fn mirror_part(acc: &Shape, id: FeatureId, m: &Mirror) -> Result<Shape, String> {
+    let sheets = acc.lumps_of(false).ok();
+    let solids = match &sheets {
+        Some(_) => acc.lumps_of(true).ok(),
+        None => None,
+    };
+    let solids: Option<&Shape> = if sheets.is_some() { solids.as_ref() } else { Some(acc) };
+    let mut out: Option<Shape> = None;
+    if let Some(sol) = solids {
+        let (lo, hi) = shape_box(sol).ok_or("nothing to mirror")?;
+        let n = m.normal();
+        let a = m.axis.min(2) as usize;
+        let (k0, k1) = (m.side(lo), m.side(hi));
+        let (klo, khi) = (k0.min(k1), k0.max(k1));
+        let size = (hi - lo).max_element().max(1.0);
+        let tol = 1e-6 * size;
+        if khi <= tol {
+            return Err(format!("nothing on the kept side of the plane (flip it: keep the {}{} side)", if m.flip { "+" } else { "−" }, m.axis_name()));
+        }
+        let cut;
+        let half: &Shape = if klo >= -tol {
+            sol
+        } else {
+            // a box over the kept side, from the plane out past the part
+            let margin = 1.0 + 0.1 * size;
+            let len = khi + margin;
+            let mut dims = (hi - lo) + DVec3::splat(2.0 * margin);
+            dims[a] = len;
+            let mut c = (lo + hi) * 0.5;
+            c[a] = m.offset + if m.flip { -0.5 * len } else { 0.5 * len };
+            let mut b = Shape::cuboid(dims.x, dims.y, dims.z)?;
+            b.set_tags(&vec![FaceTag { feature: id, sub: 0 }.pack(); b.face_count()]);
+            let b = b.transformed(rows(DMat4::from_translation(c)))?;
+            let _ = n;
+            cut = sol.common(&b)?;
+            &cut
+        };
+        let image = half.transformed(m.rows())?;
+        out = Some(half.fuse(&image)?);
+    }
+    if let Some(sh) = &sheets {
+        let both = sh.compound(&sh.transformed(m.rows())?)?;
+        out = Some(match out {
+            Some(o) => o.compound(&both)?,
+            None => both,
+        });
+    }
+    out.ok_or_else(|| "nothing to mirror".to_string())
+}
+
+/// A shape made after a Mirror: the tool and its image as one (an Add on
+/// both sides, a Carve through both), the tool alone when it is its own
+/// image (a box or a cylinder centred on the plane): None.
+fn twin_tool(t: &Shape, m: &Mirror) -> Result<Option<Shape>, String> {
+    let image = t.transformed(m.rows())?;
+    if let (Some((lo, hi)), Some((lo2, hi2))) = (shape_box(t), shape_box(&image)) {
+        let tol = 1e-4 * (hi - lo).length() + 1e-5;
+        if lo.distance(lo2) < tol && hi.distance(hi2) < tol {
+            let v = t.volume();
+            if let Ok(c) = t.common(&image) {
+                if v > 0.0 && (c.volume() - v).abs() < 1e-4 * v {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    t.fuse(&image).map(Some)
+}
+
+/// The document with every step after a Mirror made on both sides: a
+/// fillet's or chamfer's edges with their images (one step: both sides
+/// blend and stop alike); an inset, a move, the Knife followed by its image
+/// (the same id: its faces carry the same tags; `twin_of`). None when there
+/// is no Mirror. (The shapes after it are doubled in `run`, `twin_tool`.)
+fn mirrored_doc(doc: &Doc) -> Option<Doc> {
+    if !doc.features.iter().any(|f| f.mirror.is_some() && f.visible && !f.suspended) {
+        return None;
+    }
+    let mut out = doc.clone();
+    out.features.clear();
+    let mut sym: Option<Mirror> = None;
+    for f in &doc.features {
+        let on = f.visible && !f.suspended;
+        if let (Some(m), true) = (&f.mirror, on) {
+            sym = Some(*m);
+            out.features.push(f.clone());
+            continue;
+        }
+        let Some(m) = sym.filter(|_| on) else {
+            out.features.push(f.clone());
+            continue;
+        };
+        if let Some(r) = &f.round {
+            let mut g = f.clone();
+            let images: Vec<EdgeRef> = r.edges.iter().filter(|e| m.reflect(e.at).distance(e.at) > 1e-6).map(|e| EdgeRef { at: m.reflect(e.at), ..e.clone() }).collect();
+            if let Some(gr) = g.round.as_mut() {
+                gr.edges.extend(images);
+            }
+            out.features.push(g);
+        } else if let Some(sh) = &f.shell {
+            // the openings' images open too (one step: a part hollowed once)
+            let mut g = f.clone();
+            let images: Vec<FaceRef> = sh.faces.iter().filter(|r| m.reflect(r.at).distance(r.at) > 1e-6).map(|r| FaceRef { at: m.reflect(r.at), ..*r }).collect();
+            if let Some(gs) = g.shell.as_mut() {
+                gs.faces.extend(images);
+            }
+            out.features.push(g);
+        } else if f.push.is_some() || f.tweak.is_some() || f.cut.is_some() {
+            out.features.push(f.clone());
+            let refl = |p: DVec3| m.reflect(p);
+            let mut g = f.carried_by(&refl);
+            if g != *f {
+                g.name = format!("{}{MIRROR_SIDE}", f.name);
+                out.features.push(g);
+            }
+        } else {
+            out.features.push(f.clone());
+        }
+    }
+    Some(out)
+}
+
+/// The image of the step before it (`mirrored_doc`): the same id (an
+/// Array's copies have it too, but not the name).
+fn twin_of<'a>(feats: &[&'a Feature], i: usize) -> Option<&'a Feature> {
+    (i > 0 && feats[i - 1].id == feats[i].id && feats[i].name.ends_with(MIRROR_SIDE)).then(|| feats[i - 1])
+}
+
+const MIRROR_SIDE: &str = " (mirror side)";
+
+/// The document with each Pattern / Array's shapes and operations made
+/// again at each copy's place, just after it (`Doc::array_pattern`), copy
+/// after copy: the same ids, so a copy's faces carry the original's tags
+/// (a click on a copy names the original's faces, and a fillet's edges are
+/// found again on each copy near its own points). None when there is no
+/// Array. (Before `mirrored_doc`: the copies after a Mirror are made on
+/// both sides.)
+fn arrayed_doc(doc: &Doc) -> Option<Doc> {
+    if !doc.features.iter().any(|f| f.array.is_some() && f.visible && !f.suspended) {
+        return None;
+    }
+    let mut out = doc.clone();
+    out.features.clear();
+    for (i, f) in doc.features.iter().enumerate() {
+        out.features.push(f.clone());
+        let Some(a) = f.array.as_ref().filter(|_| f.visible && !f.suspended) else { continue };
+        let pat = doc.array_pattern(i);
+        for (n, (_, m)) in a.copies().into_iter().enumerate() {
+            for p in &pat {
+                let mut g = if p.is_solid() { p.moved_by(m) } else { p.carried_by(&|q| m.transform_point3(q)) };
+                g.name = format!("{} (copy {})", p.name, n + 2);
+                out.features.push(g);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// An image step that names what its step named on the solid before them
+/// (a face or a knife line across the plane): nothing more to make.
+fn twin_same(acc0: Option<&Shape>, a: &Feature, b: &Feature) -> bool {
+    if let (Some(p), Some(q)) = (&a.push, &b.push) {
+        let Some(acc) = acc0 else { return true };
+        return find_face(acc, &p.face) == find_face(acc, &q.face);
+    }
+    if let (Some(t), Some(u)) = (&a.tweak, &b.tweak) {
+        let Some(acc) = acc0 else { return true };
+        let verts = |t: &Tweak| {
+            let mut v: Vec<i32> = t.comps().filter_map(|c| comp_vertices(acc, c).ok()).flatten().collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        // the same components (across the plane): a move of them is not
+        // made twice, even one that leaves the part lopsided
+        return verts(t) == verts(u);
+    }
+    if let (Some(k), Some(l)) = (&a.cut, &b.cut) {
+        let near = |p: DVec3, set: &[DVec3]| set.iter().any(|q| q.distance(p) < 1e-6);
+        let (kp, kf, ke): (Vec<DVec3>, Vec<DVec3>, Vec<DVec3>) = (k.pts.iter().map(|q| q.at).collect(), k.remove_faces.iter().map(|q| q.at).collect(), k.remove_edges.iter().map(|q| q.at).collect());
+        return l.pts.iter().all(|p| near(p.at, &kp)) && l.remove_faces.iter().all(|r| near(r.at, &kf)) && l.remove_edges.iter().all(|e| near(e.at, &ke));
+    }
+    false
+}
+
 fn hash2(a: u64, b: u64) -> u64 {
     crate::doc::fnv(&[a.to_le_bytes(), b.to_le_bytes()].concat())
 }
@@ -1182,17 +1632,22 @@ fn hash2(a: u64, b: u64) -> u64 {
 /// Builds the features `feats` in this order: the stage after the last
 /// (the stages on the way cached by the hash of what comes before).
 fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Stage {
-    let mut stage = Stage { shape: None, errors: vec![], limits: vec![], conic: vec![], tension_limits: vec![] };
+    let mut stage = Stage { shape: None, errors: vec![], limits: vec![], conic: vec![], tension_limits: vec![], paired: false };
     let mut key = 0u64;
     // the stage before each feature (blended fillets start again from there)
     let mut befores: Vec<(&Feature, Stage)> = vec![];
+    // the Mirror the steps from here on are made on both sides of
+    let mut sym: Option<Mirror> = None;
     for (i, &f) in feats.iter().enumerate() {
         befores.push((f, stage.clone()));
         let fh = deep_hash(doc, f);
         key = hash2(key, fh);
         let skipped = |what: &str| skip.iter().any(|s| *s == step(what, f));
-        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") || skipped("cut") {
+        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") || skipped("cut") || skipped("mirror") || skipped("shell") {
             key = hash2(key, 1);
+        }
+        if let Some(m) = &f.mirror {
+            sym = Some(*m);
         }
         used_stages.push(key);
         if let Some(s) = cache.stages.get(&key) {
@@ -1200,6 +1655,36 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
             model.cached += 1;
             continue;
         }
+        // the part made symmetric
+        if let Some(m) = &f.mirror {
+            if let Some(acc) = stage.shape.clone() {
+                let res = if skipped("mirror") {
+                    Err("skipped, it crashed the kernel".to_string())
+                } else {
+                    mark(&step("mirror", f));
+                    mirror_part(&acc, f.id, m)
+                };
+                match res {
+                    Ok(s) => {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                    }
+                    Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
+                }
+            }
+            cache.stages.insert(key, stage.clone());
+            continue;
+        }
+        // the image of the step before (after a Mirror) that names what it
+        // named (a face across the plane): nothing more to make
+        if let Some(a) = twin_of(feats, i) {
+            if stage.paired || twin_same(befores[i - 1].1.shape.as_deref(), a, f) {
+                stage.paired = false;
+                cache.stages.insert(key, stage.clone());
+                continue;
+            }
+        }
+        stage.paired = false;
         // a fillet or chamfer: on the solid built so far
         if let Some(r) = &f.round {
             if let Some(acc) = stage.shape.clone() {
@@ -1339,6 +1824,17 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         // a face, edge or vertex moved: on the solid built so far
         if let Some(t) = &f.tweak {
             if let Some(acc) = stage.shape.clone() {
+                // with its mirror image next (after a Mirror): both moved
+                // in one go when they do not name the same components
+                if let Some(u) = feats.get(i + 1).filter(|g| g.id == f.id && twin_of(feats, i).is_none() && !skipped("tweak")).and_then(|g| g.tweak.as_ref().filter(|_| !twin_same(Some(&acc), f, g))) {
+                    if let Ok(Some(s)) = tweak_pair(&acc, f, t, u) {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                        stage.paired = true;
+                        cache.stages.insert(key, stage.clone());
+                        continue;
+                    }
+                }
                 let res = if skipped("tweak") { Err("skipped, it crashed the kernel".to_string()) } else { tweak(&acc, f, t) };
                 match res {
                     Ok(Some(s)) => {
@@ -1357,6 +1853,29 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                             Err(_) => stage.errors.push(format!("{}: {e}", f.name)),
                         },
                     },
+                }
+            }
+            cache.stages.insert(key, stage.clone());
+            continue;
+        }
+        // the part hollowed: on the solid built so far
+        if let Some(sh) = &f.shell {
+            if let Some(acc) = stage.shape.clone() {
+                let mut limit = None;
+                let (res, missing) = if skipped("shell") { (Err("skipped, it crashed the kernel".to_string()), 0) } else { shell(&acc, f, sh, &mut limit) };
+                if let Some(l) = limit {
+                    stage.limits.push((f.id, l));
+                }
+                if missing > 0 {
+                    stage.errors.push(format!("{}: {missing} open face{} not found", f.name, if missing > 1 { "s" } else { "" }));
+                }
+                match res {
+                    Ok(Some(s)) => {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                    }
+                    Ok(None) => {}
+                    Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
                 }
             }
             cache.stages.insert(key, stage.clone());
@@ -1385,7 +1904,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
             Ok(t.clone())
         } else {
             mark(&step("tool", f));
-            if f.shape_bool.is_some() { bool_tool(doc, f) } else { tool(f) }.map(|t| {
+            if f.revolve.is_some() || f.loft.is_some() { sheet_tool(doc, f) } else if f.shape_bool.is_some() { bool_tool(doc, f) } else { tool(f) }.map(|t| {
                 let t = Rc::new(t);
                 cache.tools.insert(fh, t.clone());
                 t
@@ -1402,8 +1921,36 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         };
         // a face of it lying just off a face of the part (a thin wall, a
         // thin step, a gap): moved onto it, or for a Carve past it
-        let t = match &stage.shape {
-            Some(acc) if !skipped("boolean") => settle(acc, f, &t).and_then(|g| tool(&g).ok()).map(Rc::new).unwrap_or(t),
+        let (t, th) = match &stage.shape {
+            Some(acc) if !skipped("boolean") => match settle(acc, f, &t).and_then(|g| tool(&g).ok().map(|s| (Rc::new(s), g.hash()))) {
+                Some(x) => x,
+                None => (t, fh),
+            },
+            _ => (t, fh),
+        };
+        // after a Mirror: the shape and its image
+        let t = match sym {
+            Some(m) if !skipped("tool") => {
+                let th = hash2(hash2(th, 0x6d6972726f72), hash2(m.axis as u64 + 3 * m.flip as u64, m.offset.to_bits()));
+                match cache.tools.get(&th) {
+                    Some(d) => {
+                        used_tools.push(th);
+                        d.clone()
+                    }
+                    None => match twin_tool(&t, &m) {
+                        Ok(d) => {
+                            let d = d.map(Rc::new).unwrap_or_else(|| t.clone());
+                            cache.tools.insert(th, d.clone());
+                            used_tools.push(th);
+                            d
+                        }
+                        Err(e) => {
+                            stage.errors.push(format!("{}: its mirror image failed ({e})", f.name));
+                            t
+                        }
+                    },
+                }
+            }
             _ => t,
         };
         // the boolean
@@ -1531,9 +2078,37 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let mut model = Model { fine, ..Default::default() };
     let mut used_tools = vec![];
     let mut used_stages = vec![];
-    let feats: Vec<&Feature> = doc.features.iter().filter(|f| f.visible && !f.suspended && !f.is_path() && !f.is_sheet() && !f.is_mesh()).collect();
+    // each Array's copies, then after a Mirror each step on both sides
+    let arrayed = arrayed_doc(doc);
+    let doc = arrayed.as_ref().unwrap_or(doc);
+    let mirrored = mirrored_doc(doc);
+    let doc = mirrored.as_ref().unwrap_or(doc);
+    let feats: Vec<&Feature> = doc.features.iter().filter(|f| f.visible && !f.suspended && doc.makes(f) == Makes::Solid).collect();
     let mut stage = run(doc, &feats, skip, cache, &mut model, &mut used_tools, &mut used_stages);
     // the surfaces, beside the part (no boolean)
+    // a curve filled, turned open, a loft of open curves (cached as tools)
+    for f in doc.features.iter().filter(|f| f.visible && !f.suspended && f.sheet.is_none() && doc.makes(f) == Makes::Sheet) {
+        let fh = deep_hash(doc, f);
+        let made = match cache.tools.get(&fh) {
+            Some(t) => Ok(t.clone()),
+            None => {
+                mark(&format!("sheet:{}:0", f.id));
+                sheet_tool(doc, f).map(Rc::new)
+            }
+        };
+        used_tools.push(fh);
+        let made = made.and_then(|t| {
+            cache.tools.insert(fh, t.clone());
+            match &stage.shape {
+                Some(acc) => acc.compound(&t).map(Rc::new),
+                None => Ok(t),
+            }
+        });
+        match made {
+            Ok(s) => stage.shape = Some(s),
+            Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
+        }
+    }
     for f in doc.features.iter().filter(|f| f.visible && !f.suspended && f.is_sheet()) {
         let sh = f.sheet.as_ref().unwrap();
         let m = f.matrix();
@@ -1574,15 +2149,34 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
         cache.tools.retain(|k, _| used_tools.contains(k));
     }
     model.errors = stage.errors.clone();
-    // the Curves set's 2D booleans: made exactly, their edges sent back
-    for f in doc.features.iter().filter(|f| f.visible && !f.suspended && f.shape_bool.is_some()) {
-        mark(&format!("region:{}:0", f.id));
-        match region(doc, f, 0).and_then(|r| r.edge_lines(0.01, 0.05)) {
-            Ok(lines) if lines.is_empty() => model.errors.push(format!("{}: nothing left (the curves share nothing)", f.name)),
-            Ok(lines) => model.curves.push((f.id, lines.iter().map(|l| l.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect()).collect())),
-            Err(e) => model.errors.push(format!("{}: {e}", f.name)),
+    // an Array's shapes it cannot repeat
+    for f in doc.features.iter().filter(|f| f.visible && !f.suspended) {
+        let Some(a) = &f.array else { continue };
+        for g in a.sources.iter().filter_map(|id| doc.feature(*id)) {
+            if g.shape_bool.is_some() || g.loft.is_some() {
+                model.errors.push(format!("{}: {} is not repeated (its curves are elsewhere)", f.name, g.name));
+            }
         }
     }
+    // the Curves set's 2D booleans: made exactly, their edges sent back
+    let mut regions = HashMap::new();
+    for f in doc.features.iter().filter(|f| f.visible && !f.suspended && f.shape_bool.is_some()) {
+        let h = deep_hash(doc, f);
+        let made = match cache.regions.remove(&h) {
+            Some(r) => r,
+            None => {
+                mark(&format!("region:{}:0", f.id));
+                region(doc, f, 0).and_then(|r| r.edge_lines(0.01, 0.05)).map(|lines| lines.iter().map(|l| l.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect()).collect())
+            }
+        };
+        match &made {
+            Ok(lines) if lines.is_empty() => model.errors.push(format!("{}: nothing left (the curves share nothing)", f.name)),
+            Ok(lines) => model.curves.push((f.id, lines.clone())),
+            Err(e) => model.errors.push(format!("{}: {e}", f.name)),
+        }
+        regions.insert(h, made);
+    }
+    cache.regions = regions;
     model.limits = stage.limits.clone();
     model.tension_limits = stage.tension_limits.clone();
     if let Some(s) = &stage.shape {
@@ -1652,6 +2246,328 @@ mod tests {
     use crate::doc::KnifePoint;
     use crate::doc::PrimKind;
     use glam::DQuat;
+
+    /// The mesh's volume (closed: the divergence theorem).
+    fn mesh_volume(m: &Model) -> f64 {
+        m.triangles
+            .iter()
+            .map(|t| {
+                let p = |i: u32| DVec3::from_array(m.positions[i as usize].map(|x| x as f64));
+                p(t[0]).dot(p(t[1]).cross(p(t[2]))) / 6.0
+            })
+            .sum()
+    }
+
+    #[test]
+    fn shell_live() {
+        use crate::doc::Shell;
+        // a 40 × 20 × 30 block (20 high), its top open, walls of 2
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let top = FaceRef { tag: tag(b, 2), at: DVec3::new(5.0, 20.0, 3.0) };
+        let s = d.add_shell(Shell { faces: vec![top], thickness: 2.0, outward: false }, top.at);
+        assert_eq!(d.feature(s).unwrap().kind_label(), "Shell");
+        assert!(!d.feature(s).unwrap().is_solid());
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((mesh_volume(&m) - (24000.0 - 36.0 * 18.0 * 26.0)).abs() < 2.0, "{}", mesh_volume(&m));
+        // the block's five faces kept; its inner walls and the rim the step's
+        let by = |id: u32| m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(id)).count();
+        assert_eq!(by(b), 5);
+        assert_eq!(by(s), 6);
+        // a fillet on an inner edge (the floor along the +Z wall), picked
+        // by its faces' tags as any edge
+        let e = edge_near(&m, DVec3::new(0.0, 2.0, 13.0));
+        assert!(e.faces.iter().all(|t| (*t >> 16) as u32 == s), "{e:?}");
+        let r = d.add_round(1.0, false, vec![e]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 1);
+        d.remove(&[r]);
+        // closed: a cavity inside
+        d.feature_mut(s).unwrap().shell.as_mut().unwrap().faces.clear();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((mesh_volume(&m) - (24000.0 - 36.0 * 16.0 * 26.0)).abs() < 2.0, "{}", mesh_volume(&m));
+        // outwards, the top open: the walls round it
+        {
+            let sh = d.feature_mut(s).unwrap().shell.as_mut().unwrap();
+            sh.faces = vec![top];
+            sh.outward = true;
+        }
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((mesh_volume(&m) - (44.0 * 22.0 * 34.0 - 24000.0)).abs() < 2.0, "{}", mesh_volume(&m));
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((lo[1] + 2.0).abs() < 1e-3 && (hi[1] - 20.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        // too thick (the block is 30 deep): the thickest that works
+        {
+            let sh = d.feature_mut(s).unwrap().shell.as_mut().unwrap();
+            sh.outward = false;
+            sh.thickness = 16.0;
+        }
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let l = m.limits.iter().find(|(id, _)| *id == s).map(|x| x.1).unwrap_or(0.0);
+        assert!(l > 14.0 && l < 15.0, "{:?}", m.limits);
+        // its vertical edges rounded before it (5 mm): the walls follow
+        let mut d2 = Doc::default();
+        let b2 = d2.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let mut c2 = Cache::default();
+        let m = build(&d2, true, false, &[], &mut c2);
+        let es: Vec<EdgeRef> = [(20.0, 15.0), (-20.0, 15.0), (20.0, -15.0), (-20.0, -15.0)].iter().map(|(x, z)| edge_near(&m, DVec3::new(*x, 10.0, *z))).collect();
+        d2.add_round(5.0, false, es);
+        let top2 = FaceRef { tag: tag(b2, 2), at: DVec3::new(0.0, 20.0, 0.0) };
+        let s2 = d2.add_shell(Shell { faces: vec![top2], thickness: 2.0, outward: false }, top2.at);
+        let m = build(&d2, true, false, &[], &mut c2);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let v_round = 24000.0 - 4.0 * (25.0 - std::f64::consts::PI * 25.0 / 4.0) * 20.0;
+        let v_in = 36.0 * 26.0 * 18.0 - 4.0 * (9.0 - std::f64::consts::PI * 9.0 / 4.0) * 18.0;
+        assert!((mesh_volume(&m) - (v_round - v_in)).abs() < 3.0, "{} {}", mesh_volume(&m), v_round - v_in);
+        assert!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(s2)).count() >= 9);
+        // after a Mirror: a block from x = −10 to 30, its +X end opened, the
+        // −X end (its image) opens too
+        let mut d3 = Doc::default();
+        let b3 = d3.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, DVec3::new(10.0, 0.0, 0.0), DQuat::IDENTITY);
+        d3.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false });
+        let end = FaceRef { tag: tag(b3, 0), at: DVec3::new(30.0, 5.0, 0.0) };
+        d3.add_shell(Shell { faces: vec![end], thickness: 1.0, outward: false }, end.at);
+        let mut c3 = Cache::default();
+        let m = build(&d3, true, false, &[], &mut c3);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((mesh_volume(&m) - (60.0 * 10.0 * 20.0 - 60.0 * 8.0 * 18.0)).abs() < 2.0, "{}", mesh_volume(&m));
+    }
+
+    #[test]
+    #[ignore]
+    fn shell_probe() {
+        use crate::doc::Shell;
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Box { x: 80.0, y: 30.0, z: 50.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let corners: Vec<EdgeRef> = [(0u16, 4u16, 40.0, 25.0), (1, 4, -40.0, 25.0), (0, 5, 40.0, -25.0), (1, 5, -40.0, -25.0)].iter().map(|(a, b, x, z)| EdgeRef { faces: [tag(c, *a), tag(c, *b)], at: DVec3::new(*x, 15.0, *z) }).collect();
+        d.add_round(8.0, false, corners);
+        if std::env::var("FORME_HOLE").map(|v| v == "1").unwrap_or(true) {
+            d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 40.0 }, DVec3::new(24.0, -5.0, 0.0), DQuat::IDENTITY);
+        }
+        let top = FaceRef { tag: tag(c, 2), at: DVec3::new(-12.0, 30.0, 6.0) };
+        let front = FaceRef { tag: tag(c, 4), at: DVec3::new(-14.0, 14.0, 25.0) };
+        for faces in [vec![top], vec![front], vec![top, front]] {
+            for t in [1.0, 2.0] {
+                let mut e = d.clone();
+                e.add_shell(Shell { faces: faces.clone(), thickness: t, outward: false }, top.at);
+                let m = build(&e, true, false, &[], &mut Cache::default());
+                eprintln!("{} faces t {t}: {} faces, volume {:.0}, errors {:?}", faces.len(), m.faces.len(), mesh_volume(&m), m.errors);
+            }
+        }
+    }
+
+    #[test]
+    fn mirror_live() {
+        use crate::doc::Mirror;
+        // a block from x = −10 to 30 across the plane x = 0, mirrored: −30
+        // to 30, its top one face (no seam)
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, DVec3::new(10.0, 0.0, 0.0), DQuat::IDENTITY);
+        let mi = d.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false });
+        assert_eq!(d.feature(mi).unwrap().kind_label(), "Mirror");
+        assert!(!d.feature(mi).unwrap().is_solid());
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((lo[0] + 30.0).abs() < 1e-3 && (hi[0] - 30.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        assert_eq!(m.faces.len(), 6, "{:?}", m.faces.iter().map(|f| f.tag).collect::<Vec<_>>());
+        assert!((mesh_volume(&m) - 60.0 * 10.0 * 20.0).abs() < 1.0, "{}", mesh_volume(&m));
+        // both ends are the block's +X face (tag sub 0)
+        assert_eq!(m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: b, sub: 0 })).count(), 2);
+        // flipped: the −X side kept (x from −10 to 0), mirrored: −10 to 10
+        d.feature_mut(mi).unwrap().mirror.as_mut().unwrap().flip = true;
+        let m = build(&d, true, false, &[], &mut cache);
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((lo[0] + 10.0).abs() < 1e-3 && (hi[0] - 10.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        d.feature_mut(mi).unwrap().mirror.as_mut().unwrap().flip = false;
+        // a hole made after it at x = 15: one at −15 too
+        let h = d.add(Op::Carve, Prim::Cylinder { radius: 3.0, height: 20.0 }, DVec3::new(15.0, -5.0, 0.0), DQuat::IDENTITY);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(h)).count(), 2);
+        let v1 = 60.0 * 10.0 * 20.0 - 2.0 * std::f64::consts::PI * 9.0 * 10.0;
+        assert!((mesh_volume(&m) - v1).abs() < 2.0, "{} {v1}", mesh_volume(&m));
+        // a box centred on the plane after it: made once (its own image)
+        let c = d.add(Op::Add, Prim::Box { x: 10.0, y: 5.0, z: 10.0 }, DVec3::new(0.0, 10.0, 0.0), DQuat::IDENTITY);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((mesh_volume(&m) - (v1 + 500.0)).abs() < 2.0, "{}", mesh_volume(&m));
+        d.remove(&[c]);
+        // the front face (across the plane) pushed out by 3: once, not twice
+        let front = FaceRef { tag: tag(b, 4), at: DVec3::new(-20.0, 5.0, 10.0) };
+        let p = d.add_push(Push { face: front, inset: 0.0, depth: 3.0 });
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((hi[2] - 13.0).abs() < 1e-3 && (lo[2] + 10.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        d.remove(&[p]);
+        // a fillet on the +X end's top edge: the −X end's too
+        let m = build(&d, true, false, &[], &mut cache);
+        let e = edge_near(&m, DVec3::new(30.0, 10.0, 0.0));
+        let r = d.add_round(2.0, false, vec![e]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 2);
+        let cut = (4.0 - std::f64::consts::PI) * 20.0;
+        assert!((mesh_volume(&m) - (v1 - 2.0 * cut)).abs() < 2.0, "{} {}", mesh_volume(&m), v1 - 2.0 * cut);
+        // the −X end's bottom edge picked on the mirror side: the +X end's too
+        let e = edge_near(&m, DVec3::new(-30.0, 0.0, 0.0));
+        let r2 = d.add_round(1.0, false, vec![e]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r2)).count(), 2);
+        // a vertex moved on the +X side: its image on the −X side
+        let t = d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(30.0, 0.0, -10.0)), delta: DVec3::new(0.0, 0.0, -4.0), more: vec![], scale: DVec3::ONE, copy: false, about: None });
+        let _ = t;
+        d.remove(&[r, r2]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, _) = m.bounds().unwrap();
+        assert!((lo[2] + 14.0).abs() < 1e-3, "{lo:?}");
+        // the vertex at the −X end moved down too: the part stays symmetric
+        let low: Vec<[f32; 3]> = m.positions.iter().filter(|q| q[2] < -13.9).copied().collect();
+        assert!(low.iter().any(|q| q[0] > 29.0) && low.iter().any(|q| q[0] < -29.0), "{low:?}");
+    }
+
+    /// The edge whose polyline passes nearest `p` (its middle as `at`).
+    fn edge_through(m: &Model, p: DVec3) -> EdgeRef {
+        let d = |e: &crate::model::Edge| e.pts.iter().map(|q| DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64).distance(p)).fold(f64::MAX, f64::min);
+        let e = m.edges.iter().filter(|e| !e.seam && e.faces[0] >= 0 && e.faces[1] >= 0).min_by(|a, b| d(a).total_cmp(&d(b))).unwrap();
+        let t = |i: i32| m.faces[i as usize].tag.unwrap().pack();
+        let q = e.pts[e.pts.len() / 2];
+        EdgeRef { faces: [t(e.faces[0]), t(e.faces[1])], at: DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64) }
+    }
+
+    #[test]
+    fn array_live() {
+        use crate::doc::{Array, ArrayKind};
+        // a plate, a hole with a rounded rim: repeated 4 times along X
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 80.0, y: 10.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let h = d.add(Op::Carve, Prim::Cylinder { radius: 3.0, height: 20.0 }, DVec3::new(-30.0, -5.0, -7.0), DQuat::IDENTITY);
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        let r = d.add_round(1.0, false, vec![edge_through(&m, DVec3::new(-27.0, 10.0, -7.0))]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let one = 80.0 * 10.0 * 30.0 - mesh_volume(&m);
+        let a = d.add_array(Array { sources: vec![h], kind: ArrayKind::Line, count: 4, step: DVec3::new(20.0, 0.0, 0.0), count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 });
+        let fa = d.feature(a).unwrap();
+        assert_eq!(fa.kind_label(), "Array");
+        assert!(!fa.is_solid());
+        assert_eq!(d.array_pattern(3).iter().map(|f| f.id).collect::<Vec<_>>(), vec![h, r]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let holes = |m: &Model| {
+            let mut v = m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: h, sub: 0 })).map(|f| (f.axis_origin[0] * 10.0).round() / 10.0).collect::<Vec<_>>();
+            v.sort_by(f64::total_cmp);
+            v
+        };
+        assert_eq!(holes(&m), vec![-30.0, -10.0, 10.0, 30.0], "{:?}", holes(&m));
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 4);
+        let v4 = 80.0 * 10.0 * 30.0 - 4.0 * one;
+        assert!((mesh_volume(&m) - v4).abs() < 2.0, "{} {v4}", mesh_volume(&m));
+        // in a grid of 4 × 2: 8
+        let set = |d: &mut Doc, f: &dyn Fn(&mut Array)| f(d.feature_mut(a).unwrap().array.as_mut().unwrap());
+        set(&mut d, &|x| {
+            x.kind = ArrayKind::Grid;
+            x.count2 = 2;
+            x.step2 = DVec3::new(0.0, 0.0, 14.0);
+        });
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(holes(&m).len(), 8);
+        let v8 = 80.0 * 10.0 * 30.0 - 8.0 * one;
+        assert!((mesh_volume(&m) - v8).abs() < 3.0, "{} {v8}", mesh_volume(&m));
+        // the original moved: the copies follow
+        set(&mut d, &|x| x.kind = ArrayKind::Line);
+        d.feature_mut(h).unwrap().origin.x = -32.0;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(holes(&m), vec![-32.0, -12.0, 8.0, 28.0], "{:?}", holes(&m));
+        d.feature_mut(h).unwrap().origin.x = -30.0;
+        // a fillet made after the Array on the third copy's bottom rim:
+        // moved before it, brought back to the original, made on all four
+        let m = build(&d, true, false, &[], &mut cache);
+        let r2 = d.add_round(0.5, false, vec![edge_through(&m, DVec3::new(13.0, 0.0, -7.0))]);
+        assert!(d.keep_arrays());
+        let order: Vec<u32> = d.features.iter().map(|f| f.id).collect();
+        assert_eq!(order, vec![1, h, r, r2, a]);
+        let at = d.feature(r2).unwrap().round.as_ref().unwrap().edges[0].at;
+        assert!((at.x + 30.0).abs() < 3.5 && at.y.abs() < 1e-3, "{at:?}");
+        assert!(!d.keep_arrays());
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r2)).count(), 4);
+        // round a disc: a boss and its fillet 6 times round Y
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Cylinder { radius: 30.0, height: 8.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let b = d.add(Op::Add, Prim::Box { x: 6.0, y: 4.0, z: 6.0 }, DVec3::new(20.0, 8.0, 0.0), DQuat::IDENTITY);
+        let m = build(&d, true, false, &[], &mut cache);
+        d.add_round(1.0, false, vec![edge_through(&m, DVec3::new(23.0, 12.0, 0.0))]);
+        let a = d.add_array(Array { sources: vec![b], kind: ArrayKind::Circle, count: 6, step: DVec3::ZERO, count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 });
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let tops: Vec<[f64; 3]> = m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: b, sub: 2 })).map(|f| f.point).collect();
+        assert_eq!(tops.len(), 6);
+        // the copies' tops all 12 high, all 20 from the axis or so
+        assert!(tops.iter().all(|p| (p[1] - 12.0).abs() < 1e-3), "{tops:?}");
+        // half round: 4 over 180°, the last at −X
+        let fa = d.feature_mut(a).unwrap().array.as_mut().unwrap();
+        fa.count = 4;
+        fa.angle = 180.0;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, _) = m.bounds().unwrap();
+        assert!((lo[1] - 0.0).abs() < 1e-3);
+        let tops: Vec<[f64; 3]> = m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: b, sub: 2 })).map(|f| f.point).collect();
+        assert_eq!(tops.len(), 4);
+        // deleted, the original stays alone; the Array goes with its shape
+        d.remove(&[b]);
+        assert!(d.feature(a).is_none());
+    }
+
+    #[test]
+    #[ignore]
+    fn mirror_probe() {
+        // the push across the plane after fillets at both ends: with the
+        // Mirror, and the same block made whole without it
+        for mirrored in [false, true] {
+            let mut d = Doc::default();
+            let b = if mirrored { d.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, DVec3::new(10.0, 0.0, 0.0), DQuat::IDENTITY) } else { d.add(Op::Add, Prim::Box { x: 60.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY) };
+            if mirrored {
+                d.add_mirror(crate::doc::Mirror { axis: 0, offset: 0.0, flip: false });
+            }
+            let mut cache = Cache::default();
+            let m = build(&d, true, false, &[], &mut cache);
+            d.add(Op::Carve, Prim::Cylinder { radius: 3.0, height: 20.0 }, DVec3::new(15.0, -5.0, 0.0), DQuat::IDENTITY);
+            if !mirrored {
+                d.add(Op::Carve, Prim::Cylinder { radius: 3.0, height: 20.0 }, DVec3::new(-15.0, -5.0, 0.0), DQuat::IDENTITY);
+            }
+            let m = build(&d, true, false, &[], &mut cache);
+            let e = edge_near(&m, DVec3::new(30.0, 10.0, 0.0));
+            let e2 = edge_near(&m, DVec3::new(-30.0, 10.0, 0.0));
+            d.add_round(2.0, false, if mirrored { vec![e] } else { vec![e, e2] });
+            let m = build(&d, true, false, &[], &mut cache);
+            let e = edge_near(&m, DVec3::new(-30.0, 0.0, 0.0));
+            let e2 = edge_near(&m, DVec3::new(30.0, 0.0, 0.0));
+            d.add_round(1.0, false, if mirrored { vec![e] } else { vec![e, e2] });
+            let m = build(&d, true, false, &[], &mut cache);
+            eprintln!("mirrored {mirrored}: {} faces {:?}", m.faces.len(), m.errors);
+            let front = FaceRef { tag: tag(b, 4), at: DVec3::new(-20.0, 5.0, 10.0) };
+            d.add_push(Push { face: front, inset: 0.0, depth: 3.0 });
+            let t0 = Instant::now();
+            let m = build(&d, true, false, &[], &mut cache);
+            eprintln!("  push: {} faces {:?} {:.0} ms", m.faces.len(), m.errors, t0.elapsed().as_secs_f64() * 1e3);
+        }
+    }
 
     #[test]
     fn cube_with_a_hole() {
@@ -1732,7 +2648,7 @@ mod tests {
         // an L of 20 × 20 mm, 10 mm high, its inside corner a curve point
         let mut d = Doc::default();
         let l = d.add(Op::Add, Prim::Profile { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        let pr = crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false, false, false, true, false, false], corner: vec![], tension: vec![], open: false };
+        let pr = crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false, false, false, true, false, false], corner: vec![], tension: vec![], open: false, spline: false };
         let pieces = pr.pieces(20.0, 20.0).len();
         d.feature_mut(l).unwrap().profile = Some(pr);
         let mut cache = Cache::default();
@@ -1761,12 +2677,12 @@ mod tests {
         let mut d = Doc::default();
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 40.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let c = d.add(Op::Carve, Prim::Profile { x: 20.0, y: 5.0, z: 20.0 }, DVec3::new(0.0, 20.0, 0.0), DQuat::from_rotation_x(std::f64::consts::PI));
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false, false, true], corner: vec![], tension: vec![], open: false });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false, false, true], corner: vec![], tension: vec![], open: false, spline: false });
         let m3 = build(&d, true, false, &[], &mut cache);
         assert!(m3.errors.is_empty(), "{:?}", m3.errors);
         assert!(m3.faces.iter().any(|f| f.tag.map(|t| t.feature) == Some(c)), "the pocket's faces carry the sketch's tags");
         // a bow tie crosses itself: an error, the block stays
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![], tension: vec![], open: false });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![], tension: vec![], open: false, spline: false });
         let m4 = build(&d, true, false, &[], &mut cache);
         assert_eq!(m4.errors.len(), 1, "{:?}", m4.errors);
     }
@@ -1840,7 +2756,7 @@ mod tests {
         // its sides allow)
         let mut d = Doc::default();
         let c = d.add(Op::Add, Prim::Profile { x: 20.0, y: 6.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![4.0, -3.0, 50.0, 0.0], tension: vec![], open: false });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![4.0, -3.0, 50.0, 0.0], tension: vec![], open: false, spline: false });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let cyl: Vec<f64> = m.faces.iter().filter(|f| f.kind == SurfKind::Cylinder).map(|f| f.radius).collect();
@@ -1864,7 +2780,7 @@ mod tests {
         // straight piece between them)
         let mut d = Doc::default();
         let c = d.add(Op::Add, Prim::Profile { x: 20.0, y: 4.0, z: 6.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![3.0; 4], tension: vec![], open: false });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![3.0; 4], tension: vec![], open: false, spline: false });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let cyl: Vec<f64> = m.faces.iter().filter(|f| f.kind == SurfKind::Cylinder).map(|f| f.radius).collect();
@@ -1910,6 +2826,234 @@ mod tests {
                 let near = m.positions.iter().map(|p| ((p[0] - want[0]).powi(2) + (p[2] - want[1]).powi(2)).sqrt()).fold(f32::MAX, f32::min);
                 assert!(near < 0.05, "no point near the ellipse at 45°: {near}");
             }
+        }
+    }
+
+    /// A path of these points (in mm, on the ground round the origin).
+    fn path_of(d: &mut Doc, pts: &[[f64; 2]], open: bool, spline: bool, at: DVec3) -> FeatureId {
+        use crate::doc::Prim;
+        let lo = pts.iter().fold([f64::MAX; 2], |a, q| [a[0].min(q[0]), a[1].min(q[1])]);
+        let hi = pts.iter().fold([f64::MIN; 2], |a, q| [a[0].max(q[0]), a[1].max(q[1])]);
+        let (w, dp) = ((hi[0] - lo[0]).max(0.01), (hi[1] - lo[1]).max(0.01));
+        let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
+        let id = d.add(Op::Add, Prim::Path { x: w, z: dp }, at + DVec3::new(c[0], 0.0, c[1]), DQuat::IDENTITY);
+        let n = pts.len();
+        d.feature_mut(id).unwrap().profile = Some(crate::doc::Profile { points: pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: vec![true; n], corner: vec![], tension: vec![], open, spline });
+        id
+    }
+
+    #[test]
+    fn spline_curves() {
+        // a closed curve through 5 points (one sharp) pulled into a solid,
+        // and filled: its sides are the spline's exact spans
+        let mut d = Doc::default();
+        let pts = [[-10.0, -8.0], [12.0, -10.0], [14.0, 6.0], [0.0, 12.0], [-12.0, 4.0]];
+        let id = path_of(&mut d, &pts, false, true, DVec3::ZERO);
+        d.feature_mut(id).unwrap().profile.as_mut().unwrap().smooth[1] = false;
+        d.feature_mut(id).unwrap().fill = true;
+        assert_eq!(d.makes(d.feature(id).unwrap()), Makes::Sheet);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.len(), 1, "one flat face");
+        assert_eq!(m.edges.len(), 5, "five spans");
+        // the curve passes through its points
+        for q in pts {
+            let near = m.positions.iter().map(|p| ((p[0] as f64 - q[0]).powi(2) + (p[2] as f64 - q[1]).powi(2)).sqrt()).fold(f64::MAX, f64::min);
+            assert!(near < 0.02, "the curve misses {q:?} by {near}");
+        }
+        // pulled up: a solid of 5 sides, a top and a bottom
+        let mut e = d.clone();
+        let f = e.feature_mut(id).unwrap();
+        f.fill = false;
+        f.prim = match f.prim { crate::doc::Prim::Path { x, z } => crate::doc::Prim::Profile { x, y: 6.0, z }, p => p };
+        let m = build(&e, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.len(), 7);
+        // an open curve cannot be filled
+        let mut e = d.clone();
+        e.feature_mut(id).unwrap().profile.as_mut().unwrap().open = true;
+        let m = build(&e, true, false, &[], &mut Cache::default());
+        assert_eq!(m.errors.len(), 1, "{:?}", m.errors);
+    }
+
+    #[test]
+    fn revolve_curves() {
+        use crate::doc::Revolve;
+        // a vase's half profile, open, both ends on the axis (its left
+        // side): a solid; turned half way: a solid with two flat ends
+        let mut d = Doc::default();
+        let id = path_of(&mut d, &[[0.0, 0.0], [8.0, 0.0], [6.0, -10.0], [9.0, -20.0], [0.0, -20.0]], true, true, DVec3::ZERO);
+        d.feature_mut(id).unwrap().revolve = Some(Revolve::default());
+        assert!(d.feature(id).unwrap().revolve_closes());
+        assert_eq!(d.makes(d.feature(id).unwrap()), Makes::Solid);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, hi) = m.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])]));
+        assert!((hi[1] - lo[1] - 2.0 * (hi[0] - 0.0)).abs() < 1.0, "round about the axis: {lo:?} {hi:?}");
+        assert!(lo[0] < -8.0 && hi[0] > 8.0, "{lo:?} {hi:?}");
+        d.feature_mut(id).unwrap().revolve.as_mut().unwrap().angle = 180.0;
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(m.faces.iter().filter(|f| f.kind == SurfKind::Plane).count() >= 2, "two flat ends");
+        // a closed square beside its axis: a ring (a torus-like solid)
+        let mut d = Doc::default();
+        let r = path_of(&mut d, &[[10.0, -3.0], [16.0, -3.0], [16.0, 3.0], [10.0, 3.0]], false, false, DVec3::ZERO);
+        let f = d.feature_mut(r).unwrap();
+        f.profile.as_mut().unwrap().smooth = vec![false; 4];
+        // the axis through the world origin along Z: the box's left side
+        // is at x = 10, so put it at its middle and move the curve
+        f.revolve = Some(Revolve { angle: 360.0, along_x: false, align: 0 });
+        f.origin = DVec3::new(0.0, 0.0, 0.0);
+        f.prim = crate::doc::Prim::Path { x: 32.0, z: 6.0 };
+        f.profile.as_mut().unwrap().points = vec![[10.0 / 32.0, -0.5], [0.5, -0.5], [0.5, 0.5], [10.0 / 32.0, 0.5]];
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(d.makes(d.feature(r).unwrap()), Makes::Solid);
+        // an open line beside the axis: a sheet (a lampshade)
+        let mut d = Doc::default();
+        let l = path_of(&mut d, &[[6.0, 0.0], [10.0, -12.0]], true, false, DVec3::ZERO);
+        let f = d.feature_mut(l).unwrap();
+        f.revolve = Some(Revolve { angle: 360.0, along_x: false, align: 0 });
+        f.origin = DVec3::new(0.0, 0.0, -6.0);
+        f.prim = crate::doc::Prim::Path { x: 20.0, z: 12.0 };
+        f.profile.as_mut().unwrap().points = vec![[0.3, 0.5], [0.5, -0.5]];
+        assert_eq!(d.makes(d.feature(l).unwrap()), Makes::Sheet);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(!m.faces.is_empty());
+        // in the chain: a revolved ring carved out of a block
+        let mut d = Doc::default();
+        d.add(Op::Add, crate::doc::Prim::Box { x: 40.0, y: 10.0, z: 40.0 }, DVec3::new(0.0, -5.0, 0.0), DQuat::IDENTITY);
+        let v = path_of(&mut d, &[[0.0, 0.0], [8.0, 0.0], [8.0, -6.0], [0.0, -6.0]], true, false, DVec3::new(0.0, 5.0, 3.0));
+        let f = d.feature_mut(v).unwrap();
+        f.profile.as_mut().unwrap().smooth = vec![false; 4];
+        f.revolve = Some(Revolve::default());
+        f.op = Op::Carve;
+        f.rot = DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(m.faces.iter().any(|f| f.tag.map(|t| t.feature) == Some(v)), "the hole's faces carry the revolve's tag");
+    }
+
+    #[test]
+    fn loft_curves() {
+        use crate::doc::{CurveKind, Loft, Prim};
+        // a square at the bottom, a circle 20 up, a smaller square 35 up:
+        // a solid through them; ruled; three open lines: a sheet
+        let mut d = Doc::default();
+        let a = d.add(Op::Add, Prim::Path { x: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(a).unwrap().curve = Some(CurveKind::Rectangle.new_curve());
+        let b = d.add(Op::Add, Prim::Path { x: 14.0, z: 14.0 }, DVec3::new(0.0, 20.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(b).unwrap().curve = Some(CurveKind::Circle.new_curve());
+        let c = d.add(Op::Add, Prim::Path { x: 8.0, z: 8.0 }, DVec3::new(2.0, 35.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(c).unwrap().curve = Some(CurveKind::Polygon.new_curve());
+        d.regen_curves();
+        let l = d.add(Op::Add, Prim::Path { x: 1.0, z: 1.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(l).unwrap().loft = Some(Loft { sections: vec![a, b, c], ruled: false });
+        d.regen_curves();
+        let f = d.feature(l).unwrap();
+        assert!(!f.is_path());
+        assert!((f.origin.y - 17.5).abs() < 1e-6, "its middle half-way up: {:?}", f.origin);
+        assert_eq!(d.makes(f), Makes::Solid);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, hi) = m.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])]));
+        assert!(lo[1].abs() < 0.01 && (hi[1] - 35.0).abs() < 0.01, "{lo:?} {hi:?}");
+        d.feature_mut(l).unwrap().loft.as_mut().unwrap().ruled = true;
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "ruled: {:?}", m.errors);
+        // its curves moved with it
+        assert_eq!(d.with_operands(&[l]).len(), 4);
+        // a curve taken out: the loft goes on with two; then with one, gone
+        let mut e = d.clone();
+        e.remove(&[c]);
+        assert_eq!(e.feature(l).map(|f| f.loft.as_ref().unwrap().sections.len()), Some(2));
+        e.remove(&[b]);
+        assert!(e.feature(l).is_none(), "a loft of one curve goes");
+        // deleting the loft leaves its curves
+        let mut e = d.clone();
+        e.remove(&[l]);
+        assert!(e.feature(a).is_some() && e.feature(b).is_some());
+        // open lines: a sheet
+        let mut d = Doc::default();
+        let s1 = path_of(&mut d, &[[-10.0, 0.0], [0.0, -4.0], [10.0, 0.0]], true, true, DVec3::ZERO);
+        let s2 = path_of(&mut d, &[[-10.0, 0.0], [0.0, 4.0], [10.0, 0.0]], true, true, DVec3::new(0.0, 15.0, 0.0));
+        let l = d.add(Op::Add, Prim::Path { x: 1.0, z: 1.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(l).unwrap().loft = Some(Loft { sections: vec![s1, s2], ruled: false });
+        d.regen_curves();
+        assert_eq!(d.makes(d.feature(l).unwrap()), Makes::Sheet);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.len(), 2, "one face per span");
+    }
+
+    #[test]
+    fn forms() {
+        use crate::doc::{Form, Prim};
+        // a sphere, a cylinder and a soft box made from their poles; a
+        // pole ring pulled out; a form added to a block and carved
+        for (name, fm) in [("sphere", Form::sphere(24, 13)), ("cylinder", Form::cylinder(24, false)), ("box", Form::cylinder(24, true))] {
+            let mut d = Doc::default();
+            let id = d.add(Op::Add, Prim::Box { x: 30.0, y: 30.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            d.feature_mut(id).unwrap().form = Some(fm.clone());
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{name}: {:?}", m.errors);
+            let (lo, hi) = m.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])]));
+            eprintln!("{name}: {lo:?} {hi:?} faces {}", m.faces.len());
+            assert!((hi[1] - lo[1] - 30.0).abs() < 0.6 && (hi[0] - lo[0] - 30.0).abs() < 1.5, "{name}: {lo:?} {hi:?}");
+            // pulled: the poles of a ring half-way up moved out on one side
+            let f = d.feature(id).unwrap().clone();
+            let mut w = f.form_poles();
+            let j = fm.nv / 2;
+            for i in 0..3 {
+                w[j * fm.nu + i] += DVec3::new(8.0, 0.0, 0.0);
+            }
+            let mut g = f.clone();
+            g.set_form_poles(&w);
+            *d.feature_mut(id).unwrap() = g;
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{name} pulled: {:?}", m.errors);
+            let hx = m.positions.iter().map(|p| p[0]).fold(f32::MIN, f32::max);
+            assert!(hx > 17.0, "{name}: pulled out to {hx}");
+            // round the block
+            let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 10.0, z: 20.0 }, DVec3::new(20.0, 5.0, 0.0), DQuat::IDENTITY);
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{name} + block: {:?}", m.errors);
+            d.feature_mut(b).unwrap().op = Op::Carve;
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{name} − block: {:?}", m.errors);
+        }
+    }
+
+    #[test]
+    fn form_basis_matches_the_kernel() {
+        // the app's evaluation of a form (its preview while a brush pulls
+        // it) is the kernel's surface, refined too
+        use crate::doc::Form;
+        let mut fm = Form::sphere(12, 9);
+        fm.poles[4 * 12 + 2][0] += 0.4;
+        fm.poles[3 * 12 + 7][1] += 0.2;
+        for f in [fm.clone(), fm.refined()] {
+            let s = Shape::form(&f.poles, f.nu, f.nv).unwrap();
+            let (ru, rv) = f.range();
+            let uv: Vec<[f64; 2]> = (0..40).map(|k| [ru * ((k * 7) % 40) as f64 / 40.0 + 0.13, rv * (k as f64 + 0.5) / 40.0]).collect();
+            let occ = s.face_eval(0, &uv).unwrap();
+            let unit: Vec<DVec3> = f.poles.iter().map(|p| DVec3::from(*p)).collect();
+            let mut worst = 0.0f64;
+            for (q, (p, _)) in uv.iter().zip(&occ) {
+                let a = Form::point(&unit, f.nu, f.nv, q[0], q[1]);
+                worst = worst.max(a.distance(DVec3::from(*p)));
+            }
+            assert!(worst < 1e-6, "{} × {}: off by {worst}", f.nu, f.nv);
+        }
+        // refined: the same surface
+        let r = fm.refined();
+        let a: Vec<DVec3> = fm.poles.iter().map(|p| DVec3::from(*p)).collect();
+        let b: Vec<DVec3> = r.poles.iter().map(|p| DVec3::from(*p)).collect();
+        for k in 0..30 {
+            let (u, v) = (12.0 * k as f64 / 30.0 + 0.07, 6.0 * (k as f64 + 0.3) / 30.0);
+            let d = Form::point(&a, fm.nu, fm.nv, u, v).distance(Form::point(&b, r.nu, r.nv, u * 2.0, v * 2.0));
+            assert!(d < 1e-9, "refined off by {d} at {u} {v}");
         }
     }
 
@@ -2129,7 +3273,7 @@ mod tests {
         // of lines and arcs, the fillet goes all round (cylinders and tori)
         let mut d = Doc::default();
         let c = d.add(Op::Add, Prim::Profile { x: 30.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![5.0; 4], tension: vec![], open: false });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![5.0; 4], tension: vec![], open: false, spline: false });
         tension_case("rounded square", d, DVec3::new(0.0, 10.0, 10.0), 2.0);
     }
 
@@ -2139,7 +3283,7 @@ mod tests {
         // slanted sides
         let mut d = Doc::default();
         let c = d.add(Op::Add, Prim::Profile { x: 30.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.25, 0.5], [-0.25, 0.5]], smooth: vec![false; 4], corner: vec![], tension: vec![], open: false });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.25, 0.5], [-0.25, 0.5]], smooth: vec![false; 4], corner: vec![], tension: vec![], open: false, spline: false });
         tension_case("trapezoid", d, DVec3::new(0.0, 10.0, -10.0), 2.0);
     }
 
@@ -2473,7 +3617,7 @@ mod tests {
         // with tension 0.7 (fuller) and 0.3 (flatter)
         let mut d = Doc::default();
         let c = d.add(Op::Add, Prim::Profile { x: 20.0, y: 6.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        let mut pr = crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![0.0, 6.0, 0.0, 0.0], tension: vec![], open: false };
+        let mut pr = crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![0.0, 6.0, 0.0, 0.0], tension: vec![], open: false, spline: false };
         d.feature_mut(c).unwrap().profile = Some(pr.clone());
         let m0 = build(&d, true, false, &[], &mut Cache::default());
         assert!(m0.errors.is_empty(), "{:?}", m0.errors);
@@ -2620,7 +3764,7 @@ mod tests {
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let m0 = build(&d, true, false, &[], &mut Cache::default());
         let p = d.add(Op::Add, Prim::Path { x: 20.0, z: 20.0 }, DVec3::new(0.0, 20.0, 0.0), DQuat::IDENTITY);
-        let pr = crate::doc::Profile { points: vec![[-0.5, 0.5], [-0.5, -0.5], [0.5, -0.5]], smooth: vec![false; 3], corner: vec![0.0, 5.0, 0.0], tension: vec![], open: true };
+        let pr = crate::doc::Profile { points: vec![[-0.5, 0.5], [-0.5, -0.5], [0.5, -0.5]], smooth: vec![false; 3], corner: vec![0.0, 5.0, 0.0], tension: vec![], open: true, spline: false };
         d.feature_mut(p).unwrap().profile = Some(pr.clone());
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
@@ -3226,7 +4370,7 @@ mod tests {
         let mut d = Doc::default();
         let b = block(&mut d);
         let s = d.add(Op::Carve, Prim::Profile { x: 12.0, y: 20.0, z: 10.0 }, DVec3::new(-6.0, 10.0, 0.0), DQuat::IDENTITY);
-        d.feature_mut(s).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [0.0, 0.1], [-0.5, 0.5]], smooth: vec![false, false, false, true, false], corner: vec![], tension: vec![], open: false });
+        d.feature_mut(s).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [0.0, 0.1], [-0.5, 0.5]], smooth: vec![false, false, false, true, false], corner: vec![], tension: vec![], open: false, spline: false });
         d.add_tweak(right_edge(b, 3.0));
         cases.push(("sketch pocket, curved side", d, None));
         // a hole whose mouth is chamfered: its slanted wall cannot slide,
@@ -3554,7 +4698,7 @@ mod tests {
         // an L sketch's top (six sides) bent: an outer corner raised 3 mm
         let mut d = Doc::default();
         let l = d.add(Op::Add, Prim::Profile { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(l).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false });
+        d.feature_mut(l).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false, spline: false });
         d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(10.0, 10.0, -10.0)), delta: DVec3::new(0.0, 3.0, 0.0) , more: vec![], scale: DVec3::ONE, copy: false, about: None });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
@@ -3571,7 +4715,7 @@ mod tests {
         // the fillet along; it ends square where the edge ends
         let mut d = Doc::default();
         let p = d.add(Op::Add, Prim::Profile { x: 60.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(p).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![10.0; 4], tension: vec![], open: false });
+        d.feature_mut(p).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![10.0; 4], tension: vec![], open: false, spline: false });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         // the top edge along +Z's straight side, then the top arc at +X
@@ -3616,7 +4760,7 @@ mod tests {
         let mut d = Doc::default();
         d.add(Op::Add, Prim::Box { x: 60.0, y: 20.0, z: 40.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let c = d.add(Op::Carve, Prim::Profile { x: 40.0, y: 10.5, z: 15.0 }, DVec3::new(0.0, 10.0, 0.0), DQuat::IDENTITY);
-        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![7.5; 4], tension: vec![], open: false });
+        d.feature_mut(c).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![7.5; 4], tension: vec![], open: false, spline: false });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let at = DVec3::new(0.0, 20.0, 7.5);
@@ -3745,15 +4889,15 @@ mod tests {
         // a sketch: an L with a curve point, and a triangle (sharp corners)
         let mut l = Doc::default();
         let li = l.add(Op::Add, Prim::Profile { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        l.feature_mut(li).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false, false, false, true, false, false], corner: vec![], tension: vec![], open: false });
+        l.feature_mut(li).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false, false, false, true, false, false], corner: vec![], tension: vec![], open: false, spline: false });
         cases.push(("sketch L, curve".into(), l, FaceRef { tag: tag(li, 1), at: DVec3::new(-7.0, 10.0, -7.0) }));
         let mut t = Doc::default();
         let ti = t.add(Op::Add, Prim::Profile { x: 30.0, y: 6.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        t.feature_mut(ti).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false; 3], corner: vec![], tension: vec![], open: false });
+        t.feature_mut(ti).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], smooth: vec![false; 3], corner: vec![], tension: vec![], open: false, spline: false });
         cases.push(("sketch triangle".into(), t, FaceRef { tag: tag(ti, 1), at: DVec3::new(0.0, 6.0, -3.0) }));
         let mut r = Doc::default();
         let ri = r.add(Op::Add, Prim::Profile { x: 30.0, y: 6.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        r.feature_mut(ri).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![3.0, 3.0, -2.0, 6.0], tension: vec![], open: false });
+        r.feature_mut(ri).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![3.0, 3.0, -2.0, 6.0], tension: vec![], open: false, spline: false });
         cases.push(("sketch rounded corners".into(), r, FaceRef { tag: tag(ri, 1), at: DVec3::new(0.0, 6.0, 0.0) }));
         // a top face after a fillet on its front edge
         let mut f = Doc::default();

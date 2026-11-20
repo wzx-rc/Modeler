@@ -67,6 +67,15 @@ pub fn feature_icon(f: &Feature) -> Icon {
     if f.tweak.is_some() {
         return Icon::Move;
     }
+    if f.shell.is_some() {
+        return Icon::Shell;
+    }
+    if f.mirror.is_some() {
+        return Icon::Mirror;
+    }
+    if f.array.is_some() {
+        return Icon::Array;
+    }
     match (&f.round, &f.push) {
         (Some(_), _) => Icon::Fillet,
         (_, Some(p)) if p.inset > 0.0 => Icon::Inset,
@@ -89,6 +98,11 @@ pub fn step_info(f: &Feature) -> String {
     }
     if let Some(t) = &f.tweak {
         return format!("{} mm", fmt_mm(t.delta.length() as f32));
+    }
+    if let Some(sh) = &f.shell {
+        let n = sh.faces.len();
+        let open = if n == 0 { "closed".to_string() } else { format!("{n} open") };
+        return format!("{} mm · {open}", fmt_mm(sh.thickness as f32));
     }
     match (&f.round, &f.push) {
         (Some(r), _) => format!("{} mm", fmt_mm(r.size as f32)),
@@ -155,6 +169,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         inspector(ctx, st, screen);
     }
     context_bar(ctx, st);
+    align_window(ctx, st);
     op_window(ctx, st);
     files_dialog(ctx, st, screen);
     toast(ctx, st, screen);
@@ -223,6 +238,9 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     // the Sculpt tab's island is wide (size, strength): short
                     Tool::Select if st.workspace == Workspace::Sculpt => "SELECT".into(),
                     Tool::Select if st.workspace == Workspace::Sdf => "SDF".into(),
+                    Tool::Form => format!("FORMS · {}", st.form.brush.label().to_uppercase()),
+                    Tool::Align => "ALIGN · PICK THE TARGET".into(),
+                    Tool::ShellPick => "SHELL · PICK FACES TO OPEN".into(),
                     Tool::Select => format!("SELECTION · {}", st.sel_mode.label().to_uppercase()),
                     Tool::Sculpt => st.sculpt.brush.label().to_uppercase(),
                     Tool::PolyLoop => "INSERT EDGE LOOP".into(),
@@ -901,6 +919,13 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                             st.arm_slot();
                         }
                     }
+                    {
+                        let tip = "Forms (M): a smooth surface (a sphere, a cylinder) pulled with brushes, like Nomad or ZBrush. Click the ground: a new form; press on a form and drag: the brush (Move, Inflate, Smooth, Flatten, Pinch, in its window); a plain Cube or Cylinder becomes a form";
+                        let sub = format!("{} · M", st.form.brush.label().to_uppercase());
+                        if card(ui, Some(Icon::Sphere), "FORMS", &sub, st.tool == Tool::Form, op_color(mode), tip).clicked() {
+                            st.arm_form();
+                        }
+                    }
                     divider(ui);
                     for (k, icon, tip) in [
                         (PushKind::Inset, Icon::Inset, "Inset (I): a flat face's outline moved in (2 mm), sized with its dot; its arrow raises or sinks it. Click a face, or pick a face (3) and press I"),
@@ -977,7 +1002,7 @@ fn materials_island(ctx: &egui::Context, st: &mut AppState) {
                 } else if resp.hovered() || dragging {
                     p.circle_stroke(c, 10.5, Stroke::new(1.0, DIVIDER()));
                 }
-                material_ball(p, c, 8.0, m);
+                material_ball(p, c, 8.0, &st.look(i as u32));
                 if resp.hovered() || dragging {
                     hovered = Some(i);
                 }
@@ -992,7 +1017,7 @@ fn materials_island(ctx: &egui::Context, st: &mut AppState) {
                         d.target = target;
                     }
                     if let Some(q) = pos {
-                        drag_ball(ctx, st, q, m);
+                        drag_ball(ctx, st, q, &st.look(i as u32));
                     }
                 }
                 if resp.drag_stopped() {
@@ -1008,7 +1033,21 @@ fn materials_island(ctx: &egui::Context, st: &mut AppState) {
             let p = ui.painter();
             p.text(pos2(hr.min.x + 2.0, hr.center().y), Align2::LEFT_CENTER, "MATERIAL", mono(10.0), LABEL());
             let name = hovered.or(cur.map(|c| c as usize)).map(|i| materials::get(i as u32).name).unwrap_or("–");
-            p.text(pos2(hr.max.x - 2.0, hr.center().y), Align2::RIGHT_CENTER, name, regular(10.5), TEXT2());
+            // a ball changed: a small reset by its name
+            let mi = cur.unwrap_or(st.material);
+            let changed = materials::changed(&st.doc, mi);
+            p.text(pos2(hr.max.x - if changed { 18.0 } else { 2.0 }, hr.center().y), Align2::RIGHT_CENTER, name, regular(10.5), TEXT2());
+            if changed {
+                let rr = Rect::from_center_size(pos2(hr.max.x - 7.0, hr.center().y), vec2(14.0, 14.0));
+                let resp = ui.interact(rr, Id::new("look-reset"), Sense::click());
+                ui.painter().text(rr.center(), Align2::CENTER_CENTER, "↺", regular(12.0), if resp.hovered() { TEXT_STRONG() } else { LABEL() });
+                if resp.on_hover_text(format!("{} back as it comes", materials::get(mi).name)).clicked() {
+                    st.reset_look(mi);
+                }
+            }
+            // the current ball's settings (Romain, 20 nov., 15 h 42: "quelques
+            // petits slots basiques": base colour, specular, transparency)
+            look_slots(ui, st, cur.unwrap_or(st.material), w);
         });
     });
     // a drag that ended elsewhere (the button let go off the ball's
@@ -1018,8 +1057,206 @@ fn materials_island(ctx: &egui::Context, st: &mut AppState) {
     }
 }
 
+/// The settings of the ball shown as current, under the balls: its colour
+/// (a click on the row opens a small picker below it), its specular and
+/// its transparency (a press or a drag on the bar sets it, a double-click
+/// puts it back as the ball comes). They change every face of that
+/// material at once; each gesture is one undo step.
+fn look_slots(ui: &mut Ui, st: &mut AppState, mi: u32, w: f32) {
+    let look = st.look(mi);
+    let mut held = false;
+    let (sr, _) = ui.allocate_exact_size(vec2(w, 7.0), Sense::hover());
+    ui.painter().hline(sr.x_range(), sr.center().y, Stroke::new(1.0, DIVIDER()));
+    let ctx = ui.ctx().clone();
+    let open_id = Id::new("look-color-open");
+    let open = ctx.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    // colour
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 18.0), Sense::click());
+    ctx.data_mut(|d| d.insert_temp(Id::new(("look-slot", 0usize)), r));
+    let hot = resp.hovered() || open;
+    slot_frame(ui, r, hot);
+    let p = ui.painter();
+    p.text(pos2(r.min.x + 7.0, r.center().y), Align2::LEFT_CENTER, "Color", regular(10.5), LABEL());
+    let c8 = look.color.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let sw = Rect::from_min_size(pos2(r.max.x - 7.0 - 24.0, r.center().y - 5.0), vec2(24.0, 10.0));
+    p.rect(sw, 3.0, Color32::from_rgb(c8[0], c8[1], c8[2]), Stroke::new(1.0, tint(Color32::WHITE, 0.28)), StrokeKind::Outside);
+    p.text(pos2(sw.min.x - 6.0, r.center().y), Align2::RIGHT_CENTER, format!("#{:02X}{:02X}{:02X}", c8[0], c8[1], c8[2]), mono(9.5), TEXT2());
+    if resp.clicked() {
+        ctx.data_mut(|d| d.insert_temp(open_id, !open));
+    }
+    resp.on_hover_text("Base color: click to open the picker");
+    if open {
+        // the picker beside the island, on its left (it closes on a click
+        // anywhere else)
+        // its foot level with the island's
+        let foot = ctx.memory(|m| m.area_rect(Id::new("materials"))).map(|a| a.max.y).unwrap_or(r.max.y + 60.0);
+        let pr = egui::Area::new(Id::new("look-picker")).order(Order::Foreground).pivot(Align2::RIGHT_BOTTOM).fixed_pos(pos2(r.min.x - 16.0, foot)).show(&ctx, |ui| {
+            island().inner_margin(Margin::same(8)).show(ui, |ui| color_picker(ui, st, mi, 176.0)).inner
+        });
+        held |= pr.inner;
+        let away = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().map(|q| !pr.response.rect.contains(q) && !r.contains(q)).unwrap_or(false));
+        if away || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            ctx.data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
+    ui.add_space(3.0);
+    // specular and transparency
+    let rows: [(&str, f32, f32, &str); 2] = [("Specular", look.specular, materials::SPECULAR, "Material specular"), ("Transparency", look.transparency, 0.0, "Material transparency")];
+    for (k, (label, v, default, step)) in rows.into_iter().enumerate() {
+        let (r, resp) = ui.allocate_exact_size(vec2(w, 18.0), Sense::click_and_drag());
+        ctx.data_mut(|d| d.insert_temp(Id::new(("look-slot", k + 1)), r));
+        let down = resp.is_pointer_button_down_on() || resp.dragged();
+        held |= down;
+        let mut nv = None;
+        if down {
+            if let Some(q) = resp.interact_pointer_pos() {
+                nv = Some((((q.x - r.min.x - 2.0) / (r.width() - 4.0)).clamp(0.0, 1.0) * 100.0).round() / 100.0);
+            }
+        }
+        if resp.double_clicked() {
+            nv = Some(default);
+        }
+        let shown = nv.unwrap_or(v);
+        slot_frame(ui, r, resp.hovered() || down);
+        let p = ui.painter();
+        let fill = Rect::from_min_max(r.min, pos2(r.min.x + 2.0 + (r.width() - 4.0) * shown, r.max.y)).shrink(1.5);
+        if fill.width() > 0.5 {
+            p.rect_filled(fill, 4.0, tint(TEXT_STRONG(), if down { 0.2 } else { 0.13 }));
+        }
+        p.text(pos2(r.min.x + 7.0, r.center().y), Align2::LEFT_CENTER, label, regular(10.5), LABEL());
+        p.text(pos2(r.max.x - 7.0, r.center().y), Align2::RIGHT_CENTER, format!("{} %", (shown * 100.0).round() as i32), regular(10.5), TEXT_STRONG());
+        if let Some(x) = nv {
+            st.edit_look(mi, step, |l| if k == 0 { l.specular = x } else { l.transparency = x });
+        }
+        resp.on_hover_text(if k == 0 { "Specular: the highlights' strength (50 % as the ball comes). Drag; double-click: back" } else { "Transparency: 0 % solid. Drag; double-click: back" });
+        if k == 0 {
+            ui.add_space(3.0);
+        }
+    }
+    // the gesture let go: one undo step
+    if !held && st.look_live.is_some() {
+        st.end_look();
+    }
+}
+
+/// A slot's well: rounded, a fine border lighter when hovered.
+fn slot_frame(ui: &Ui, r: Rect, hot: bool) {
+    ui.painter().rect(r, 5.0, WELL(), Stroke::new(1.0, if hot { TEXT2() } else { DIVIDER() }), StrokeKind::Inside);
+}
+
+/// The small colour picker under the Color row: saturation / value in a
+/// square, the hue on a bar. Returns whether it is held.
+fn color_picker(ui: &mut Ui, st: &mut AppState, mi: u32, w: f32) -> bool {
+    use egui::ecolor::{hsv_from_rgb, rgb_from_hsv};
+    ui.set_width(w);
+    let (tr, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
+    ui.painter().text(tr.left_center(), Align2::LEFT_CENTER, "COLOR", mono(10.0), LABEL());
+    ui.painter().text(tr.right_center(), Align2::RIGHT_CENTER, materials::get(mi).name, regular(10.5), TEXT2());
+    // a few hard-surface finishes, one click each
+    const SWATCHES: [(&str, [f32; 3]); 8] = [
+        ("Anodized black", [0.10, 0.10, 0.11]),
+        ("Gunmetal", [0.29, 0.31, 0.34]),
+        ("Aluminium", [0.72, 0.73, 0.75]),
+        ("Off-white", [0.88, 0.87, 0.83]),
+        ("Olive drab", [0.36, 0.38, 0.22]),
+        ("Desert tan", [0.72, 0.60, 0.43]),
+        ("Safety orange", [0.93, 0.40, 0.10]),
+        ("Signal red", [0.70, 0.12, 0.10]),
+    ];
+    let (row, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
+    let sw = (w - 7.0 * 4.0) / 8.0;
+    let mut clicked = false;
+    for (k, (name, c)) in SWATCHES.iter().enumerate() {
+        let r = Rect::from_min_size(pos2(row.min.x + k as f32 * (sw + 4.0), row.min.y + 2.0), vec2(sw, 14.0));
+        let resp = ui.interact(r, Id::new(("look-swatch", k)), Sense::click());
+        let c8 = c.map(|x| (x * 255.0) as u8);
+        ui.painter().rect(r, 3.0, Color32::from_rgb(c8[0], c8[1], c8[2]), Stroke::new(1.0, if resp.hovered() { TEXT_STRONG() } else { tint(Color32::WHITE, 0.18) }), StrokeKind::Inside);
+        if resp.clicked() {
+            st.edit_look(mi, "Material color", |l| l.color = *c);
+            clicked = true;
+        }
+        resp.on_hover_text(*name);
+    }
+    if clicked {
+        st.end_look();
+    }
+    let look = st.look(mi);
+    // the hue kept while it cannot be read from the colour (a grey)
+    let hue_id = Id::new(("look-hue", mi));
+    let (mut h, s0, v0) = hsv_from_rgb(look.color);
+    if s0 < 1e-3 || v0 < 1e-3 {
+        h = ui.ctx().data(|d| d.get_temp::<f32>(hue_id)).unwrap_or(h);
+    }
+    let (mut s, mut v) = (s0, v0);
+    ui.add_space(4.0);
+    let (sq, sresp) = ui.allocate_exact_size(vec2(w, 104.0), Sense::click_and_drag());
+    ui.add_space(4.0);
+    let (hb, hresp) = ui.allocate_exact_size(vec2(w, 11.0), Sense::click_and_drag());
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(Id::new(("look-slot", 3usize)), sq);
+        d.insert_temp(Id::new(("look-slot", 4usize)), hb);
+    });
+    let sdown = sresp.is_pointer_button_down_on() || sresp.dragged();
+    let hdown = hresp.is_pointer_button_down_on() || hresp.dragged();
+    let mut changed = false;
+    if sdown {
+        if let Some(q) = sresp.interact_pointer_pos() {
+            s = ((q.x - sq.min.x) / sq.width()).clamp(0.0, 1.0);
+            v = 1.0 - ((q.y - sq.min.y) / sq.height()).clamp(0.0, 1.0);
+            changed = true;
+        }
+    }
+    if hdown {
+        if let Some(q) = hresp.interact_pointer_pos() {
+            h = ((q.x - hb.min.x) / hb.width()).clamp(0.0, 0.9999);
+            changed = true;
+        }
+    }
+    if changed {
+        ui.ctx().data_mut(|d| d.insert_temp(hue_id, h));
+        let rgb = rgb_from_hsv((h, s, v));
+        st.edit_look(mi, "Material color", |l| l.color = rgb);
+    }
+    let c32 = |rgb: [f32; 3]| Color32::from_rgb((rgb[0] * 255.0) as u8, (rgb[1] * 255.0) as u8, (rgb[2] * 255.0) as u8);
+    let p = ui.painter();
+    // the square: white to the hue across, black down (exact by corners)
+    let pure = c32(rgb_from_hsv((h, 1.0, 1.0)));
+    let mut m = egui::Mesh::default();
+    m.colored_vertex(sq.left_top(), Color32::WHITE);
+    m.colored_vertex(sq.right_top(), pure);
+    m.colored_vertex(sq.right_bottom(), Color32::BLACK);
+    m.colored_vertex(sq.left_bottom(), Color32::BLACK);
+    m.add_triangle(0, 1, 2);
+    m.add_triangle(0, 2, 3);
+    p.add(m);
+    p.rect_stroke(sq, 3.0, Stroke::new(1.0, DIVIDER()), StrokeKind::Outside);
+    let at = pos2(sq.min.x + s * sq.width(), sq.min.y + (1.0 - v) * sq.height());
+    p.circle_stroke(at, 4.0, Stroke::new(1.5, Color32::WHITE));
+    p.circle_stroke(at, 5.2, Stroke::new(1.0, Color32::from_black_alpha(140)));
+    // the hue bar
+    let mut m = egui::Mesh::default();
+    let n = 12;
+    for k in 0..=n {
+        let t = k as f32 / n as f32;
+        let c = c32(rgb_from_hsv((t.min(0.9999), 1.0, 1.0)));
+        let x = hb.min.x + t * hb.width();
+        m.colored_vertex(pos2(x, hb.min.y), c);
+        m.colored_vertex(pos2(x, hb.max.y), c);
+        if k > 0 {
+            let i = (k * 2) as u32;
+            m.add_triangle(i - 2, i - 1, i);
+            m.add_triangle(i - 1, i + 1, i);
+        }
+    }
+    p.add(m);
+    p.rect_stroke(hb, 2.0, Stroke::new(1.0, DIVIDER()), StrokeKind::Outside);
+    let hx = hb.min.x + h * hb.width();
+    p.rect(Rect::from_center_size(pos2(hx, hb.center().y), vec2(4.0, hb.height() + 4.0)), 2.0, Color32::WHITE, Stroke::new(1.0, Color32::from_black_alpha(160)), StrokeKind::Outside);
+    sdown || hdown
+}
+
 /// The ball carried by the pointer, with what it would land on.
-fn drag_ball(ctx: &egui::Context, st: &AppState, at: egui::Pos2, m: &materials::Material) {
+fn drag_ball(ctx: &egui::Context, st: &AppState, at: egui::Pos2, m: &materials::Look) {
     let p = ctx.layer_painter(egui::LayerId::new(Order::Tooltip, Id::new("mat-drag")));
     let c = at + vec2(14.0, -14.0);
     p.circle_filled(c + vec2(0.0, 1.5), 12.0, Color32::from_black_alpha(70));
@@ -1070,6 +1307,12 @@ fn step_icon(label: &str) -> (Icon, Color32) {
         (Icon::Inset, FACE_SEL)
     } else if has(&["extrude"]) {
         (Icon::Extrude, FACE_SEL)
+    } else if has(&["shell", "open a face", "close a face"]) {
+        (Icon::Shell, TEXT2())
+    } else if has(&["mirror"]) {
+        (Icon::Mirror, TEXT2())
+    } else if has(&["array"]) {
+        (Icon::Array, TEXT2())
     } else if has(&["knife", "cut"]) {
         (Icon::Knife, EDGE_SEL)
     } else if has(&["point"]) {
@@ -1339,6 +1582,10 @@ fn help_title(st: &AppState) -> String {
         Tool::Point => "Point on edge".into(),
         Tool::Slot if st.slot_on_scan => "Slot · on the scan".into(),
         Tool::Slot => format!("Slot · {}", st.mode.label()),
+        Tool::Form => format!("Forms · {}", st.form.brush.label()),
+        Tool::Align => "Align · pick the target".into(),
+        Tool::ShellPick => "Shell · pick faces to open".into(),
+        Tool::Select if st.align_open() => "Align".into(),
         Tool::Select => format!("{} · {}", st.gizmo.label(), st.sel_mode.label()),
         Tool::Sculpt => format!("Sculpt · {}", st.sculpt.brush.label()),
         Tool::PolyLoop => "Insert edge loop".into(),
@@ -1437,6 +1684,9 @@ fn help_box(ctx: &egui::Context, st: &mut AppState) {
         Tool::Push(_) => FACE_SEL,
         Tool::Knife | Tool::Point => EDGE_SEL,
         Tool::Slot => accent(),
+        Tool::Form => op_color(st.mode),
+        Tool::Align => TEXT2(),
+        Tool::ShellPick => FACE_SEL,
         Tool::Select if st.sel_mode == SelMode::Edge => EDGE_SEL,
         Tool::Select if st.sel_mode == SelMode::Face => FACE_SEL,
         Tool::Select => st.single().map(feature_color).unwrap_or(TEXT2()),
@@ -1531,8 +1781,8 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
     if st.poly_comp() || st.poly_pull.is_some() || st.poly_drag.is_some() || st.stroke.is_some() || st.poly_bevel.is_some() || st.tool == Tool::PolyCut {
         return;
     }
-    // an inset or extrusion: its handles are there instead (Del deletes it)
-    if st.selected_push().is_some() {
+    // an inset or extrusion, an Array: their handles are there instead
+    if st.selected_push().is_some() || st.selected_array().is_some() {
         return;
     }
     let b = st.doc.features.iter().filter(|f| st.selection.contains(&f.id)).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
@@ -1573,6 +1823,18 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                     if icon_btn(ui, Icon::Duplicate, false, "Duplicate (Ctrl+D)", 28.0).clicked() {
                         st.duplicate_selected();
                     }
+                    if icon_btn(ui, Icon::Align, st.tool == Tool::Align, "Align (Alt+A): then click the shape to align to", 28.0).clicked() {
+                        st.begin_align();
+                    }
+                    if icon_btn(ui, Icon::Mirror, false, "Mirror (Alt+M): the part made symmetric across X, the steps after it on both sides", 28.0).clicked() {
+                        st.add_mirror(0);
+                    }
+                    if icon_btn(ui, Icon::Array, false, "Array (Ctrl+Shift+D): copies in a line, in rows or round an axis, with their operations", 28.0).clicked() {
+                        st.add_array();
+                    }
+                    if icon_btn(ui, Icon::Shell, false, "Shell (Alt+S): the part hollowed, 2 mm walls (Face mode: the faces picked left open)", 28.0).clicked() {
+                        st.add_shell();
+                    }
                 }
                 if icon_btn(ui, Icon::Frame, false, "Frame (F)", 28.0).clicked() {
                     st.frame_selection();
@@ -1610,8 +1872,15 @@ fn op_pop(st: &AppState) -> Option<OpPop> {
     if st.poly_bevel_valid() {
         return Some(OpPop::PolyBevel);
     }
-    if (st.tool == Tool::Create(PrimKind::Surface) || (st.tool == Tool::Slot && st.slot_draw.is_none())) && st.creation.is_none() {
+    if st.align.is_some() {
+        return None;
+    }
+    if (st.tool == Tool::Create(PrimKind::Surface) || st.tool == Tool::Create(PrimKind::Path) || st.tool == Tool::Form || (st.tool == Tool::Slot && st.slot_draw.is_none())) && st.creation.is_none() {
         return Some(OpPop::Tool);
+    }
+    // picking a Shell's faces: its window stays
+    if st.tool == Tool::ShellPick {
+        return st.selected_shell().map(|f| OpPop::Step(f.id));
     }
     if st.creation.is_some() || st.sketch.is_some() || st.push.is_some() || st.curve_pull.is_some() || st.tool != Tool::Select || st.poly_comp() || st.poly_pull.is_some() {
         return None;
@@ -1627,11 +1896,12 @@ fn op_pop(st: &AppState) -> Option<OpPop> {
             None
         };
     }
-    if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {
+    // two curves or more: a 2D boolean (closed) or a loft
+    if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.feature(*id).map(|f| f.is_path()).unwrap_or(false)) {
         return Some(OpPop::Curves);
     }
     let f = st.single()?;
-    Some(if !f.is_solid() || f.is_path() { OpPop::Step(f.id) } else { OpPop::Shape(f.id) })
+    Some(if !f.is_solid() || f.is_path() || f.loft.is_some() { OpPop::Step(f.id) } else { OpPop::Shape(f.id) })
 }
 
 /// Where the worked component is on screen: the box round its points.
@@ -1649,6 +1919,10 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
                 vec![t.at() + t.delta]
             } else if let Some(r) = &f.round {
                 r.edges.iter().map(|e| e.at).collect()
+            } else if let Some((_, q)) = st.mirror_plane().filter(|_| f.mirror.is_some()) {
+                q.to_vec()
+            } else if let Some((_, q)) = st.array_marks().filter(|_| f.array.is_some()) {
+                q
             } else {
                 vec![f.origin]
             }
@@ -1679,106 +1953,340 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
     r
 }
 
-/// The settings of the operation under way, in a small window next to the
-/// component it works on (Romain 18 nov., 22 h 31: "en pop-up fenêtre avec
-/// grip de déplacement… comme dans Maya quand on fait un Bevel"). It
-/// follows the component; its grip moves it (double-click: back by it).
-fn op_window(ctx: &egui::Context, st: &mut AppState) {
-    // the marking menu open: nothing over it
-    if st.marking.is_open() {
+/// The Align window (3ds Max's Align, `align.rs`): what lines up with
+/// what, the axes, the point of each, the orientation; the part shows it
+/// live. Apply keeps it and goes on, OK keeps it, Cancel puts it back.
+fn align_window(ctx: &egui::Context, st: &mut AppState) {
+    if !st.align_open() || st.marking.is_open() {
         return;
     }
-    let Some(k) = op_pop(st) else { return };
-    let Some(anchor) = op_anchor(st, k) else { return };
-    // a new subject: the window comes back next to it
-    let subject = format!("{k:?}");
-    let key = Id::new("op-pop-subject");
-    if ctx.data(|d| d.get_temp::<String>(key)) != Some(subject.clone()) {
-        ctx.data_mut(|d| {
-            d.insert_temp(key, subject);
-            d.insert_persisted(Id::new(("panel-offset", "op-pop")), egui::Vec2::ZERO);
-        });
-    }
+    let Some(a) = st.align.clone() else { return };
     const W: f32 = 236.0;
-    let full = W + 20.0;
     let vr = st.view_rect;
-    // at the component's height, beside the part so it covers neither the
-    // part nor the gizmo: on its right, else its left, else by the component
+    let full = W + 20.0;
+    let h = ctx.memory(|m| m.area_rect(Id::new("align-pop"))).map(|r| r.height()).unwrap_or(300.0);
+    // beside the part (as it was when the window opened), on its right,
+    // else on its left, else by the click on the target
+    let view = st.view();
+    let mut part = Rect::from_min_max(pos2(a.at[0], a.at[1]), pos2(a.at[0], a.at[1]));
+    let mut corners: Vec<DVec3> = a.boxes.iter().flat_map(|(_, b)| [b.lo, b.hi]).collect();
+    if let Some(t) = &a.tbox {
+        corners.extend([t.lo, t.hi]);
+    }
+    if let Some((lo, hi)) = st.model.as_ref().and_then(|m| m.bounds()) {
+        corners.extend([DVec3::from(lo.map(|x| x as f64)), DVec3::from(hi.map(|x| x as f64))]);
+    }
+    for w in corners.chunks(2) {
+        for i in 0..8 {
+            let c = DVec3::new(if i & 1 == 0 { w[0].x } else { w[1].x }, if i & 2 == 0 { w[0].y } else { w[1].y }, if i & 4 == 0 { w[0].z } else { w[1].z });
+            if let Some(q) = view.project(c.as_vec3()) {
+                part = part.union(Rect::from_min_max(pos2(q[0], q[1]), pos2(q[0], q[1])));
+            }
+        }
+    }
+    let gap = 28.0;
+    let (left, right) = (vr[0] + 8.0, vr[2] - 8.0);
+    let x = if part.max.x + gap + full < right {
+        part.max.x + gap
+    } else if part.min.x - gap - full > left {
+        part.min.x - gap - full
+    } else if a.at[0] + 70.0 + full < right {
+        a.at[0] + 70.0
+    } else {
+        (a.at[0] - 70.0 - full).max(left)
+    };
+    let top = vr[1] + 48.0;
+    let mut y = (a.at[1] - 110.0).clamp(top, (vr[3] - 8.0 - h).max(top));
+    // not over the help box (bottom right): above it
+    if let Some(hb) = ctx.memory(|m| m.area_rect(Id::new("help-box"))) {
+        if Rect::from_min_size(pos2(x, y), vec2(full, h)).intersects(hb) {
+            y = (hb.min.y - 8.0 - h).max(top);
+        }
+    }
+    let at = pos2(x, y) + panel_offset(ctx, "align-pop");
+    let (what, target) = st.align_names();
+    let mut changed = false;
+    let mut close: Option<bool> = None;
+    let mut apply = false;
+    egui::Area::new(Id::new("align-pop")).order(Order::Foreground).fixed_pos(at).show(ctx, |ui| {
+        island().inner_margin(Margin::same(10)).show(ui, |ui| {
+            ui.set_width(W);
+            grip(ui, "align-pop");
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Align").font(semibold(14.0)).color(TEXT()));
+                chip_label(ui, "Alt + A", RAISED(), LABEL());
+            });
+            // what moves, and onto what
+            let (r, _) = ui.allocate_exact_size(vec2(W, 20.0), Sense::hover());
+            let p = ui.painter();
+            let g1 = p.layout_no_wrap(what.clone(), medium(12.0), TEXT_STRONG());
+            let g2 = p.layout_no_wrap(target.clone(), medium(12.0), accent());
+            let x1 = r.min.x + g1.size().x;
+            p.galley(pos2(r.min.x, r.center().y - g1.size().y / 2.0), g1, TEXT_STRONG());
+            p.text(pos2(x1 + 8.0, r.center().y), Align2::LEFT_CENTER, "→", regular(12.0), LABEL());
+            p.galley(pos2(x1 + 24.0, r.center().y - g2.size().y / 2.0), g2, accent());
+            ui.add_space(4.0);
+            let label = |ui: &mut Ui, t: &str| {
+                let (r, _) = ui.allocate_exact_size(vec2(W, 16.0), Sense::hover());
+                ui.painter().text(r.left_center(), Align2::LEFT_CENTER, t, mono(10.0), LABEL());
+            };
+            // the axes (3ds Max's X / Y / Z Position)
+            label(ui, "POSITION");
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let bw = (W - 12.0) / 3.0;
+                for (k, (n, c)) in [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AXIS_Z)].into_iter().enumerate() {
+                    let on = a.axes[k];
+                    let (r, resp) = ui.allocate_exact_size(vec2(bw, 24.0), Sense::click());
+                    ui.ctx().data_mut(|d| d.insert_temp(Id::new(("align-axis", k)), r));
+                    let p = ui.painter();
+                    p.rect(r, 6.0, if on { RAISED() } else { WELL() }, Stroke::new(1.0, if on { c } else if resp.hovered() { TEXT2() } else { DIVIDER() }), StrokeKind::Inside);
+                    // a tick box and the axis
+                    let b = Rect::from_center_size(pos2(r.center().x - 9.0, r.center().y), vec2(11.0, 11.0));
+                    p.rect(b, 3.0, if on { c } else { Color32::TRANSPARENT }, Stroke::new(1.0, if on { c } else { LABEL() }), StrokeKind::Inside);
+                    if on {
+                        p.line_segment([b.left_center() + vec2(2.5, 0.0), b.center_bottom() + vec2(-0.5, -2.5)], Stroke::new(1.4, Color32::BLACK));
+                        p.line_segment([b.center_bottom() + vec2(-0.5, -2.5), b.right_top() + vec2(-2.5, 2.5)], Stroke::new(1.4, Color32::BLACK));
+                    }
+                    p.text(pos2(r.center().x + 3.0, r.center().y), Align2::LEFT_CENTER, n, semibold(12.0), if on { c } else { TEXT2() });
+                    if resp.clicked() {
+                        if let Some(al) = st.align.as_mut() {
+                            al.axes[k] = !al.axes[k];
+                        }
+                        changed = true;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            let items: Vec<(crate::align::AlignPoint, &str, Color32)> = crate::align::AlignPoint::ALL.iter().map(|p| (*p, p.label(), TEXT2())).collect();
+            label(ui, &format!("CURRENT · {}", what.to_uppercase()));
+            if let Some(v) = ui.push_id("align-cur", |ui| segmented(ui, &items, a.cur, 26.0)).inner {
+                if let Some(al) = st.align.as_mut() {
+                    al.cur = v;
+                }
+                changed = true;
+            }
+            ui.add_space(2.0);
+            label(ui, &format!("TARGET · {}", target.to_uppercase()));
+            if let Some(v) = ui.push_id("align-tgt", |ui| segmented(ui, &items, a.tgt, 26.0)).inner {
+                if let Some(al) = st.align.as_mut() {
+                    al.tgt = v;
+                }
+                changed = true;
+            }
+            ui.add_space(2.0);
+            label(ui, "ORIENTATION");
+            if toggle_row(ui, "Match the target's", a.orient) {
+                if let Some(al) = st.align.as_mut() {
+                    al.orient = !al.orient;
+                }
+                changed = true;
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let bw = (W - 12.0) / 3.0;
+                let r = secondary_btn(ui, "Cancel", bw);
+                ui.ctx().data_mut(|d| d.insert_temp(Id::new(("align-btn", 0usize)), r.rect));
+                if r.on_hover_text("Esc: everything back as it was").clicked() {
+                    close = Some(false);
+                }
+                let r = secondary_btn(ui, "Apply", bw);
+                ui.ctx().data_mut(|d| d.insert_temp(Id::new(("align-btn", 1usize)), r.rect));
+                if r.on_hover_text("Keep it and go on (the axes cleared, as in 3ds Max)").clicked() {
+                    apply = true;
+                }
+                let r = primary_btn(ui, None, "OK", Some(bw));
+                ui.ctx().data_mut(|d| d.insert_temp(Id::new(("align-btn", 2usize)), r.rect));
+                if r.on_hover_text("Enter: keep it").clicked() {
+                    close = Some(true);
+                }
+            });
+        });
+    });
+    if changed {
+        st.align_update();
+    }
+    if apply {
+        st.align_apply();
+    }
+    match close {
+        Some(true) => st.align_ok(),
+        Some(false) => st.align_cancel(),
+        None => {}
+    }
+}
+
+/// What the operation window works on, as a key: a new key is a new
+/// subject (a new selection, a tool run again), and the window takes a new
+/// place; adding to what is picked keeps the first one, so it stays.
+fn op_subject(st: &AppState, k: OpPop) -> String {
+    match k {
+        OpPop::Edges => format!("Edges {:?}", st.edge_sel.first().map(|e| e.faces)),
+        OpPop::Faces => format!("Faces {:?}", st.face_sel.first().map(|f| f.tag)),
+        OpPop::Verts => format!("Verts {:?}", st.vert_sel.first().map(|v| (*v * 100.0).round())),
+        OpPop::Curves => format!("Curves {:?}", st.selection.first()),
+        OpPop::Tool => format!("Tool {:?}", st.tool),
+        _ => format!("{k:?}"),
+    }
+}
+
+/// The operation window's width (its content; the card adds its margins).
+const OP_W: f32 = 288.0;
+
+/// Where the operation window goes for a new subject: at the component's
+/// height, beside the part so it covers neither the part nor the gizmo. The
+/// part is what is on screen of the kernel's mesh, the paths and the
+/// subject's own points; of the places round it (its right, its left, below,
+/// above, the view's sides) the one that covers least of it, of the
+/// component and of the help box, then the nearest the component. A tool's
+/// options go at the view's top right.
+fn op_place(ctx: &egui::Context, st: &AppState, k: OpPop, anchor: Rect, h: f32) -> egui::Pos2 {
+    let full = OP_W + 26.0;
+    let vr = st.view_rect;
+    let (left, right, top, bottom) = (vr[0] + 8.0, vr[2] - 8.0, vr[1] + 48.0, vr[3] - 8.0);
+    if k == OpPop::Tool {
+        return pos2(right - full, top + 60.0);
+    }
     let view = st.view();
     let mut part = anchor;
-    if let Some((lo, hi)) = st.model.as_ref().and_then(|m| m.bounds()) {
-        for i in 0..8 {
-            let c = glam::Vec3::new(if i & 1 == 0 { lo[0] } else { hi[0] }, if i & 2 == 0 { lo[1] } else { hi[1] }, if i & 4 == 0 { lo[2] } else { hi[2] });
-            if let Some(p) = view.project(c) {
-                part = part.union(Rect::from_min_max(pos2(p[0], p[1]), pos2(p[0], p[1])));
-            }
+    let mut add = |p: Option<[f32; 2]>| {
+        if let Some(p) = p {
+            part = part.union(Rect::from_min_max(pos2(p[0], p[1]), pos2(p[0], p[1])));
+        }
+    };
+    if let Some(m) = st.model.as_ref() {
+        // the mesh's points (some 4000 of them), not its box's corners: a
+        // disc's box reaches far past it on screen
+        let stride = (m.positions.len() / 4000).max(1);
+        for q in m.positions.iter().step_by(stride) {
+            add(view.project(glam::Vec3::from(*q)));
         }
     }
     // the Sculpt and Poly meshes: the kernel never sees them
     for f in st.doc.features.iter().filter(|f| f.visible && f.is_mesh()) {
         for q in f.corners() {
-            if let Some(p) = view.project(q.as_vec3()) {
-                part = part.union(Rect::from_min_max(pos2(p[0], p[1]), pos2(p[0], p[1])));
-            }
+            add(view.project(q.as_vec3()));
         }
     }
     // the paths too: they have no mesh
     for f in st.doc.features.iter().filter(|f| f.visible && f.is_path()) {
         for q in st.curve_lines(f).concat() {
-            if let Some(p) = view.project(q.as_vec3()) {
-                part = part.union(Rect::from_min_max(pos2(p[0], p[1]), pos2(p[0], p[1])));
-            }
+            add(view.project(q.as_vec3()));
         }
     }
+    let part = part.intersect(Rect::from_min_max(pos2(vr[0], vr[1]), pos2(vr[2], vr[3])));
+    let help = ctx.memory(|m| m.area_rect(Id::new("help-box")));
+    // the other islands on screen (the panel, the Sub Outliner, the rail,
+    // the history, the materials): not over them either
+    let islands: Vec<Rect> = ctx.memory(|m| {
+        m.areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter(|l| matches!(l.order, Order::Middle | Order::Foreground) && l.id != Id::new("op-pop") && l.id != Id::new("help-box"))
+            .filter_map(|l| m.area_rect(l.id))
+            .filter(|r| r.is_positive() && r.area() < (vr[2] - vr[0]) * (vr[3] - vr[1]) * 0.5)
+            .collect()
+    });
     let gap = 28.0;
-    // its height as drawn last frame keeps it inside the view
-    let h = ctx.memory(|m| m.area_rect(Id::new("op-pop"))).map(|r| r.height()).unwrap_or(200.0);
-    let (left, right, top, bottom) = (vr[0] + 8.0, vr[2] - 8.0, vr[1] + 48.0, vr[3] - 8.0);
-    let y_by = (anchor.center().y - 60.0).clamp(top, (bottom - h).max(top));
-    let x_by = (anchor.center().x - full * 0.5).clamp(left, (right - full).max(left));
-    let at = if k == OpPop::Tool {
-        // a tool's options: at the view's top right, out of the drawing
-        pos2(right - full, top + 60.0)
-    } else if part.max.x + gap + full < right {
-        pos2(part.max.x + gap, y_by)
-    } else if part.min.x - gap - full > left {
-        pos2(part.min.x - gap - full, y_by)
-    } else if part.max.y + gap + h < bottom {
-        pos2(x_by, part.max.y + gap)
-    } else if part.min.y - gap - h > top {
-        pos2(x_by, part.min.y - gap - h)
-    } else {
-        let x = if anchor.max.x + 96.0 + full < right { anchor.max.x + 96.0 } else { anchor.min.x - 96.0 - full };
-        pos2(x.clamp(left, (right - full).max(left)), y_by)
-    } + panel_offset(ctx, "op-pop");
-    // not over the help box (bottom right): moved up above it
-    let mut at = at;
-    if let Some(hb) = ctx.memory(|m| m.area_rect(Id::new("help-box"))) {
+    let y_by = anchor.center().y - 60.0;
+    let x_by = anchor.center().x - full * 0.5;
+    let cands = [
+        pos2(part.max.x + gap, y_by),
+        pos2(part.min.x - gap - full, y_by),
+        pos2(x_by, part.max.y + gap),
+        pos2(x_by, part.min.y - gap - h),
+        pos2(right - full, y_by),
+        pos2(left, y_by),
+        pos2(right - full, top),
+        pos2(left, top),
+    ];
+    let area = |a: Rect, b: Rect| {
+        let i = a.intersect(b);
+        if i.is_positive() { i.area() } else { 0.0 }
+    };
+    let near = anchor.expand(36.0);
+    let mut best: Option<(f32, egui::Pos2)> = None;
+    for c in cands {
+        let at = pos2(c.x.clamp(left, (right - full).max(left)), c.y.clamp(top, (bottom - h).max(top)));
         let r = Rect::from_min_size(at, vec2(full, h));
-        if r.intersects(hb) && k != OpPop::Tool {
-            at.y = (hb.min.y - 8.0 - h).max(top);
+        let mut score = area(r, part) + 6.0 * area(r, near) + help.map(|hb| 3.0 * area(r, hb.expand(8.0))).unwrap_or(0.0);
+        score += islands.iter().map(|i| 4.0 * area(r, i.expand(6.0))).sum::<f32>();
+        score += 0.5 * r.distance_to_pos(anchor.center()) * 40.0;
+        if best.map(|b| score < b.0).unwrap_or(true) {
+            best = Some((score, at));
         }
     }
+    best.map(|b| b.1).unwrap_or(pos2(right - full, top))
+}
+
+/// The settings of the operation under way, in a small window next to the
+/// component it works on (Romain 18 nov., 22 h 31: "en pop-up fenêtre avec
+/// grip de déplacement… comme dans Maya quand on fait un Bevel"). It takes
+/// its place when its subject is new (a selection, a tool run again), then
+/// stays there while the view turns or the part changes (Romain 20 nov.,
+/// 19 h 01: "après elle ne suit pas en permanence"); its grip moves it
+/// (double-click: back to its place).
+fn op_window(ctx: &egui::Context, st: &mut AppState) {
+    // the marking menu open: nothing over it
+    if st.marking.is_open() {
+        return;
+    }
+    let key = Id::new("op-pop-subject");
+    let base_key = Id::new("op-pop-base");
+    let shown = op_pop(st).and_then(|k| op_anchor(st, k).map(|a| (k, a)));
+    let Some((k, anchor)) = shown else {
+        // hidden: the next subject takes a place of its own, even the same one
+        ctx.data_mut(|d| d.remove::<String>(key));
+        return;
+    };
+    let subject = op_subject(st, k);
+    let h = ctx.memory(|m| m.area_rect(Id::new("op-pop"))).map(|r| r.height()).unwrap_or(200.0);
+    let known = ctx.data(|d| d.get_temp::<String>(key));
+    let kept = ctx.data(|d| d.get_temp::<egui::Pos2>(base_key));
+    // the window's own controls changed its subject (a fillet made from the
+    // picked edges, a curve picked in a boolean's list): it stays where it is
+    let over = ctx.input(|i| i.pointer.latest_pos()).zip(ctx.memory(|m| m.area_rect(Id::new("op-pop")))).map(|(p, r)| r.expand(6.0).contains(p)).unwrap_or(false);
+    let base = match kept {
+        Some(b) if known.as_deref() == Some(subject.as_str()) => b,
+        Some(b) if known.is_some() && over => {
+            ctx.data_mut(|d| d.insert_temp(key, subject));
+            b
+        }
+        _ => {
+            let at = op_place(ctx, st, k, anchor, h);
+            ctx.data_mut(|d| {
+                d.insert_temp(key, subject);
+                d.insert_temp(base_key, at);
+                d.insert_persisted(Id::new(("panel-offset", "op-pop")), egui::Vec2::ZERO);
+            });
+            at
+        }
+    };
+    // kept inside the view as it grows or the window is resized
+    let vr = st.view_rect;
+    let full = OP_W + 26.0;
+    let (left, right, top, bottom) = (vr[0] + 8.0, vr[2] - 8.0, vr[1] + 48.0, vr[3] - 8.0);
+    let at = base + panel_offset(ctx, "op-pop");
+    let at = pos2(at.x.clamp(left, (right - full).max(left)), at.y.clamp(top, (bottom - h).max(top)));
+    set_op_style(ctx, true);
     egui::Area::new(Id::new("op-pop")).order(Order::Foreground).fixed_pos(at).show(ctx, |ui| {
-        island().inner_margin(Margin::same(10)).show(ui, |ui| {
-            ui.set_width(W);
+        op_island().show(ui, |ui| {
+            ui.set_width(OP_W);
             grip(ui, "op-pop");
             match k {
                 OpPop::Edges => round_card(ui, st),
                 OpPop::Faces => face_card(ui, st),
                 OpPop::Verts => {
                     let n = st.vert_sel.len();
-                    ui.label(egui::RichText::new(if n > 1 { format!("{n} vertices") } else { "Vertex".to_string() }).font(semibold(14.0)).color(TEXT()));
+                    op_title(ui, &if n > 1 { format!("{n} vertices") } else { "Vertex".to_string() }, "");
                     vertex_card(ui, st);
                 }
                 OpPop::Curves => combine_card(ui, st),
                 OpPop::PolyBevel => poly_bevel_card(ui, st),
                 OpPop::Step(id) => {
                     let Some(f) = st.doc.feature(id).cloned() else { return };
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&f.name).font(semibold(14.0)).color(TEXT()));
-                        chip_label(ui, f.kind_label(), RAISED(), LABEL());
-                    });
+                    op_title(ui, &f.name, f.kind_label());
                     // a curve of a 2D boolean: back to it
                     if let Some(b) = st.curve_inside(f.id).map(|b| (b.id, b.name.clone())) {
                         let r = ui.add(egui::Label::new(egui::RichText::new(format!("‹ In {}", b.1)).font(medium(12.0)).color(LABEL())).sense(Sense::click()));
@@ -1786,33 +2294,231 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                             st.selection = vec![b.0];
                         }
                     }
-                    if f.shape_bool.is_some() {
+                    if f.loft.is_some() {
+                        loft_card(ui, st, &f);
+                    } else if f.shape_bool.is_some() {
                         bool_card(ui, st, &f);
+                        curve_make_card(ui, st, &f);
                     } else if f.push.is_some() {
                         push_card(ui, st);
                     } else if f.tweak.is_some() {
                         tweak_card(ui, st, id);
                     } else if f.curve.is_some() {
                         curve_card(ui, st, &f);
+                        curve_make_card(ui, st, &f);
                     } else if f.is_path() {
                         path_card(ui, st, &f);
+                        curve_make_card(ui, st, &f);
+                    } else if f.shell.is_some() {
+                        shell_card(ui, st, &f);
+                    } else if f.mirror.is_some() {
+                        mirror_card(ui, st, &f);
+                    } else if f.array.is_some() {
+                        array_card(ui, st, &f);
                     } else {
                         round_card(ui, st);
                     }
                 }
                 OpPop::Tool if st.tool == Tool::Slot => slot_options(ui, st),
+                OpPop::Tool if st.tool == Tool::Form => form_options(ui, st),
+                OpPop::Tool if st.tool == Tool::Create(PrimKind::Path) => path_options(ui, st),
                 OpPop::Tool => surface_options(ui, st),
                 OpPop::Shape(id) => {
                     let Some(f) = st.doc.feature(id).cloned() else { return };
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&f.name).font(semibold(14.0)).color(TEXT()));
-                        chip_label(ui, f.kind_label(), RAISED(), LABEL());
-                    });
+                    op_title(ui, &f.name, f.kind_label());
                     shape_card(ui, st, &f);
                 }
             }
         });
     });
+    set_op_style(ctx, false);
+}
+
+/// The operation window's title: the name, and its kind when the name does
+/// not say it already ("Array 2" is an Array).
+fn op_title(ui: &mut Ui, name: &str, kind: &str) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(name).font(semibold(15.0)).color(TEXT_STRONG()));
+        if !kind.is_empty() && !name.starts_with(kind) {
+            chip_label(ui, kind, RAISED(), LABEL());
+        }
+    });
+}
+
+/// A Shell step: the walls' thickness and their way, the faces open (each
+/// closed again by its ×), Pick faces to open more.
+fn shell_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let Some(sh) = f.shell.clone() else { return };
+    section(ui, "Walls");
+    let small = st.model.as_ref().and_then(|m| m.bounds()).map(|(lo, hi)| (0..3).map(|a| hi[a] - lo[a]).fold(f32::MAX, f32::min)).unwrap_or(40.0);
+    let span = (small * 0.5).max(5.0).max(sh.thickness as f32).ceil();
+    let mut t = sh.thickness as f32;
+    let (ch, start) = slider_row(ui, "Thickness", &mut t, 0.1..=span, 0.1, "mm");
+    if ch {
+        st.set_shell(nurbs_kernel::Shell { thickness: (t as f64).max(0.05), ..sh.clone() }, start || !st.is_live());
+    }
+    let c = TEXT();
+    if let Some(out) = ui.push_id("shell-way", |ui| segmented(ui, &[(false, "Inward", c), (true, "Outward", c)], sh.outward, 28.0)).inner {
+        if out != sh.outward {
+            st.set_shell(nurbs_kernel::Shell { outward: out, ..sh.clone() }, true);
+            st.end_live();
+        }
+    }
+    section(ui, "Open faces");
+    if sh.faces.is_empty() {
+        ui.label(egui::RichText::new("None: a closed cavity inside (Alt+X: X-ray)").font(regular(12.0)).color(TEXT2()));
+    }
+    for (k, r) in sh.faces.iter().enumerate() {
+        let name = st.shell_face_label(r);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("{}  {name}", k + 1)).font(medium(13.0)).color(TEXT()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Label::new(egui::RichText::new("×").font(medium(14.0)).color(LABEL())).sense(Sense::click())).on_hover_text("Close it again").clicked() {
+                    st.shell_close_face(k);
+                }
+            });
+        });
+    }
+    ui.add_space(2.0);
+    let picking = st.tool == Tool::ShellPick;
+    if secondary_btn(ui, if picking { "Done  Esc" } else { "Pick faces to open" }, ui.available_width()).clicked() {
+        st.shell_pick_toggle();
+    }
+    if let Some(e) = st.feature_error(f) {
+        ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
+    }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
+        st.end_live();
+    }
+}
+
+/// A Mirror step: its plane (the axis it is square to, where it passes)
+/// and the side kept.
+fn mirror_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let Some(m) = f.mirror else { return };
+    section(ui, "Plane");
+    let items: Vec<(u8, &str, Color32)> = vec![(0, "X", AXIS_X), (1, "Y", AXIS_Y), (2, "Z", AXIS_Z)];
+    if let Some(a) = ui.push_id("mirror-axis", |ui| segmented(ui, &items, m.axis, 28.0)).inner {
+        if a != m.axis {
+            let flip = st.model.as_ref().and_then(|md| md.bounds()).map(|(lo, hi)| (lo[a as usize] + hi[a as usize]) < -1e-3).unwrap_or(false);
+            st.set_mirror(nurbs_kernel::Mirror { axis: a, offset: 0.0, flip }, true);
+            st.end_live();
+        }
+    }
+    let span = st.model.as_ref().and_then(|md| md.bounds()).map(|(lo, hi)| lo[m.axis as usize].abs().max(hi[m.axis as usize].abs())).unwrap_or(50.0).max(10.0).ceil();
+    let mut off = m.offset as f32;
+    let (ch, start) = slider_row(ui, "Offset", &mut off, -span..=span, 0.1, "mm");
+    if ch {
+        st.set_mirror(nurbs_kernel::Mirror { offset: off as f64, ..m }, start || !st.is_live());
+    }
+    if toggle_row(ui, &format!("Keep the −{} side", m.axis_name()), m.flip) {
+        st.set_mirror(nurbs_kernel::Mirror { flip: !m.flip, ..m }, true);
+        st.end_live();
+    }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
+        st.end_live();
+    }
+}
+
+/// A Pattern / Array step: Line, Grid or Circle, how many and how far;
+/// what it repeats.
+fn array_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
+    use nurbs_kernel::ArrayKind;
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let Some(a) = f.array.clone() else { return };
+    let note = |ui: &mut Ui, t: &str| {
+        ui.label(egui::RichText::new(t).font(regular(11.5)).color(LABEL()));
+    };
+    ui.add_space(4.0);
+    let c = TEXT();
+    let kinds: Vec<(ArrayKind, &str, Color32)> = vec![(ArrayKind::Line, "Line", c), (ArrayKind::Grid, "Grid", c), (ArrayKind::Circle, "Circle", c)];
+    if let Some(k) = ui.push_id("array-kind", |ui| segmented(ui, &kinds, a.kind, 28.0)).inner {
+        if k != a.kind {
+            let mut b = a.clone();
+            b.kind = k;
+            if k == ArrayKind::Circle {
+                b.count = b.count.max(3);
+                if b.centre == DVec3::ZERO {
+                    b.centre = st.circle_centre(&b.sources);
+                }
+            }
+            st.set_array(b, true);
+            st.end_live();
+        }
+    }
+    note(ui, if a.kind == ArrayKind::Circle { "In the view: the square sets how many, the arrow the angle" } else { "In the view: the squares set the steps, the arrows how many" });
+    let colors = [AXIS_X, AXIS_Y, AXIS_Z];
+    // a vector as X / Y / Z fields under its name
+    let vec_row = |ui: &mut Ui, st: &mut AppState, title: &str, v: DVec3, set: &dyn Fn(&mut nurbs_kernel::Array, DVec3)| {
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new(title).font(regular(12.5)).color(TEXT2()));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for k in 0..3 {
+                let mut x = v[k] as f32;
+                let r = axis_field(ui, ["X", "Y", "Z"][k], colors[k], &mut x, "");
+                if r.changed() {
+                    let mut w = v;
+                    w[k] = x as f64;
+                    let mut b = a.clone();
+                    set(&mut b, w);
+                    st.set_array(b, r.drag_started() || !st.is_live());
+                }
+            }
+        });
+    };
+    section(ui, "Copies");
+    let mut count = a.count as f32;
+    let (ch, start) = slider_row(ui, "Count", &mut count, 1.0..=50.0, 1.0, "");
+    if ch {
+        st.set_array(nurbs_kernel::Array { count: count.round().max(1.0) as u32, ..a.clone() }, start || !st.is_live());
+    }
+    match a.kind {
+        ArrayKind::Line | ArrayKind::Grid => {
+            vec_row(ui, st, "Step, mm", a.step, &|b, w| b.step = w);
+            if a.kind == ArrayKind::Grid {
+                section(ui, "Rows");
+                let mut rows = a.count2 as f32;
+                let (ch, start) = slider_row(ui, "Rows", &mut rows, 1.0..=30.0, 1.0, "");
+                if ch {
+                    st.set_array(nurbs_kernel::Array { count2: rows.round().max(1.0) as u32, ..a.clone() }, start || !st.is_live());
+                }
+                vec_row(ui, st, "Row step, mm", a.step2, &|b, w| b.step2 = w);
+            }
+        }
+        ArrayKind::Circle => {
+            let mut ang = a.angle as f32;
+            let (ch, start) = slider_row(ui, "Angle", &mut ang, 1.0..=360.0, 1.0, "°");
+            if ch {
+                st.set_array(nurbs_kernel::Array { angle: ang as f64, ..a.clone() }, start || !st.is_live());
+            }
+            note(ui, if a.angle >= 359.999 { "360°: evenly all round" } else { "The first and the last at the ends of the angle" });
+            section(ui, "Axis");
+            let items: Vec<(u8, &str, Color32)> = vec![(0, "X", AXIS_X), (1, "Y", AXIS_Y), (2, "Z", AXIS_Z)];
+            if let Some(x) = ui.push_id("array-axis", |ui| segmented(ui, &items, a.axis, 26.0)).inner {
+                if x != a.axis {
+                    st.set_array(nurbs_kernel::Array { axis: x, ..a.clone() }, true);
+                    st.end_live();
+                }
+            }
+            vec_row(ui, st, "Through, mm", a.centre, &|b, w| b.centre = w);
+        }
+    }
+    section(ui, "Repeats");
+    let names: Vec<String> = a.sources.iter().filter_map(|id| st.doc.feature(*id)).map(|g| g.name.clone()).collect();
+    let ops = st.doc.features.iter().position(|x| x.id == f.id).map(|i| st.doc.array_pattern(i).iter().filter(|p| !p.is_solid()).count()).unwrap_or(0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(names.join(", ")).font(semibold(13.0)).color(TEXT()));
+        if ops > 0 {
+            chip_label(ui, &format!("+ {ops} operation{}", if ops == 1 { "" } else { "s" }), RAISED(), LABEL());
+        }
+    });
+    note(ui, "An operation on any copy is made on all of them");
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
+        st.end_live();
+    }
 }
 
 /// The Poly tab's Bevel (Maya's window): its width, segments, and Chamfer
@@ -1906,6 +2612,52 @@ fn slot_options(ui: &mut Ui, st: &mut AppState) {
             }
         }
     });
+}
+
+/// The Forms tool's options: the brush, its radius (on screen) and
+/// intensity, the symmetry, what a click on the ground makes; the form
+/// selected: its poles and More detail.
+fn form_options(ui: &mut Ui, st: &mut AppState) {
+    use crate::forms::BRUSHES;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Forms").font(semibold(14.0)).color(TEXT()));
+        chip_label(ui, "Brush", RAISED(), LABEL());
+    });
+    ui.add_space(6.0);
+    let c = op_color(st.mode);
+    let items: Vec<(crate::forms::Brush, &str, Color32)> = BRUSHES.iter().map(|b| (*b, b.label(), c)).collect();
+    if let Some(b) = segmented(ui, &items, st.form.brush, 30.0) {
+        st.form.brush = b;
+    }
+    ui.label(egui::RichText::new(st.form.brush.tip()).font(regular(11.5)).color(TEXT2()));
+    ui.add_space(4.0);
+    let mut r = st.form.radius;
+    let _ = slider_row(ui, "Radius", &mut r, 8.0..=600.0, 1.0, "pt");
+    st.form.radius = r.clamp(8.0, 600.0);
+    let k = st.form.brush.index();
+    let mut i = (st.form.intensity[k] * 100.0) as f32;
+    let _ = slider_row(ui, "Intensity", &mut i, 1.0..=100.0, 1.0, "%");
+    st.form.intensity[k] = (i.clamp(1.0, 100.0) / 100.0) as f64;
+    section(ui, "Symmetry");
+    if let Some(m) = segmented(ui, &[(false, "Off", c), (true, "Mirror X", c)], st.form.mirror, 28.0) {
+        st.form.mirror = m;
+    }
+    section(ui, "New form (a click on the ground)");
+    let kinds = [(nurbs_kernel::FormKind::Sphere, "Sphere", c), (nurbs_kernel::FormKind::Cylinder, "Cylinder", c)];
+    if let Some(k) = segmented(ui, &kinds, st.form.new_kind, 28.0) {
+        st.form.new_kind = k;
+    }
+    if let Some(f) = st.single().filter(|f| f.form.is_some()).cloned() {
+        let fm = f.form.as_ref().unwrap();
+        section(ui, &format!("{} · {} × {} poles", f.name, fm.nu, fm.nv));
+        let r = ui.add(egui::Label::new(egui::RichText::new("More detail").font(medium(12.0)).color(LABEL())).sense(Sense::click()));
+        if r.on_hover_text("Twice the poles round and up, the same surface: smaller brushes take hold").clicked() {
+            st.form_detail(f.id);
+        }
+        if let Some(e) = st.feature_error(&f) {
+            ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
+        }
+    }
 }
 
 /// The Surface tool's options, in the operation window (Romain 19 nov.,
@@ -2071,11 +2823,12 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     // the second column, beside the panel
     let feats = st.doc.features.clone();
     let ops_of = |st: &AppState, id: FeatureId| feats.iter().filter(|g| !g.is_solid() && !g.is_path() && st.owner_of(g.id) == Some(id)).count();
-    let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 7] = [
-        ("PRIMITIVES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && !f.is_mesh() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }))),
+    let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 8] = [
+        ("PRIMITIVES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && !f.is_mesh() && f.form.is_none() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }))),
+        ("FORMS", Box::new(|f: &Feature| f.form.is_some())),
         ("SHAPES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Profile { .. }))),
-        ("CURVES", Box::new(|f: &Feature| f.is_path())),
-        ("SURFACES", Box::new(|f: &Feature| f.is_sheet())),
+        ("CURVES", Box::new(|f: &Feature| f.is_path() && !f.fill && f.revolve.is_none())),
+        ("SURFACES", Box::new(|f: &Feature| f.is_sheet() || f.fill || f.revolve.is_some() || f.loft.is_some())),
         ("OPERATIONS", Box::new(|_: &Feature| false)),
         ("SCULPT", Box::new(|f: &Feature| f.mesh.as_ref().map(|m| m.kind == nurbs_kernel::mesh::MeshKind::Sculpt).unwrap_or(false))),
         ("POLY", Box::new(|f: &Feature| f.mesh.as_ref().map(|m| m.kind == nurbs_kernel::mesh::MeshKind::Poly).unwrap_or(false))),
@@ -2090,10 +2843,10 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
         for (gi, (title, keep)) in groups.iter().enumerate() {
             // the last group: operations whose shape cannot be told
             // a 2D boolean's curves under it, not on their own
-            let members: Vec<&Feature> = if gi == 4 {
+            let members: Vec<&Feature> = if *title == "OPERATIONS" {
                 feats.iter().filter(|f| !f.is_solid() && !f.is_path() && st.owner_of(f.id).is_none()).collect()
             } else {
-                feats.iter().filter(|f| keep(f) && (gi != 2 || st.doc.boolean_of(f.id).is_none())).collect()
+                feats.iter().filter(|f| keep(f) && (*title != "CURVES" || st.doc.boolean_of(f.id).is_none())).collect()
             };
             if members.is_empty() {
                 continue;
@@ -2553,6 +3306,18 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         if f.is_solid() && icon_btn(ui, Icon::Duplicate, false, "Duplicate", 30.0).clicked() {
             st.duplicate_selected();
         }
+        if icon_btn(ui, Icon::Align, st.tool == Tool::Align, "Align (Alt+A): then click the shape to align to", 30.0).clicked() {
+            st.begin_align();
+        }
+        if f.is_solid() && icon_btn(ui, Icon::Mirror, false, "Mirror (Alt+M): the part made symmetric across X, the steps after it on both sides", 30.0).clicked() {
+            st.add_mirror(0);
+        }
+        if f.is_solid() && !f.is_path() && icon_btn(ui, Icon::Array, false, "Array (Ctrl+Shift+D): copies in a line, in rows or round an axis, with their operations", 30.0).clicked() {
+            st.add_array();
+        }
+        if f.is_solid() && !f.is_path() && icon_btn(ui, Icon::Shell, false, "Shell (Alt+S): the part hollowed, 2 mm walls (Face mode: the faces picked left open)", 30.0).clicked() {
+            st.add_shell();
+        }
         if icon_btn(ui, if f.visible { Icon::Eye } else { Icon::EyeOff }, false, "Hide", 30.0).clicked() {
             st.toggle_visible(id);
         }
@@ -2991,11 +3756,140 @@ fn combine_card(ui: &mut Ui, st: &mut AppState) {
     let n = st.selection.len();
     let first = st.selection.first().and_then(|id| st.doc.feature(*id)).map(|f| f.name.clone()).unwrap_or_default();
     ui.label(egui::RichText::new(format!("{n} curves")).font(semibold(14.0)).color(TEXT()));
-    section(ui, "Combine");
-    if let Some(op) = bool_tiles(ui, None) {
-        st.make_curve_bool(op);
+    let closed = st.selection.iter().filter(|id| st.doc.is_closed_curve(**id)).count();
+    if closed == n {
+        section(ui, "Combine");
+        if let Some(op) = bool_tiles(ui, None) {
+            st.make_curve_bool(op);
+        }
+        ui.label(egui::RichText::new(format!("Base: {first}")).font(regular(12.0)).color(TEXT2()));
     }
-    ui.label(egui::RichText::new(format!("Base: {first}")).font(regular(12.0)).color(TEXT2()));
+    // a loft through them, in the order picked (20 nov.)
+    section(ui, "Loft");
+    if closed != 0 && closed != n {
+        ui.label(egui::RichText::new("A loft's curves are all closed or all open").font(regular(12.0)).color(TEXT2()));
+        return;
+    }
+    let what = if closed == n { "a solid (Add / Carve: the top bar)" } else { "a surface" };
+    let r = ui.add_sized(vec2(ui.available_width(), 30.0), egui::Button::new(egui::RichText::new("Loft").font(semibold(13.0)).color(on_accent())).fill(PATH).corner_radius(15.0));
+    if r.on_hover_text(format!("A surface through the curves in the order picked: {what}")).clicked() {
+        st.make_loft();
+    }
+    ui.label(egui::RichText::new(format!("Through {n} curves in the order picked: {what}")).font(regular(12.0)).color(TEXT2()));
+}
+
+/// The Path tool's options: straight sides or a smooth curve through the
+/// points (20 nov.: "créer proprement une courbe").
+fn path_options(ui: &mut Ui, st: &mut AppState) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Path").font(semibold(14.0)).color(TEXT()));
+        chip_label(ui, "Tool", RAISED(), LABEL());
+    });
+    ui.add_space(6.0);
+    let items = [(false, "LINEAR", PATH), (true, "CURVE", PATH)];
+    if let Some(c) = segmented(ui, &items, st.surface_curve, 28.0) {
+        st.surface_curve = c;
+    }
+    let tip = if st.surface_curve { "A smooth curve through the points, exact · Shift + click a point placed: sharp / smooth" } else { "Straight sides · Ctrl + drag a point placed: its fillet" };
+    ui.label(egui::RichText::new(tip).font(regular(12.0)).color(TEXT2()));
+}
+
+/// What a curve makes (20 nov.): its line straight or the spline through
+/// its points; nothing, a flat face (Fill), or a turn round an axis in its
+/// plane (Revolve: its angle, the axis along its X or Z, at its box's
+/// min side, middle or max side).
+fn curve_make_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    use crate::surfaces::CurveMake;
+    let any_down = ui.input(|i| i.pointer.any_down());
+    let id = f.id;
+    if f.curve.is_none() && f.shape_bool.is_none() {
+        if let Some(pr) = &f.profile {
+            section(ui, "Line");
+            let items = [(false, "Linear", PATH), (true, "Curve", PATH)];
+            if let Some(c) = segmented(ui, &items, pr.spline, 36.0) {
+                st.set_spline(id, c);
+            }
+        }
+    }
+    section(ui, "Surface");
+    let now = if f.revolve.is_some() {
+        CurveMake::Revolve
+    } else if f.fill {
+        CurveMake::Fill
+    } else {
+        CurveMake::Nothing
+    };
+    let items = [(CurveMake::Nothing, "None", PATH), (CurveMake::Fill, "Fill", PATH), (CurveMake::Revolve, "Revolve", PATH)];
+    if let Some(k) = segmented(ui, &items, now, 36.0) {
+        if k != now {
+            st.set_curve_make(id, k);
+        }
+    }
+    if let Some(r) = f.revolve {
+        let mut a = r.angle as f32;
+        let (ch, start) = slider_row(ui, "Angle", &mut a, 1.0..=360.0, 1.0, "°");
+        if ch {
+            st.set_revolve(id, nurbs_kernel::Revolve { angle: (a as f64).clamp(1.0, 360.0), ..r }, "Revolve angle", start);
+        }
+        let axes = [(false, "Axis Z", PATH), (true, "Axis X", PATH)];
+        if let Some(x) = segmented(ui, &axes, r.along_x, 32.0) {
+            st.set_revolve(id, nurbs_kernel::Revolve { along_x: x, ..r }, "Revolve axis", true);
+            st.end_live();
+        }
+        let aligns = [(-1i8, "Min", PATH), (0, "Center", PATH), (1, "Max", PATH)];
+        if let Some(al) = segmented(ui, &aligns, r.align, 32.0) {
+            st.set_revolve(id, nurbs_kernel::Revolve { align: al, ..r }, "Revolve align", true);
+            st.end_live();
+        }
+        let solid = st.doc.makes(f) == nurbs_kernel::Makes::Solid;
+        let what = if solid { format!("A solid · {} (the top bar)", f.op.label()) } else { "A surface: an open curve whose ends are not both on the axis".to_string() };
+        ui.label(egui::RichText::new(what).font(regular(12.0)).color(TEXT2()));
+    } else if f.fill {
+        ui.label(egui::RichText::new("A flat face inside the curve, no thickness").font(regular(12.0)).color(TEXT2()));
+    }
+    if let Some(e) = st.feature_error(f) {
+        ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
+    }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+        st.end_live();
+    }
+}
+
+/// A loft: its curves in order (a click selects one, ↑ moves it earlier),
+/// smooth or ruled, what the kernel said.
+fn loft_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    let Some(l) = f.loft.clone() else { return };
+    let id = f.id;
+    section(ui, "Loft");
+    let items = [(false, "Smooth", PATH), (true, "Ruled", PATH)];
+    if let Some(r) = segmented(ui, &items, l.ruled, 36.0) {
+        if r != l.ruled {
+            st.set_loft_ruled(id, r);
+        }
+    }
+    let solid = st.doc.makes(f) == nurbs_kernel::Makes::Solid;
+    let what = if solid { format!("A solid · {} (the top bar)", f.op.label()) } else { "A surface (open curves)".to_string() };
+    ui.label(egui::RichText::new(what).font(regular(12.0)).color(TEXT2()));
+    section(ui, "Curves");
+    for (k, o) in l.sections.iter().enumerate() {
+        let Some(g) = st.doc.feature(*o).cloned() else { continue };
+        ui.horizontal(|ui| {
+            let r = ui.add(egui::Label::new(egui::RichText::new(format!("{}  {}", k + 1, g.name)).font(medium(13.0)).color(TEXT())).sense(Sense::click()));
+            if r.on_hover_text("Select this curve: its settings, its points (Vertex mode)").clicked() {
+                st.selection = vec![*o];
+            }
+            if k > 0 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(egui::Label::new(egui::RichText::new("↑").font(medium(14.0)).color(LABEL())).sense(Sense::click())).on_hover_text("Earlier in the loft").clicked() {
+                        st.loft_up(id, k);
+                    }
+                });
+            }
+        });
+    }
+    if let Some(e) = st.feature_error(f) {
+        ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
+    }
 }
 
 /// A 2D boolean: its operation, its curves (a click: that curve's own
@@ -3120,10 +4014,11 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
     // one click sizes
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
+        let cw = ((ui.available_width() - 16.0) / 5.0).max(44.0);
         for q in [0.5, 1.0, 2.0, 3.0, 5.0] {
             let on = (size - q).abs() < 1e-6;
             let g = ui.painter().layout_no_wrap(fmt_mm(q as f32), medium(12.0), if on { on_accent() } else { TEXT() });
-            let (r, resp) = ui.allocate_exact_size(vec2(44.0, 24.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(cw, 24.0), Sense::click());
             let p = ui.painter();
             p.rect(r, 6.0, if on { EDGE_SEL } else if resp.hovered() { RAISED() } else { WELL() }, Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
             p.galley(r.center() - g.size() * 0.5, g, TEXT());
@@ -3203,6 +4098,11 @@ fn face_card(ui: &mut Ui, st: &mut AppState) {
         }
     });
     ui.add_space(2.0);
+    let label = if n > 1 { format!("Shell, these {n} open  Alt+S") } else { "Shell, this face open  Alt+S".to_string() };
+    if secondary_btn(ui, &label, ui.available_width()).on_hover_text("The part hollowed (walls of 2 mm), the faces picked left open").clicked() {
+        st.add_shell();
+    }
+    ui.add_space(2.0);
     if secondary_btn(ui, "Deselect the faces", ui.available_width()).clicked() {
         st.face_sel.clear();
     }
@@ -3254,10 +4154,26 @@ fn tension_rows(ui: &mut Ui, cur: f64, circle: f64) -> Option<(f64, bool)> {
 /// Vertices picked: the arrows move them; at a corner of a thin plate, a
 /// radius rounds it in its plane (a fillet on the short edge there).
 fn vertex_card(ui: &mut Ui, st: &mut AppState) {
+    // a curve's points (20 nov.): moved by the gizmo in its plane; a
+    // spline's made sharp or smooth
+    if let Some(pts) = st.picked_path_points() {
+        let n = pts.len();
+        section(ui, if n > 1 { "Curve points" } else { "Curve point" });
+        let spline: Vec<(FeatureId, usize, bool)> = pts.iter().filter_map(|(id, i)| st.doc.feature(*id).and_then(|f| f.profile.as_ref()).filter(|p| p.spline).map(|p| (*id, *i, !p.smooth.get(*i).copied().unwrap_or(true)))).collect();
+        if !spline.is_empty() {
+            let sharp = spline.iter().all(|x| x.2);
+            let items = [(false, "Smooth", PATH), (true, "Sharp", PATH)];
+            if let Some(s) = segmented(ui, &items, sharp, 32.0) {
+                st.set_points_sharp(&pts, s);
+            }
+        }
+        ui.label(egui::RichText::new("W: the arrows move them in the curve's plane").font(regular(12.0)).color(TEXT2()));
+    }
     // a sketch's corner: cut in its outline (exact arc or chamfer), the
     // whole height follows
     if let Some((size, chamfer, max)) = st.profile_corner_state() {
         let n = st.picked_profile_corners().len();
+        // (fall through to the part's corners below otherwise)
         let on_path = st.picked_profile_corners().iter().all(|(id, _)| st.doc.feature(*id).map(|f| f.is_path()).unwrap_or(false));
         section(ui, match (on_path, n > 1) {
             (true, true) => "Path corners",
@@ -3295,6 +4211,10 @@ fn vertex_card(ui: &mut Ui, st: &mut AppState) {
         if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
             st.end_live();
         }
+        return;
+    }
+    // curve points only: nothing to round on the part
+    if st.picked_path_points().is_some() {
         return;
     }
     let corners = st.vert_sel.iter().filter(|v| !st.vertex_edges(**v).is_empty()).count();
@@ -3338,23 +4258,35 @@ fn tweak_card(ui: &mut Ui, st: &mut AppState, id: FeatureId) {
 
 /// A material as a small shaded ball: discs shrinking toward the light, a
 /// rim, a highlight sharper on metals.
-pub fn material_ball(p: &egui::Painter, c: egui::Pos2, r: f32, m: &materials::Material) {
+pub fn material_ball(p: &egui::Painter, c: egui::Pos2, r: f32, m: &materials::Look) {
+    // a see-through ball shows two lines behind it
+    let a = 0.25 + 0.75 * m.opacity();
+    if m.transparency > 0.01 {
+        let st = Stroke::new(1.2, tint(Color32::WHITE, 0.35));
+        p.line_segment([c + vec2(-0.9, 0.35) * r, c + vec2(0.9, -0.35) * r], st);
+        p.line_segment([c + vec2(-0.6, 0.85) * r, c + vec2(0.95, 0.25) * r], st);
+    }
     let steps = 18;
     for k in 0..steps {
         let t = k as f32 / (steps - 1) as f32;
         let lum = 0.45 + 0.75 * t;
         let ch = |x: f32| ((x * lum).clamp(0.0, 1.0) * 255.0) as u8;
-        p.circle_filled(c + vec2(-0.3, -0.34) * r * t, r * (1.0 - 0.7 * t), Color32::from_rgb(ch(m.color[0]), ch(m.color[1]), ch(m.color[2])));
+        let al = if k == 0 { a } else { (a * 0.5).min(1.0) };
+        p.circle_filled(c + vec2(-0.3, -0.34) * r * t, r * (1.0 - 0.7 * t), Color32::from_rgba_unmultiplied(ch(m.color[0]), ch(m.color[1]), ch(m.color[2]), (al * 255.0) as u8));
     }
-    let spec = 0.22 + 0.45 * m.metal * (1.0 - m.rough);
-    p.circle_filled(c + vec2(-0.36, -0.4) * r, r * (0.24 - 0.08 * m.metal), Color32::from_white_alpha((spec * 255.0) as u8));
+    // the highlight follows the specular (0.5 as the balls come)
+    let k = m.specular * 2.0;
+    let spec = ((0.22 + 0.45 * m.metal * (1.0 - m.rough)) * k).min(1.0);
+    let size = (0.24 - 0.08 * m.metal) * (1.0 - 0.25 * (k - 1.0).max(0.0));
+    p.circle_filled(c + vec2(-0.36, -0.4) * r, r * size, Color32::from_white_alpha((spec * 255.0) as u8));
     p.circle_stroke(c, r, Stroke::new(1.0, tint(Color32::WHITE, 0.22)));
 }
 
 fn axis_field(ui: &mut Ui, label: &str, color: Color32, v: &mut f32, suffix: &str) -> egui::Response {
     let (lr, _) = ui.allocate_exact_size(vec2(18.0, 22.0), Sense::hover());
     ui.painter().text(lr.center(), Align2::CENTER_CENTER, label, semibold(12.0), color);
-    value_field(ui, v, -100000.0..=100000.0, if suffix == "°" { 1.0 } else { 0.1 }, suffix, 66.0)
+    // in the operation window, the three fill its width
+    value_field(ui, v, -100000.0..=100000.0, if suffix == "°" { 1.0 } else { 0.1 }, suffix, if op_style(ui) { ((OP_W - 74.0) / 3.0).floor() } else { 66.0 })
 }
 
 fn position_rows(ui: &mut Ui, st: &mut AppState, f: &Feature) {
@@ -3477,6 +4409,36 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     use egui::Key;
     let (ctrl, shift) = ctx.input(|i| (i.modifiers.ctrl || i.modifiers.mac_cmd, i.modifiers.shift));
     let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
+    // Align (3ds Max's Alt + A); its window: Enter OK, Esc Cancel
+    if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::A) {
+        st.begin_align();
+        return;
+    }
+    // Mirror (Alt + M): across X, the steps after it made on both sides
+    if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::M) {
+        st.add_mirror(0);
+        return;
+    }
+    // Shell (Alt + S): hollowed, the faces picked in Face mode left open
+    if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::S) {
+        st.add_shell();
+        return;
+    }
+    // picking a Shell's faces: Enter ends it (Esc too, below)
+    if st.tool == Tool::ShellPick && pressed(Key::Enter) {
+        st.select_tool();
+        return;
+    }
+    if st.align.is_some() {
+        if pressed(Key::Escape) {
+            st.align_cancel();
+            return;
+        }
+        if pressed(Key::Enter) && st.align_open() {
+            st.align_ok();
+            return;
+        }
+    }
     let space = st.workspace;
     // the tabs: F1 Forme, F2 Sculpt, F3 Poly, F4 SDF; Ctrl + Tab the next one
     for (k, w) in [(Key::F1, Workspace::Forme), (Key::F2, Workspace::Sculpt), (Key::F3, Workspace::Poly), (Key::F4, Workspace::Sdf)] {
@@ -3560,7 +4522,12 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.redo();
         }
         if pressed(Key::D) {
-            st.duplicate_selected();
+            // Ctrl + Shift + D: Pattern / Array (Maya's Duplicate Special)
+            if shift {
+                st.add_array();
+            } else {
+                st.duplicate_selected();
+            }
         }
         if pressed(Key::S) {
             st.files_open = true;
@@ -3654,6 +4621,17 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     }
     if shift && pressed(Key::S) {
         st.arm_slot();
+    }
+    if pressed(Key::M) && !shift && !ctx.input(|i| i.modifiers.alt) {
+        st.arm_form();
+    }
+    if st.tool == Tool::Form {
+        if pressed(Key::OpenBracket) {
+            st.form.radius = (st.form.radius / 1.2).max(8.0);
+        }
+        if pressed(Key::CloseBracket) {
+            st.form.radius = (st.form.radius * 1.2).min(600.0);
+        }
     }
     // Enter (Romain 20 nov., 11 h 54): what is under way kept, back to
     // Select (the Knife's cut, an extrusion, a shape's height, a slot's

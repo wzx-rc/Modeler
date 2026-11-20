@@ -4,6 +4,8 @@ use egui::{epaint::PathStroke, pos2, vec2, Color32, Painter, Pos2, Rect, Shape, 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
+    /// Align (3ds Max's): two bars lined up on a line.
+    Align,
     Select,
     Box,
     Cylinder,
@@ -17,6 +19,10 @@ pub enum Icon {
     Undo,
     Redo,
     Mirror,
+    /// Pattern / Array: one shape and its copies in a row.
+    Array,
+    /// Shell: a block hollowed, open at the top (its walls in section).
+    Shell,
     Magnet,
     Grid,
     Export,
@@ -243,6 +249,19 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(7.0, 5.0), (3.0, 10.0), (7.0, 15.0)]);
             pen.line(&[(13.0, 5.0), (17.0, 10.0), (13.0, 15.0)]);
         }
+        Icon::Array => {
+            // the original filled, its copies drawn
+            let sq = |x: f32, y: f32| [(x - 2.4, y - 2.4), (x + 2.4, y - 2.4), (x + 2.4, y + 2.4), (x - 2.4, y + 2.4)];
+            pen.fill(&sq(4.5, 13.0), 0.9);
+            pen.closed(&sq(4.5, 13.0));
+            pen.closed(&sq(10.0, 10.0));
+            pen.closed(&sq(15.5, 7.0));
+        }
+        Icon::Shell => {
+            // a cup in section: its walls and floor, open at the top
+            pen.closed(&[(3.0, 4.5), (3.0, 16.0), (17.0, 16.0), (17.0, 4.5), (14.0, 4.5), (14.0, 13.0), (6.0, 13.0), (6.0, 4.5)]);
+            pen.fill(&[(3.0, 13.0), (3.0, 16.0), (17.0, 16.0), (17.0, 13.0)], 0.35);
+        }
         Icon::Magnet => {
             pen.line(&[(6.0, 3.0), (6.0, 9.0)]);
             pen.line(&[(14.0, 3.0), (14.0, 9.0)]);
@@ -367,6 +386,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(10.0, 13.0), (10.0, 3.0)]);
             pen.line(&[(6.0, 7.0), (10.0, 3.0), (14.0, 7.0)]);
             pen.line(&[(4.0, 12.0), (4.0, 16.0), (16.0, 16.0), (16.0, 12.0)]);
+        }
+        Icon::Align => {
+            pen.line(&[(4.0, 2.5), (4.0, 17.5)]);
+            pen.closed(&[(6.5, 5.0), (16.5, 5.0), (16.5, 9.0), (6.5, 9.0)]);
+            pen.closed(&[(6.5, 11.5), (12.5, 11.5), (12.5, 15.5), (6.5, 15.5)]);
         }
         Icon::Duplicate => {
             pen.closed(&[(7.0, 7.0), (17.0, 7.0), (17.0, 17.0), (7.0, 17.0)]);

@@ -25,6 +25,6 @@ pub mod build;
 #[cfg(feature = "occ")]
 pub mod quads;
 
-pub use doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Knife, KnifePoint, Op, Paint, Prim, Profile, Push, RefMesh, Round, Sheet, Tweak};
+pub use doc::{Array, ArrayKind, Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Form, FormKind, Knife, KnifePoint, Loft, Makes, MaterialLook, Mirror, Op, Paint, Prim, Profile, Push, RefMesh, Revolve, Round, Sheet, Shell, Tweak};
 pub use mesh::{MeshData, MeshKind, MeshRef};
 pub use model::{Edge, Face, FaceTag, Model, Quads};

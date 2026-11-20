@@ -50,11 +50,13 @@ impl Drawer {
         let quads = st.quad_mesh();
         // whole shapes dragged in Object mode: their faces follow at once
         let preview = if quads.is_none() { st.drag_preview().filter(|p| !p.is_empty()) } else { None };
+        // a form pulled by a brush: drawn from its poles (`forms.rs`)
+        let form = if quads.is_none() { st.form_preview() } else { None };
         let mkey = st.meshes_key();
-        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() || preview.is_some() || self.previewed || self.meshes_key != mkey {
+        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() || preview.is_some() || form.is_some() || self.previewed || self.meshes_key != mkey {
             self.model_gen = st.model_gen;
             self.meshes_key = mkey;
-            self.previewed = preview.is_some();
+            self.previewed = preview.is_some() || form.is_some();
             self.quads_shown = quads.is_some();
             let mut verts = vec![];
             let mut edges = vec![];
@@ -66,14 +68,19 @@ impl Drawer {
                 };
                 // the distance to the reference, when shown and measured on
                 // this model: its finer triangles instead
-                let dev = st.deviation_shown().filter(|_| quads.is_none());
+                let dev = st.deviation_shown().filter(|_| quads.is_none() && form.is_none());
+                // the form's own faces: drawn from its poles instead
+                let form_faces: std::collections::HashSet<u32> = match &form {
+                    Some((id, _)) => m.faces.iter().enumerate().filter(|(_, f)| f.tag.map(|t| t.feature == *id).unwrap_or(false)).map(|(i, _)| i as u32).collect(),
+                    None => Default::default(),
+                };
                 if let Some(d) = dev {
                     verts.extend_from_slice(d);
                 } else {
                     verts.reserve(m.triangles.len() * 3);
                     for (t, tri) in m.triangles.iter().enumerate() {
                         let face = m.tri_face[t];
-                        if !left.contains(&face) {
+                        if !left.contains(&face) || form_faces.contains(&face) {
                             continue;
                         }
                         for &v in tri {
@@ -112,9 +119,13 @@ impl Drawer {
                         }
                     }
                 }
+                if let (Some((_, tris)), Some(face)) = (&form, form_faces.iter().min()) {
+                    verts.extend(tris.iter().map(|(p, n)| MeshVertex { pos: *p, nrm: *n, face: *face, dev: NO_DEV }));
+                }
                 // the edges a person draws: dark and thin like a CAD view
                 let moved = |e: &nurbs_kernel::Edge| e.faces.iter().find_map(|f| usize::try_from(*f).ok().and_then(|f| face_m.get(f).copied().flatten()));
-                let lines: Vec<Vec<[f32; 3]>> = m.edges.iter().filter(|e| !e.seam).map(|e| match moved(e) {
+                let on_form = |e: &nurbs_kernel::Edge| e.faces.iter().any(|f| u32::try_from(*f).map(|f| form_faces.contains(&f)).unwrap_or(false));
+                let lines: Vec<Vec<[f32; 3]>> = m.edges.iter().filter(|e| !e.seam && !on_form(e)).map(|e| match moved(e) {
                     Some(x) => e.pts.iter().map(|p| x.transform_point3(glam::Vec3::from(*p)).to_array()).collect(),
                     None => e.pts.clone(),
                 }).collect();
@@ -163,8 +174,7 @@ impl Drawer {
                 .map(|(i, f)| {
                     // a material ball dragged over it: shown on it already
                     if let Some(d) = st.mat_drag.as_ref().filter(|d| d.target.map(|t| st.face_in_target(i, &t)).unwrap_or(false)) {
-                        let mat = materials::get(d.material);
-                        return FaceGpu { color: linear(mat.color), flags: 0, metal: mat.metal, rough: mat.rough, pad: [0.0; 2] };
+                        return face_gpu(&st.look(d.material), 0);
                     }
                     let flags = if by_face {
                         if picked.contains(&i) || f.tag.map(|t| st.selection.contains(&t.feature)).unwrap_or(false) {
@@ -181,15 +191,15 @@ impl Drawer {
                             _ => 0,
                         }
                     };
-                    let sheet = f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| x.is_sheet()).unwrap_or(false);
+                    let sheet = f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| st.doc.makes(x) == nurbs_kernel::Makes::Sheet).unwrap_or(false);
                     let flags = if sheet { flags | crate::render::FACE_SHEET } else { flags };
-                    let mat = materials::get(st.face_material(i));
+                    let mat = st.look(st.face_material(i));
                     // Quads view: the fillet and chamfer bands in orange
                     let band = self.quads_shown && f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| x.round.is_some()).unwrap_or(false);
                     if band {
-                        return FaceGpu { color: linear(BAND), flags, metal: 0.0, rough: 0.6, pad: [0.0; 2] };
+                        return FaceGpu { color: linear(BAND), flags, metal: 0.0, rough: 0.6, spec: materials::SPECULAR, alpha: 1.0 };
                     }
-                    FaceGpu { color: linear(mat.color), flags, metal: mat.metal, rough: mat.rough, pad: [0.0; 2] }
+                    face_gpu(&mat, flags)
                 })
                 .collect(),
             None => vec![],
@@ -200,13 +210,11 @@ impl Drawer {
         let poly_target = if st.poly_comp() { st.poly_target() } else { None };
         for (id, _first, n) in &self.mesh_slots {
             let Some(f) = st.doc.feature(*id) else { continue };
-            let mat = materials::get(f.material);
-            let (color, metal, rough) = match st.mat_drag.as_ref().filter(|d| d.target == Some(crate::state::DropTarget::Shape(*id))) {
-                Some(d) => {
-                    let m = materials::get(d.material);
-                    (m.color, m.metal, m.rough)
-                }
-                None => (mat.color, mat.metal, mat.rough),
+            // the same look as the part's faces (colour, specular,
+            // transparency set under the balls): one path for every object
+            let look = match st.mat_drag.as_ref().filter(|d| d.target == Some(crate::state::DropTarget::Shape(*id))) {
+                Some(d) => st.look(d.material),
+                None => st.look(f.material),
             };
             // a linked surface in NURBS: the surface lit as a whole, the
             // Poly layer's own shapes in the Poly tab's colour (shown, not
@@ -222,10 +230,10 @@ impl Drawer {
                 } else {
                     0
                 };
-                flags.push(FaceGpu { color: linear(color), flags: fl, metal, rough, pad: [0.0; 2] });
+                flags.push(face_gpu(&look, fl));
                 let g = crate::workspace::Workspace::Poly.swatch();
                 let ghost = [g.r() as f32 / 255.0 * 0.62, g.g() as f32 / 255.0 * 0.66, g.b() as f32 / 255.0 * 0.72];
-                flags.push(FaceGpu { color: linear(ghost), flags: 0, metal: 0.0, rough: 0.75, pad: [0.0; 2] });
+                flags.push(FaceGpu { color: linear(ghost), flags: 0, metal: 0.0, rough: 0.75, spec: materials::SPECULAR, alpha: 1.0 });
                 continue;
             }
             for k in 0..*n as u32 {
@@ -249,7 +257,7 @@ impl Drawer {
                 } else {
                     0
                 };
-                flags.push(FaceGpu { color: linear(color), flags: fl, metal, rough, pad: [0.0; 2] });
+                flags.push(face_gpu(&look, fl));
             }
         }
         if flags != self.flags || flags.is_empty() {
@@ -508,4 +516,9 @@ fn quad_vertices(q: &nurbs_kernel::Quads, out: &mut Vec<MeshVertex>) {
             out.push(MeshVertex { pos: q.positions[v as usize], nrm: n.to_array(), face: *f, dev: NO_DEV });
         }
     }
+}
+
+/// A face as the shader reads it, from its material's look.
+fn face_gpu(l: &materials::Look, flags: u32) -> FaceGpu {
+    FaceGpu { color: linear(l.color), flags, metal: l.metal, rough: l.rough, spec: l.specular, alpha: l.opacity() }
 }

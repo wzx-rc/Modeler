@@ -89,8 +89,46 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, items: &[(T, &str, Color32)],
 }
 
 pub fn section(ui: &mut Ui, title: &str) {
+    if op_style(ui) {
+        // the operation window: a small caps title and a hairline to the
+        // window's edge, so each group reads apart
+        ui.add_space(8.0);
+        let w = ui.available_width();
+        let (r, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
+        let p = ui.painter();
+        let g = p.layout_no_wrap(title.to_uppercase(), mono(10.0), LABEL());
+        let gw = g.size().x;
+        p.galley(pos2(r.min.x, r.center().y - g.size().y * 0.5), g, LABEL());
+        if gw + 10.0 < w {
+            p.rect_filled(Rect::from_x_y_ranges(r.min.x + gw + 8.0..=r.max.x, r.center().y - 0.5..=r.center().y + 0.5), 0.0, DIVIDER());
+        }
+        ui.add_space(2.0);
+        return;
+    }
     ui.add_space(4.0);
     ui.label(egui::RichText::new(title).font(semibold(12.0)).color(TEXT2()));
+}
+
+/// Whether the widgets are drawn for the operation window (Romain 20 nov.,
+/// 19 h 01: "mieux organisé, visible, que le slider soit plus large"):
+/// sections with a hairline, sliders the window's width under their label.
+pub fn op_style(ui: &Ui) -> bool {
+    ui.ctx().data(|d| d.get_temp::<bool>(Id::new("op-style"))).unwrap_or(false)
+}
+
+pub fn set_op_style(ctx: &egui::Context, on: bool) {
+    ctx.data_mut(|d| d.insert_temp(Id::new("op-style"), on));
+}
+
+/// The operation window's card: opaque, a lighter border and a soft shadow,
+/// so it reads over the part and the grid.
+pub fn op_island() -> Frame {
+    Frame::new()
+        .fill(PANEL())
+        .stroke(Stroke::new(1.0, pick(Color32::from_rgb(0x3A, 0x3F, 0x47), Color32::from_rgb(0xC4, 0xC9, 0xD0))))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin { left: 12, right: 12, top: 6, bottom: 12 })
+        .shadow(egui::Shadow { offset: [0, 6], blur: 22, spread: 0, color: Color32::from_black_alpha(110) })
 }
 
 pub fn nice_ceil(x: f32) -> f32 {
@@ -139,7 +177,8 @@ pub fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adapti
     if resp.dragged() || resp.drag_stopped() {
         hi = ui.data(|d| d.get_temp::<f32>(key)).unwrap_or(soft);
     }
-    let rail = Rect::from_center_size(rect.center(), vec2(width - if DESK { 10.0 } else { 20.0 }, if DESK { 1.5 } else { 4.0 }));
+    let wide = op_style(ui);
+    let rail = Rect::from_center_size(rect.center(), vec2(width - if DESK { 10.0 } else { 20.0 }, if wide { 2.0 } else if DESK { 1.5 } else { 4.0 }));
     let mut changed = false;
     let started = resp.drag_started() || resp.clicked();
     if resp.dragged() || resp.clicked() || resp.drag_started() {
@@ -167,7 +206,7 @@ pub fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adapti
     if DESK {
         // the knob: a small upright pill, light grey with a fine dark edge
         // and a thin light ring round it when hovered or held
-        let k = Rect::from_center_size(pos2(kx, rail.center().y), vec2(6.0, 12.0));
+        let k = Rect::from_center_size(pos2(kx, rail.center().y), if wide { vec2(7.0, 14.0) } else { vec2(6.0, 12.0) });
         let fill = if active { Color32::WHITE } else { pick(Color32::from_rgb(0xDD, 0xE0, 0xE4), Color32::from_rgb(0xFA, 0xFB, 0xFC)) };
         p.rect(k, 3.0, fill, Stroke::new(1.0, pick(Color32::from_rgb(0x16, 0x18, 0x1C), Color32::from_rgb(0x9A, 0xA0, 0xA8))), StrokeKind::Outside);
         if hot {
@@ -256,6 +295,33 @@ pub fn value_field(ui: &mut Ui, v: &mut f32, range: std::ops::RangeInclusive<f32
 pub fn slider_row(ui: &mut Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, step: f64, suffix: &str) -> (bool, bool) {
     let mut out = (false, false);
     let id = ui.make_persistent_id(("slider", label));
+    if DESK && op_style(ui) {
+        // the operation window: the label and its value on one line, the
+        // slider the window's whole width under them
+        let (min, max) = (*range.start(), *range.end());
+        let adaptive = suffix == "mm" && min >= 0.0 && max > 20.0;
+        let hint = if adaptive { 10.0 } else { max };
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let vw = 78.0;
+            let (lr, _) = ui.allocate_exact_size(vec2((ui.available_width() - vw - 6.0).max(20.0), 22.0), Sense::hover());
+            ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(12.5), TEXT2());
+            let r = value_field(ui, v, range.clone(), step, suffix, vw);
+            if r.changed() {
+                out = (true, r.drag_started() || !r.dragged());
+            }
+        });
+        let w = ui.available_width();
+        let (ch, st) = touch_slider(ui, id, v, min, hint.min(max), adaptive, step as f32, w);
+        if ch {
+            out = (true, out.1 || st);
+        } else if st {
+            out.1 = true;
+        }
+        *v = v.clamp(min, max);
+        return out;
+    }
     if DESK {
         // desktop: compact row, the value is a field you can type into
         ui.horizontal(|ui| {

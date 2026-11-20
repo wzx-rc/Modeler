@@ -4,11 +4,16 @@
 //! own process): the app shows its mesh, picks its B-rep faces, and edits a
 //! document of features. Same look as the first Forme NURBS.
 
+pub mod align;
+pub mod mirror;
+pub mod array;
+pub mod shell;
 pub mod cage;
 pub mod camera;
 pub mod draw;
 pub mod faces;
 pub mod files;
+pub mod forms;
 pub mod icons;
 pub mod knife;
 pub mod history;
@@ -23,6 +28,7 @@ pub mod settings;
 pub mod slot;
 pub mod snap;
 pub mod state;
+pub mod surfaces;
 pub mod theme;
 pub mod ui;
 pub mod view;

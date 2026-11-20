@@ -24,13 +24,15 @@ struct U {
     refc: vec4<f32>,     // reference mesh colour (linear), w = ghost opacity
 };
 @group(0) @binding(0) var<uniform> u: U;
-// per face: its material (linear colour, metal, roughness) and its state
+// per face: its material (linear colour, metal, roughness, specular 0..1
+// with 0.5 as the balls come, opacity) and its state
 struct FaceGpu {
     color: vec3<f32>,
     flags: u32,
     metal: f32,
     rough: f32,
-    pad: vec2<f32>,
+    spec: f32,
+    alpha: f32,
 };
 @group(0) @binding(1) var<storage, read> faces: array<FaceGpu>;
 
@@ -183,9 +185,19 @@ fn deviation_color(d: f32) -> vec3<f32> {
     return select(mix(cyan, blue, (t - 0.5) * 2.0), mix(green, cyan, t * 2.0), t < 0.5);
 }
 
+// the light on a face: what it scatters and its highlights (linear)
+struct Lit {
+    diff: vec3<f32>,
+    spec: vec3<f32>,
+};
+
+fn tone(c: vec3<f32>) -> vec3<f32> {
+    return pow(aces(c * 0.9), vec3<f32>(1.0 / 2.2));
+}
+
 // the part's faces, or the reference mesh (face 0xFFFFFFFF: its colour,
 // matte)
-fn shade(i: MOut) -> vec3<f32> {
+fn light(i: MOut) -> Lit {
     var n = normalize(i.nrm);
     let v = normalize(u.eye.xyz - i.wpos);
     if (dot(n, v) < 0.0) {
@@ -194,6 +206,8 @@ fn shade(i: MOut) -> vec3<f32> {
     var base = u.refc.rgb;
     var metal = 0.0;
     var rough = 0.85;
+    // the material's specular: 1 as the balls come, 0 none, 2 twice
+    var k = 1.0;
     if (i.face != 0xFFFFFFFFu) {
         let fc = faces[i.face];
         base = fc.color;
@@ -208,6 +222,7 @@ fn shade(i: MOut) -> vec3<f32> {
         }
         metal = fc.metal;
         rough = fc.rough;
+        k = fc.spec * 2.0;
     }
     let key = normalize(-u.right.xyz * 0.45 + u.up.xyz * 0.8 - u.fwd.xyz * 0.55);
     let fill = normalize(u.right.xyz * 0.7 - u.up.xyz * 0.2 - u.fwd.xyz * 0.6);
@@ -215,22 +230,75 @@ fn shade(i: MOut) -> vec3<f32> {
     let sky = 0.5 + 0.5 * dot(n, u.up.xyz);
     let diff = max(dot(n, key), 0.0) * 0.95 + max(dot(n, fill), 0.0) * 0.18 + 0.05 + 0.07 * sky;
     // sharper, stronger and tinted highlights on metals; a sky / ground
-    // reflection gives them their look
-    let shine = mix(110.0, 8.0, rough);
-    let spec = pow(max(dot(n, h), 0.0), shine) * mix(0.18, 0.9, metal) * (1.0 - 0.6 * rough);
+    // reflection gives them their look. Past its usual specular a
+    // material gets glossier: a sharper highlight and a clear coat
+    // reflecting the sky at grazing angles
+    let gloss = max(k - 1.0, 0.0);
+    let shine = mix(110.0, 8.0, rough) * (1.0 + 2.0 * gloss);
+    let spec = pow(max(dot(n, h), 0.0), shine) * mix(0.18, 0.9, metal) * (1.0 - 0.6 * rough) * k * (1.0 + gloss);
     let rim = pow(1.0 - max(dot(n, v), 0.0), 4.0) * 0.08;
     let r = reflect(-v, n);
     let env = mix(vec3<f32>(0.10, 0.10, 0.11), vec3<f32>(0.85, 0.87, 0.9), clamp(0.5 + 0.5 * dot(r, u.up.xyz), 0.0, 1.0));
     let spec_col = mix(vec3<f32>(1.0), base, metal);
-    let c = base * diff * (1.0 - 0.75 * metal) + base * env * metal * 0.85 + spec_col * spec + vec3<f32>(rim);
-    return pow(aces(c * 0.9), vec3<f32>(1.0 / 2.2));
+    let fres = pow(1.0 - max(dot(n, v), 0.0), 5.0);
+    let coat = env * (0.04 + 0.6 * fres) * gloss * (1.0 - metal) * 0.7;
+    var o: Lit;
+    o.diff = base * diff * (1.0 - 0.75 * metal) + base * env * metal * 0.85 * mix(0.35, 1.0, min(k, 1.0)) + vec3<f32>(rim);
+    o.spec = spec_col * spec + coat;
+    return o;
+}
+
+fn shade(i: MOut) -> vec3<f32> {
+    let l = light(i);
+    return tone(l.diff + l.spec);
 }
 
 @fragment fn fs_mesh(i: MOut) -> @location(0) vec4<f32> {
+    // a transparent material is drawn after, see-through (`glass`)
+    if (i.face != 0xFFFFFFFFu && faces[i.face].alpha < 0.995) {
+        discard;
+    }
     // a surface with no thickness is seen from both sides: light the side facing the eye
     var j = i;
     if (dot(j.nrm, u.eye.xyz - j.wpos) < 0.0) { j.nrm = -j.nrm; }
     return vec4<f32>(shade(j), 1.0);
+}
+
+// a transparent material (Romain, 20 nov., 15 h 42): its faces turned
+// away from the eye first, then those facing it, blended over what the
+// opaque faces left (premultiplied: the highlights stay bright); denser at
+// grazing angles, as glass is
+fn glass(i: MOut, front: bool) -> vec4<f32> {
+    if (i.face == 0xFFFFFFFFu) {
+        discard;
+    }
+    let fc = faces[i.face];
+    if (fc.alpha >= 0.995) {
+        discard;
+    }
+    var j = i;
+    let facing = dot(j.nrm, u.eye.xyz - j.wpos) >= 0.0;
+    if (facing != front) {
+        discard;
+    }
+    if (!facing) { j.nrm = -j.nrm; }
+    let l = light(j);
+    let nv = abs(dot(normalize(j.nrm), normalize(u.eye.xyz - j.wpos)));
+    var a = fc.alpha + (1.0 - fc.alpha) * pow(1.0 - nv, 3.0) * 0.55;
+    if (!front) {
+        a = a * 0.7;
+    }
+    let body = tone(l.diff + l.spec);
+    let hl = tone(l.spec);
+    return vec4<f32>(body * a + hl * (1.0 - a), a);
+}
+
+@fragment fn fs_glass_back(i: MOut) -> @location(0) vec4<f32> {
+    return glass(i, false);
+}
+
+@fragment fn fs_glass_front(i: MOut) -> @location(0) vec4<f32> {
+    return glass(i, true);
 }
 
 // X-ray: the part's nearest layer see-through, a little denser at its
@@ -381,7 +449,10 @@ pub struct FaceGpu {
     pub flags: u32,
     pub metal: f32,
     pub rough: f32,
-    pub pad: [f32; 2],
+    /// The highlights' strength, 0..1 (0.5 as the balls come).
+    pub spec: f32,
+    /// Opacity (below 1: drawn see-through after the opaque faces).
+    pub alpha: f32,
 }
 
 /// sRGB 0..1 to linear.
@@ -473,6 +544,11 @@ pub struct Renderer {
     /// X-ray: the part's depth, then its colour see-through.
     xray_depth: wgpu::RenderPipeline,
     xray: wgpu::RenderPipeline,
+    /// Transparent materials: their back faces, then their front faces.
+    glass_back: wgpu::RenderPipeline,
+    glass_front: wgpu::RenderPipeline,
+    /// Some face has a transparent material.
+    glass: bool,
     uniforms: wgpu::Buffer,
     faces: wgpu::Buffer,
     faces_cap: u64,
@@ -578,6 +654,9 @@ impl Renderer {
         let ref_ghost = pipeline("reference-ghost", "vs_mesh", "fs_ref_ghost", Some((&mesh_attrs, mstride)), alpha, depth(false, wgpu::CompareFunction::LessEqual));
         let xray_depth = pipeline_mask("xray-depth", "vs_mesh", "fs_mesh", Some((&mesh_attrs, mstride)), None, depth(true, wgpu::CompareFunction::Less), wgpu::ColorWrites::empty());
         let xray = pipeline("xray", "vs_mesh", "fs_xray", Some((&mesh_attrs, mstride)), alpha, depth(false, wgpu::CompareFunction::LessEqual));
+        let pre = Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+        let glass_back = pipeline("glass-back", "vs_mesh", "fs_glass_back", Some((&mesh_attrs, mstride)), pre, depth(false, wgpu::CompareFunction::LessEqual));
+        let glass_front = pipeline("glass-front", "vs_mesh", "fs_glass_front", Some((&mesh_attrs, mstride)), pre, depth(false, wgpu::CompareFunction::LessEqual));
         Renderer {
             format,
             layout,
@@ -591,6 +670,9 @@ impl Renderer {
             ref_ghost,
             xray_depth,
             xray,
+            glass_back,
+            glass_front,
+            glass: false,
             uniforms,
             faces,
             faces_cap,
@@ -640,6 +722,7 @@ impl Renderer {
         if !flags.is_empty() {
             queue.write_buffer(&self.faces, 0, bytemuck::cast_slice(flags));
         }
+        self.glass = flags.iter().any(|f| f.alpha < 0.995);
     }
 
     /// Outlines drawn over the part (empty: none).
@@ -759,6 +842,12 @@ impl Renderer {
                     pass.set_pipeline(&self.mesh);
                     pass.set_vertex_buffer(0, buf.slice(..));
                     pass.draw(0..n, 0..1);
+                    if self.glass {
+                        pass.set_pipeline(&self.glass_back);
+                        pass.draw(0..n, 0..1);
+                        pass.set_pipeline(&self.glass_front);
+                        pass.draw(0..n, 0..1);
+                    }
                 }
             }
             if let (Some(buf), n) = (&self.edge_buf.buf, self.edge_buf.count) {

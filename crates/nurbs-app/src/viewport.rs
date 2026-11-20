@@ -32,8 +32,12 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_patch(p, st);
         draw_brush(p, st, ctx.input(|i| i.pointer.hover_pos()), resp.hovered() || resp.dragged());
         draw_push(p, st);
+        draw_shell(p, st);
+        draw_mirror(p, st);
+        draw_array(p, st);
         draw_knife(p, st, ctx.input(|i| i.pointer.hover_pos()));
         draw_poly_cut(p, st, ctx.input(|i| i.pointer.hover_pos()));
+        draw_form_brush(p, st, ctx.input(|i| i.pointer.latest_pos()));
         if let (Some(g), Some(h)) = (&st.round_drag, ctx.input(|i| i.pointer.latest_pos())) {
             if g.size > 1e-9 {
                 let label = if g.chamfer { "Chamfer" } else { "Fillet" };
@@ -107,6 +111,14 @@ fn dist_seg(p: Pos2, a: Pos2, b: Pos2) -> f32 {
 
 /// The handle under the pointer: a size handle, an arrow, a plane square.
 fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
+    // the selected Shell's dot (or its line across the wall)
+    if let Some(g) = st.shell_grip() {
+        if let (Some(a), Some(b)) = (world(st, g.from), world(st, g.at)) {
+            if (b - p).length() < 10.0 || dist_seg(p, a, b) < 5.0 {
+                return Some(Handle::ShellThick);
+            }
+        }
+    }
     // the selected inset or extrusion: its dot, its arrow
     if let Some(hs) = st.push_handles() {
         if let Some((_, _, k)) = hs.inset {
@@ -117,6 +129,20 @@ fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
         if let (Some(a), Some(b)) = (world(st, hs.base), world(st, hs.tip)) {
             if dist_seg(p, a + (b - a) * 0.25, b + (b - a).normalized() * 10.0) < 8.0 {
                 return Some(Handle::PushDepth);
+            }
+        }
+    }
+    // the selected Array's grips: its squares first, then its arrows
+    let grips = st.array_grips();
+    for g in grips.iter().filter(|g| g.from.is_none()) {
+        if world(st, g.at).map(|q| (q - p).length() < 9.0).unwrap_or(false) {
+            return Some(g.handle);
+        }
+    }
+    for g in grips.iter() {
+        if let (Some(f), Some(b)) = (g.from.and_then(|f| world(st, f)), world(st, g.at)) {
+            if dist_seg(p, f + (b - f) * 0.3, b + (b - f).normalized() * 10.0) < 8.0 {
+                return Some(g.handle);
             }
         }
     }
@@ -305,7 +331,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     let select = st.tool == Tool::Select && !st.poly_comp();
     let knife = matches!(st.tool, Tool::Knife | Tool::Point);
     let edges = (select && st.sel_mode == SelMode::Edge) || knife;
-    let faces = (select && st.sel_mode == SelMode::Face) || matches!(st.tool, Tool::Push(_));
+    let faces = (select && st.sel_mode == SelMode::Face) || matches!(st.tool, Tool::Push(_) | Tool::ShellPick);
     let verts = select && st.sel_mode == SelMode::Vertex;
     if st.drag.is_none() && st.round_drag.is_none() && st.face_drag.is_none() && st.creation.is_none() && st.marquee.is_none() && st.push.is_none() && !over_ui {
         st.hover_hit = hover.and_then(|h| st.pick_at(p2(h)));
@@ -325,7 +351,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         } else {
             None
         };
-        let by_feature = select && matches!(st.sel_mode, SelMode::Object | SelMode::Edge);
+        let by_feature = (select && matches!(st.sel_mode, SelMode::Object | SelMode::Edge)) || st.tool == Tool::Align;
         st.hover_feature = if st.hot_handle.is_none() && by_feature {
             if st.sel_mode == SelMode::Object {
                 // a mesh in front of the part counts too
@@ -481,6 +507,17 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         }
         return;
     }
+    // the selected Shell's faces to open (`shell.rs`): a click opens one
+    if st.tool == Tool::ShellPick {
+        if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.shell_pick(p2(p));
+            }
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            st.select_tool();
+        }
+        return;
+    }
     // a linked surface in its NURBS state, Vertex mode: its contour's
     // points (clicks, rectangles, the gizmo on them; a drag on a point moves
     // it at once, in the plane facing the eye)
@@ -597,6 +634,23 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         }
     }
 
+
+    // Align (`align.rs`): the click on the target; its window open, the
+    // view only turns (the window's buttons end it)
+    if st.tool == Tool::Align {
+        if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.align_pick(p2(p));
+            }
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            st.align_cancel();
+        }
+        return;
+    }
+    if st.align_open() {
+        return;
+    }
+
     // Vertex, Edge and Face modes: the selected inset's dot and arrow, the
     // gizmo of the picked component (a drag moves it, Plasticity style)
     if st.tool == Tool::Select && st.sel_mode != SelMode::Object {
@@ -699,6 +753,31 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             if resp.double_clicked_by(PointerButton::Primary) {
                 if let Some(v) = resp.interact_pointer_pos().or(hover).map(p2).and_then(|p| st.pick_vertex(p)) {
                     st.pick_linked_vertices(v, shift || ctrl);
+                }
+            }
+        }
+        Tool::Align | Tool::ShellPick => {}
+        Tool::Form => {
+            // a brush stroke on a form (`forms.rs`)
+            if st.form_brush.is_some() {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.form_drag(p2(p));
+                }
+                if resp.drag_stopped() || !l {
+                    st.form_release();
+                }
+                return;
+            }
+            if resp.drag_started_by(PointerButton::Primary) {
+                let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                if st.form_press(p2(origin), shift, ctrl) {
+                    if let Some(p) = hover {
+                        st.form_drag(p2(p));
+                    }
+                }
+            } else if resp.clicked_by(PointerButton::Primary) {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    st.form_click(p2(p));
                 }
             }
         }
@@ -1128,7 +1207,12 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
 fn draw_sketch(p: &Painter, st: &AppState) {
     let Some(k) = &st.sketch else { return };
     if st.tool == Tool::Create(PrimKind::Surface) {
-        draw_surface_outline(p, st, k);
+        draw_surface_outline(p, st, k, false);
+        return;
+    }
+    // the Path tool's CURVE: the spline through the points as it will be
+    if st.tool == Tool::Create(PrimKind::Path) && st.surface_curve {
+        draw_surface_outline(p, st, k, true);
         return;
     }
     let path = st.tool == Tool::Create(PrimKind::Path);
@@ -1200,7 +1284,7 @@ fn draw_sketch(p: &Painter, st: &AppState) {
 /// The Surface tool's outline: straight sides through the points (on the
 /// plane, or on the scan "On scan"), the pointer as the next point, the side
 /// back to the first point dimmed.
-fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch) {
+fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch, path: bool) {
     let col = PATH;
     let hover = p.ctx().input(|i| i.pointer.hover_pos());
     let closing = hover.map(|h| st.sketch_on_first(p2(h))).unwrap_or(false);
@@ -1212,14 +1296,16 @@ fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch) {
             next = if st.surface_on_scan { st.reference_at(p2(h)).map(|x| x.0) } else { st.sketch_snap(p2(h)).map(|(q, _)| k.plane.at(q)) };
         }
     }
-    // the outline with its fillets, closed once it has 3 points
+    // the outline with its fillets, closed once it has 3 points (a path:
+    // open, closed only when the pointer is on its first point)
     let n = placed + next.is_some() as usize;
-    let line = st.surface_line(k, next, n >= 3);
+    let closed = if path { closing && placed >= 3 } else { n >= 3 };
+    let line = st.surface_line(k, next, closed);
     let sl: Vec<Option<Pos2>> = line.iter().map(|q| world(st, *q)).collect();
     let m = sl.len();
     for i in 0..m {
         let j = (i + 1) % m;
-        if j == 0 && n < 3 {
+        if j == 0 && (n < 3 || (path && !closed)) {
             continue;
         }
         let (Some(a), Some(b)) = (sl[i], sl[j]) else { continue };
@@ -1244,7 +1330,13 @@ fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch) {
     }
     if let Some(h) = hover {
         let on = if st.surface_on_scan { "on the scan" } else { k.plane.label() };
-        let txt = if closing { "close: fill it".to_string() } else { format!("{} point{} · {on}", placed, if placed == 1 { "" } else { "s" }) };
+        let txt = if closing {
+            if path { "close".to_string() } else { "close: fill it".to_string() }
+        } else if path && placed >= 2 {
+            format!("{placed} points · Enter: an open curve")
+        } else {
+            format!("{} point{} · {on}", placed, if placed == 1 { "" } else { "s" })
+        };
         chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, tint(col, 0.6), if closing { HOT } else { TEXT2() });
     }
 }
@@ -1597,6 +1689,64 @@ fn draw_brush(p: &Painter, st: &AppState, pointer: Option<Pos2>, in_view: bool) 
     p.circle_filled(c, 1.6, a);
 }
 
+/// The Forms tool's brush: a ring of its radius laid on the surface under
+/// the pointer (on screen off the part), and its mirror with the symmetry.
+fn draw_form_brush(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
+    if st.tool != Tool::Form {
+        return;
+    }
+    let Some(at) = pointer else { return };
+    let light = Color32::from_rgba_unmultiplied(240, 242, 245, 230);
+    let dark = Color32::from_rgba_unmultiplied(10, 12, 16, 150);
+    let ring = |pts: Vec<Pos2>, strong: bool| {
+        let (w, c) = if strong { (1.4, light) } else { (1.0, Color32::from_rgba_unmultiplied(240, 242, 245, 120)) };
+        p.add(egui::Shape::closed_line(pts.clone(), Stroke::new(w + 2.0, dark)));
+        p.add(egui::Shape::closed_line(pts, Stroke::new(w, c)));
+    };
+    // on a stroke: the ring on screen round the pointer
+    let (hit, strong) = match &st.form_brush {
+        Some(_) => (None, true),
+        None => (st.hover_hit.and_then(|h| st.feature_of_face(h.face).map(|id| (h.point.as_dvec3(), h.normal.as_dvec3(), id))), true),
+    };
+    let r_pts = st.form.radius;
+    match hit {
+        Some((h, n, id)) => {
+            let r = r_pts as f64 * st.mm_per_point(h);
+            let n = n.normalize_or(DVec3::Y);
+            let u = n.any_orthonormal_vector();
+            let v = n.cross(u);
+            let circle = |c: DVec3, u: DVec3, v: DVec3| -> Vec<Pos2> { (0..48).filter_map(|k| { let a = std::f64::consts::TAU * k as f64 / 48.0; world(st, c + (u * a.cos() + v * a.sin()) * r) }).collect() };
+            let pts = circle(h, u, v);
+            if pts.len() > 8 {
+                ring(pts, strong);
+            }
+            if let Some(c) = world(st, h) {
+                p.circle_filled(c, 2.0, light);
+            }
+            // the mirror, across the form's middle
+            if st.form.mirror {
+                if let Some(f) = st.doc.feature(id).filter(|f| f.form.is_some()) {
+                    let m = f.matrix();
+                    let (o, ax) = (m.transform_point3(DVec3::ZERO), m.transform_vector3(DVec3::X).normalize_or(DVec3::X));
+                    let refl = |q: DVec3| q - ax * (2.0 * (q - o).dot(ax));
+                    let refv = |q: DVec3| q - ax * (2.0 * q.dot(ax));
+                    let pts = circle(refl(h), refv(u), refv(v));
+                    if pts.len() > 8 {
+                        ring(pts, false);
+                    }
+                }
+            }
+        }
+        None => {
+            let pts: Vec<Pos2> = (0..48).map(|k| { let a = std::f32::consts::TAU * k as f32 / 48.0; at + vec2(a.cos(), a.sin()) * r_pts }).collect();
+            ring(pts, st.form_brush.is_some());
+        }
+    }
+    if let Some(s) = &st.form_brush {
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, s.brush.label(), HOT, HOT);
+    }
+}
+
 /// The Knife: the point the pointer catches on an edge (a diamond), the
 /// line from the cut's last point to it (or to the pointer, dashed).
 fn draw_knife(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
@@ -1692,6 +1842,173 @@ fn draw_push(p: &Painter, st: &AppState) {
             let txt = if d.abs() < 1e-9 { "Depth 0 (the line only)".to_string() } else { format!("Depth {}{} mm", if d > 0.0 { "+" } else { "−" }, fmt_mm(d.abs() as f32)) };
             chip(p, b + vec2(14.0, -6.0), Align2::LEFT_BOTTOM, &txt, col, col);
         }
+    }
+}
+
+/// The selected Shell's grip: a line across the wall from the face it
+/// keeps, ticked at both ends, its dot at the thickness; hovered or
+/// dragged, the value by it.
+fn draw_shell(p: &Painter, st: &AppState) {
+    let Some(g) = st.shell_grip() else { return };
+    let Some(sh) = st.selected_shell().and_then(|f| f.shell.clone()) else { return };
+    let (Some(a), Some(b)) = (world(st, g.from), world(st, g.at)) else { return };
+    let col = accent();
+    let on = st.hot_handle == Some(Handle::ShellThick) || st.drag.as_ref().map(|d| d.handle == Handle::ShellThick).unwrap_or(false);
+    // seen short on screen: the line drawn on past the dot (dimmer), so it
+    // can be found and its way seen
+    let d = b - a;
+    let len = d.length();
+    let dir = if len > 1e-3 { d / len } else { vec2(0.0, -1.0) };
+    if len < 24.0 {
+        p.line_segment([b, b + dir * (24.0 - len)], Stroke::new(1.0, tint(col, 0.35)));
+    }
+    p.line_segment([a, b], Stroke::new(if on { 2.4 } else { 1.8 }, col));
+    let n = vec2(-dir.y, dir.x) * 5.0;
+    p.line_segment([a - n, a + n], Stroke::new(1.4, col));
+    p.circle(b, if on { 4.5 } else { 3.5 }, if on { HOT } else { chip_bg() }, Stroke::new(1.4, col));
+    if on {
+        let at = b + dir * 16.0;
+        let anchor = if dir.x >= 0.0 { Align2::LEFT_CENTER } else { Align2::RIGHT_CENTER };
+        let way = if sh.outward { " out" } else { "" };
+        chip(p, at, anchor, &format!("Wall {} mm{way}", fmt_mm(sh.thickness as f32)), col, col);
+    }
+}
+
+/// The selected Mirror's plane: a faint pane round the part, its border
+/// dashed, its axis and the side kept.
+fn draw_mirror(p: &Painter, st: &AppState) {
+    let Some((m, q)) = st.mirror_plane() else { return };
+    let col = match m.axis {
+        0 => AXIS_X,
+        1 => AXIS_Y,
+        _ => AXIS_Z,
+    };
+    let pts: Vec<Pos2> = q.iter().filter_map(|w| world(st, *w)).collect();
+    if pts.len() != 4 {
+        return;
+    }
+    p.add(egui::Shape::convex_polygon(pts.clone(), tint(col, 0.07), Stroke::NONE));
+    for i in 0..4 {
+        p.add(egui::Shape::dashed_line(&[pts[i], pts[(i + 1) % 4]], Stroke::new(1.2, tint(col, 0.75)), 6.0, 4.0));
+    }
+    // the side kept: an arrow from the pane's middle
+    let c = (q[0] + q[1] + q[2] + q[3]) * 0.25;
+    let n = m.normal() * if m.flip { -1.0 } else { 1.0 };
+    let reach = (q[0] - q[2]).length() * 0.08;
+    if let (Some(a), Some(b)) = (world(st, c), world(st, c + n * reach)) {
+        arrow(p, a, b, col, 2.0);
+        chip(p, b + vec2(10.0, -4.0), Align2::LEFT_BOTTOM, &format!("Mirror {} · keeps {}{}", m.axis_name(), if m.flip { "−" } else { "+" }, m.axis_name()), col, col);
+    }
+}
+
+/// The selected Array's places: a dot at each copy's middle (the
+/// original's ringed), joined in order by a dashed line (round a circle,
+/// an arc on its axis), with its count.
+fn draw_array(p: &Painter, st: &AppState) {
+    let Some((a, pts)) = st.array_marks() else { return };
+    let col = accent();
+    let screen: Vec<Option<Pos2>> = pts.iter().map(|w| world(st, *w)).collect();
+    let dash = |p: &Painter, line: &[Pos2]| {
+        if line.len() >= 2 {
+            p.add(egui::Shape::dashed_line(line, Stroke::new(1.2, tint(col, 0.6)), 5.0, 4.0));
+        }
+    };
+    match a.kind {
+        nurbs_kernel::ArrayKind::Circle => {
+            // the arc through the copies' middles, on the axis
+            let n = a.axis_dir();
+            let c0 = pts[0];
+            let centre = a.centre + n * (c0 - a.centre).dot(n);
+            let r0 = c0 - centre;
+            let total = if a.angle.abs() >= 359.999 { 360.0 } else { a.step_angle() * (a.count.max(1) - 1) as f64 };
+            let steps = ((total.abs() / 4.0).ceil() as usize).max(2);
+            let arc: Vec<Pos2> = (0..=steps).filter_map(|i| world(st, centre + glam::DQuat::from_axis_angle(n, (total * i as f64 / steps as f64).to_radians()) * r0)).collect();
+            dash(p, &arc);
+            // the axis, a little past the arc
+            let reach = r0.length().max(5.0) * 0.35;
+            if let (Some(u), Some(v)) = (world(st, centre - n * reach), world(st, centre + n * reach)) {
+                p.line_segment([u, v], Stroke::new(1.2, tint(col, 0.8)));
+                p.circle_filled(world(st, centre).unwrap_or(u), 2.5, col);
+            }
+        }
+        nurbs_kernel::ArrayKind::Line | nurbs_kernel::ArrayKind::Grid => {
+            let n = a.count.max(1) as usize;
+            let rows = if a.kind == nurbs_kernel::ArrayKind::Grid { a.count2.max(1) as usize } else { 1 };
+            // the places in rows: row j holds i = 0..n (the original first)
+            let at = |i: usize, j: usize| -> Option<Pos2> {
+                let k = j * n + i;
+                screen.get(k).copied().flatten()
+            };
+            for j in 0..rows {
+                let row: Vec<Pos2> = (0..n).filter_map(|i| at(i, j)).collect();
+                dash(p, &row);
+            }
+            if rows > 1 {
+                let col0: Vec<Pos2> = (0..rows).filter_map(|j| at(0, j)).collect();
+                dash(p, &col0);
+            }
+        }
+    }
+    for (k, s) in screen.iter().enumerate() {
+        let Some(s) = s else { continue };
+        if k == 0 {
+            p.circle_stroke(*s, 5.0, Stroke::new(1.5, col));
+        }
+        p.circle_filled(*s, 2.6, col);
+    }
+    // its grips: squares on the first copies, arrows past the ends; the
+    // one hovered or dragged lit, its value by it
+    let hot = st.hot_handle;
+    let dragging = st.drag.as_ref().map(|d| d.handle);
+    let dark = Color32::from_rgb(0x20, 0x22, 0x26);
+    let mut lit_at = None;
+    let grips = st.array_grips();
+    for g in &grips {
+        if dragging.is_some() && dragging != Some(g.handle) {
+            continue;
+        }
+        let on = hot == Some(g.handle) || dragging == Some(g.handle);
+        let Some(q) = world(st, g.at) else { continue };
+        match g.from.and_then(|f| world(st, f)) {
+            Some(f) => {
+                p.circle_filled(f, 2.0, col);
+                arrow(p, f, q, if on { HOT } else { col }, if on { 2.8 } else { 2.0 });
+            }
+            None => {
+                let r = if on { 5.5 } else { 4.5 };
+                p.rect(Rect::from_center_size(q, vec2(r * 2.0, r * 2.0)), 1.5, if on { HOT } else { Color32::WHITE }, Stroke::new(1.0, dark), egui::StrokeKind::Middle);
+            }
+        }
+        if on {
+            lit_at = Some((g.handle, q));
+        }
+    }
+    if let Some((h, q)) = lit_at {
+        let text = match (&st.gizmo_readout, dragging) {
+            (Some(t), Some(_)) => t.clone(),
+            _ => grip_value(&a, h),
+        };
+        // over the windows (the operation window stays put: the arrow may
+        // reach under it)
+        let top = p.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("array-grip-chip"))).with_clip_rect(p.clip_rect());
+        chip(&top, q + vec2(14.0, 12.0), Align2::LEFT_TOP, &text, HOT, HOT);
+    } else if let Some(Some(last)) = screen.last() {
+        let total = pts.len();
+        chip(p, *last + vec2(12.0, -10.0), Align2::LEFT_BOTTOM, &format!("Array · {} · {total}", a.kind_name()), col, col);
+    }
+}
+
+/// What an Array grip changes, as it is now (shown while hovered).
+fn grip_value(a: &nurbs_kernel::Array, h: Handle) -> String {
+    match h {
+        Handle::ArrayStep(w) => {
+            let s = if w == 0 { a.step } else { a.step2 };
+            format!("{} {} mm · drag", if w == 0 { "Step" } else { "Row step" }, crate::widgets::fmt3(s.length()))
+        }
+        Handle::ArrayCount(_) if a.kind == nurbs_kernel::ArrayKind::Circle => format!("Count {} · drag round", a.count),
+        Handle::ArrayCount(w) => format!("{} {} · pull: more", if w == 0 { "Count" } else { "Rows" }, if w == 0 { a.count } else { a.count2 }),
+        Handle::ArrayAngle => format!("Angle {}° · drag round", crate::widgets::fmt3(if a.angle.abs() >= 359.999 { 360.0 } else { a.angle }).trim_end_matches(",0")),
+        _ => String::new(),
     }
 }
 
@@ -1814,6 +2131,7 @@ pub fn hint(st: &AppState) -> String {
             None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),
             None => "Click: the first point, on a face or the ground".into(),
             Some(k) if k.pts.len() < 2 => "Click or drag: a corner · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
+            Some(_) if st.surface_curve => "Enter: an open curve · First point: a closed one · Shift + click a point: sharp / smooth · Shift: 0°, 45°, 90°".into(),
             Some(_) => "Enter: an open path · First point: a closed one · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Create(PrimKind::Surface)) => match &st.sketch {
@@ -1829,6 +2147,14 @@ pub fn hint(st: &AppState) -> String {
             Some(k) if k.pts.len() < 3 => "Click or drag: a corner · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
             Some(_) => "First point or Enter: close it · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
+        (None, Tool::Align) => "Click: the shape to align the selection to · Esc or right click: cancel".into(),
+        (None, Tool::ShellPick) => "Click: a face of the part to open · Esc, Enter or right click: done · The window's ×: close one again".into(),
+        (None, Tool::Select) if st.align_open() => "Min / Max: the box's sides · Center: its middle · Pivot: the base's centre (or the one put with D) · Apply: keep and go on · Enter: OK · Esc: cancel".into(),
+        (None, Tool::Form) if st.form_brush.is_some() => "Drag: the brush pulls the surface · Release: done (one undo step) · Esc: cancel".into(),
+        (None, Tool::Form) => format!(
+            "Press on a form and drag: {} · Shift + drag: Smooth · Ctrl: the other way · [ ]: radius · Click on the ground: a new form · A plain Cube or Cylinder becomes a form",
+            st.form.brush.label()
+        ),
         (None, Tool::Slot) if !st.slot_on_scan => match &st.slot_draw {
             Some(s) if s.width => "Move: its width · Click: on to its height · Esc: cancel".into(),
             Some(_) => "To its other end · Shift: 0°, 45°, 90° · Release: then its width".into(),
@@ -1899,11 +2225,22 @@ pub fn hint(st: &AppState) -> String {
             if let Some(d) = &st.drag {
                 match d.handle {
                     Handle::Rot(_) => "Round the ring: turn · 15° steps while Snap is on · Release: keep it".into(),
+                    Handle::ArrayStep(_) => "Along the line: the step, the copies follow · Release: keep it".into(),
+                    Handle::ArrayCount(_) if st.selected_array().and_then(|f| f.array.as_ref()).map(|a| a.kind == nurbs_kernel::ArrayKind::Circle).unwrap_or(false) => "Round the axis: nearer the original, more copies · Release: keep it".into(),
+                    Handle::ArrayCount(_) => "Out: more copies, the same step · In: fewer · Release: keep it".into(),
+                    Handle::ArrayAngle => "Round the axis: the angle, the count kept · 15° steps while Snap is on · 360°: evenly all round · Release: keep it".into(),
+                    Handle::ShellThick => "Along the line: the walls' thickness, 0.1 mm steps while Snap is on · Release: keep it".into(),
                     Handle::Scale(_) => "Away from the centre: bigger · Release: keep it".into(),
                     Handle::ScaleAll => "To the right: bigger · To the left: smaller · Release: keep it".into(),
                     Handle::Cage(_) => "The side facing the grip stays · Shift: proportions kept · Alt: from the middle · Ctrl: no snapping · Release: keep it".into(),
                     _ => "Moving: the kernel rebuilds the booleans live".into(),
                 }
+            } else if st.selected_array().is_some() {
+                "Square on the first copy: the step (round a circle: how many) · Arrow at the end: how many (round a circle: the angle) · A copy clicked is the original: an operation on it is made on all · Del: delete it".into()
+            } else if st.selected_shell().is_some() {
+                "Dot: the walls' thickness · Window: Inward / Outward, the faces open, Pick faces · Del: delete it".into()
+            } else if st.selected_mirror().is_some() {
+                "Window: the plane's axis, where it passes, the side kept · The steps after it are made on both sides · Del: delete it".into()
             } else if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {
                 "Window: Union, Subtract (the first picked less the others), Intersect: one curve, kept live · Shift + click: add a curve".into()
             } else if st.single().is_some_and(|f| f.is_extruded_curve()) {
@@ -1923,7 +2260,7 @@ pub fn hint(st: &AppState) -> String {
             } else {
                 match st.gizmo {
                     GizmoMode::Select => "W: move · E: rotate · R: scale · Right button: menu · Del: delete · Esc: deselect".into(),
-                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · E: rotate · R: scale · Del: delete".into(),
+                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · Alt + M: mirror · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
                     GizmoMode::Scale => "Cage: a face's grip one side, an edge's two, a corner all three · Shift: proportions kept · Alt: from the middle · W: move · E: rotate".into(),
                 }

@@ -328,6 +328,41 @@ pub fn spec_of(f: &Feature) -> Value {
         o["at"] = r3(f.origin);
         return o;
     }
+    if let Some(m) = &f.mirror {
+        o["kind"] = json!("mirror");
+        o["axis"] = json!(m.axis_name());
+        o["offset"] = json!(r(m.offset));
+        o["keep"] = json!(if m.flip { "-" } else { "+" });
+        return o;
+    }
+    if let Some(sh) = &f.shell {
+        o["kind"] = json!("shell");
+        o["thickness"] = json!(r(sh.thickness));
+        o["outward"] = json!(sh.outward);
+        o["open_faces"] = json!(sh.faces.iter().map(|q| r3(q.at)).collect::<Vec<_>>());
+        return o;
+    }
+    if let Some(a) = &f.array {
+        o["kind"] = json!("array");
+        o["sources"] = json!(a.sources);
+        o["layout"] = json!(a.kind_name());
+        o["count"] = json!(a.count);
+        match a.kind {
+            nurbs_kernel::ArrayKind::Circle => {
+                o["axis"] = json!(["X", "Y", "Z"][a.axis.min(2) as usize]);
+                o["centre"] = r3(a.centre);
+                o["angle"] = json!(r(a.angle));
+            }
+            k => {
+                o["step"] = r3(a.step);
+                if k == nurbs_kernel::ArrayKind::Grid {
+                    o["rows"] = json!(a.count2);
+                    o["row_step"] = r3(a.step2);
+                }
+            }
+        }
+        return o;
+    }
     o["origin"] = r3(f.origin);
     o["x_axis"] = r3(x_axis);
     o["up"] = r3(up);
@@ -465,7 +500,7 @@ fn apply_spec(spec: &Value, base: Option<&Feature>) -> Result<(Op, Prim, DVec3, 
             origin += rot * DVec3::new(cx, 0.0, cz);
             let points: Vec<[f64; 2]> = pts.iter().map(|q| [(q[0] - cx) / sx, (q[1] - cz) / sz]).collect();
             let corner = if corner.iter().any(|c| *c != 0.0) { corner } else { vec![] };
-            let profile = Profile { points, smooth: vec![false; n], corner, tension: vec![], open: false };
+            let profile = Profile { points, smooth: vec![false; n], corner, tension: vec![], open: false, spline: false };
             Ok((op, Prim::Profile { x: sx, y: height, z: sz }, origin, rot, Some(profile)))
         }
         k => Err(format!("kind {k}: cube, cylinder or sketch")),
@@ -629,6 +664,13 @@ fn primary_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
             sheet: None,
             curve: None,
             shape_bool: None,
+            fill: false,
+            revolve: None,
+            loft: None,
+            form: None,
+            mirror: None,
+            array: None,
+            shell: None,
         };
         let mut v = spec_of(&f);
         if let Some(o) = v.as_object_mut() {

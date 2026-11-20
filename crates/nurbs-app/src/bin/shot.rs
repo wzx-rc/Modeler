@@ -929,7 +929,7 @@ fn main() {
         // fillets and a chamfer (Romain 18 nov.: "Bevel fillet sur un path")
         let mut d = Doc::default();
         let id = d.add(Op::Add, Prim::Profile { x: 40.0, y: 6.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(id).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.0], [0.0, 0.0], [0.0, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false });
+        d.feature_mut(id).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.0], [0.0, 0.0], [0.0, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false, spline: false });
         h.reset(d, "Sketch");
         h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(25.0, 10.0, 20.0));
         h.steps(2);
@@ -1736,10 +1736,11 @@ fn main() {
         h.key(egui::Key::R);
         h.settle();
         h.shot("zero-qwer-4-scale");
-        let pivot = h.st.pivot().unwrap().as_vec3();
-        let v = h.st.view();
-        let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0;
-        let (a, b) = (h.screen_of(pivot + Vec3::Y * k), h.screen_of(pivot + Vec3::Y * k * 1.5));
+        // R is the scale cage (20 nov.): the top face's grip pulled up half
+        // the height again (the bottom stays)
+        let c = h.st.cage().expect("a cage");
+        let (top, bottom) = (c.point([0, 1, 0]), c.point([0, -1, 0]));
+        let (a, b) = (h.screen_of(top.as_vec3()), h.screen_of((top + (top - bottom) * 0.5).as_vec3()));
         h.move_to(a);
         h.steps(2);
         h.drag(a, b, 12, false);
@@ -1748,14 +1749,18 @@ fn main() {
         eprintln!("  scale readout {:?}", h.st.gizmo_readout);
         h.press(b, false);
         h.settle();
-        // the centre: dragged to the right, bigger all round
-        let c = h.screen_of(h.st.pivot().unwrap().as_vec3());
-        h.move_to(c);
+        // a corner with Shift: bigger all round
+        let c = h.st.cage().expect("a cage");
+        let (k0, k1) = (c.point([-1, -1, -1]), c.point([1, 1, 1]));
+        let (g, to) = (h.screen_of(k1.as_vec3()), h.screen_of((k1 + (k1 - k0) * 0.13).as_vec3()));
+        h.move_to(g);
         h.steps(2);
-        h.drag(c, c + vec2(40.0, 0.0), 8, false);
+        h.hold(Modifiers::SHIFT);
+        h.drag(g, to, 8, false);
         h.settle();
         eprintln!("  scale all readout {:?}", h.st.gizmo_readout);
-        h.press(c + vec2(40.0, 0.0), false);
+        h.press(to, false);
+        h.hold(Modifiers::NONE);
         h.settle();
         h.shot("zero-qwer-6-scaled");
         eprintln!("  boss {:?}", h.st.doc.features[2].prim);
@@ -1847,6 +1852,608 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("looks") {
+        // the slots under the balls (Romain 20 nov., 15 h 42): a colour
+        // picked, the specular up, a material made see-through
+        h.reset(test_part(), "Test part");
+        let ball = |h: &Harness, i: usize| h.ctx.data(|d| d.get_temp::<Pos2>(egui::Id::new(("mat-ball", i)))).expect("ball drawn");
+        let slot = |h: &Harness, k: usize| h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(("look-slot", k)))).expect("slot drawn");
+        h.st.select(Some(1), false);
+        h.steps(3);
+        h.click(ball(&h, 2));
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(2);
+        h.shot("zero-looks-1-slots");
+        // the colour row opens the picker; a teal in the square, the hue bar
+        h.click(slot(&h, 0).center());
+        h.steps(3);
+        let hb = slot(&h, 4);
+        h.drag(hb.center(), pos2(hb.min.x + hb.width() * 0.53, hb.center().y), 6, true);
+        h.steps(2);
+        let sq = slot(&h, 3);
+        h.drag(sq.center(), pos2(sq.min.x + sq.width() * 0.62, sq.min.y + sq.height() * 0.3), 6, true);
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(2);
+        h.shot("zero-looks-2-color");
+        eprintln!("  looks {:?}", h.st.doc.looks);
+        // the picker closed, the specular to 100 %
+        h.click(slot(&h, 0).center());
+        h.steps(3);
+        let sp = slot(&h, 1);
+        h.drag(sp.center(), pos2(sp.max.x - 1.0, sp.center().y), 6, true);
+        h.settle();
+        // nothing selected, Orange for the new shapes: its slots stay shown
+        h.st.select(None, false);
+        h.steps(2);
+        h.click(ball(&h, 2));
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(2);
+        h.shot("zero-looks-3-specular");
+        // the boss in Steel, Steel at 65 % transparency
+        h.st.select(Some(3), false);
+        h.steps(3);
+        h.click(ball(&h, 4));
+        h.settle();
+        let tr = slot(&h, 2);
+        h.drag(tr.min + vec2(4.0, tr.height() / 2.0), pos2(tr.min.x + 2.0 + (tr.width() - 4.0) * 0.65, tr.center().y), 8, true);
+        h.settle();
+        h.st.select(None, false);
+        h.steps(2);
+        h.click(ball(&h, 4));
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-looks-4-transparent");
+        eprintln!("  looks {:?}", h.st.doc.looks);
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+        // one undo of the document: the transparency back
+        h.st.undo_doc();
+        h.settle();
+        eprintln!("  after undo {:?}", h.st.doc.looks);
+    }
+
+    if want("mirror") {
+        // Mirror (Alt + M): half a part (a block from x = −5 to 35, a hole,
+        // a boss), mirrored across X; then a fillet picked on the mirror
+        // side, the boss moved, a slot carved on the far side: all made on
+        // both sides; the window set to Z
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::new(15.0, 0.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(b).unwrap().name = "Block".into();
+        let hole = d.add(Op::Carve, Prim::Cylinder { radius: 4.0, height: 30.0 }, DVec3::new(24.0, -5.0, -6.0), DQuat::IDENTITY);
+        d.feature_mut(hole).unwrap().name = "Hole".into();
+        let boss = d.add(Op::Add, Prim::Cylinder { radius: 5.0, height: 8.0 }, DVec3::new(14.0, 20.0, 5.0), DQuat::IDENTITY);
+        d.feature_mut(boss).unwrap().name = "Boss".into();
+        h.reset(d, "Mirror");
+        h.st.camera.dist *= 1.35;
+        h.st.camera.yaw -= 0.35;
+        h.st.camera.pitch += 0.12;
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-mirror-1-half");
+        h.hold(Modifiers::ALT);
+        h.key(egui::Key::M);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-mirror-2-mirrored");
+        eprintln!("  mirror: {:?}", h.st.selected_mirror().map(|f| (f.name.clone(), f.mirror)));
+        // the far end's top front edge picked (the mirror side), filleted
+        h.st.select(None, false);
+        h.key(egui::Key::Num2);
+        let e = h.screen_of(Vec3::new(-35.0, 20.0, 0.0));
+        h.click(e);
+        h.st.set_round(4.0, false, true);
+        h.st.end_live();
+        h.settle();
+        h.key(egui::Key::Q);
+        h.st.select(None, false);
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-mirror-3-fillet");
+        // the boss moved (its own side): both move
+        h.st.edit("Move", |d| d.feature_mut(boss).unwrap().origin.z = -4.0);
+        // a slot carved on the far side, after the Mirror
+        h.st.edit("Slot", |d| {
+            let s = d.add(Op::Carve, Prim::Box { x: 6.0, y: 6.0, z: 40.0 }, DVec3::new(-26.0, 15.0, 0.0), DQuat::IDENTITY);
+            d.feature_mut(s).unwrap().name = "Slot".into();
+        });
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-mirror-4-live");
+        // the Mirror selected again: across Z, keeping −Z
+        let mid = h.st.doc.features.iter().find(|f| f.mirror.is_some()).map(|f| f.id).unwrap();
+        h.st.selection = vec![mid];
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-mirror-5-selected");
+        h.st.set_mirror(nurbs_kernel::Mirror { axis: 2, offset: 0.0, flip: true }, true);
+        h.st.end_live();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-mirror-6-z");
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
+    if want("array") {
+        // Pattern / Array (Ctrl + Shift + D): a vent carved in a plate, its
+        // rim rounded, picked and repeated: 4 in a line as it comes, 8 a
+        // step of 10, a grid of 2 rows; the original made wider (the copies
+        // follow), an inset sunk in a copy's floor (made in every one);
+        // then a boss with its hole, 8 round a disc, then 5 over 180°
+        let mut d = Doc::default();
+        let plate = d.add(Op::Add, Prim::Box { x: 90.0, y: 8.0, z: 60.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(plate).unwrap().name = "Plate".into();
+        let vent = d.add(Op::Carve, Prim::Profile { x: 5.0, y: 10.0, z: 16.0 }, DVec3::new(-36.0, 5.0, -12.0), DQuat::IDENTITY);
+        d.feature_mut(vent).unwrap().name = "Vent".into();
+        d.feature_mut(vent).unwrap().profile = Some(nurbs_kernel::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![2.5; 4], tension: vec![], open: false, spline: false });
+        h.reset(d, "Array");
+        h.st.camera.dist *= 1.2;
+        h.st.camera.pitch += 0.25;
+        h.settle();
+        // the rim rounded (one edge: OpenCascade runs it round)
+        h.key(egui::Key::Num2);
+        h.click(h.screen_of(Vec3::new(-33.5, 8.0, -12.0)));
+        h.st.set_round(0.8, false, true);
+        h.st.end_live();
+        h.settle();
+        h.key(egui::Key::Num4);
+        h.st.select(None, false);
+        h.click(h.screen_of(Vec3::new(-36.0, 5.0, -12.0)));
+        h.settle();
+        eprintln!("  picked: {:?}", h.st.selection.iter().filter_map(|id| h.st.doc.feature(*id)).map(|f| f.name.clone()).collect::<Vec<_>>());
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-1-vent");
+        h.hold(Modifiers::CTRL | Modifiers::SHIFT);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-2-four");
+        let arr = |h: &Harness| h.st.selected_array().and_then(|f| f.array.clone()).unwrap();
+        eprintln!("  array: {:?}", arr(&h));
+        let a = arr(&h);
+        h.st.set_array(nurbs_kernel::Array { count: 8, step: DVec3::new(10.0, 0.0, 0.0), ..a }, true);
+        h.st.end_live();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-3-line");
+        let a = arr(&h);
+        h.st.set_array(nurbs_kernel::Array { kind: nurbs_kernel::ArrayKind::Grid, count2: 2, step2: DVec3::new(0.0, 0.0, 24.0), ..a }, true);
+        h.st.end_live();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-4-grid");
+        // the original wider: the copies follow
+        h.st.edit("Width", |d| {
+            let f = d.feature_mut(vent).unwrap();
+            f.prim = Prim::Profile { x: 6.0, y: 10.0, z: 16.0 };
+            f.profile.as_mut().unwrap().corner = vec![3.0; 4];
+        });
+        h.st.select(None, false);
+        h.settle();
+        // the floor of a copy (the second row's sixth) inset and sunk
+        h.key(egui::Key::Num3);
+        let floor = h.screen_of(Vec3::new(14.0, 5.0, 12.0));
+        h.click(floor);
+        h.settle();
+        h.move_to(floor);
+        h.key(egui::Key::I);
+        h.settle();
+        h.st.set_push(1.0, -1.5, true);
+        h.st.end_live();
+        h.settle();
+        eprintln!("  order: {:?}", h.st.doc.features.iter().map(|f| f.name.clone()).collect::<Vec<_>>());
+        h.key(egui::Key::Num4);
+        h.st.select(None, false);
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-5-follow");
+        eprintln!("  errors: {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        // round a disc: a boss and its hole, 8 times
+        let mut d = Doc::default();
+        let disc = d.add(Op::Add, Prim::Cylinder { radius: 40.0, height: 8.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(disc).unwrap().name = "Disc".into();
+        let boss = d.add(Op::Add, Prim::Cylinder { radius: 5.0, height: 6.0 }, DVec3::new(30.0, 8.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(boss).unwrap().name = "Boss".into();
+        let hole = d.add(Op::Carve, Prim::Cylinder { radius: 2.0, height: 20.0 }, DVec3::new(30.0, -2.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(hole).unwrap().name = "Hole".into();
+        h.reset(d, "Array round");
+        h.st.camera.dist *= 1.15;
+        h.st.camera.pitch += 0.2;
+        h.settle();
+        // the boss's foot rounded
+        h.key(egui::Key::Num2);
+        h.click(h.screen_of(Vec3::new(30.0, 8.0, 5.0)));
+        h.st.set_round(1.5, false, true);
+        h.st.end_live();
+        h.settle();
+        h.key(egui::Key::Num4);
+        h.st.selection = vec![boss, hole];
+        h.hold(Modifiers::CTRL | Modifiers::SHIFT);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let a = arr(&h);
+        h.st.set_array(nurbs_kernel::Array { kind: nurbs_kernel::ArrayKind::Circle, count: 8, ..a }, true);
+        h.st.end_live();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-6-circle");
+        eprintln!("  circle: {:?}", arr(&h));
+        let a = arr(&h);
+        h.st.set_array(nurbs_kernel::Array { count: 5, angle: 180.0, ..a }, true);
+        h.st.end_live();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-array-7-half");
+        eprintln!("  errors: {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
+    if want("shell") {
+        // Shell (Romain 20 nov., 20 h 58: "Continue les shell"): a case with
+        // rounded corners and a hole through it; its top face picked in Face
+        // mode, Alt + S: hollowed with 2 mm walls, the top open; its dot
+        // dragged to 4 mm; outwards; the front opened too (Pick faces); an
+        // inner edge rounded after it; then a closed block hollowed (X-ray)
+        // and asked too thick (it stops at the thickest that works)
+        use nurbs_app::state::Handle;
+        let mut d = Doc::default();
+        let case = d.add(Op::Add, Prim::Box { x: 80.0, y: 30.0, z: 50.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(case).unwrap().name = "Case".into();
+        let tg = |sub: u16| nurbs_kernel::model::FaceTag { feature: case, sub }.pack();
+        let corners: Vec<nurbs_kernel::EdgeRef> = [(0u16, 4u16, 40.0, 25.0), (1, 4, -40.0, 25.0), (0, 5, 40.0, -25.0), (1, 5, -40.0, -25.0)].iter().map(|(a, b, x, z)| nurbs_kernel::EdgeRef { faces: [tg(*a), tg(*b)], at: DVec3::new(*x, 15.0, *z) }).collect();
+        d.add_round(8.0, false, corners);
+        let hole = d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 40.0 }, DVec3::new(24.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(hole).unwrap().name = "Hole".into();
+        h.reset(d, "Shell");
+        h.st.camera.dist *= 1.3;
+        h.st.camera.pitch += 0.3;
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-shell-1-part");
+        // the top face picked
+        h.key(egui::Key::Num3);
+        h.click(h.screen_of(Vec3::new(-12.0, 30.0, 6.0)));
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-shell-2-face");
+        h.hold(Modifiers::ALT);
+        h.key(egui::Key::S);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let shell = |h: &Harness| h.st.selected_shell().and_then(|f| f.shell.clone());
+        eprintln!("  shell: {:?} errors {:?}", shell(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-shell-3-open");
+        // its dot hovered, then dragged to 4 mm
+        let g = h.st.shell_grip().expect("grip");
+        let p = h.screen_of(g.at.as_vec3());
+        h.move_to(p);
+        h.steps(3);
+        eprintln!("  hot: {:?}", h.st.hot_handle == Some(Handle::ShellThick));
+        h.shot("zero-shell-4-hover");
+        let q = h.screen_of((g.from + g.dir * 4.0).as_vec3());
+        h.drag(p, q, 10, false);
+        h.settle();
+        h.shot("zero-shell-5-four");
+        h.press(q, false);
+        h.settle();
+        eprintln!("  thickness: {:?}", shell(&h).map(|s| s.thickness));
+        // outwards
+        let s0 = shell(&h).unwrap();
+        h.st.set_shell(nurbs_kernel::Shell { outward: true, ..s0.clone() }, true);
+        h.st.end_live();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-shell-6-outward");
+        h.st.set_shell(nurbs_kernel::Shell { outward: false, thickness: 2.0, ..s0 }, true);
+        h.st.end_live();
+        h.settle();
+        // Pick faces: the front opened too, the left side hovered
+        h.st.shell_pick_toggle();
+        h.click(h.screen_of(Vec3::new(-14.0, 14.0, 25.0)));
+        h.settle();
+        h.move_to(h.screen_of(Vec3::new(40.0, 15.0, -6.0)));
+        h.steps(3);
+        eprintln!("  open: {:?}", shell(&h).map(|s| s.faces.len()));
+        h.shot("zero-shell-7-pick");
+        h.key(egui::Key::Escape);
+        h.settle();
+        // an inner edge rounded after it (the floor along the back wall)
+        h.key(egui::Key::Num2);
+        h.click(h.screen_of(Vec3::new(-6.0, 2.0, -23.0)));
+        h.st.set_round(3.0, false, true);
+        h.st.end_live();
+        h.settle();
+        h.key(egui::Key::Num4);
+        h.st.select(None, false);
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        eprintln!("  errors: {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-shell-8-inner-fillet");
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+        // a closed block: a cavity inside, seen in X-ray
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 60.0, y: 30.0, z: 40.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(b).unwrap().name = "Block".into();
+        h.reset(d, "Shell closed");
+        h.st.camera.dist *= 1.3;
+        h.settle();
+        h.key(egui::Key::Num4);
+        h.click(h.screen_of(Vec3::new(0.0, 30.0, 0.0)));
+        h.settle();
+        h.hold(Modifiers::ALT);
+        h.key(egui::Key::S);
+        h.key(egui::Key::X);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        eprintln!("  closed: {:?} volume-ish errors {:?}", shell(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-shell-9-closed-xray");
+        // asked 30 mm: the block is 30 high, it stops at the thickest
+        let s0 = shell(&h).unwrap();
+        h.st.set_shell(nurbs_kernel::Shell { thickness: 30.0, ..s0 }, true);
+        h.st.end_live();
+        h.settle();
+        h.steps(10);
+        h.settle();
+        eprintln!("  limit: {:?} toast {:?}", shell(&h).map(|s| s.thickness), h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.shot("zero-shell-10-limit");
+    }
+
+    if want("array-grips") {
+        // the Array's grips in the view (Romain 20 nov., 19 h 01: "des
+        // poignées pour manipuler directement l'influence des array"): the
+        // vent's line, its first copy dragged (the step), its arrow pulled
+        // (more copies), a grid's rows pulled; the operation window stays
+        // where it was put while the view turns; round a disc, the arrow
+        // turned back to 180° and the first copy brought further (fewer)
+        use nurbs_app::state::Handle;
+        let mut d = Doc::default();
+        let plate = d.add(Op::Add, Prim::Box { x: 90.0, y: 8.0, z: 60.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(plate).unwrap().name = "Plate".into();
+        let vent = d.add(Op::Carve, Prim::Profile { x: 5.0, y: 10.0, z: 16.0 }, DVec3::new(-36.0, 5.0, -12.0), DQuat::IDENTITY);
+        d.feature_mut(vent).unwrap().name = "Vent".into();
+        d.feature_mut(vent).unwrap().profile = Some(nurbs_kernel::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![2.5; 4], tension: vec![], open: false, spline: false });
+        h.reset(d, "Array grips");
+        h.st.camera.dist *= 1.2;
+        h.st.camera.pitch += 0.25;
+        h.settle();
+        h.key(egui::Key::Num2);
+        h.click(h.screen_of(Vec3::new(-33.5, 8.0, -12.0)));
+        h.st.set_round(0.8, false, true);
+        h.st.end_live();
+        h.settle();
+        h.key(egui::Key::Num4);
+        h.st.select(None, false);
+        h.click(h.screen_of(Vec3::new(-36.0, 5.0, -12.0)));
+        h.settle();
+        h.hold(Modifiers::CTRL | Modifiers::SHIFT);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let arr = |h: &Harness| h.st.selected_array().and_then(|f| f.array.clone()).unwrap();
+        // where a grip is on screen (an arrow: three quarters along it)
+        let grip = |h: &Harness, which: Handle| -> Pos2 {
+            let g = h.st.array_grips().into_iter().find(|g| g.handle == which).expect("grip");
+            match g.from {
+                None => h.screen_of(g.at.as_vec3()),
+                Some(f) => {
+                    let (a, b) = (h.screen_of(f.as_vec3()), h.screen_of(g.at.as_vec3()));
+                    a + (b - a) * 0.75
+                }
+            }
+        };
+        let origin = |h: &Harness| h.st.array_marks().unwrap().1[0];
+        eprintln!("  array: {:?}", arr(&h));
+        let p = grip(&h, Handle::ArrayStep(0));
+        h.move_to(p);
+        h.steps(3);
+        h.shot("zero-array-grips-1-hover");
+        // the first copy dragged out to 11 mm from the original
+        let o = origin(&h);
+        let q = h.screen_of((o + DVec3::X * 11.0).as_vec3());
+        h.drag(p, q, 10, false);
+        h.settle();
+        h.shot("zero-array-grips-2-step");
+        h.press(q, false);
+        h.settle();
+        eprintln!("  step: {:?}", arr(&h).step);
+        // the arrow pulled out by three steps: 3 more
+        let p = grip(&h, Handle::ArrayCount(0));
+        let a = arr(&h);
+        let q = p + (h.screen_of((o + a.step * 3.0).as_vec3()) - h.screen_of(o.as_vec3()));
+        h.drag(p, q, 12, false);
+        h.settle();
+        h.shot("zero-array-grips-3-count");
+        h.press(q, false);
+        h.settle();
+        eprintln!("  count: {}", arr(&h).count);
+        // a grid: its rows' arrow pulled by one row
+        let a = arr(&h);
+        h.st.set_array(nurbs_kernel::Array { kind: nurbs_kernel::ArrayKind::Grid, count2: 2, step2: DVec3::new(0.0, 0.0, 20.0), ..a }, true);
+        h.st.end_live();
+        h.settle();
+        let p = grip(&h, Handle::ArrayCount(1));
+        let q = p + (h.screen_of((o + DVec3::Z * 20.0).as_vec3()) - h.screen_of(o.as_vec3()));
+        h.drag(p, q, 10, false);
+        h.settle();
+        h.shot("zero-array-grips-4-rows");
+        h.press(q, false);
+        h.settle();
+        eprintln!("  rows: {}", arr(&h).count2);
+        // the view turned: the window stays where it was put
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        let before = h.ctx.memory(|m| m.area_rect(egui::Id::new("op-pop")));
+        h.shot("zero-array-grips-5-window");
+        h.st.camera.yaw += 0.6;
+        h.st.camera.dist *= 0.85;
+        h.settle();
+        h.steps(3);
+        let after = h.ctx.memory(|m| m.area_rect(egui::Id::new("op-pop")));
+        h.shot("zero-array-grips-6-turned");
+        eprintln!("  window before {:?} after {:?}", before.map(|r| r.min), after.map(|r| r.min));
+        // round a disc: 8, the arrow turned back to 180°, then the first
+        // copy brought further round (fewer copies)
+        let mut d = Doc::default();
+        let disc = d.add(Op::Add, Prim::Cylinder { radius: 40.0, height: 8.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(disc).unwrap().name = "Disc".into();
+        let boss = d.add(Op::Add, Prim::Cylinder { radius: 5.0, height: 6.0 }, DVec3::new(30.0, 8.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(boss).unwrap().name = "Boss".into();
+        h.reset(d, "Array grips round");
+        h.st.camera.dist *= 1.15;
+        h.st.camera.pitch += 0.3;
+        h.settle();
+        h.st.selection = vec![boss];
+        h.hold(Modifiers::CTRL | Modifiers::SHIFT);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let a = arr(&h);
+        h.st.set_array(nurbs_kernel::Array { kind: nurbs_kernel::ArrayKind::Circle, count: 8, ..a }, true);
+        h.st.end_live();
+        h.settle();
+        let p = grip(&h, Handle::ArrayAngle);
+        h.move_to(p);
+        h.steps(3);
+        h.shot("zero-array-grips-7-round");
+        // along the arc, from the end (360°) back to 180°
+        let a = arr(&h);
+        let o = origin(&h);
+        let c = DVec3::new(a.centre.x, o.y, a.centre.z);
+        let r0 = o - c;
+        h.press(p, true);
+        for i in 1..=12 {
+            let ang = (360.0 - 15.0 * i as f64).to_radians();
+            let w = c + DQuat::from_axis_angle(DVec3::Y, ang) * r0 * 1.15;
+            h.move_to(h.screen_of(w.as_vec3()));
+        }
+        h.settle();
+        h.shot("zero-array-grips-8-angle");
+        let w = c + DQuat::from_axis_angle(DVec3::Y, 180f64.to_radians()) * r0 * 1.15;
+        h.press(h.screen_of(w.as_vec3()), false);
+        h.settle();
+        eprintln!("  angle: {} count {}", arr(&h).angle, arr(&h).count);
+        // the first copy taken to 45°: 180 / 45 + 1 = 5
+        let p = grip(&h, Handle::ArrayCount(0));
+        let a0 = arr(&h).step_angle();
+        h.press(p, true);
+        for i in 1..=8 {
+            let ang = (a0 + (45.0 - a0) * i as f64 / 8.0).to_radians();
+            h.move_to(h.screen_of((c + DQuat::from_axis_angle(DVec3::Y, ang) * r0).as_vec3()));
+        }
+        h.settle();
+        h.shot("zero-array-grips-9-fewer");
+        let w = c + DQuat::from_axis_angle(DVec3::Y, 45f64.to_radians()) * r0;
+        h.press(h.screen_of(w.as_vec3()), false);
+        h.settle();
+        eprintln!("  angle: {} count {}", arr(&h).angle, arr(&h).count);
+        eprintln!("  errors: {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+    }
+
+    if want("align-window") {
+        // Align (3ds Max's, Alt + A): a bracket turned 30° to the right of
+        // the block, picked, Align, the block clicked; centre on centre,
+        // then on the ground along Y with the block's orientation (Apply),
+        // its Min against the block's Max along X (Apply), centred along Z
+        // (OK)
+        let mut d = test_part();
+        let b = d.add(Op::Add, Prim::Box { x: 12.0, y: 8.0, z: 10.0 }, DVec3::new(48.0, 6.0, -26.0), DQuat::from_rotation_y(30f64.to_radians()));
+        d.feature_mut(b).unwrap().name = "Bracket".into();
+        h.reset(d, "Test part");
+        h.st.camera.dist *= 1.35;
+        h.settle();
+        let rect = |h: &Harness, k: &str, i: usize| h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new((k, i)))).expect("drawn");
+        h.click(h.screen_of(Vec3::new(48.0, 14.0, -26.0)));
+        h.settle();
+        h.st.begin_align();
+        let block = h.screen_of(Vec3::new(-12.0, 8.0, 15.0));
+        h.move_to(block);
+        h.steps(3);
+        h.shot("zero-alignwin-1-pick");
+        h.click(block);
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-alignwin-2-center");
+        // first square with the block and on the ground: Y only, Min on
+        // Min, the block's orientation (Apply)
+        h.click(rect(&h, "align-axis", 0).center());
+        h.click(rect(&h, "align-axis", 2).center());
+        if let Some(a) = h.st.align.as_mut() {
+            a.cur = nurbs_app::align::AlignPoint::Min;
+            a.tgt = nurbs_app::align::AlignPoint::Min;
+            a.orient = true;
+        }
+        h.st.align_update();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-alignwin-3-orient");
+        h.click(rect(&h, "align-btn", 1).center());
+        h.settle();
+        // X: the bracket's Min on the block's Max (Apply)
+        h.click(rect(&h, "align-axis", 0).center());
+        if let Some(a) = h.st.align.as_mut() {
+            a.cur = nurbs_app::align::AlignPoint::Min;
+            a.tgt = nurbs_app::align::AlignPoint::Max;
+        }
+        h.st.align_update();
+        h.settle();
+        h.click(rect(&h, "align-btn", 1).center());
+        h.settle();
+        // Z: centre on centre (OK)
+        h.click(rect(&h, "align-axis", 2).center());
+        if let Some(a) = h.st.align.as_mut() {
+            a.cur = nurbs_app::align::AlignPoint::Center;
+            a.tgt = nurbs_app::align::AlignPoint::Center;
+        }
+        h.st.align_update();
+        h.settle();
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-alignwin-4-x-z");
+        h.click(rect(&h, "align-btn", 2).center());
+        h.settle();
+        h.st.select(None, false);
+        h.move_to(pos2(800.0, 120.0));
+        h.steps(3);
+        h.shot("zero-alignwin-5-done");
+        let f = h.st.doc.feature(b).unwrap();
+        eprintln!("  bracket origin {:?} rot {:?}", f.origin, f.rot.to_euler(glam::EulerRot::YXZ));
+        eprintln!("  undo steps: {:?}", h.st.undo_labels());
+        // Cancel puts it back
+        h.st.selection = vec![b];
+        h.st.begin_align();
+        h.click(block);
+        h.settle();
+        let moved = h.st.doc.feature(b).unwrap().origin;
+        h.click(rect(&h, "align-btn", 0).center());
+        h.settle();
+        eprintln!("  cancel: moved to {:?}, back to {:?}", moved, h.st.doc.feature(b).unwrap().origin);
+    }
+
     if want("marking") {
         // the marking menu (right button): on a shape, its material arc, a
         // quick flick, on a picked edge, in empty space
@@ -1877,7 +2484,7 @@ fn main() {
         h.shot("zero-marking-4-flick");
         h.settle();
         eprintln!("  boss op {:?}", h.st.doc.features[2].op);
-        h.st.undo();
+        h.st.undo_doc();
         h.settle();
         // Edge mode: on an edge, Fillet
         h.key(egui::Key::F10);
@@ -2250,7 +2857,7 @@ fn main() {
                 h.shot(&format!("zero-scan-{}-boss", 8 + k));
                 if k == 0 {
                     // undone: the outer step next, at the same place
-                    h.st.undo();
+                    h.st.undo_doc();
                     h.settle();
                 }
             }
@@ -3208,7 +3815,7 @@ fn main() {
         say(&h, "scaled");
         h.shot("zero-comp-flow-2-scaled");
         // an edge: W then R
-        h.st.undo();
+        h.st.undo_doc();
         h.settle();
         h.key(egui::Key::F10);
         h.click(h.screen_of(Vec3::new(0.0, 0.0, 10.0)));
@@ -3742,8 +4349,8 @@ fn main() {
         h.settle();
         eprintln!("  pocket {pocket} moved: {} · faces {} · toast {:?}", order(&h), faces(&h), h.st.toast.as_ref().map(|t| t.text.clone()));
         h.shot("zero-carve-order-4-pocket");
-        h.st.undo();
-        h.st.undo();
+        h.st.undo_doc();
+        h.st.undo_doc();
         h.settle();
         eprintln!("  undo ×2: {} · faces {}", order(&h), faces(&h));
     }
@@ -3754,7 +4361,7 @@ fn main() {
         // ends), then chamfered; off, the whole tangent outline
         let mut d = Doc::default();
         let p = d.add(Op::Add, Prim::Profile { x: 60.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(p).unwrap().profile = Some(nurbs_kernel::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![10.0; 4], tension: vec![], open: false });
+        d.feature_mut(p).unwrap().profile = Some(nurbs_kernel::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![10.0; 4], tension: vec![], open: false, spline: false });
         h.reset(d, "Pill");
         h.st.camera.frame(Vec3::new(-32.0, 0.0, -12.0), Vec3::new(32.0, 22.0, 12.0));
         h.steps(2);
@@ -3957,6 +4564,323 @@ fn main() {
         );
     }
 
+    if want("surf-curve") {
+        // a clean closed curve (Romain 20 nov., 13 h 05): the Path tool in
+        // CURVE, five points on the ground, one made sharp, closed on its
+        // first point; filled (Fill); a point moved with the gizmo in
+        // Vertex mode; the Surface tool on its plane: a curve filled
+        h.reset(Doc::default(), "Curves");
+        h.st.camera.frame(Vec3::new(-40.0, 0.0, -30.0), Vec3::new(60.0, 5.0, 30.0));
+        h.st.camera.pitch = 0.95;
+        h.steps(2);
+        h.key(egui::Key::P);
+        h.st.surface_curve = true;
+        h.steps(1);
+        let g = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 0.0, z));
+        let pts = [(-30.0, 10.0), (-10.0, -22.0), (15.0, -14.0), (12.0, 18.0), (-14.0, 22.0)];
+        for (x, z) in pts {
+            let q = g(&h, x, z);
+            h.move_to(q);
+            h.click(q);
+        }
+        // the second point made sharp (Shift + click on it)
+        h.hold(Modifiers::SHIFT);
+        let q = g(&h, -10.0, -22.0);
+        h.move_to(q);
+        h.click(q);
+        h.hold(Modifiers::NONE);
+        let q = g(&h, -30.0, 10.0);
+        h.move_to(q);
+        h.steps(2);
+        eprintln!("  sharp {:?}", h.st.sketch.as_ref().map(|k| k.sharp.clone()));
+        h.shot("zero-surf-curve-1-drawing");
+        h.click(q);
+        h.settle();
+        let id = h.st.doc.features.last().map(|f| f.id).unwrap();
+        eprintln!("  made: {:?}", h.st.doc.feature(id).map(|f| (f.name.clone(), f.profile.as_ref().map(|p| (p.spline, p.open, p.smooth.clone())))));
+        h.shot("zero-surf-curve-2-curve");
+        h.st.set_curve_make(id, nurbs_app::surfaces::CurveMake::Fill);
+        h.settle();
+        eprintln!("  filled: faces {:?} edges {:?} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.edges.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-curve-3-filled");
+        // Vertex mode: the fourth point picked and moved 12 mm along X
+        h.key(egui::Key::Num1);
+        h.steps(1);
+        let v = nurbs_app::surfaces::path_point_pos(h.st.doc.feature(id).unwrap(), 3).unwrap();
+        let q = h.screen_of(v.as_vec3());
+        h.click(q);
+        h.steps(2);
+        eprintln!("  picked {:?} path points {:?} pivot {:?}", h.st.vert_sel.len(), h.st.picked_path_points(), h.st.pivot());
+        let at = h.screen_of(h.st.pivot().unwrap().as_vec3());
+        h.st.begin_drag(nurbs_app::state::Handle::Axis(0), [at.x, at.y]);
+        let to = h.screen_of((v + DVec3::new(12.0, 0.0, 0.0)).as_vec3());
+        h.st.update_drag([to.x, to.y]);
+        h.st.end_drag();
+        h.settle();
+        eprintln!("  moved: point {:?} errors {:?}", nurbs_app::surfaces::path_point_pos(h.st.doc.feature(id).unwrap(), 3), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-curve-4-moved");
+        // the Surface tool on its plane, LINEAR, a corner filleted: a curve
+        // filled, editable
+        h.key(egui::Key::Num4);
+        h.st.selection.clear();
+        h.key(egui::Key::U);
+        h.st.surface_curve = false;
+        h.steps(1);
+        for (x, z) in [(30.0, -15.0), (55.0, -15.0), (55.0, 15.0), (30.0, 15.0)] {
+            let q = g(&h, x, z);
+            h.move_to(q);
+            h.click(q);
+        }
+        h.hold(Modifiers::CTRL);
+        h.drag(g(&h, 55.0, 15.0), g(&h, 55.0, 23.0), 8, false);
+        h.steps(2);
+        h.press(g(&h, 55.0, 23.0), false);
+        h.hold(Modifiers::NONE);
+        h.key(egui::Key::Enter);
+        h.settle();
+        let s = h.st.doc.features.last().cloned().unwrap();
+        eprintln!("  surface: {} fill {} makes {:?} corners {:?} errors {:?}", s.name, s.fill, h.st.doc.makes(&s), s.profile.as_ref().map(|p| p.corner.clone()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-curve-5-surface");
+    }
+
+    if want("surf-revolve") {
+        // Revolve (3ds Max's Lathe): a bottle's half profile drawn in
+        // CURVE, its two ends on the axis (the box's left side), turned
+        // into a solid; half a turn; its axis along X; a ring carved from
+        // a block
+        h.reset(Doc::default(), "Revolve");
+        h.st.camera.frame(Vec3::new(-10.0, 0.0, -45.0), Vec3::new(30.0, 5.0, 5.0));
+        h.st.camera.pitch = 1.3;
+        h.st.camera.yaw = 0.0;
+        h.steps(2);
+        h.key(egui::Key::P);
+        h.st.surface_curve = true;
+        h.steps(1);
+        let g = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 0.0, z));
+        let prof = [(0.0, 0.0), (10.0, 0.0), (10.0, -6.0), (6.0, -16.0), (7.0, -28.0), (4.0, -33.0), (4.0, -40.0), (0.0, -40.0)];
+        for (x, z) in prof {
+            let q = g(&h, x, z);
+            h.move_to(q);
+            h.click(q);
+        }
+        h.hold(Modifiers::SHIFT);
+        for (x, z) in [(10.0, 0.0), (4.0, -40.0)] {
+            let q = g(&h, x, z);
+            h.move_to(q);
+            h.click(q);
+        }
+        h.hold(Modifiers::NONE);
+        h.shot("zero-surf-revolve-1-profile");
+        h.key(egui::Key::Enter);
+        h.settle();
+        let id = h.st.doc.features.last().map(|f| f.id).unwrap();
+        h.st.set_curve_make(id, nurbs_app::surfaces::CurveMake::Revolve);
+        h.settle();
+        let f = h.st.doc.feature(id).cloned().unwrap();
+        eprintln!("  revolve: closes {} makes {:?} faces {:?} errors {:?}", f.revolve_closes(), h.st.doc.makes(&f), h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-revolve-2-top");
+        h.st.camera.yaw = 0.6;
+        h.st.camera.pitch = 0.35;
+        h.st.camera.frame(Vec3::new(-12.0, -12.0, -42.0), Vec3::new(12.0, 12.0, 2.0));
+        h.steps(2);
+        h.shot("zero-surf-revolve-3-solid");
+        let r = h.st.doc.feature(id).and_then(|f| f.revolve).unwrap();
+        h.st.set_revolve(id, nurbs_kernel::Revolve { angle: 200.0, ..r }, "Revolve angle", true);
+        h.st.end_live();
+        h.settle();
+        eprintln!("  200°: faces {:?} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-revolve-4-part");
+        h.st.set_revolve(id, nurbs_kernel::Revolve { angle: 360.0, along_x: true, align: 1 }, "Revolve axis", true);
+        h.st.end_live();
+        h.settle();
+        eprintln!("  axis X at its max side: makes {:?} faces {:?} errors {:?}", h.st.doc.makes(h.st.doc.feature(id).unwrap()), h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.st.camera.frame(Vec3::new(-15.0, -45.0, -50.0), Vec3::new(15.0, 45.0, 10.0));
+        h.steps(2);
+        h.shot("zero-surf-revolve-5-axis-x");
+    }
+
+    if want("surf-loft") {
+        // Loft: a rounded rectangle on the ground, a circle 20 mm up, a
+        // star 40 mm up: picked in that order, Loft (a solid); ruled; the
+        // circle made bigger (the loft follows)
+        use nurbs_kernel::doc::CurveKind;
+        h.reset(Doc::default(), "Loft");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -25.0), Vec3::new(25.0, 45.0, 25.0));
+        h.st.camera.pitch = 0.45;
+        h.st.camera.yaw = 0.6;
+        h.steps(2);
+        let w = |x: f32, z: f32| Vec3::new(x, 0.0, z);
+        let mut ids = vec![];
+        for (k, a, b) in [(CurveKind::Rectangle, w(-18.0, -12.0), w(18.0, 12.0)), (CurveKind::Circle, w(0.0, 0.0), w(10.0, 0.0)), (CurveKind::Star, w(0.0, 0.0), w(9.0, 0.0))] {
+            h.st.arm_curve(k);
+            h.steps(1);
+            let (pa, pb) = (h.screen_of(a), h.screen_of(b));
+            h.drag(pa, pb, 8, false);
+            h.steps(1);
+            h.press(pb, false);
+            h.steps(2);
+            ids.push(h.st.doc.features.last().unwrap().id);
+        }
+        h.st.edit("Lift", |d| {
+            if let Some(c) = d.feature_mut(ids[0]).and_then(|f| f.curve.as_mut()) {
+                c.corner = 4.0;
+            }
+            d.feature_mut(ids[1]).unwrap().origin.y = 20.0;
+            d.feature_mut(ids[2]).unwrap().origin.y = 40.0;
+        });
+        h.st.selection = ids.clone();
+        h.steps(3);
+        h.shot("zero-surf-loft-1-curves");
+        h.st.make_loft();
+        h.settle();
+        let l = h.st.selection[0];
+        eprintln!("  loft: makes {:?} faces {:?} errors {:?}", h.st.doc.makes(h.st.doc.feature(l).unwrap()), h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-loft-2-solid");
+        h.st.set_loft_ruled(l, true);
+        h.settle();
+        eprintln!("  ruled: faces {:?} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-loft-3-ruled");
+        h.st.set_loft_ruled(l, false);
+        h.st.edit("Radius", |d| {
+            let f = d.feature_mut(ids[1]).unwrap();
+            let (Some(c), nurbs_kernel::Prim::Path { .. }) = (f.curve, f.prim) else { return };
+            f.reshape_curve(c, 16.0);
+        });
+        h.st.selection = vec![l];
+        h.settle();
+        eprintln!("  circle grown: errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-surf-loft-4-follows");
+    }
+
+    if want("forms") {
+        // Forms (Romain 20 nov., 13 h 05: "le feeling… Nomad ou ZBrush…
+        // une move brush"): M, a click on the ground makes a sphere; the
+        // Move brush pulls its side out (shot during the stroke: the app's
+        // own drawing of it); Mirror X and Move up: two ears; Inflate the
+        // front; Shift: Smooth; a plain Cylinder pulled (it becomes a
+        // form); More detail and a small Pinch; a Cube added through a form
+        h.reset(Doc::default(), "Forms");
+        let view = |h: &mut Harness| {
+            h.st.camera.yaw = 0.35;
+            h.st.camera.pitch = 0.35;
+            h.st.camera.frame(Vec3::new(-24.0, 0.0, -20.0), Vec3::new(30.0, 38.0, 20.0));
+            h.steps(2);
+        };
+        view(&mut h);
+        h.key(egui::Key::M);
+        let o = h.screen_of(Vec3::ZERO);
+        h.move_to(o);
+        h.click(o);
+        h.settle();
+        let id = h.st.doc.features.last().map(|f| f.id).unwrap();
+        let info = |h: &Harness| {
+            let f = h.st.doc.feature(id).unwrap();
+            let fm = f.form.as_ref().unwrap();
+            format!("{} {:?} {}×{} box {:?} faces {:?} errors {:?}", f.name, f.op, fm.nu, fm.nv, f.prim, h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()))
+        };
+        eprintln!("  new: {}", info(&h));
+        // a point of the sphere (centre 0, 15, 0, radius 15) along a direction
+        let on = |h: &Harness, d: Vec3| h.screen_of(Vec3::new(0.0, 15.0, 0.0) + d.normalize() * 14.0);
+        let p = on(&h, Vec3::new(0.9, 0.0, 0.45));
+        h.move_to(p);
+        h.steps(2);
+        h.shot("zero-forms-1-sphere");
+        // Move: the right side pulled out
+        let t0 = Instant::now();
+        h.drag(p, p + vec2(150.0, -20.0), 10, false);
+        h.steps(1);
+        eprintln!("  stroke of 10 moves: {:?}, preview {}", t0.elapsed(), h.st.form_preview().is_some());
+        h.shot("zero-forms-2-move-live");
+        h.press(p + vec2(150.0, -20.0), false);
+        let t0 = Instant::now();
+        h.settle();
+        eprintln!("  move: {} · fine model after {:?}", info(&h), t0.elapsed());
+        h.shot("zero-forms-3-moved");
+        // Mirror X: a point up on the left pulled up, both sides follow
+        h.st.form.mirror = true;
+        h.st.form.radius = 60.0;
+        let p = on(&h, Vec3::new(-0.45, 0.8, 0.4));
+        h.move_to(p);
+        h.steps(2);
+        h.shot("zero-forms-4-mirror-ring");
+        h.drag(p, p + vec2(-10.0, -90.0), 10, true);
+        h.settle();
+        eprintln!("  mirror: {}", info(&h));
+        h.move_to(p + vec2(-200.0, 200.0));
+        h.steps(2);
+        h.shot("zero-forms-5-mirror");
+        // Inflate the front, then Shift: Smooth where the side was pulled
+        h.st.form.mirror = false;
+        h.st.form.radius = 70.0;
+        h.st.form.brush = nurbs_app::forms::Brush::Inflate;
+        let p = on(&h, Vec3::new(-0.2, -0.25, 1.0));
+        h.drag(p, p + vec2(0.0, -50.0), 8, true);
+        h.settle();
+        eprintln!("  inflate: {}", info(&h));
+        h.shot("zero-forms-6-inflate");
+        // on the pulled side, half-way to its tip (the first stroke's press
+        // moved along it, same view)
+        let p = on(&h, Vec3::new(0.9, 0.0, 0.45)) + vec2(80.0, -12.0);
+        h.st.form.radius = 110.0;
+        h.st.form.intensity[2] = 0.8;
+        h.hold(Modifiers::SHIFT);
+        h.drag(p, p + vec2(0.0, 300.0), 12, true);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  smooth: {} · undo: {:?}", info(&h), h.st.undo_labels().iter().rev().take(6).collect::<Vec<_>>());
+        h.shot("zero-forms-7-smooth");
+        // a plain Cylinder beside it: the Move brush makes it a form
+        let mut cyl = 0;
+        h.st.begin_live("Cylinder");
+        h.st.live(|d| cyl = d.add(Op::Add, nurbs_kernel::Prim::Cylinder { radius: 10.0, height: 30.0 }, DVec3::new(48.0, 0.0, 0.0), glam::DQuat::IDENTITY));
+        h.st.end_live();
+        h.st.camera.frame(Vec3::new(-24.0, 0.0, -20.0), Vec3::new(64.0, 45.0, 20.0));
+        h.st.form.brush = nurbs_app::forms::Brush::Move;
+        h.st.form.radius = 50.0;
+        h.settle();
+        let k = h.screen_of(Vec3::new(48.0, 27.0, 9.0));
+        h.drag(k, k + vec2(60.0, -50.0), 8, true);
+        h.settle();
+        let f = h.st.doc.feature(cyl).unwrap();
+        eprintln!("  cylinder: form {:?} errors {:?}", f.form.as_ref().map(|m| (m.kind, m.nu, m.nv)), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-forms-8-cylinder");
+        // More detail on the sphere, then a small Pinch across its top
+        h.st.selection = vec![id];
+        h.st.form_detail(id);
+        h.settle();
+        eprintln!("  detail: {}", info(&h));
+        h.st.form.brush = nurbs_app::forms::Brush::Flatten;
+        h.st.form.radius = 55.0;
+        h.st.form.intensity[3] = 1.0;
+        view(&mut h);
+        let p = on(&h, Vec3::new(-0.3, 0.0, 1.0));
+        h.drag(p, p + vec2(0.0, 160.0), 8, true);
+        h.settle();
+        eprintln!("  flatten: {}", info(&h));
+        h.st.form.brush = nurbs_app::forms::Brush::Pinch;
+        h.st.form.radius = 45.0;
+        let p = on(&h, Vec3::new(0.0, 0.75, 0.66));
+        h.drag(p, p + vec2(0.0, 150.0), 8, true);
+        h.settle();
+        eprintln!("  pinch: {}", info(&h));
+        h.st.camera.yaw = -0.25;
+        h.steps(2);
+        h.move_to(p + vec2(-300.0, 200.0));
+        h.steps(2);
+        h.shot("zero-forms-9-detail-flatten-pinch");
+        // a Cube added through the form: one part
+        h.key(egui::Key::Q);
+        let mut b = 0;
+        h.st.begin_live("Cube");
+        h.st.live(|d| b = d.add(Op::Add, nurbs_kernel::Prim::Box { x: 60.0, y: 8.0, z: 24.0 }, DVec3::new(5.0, 2.0, 0.0), glam::DQuat::IDENTITY));
+        h.st.end_live();
+        h.st.selection.clear();
+        h.st.camera.frame(Vec3::new(-35.0, 0.0, -30.0), Vec3::new(70.0, 45.0, 30.0));
+        h.settle();
+        eprintln!("  + cube {b}: faces {:?} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-forms-10-with-cube");
+    }
+
     if want("curves") {
         // the Curves set (Romain 20 nov. 8 h 08, 3ds Max's Shapes): each
         // shape dragged on the ground, then its settings changed
@@ -4110,7 +5034,7 @@ fn main() {
         // deleted: its curves go too; undone
         h.st.delete_selected();
         eprintln!("  deleted: {} features left", h.st.doc.features.len());
-        h.st.undo();
+        h.st.undo_doc();
         h.settle();
         eprintln!("  undone: {} features", h.st.doc.features.len());
     }
@@ -4390,7 +5314,7 @@ fn main() {
         h.shot("zero-comp-bend-2b-pentagon-side");
         let mut d = Doc::default();
         let l = d.add(Op::Add, Prim::Profile { x: 30.0, y: 10.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(l).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false });
+        d.feature_mut(l).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, -0.2], [-0.2, -0.2], [-0.2, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false, spline: false });
         h.reset(d, "L sketch");
         h.st.camera.frame(Vec3::new(-16.0, 0.0, -16.0), Vec3::new(16.0, 16.0, 16.0));
         h.steps(2);
@@ -4458,7 +5382,7 @@ fn main() {
         h.st.select(None, false);
         h.steps(2);
         h.shot("zero-comp-tilt-3-boss-pocket");
-        h.st.undo();
+        h.st.undo_doc();
         h.steps(2);
         h.settle();
         h.key(egui::Key::Num2);

@@ -50,6 +50,10 @@ extern "C" {
     fn focc_cut(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_common(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_region_cut(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int) -> *mut FShape;
+    fn focc_outline_wire(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int, open: c_int) -> *mut FShape;
+    fn focc_revolve(s: *const FShape, o: *const c_double, d: *const c_double, angle: c_double) -> *mut FShape;
+    fn focc_form(poles: *const c_double, nu: c_int, nv: c_int) -> *mut FShape;
+    fn focc_loft(secs: *const *const FShape, n: c_int, solid: c_int, ruled: c_int) -> *mut FShape;
     fn focc_section_count(s: *const FShape) -> c_int;
     fn focc_section_edge(s: *const FShape, k: c_int) -> c_int;
     fn focc_edge_count(s: *const FShape) -> c_int;
@@ -68,6 +72,7 @@ extern "C" {
     fn focc_split(s: *const FShape, pts: *const f64, n: c_int, segs: *const c_int, nseg: c_int) -> *mut FShape;
     fn focc_remove_faces(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
     fn focc_defeature(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
+    fn focc_shell(s: *const FShape, idx: *const c_int, n: c_int, t: c_double, out: c_int, base: i64, arc: c_int) -> *mut FShape;
     fn focc_piece(s: *const FShape, idx: *const c_int, n: c_int, m: *const c_double, tag: i64) -> *mut FShape;
     fn focc_remove_edges(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
     fn focc_face_distance(s: *const FShape, face: c_int, p: *const c_double) -> c_double;
@@ -131,6 +136,9 @@ pub enum CutKind {
     /// A curve point with tension: its curve the conic of rho (given as the
     /// middle point's x) instead of the quadratic (an ellipse's quarter).
     Curve,
+    /// A spline's span: the side from this point to the next a cubic
+    /// Bezier, its inner controls given as the cut's start and middle.
+    Span,
 }
 
 /// What `Shape::fillet_tension` did for one fillet: how many of its faces
@@ -456,7 +464,7 @@ impl Shape {
     pub fn prism_cuts(points: &[[f64; 2]], smooth: &[bool], cuts: &[Option<(CutKind, [f64; 2], [f64; 2], [f64; 2])>], h: f64) -> Result<Shape, String> {
         let xy: Vec<f64> = points.iter().flat_map(|p| [p[0], p[1]]).collect();
         let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
-        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some(_) => 1, None => 0 }).collect();
+        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some((CutKind::Span, ..)) => 5, Some(_) => 1, None => 0 }).collect();
         let abm: Vec<f64> = (0..points.len()).flat_map(|i| match cuts.get(i).copied().flatten() { Some((_, a, m, b)) => [a[0], a[1], m[0], m[1], b[0], b[1]], None => [0.0; 6] }).collect();
         shape(unsafe { focc_prism_cut(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int, h) })
     }
@@ -466,9 +474,40 @@ impl Shape {
     pub fn region_cuts(points: &[[f64; 2]], smooth: &[bool], cuts: &[Option<(CutKind, [f64; 2], [f64; 2], [f64; 2])>]) -> Result<Shape, String> {
         let xy: Vec<f64> = points.iter().flat_map(|p| [p[0], p[1]]).collect();
         let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
-        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some(_) => 1, None => 0 }).collect();
+        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some((CutKind::Span, ..)) => 5, Some(_) => 1, None => 0 }).collect();
         let abm: Vec<f64> = (0..points.len()).flat_map(|i| match cuts.get(i).copied().flatten() { Some((_, a, m, b)) => [a[0], a[1], m[0], m[1], b[0], b[1]], None => [0.0; 6] }).collect();
         shape(unsafe { focc_region_cut(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int) })
+    }
+
+    /// The outline of `prism_cuts` as a wire in the XY plane, open (a
+    /// path: its first point to its last, the ends plain) or closed.
+    pub fn outline_wire(points: &[[f64; 2]], smooth: &[bool], cuts: &[Option<(CutKind, [f64; 2], [f64; 2], [f64; 2])>], open: bool) -> Result<Shape, String> {
+        let xy: Vec<f64> = points.iter().flat_map(|p| [p[0], p[1]]).collect();
+        let sm: Vec<c_int> = (0..points.len()).map(|i| smooth.get(i).copied().unwrap_or(false) as c_int).collect();
+        let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some((CutKind::Span, ..)) => 5, Some(_) => 1, None => 0 }).collect();
+        let abm: Vec<f64> = (0..points.len()).flat_map(|i| match cuts.get(i).copied().flatten() { Some((_, a, m, b)) => [a[0], a[1], m[0], m[1], b[0], b[1]], None => [0.0; 6] }).collect();
+        shape(unsafe { focc_outline_wire(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int, open as c_int) })
+    }
+    /// Turned by `angle` (radians) round the axis through `o` along `d`
+    /// (Revolve): a face makes a solid, a wire a sheet.
+    pub fn revolve(&self, o: [f64; 3], d: [f64; 3], angle: f64) -> Result<Shape, String> {
+        shape(unsafe { focc_revolve(self.0, o.as_ptr(), d.as_ptr(), angle) })
+    }
+    /// A sculpted form: the bicubic BSpline through `poles` (world, nu × nv
+    /// row major), periodic round, clamped bottom to top, its end rows
+    /// single points: a solid.
+    pub fn form(poles: &[[f64; 3]], nu: usize, nv: usize) -> Result<Shape, String> {
+        if poles.len() != nu * nv {
+            return Err("a form's poles do not match its grid".into());
+        }
+        let v: Vec<f64> = poles.iter().flatten().copied().collect();
+        shape(unsafe { focc_form(v.as_ptr(), nu as c_int, nv as c_int) })
+    }
+    /// A loft through `secs` in order (wires, or faces: their outline): a
+    /// solid when `solid`, else a sheet; `ruled`: straight between them.
+    pub fn loft(secs: &[&Shape], solid: bool, ruled: bool) -> Result<Shape, String> {
+        let ptrs: Vec<*const FShape> = secs.iter().map(|s| s.0 as *const FShape).collect();
+        shape(unsafe { focc_loft(ptrs.as_ptr(), ptrs.len() as c_int, solid as c_int, ruled as c_int) })
     }
 
     /// A flat outline (Forme Rectify's Pen) through `pts` on the plane
@@ -702,6 +741,16 @@ impl Shape {
     pub fn defeature(&self, faces: &[usize]) -> Result<Shape, String> {
         let idx: Vec<c_int> = faces.iter().map(|&i| i as c_int).collect();
         shape(unsafe { focc_defeature(self.0, idx.as_ptr(), idx.len() as c_int) })
+    }
+    /// The part hollowed (Shell): faces (0-based) taken away as openings,
+    /// the walls `t` thick inwards (or `outward`); only the solids holding
+    /// an opening (every one when there is none: a cavity inside). `arc`:
+    /// the gaps between two faces' offsets filled round, not grown sharp.
+    /// Tags: a face kept its own, its offset `base` + 1 + a hash of its
+    /// tag, the rims `base`.
+    pub fn shell(&self, faces: &[usize], t: f64, outward: bool, base: i64, arc: bool) -> Result<Shape, String> {
+        let idx: Vec<c_int> = faces.iter().map(|&i| i as c_int).collect();
+        shape(unsafe { focc_shell(self.0, idx.as_ptr(), idx.len() as c_int, t, outward as c_int, base, arc as c_int) })
     }
     /// Faces (0-based) copied as a piece (closed by flat faces where they
     /// are open, else a sheet: volume 0), moved by the affine map `rows`;
@@ -1120,6 +1169,49 @@ mod tests {
         let adj = cut.edge_faces();
         for e in &t.edges {
             assert_eq!(adj[e.index as usize - 1], e.faces, "edge {}", e.index);
+        }
+    }
+
+    #[test]
+    fn shell_box() {
+        // a 40 × 20 × 30 box (Y up), tagged face by face, hollowed 2 mm
+        let mut b = Shape::cuboid(40.0, 20.0, 30.0).unwrap();
+        let tags: Vec<i64> = (0..b.face_count() as i64).map(|i| 10 + i).collect();
+        b.set_tags(&tags);
+        let top = (0..b.face_count()).find(|i| b.face_info(*i).unwrap().normal[1] > 0.9).unwrap();
+        let base = 7i64 << 16;
+        // the top open, inwards: 24000 − 36 × 18 × 26
+        let s = b.shell(&[top], 2.0, false, base, false).unwrap();
+        assert!(s.is_valid());
+        assert!((s.volume() - 7152.0).abs() < 1.0, "open: {}", s.volume());
+        let t: Vec<i64> = (0..s.face_count()).map(|i| s.face_tag(i)).collect();
+        assert_eq!(t.iter().filter(|x| (10..16).contains(*x)).count(), 5, "the outer faces keep their tags: {t:?}");
+        assert_eq!(t.iter().filter(|x| **x > base && **x < base + 65536).count(), 5, "the inner faces: {t:?}");
+        assert!(t.iter().any(|x| *x == base), "the rim: {t:?}");
+        // closed: a cavity inside, 24000 − 36 × 16 × 26
+        let c = b.shell(&[], 2.0, false, base, false).unwrap();
+        assert!((c.volume() - 9024.0).abs() < 1.0, "closed: {}", c.volume());
+        // outwards: 44 × 22 × 34 − 24000
+        let o = b.shell(&[top], 2.0, true, base, false).unwrap();
+        assert!((o.volume() - 8912.0).abs() < 1.0, "outwards: {}", o.volume());
+        // too thick: the box is 30 deep
+        assert!(b.shell(&[top], 16.0, false, base, false).is_err());
+        // with a hole through it and its rims rounded
+        let hole = Shape::cylinder(4.0, 40.0).unwrap();
+        let cut = b.cut(&hole).unwrap();
+        let sec = cut.section_edges();
+        let f = cut.fillet(&sec, 1.0, 99).unwrap();
+        let top = (0..f.face_count()).find(|i| f.face_info(*i).map(|x| x.kind == SurfKind::Plane && x.normal[1] > 0.9).unwrap_or(false)).unwrap();
+        let topc = (0..cut.face_count()).find(|i| cut.face_info(*i).map(|x| x.kind == SurfKind::Plane && x.normal[1] > 0.9).unwrap_or(false)).unwrap();
+        let h = cut.shell(&[topc], 1.5, false, base, false).unwrap();
+        assert!(h.is_valid() && h.volume() > 6000.0 && h.volume() < 6500.0, "hole: {}", h.volume());
+        // the hole's rim rounded: the top meets the fillet tangent, its
+        // wall cut through after the offset
+        for (t, arc) in [(0.8, false), (0.8, true), (1.5, false), (1.5, true)] {
+            match f.shell(&[top], t, false, base, arc) {
+                Ok(h) => eprintln!("hole + fillet t {t} arc {arc}: valid {} volume {:.0} faces {}", h.is_valid(), h.volume(), h.face_count()),
+                Err(e) => eprintln!("hole + fillet t {t} arc {arc}: {e}"),
+            }
         }
     }
 }

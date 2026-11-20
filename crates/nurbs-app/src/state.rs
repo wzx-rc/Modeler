@@ -37,6 +37,13 @@ pub enum Tool {
     /// The Poly tab's Cut (K, Maya's Multi-Cut): clicks on edges and
     /// points join across the faces (`poly.rs`).
     PolyCut,
+    /// Forms (M): brushes that pull a form's surface (`forms.rs`).
+    Form,
+    /// Align (Alt + A): the click on the shape to align the selection to
+    /// (`align.rs`).
+    Align,
+    /// The selected Shell's faces to open, clicked one by one (`shell.rs`).
+    ShellPick,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,6 +407,16 @@ pub enum Handle {
     /// cage à poignées"): a grip by its side of each axis (-1, 0, 1): a
     /// face's middle, an edge's middle, a corner.
     Cage([i8; 3]),
+    /// The selected Array's grips (Romain 20 nov., 19 h 01: "des poignées
+    /// pour manipuler directement l'influence des array"): the first copy
+    /// (0 along, 1 a Grid's rows) sets the step, the arrow past the last
+    /// copy the count; round a Circle the first copy sets the count, the
+    /// arrow at the end the angle.
+    ArrayStep(u8),
+    ArrayCount(u8),
+    ArrayAngle,
+    /// The selected Shell's grip: its dot across the wall, the thickness.
+    ShellThick,
 }
 
 /// The directions a move handle may take: along its axis, in its plane, or
@@ -461,6 +478,9 @@ pub struct Drag {
     pub keep: Vec<(FeatureId, FeatureId)>,
     /// The scale cage as it was when it began.
     pub cage: Option<crate::cage::CageBox>,
+    /// Path points moved in Vertex mode (curve, point), `start` their
+    /// curves as they were.
+    pub pts: Vec<(FeatureId, usize)>,
 }
 
 /// A fillet or chamfer sized by a drag on screen (Rectify's Radius
@@ -655,6 +675,19 @@ pub struct AppState {
     pub surface_on_scan: bool,
     /// The Slot tool reads the scan (ON SCAN) instead of drawing by hand.
     pub slot_on_scan: bool,
+    /// The Forms tool's brushes and their settings, the stroke under way,
+    /// the form drawn from its poles until the kernel's model of it comes.
+    pub form: crate::forms::FormSettings,
+    pub form_brush: Option<crate::forms::Sculpt>,
+    pub form_shown: Option<FeatureId>,
+    /// Counts the changes of the balls' looks (they do not go to the
+    /// kernel, so `version` does not move; the session save reads it).
+    pub looks_rev: u64,
+    /// A look being changed (a slider held, the colour picker open): one
+    /// undo step when it ends (`end_look`).
+    pub look_live: Option<(String, Doc, SelState)>,
+    /// Align (`align.rs`): the target to click, then its window.
+    pub align: Option<crate::align::Align>,
     /// The Slot drawn by hand.
     pub slot_draw: Option<crate::slot::SlotDraw>,
     /// A curve or 2D boolean being pulled into a solid (Curves, step 3).
@@ -881,6 +914,12 @@ impl AppState {
             round_only: false,
             surface_on_scan: false,
             slot_on_scan: false,
+            form: Default::default(),
+            form_brush: None,
+            form_shown: None,
+            looks_rev: 0,
+            look_live: None,
+            align: None,
             slot_draw: None,
             curve_pull: None,
             journal: Default::default(),
@@ -1295,10 +1334,14 @@ impl AppState {
 
     // ------------------------------------------------------------- history
 
-    fn touched(&mut self) {
+    pub(crate) fn touched(&mut self) {
         // the curves follow their settings and boxes
         self.doc.regen_curves();
         self.keep_markers();
+        // an operation made on an Array's copy: on every copy
+        if self.doc.keep_arrays() {
+            self.toast("Made on the original and every copy of its Array", false);
+        }
         self.version += 1;
     }
 
@@ -1353,7 +1396,7 @@ impl AppState {
 
     /// A change kept: written in the journal, and its build checked when it
     /// arrives (`check_build`).
-    fn after_change(&mut self, label: &str, before: &Doc) {
+    pub(crate) fn after_change(&mut self, label: &str, before: &Doc) {
         let steps: Vec<FeatureId> = self.doc.features.iter().filter(|f| before.feature(f.id) != Some(*f)).map(|f| f.id).collect();
         self.record("edit", label);
         if let Some(e) = self.journal.back_mut() {
@@ -2384,6 +2427,10 @@ impl AppState {
 
     /// Cancels what is under way (creation, sketch, drag, inset).
     pub fn abort_gestures(&mut self) {
+        self.end_look();
+        if self.align.is_some() {
+            self.align_cancel();
+        }
         // a stroke made is kept (its dabs are already on the clay)
         if self.stroke.is_some() {
             self.end_stroke();
@@ -2399,7 +2446,7 @@ impl AppState {
         self.end_poly_cut();
         self.poly_cut_hover = None;
         self.poly_loop.clear();
-        if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() || self.round_drag.take().is_some() || self.face_drag.take().is_some() || self.curve_pull.take().is_some() {
+        if self.creation.take().is_some() || self.drag.take().is_some() || self.push.take().is_some() || self.round_drag.take().is_some() || self.face_drag.take().is_some() || self.curve_pull.take().is_some() || self.form_brush.take().is_some() {
             self.cancel_live();
             self.clean_selection_ids();
         }
@@ -2445,6 +2492,9 @@ impl AppState {
         }
         if self.stroke.is_some() {
             self.end_stroke();
+        }
+        if self.form_brush.is_some() {
+            self.form_release();
         }
         if self.push.is_some() {
             self.finish_push();
@@ -2559,6 +2609,12 @@ impl AppState {
                 }
             } else if let Some(k) = &f.cut {
                 k.pts.first().map(|p| p.edge.faces[0]).or(k.remove_faces.first().map(|r| r.tag)).or(k.remove_edges.first().map(|e| e.faces[0]))
+            } else if let Some(sh) = &f.shell {
+                // a Shell: its first opening's (none: no element)
+                sh.faces.first().map(|r| r.tag)
+            } else if let Some(a) = &f.array {
+                // an Array: its first shape's
+                return a.sources.first().copied().filter(|s| self.doc.feature(*s).is_some());
             } else {
                 return None;
             };
@@ -2819,6 +2875,7 @@ impl AppState {
             Some(Tool::Push(k)) => self.arm_push(k, at),
             Some(t @ (Tool::Knife | Tool::Point)) => self.arm_knife(t),
             Some(Tool::Slot) => self.arm_slot(),
+            Some(Tool::Form) => self.arm_form(),
             _ => self.toast("No tool used yet", false),
         }
     }
@@ -3269,7 +3326,7 @@ impl AppState {
     /// Shift + click on a point placed (Surface, Curve mode): it breaks the
     /// curve in a V, or no longer. False when no point is there.
     pub fn sketch_toggle_sharp(&mut self, p: [f32; 2]) -> bool {
-        if self.tool != Tool::Create(PrimKind::Surface) || !self.surface_curve {
+        if !matches!(self.tool, Tool::Create(PrimKind::Surface) | Tool::Create(PrimKind::Path)) || !self.surface_curve {
             return false;
         }
         let i = self.sketch_point_at(p);
@@ -3348,7 +3405,7 @@ impl AppState {
             return;
         }
         let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
-        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: k.corner.clone(), tension: vec![], open: false };
+        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: k.corner.clone(), tension: vec![], open: false, spline: false };
         self.sketch = None;
         self.begin_live("New Sketch");
         let op = self.mode;
@@ -3377,6 +3434,30 @@ impl AppState {
         let Some(k) = self.sketch.clone() else { return };
         if k.pts.len() < 3 {
             self.toast("A surface needs 3 points at least", true);
+            return;
+        }
+        // on its plane (20 nov.): a closed curve filled, exact (the spline
+        // or straight sides with their fillets), still a curve to edit
+        if !(self.surface_on_scan || k.free.iter().any(|f| f.is_some())) {
+            let Some((profile, origin, rot, w, dp)) = crate::surfaces::sketch_profile(&k, true, self.surface_curve) else {
+                self.toast("The outline is too small: draw it wider", true);
+                return;
+            };
+            self.sketch = None;
+            let mut id = 0;
+            let mat = self.material;
+            self.edit("New Surface", |d| {
+                let name = d.fresh_name("Surface");
+                id = d.add(Op::Add, Prim::Path { x: w, z: dp }, origin, rot);
+                if let Some(f) = d.feature_mut(id) {
+                    f.name = name;
+                    f.material = mat;
+                    f.profile = Some(profile);
+                    f.fill = true;
+                }
+            });
+            self.selection = vec![id];
+            self.tool = Tool::Select;
             return;
         }
         let w: Vec<DVec3> = self.surface_line(&k, None, true);
@@ -3530,19 +3611,12 @@ impl AppState {
             self.toast(if closed { "A closed path needs 3 points at least" } else { "A path needs 2 points at least" }, true);
             return;
         }
-        let lo = k.pts.iter().fold([f64::MAX; 2], |a, q| [a[0].min(q[0]), a[1].min(q[1])]);
-        let hi = k.pts.iter().fold([f64::MIN; 2], |a, q| [a[0].max(q[0]), a[1].max(q[1])]);
-        let (w, dp) = (hi[0] - lo[0], hi[1] - lo[1]);
-        if w.max(dp) < 0.5 {
+        // straight sides, or the spline through the points (CURVE)
+        let Some((profile, origin, rot, w, dp)) = crate::surfaces::sketch_profile(&k, closed, self.surface_curve) else {
             self.toast("The path is too short: draw it longer", true);
             return;
-        }
-        // a straight path along X or Z: its box is 0.01 mm across
-        let (w, dp) = (w.max(0.01), dp.max(0.01));
-        let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
-        let profile = Profile { points: k.pts.iter().map(|q| [(q[0] - c[0]) / w, (q[1] - c[1]) / dp]).collect(), smooth: k.smooth.clone(), corner: k.corner.clone(), tension: vec![], open: !closed };
+        };
         self.sketch = None;
-        let (origin, rot) = (k.plane.at(c), basis_rotation(k.plane.u, k.plane.n));
         let mut id = 0;
         self.edit("New Path", |d| {
             id = d.add(Op::Add, Prim::Path { x: w, z: dp }, origin, rot);
@@ -3727,7 +3801,7 @@ impl AppState {
                 let n = (self.view().eye.as_dvec3() - pivot).try_normalize()?;
                 BasePlane::new(pivot, n, None).hit(ro, rd)
             }
-            Handle::PushInset | Handle::PushDepth => None,
+            Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick => None,
             Handle::Rot(a) => BasePlane::new(pivot, DVec3::AXES[a], None).hit(ro, rd),
             Handle::Scale(a) => {
                 let axis = self.scale_frame()? * DVec3::AXES[a];
@@ -3762,6 +3836,14 @@ impl AppState {
         }
         if self.sdf_comp() {
             self.begin_sdf_drag(h, p);
+            return;
+        }
+        if matches!(h, Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle) {
+            self.begin_array_drag(h, p);
+            return;
+        }
+        if h == Handle::ShellThick {
+            self.begin_shell_drag(p);
             return;
         }
         if self.sel_mode != SelMode::Object {
@@ -3799,7 +3881,7 @@ impl AppState {
             .collect();
         let keep: Vec<(FeatureId, FeatureId)> = start.iter().filter(|s| s.op == Op::Carve).flat_map(|s| self.later_overlaps(s.id).into_iter().map(move |h| (s.id, h))).collect();
         let cage = if matches!(h, Handle::Cage(_)) { self.cage() } else { None };
-        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom, keep, cage });
+        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom, keep, cage, pts: vec![] });
     }
 
     /// The point a handle sits on.
@@ -3844,6 +3926,18 @@ impl AppState {
 
     fn update_drag_shapes(&mut self, p: [f32; 2]) {
         let Some(d) = self.drag.clone() else { return };
+        if !d.pts.is_empty() {
+            self.update_path_points_drag(&d, p);
+            return;
+        }
+        if matches!(d.handle, Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle) {
+            self.update_array_drag(&d, p);
+            return;
+        }
+        if d.handle == Handle::ShellThick {
+            self.update_shell_drag(&d, p);
+            return;
+        }
         if d.line.is_some() {
             self.update_push_drag(&d, p);
             return;
@@ -3891,7 +3985,7 @@ impl AppState {
                     }
                 });
             }
-            Handle::PushInset | Handle::PushDepth => {}
+            Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick => {}
             Handle::Rot(a) => {
                 let axis = DVec3::AXES[a];
                 let flat = |v: DVec3| v - axis * v.dot(axis);
@@ -4037,13 +4131,20 @@ impl AppState {
         if m.serial / 4 == self.version {
             return None;
         }
+        // after a Mirror the faces on both sides carry the same tags (one
+        // side would move the wrong way): the kernel's model only
+        // (an Array's copies too, each moved its own way round a circle; a
+        // Shell's inner walls carry the step's tags, they would stay behind)
+        if self.doc.features.iter().any(|f| (f.mirror.is_some() || f.array.is_some() || f.shell.is_some()) && f.visible && !f.suspended) {
+            return None;
+        }
         // the shapes' frames when the model on screen was asked for
         let (_, then) = self.sent_frames.iter().find(|(s, _)| *s == m.serial)?;
         let mut out = std::collections::HashMap::new();
         for (id, t) in then {
             // a shape carved out is the part's hole: the kernel's model
             // shows it, its cage where the pointer takes it
-            let Some(now) = self.doc.feature(*id).filter(|f| f.op != Op::Carve) else { continue };
+            let Some(now) = self.doc.feature(*id).filter(|f| f.op != Op::Carve && Some(f.id) != self.form_shown) else { continue };
             let x = shape_frame(now) * t.inverse();
             if !x.abs_diff_eq(DMat4::IDENTITY, 1e-9) && x.is_finite() {
                 out.insert(*id, x);
@@ -4093,6 +4194,10 @@ impl AppState {
                 self.check_build();
             }
         }
+        // a form pulled by a brush: drawn by the app until its model comes
+        if self.form_brush.is_none() && self.form_shown.is_some() && self.model.as_ref().map(|m| m.serial / 4 == self.version).unwrap_or(true) {
+            self.form_shown = None;
+        }
         // the journal: tool and mode changes
         let seen = (format!("{:?}", self.tool), format!("{:?}", self.sel_mode));
         if seen != self.journal_seen {
@@ -4101,6 +4206,7 @@ impl AppState {
             self.record("tool", &what);
         }
         self.refresh_snaps();
+        self.align_tick();
         self.remesh_tick();
         self.sdf_tick();
         self.reference_tick();
@@ -4148,6 +4254,12 @@ impl AppState {
                     if p.inset > l + 1e-6 {
                         p.inset = *l;
                         said = Some(format!("{name}: {} mm is its largest inset", crate::widgets::fmt_mm(*l as f32)));
+                    }
+                }
+                if let Some(sh) = f.shell.as_mut() {
+                    if sh.thickness > l + 1e-6 {
+                        sh.thickness = *l;
+                        said = Some(format!("{name}: {} mm is its thickest wall here", crate::widgets::fmt_mm(*l as f32)));
                     }
                 }
             }
@@ -4580,34 +4692,7 @@ fn from_norm(f: &Feature, q: DVec3) -> DVec3 {
 /// An operation with its points mapped by `m` (an affine map): its edges',
 /// face's, components' and knife points; a move's delta as a vector.
 pub fn carried(op: &Feature, m: &dyn Fn(DVec3) -> DVec3) -> Feature {
-    let mut f = op.clone();
-    let lin = |v: DVec3| m(v) - m(DVec3::ZERO);
-    if let Some(r) = f.round.as_mut() {
-        for e in &mut r.edges {
-            e.at = m(e.at);
-        }
-    }
-    if let Some(p) = f.push.as_mut() {
-        p.face.at = m(p.face.at);
-    }
-    if let Some(t) = f.tweak.as_mut() {
-        let c = |c: &mut nurbs_kernel::Comp| match c {
-            nurbs_kernel::Comp::Face(r) => r.at = m(r.at),
-            nurbs_kernel::Comp::Edge(e) => e.at = m(e.at),
-            nurbs_kernel::Comp::Vertex(v) => *v = m(*v),
-        };
-        c(&mut t.comp);
-        t.more.iter_mut().for_each(c);
-        t.delta = lin(t.delta);
-        t.about = t.about.map(m);
-    }
-    if let Some(k) = f.cut.as_mut() {
-        for p in &mut k.pts {
-            p.at = m(p.at);
-            p.edge.at = m(p.edge.at);
-        }
-    }
-    f
+    op.carried_by(m)
 }
 
 pub fn scaled(s: &Feature, pivot: DVec3, frame: DQuat, k: DVec3) -> Feature {
@@ -4666,7 +4751,7 @@ pub fn size_handle_pos(f: &Feature, h: Handle) -> Option<DVec3> {
 /// The size handles of a shape.
 pub fn size_handles(f: &Feature) -> Vec<Handle> {
     // a 2D boolean's box is its operands' (Scale, R, sizes them)
-    if !f.is_solid() || f.is_sheet() || f.shape_bool.is_some() {
+    if !f.is_solid() || f.is_sheet() || f.shape_bool.is_some() || f.loft.is_some() {
         return vec![];
     }
     match f.prim {
