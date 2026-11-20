@@ -609,27 +609,117 @@ pub fn extrude_faces(pts: &mut Vec<Vec3>, faces: &mut Vec<Vec<u32>>, sel: &[u32]
     sel.to_vec()
 }
 
-/// Each face moved in towards its centre by the fraction `t` (Maya's
-/// Inset, faces apart): a ring of quads round each. Returns the inner faces.
+/// Inset (I): the picked faces kept together (Maya's default, Keep Faces
+/// Together): only the region's border comes in, each border point along
+/// its two border sides' inward directions (a mitre), by `t` times the
+/// smallest of the region's faces' half widths, so a strip of one face
+/// never folds; a ring of quads joins the old border to the new one. The
+/// region's inner points stay. The picked faces are given back (their
+/// indices do not change).
 pub fn inset_faces(pts: &mut Vec<Vec3>, faces: &mut Vec<Vec<u32>>, sel: &[u32], t: f32) -> Vec<u32> {
-    let mut inner = vec![];
-    for &fi in sel {
-        let f = faces[fi as usize].clone();
-        let c = poly_centre(pts, &f);
-        let base = pts.len() as u32;
-        for &v in &f {
-            let p = pts[v as usize];
-            pts.push(p.lerp(c, t));
-        }
-        let n = f.len() as u32;
-        for i in 0..n {
-            let j = (i + 1) % n;
-            faces.push(vec![f[i as usize], f[j as usize], base + j, base + i]);
-        }
-        faces[fi as usize] = (0..n).map(|i| base + i).collect();
-        inner.push(fi);
+    let sel: Vec<u32> = {
+        let mut s: Vec<u32> = sel.iter().copied().filter(|f| (*f as usize) < faces.len()).collect();
+        s.sort();
+        s.dedup();
+        s
+    };
+    if sel.is_empty() {
+        return vec![];
     }
-    inner
+    // the region's border: its sides used once by its faces, in their
+    // faces' direction, with the face each belongs to
+    let mut count: HashMap<(u32, u32), i32> = HashMap::new();
+    for &fi in &sel {
+        let f = &faces[fi as usize];
+        for i in 0..f.len() {
+            *count.entry(edge_key(f[i], f[(i + 1) % f.len()])).or_default() += 1;
+        }
+    }
+    let mut border: Vec<(u32, u32, u32)> = vec![];
+    for &fi in &sel {
+        let f = &faces[fi as usize];
+        for i in 0..f.len() {
+            let (a, b) = (f[i], f[(i + 1) % f.len()]);
+            if count[&edge_key(a, b)] == 1 {
+                border.push((a, b, fi));
+            }
+        }
+    }
+    // how far: t times the smallest half width of the region's faces (the
+    // distance from a face's centre to its nearest side)
+    let mut half = f32::MAX;
+    for &fi in &sel {
+        let f = &faces[fi as usize];
+        let c = poly_centre(pts, f);
+        for i in 0..f.len() {
+            let (a, b) = (pts[f[i] as usize], pts[f[(i + 1) % f.len()] as usize]);
+            let ab = b - a;
+            let l2 = ab.length_squared();
+            if l2 > 1e-12 {
+                let k = ((c - a).dot(ab) / l2).clamp(0.0, 1.0);
+                half = half.min((a + ab * k).distance(c));
+            }
+        }
+    }
+    if !half.is_finite() || half <= 0.0 {
+        return sel;
+    }
+    let d = t.clamp(0.0, 0.98) * half;
+    // each border side's inward way, in its face's plane
+    let inward = |pts: &Vec<Vec3>, faces: &Vec<Vec<u32>>, a: u32, b: u32, fi: u32| -> Vec3 {
+        let n = poly_normal(pts, &faces[fi as usize]).normalize_or_zero();
+        n.cross(pts[b as usize] - pts[a as usize]).normalize_or_zero()
+    };
+    // a border point's sides: the one coming in, the one going out
+    let mut into: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut out_of: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (k, (a, b, _)) in border.iter().enumerate() {
+        out_of.entry(*a).or_default().push(k);
+        into.entry(*b).or_default().push(k);
+    }
+    let mut moved: HashMap<u32, u32> = HashMap::new();
+    let mut verts: Vec<u32> = border.iter().map(|e| e.0).collect();
+    verts.sort();
+    verts.dedup();
+    for v in verts {
+        let ins: Vec<Vec3> = into.get(&v).into_iter().flatten().chain(out_of.get(&v).into_iter().flatten()).map(|k| {
+            let (a, b, fi) = border[*k];
+            inward(pts, faces, a, b, fi)
+        }).collect();
+        let (i1, i2) = match (into.get(&v).and_then(|k| k.first()), out_of.get(&v).and_then(|k| k.first())) {
+            (Some(k1), Some(k2)) => {
+                let (a, b, f1) = border[*k1];
+                let (c, e, f2) = border[*k2];
+                (inward(pts, faces, a, b, f1), inward(pts, faces, c, e, f2))
+            }
+            _ => {
+                let m = ins.iter().copied().sum::<Vec3>().normalize_or_zero();
+                (m, m)
+            }
+        };
+        // the mitre: d along each side's inward way, at most three times d
+        let dot = i1.dot(i2).clamp(-1.0, 1.0);
+        let mut m = if dot > -0.95 { (i1 + i2) * (d / (1.0 + dot)) } else { (i1 - i2).normalize_or_zero() * d };
+        if m.length() > 3.0 * d {
+            m = m.normalize_or_zero() * 3.0 * d;
+        }
+        let at = pts[v as usize] + m;
+        pts.push(at);
+        moved.insert(v, pts.len() as u32 - 1);
+    }
+    // the ring joining the old border to the new one
+    for (a, b, _) in &border {
+        faces.push(vec![*a, *b, moved[b], moved[a]]);
+    }
+    // the region's faces take the new border points
+    for &fi in &sel {
+        for v in faces[fi as usize].iter_mut() {
+            if let Some(n) = moved.get(v) {
+                *v = *n;
+            }
+        }
+    }
+    sel
 }
 
 /// Takes the faces out (their points too when nothing else uses them).
@@ -950,6 +1040,42 @@ mod tests {
         delete_faces(&mut m, &[3]);
         assert_eq!(m.faces.len(), 13);
         assert_eq!(m.verts.len(), 16);
+    }
+
+    #[test]
+    fn inset_keeps_faces_together() {
+        // the plane's four middle cells: one border round them, their
+        // middle point kept
+        let (mut p, mut f) = poly_plane(20.0, 4);
+        let sel: Vec<u32> = (0..f.len() as u32).filter(|i| {
+            let c = poly_centre(&p, &f[*i as usize]);
+            c.x.abs() < 5.0 && c.z.abs() < 5.0
+        }).collect();
+        assert_eq!(sel.len(), 4);
+        let (np, nf) = (p.len(), f.len());
+        let up = |p: &Vec<Vec3>, f: &Vec<Vec<u32>>| f.iter().all(|q| poly_normal(p, q).y > 0.0);
+        let inner = inset_faces(&mut p, &mut f, &sel, 0.5);
+        assert_eq!(inner, sel);
+        assert_eq!(p.len(), np + 8);
+        assert_eq!(f.len(), nf + 8);
+        assert!(up(&p, &f));
+        let centre = p.iter().position(|q| q.length() < 1e-5).unwrap() as u32;
+        assert!(sel.iter().all(|i| f[*i as usize].contains(&centre)));
+        // 2.5 mm half cells, t = 0.5: the border in by 1.25 mm, corners too
+        let mut xs: Vec<f32> = sel.iter().flat_map(|i| f[*i as usize].iter().map(|v| p[*v as usize].x.abs())).collect();
+        xs.sort_by(|a, b| a.total_cmp(b));
+        xs.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+        assert_eq!(xs.len(), 2);
+        assert!(xs[0].abs() < 1e-4 && (xs[1] - 3.75).abs() < 1e-4, "{xs:?}");
+        // a strip one face wide never folds, even at its fullest
+        let (mut p, mut f) = poly_plane(20.0, 4);
+        let row: Vec<u32> = (0..f.len() as u32).filter(|i| {
+            let c = poly_centre(&p, &f[*i as usize]);
+            c.z > 0.0 && c.z < 5.0
+        }).collect();
+        assert_eq!(row.len(), 4);
+        inset_faces(&mut p, &mut f, &row, 0.95);
+        assert!(up(&p, &f));
     }
 
     #[test]

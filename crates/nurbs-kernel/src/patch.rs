@@ -233,6 +233,60 @@ pub fn place(cv: &[Vec3; 16], b: [f32; 5]) -> Vec3 {
     s + tu * b[2] + tv * b[3] + n * b[4]
 }
 
+/// How far the surface leaves the chords of a cell `du` × `dv` (in
+/// parameter) round (u, v), in mm: its curvature along the normal there
+/// (finite differences of the tangents) over the cell, an eighth of it.
+pub fn sag(cv: &[Vec3; 16], u: f32, v: f32, du: f32, dv: f32) -> f32 {
+    let h = 1e-3;
+    let (u0, u1) = ((u - h).max(0.0), (u + h).min(1.0));
+    let (v0, v1) = ((v - h).max(0.0), (v + h).min(1.0));
+    let (_, su, sv) = eval(cv, u, v);
+    let n = frame(su, sv).2;
+    let (_, sua, _) = eval(cv, u0, v);
+    let (_, sub, _) = eval(cv, u1, v);
+    let (_, suc, svc) = eval(cv, u, v0);
+    let (_, sud, svd) = eval(cv, u, v1);
+    let suu = n.dot(sub - sua) / (u1 - u0);
+    let svv = n.dot(svd - svc) / (v1 - v0);
+    let suv = n.dot(sud - suc) / (v1 - v0);
+    (suu.abs() * du * du + 2.0 * suv.abs() * du * dv + svv.abs() * dv * dv) / 8.0
+}
+
+/// Back from Poly: the points that sit off the surface by no more than its
+/// facets do (an inset's ring, a loop or a cut across a face: they lie on
+/// the layer's flat faces, which cut the curve's chords) are put on it, so
+/// they ride on it as the grid does; what stands off further (an
+/// extrusion, a point pulled by hand) keeps its height. The cell is the
+/// largest step in u and in v along the layer's edges lying on the surface.
+/// Returns how many were put on it.
+pub fn settle_on(cv: &[Vec3; 16], bind: &mut [[f32; 5]], faces: &[Vec<u32>]) -> usize {
+    let on = |b: &[f32; 5]| b[2].abs() + b[3].abs() + b[4].abs() <= OFF;
+    let (mut du, mut dv) = (0.0f32, 0.0f32);
+    for f in faces {
+        for i in 0..f.len() {
+            let (a, b) = (f[i] as usize, f[(i + 1) % f.len()] as usize);
+            if a < bind.len() && b < bind.len() && on(&bind[a]) && on(&bind[b]) {
+                du = du.max((bind[a][0] - bind[b][0]).abs());
+                dv = dv.max((bind[a][1] - bind[b][1]).abs());
+            }
+        }
+    }
+    if du <= 0.0 || dv <= 0.0 {
+        return 0;
+    }
+    let mut n = 0;
+    for b in bind.iter_mut() {
+        if on(b) || b[2].abs() + b[3].abs() > OFF {
+            continue;
+        }
+        if b[4].abs() <= OFF + 1.25 * sag(cv, b[0], b[1], du, dv) {
+            b[4] = 0.0;
+            n += 1;
+        }
+    }
+    n
+}
+
 /// One of the patch's four sides as a polyline (mm): 0 v = 0, 1 u = 1,
 /// 2 v = 1, 3 u = 0.
 pub fn side(cv: &[Vec3; 16], k: usize, n: usize) -> Vec<Vec3> {
@@ -837,6 +891,34 @@ mod tests {
         assert!(((q1 - q0).length() - 3.0).abs() < 1e-3);
         assert!((q1 - q0).normalize().dot(frame(su, sv).2) > 0.999);
         assert!(q0.y > 1.0);
+    }
+
+    #[test]
+    fn facet_points_settle_on_the_surface() {
+        // a domed patch, its 8 x 8 grid bound; a point in the middle of a
+        // cell on its flat quad (an inset's corner) and one 1.5 mm over the
+        // surface (pulled by hand)
+        let mut p = flat();
+        for k in [5, 6, 9, 10] {
+            p.cv[k][1] = 18.0;
+        }
+        let cv = p.cvs(Vec3::ONE);
+        let (pts, faces, uv) = grid(&cv, 8, 8);
+        let mut bs: Vec<[f32; 5]> = uv.iter().map(|t| [t[0], t[1], 0.0, 0.0, 0.0]).collect();
+        let seeds = seeds(&cv, 24);
+        let q = &faces[2 * 8 + 3];
+        let mid = q.iter().map(|v| pts[*v as usize]).sum::<Vec3>() / 4.0;
+        let bm = bind(&cv, mid, &seeds);
+        assert!(bm[4].abs() > OFF, "the facet's middle is off the dome: {}", bm[4]);
+        bs.push(bm);
+        let (s, su, sv) = eval(&cv, 0.6, 0.4);
+        let high = s + frame(su, sv).2 * 1.5;
+        bs.push(bind(&cv, high, &seeds));
+        let n = settle_on(&cv, &mut bs, &faces);
+        assert_eq!(n, 1);
+        let k = bs.len();
+        assert_eq!(bs[k - 2][4], 0.0);
+        assert!((bs[k - 1][4] - 1.5).abs() < 1e-3);
     }
 
     #[test]

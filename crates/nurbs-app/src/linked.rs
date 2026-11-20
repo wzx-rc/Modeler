@@ -87,16 +87,22 @@ pub fn apply_binding(f: &mut Feature) {
     m.make_mut().verts = unit;
 }
 
-/// Each point of the Poly layer bound to the surface again (back from Poly).
+/// Each point of the Poly layer bound to the surface again (back from Poly);
+/// what lies on its facets put on the surface itself (`patch::settle_on`).
 pub fn rebind(f: &mut Feature) {
     let s = size(f);
     let Some(m) = f.mesh.as_mut() else { return };
     let Some(p) = m.patch.clone() else { return };
     let cv = p.cvs(s);
     let seeds = patch::seeds(&cv, 24);
-    let bind: Vec<[f32; 5]> = m.local(s).iter().map(|q| patch::bind(&cv, *q, &seeds)).collect();
+    let mut bind: Vec<[f32; 5]> = m.local(s).iter().map(|q| patch::bind(&cv, *q, &seeds)).collect();
+    // what lies on the layer's facets rides on the surface itself
+    let settled = patch::settle_on(&cv, &mut bind, &m.faces);
     if let Some(pp) = m.make_mut().patch.as_mut() {
         pp.bind = bind;
+    }
+    if settled > 0 {
+        apply_binding(f);
     }
 }
 

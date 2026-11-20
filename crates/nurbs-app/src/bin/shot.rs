@@ -338,6 +338,9 @@ fn main() {
     if want("lsurf") {
         linked(&mut h);
     }
+    if want("lsurfx") {
+        linked_complex(&mut h);
+    }
 
     if want("empty") {
         h.reset(Doc::default(), "Untitled");
@@ -5488,4 +5491,423 @@ fn linked(h: &mut Harness) {
     eprintln!("linked: extrusion {:.2} mm, scaled 1.5 then a point moved: {:.2} mm", before, tall(h));
     h.st.undo();
     h.st.undo();
+}
+
+/// The linked surface on a busier part (Romain, 20 nov., 20 h 58: "Test
+/// plus complexe comme modèle"): a twisted surface, in Poly a rib bevelled
+/// round, a stepped boss, a pocket, an island, an edge loop over them; back
+/// in NURBS its contour pulled far; a slot and two holes carved on it.
+fn linked_complex(h: &mut Harness) {
+    use egui::Key;
+    use nurbs_app::linked::cvs_world;
+    use nurbs_app::poly::PolySel;
+    use nurbs_kernel::patch::{is_corner, PatchState, CONTOUR};
+    h.reset(Doc::default(), "Linked surface, complex");
+    let view = |h: &mut Harness| {
+        h.st.camera.yaw = 0.55;
+        h.st.camera.pitch = 0.62;
+        h.st.camera.target = Vec3::new(0.0, 4.0, 0.0);
+        h.st.camera.dist = 255.0;
+        h.steps(2);
+    };
+    let top = |h: &mut Harness| {
+        h.st.camera.yaw = 0.0;
+        h.st.camera.pitch = 1.35;
+        h.st.camera.target = Vec3::new(0.0, 0.0, 15.0);
+        h.st.camera.dist = 300.0;
+        h.steps(2);
+    };
+    let park = |h: &mut Harness, n: usize| {
+        h.move_to(pos2(1200.0, 700.0));
+        h.steps(n);
+    };
+    top(h);
+    // 1. a trapezoid Path, 120 x 84 (drawn from above: it all fits there)
+    h.key(Key::P);
+    let g = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 0.0, z));
+    let first = g(h, -60.0, 42.0);
+    h.click(first);
+    h.click(g(h, 60.0, 42.0));
+    h.click(g(h, 46.0, -42.0));
+    h.click(g(h, -46.0, -42.0));
+    h.move_to(first);
+    h.steps(2);
+    h.click(first);
+    h.settle();
+    let Some(path) = h.st.doc.features.iter().rev().find(|f| f.is_path()).map(|f| f.id) else {
+        eprintln!("lsurfx: no path made");
+        return;
+    };
+    h.st.tool = Tool::Select;
+    h.st.selection = vec![path];
+    if !h.st.make_linked_surface() {
+        let f = h.st.doc.feature(path).unwrap();
+        eprintln!("lsurfx: not made: {:?} {:?}", f.prim, f.profile);
+        return;
+    }
+    let id = h.st.selection[0];
+    view(h);
+    // 2. twisted: the front side's tangents up and down, the back's the
+    //    other way, a side's up (Vertex mode, the gizmo's Y arrow)
+    h.key(Key::Num1);
+    h.key(Key::W);
+    h.steps(2);
+    let cv = |h: &Harness| cvs_world(h.st.doc.feature(id).unwrap()).unwrap();
+    let lift = |h: &mut Harness, k: usize, d: f32| {
+        let c = cv(h)[k];
+        h.click(h.screen_of(c));
+        h.steps(2);
+        let s0 = h.screen_of(c);
+        let dir = (h.screen_of(c + Vec3::Y * 10.0) - s0).normalized();
+        let a = s0 + dir * 50.0;
+        let b = h.screen_of(c + Vec3::Y * d) + dir * 50.0;
+        h.move_to(a);
+        h.steps(2);
+        h.drag(a, b, 12, true);
+        h.steps(2);
+        let after = cv(h)[k];
+        eprintln!("lsurfx: point {k} moved {:.2} mm up", after.y - c.y);
+    };
+    let c = cv(h);
+    let mut tangents: Vec<usize> = CONTOUR.iter().copied().filter(|k| !is_corner(*k)).collect();
+    tangents.sort_by(|a, b| c[*b].z.total_cmp(&c[*a].z));
+    let front = {
+        let mut f = vec![tangents[0], tangents[1]];
+        f.sort_by(|a, b| c[*a].x.total_cmp(&c[*b].x));
+        f
+    };
+    let back = {
+        let n = tangents.len();
+        let mut f = vec![tangents[n - 1], tangents[n - 2]];
+        f.sort_by(|a, b| c[*a].x.total_cmp(&c[*b].x));
+        f
+    };
+    let side = tangents[2..tangents.len() - 2].iter().copied().min_by(|a, b| c[*a].x.total_cmp(&c[*b].x)).unwrap();
+    lift(h, front[0], 16.0);
+    lift(h, front[1], -10.0);
+    lift(h, back[0], -8.0);
+    lift(h, back[1], 14.0);
+    lift(h, side, 10.0);
+    h.key(Key::Num4);
+    h.st.selection = vec![id];
+    park(h, 14);
+    h.shot("lsurfx-01-twisted");
+    // 3. Poly: the layer's grid read once (its faces' places on screen
+    //    from above stay while they are not touched)
+    h.st.set_patch_state(id, PatchState::Poly);
+    h.steps(4);
+    let f = h.st.doc.feature(id).unwrap().clone();
+    let pts = nurbs_app::meshes::world_points(&f);
+    let m = f.mesh.clone().unwrap();
+    let bind = m.patch.as_ref().unwrap().bind.clone();
+    let count = |k: usize| {
+        let mut v: Vec<i32> = bind.iter().map(|b| (b[k] * 1000.0).round() as i32).collect();
+        v.sort();
+        v.dedup();
+        v.len() - 1
+    };
+    let (nu, nv) = (count(0), count(1));
+    eprintln!("lsurfx: grid {nu} x {nv}");
+    let face_c = |i: usize, j: usize| {
+        let q = &m.faces[j * nu + i];
+        q.iter().map(|x| pts[*x as usize]).sum::<Vec3>() / q.len() as f32
+    };
+    // Face mode, faces clicked from above (Shift adds)
+    let pick = |h: &mut Harness, cells: &[(usize, usize)]| {
+        top(h);
+        h.key(Key::Num3);
+        h.steps(2);
+        for (n, (i, j)) in cells.iter().enumerate() {
+            if n > 0 {
+                h.hold(Modifiers::SHIFT);
+            }
+            h.click(h.screen_of(face_c(*i, *j)));
+            h.hold(Modifiers::NONE);
+        }
+        let got = h.st.poly_sel.as_ref().map(|s| s.faces.len()).unwrap_or(0);
+        eprintln!("lsurfx: {} of {} faces picked", got, cells.len());
+        view(h);
+    };
+    let centre_of = |cells: &[(usize, usize)]| cells.iter().map(|(i, j)| face_c(*i, *j)).sum::<Vec3>() / cells.len() as f32;
+    // Ctrl + E, the pointer along the normal by `d`, a click
+    let extrude = |h: &mut Harness, at3: Vec3, d: f32| {
+        let at = h.screen_of(at3);
+        h.move_to(at);
+        h.steps(2);
+        h.hold(Modifiers::CTRL);
+        h.key(Key::E);
+        h.hold(Modifiers::NONE);
+        let to = h.screen_of(at3 + Vec3::Y * d);
+        for k in 1..=8 {
+            h.move_to(at + (to - at) * (k as f32 / 8.0));
+        }
+        h.steps(2);
+        let label = h.st.gizmo_readout.clone();
+        h.click(to);
+        h.settle();
+        eprintln!("lsurfx: {label:?}");
+    };
+    // I, the pointer from 60 to 36 points off the faces' centre, a click
+    let inset = |h: &mut Harness, at3: Vec3| {
+        let c = h.screen_of(at3);
+        h.move_to(c + vec2(60.0, 0.0));
+        h.steps(2);
+        h.key(Key::I);
+        for k in 1..=6 {
+            h.move_to(c + vec2(60.0 - 4.0 * k as f32, 0.0));
+        }
+        h.steps(2);
+        let label = h.st.gizmo_readout.clone();
+        h.click(c + vec2(36.0, 0.0));
+        h.settle();
+        eprintln!("lsurfx: {label:?}");
+    };
+    let jm = nv / 2;
+    // the rib: the middle row, its ends left flat
+    let rib: Vec<(usize, usize)> = (2..nu - 2).map(|i| (i, jm)).collect();
+    let boss: Vec<(usize, usize)> = vec![(2, 1), (3, 1), (2, 2), (3, 2)];
+    let pocket: Vec<(usize, usize)> = vec![(nu - 4, 1), (nu - 3, 1), (nu - 4, 2), (nu - 3, 2)];
+    let island: Vec<(usize, usize)> = vec![(nu / 2 - 1, nv - 3), (nu / 2, nv - 3), (nu / 2 - 1, nv - 2), (nu / 2, nv - 2)];
+    let (rib_c, boss_c, pocket_c, island_c) = (centre_of(&rib), centre_of(&boss), centre_of(&pocket), centre_of(&island));
+    // their places on the surface (u, v), to find them once it moved
+    let uv_of = |cells: &[(usize, usize)]| {
+        let mut t = [0.0f32; 2];
+        let mut n = 0.0;
+        for (i, j) in cells {
+            for v in &m.faces[j * nu + i] {
+                t[0] += bind[*v as usize][0];
+                t[1] += bind[*v as usize][1];
+                n += 1.0;
+            }
+        }
+        [t[0] / n, t[1] / n]
+    };
+    let (island_uv, pocket_uv, boss_uv) = (uv_of(&island), uv_of(&pocket), uv_of(&boss));
+    // the loop's edge: face (0, 1)'s border at u = 0 (the ring runs along u
+    // through row 1, over the boss and into the pocket)
+    let loop_at = {
+        let q = &m.faces[nu];
+        let mut vs: Vec<u32> = q.clone();
+        vs.sort_by(|a, b| bind[*a as usize][0].total_cmp(&bind[*b as usize][0]));
+        let e = (pts[vs[0] as usize] + pts[vs[1] as usize]) * 0.5;
+        e + (face_c(0, 1) - e) * 0.2
+    };
+    park(h, 12);
+    h.shot("lsurfx-02-poly");
+    // 4. the rib: extruded 6 mm, its top's rim bevelled round (3 segments)
+    pick(h, &rib);
+    extrude(h, rib_c, 6.0);
+    park(h, 6);
+    h.shot("lsurfx-03-rib");
+    let tops = h.st.poly_sel.as_ref().map(|s| s.faces.clone()).unwrap_or_default();
+    let mut rim: Vec<(u32, u32)> = vec![];
+    {
+        let f = h.st.doc.feature(id).unwrap();
+        let m = f.mesh.as_ref().unwrap();
+        let mut seen: std::collections::HashMap<(u32, u32), u32> = Default::default();
+        for t in &tops {
+            let q = &m.faces[*t as usize];
+            for k in 0..q.len() {
+                let (a, b) = (q[k], q[(k + 1) % q.len()]);
+                *seen.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        rim.extend(seen.into_iter().filter(|(_, n)| *n == 1).map(|(e, _)| e));
+        rim.sort();
+    }
+    eprintln!("lsurfx: rib top {} faces, rim {} edges", tops.len(), rim.len());
+    h.st.sel_mode = SelMode::Edge;
+    h.st.poly_sel = Some(PolySel { id, edges: rim, ..Default::default() });
+    let start = h.screen_of(rib_c + Vec3::Y * 6.0) + vec2(120.0, 80.0);
+    h.move_to(start);
+    h.steps(2);
+    h.hold(Modifiers::CTRL);
+    h.key(Key::B);
+    h.hold(Modifiers::NONE);
+    h.key(Key::CloseBracket);
+    h.key(Key::CloseBracket);
+    h.key(Key::C);
+    let (w0, mpp) = h.st.poly_bevel.as_ref().map(|b| (b.w0, b.mm_per_pt)).unwrap_or((0.5, 0.2));
+    let to = start + vec2(((1.6 - w0) / mpp).max(0.0), 0.0);
+    for k in 1..=6 {
+        h.move_to(start + (to - start) * (k as f32 / 6.0));
+    }
+    h.steps(2);
+    h.shot("lsurfx-04-rib-bevel-live");
+    h.click(to);
+    h.steps(3);
+    let b = h.st.poly_bevel.clone();
+    eprintln!("lsurfx: bevel made {:?} segments {:?} chamfer {:?} faces {:?}", b.as_ref().map(|b| b.made), b.as_ref().map(|b| b.segments), b.as_ref().map(|b| b.chamfer), b.as_ref().map(|b| b.faces.len()));
+    h.st.poly_sel = None;
+    // 5. the stepped boss: 4 faces out 5 mm, their top inset, out 3 more
+    pick(h, &boss);
+    extrude(h, boss_c, 5.0);
+    inset(h, boss_c + Vec3::Y * 5.0);
+    extrude(h, boss_c + Vec3::Y * 5.0, 3.0);
+    // 6. the pocket: inset, then 4 mm in
+    pick(h, &pocket);
+    inset(h, pocket_c);
+    extrude(h, pocket_c, -4.0);
+    // 7. the island: out 4 mm
+    pick(h, &island);
+    extrude(h, island_c, 4.0);
+    h.st.poly_sel = None;
+    park(h, 6);
+    h.shot("lsurfx-05-details");
+    // 8. an edge loop (Ctrl + R) along row 1: over the boss, into the pocket
+    top(h);
+    h.key(Key::Num2);
+    h.hold(Modifiers::CTRL);
+    h.key(Key::R);
+    h.hold(Modifiers::NONE);
+    let la = h.screen_of(loop_at);
+    h.move_to(la);
+    h.steps(3);
+    view(h);
+    h.move_to(h.screen_of(loop_at));
+    h.steps(3);
+    h.shot("lsurfx-06-loop-preview");
+    let faces_before = h.st.doc.feature(id).unwrap().mesh.as_ref().unwrap().faces.len();
+    h.click(h.screen_of(loop_at));
+    h.steps(3);
+    h.key(Key::Q);
+    h.st.tool = Tool::Select;
+    let faces_after = h.st.doc.feature(id).unwrap().mesh.as_ref().unwrap().faces.len();
+    eprintln!("lsurfx: loop: {faces_before} -> {faces_after} faces");
+    park(h, 6);
+    h.shot("lsurfx-07-loop");
+    h.st.poly_sel = None;
+    h.key(Key::Num4);
+    h.st.selection.clear();
+    park(h, 6);
+    h.shot("lsurfx-08-poly-done");
+    // 9. NURBS: the layer bound again, its details riding on the surface
+    h.st.set_patch_state(id, PatchState::Nurbs);
+    h.key(Key::Num4);
+    h.st.selection = vec![id];
+    park(h, 14);
+    h.shot("lsurfx-09-nurbs");
+    {
+        let f = h.st.doc.feature(id).unwrap();
+        let m = f.mesh.as_ref().unwrap();
+        let p = m.patch.as_ref().unwrap();
+        eprintln!("lsurfx: layer {} points, {} faces, {} off the surface, bound off {:.4}", m.verts.len(), m.faces.len(), p.off_surface().iter().filter(|o| **o).count(), nurbs_app::linked::bound_off(f));
+    }
+    // 10. the contour pulled far: a front corner up 24, the opposite back
+    //     corner down 14, a back tangent out 18 in plan (scripted), the
+    //     front's middle up again
+    h.key(Key::Num1);
+    h.key(Key::W);
+    h.st.selection = vec![id];
+    h.steps(2);
+    let c = cv(h);
+    let corners = [0usize, 3, 12, 15];
+    // the front-left corner (the front-right one sits under the help box)
+    let fr = corners.into_iter().max_by(|a, b| (c[*a].z - c[*a].x).total_cmp(&(c[*b].z - c[*b].x))).unwrap();
+    let bl = corners.into_iter().min_by(|a, b| (c[*a].z + c[*a].x).total_cmp(&(c[*b].z + c[*b].x))).unwrap();
+    lift(h, fr, 22.0);
+    lift(h, bl, -14.0);
+    h.st.move_patch_points(id, &[back[1]], Vec3::new(0.0, 0.0, -18.0));
+    lift(h, front[0], 8.0);
+    park(h, 4);
+    h.shot("lsurfx-10-contour");
+    h.key(Key::Num4);
+    h.st.selection = vec![id];
+    park(h, 14);
+    h.shot("lsurfx-11-follows");
+    h.st.selection.clear();
+    park(h, 10);
+    h.shot("lsurfx-12-follows-plain");
+    // 11. carved on the surface: a slot across the rib (Cube), a hole through
+    //     the island, one through the pocket's floor (Cylinders)
+    let surface_at = |h: &Harness, p: Vec3| {
+        // the layer's point under p seen from above
+        let f = h.st.doc.feature(id).unwrap();
+        let pts = nurbs_app::meshes::world_points(f);
+        let near = pts.iter().copied().min_by(|a, b| (a.x - p.x).hypot(a.z - p.z).total_cmp(&(b.x - p.x).hypot(b.z - p.z))).unwrap();
+        Vec3::new(p.x, near.y, p.z)
+    };
+    h.st.selection.clear();
+    h.st.mode = Op::Carve;
+    let make = |h: &mut Harness, kind: PrimKind, a3: Vec3, b3: Vec3, up: f32| {
+        h.st.tool = Tool::Create(kind);
+        let a = h.screen_of(a3);
+        let b = h.screen_of(b3);
+        h.move_to(a);
+        h.steps(2);
+        h.drag(a, b, 10, true);
+        let t = h.screen_of(b3 + Vec3::Y * up);
+        h.move_to(t);
+        h.settle();
+        h.click(t);
+        h.settle();
+        h.st.tool = Tool::Select;
+        let f = h.st.doc.features.last().unwrap();
+        eprintln!("lsurfx: {:?} {:?} {:?} at {:?}", f.name, f.op, f.prim, f.origin);
+    };
+    // the rib's middle, now where the surface took it
+    let rib_now = {
+        let f = h.st.doc.feature(id).unwrap();
+        let m = f.mesh.as_ref().unwrap();
+        let p = m.patch.as_ref().unwrap();
+        let cvm = p.cvs(nurbs_app::meshes::size(f));
+        let x = nurbs_app::linked::to_world(f);
+        let u = 0.5 + 0.5 / nu as f32;
+        let v = (jm as f32 + 0.5) / nv as f32;
+        let mid = x.transform_point3(nurbs_kernel::patch::eval(&cvm, u, v).0);
+        let across = x.transform_point3(nurbs_kernel::patch::eval(&cvm, u, v + 2.2 / nv as f32).0);
+        (mid, across)
+    };
+    let on_now = |h: &Harness, u: f32, v: f32| {
+        let f = h.st.doc.feature(id).unwrap();
+        let p = f.mesh.as_ref().unwrap().patch.as_ref().unwrap();
+        let cvm = p.cvs(nurbs_app::meshes::size(f));
+        nurbs_app::linked::to_world(f).transform_point3(nurbs_kernel::patch::eval(&cvm, u, v).0)
+    };
+    let dir = (rib_now.1 - rib_now.0).normalize();
+    let a3 = surface_at(h, rib_now.0 - dir * 16.0 - Vec3::new(5.0, 0.0, 0.0));
+    let b3 = Vec3::new(a3.x + 10.0, a3.y, a3.z + 32.0 * dir.z.signum());
+    make(h, PrimKind::Box, a3, b3, 28.0);
+    let island_now = on_now(h, island_uv[0], island_uv[1]);
+    make(h, PrimKind::Cylinder, island_now, island_now + Vec3::new(4.5, 0.0, 0.0), 26.0);
+    let pocket_now = on_now(h, pocket_uv[0], pocket_uv[1]);
+    make(h, PrimKind::Cylinder, pocket_now, pocket_now + Vec3::new(3.0, 0.0, 0.0), 26.0);
+    h.st.mode = Op::Add;
+    h.st.selection.clear();
+    park(h, 14);
+    h.shot("lsurfx-13-carved-nurbs");
+    h.st.set_patch_state(id, PatchState::Poly);
+    h.st.selection.clear();
+    park(h, 14);
+    h.shot("lsurfx-14-carved-poly");
+    // 12. close-ups, nothing selected, both states
+    let close = |h: &mut Harness, at: Vec3, yaw: f32, pitch: f32, dist: f32| {
+        h.st.camera.yaw = yaw;
+        h.st.camera.pitch = pitch;
+        h.st.camera.target = at;
+        h.st.camera.dist = dist;
+        h.steps(10);
+    };
+    let rib_close = surface_at(h, rib_now.0);
+    let boss_now = on_now(h, boss_uv[0], boss_uv[1]);
+    for (name, at, yaw, pitch, dist) in [("rib", rib_close, 0.7f32, 0.55f32, 90.0f32), ("boss", boss_now, -0.6, 0.6, 70.0), ("pocket", pocket_now, 0.4, 0.85, 60.0), ("island", island_now, 2.6, 0.6, 70.0)] {
+        h.st.set_patch_state(id, PatchState::Poly);
+        h.st.selection.clear();
+        close(h, at, yaw, pitch, dist);
+        h.shot(&format!("lsurfx-15-{name}-poly"));
+        h.st.set_patch_state(id, PatchState::Nurbs);
+        h.st.selection.clear();
+        h.steps(8);
+        h.shot(&format!("lsurfx-16-{name}-nurbs"));
+    }
+    // 13. from below and from the back side
+    close(h, Vec3::new(0.0, 4.0, 0.0), 3.6, -0.35, 240.0);
+    h.shot("lsurfx-17-below-nurbs");
+    close(h, Vec3::new(0.0, 4.0, 0.0), 3.4, 0.5, 250.0);
+    h.shot("lsurfx-18-back-nurbs");
+    h.st.set_patch_state(id, PatchState::Poly);
+    h.st.selection.clear();
+    h.steps(8);
+    h.shot("lsurfx-18-back-poly");
+    eprintln!("lsurfx: undo {:?}", h.st.undo_labels().iter().rev().take(12).collect::<Vec<_>>());
 }
