@@ -66,6 +66,7 @@ extern "C" {
     fn focc_split(s: *const FShape, pts: *const f64, n: c_int, segs: *const c_int, nseg: c_int) -> *mut FShape;
     fn focc_remove_faces(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
     fn focc_defeature(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
+    fn focc_piece(s: *const FShape, idx: *const c_int, n: c_int, m: *const c_double, tag: i64) -> *mut FShape;
     fn focc_remove_edges(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
     fn focc_face_distance(s: *const FShape, face: c_int, p: *const c_double) -> c_double;
     fn focc_vertex_points(s: *const FShape, xyz: *mut c_double, cap: c_int) -> c_int;
@@ -73,6 +74,7 @@ extern "C" {
     fn focc_move_vertices(s: *const FShape, idx: *const c_int, xyz: *const c_double, n: c_int) -> *mut FShape;
     fn focc_face_count(s: *const FShape) -> c_int;
     fn focc_face_info(s: *const FShape, index: c_int, out: *mut c_double) -> c_int;
+    fn focc_face_box(s: *const FShape, index: c_int, out: *mut c_double) -> c_int;
     fn focc_set_tags(s: *mut FShape, tags: *const i64, n: c_int);
     fn focc_face_tag(s: *const FShape, index: c_int) -> i64;
     fn focc_topo(s: *const FShape, defl: c_double, angle: c_double) -> *mut FBuf;
@@ -663,6 +665,14 @@ impl Shape {
         let idx: Vec<c_int> = faces.iter().map(|&i| i as c_int).collect();
         shape(unsafe { focc_defeature(self.0, idx.as_ptr(), idx.len() as c_int) })
     }
+    /// Faces (0-based) copied as a piece (closed by flat faces where they
+    /// are open, else a sheet: volume 0), moved by the affine map `rows`;
+    /// the copies tagged `tag | 1`, the closing faces `tag`.
+    pub fn piece(&self, faces: &[usize], rows: [[f64; 4]; 3], tag: i64) -> Result<Shape, String> {
+        let idx: Vec<c_int> = faces.iter().map(|&i| i as c_int).collect();
+        let m: Vec<f64> = rows.iter().flatten().copied().collect();
+        shape(unsafe { focc_piece(self.0, idx.as_ptr(), idx.len() as c_int, m.as_ptr(), tag) })
+    }
     /// Faces (0-based) taken out: the part left open there.
     pub fn remove_faces(&self, faces: &[usize]) -> Result<Shape, String> {
         let idx: Vec<c_int> = faces.iter().map(|&i| i as c_int).collect();
@@ -718,6 +728,13 @@ impl Shape {
         let mut d = [0.0f64; 13];
         let k = unsafe { focc_face_info(self.0, index as c_int, d.as_mut_ptr()) };
         (k >= 0).then(|| FaceInfo::from_raw(k, &d))
+    }
+
+    /// Face `index`'s bounding box (min, max).
+    pub fn face_box(&self, index: usize) -> Option<([f64; 3], [f64; 3])> {
+        let mut d = [0.0f64; 6];
+        let k = unsafe { focc_face_box(self.0, index as c_int, d.as_mut_ptr()) };
+        (k >= 0).then(|| ([d[0], d[1], d[2]], [d[3], d[4], d[5]]))
     }
 
     /// Names the faces (one tag per face, in face order). Transforms,

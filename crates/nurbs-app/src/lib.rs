@@ -19,6 +19,7 @@ pub mod remote;
 pub mod render;
 pub mod scan;
 pub mod settings;
+pub mod slot;
 pub mod snap;
 pub mod state;
 pub mod theme;

@@ -647,10 +647,14 @@ impl AppState {
         on_scan.or(on_plane)
     }
 
-    /// The Slot tool (S): reads the scan only.
+    /// The Slot tool (Shift + S): drawn by hand, or reading the scan (ON
+    /// SCAN, only with a scan loaded).
     pub fn arm_slot(&mut self) {
         self.abort_gestures();
         self.tool = Tool::Slot;
+        if self.doc.reference.is_none() {
+            self.slot_on_scan = false;
+        }
         self.edge_sel.clear();
         self.face_sel.clear();
         self.vert_sel.clear();

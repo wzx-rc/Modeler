@@ -99,51 +99,18 @@ fn it(dir: u8, label: &'static str, checked: bool, act: Act) -> Item {
 /// The items of each context. Change the menu here.
 pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
     match ctx {
-        Ctx::Shape(id) => {
-            let carve = st.doc.feature(id).map(|f| f.op == Op::Carve).unwrap_or(false);
-            // the component modes round it, as in Maya (Romain, 19 nov.
-            // 23 h 18): Vertex west, Edge east, Face south, Object NE
+        // on the part, only the four modes (Romain, 20 nov. 5 h 52: "ne
+        // mettre que les 4 états, Object, Edge, Point, Face"), placed as
+        // in Maya: Vertex west, Edge east, Face south, Object NE
+        Ctx::Shape(_) | Ctx::Step(_) | Ctx::Edge | Ctx::Face => {
             let m = st.sel_mode;
             vec![
-                it(0, "Material ›", false, Act::Material),
-                it(1, "Object mode", m == SelMode::Object, Act::Mode(SelMode::Object)),
+                it(1, "Object", m == SelMode::Object, Act::Mode(SelMode::Object)),
                 it(2, "Edge", m == SelMode::Edge, Act::Mode(SelMode::Edge)),
-                it(3, "Duplicate", false, Act::Duplicate),
                 it(4, "Face", m == SelMode::Face, Act::Mode(SelMode::Face)),
-                it(5, if carve { "Make it Add" } else { "Make it Carve" }, false, Act::ToggleCarve),
                 it(6, "Vertex", m == SelMode::Vertex, Act::Mode(SelMode::Vertex)),
-                it(7, "Frame", false, Act::Frame),
             ]
         }
-        Ctx::Step(_) => vec![
-            it(0, "Turn off", false, Act::TurnOff),
-            it(1, "Back to here", false, Act::Marker),
-            it(2, "Frame", false, Act::Frame),
-            it(4, "Delete", false, Act::Delete),
-            it(6, "Object mode", false, Act::ObjectMode),
-        ],
-        Ctx::Edge => {
-            let mut v = vec![
-                it(0, "Fillet", false, Act::Fillet),
-                it(2, "Chamfer", false, Act::Chamfer),
-                it(4, "Deselect", false, Act::Deselect),
-                it(6, "Object mode", false, Act::ObjectMode),
-                it(5, "Vertex", false, Act::Mode(SelMode::Vertex)),
-                it(7, "Face", false, Act::Mode(SelMode::Face)),
-            ];
-            if st.reference.is_some() {
-                v.push(it(1, "Fit to scan", false, Act::FitScan));
-            }
-            v
-        }
-        Ctx::Face => vec![
-            it(0, "Extrude", false, Act::Extrude),
-            it(2, "Inset", false, Act::Inset),
-            it(4, "Deselect", false, Act::Deselect),
-            it(6, "Object mode", false, Act::ObjectMode),
-            it(5, "Vertex", false, Act::Mode(SelMode::Vertex)),
-            it(7, "Edge", false, Act::Mode(SelMode::Edge)),
-        ],
         Ctx::Empty => vec![
             it(0, "Cube", st.tool == Tool::Create(PrimKind::Box), Act::Place(PrimKind::Box)),
             it(1, "Cylinder", st.tool == Tool::Create(PrimKind::Cylinder), Act::Place(PrimKind::Cylinder)),

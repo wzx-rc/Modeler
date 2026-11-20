@@ -195,7 +195,8 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     Tool::Push(k) => k.label().to_uppercase(),
                     Tool::Knife => "KNIFE".into(),
                     Tool::Point => "POINT ON EDGE".into(),
-                    Tool::Slot => "SLOT · ON THE SCAN".into(),
+                    Tool::Slot if st.slot_on_scan => "SLOT · ON THE SCAN".into(),
+                    Tool::Slot => format!("SLOT · {}", st.mode.label().to_uppercase()),
                     Tool::Select => format!("SELECTION · {}", st.sel_mode.label().to_uppercase()),
                 };
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
@@ -452,9 +453,9 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             if card(ui, Some(Icon::Path), "SURFACE", "SHEET · U", st.tool == Tool::Create(uk), PATH, tip).clicked() {
                 st.arm(uk);
             }
-            if st.doc.reference.is_some() {
-                let tip = "Slot (S): drag along a slot of the scan (or a raised pill), from one end to the other; let go, the scan is read there and a sketch made as read (Carve when cut in, Add when raised)";
-                if card(ui, Some(Icon::Scan), "SLOT", "SCAN · Shift+S", st.tool == Tool::Slot, accent(), tip).clicked() {
+            {
+                let tip = "Slot (Shift + S): drag from one end to the other on a face or the ground, move to set its width, click, then its height. ON SCAN (its options): read a slot of the scan instead";
+                if card(ui, Some(Icon::Scan), "SLOT", "SHAPE · Shift+S", st.tool == Tool::Slot, accent(), tip).clicked() {
                     st.arm_slot();
                 }
             }
@@ -891,7 +892,8 @@ fn help_title(st: &AppState) -> String {
         Tool::Push(k) => k.label().into(),
         Tool::Knife => "Knife".into(),
         Tool::Point => "Point on edge".into(),
-        Tool::Slot => "Slot · on the scan".into(),
+        Tool::Slot if st.slot_on_scan => "Slot · on the scan".into(),
+        Tool::Slot => format!("Slot · {}", st.mode.label()),
         Tool::Select => format!("{} · {}", st.gizmo.label(), st.sel_mode.label()),
     }
 }
@@ -1147,7 +1149,7 @@ enum OpPop {
 }
 
 fn op_pop(st: &AppState) -> Option<OpPop> {
-    if st.tool == Tool::Create(PrimKind::Surface) && st.creation.is_none() {
+    if (st.tool == Tool::Create(PrimKind::Surface) || (st.tool == Tool::Slot && st.slot_draw.is_none())) && st.creation.is_none() {
         return Some(OpPop::Tool);
     }
     if st.creation.is_some() || st.sketch.is_some() || st.push.is_some() || st.tool != Tool::Select {
@@ -1296,6 +1298,7 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                         round_card(ui, st);
                     }
                 }
+                OpPop::Tool if st.tool == Tool::Slot => slot_options(ui, st),
                 OpPop::Tool => surface_options(ui, st),
                 OpPop::Shape(id) => {
                     let Some(f) = st.doc.feature(id).cloned() else { return };
@@ -1307,6 +1310,42 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                 }
             }
         });
+    });
+}
+
+/// The Slot tool's options (Romain, 20 nov. 5 h 55: by hand by default,
+/// reading the scan as an option): BY HAND or ON SCAN.
+fn slot_options(ui: &mut Ui, st: &mut AppState) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Slot").font(semibold(14.0)).color(TEXT()));
+        chip_label(ui, "Tool", RAISED(), LABEL());
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let (well, _) = ui.allocate_exact_size(vec2(2.0 * 84.0 + 6.0, 28.0), Sense::hover());
+        ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+        for (i, (c, name)) in [(false, "BY HAND"), (true, "ON SCAN")].into_iter().enumerate() {
+            let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 84.0, 3.0), vec2(84.0, 22.0));
+            let resp = ui.interact(r, Id::new(("isl-slot", i)), Sense::click());
+            let on = st.slot_on_scan == c;
+            if on {
+                ui.painter().rect_filled(r, 11.0, accent());
+            } else if resp.hovered() {
+                ui.painter().rect_filled(r, 11.0, RAISED());
+            }
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, name, mono(11.0), if on { on_accent() } else { TEXT2() });
+            let tip = if c {
+                "Drag along a slot of the scan (or a raised pill), end to end: the scan is read there and the slot made as read"
+            } else {
+                "Drag from one end of the slot to the other on a face or the ground, move to set its width, click, then its height (Add or Carve)"
+            };
+            let enabled = !c || st.doc.reference.is_some();
+            let resp = resp.on_hover_text(if enabled { tip } else { "No scan loaded: drop an .obj on the window first" });
+            if resp.clicked() && enabled && st.slot_on_scan != c {
+                st.abort_gestures();
+                st.slot_on_scan = c;
+            }
+        }
     });
 }
 
@@ -2496,7 +2535,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         } else if st.push.is_some() {
             st.abort_gestures();
             st.select_tool();
-        } else if st.creation.is_some() || st.drag.is_some() || st.sketch.is_some() || st.scan_round.is_some() || st.scan_slot.is_some() {
+        } else if st.creation.is_some() || st.drag.is_some() || st.sketch.is_some() || st.scan_round.is_some() || st.scan_slot.is_some() || st.slot_draw.is_some() {
             st.abort_gestures();
         } else if st.tool != Tool::Select {
             st.select_tool();

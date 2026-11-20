@@ -551,6 +551,12 @@ pub struct Tweak {
     /// a component mode), before the move.
     #[serde(default = "one3", skip_serializing_if = "is_one3")]
     pub scale: DVec3,
+    /// Duplicate faces (Ctrl + D in Face mode, 20 nov.): the picked faces
+    /// copied as a piece (closed by flat faces where they are open), moved
+    /// and scaled as a move would, then fused with the part; the part
+    /// itself does not change.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub copy: bool,
 }
 
 fn one3() -> DVec3 {
@@ -562,6 +568,9 @@ fn is_one3(v: &DVec3) -> bool {
 
 impl Tweak {
     pub fn label(&self) -> &'static str {
+        if self.copy {
+            return "Duplicate faces";
+        }
         if self.scale != DVec3::ONE {
             return match self.comp {
                 Comp::Face(_) => "Scale faces",
@@ -579,7 +588,7 @@ impl Tweak {
     pub fn new(comps: Vec<Comp>) -> Option<Tweak> {
         let mut it = comps.into_iter();
         let comp = it.next()?;
-        Some(Tweak { comp, delta: DVec3::ZERO, more: it.collect(), scale: DVec3::ONE })
+        Some(Tweak { comp, delta: DVec3::ZERO, more: it.collect(), scale: DVec3::ONE, copy: false })
     }
     /// All its components.
     pub fn comps(&self) -> impl Iterator<Item = &Comp> {

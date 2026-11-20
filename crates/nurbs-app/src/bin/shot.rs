@@ -3021,6 +3021,78 @@ fn main() {
         h.shot("zero-comp-flow-6-duplicate");
     }
 
+    if want("slot-hand") {
+        // the Slot by hand (20 nov.): a drag on the block's top along X,
+        // the width moved, a click, the height moved down, a click (Carve)
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 60.0, y: 20.0, z: 40.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.st.camera.frame(Vec3::new(-30.0, 0.0, -20.0), Vec3::new(30.0, 20.0, 20.0));
+        h.steps(2);
+        h.settle();
+        h.st.mode = Op::Carve;
+        h.hold(Modifiers::SHIFT);
+        h.key(egui::Key::S);
+        h.hold(Modifiers::NONE);
+        h.steps(2);
+        let (a, b) = (h.screen_of(Vec3::new(-15.0, 20.0, 0.0)), h.screen_of(Vec3::new(15.0, 20.0, 0.0)));
+        h.drag(a, b, 10, true);
+        h.steps(2);
+        let w = h.screen_of(Vec3::new(0.0, 20.0, 4.0));
+        h.move_to(w);
+        h.steps(2);
+        eprintln!("  slot drawn: {:?}", h.st.slot_draw.as_ref().map(|s| (s.len(), s.w, s.width)));
+        h.shot("zero-slot-hand-1-width");
+        h.click(w);
+        h.steps(2);
+        let down = w + egui::vec2(0.0, 60.0);
+        h.move_to(down);
+        h.steps(2);
+        h.click(down);
+        h.settle();
+        eprintln!("  slot made: steps {:?} faces {} errors {:?}", h.st.doc.features.iter().map(|f| (f.name.clone(), f.prim)).collect::<Vec<_>>(), h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-slot-hand-2-made");
+        // Object mode: a click on the fillet selects the block, all lit
+        h.key(egui::Key::Num4);
+        h.click(h.screen_of(Vec3::new(20.0, 20.0, 0.0)));
+        h.steps(2);
+        eprintln!("  object click: selection {:?}", h.st.selection);
+        h.shot("zero-slot-hand-3-object");
+    }
+
+    if want("dup-faces") {
+        // Ctrl + D on faces (20 nov.): a block's faces all but its bottom
+        // picked by a rectangle in X-ray, copied as a piece (closed by a
+        // bottom) and moved 50 along X; then the top alone (a sheet)
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(75.0, 25.0, 20.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::F11);
+        h.st.xray = true;
+        let (a, b) = (h.screen_of(Vec3::new(-22.0, 22.0, 0.0)), h.screen_of(Vec3::new(22.0, 5.0, 0.0)));
+        h.drag(egui::pos2(a.x.min(b.x) - 60.0, a.y.min(b.y) - 60.0), egui::pos2(a.x.max(b.x) + 60.0, a.y.max(b.y)), 10, true);
+        h.steps(2);
+        eprintln!("  faces picked {}", h.st.face_sel.len());
+        h.st.xray = false;
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let c = h.st.pivot().expect("a gizmo").as_vec3();
+        let s0 = h.screen_of(c);
+        let dir = (h.screen_of(c + Vec3::X) - s0).normalized();
+        let grab = s0 + dir * 55.0;
+        let by = h.screen_of(c + Vec3::X * 50.0) - s0;
+        h.drag(grab, grab + by, 10, true);
+        h.settle();
+        eprintln!("  tweak {:?}", h.st.doc.features.last().and_then(|f| f.tweak.as_ref()).map(|t| (t.delta, t.copy)));
+        eprintln!("  copy moved: steps {:?} faces {} errors {:?}", h.st.doc.features.iter().map(|f| f.name.clone()).collect::<Vec<_>>(), h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-dup-faces-1-piece");
+    }
+
     if want("knife-diag") {
         // Romain's flank (20 nov.): a block with filleted top edges, a
         // diagonal knife cut from the flank's top corner; the cut picked in

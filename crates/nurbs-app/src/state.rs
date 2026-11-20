@@ -7,7 +7,7 @@ use crate::camera::OrbitCamera;
 use crate::pick::{Hit, Picker};
 use crate::settings::Settings;
 use crate::view::View;
-use glam::{DQuat, DVec3, Vec3};
+use glam::{DMat4, DQuat, DVec3, Vec3};
 use nurbs_kernel::client::{Kernel, Status};
 use nurbs_kernel::doc::PrimKind;
 use nurbs_kernel::{Doc, EdgeRef, FaceRef, FaceTag, Feature, FeatureId, Knife, Model, Op, Prim, Profile};
@@ -515,6 +515,10 @@ pub struct AppState {
     /// The Surface tool's points: put on the reference under the pointer
     /// (true), else locked on the plane under its first point.
     pub surface_on_scan: bool,
+    /// The Slot tool reads the scan (ON SCAN) instead of drawing by hand.
+    pub slot_on_scan: bool,
+    /// The Slot drawn by hand.
+    pub slot_draw: Option<crate::slot::SlotDraw>,
     /// The Surface's outline: straight sides (false) or SplitIt's curve
     /// through the points.
     pub surface_curve: bool,
@@ -567,6 +571,9 @@ pub struct AppState {
     pub model_gen: u64,
     pub picker: Picker,
     submitted: u64,
+    /// While whole shapes are dragged: each request sent, with the dragged
+    /// shapes' frames in it (the drag's preview, `drag_preview`).
+    sent_frames: Vec<(u64, Vec<(FeatureId, DMat4)>)>,
     /// Kernel round trip of the last model (ms).
     pub round_ms: f32,
 
@@ -669,6 +676,8 @@ impl AppState {
             hover_edge: None,
             round_chamfer: false,
             surface_on_scan: false,
+            slot_on_scan: false,
+            slot_draw: None,
             surface_curve: false,
             round_drag: None,
             face_drag: None,
@@ -698,6 +707,7 @@ impl AppState {
             model_gen: 0,
             picker: Picker::default(),
             submitted: 0,
+            sent_frames: vec![],
             round_ms: 0.0,
             settings: Settings::default(),
             toast: None,
@@ -946,12 +956,23 @@ impl AppState {
             self.vert_sel.clear();
             return;
         }
-        let ids = self.selection.clone();
+        let mut ids = self.selection.clone();
         let n = ids.len();
         let what = match self.single() {
             Some(f) if !f.is_solid() => f.kind_label().to_string(),
             _ => format!("{n} shape{}", if n > 1 { "s" } else { "" }),
         };
+        // a shape deleted takes its operations with it (20 nov.: a cube
+        // deleted left its moves failing, "its edge is gone")
+        for id in self.selection.clone() {
+            if self.doc.feature(id).is_some_and(|f| f.is_solid()) {
+                for o in self.element_ops(id) {
+                    if !ids.contains(&o) {
+                        ids.push(o);
+                    }
+                }
+            }
+        }
         self.edit("Delete", |d| d.remove(&ids));
         self.selection.clear();
         self.toast(&format!("{what} deleted"), false);
@@ -963,6 +984,20 @@ impl AppState {
         // the elements they belong to, copied in place with their
         // operations, then moved with the gizmo; an Add copy stays fused
         let comps = self.sel_mode != SelMode::Object;
+        // picked faces (20 nov., "je n'arrive pas à faire le duplicate
+        // faces"): those faces copied as a piece, fused with the part, moved
+        // with the gizmo (a Duplicate faces step, a move step that copies)
+        if self.sel_mode == SelMode::Face && !self.face_sel.is_empty() {
+            let Some(mut t) = nurbs_kernel::Tweak::new(self.face_sel.iter().cloned().map(nurbs_kernel::Comp::Face).collect()) else { return };
+            t.copy = true;
+            let mut id = 0;
+            self.edit("Duplicate faces", |d| id = d.add_tweak(t));
+            self.face_sel.clear();
+            self.select(Some(id), false);
+            self.gizmo = GizmoMode::Move;
+            self.toast("Faces duplicated in place: drag the arrows to move the copy", false);
+            return;
+        }
         let ids: Vec<FeatureId> = if comps {
             let mut tags: Vec<i64> = self.face_sel.iter().map(|r| r.tag).collect();
             tags.extend(self.edge_sel.iter().map(|e| e.faces[0]));
@@ -1487,6 +1522,7 @@ impl AppState {
         self.gizmo_readout = None;
         self.scan_round = None;
         self.scan_slot = None;
+        self.slot_draw = None;
         self.scan_box_from = None;
         self.sketch = None;
         self.knife = None;
@@ -2515,6 +2551,39 @@ impl AppState {
         fs.iter().find(|f| Some(f.id) == last).or(fs.first()).map(|f| f.rot)
     }
 
+    /// The whole shapes an Object-mode drag moves, turns or scales.
+    pub fn dragged_shapes(&self) -> Option<Vec<FeatureId>> {
+        let d = self.drag.as_ref()?;
+        if self.sel_mode != SelMode::Object || d.start.is_empty() || !d.start.iter().all(|f| f.is_solid() && !f.is_path()) {
+            return None;
+        }
+        Some(d.start.iter().map(|f| f.id).collect())
+    }
+
+    /// Object mode is a transform (Romain, 20 nov. 5 h 52: "déplace le
+    /// transform qui contient l'élément, du coup ce doit être fluide et
+    /// léger"): while whole shapes are dragged, each one's faces (its
+    /// operations' too) shown at once where the pointer takes them, from
+    /// where the model on screen has them; the kernel's booleans catch up.
+    /// Each dragged element with its matrix (model → now).
+    pub fn drag_preview(&self) -> Option<std::collections::HashMap<FeatureId, DMat4>> {
+        let ids = self.dragged_shapes()?;
+        let d = self.drag.as_ref()?;
+        let serial = self.model.as_ref()?.serial;
+        let sent = self.sent_frames.iter().find(|(s, _)| *s == serial).map(|(_, f)| f);
+        let mut out = std::collections::HashMap::new();
+        for id in ids {
+            let Some(now) = self.doc.feature(id) else { continue };
+            let then = sent.and_then(|v| v.iter().find(|(i, _)| *i == id).map(|(_, m)| *m)).or_else(|| d.start.iter().find(|f| f.id == id).map(shape_frame));
+            let Some(then) = then else { continue };
+            let m = shape_frame(now) * then.inverse();
+            if !m.abs_diff_eq(DMat4::IDENTITY, 1e-9) && m.is_finite() {
+                out.insert(id, m);
+            }
+        }
+        Some(out)
+    }
+
     pub fn end_drag(&mut self) {
         self.snap_shown = None;
         self.gizmo_readout = None;
@@ -2552,6 +2621,15 @@ impl AppState {
         if want != self.submitted && self.kernel.status() != Status::Missing {
             self.kernel.submit(want, &self.doc, fine, quads);
             self.submitted = want;
+            if let Some(ids) = self.dragged_shapes() {
+                let frames = ids.iter().filter_map(|id| self.doc.feature(*id)).map(|f| (f.id, shape_frame(f))).collect();
+                self.sent_frames.push((want, frames));
+                if self.sent_frames.len() > 64 {
+                    self.sent_frames.remove(0);
+                }
+            } else {
+                self.sent_frames.clear();
+            }
         }
     }
 
@@ -3075,4 +3153,15 @@ pub fn size_handles(f: &Feature) -> Vec<Handle> {
         Prim::Cylinder { .. } => vec![Handle::Size(3), Handle::Size(1)],
         Prim::Path { .. } => vec![Handle::Size(0), Handle::Size(2)],
     }
+}
+
+/// A shape's frame with its sizes: its unit shape to the world (what a move,
+/// turn or scale changes).
+pub fn shape_frame(f: &Feature) -> DMat4 {
+    let k = match f.prim {
+        Prim::Box { x, y, z } | Prim::Profile { x, y, z } => DVec3::new(x, y, z),
+        Prim::Cylinder { radius, height } => DVec3::new(radius, height, radius),
+        Prim::Path { x, z } => DVec3::new(x, 1.0, z),
+    };
+    f.matrix() * DMat4::from_scale(k.max(DVec3::splat(1e-6)))
 }

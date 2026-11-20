@@ -133,7 +133,7 @@ impl AppState {
     /// The vertices the eye sees, with their place on screen.
     pub fn visible_vertices(&self) -> Vec<(Vec3, [f32; 2])> {
         let v = self.view();
-        self.vertices().into_iter().filter(|q| !self.hidden(*q)).filter_map(|q| v.project(q).map(|s| (q, s))).collect()
+        self.vertices().into_iter().filter(|q| self.xray || !self.hidden(*q)).filter_map(|q| v.project(q).map(|s| (q, s))).collect()
     }
 
     /// The vertex under the pointer (within a few points, not hidden).
@@ -178,7 +178,7 @@ impl AppState {
                 for i in 0..m.edges.len() {
                     let Some(r) = self.edge_ref(i) else { continue };
                     let mid = r.at.as_vec3();
-                    if v.project(mid).map(inside).unwrap_or(false) && !self.hidden(mid) {
+                    if v.project(mid).map(inside).unwrap_or(false) && (self.xray || !self.hidden(mid)) {
                         found.push(r);
                     }
                 }
@@ -210,7 +210,8 @@ impl AppState {
                     let c = tri.iter().map(|k| Vec3::from(m.positions[*k as usize])).sum::<Vec3>() / 3.0;
                     let Some(s) = v.project(c).filter(|s| inside(*s)) else { continue };
                     tries[f] += 1;
-                    if self.pick_at(s).map(|h| h.face) == Some(f) {
+                    // in X-ray the faces behind are taken too
+                    if self.xray || self.pick_at(s).map(|h| h.face) == Some(f) {
                         found.push((f, c.as_dvec3()));
                     }
                 }

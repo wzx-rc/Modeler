@@ -223,7 +223,7 @@ fn scale_at(st: &AppState, p: Pos2) -> Option<Handle> {
 
 fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, rect: Rect) {
     let hover = ctx.input(|i| i.pointer.hover_pos());
-    st.interacting = st.drag.is_some() || st.creation.is_some() || st.scan_round.is_some() || st.scan_slot.is_some();
+    st.interacting = st.drag.is_some() || st.creation.is_some() || st.scan_round.is_some() || st.scan_slot.is_some() || st.slot_draw.is_some();
 
     // Maya navigation: Alt + left = orbit, Alt + middle = pan, Alt + right =
     // zoom, whatever the tool
@@ -305,6 +305,10 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         };
         let by_feature = select && matches!(st.sel_mode, SelMode::Object | SelMode::Edge);
         st.hover_feature = if st.hot_handle.is_none() && by_feature { hover.and_then(|h| st.pick_path(p2(h))).or_else(|| st.hover_hit.and_then(|h| st.feature_of_face(h.face))) } else { None };
+        // Object mode (Maya): the whole element, its operations' faces too
+        if st.sel_mode == SelMode::Object {
+            st.hover_feature = st.hover_feature.map(|id| st.element_of(id));
+        }
         // edges: only a fillet's faces light up (a click there selects it)
         if edges && (st.hover_edge.is_some() || st.hover_feature.and_then(|id| st.doc.feature(id)).map(|f| f.round.is_none()).unwrap_or(true)) {
             st.hover_feature = None;
@@ -426,6 +430,52 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 }
                 return;
             }
+            // by hand (the default): its length dragged, its width moved,
+            // a click, then its height as any shape
+            if !st.slot_on_scan {
+                if st.creation.is_some() {
+                    if let Some(p) = hover {
+                        st.update_creation(p2(p), shift);
+                    }
+                    if resp.clicked_by(PointerButton::Primary) || resp.drag_started_by(PointerButton::Primary) {
+                        st.finish_creation();
+                    }
+                    return;
+                }
+                let width = st.slot_draw.as_ref().map(|s| s.width);
+                match width {
+                    Some(false) => {
+                        if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                            st.slot_move(p2(p));
+                        }
+                        if resp.drag_stopped() || !l {
+                            let p = hover.or(resp.interact_pointer_pos()).unwrap_or(rect.center());
+                            st.slot_release(p2(p));
+                        }
+                    }
+                    Some(true) => {
+                        if let Some(p) = hover {
+                            st.slot_move(p2(p));
+                        }
+                        if resp.clicked_by(PointerButton::Primary) || resp.drag_started_by(PointerButton::Primary) {
+                            let p = resp.interact_pointer_pos().or(hover).unwrap_or(rect.center());
+                            st.slot_press(p2(p));
+                        }
+                    }
+                    None => {
+                        if resp.drag_started_by(PointerButton::Primary) {
+                            let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                            st.slot_press(p2(origin));
+                            if let Some(p) = hover {
+                                st.slot_move(p2(p));
+                            }
+                        } else if resp.clicked_by(PointerButton::Primary) {
+                            st.toast("Slot: drag from one end of the slot to the other, then set its width", false);
+                        }
+                    }
+                }
+                return;
+            }
             if resp.drag_started_by(PointerButton::Primary) {
                 let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
                 if st.scan_slot_press(p2(origin)) {
@@ -434,7 +484,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                     }
                 }
             } else if resp.clicked_by(PointerButton::Primary) {
-                st.toast("Slot: drag along a slot of the scan, from one end to the other", false);
+                st.toast("Slot on the scan: drag along a slot of the scan, from one end to the other", false);
             }
         }
         Tool::Knife | Tool::Point => {
@@ -505,6 +555,8 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             if resp.clicked_by(PointerButton::Primary) {
                 let at = resp.interact_pointer_pos().or(hover);
                 let id = at.and_then(|p| st.pick_path(p2(p))).or_else(|| at.and_then(|p| st.pick_at(p2(p))).and_then(|h| st.feature_of_face(h.face)));
+                // the element, not the operation whose face was clicked
+                let id = id.map(|id| st.element_of(id));
                 st.select(id, shift || ctrl);
             }
         }
@@ -872,7 +924,14 @@ fn draw_creation(p: &Painter, st: &AppState) {
         chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("{} mm · release: read the scan", fmt_mm((ss.b - ss.a).length() as f32)), accent(), accent());
         return;
     }
-    if st.tool == Tool::Slot {
+    // the Slot by hand: its length, then its width
+    if let Some(sd) = &st.slot_draw {
+        let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
+        let txt = if sd.width { format!("W {} mm · click: its height", fmt_mm(sd.w as f32)) } else { format!("L {} mm · release: its width", fmt_mm(sd.len() as f32)) };
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, accent(), accent());
+        return;
+    }
+    if st.tool == Tool::Slot && st.slot_on_scan && st.creation.is_none() {
         if let Some(h) = p.ctx().input(|i| i.pointer.hover_pos()) {
             let (txt, col) = if st.scan_under(p2(h)).is_some() { ("on the scan · drag along a slot, end to end", accent()) } else { ("the Slot reads the scan", TEXT2()) };
             p.circle_stroke(h, 7.0, Stroke::new(1.5, col));
@@ -1238,6 +1297,11 @@ pub fn hint(st: &AppState) -> String {
             None => "Click: the first point, on a face or the ground".into(),
             Some(k) if k.pts.len() < 3 => "Click or drag: a corner · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
             Some(_) => "First point or Enter: close it · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
+        },
+        (None, Tool::Slot) if !st.slot_on_scan => match &st.slot_draw {
+            Some(s) if s.width => "Move: its width · Click: on to its height · Esc: cancel".into(),
+            Some(_) => "To its other end · Release: then its width".into(),
+            None => "Drag from one end of the slot to the other on a face or the ground, then set its width and its height · ON SCAN (options): read a slot of the scan".into(),
         },
         (None, Tool::Slot) if st.scan_slot.is_some() => "Along the slot, to its other end · Release: the scan read there, a sketch made as read · Esc: cancel".into(),
         (None, Tool::Slot) => "Drag along a slot of the scan (or a raised pill), from one end to the other · Release: read there, a Carve sketch (cut in) or an Add (raised) with round ends".into(),

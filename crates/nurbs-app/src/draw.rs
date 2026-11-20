@@ -23,6 +23,8 @@ pub struct Drawer {
     quads_shown: bool,
     flags: Vec<FaceGpu>,
     overlay: Vec<LineVertex>,
+    /// The part was uploaded moved by a drag's preview.
+    previewed: bool,
 }
 
 fn rgb(c: egui::Color32) -> [f32; 3] {
@@ -31,7 +33,7 @@ fn rgb(c: egui::Color32) -> [f32; 3] {
 
 impl Drawer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Drawer {
-        Drawer { r: Renderer::new(device, format), model_gen: u64::MAX, ref_gen: u64::MAX, quads_shown: false, flags: vec![], overlay: vec![] }
+        Drawer { r: Renderer::new(device, format), model_gen: u64::MAX, ref_gen: u64::MAX, quads_shown: false, flags: vec![], overlay: vec![], previewed: false }
     }
 
     fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, st: &AppState) {
@@ -42,8 +44,11 @@ impl Drawer {
         }
         // the part
         let quads = st.quad_mesh();
-        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() {
+        // whole shapes dragged in Object mode: their faces follow at once
+        let preview = if quads.is_none() { st.drag_preview().filter(|p| !p.is_empty()) } else { None };
+        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() || preview.is_some() || self.previewed {
             self.model_gen = st.model_gen;
+            self.previewed = preview.is_some();
             self.quads_shown = quads.is_some();
             let mut verts = vec![];
             let mut edges = vec![];
@@ -85,8 +90,28 @@ impl Drawer {
                     }
                     line_vertices(&wire, [16, 18, 22, 150], 0.8, &mut edges);
                 }
+                // the dragged elements' faces and edges, moved
+                let face_m: Vec<Option<glam::Mat4>> = match &preview {
+                    Some(pv) => {
+                        let els = element_map(st, m);
+                        m.faces.iter().map(|f| f.tag.and_then(|t| pv.get(els.get(&t.feature).unwrap_or(&t.feature))).map(|x| x.as_mat4())).collect()
+                    }
+                    None => vec![],
+                };
+                if !face_m.is_empty() && dev_none(st) {
+                    for v in verts.iter_mut() {
+                        if let Some(Some(x)) = face_m.get(v.face as usize) {
+                            v.pos = x.transform_point3(glam::Vec3::from(v.pos)).to_array();
+                            v.nrm = x.inverse().transpose().transform_vector3(glam::Vec3::from(v.nrm)).normalize_or_zero().to_array();
+                        }
+                    }
+                }
                 // the edges a person draws: dark and thin like a CAD view
-                let lines: Vec<Vec<[f32; 3]>> = m.edges.iter().filter(|e| !e.seam).map(|e| e.pts.clone()).collect();
+                let moved = |e: &nurbs_kernel::Edge| e.faces.iter().find_map(|f| usize::try_from(*f).ok().and_then(|f| face_m.get(f).copied().flatten()));
+                let lines: Vec<Vec<[f32; 3]>> = m.edges.iter().filter(|e| !e.seam).map(|e| match moved(e) {
+                    Some(x) => e.pts.iter().map(|p| x.transform_point3(glam::Vec3::from(*p)).to_array()).collect(),
+                    None => e.pts.clone(),
+                }).collect();
                 line_vertices(&lines, [24, 26, 30, 210], 1.0, &mut edges);
             }
             self.r.upload_part(device, queue, &verts, &edges);
@@ -96,6 +121,10 @@ impl Drawer {
         // Extrude tools) face by face, else by the feature they come from
         let by_face = face_mode(st);
         let picked = if by_face { st.picked_faces() } else { vec![] };
+        // Object mode: a face lights with its element (the shape and all
+        // its operations), a selected operation alone with its own faces
+        let elements = st.model.as_ref().map(|m| element_map(st, m)).unwrap_or_default();
+        let el = |t: nurbs_kernel::FaceTag| elements.get(&t.feature).copied().unwrap_or(t.feature);
         let flags: Vec<FaceGpu> = match &st.model {
             Some(m) => m
                 .faces
@@ -117,8 +146,8 @@ impl Drawer {
                         }
                     } else {
                         match f.tag {
-                            Some(t) if st.selection.contains(&t.feature) => FACE_SELECTED,
-                            Some(t) if st.hover_feature == Some(t.feature) => FACE_HOVERED,
+                            Some(t) if st.selection.contains(&t.feature) || st.selection.contains(&el(t)) => FACE_SELECTED,
+                            Some(t) if st.hover_feature == Some(t.feature) || st.hover_feature == Some(el(t)) => FACE_HOVERED,
                             _ => 0,
                         }
                     };
@@ -165,6 +194,12 @@ impl Drawer {
             ];
             line_vertices(&lines, [accent.r(), accent.g(), accent.b(), 235], 1.8, &mut over);
         }
+        // the Slot drawn by hand: its outline on the plane
+        if let Some(sd) = &st.slot_draw {
+            let o: Vec<[f32; 3]> = sd.outline().iter().map(|p| p.as_vec3().to_array()).collect();
+            let line = vec![sd.plane.at(sd.a).as_vec3().to_array(), sd.plane.at(sd.b).as_vec3().to_array()];
+            line_vertices(&[o, line], [accent.r(), accent.g(), accent.b(), 235], 1.6, &mut over);
+        }
         // the Cylinder dragged across a round part of the reference
         if let Some(sr) = &st.scan_round {
             let lines = vec![sr.ring(96).iter().map(|p| p.as_vec3().to_array()).collect::<Vec<_>>(), vec![sr.a.as_vec3().to_array(), sr.b.as_vec3().to_array()]];
@@ -186,6 +221,30 @@ impl Drawer {
             let alpha = if selected || creating { 230 } else { 140 };
             let lines: Vec<Vec<[f32; 3]>> = f.outline().iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
             line_vertices(&lines, [c.r(), c.g(), c.b(), alpha], 1.2, &mut over);
+        }
+        // Object mode (Maya): the selected element drawn by all its edges in
+        // the accent, its faces only lightly tinted; the one under the
+        // pointer fainter. Components are never drawn in this mode.
+        if object_mode(st) && (!st.selection.is_empty() || st.hover_feature.is_some()) {
+            if let Some(m) = &st.model {
+                let elements = element_map(st, m);
+                let of = |fi: i32| -> Option<nurbs_kernel::FeatureId> {
+                    let t = m.faces.get(usize::try_from(fi).ok()?)?.tag?;
+                    Some(elements.get(&t.feature).copied().unwrap_or(t.feature))
+                };
+                let (mut sel, mut hov) = (vec![], vec![]);
+                for e in m.edges.iter().filter(|e| !e.seam) {
+                    let els = [of(e.faces[0]), of(e.faces[1])];
+                    if els.iter().flatten().any(|x| st.selection.contains(x)) {
+                        sel.push(e.pts.clone());
+                    } else if st.hover_feature.map(|h| els.contains(&Some(h))).unwrap_or(false) {
+                        hov.push(e.pts.clone());
+                    }
+                }
+                let a = theme::accent();
+                line_vertices(&sel, [a.r(), a.g(), a.b(), 240], 1.7, &mut over);
+                line_vertices(&hov, [a.r(), a.g(), a.b(), 120], 1.4, &mut over);
+            }
         }
         // Edge mode: the picked edges, whole, and the one under the pointer
         if st.sel_mode == SelMode::Edge {
@@ -218,8 +277,8 @@ impl Drawer {
             grid: st.settings.grid,
             origin: st.settings.origin,
             base: CLAY,
-            sel: (sel, 0.45),
-            hover: (sel, 0.2),
+            sel: (sel, if object_mode(st) { 0.18 } else { 0.45 }),
+            hover: (sel, if object_mode(st) { 0.08 } else { 0.2 }),
             reference: match (st.reference.is_some(), st.ref_shown, st.ref_ghost) {
                 (true, true, false) => RefDraw::Solid,
                 (true, true, true) => RefDraw::Ghost,
@@ -233,6 +292,27 @@ impl Drawer {
         };
         self.r.render(device, queue, target, size, frame);
     }
+}
+
+/// The part is drawn from the kernel's triangles (not the deviation's).
+fn dev_none(st: &AppState) -> bool {
+    st.deviation_shown().is_none()
+}
+
+/// Each feature whose faces the model shows, with its element.
+pub fn element_map(st: &AppState, m: &nurbs_kernel::Model) -> std::collections::HashMap<nurbs_kernel::FeatureId, nurbs_kernel::FeatureId> {
+    let mut out = std::collections::HashMap::new();
+    for f in &m.faces {
+        if let Some(t) = f.tag {
+            out.entry(t.feature).or_insert_with(|| st.element_of(t.feature));
+        }
+    }
+    out
+}
+
+/// Object mode with the Select tool: whole elements, Maya's look.
+fn object_mode(st: &AppState) -> bool {
+    st.tool == Tool::Select && st.sel_mode == SelMode::Object && st.push.is_none() && st.selected_push().is_none()
 }
 
 /// Faces light up one by one: Face mode, or the Inset / Extrude tool waiting

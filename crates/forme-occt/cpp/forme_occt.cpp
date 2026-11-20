@@ -120,6 +120,10 @@
 
 #include <BRepOffset_MakeOffset.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
+#include <gp_GTrsf.hxx>
+#include <BRepBuilderAPI_GTransform.hxx>
+#include <ShapeFix_Solid.hxx>
+#include <ShapeAnalysis_FreeBounds.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Ax3.hxx>
 #include <TopoDS_Compound.hxx>
@@ -4322,6 +4326,22 @@ int focc_face_info(const FShape* s, int index, double* out) {
         -1);
 }
 
+// Face `index`'s bounding box: xmin ymin zmin xmax ymax zmax.
+int focc_face_box(const FShape* s, int index, double* out) {
+    return guard(
+        [&] {
+            TopTools_IndexedMapOfShape m;
+            face_map(s->s, m);
+            if (index < 0 || index >= m.Extent()) return -1;
+            Bnd_Box b;
+            BRepBndLib::AddOptimal(m(index + 1), b, Standard_False, Standard_False);
+            if (b.IsVoid()) return -1;
+            b.Get(out[0], out[1], out[2], out[3], out[4], out[5]);
+            return 0;
+        },
+        -1);
+}
+
 void focc_set_tags(FShape* s, const long long* tags, int n) { s->tags.assign(tags, tags + (n > 0 ? n : 0)); }
 
 long long focc_face_tag(const FShape* s, int index) { return index >= 0 && index < (int)s->tags.size() ? s->tags[index] : -1; }
@@ -5227,6 +5247,104 @@ FShape* focc_compound(const FShape* a, const FShape* b) {
 // Delete faces (Face mode + Del, Romain 19 nov. 23 h 22): the faces at
 // these indices (0-based) taken out, the part left open where they were.
 // The others keep their tags.
+// Duplicate faces (Ctrl + D in Face mode, 20 nov.): the faces (0-based)
+// copied, sewn, their open loops closed by flat faces when they can be (a
+// piece of the part), then moved by the affine map `m` (3 rows of 4). The
+// copies are tagged `tag | 1`, the closing faces `tag`. A piece that cannot
+// be closed stays a sheet (its volume is 0).
+FShape* focc_piece(const FShape* s, const int* idx, int n, const double* m, long long tag) {
+    return guard(
+        [&]() -> FShape* {
+            TopTools_IndexedMapOfShape fm;
+            face_map(s->s, fm);
+            BRepBuilderAPI_Sewing sew(1e-4);
+            std::vector<TopoDS_Shape> copies;
+            for (int i = 0; i < n; i++) {
+                if (idx[i] < 0 || idx[i] >= fm.Extent()) continue;
+                TopoDS_Shape c = BRepBuilderAPI_Copy(fm(idx[i] + 1)).Shape();
+                copies.push_back(c);
+                sew.Add(c);
+            }
+            if (copies.empty()) {
+                set_err("no face to copy");
+                return nullptr;
+            }
+            sew.Perform();
+            TopoDS_Shape sh = sew.SewedShape();
+            // its open loops closed by flat faces
+            std::vector<TopoDS_Face> caps;
+            ShapeAnalysis_FreeBounds fb(sh, 1e-4, Standard_False, Standard_False);
+            bool closable = true;
+            for (TopExp_Explorer x(fb.GetClosedWires(), TopAbs_WIRE); x.More(); x.Next()) {
+                BRepBuilderAPI_MakeFace mf(TopoDS::Wire(x.Current()), Standard_True);
+                if (!mf.IsDone()) {
+                    closable = false;
+                    break;
+                }
+                caps.push_back(mf.Face());
+            }
+            for (TopExp_Explorer x(fb.GetOpenWires(), TopAbs_WIRE); x.More(); x.Next()) closable = false;
+            TopoDS_Shape out = sh;
+            TopTools_MapOfShape capped;
+            if (closable && !caps.empty()) {
+                BRepBuilderAPI_Sewing sew2(1e-4);
+                sew2.Add(sh);
+                for (const TopoDS_Face& c : caps) sew2.Add(c);
+                sew2.Perform();
+                TopoDS_Shape closed = sew2.SewedShape();
+                BRepBuilderAPI_MakeSolid ms;
+                int shells = 0;
+                for (TopExp_Explorer x(closed, TopAbs_SHELL); x.More(); x.Next()) {
+                    ms.Add(TopoDS::Shell(x.Current()));
+                    shells++;
+                }
+                if (shells > 0 && ms.IsDone()) {
+                    ShapeFix_Solid fix;
+                    fix.Init(ms.Solid());
+                    fix.Perform();
+                    TopoDS_Shape so = fix.Solid();
+                    GProp_GProps gp;
+                    BRepGProp::VolumeProperties(so, gp);
+                    if (valid(so) && std::abs(gp.Mass()) > 1e-9) {
+                        out = so;
+                        for (const TopoDS_Face& c : caps) {
+                            TopoDS_Shape im = sew2.IsModified(c) ? sew2.Modified(c) : c;
+                            capped.Add(im);
+                        }
+                    }
+                }
+            }
+            // the tags, in the order of the faces (kept by the move)
+            std::vector<long long> tags;
+            TopTools_IndexedMapOfShape om;
+            face_map(out, om);
+            for (int i = 1; i <= om.Extent(); i++) tags.push_back(capped.Contains(om(i)) ? tag : (tag | 1));
+            gp_GTrsf g;
+            g.SetVectorialPart(gp_Mat(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]));
+            g.SetTranslationPart(gp_XYZ(m[3], m[7], m[11]));
+            TopoDS_Shape moved;
+            if (g.Form() == gp_Other) {
+                BRepBuilderAPI_GTransform gt(out, g, Standard_True);
+                if (!gt.IsDone()) {
+                    set_err("the copy could not be scaled");
+                    return nullptr;
+                }
+                moved = gt.Shape();
+            } else {
+                gp_Trsf t;
+                t.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+                moved = BRepBuilderAPI_Transform(out, t, Standard_True).Shape();
+            }
+            FShape* r = wrap(moved);
+            if (!r) return nullptr;
+            TopTools_IndexedMapOfShape mm;
+            face_map(moved, mm);
+            r->tags = (int)tags.size() == mm.Extent() ? tags : std::vector<long long>(mm.Extent(), tag | 1);
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
 // Faces (0-based) taken away and the faces round them made longer to close
 // the part again (BRepAlgoAPI_Defeaturing: a fillet's faces gone, its edge
 // sharp again), the tags carried.
