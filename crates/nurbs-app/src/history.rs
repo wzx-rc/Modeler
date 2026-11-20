@@ -103,21 +103,24 @@ impl AppState {
     /// The scene's history: the names of the steps done, oldest first,
     /// then those that can be done again; and how many are done.
     pub fn scene_history(&self) -> (Vec<String>, usize) {
-        let mut v: Vec<String> = self.undo.iter().map(|u| u.0.clone()).collect();
-        v.extend(self.redo.iter().rev().map(|r| r.0.clone()));
-        (v, self.undo.len())
+        let mut v: Vec<String> = self.undo.iter().filter(|u| u.doc.is_some()).map(|u| u.label.clone()).collect();
+        let done = v.len();
+        v.extend(self.redo.iter().rev().filter(|r| r.doc.is_some()).map(|r| r.label.clone()));
+        (v, done)
     }
 
-    /// Goes back or forward in the scene's history to `n` steps done.
+    /// Goes back or forward in the scene's history to `n` steps done (the
+    /// document's steps; selection steps are passed through).
     pub fn scene_go(&mut self, n: usize) {
-        let before = self.undo.len();
-        while self.undo.len() > n {
+        let done = |s: &Self| s.undo.iter().filter(|u| u.doc.is_some()).count();
+        let before = done(self);
+        while done(self) > n && !self.undo.is_empty() {
             self.undo();
         }
-        while self.undo.len() < n && !self.redo.is_empty() {
+        while done(self) < n && self.redo.iter().any(|r| r.doc.is_some()) {
             self.redo();
         }
-        if self.undo.len() != before {
+        if done(self) != before {
             let (names, at) = self.scene_history();
             let what = if at == 0 { "the start".to_string() } else { names[at - 1].clone() };
             self.toast(&format!("History: {what} ({at} of {})", names.len()), false);

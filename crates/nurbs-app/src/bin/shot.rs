@@ -3334,6 +3334,134 @@ fn main() {
         h.shot("zero-move-free-3-made");
     }
 
+    if want("undo-select") {
+        // Ctrl + Z through the clicks (Romain 20 nov., 9 h 38): three faces
+        // picked one by one, three Ctrl + Z take them off one by one; then a
+        // move undone gives back its selection
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        h.reset(d, "Cube");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(25.0, 25.0, 20.0));
+        h.steps(2);
+        h.settle();
+        let z = |h: &mut Harness| {
+            h.hold(Modifiers::CTRL);
+            h.key(egui::Key::Z);
+            h.hold(Modifiers::NONE);
+            h.steps(2);
+        };
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(20.0, 10.0, 0.0)));
+        h.click(h.screen_of(Vec3::new(0.0, 10.0, 15.0)));
+        h.hold(Modifiers::NONE);
+        h.steps(2);
+        eprintln!("  picked {} · undo {:?}", h.st.face_sel.len(), h.st.undo.iter().map(|u| u.label.clone()).collect::<Vec<_>>());
+        for _ in 0..4 {
+            z(&mut h);
+            eprintln!("  Ctrl + Z: faces {} mode {:?} toast {:?}", h.st.face_sel.len(), h.st.sel_mode, h.st.toast.as_ref().map(|t| t.text.clone()));
+        }
+        for _ in 0..2 {
+            h.hold(Modifiers::CTRL);
+            h.key(egui::Key::Y);
+            h.hold(Modifiers::NONE);
+            h.steps(2);
+            eprintln!("  Ctrl + Y: faces {} mode {:?}", h.st.face_sel.len(), h.st.sel_mode);
+        }
+        h.shot("zero-undo-select-1-redo");
+        // the three faces moved up, the move undone: the move gone, the
+        // three faces still picked
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(0.0, 10.0, 15.0)));
+        h.hold(Modifiers::NONE);
+        h.steps(2);
+        let c = h.st.pivot().expect("a gizmo").as_vec3();
+        let s0 = h.screen_of(c);
+        let dir = (h.screen_of(c + Vec3::Y) - s0).normalized();
+        let grab = s0 + dir * 55.0;
+        let to = h.screen_of(c + Vec3::Y * 5.0) - s0;
+        h.drag(grab, grab + to, 10, true);
+        h.settle();
+        eprintln!("  moved: steps {} faces picked {}", h.st.doc.features.len(), h.st.face_sel.len());
+        z(&mut h);
+        h.settle();
+        eprintln!("  move undone: steps {} faces picked {} selection {:?}", h.st.doc.features.len(), h.st.face_sel.len(), h.st.selection);
+        h.shot("zero-undo-select-2-move-undone");
+    }
+
+    if want("isolate") {
+        // Isolate (Romain 20 nov., 9 h 38, Maya): a block beside the test
+        // part picked, the top bar's icon: it alone, framed; again: all
+        let mut d = test_part();
+        let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 15.0, z: 20.0 }, glam::DVec3::new(70.0, 0.0, 0.0), glam::DQuat::IDENTITY);
+        h.reset(d, "Part");
+        h.st.camera.frame(Vec3::new(-40.0, 0.0, -30.0), Vec3::new(85.0, 30.0, 30.0));
+        h.steps(2);
+        h.settle();
+        h.click(h.screen_of(Vec3::new(70.0, 15.0, 0.0)));
+        eprintln!("  selected {:?} (block {b})", h.st.selection);
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::Num1);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  isolated {:?}: faces {}", h.st.isolate.as_ref().map(|i| i.ids.clone()), h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0));
+        h.shot("zero-isolate-1-on");
+        // the part's block picked by a face (Face mode), isolated with its hole, boss, slot
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::Num1);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.st.camera.frame(Vec3::new(-40.0, 0.0, -30.0), Vec3::new(85.0, 30.0, 30.0));
+        h.steps(2);
+        h.click(h.screen_of(Vec3::new(-20.0, 10.0, 10.0)));
+        eprintln!("  selected {:?}", h.st.selection);
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::Num1);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  isolated {:?}: faces {}", h.st.isolated_ids(), h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0));
+        h.shot("zero-isolate-2-part");
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::Num1);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  off: faces {}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0));
+        h.shot("zero-isolate-3-off");
+    }
+
+    if want("edges-depth") {
+        // edges seen a little behind a face near its outline (Romain 20
+        // nov., 9 h 30, his stacked pills with a groove): stacked pills, a
+        // groove, a thin pill on top, seen from above and in front
+        let mut d = Doc::default();
+        let y = |d: &mut Doc, op: Op, x: f64, h: f64, z: f64, at: DVec3| {
+            d.add(op, Prim::Box { x, y: h, z }, at, DQuat::IDENTITY);
+            if op == Op::Add {
+                for s in [-1.0, 1.0] {
+                    d.add(op, Prim::Cylinder { radius: z * 0.5, height: h }, at + DVec3::new(s * x * 0.5, 0.0, 0.0), DQuat::IDENTITY);
+                }
+            }
+        };
+        y(&mut d, Op::Add, 80.0, 10.0, 30.0, DVec3::ZERO);
+        y(&mut d, Op::Add, 76.0, 14.0, 22.0, DVec3::new(0.0, 10.0, 0.0));
+        y(&mut d, Op::Carve, 70.0, 6.0, 5.0, DVec3::new(4.0, 19.0, 0.0));
+        y(&mut d, Op::Add, 4.0, 20.0, 5.0, DVec3::new(-36.0, 24.0, -6.0));
+        y(&mut d, Op::Add, 60.0, 30.0, 16.0, DVec3::new(10.0, 0.0, -40.0));
+        h.reset(d, "Pills");
+        h.st.camera.frame(Vec3::new(-45.0, 0.0, -50.0), Vec3::new(10.0, 45.0, 15.0));
+        h.st.camera.yaw = -0.55;
+        h.st.camera.pitch = 0.45;
+        h.st.camera.dist *= 0.55;
+        h.steps(3);
+        h.settle();
+        h.shot("zero-edges-depth-1");
+        h.st.camera.yaw = 0.35;
+        h.st.camera.pitch = 0.25;
+        h.steps(3);
+        h.shot("zero-edges-depth-2");
+    }
+
     if want("align") {
         // Romain (20 nov. 7 h 22): a point of the moved piece, not only its
         // centre, lands on a point of interest it passes near

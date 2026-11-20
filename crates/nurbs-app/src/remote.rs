@@ -758,10 +758,10 @@ fn undo(st: &mut AppState, p: &Value) -> Value {
     let mut done = 0;
     for _ in 0..n {
         if redo && st.can_redo() {
-            st.redo();
+            st.redo_doc();
             done += 1;
         } else if !redo && st.can_undo() {
-            st.undo();
+            st.undo_doc();
             done += 1;
         }
     }

@@ -70,6 +70,7 @@ pub enum Icon {
     Deviation,
     /// X-ray: a cube seen through, its hidden edges shown.
     Xray,
+    Isolate,
     /// The Curves set: a rectangle with rounded corners, a circle, an
     /// ellipse, a hexagon, a star.
     CurveRect,
@@ -423,6 +424,16 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 }
                 _ => {}
             }
+        }
+        Icon::Isolate => {
+            // a block alone, framed by four corners (Maya's Isolate Select)
+            let b = [(7.0, 7.0), (13.0, 7.0), (13.0, 13.0), (7.0, 13.0)];
+            pen.fill(&b, 0.5);
+            pen.closed(&b);
+            pen.line(&[(2.5, 6.0), (2.5, 2.5), (6.0, 2.5)]);
+            pen.line(&[(14.0, 2.5), (17.5, 2.5), (17.5, 6.0)]);
+            pen.line(&[(17.5, 14.0), (17.5, 17.5), (14.0, 17.5)]);
+            pen.line(&[(6.0, 17.5), (2.5, 17.5), (2.5, 14.0)]);
         }
         Icon::Xray => {
             let hex = [(10.0, 2.5), (16.5, 6.0), (16.5, 14.0), (10.0, 17.5), (3.5, 14.0), (3.5, 6.0)];

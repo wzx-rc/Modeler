@@ -267,11 +267,16 @@ struct LOut {
     @location(1) @interpolate(linear) across: vec2<f32>,
 };
 
-// pulled a little towards the eye so a line wins over the faces it lies on
+// pulled a little towards the eye so a line wins over the faces it lies on:
+// by about three pixels' worth at its depth (it was 0.03 mm + 0.4 % of the
+// distance, about ten pixels: an edge just behind a face near its outline
+// showed through it; Romain 20 nov., 9 h 30)
 fn pulled(p: vec3<f32>) -> vec4<f32> {
     let d = u.eye.xyz - p;
     let dist = length(d);
-    return project(p + d / max(dist, 1e-6) * (0.03 + 0.004 * dist));
+    let z = max(dot(p - u.eye.xyz, u.fwd.xyz), 1e-3);
+    let px = 2.0 * z * u.eye.w / max(u.view.y, 1.0);
+    return project(p + d / max(dist, 1e-6) * (0.005 + 3.0 * px));
 }
 
 // a segment is a quad `width` pixels wide plus one pixel of fringe on each

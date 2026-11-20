@@ -548,15 +548,56 @@ pub struct JournalEntry {
     pub errors: Vec<String>,
 }
 
+/// Isolate (Maya's Isolate Select; Romain 20 nov., 9 h 38: "un isolation
+/// mode comme Maya… en icône dans la top bar"): the kernel builds only
+/// these elements (with their operations, the curves of their 2D booleans,
+/// the Carve shapes that cut them, and the shapes made since), the
+/// document unchanged; the scan hidden meanwhile.
+#[derive(Clone, Debug)]
+pub struct Isolate {
+    pub ids: Vec<FeatureId>,
+    /// The document's next id then: newer features are shown too.
+    pub from: FeatureId,
+    /// Whether the scan was shown (put back after).
+    pub ref_shown: bool,
+}
+
+/// The selection as the undo steps keep it: Ctrl + Z goes back through
+/// the clicks too, one by one (Maya; Romain 20 nov., 9 h 37: "je click une
+/// face + une face + une face… il faut remonter à chaque click un par un").
+#[derive(Clone, Debug, PartialEq)]
+pub struct SelState {
+    pub mode: SelMode,
+    pub selection: Vec<FeatureId>,
+    pub faces: Vec<FaceRef>,
+    pub edges: Vec<EdgeRef>,
+    pub verts: Vec<DVec3>,
+}
+
+/// One undo step: the document before it (None: a selection change only)
+/// and the selection then.
+#[derive(Clone, Debug)]
+pub struct UndoStep {
+    pub label: String,
+    pub doc: Option<Doc>,
+    pub sel: SelState,
+}
+
 pub struct AppState {
     pub doc: Doc,
     pub doc_name: String,
     /// Bumped on every change of the document.
     pub version: u64,
-    pub(crate) undo: Vec<(String, Doc)>,
-    pub(crate) redo: Vec<(String, Doc)>,
-    /// The document before the gesture under way (drag, creation).
+    pub undo: Vec<UndoStep>,
+    pub redo: Vec<UndoStep>,
+    /// The document before the gesture under way (drag, creation), and the
+    /// selection then.
     live_before: Option<(String, Doc)>,
+    live_sel: Option<SelState>,
+    /// The selection the undo steps know, and the version it was seen at
+    /// (`sync_selection`).
+    sel_seen: SelState,
+    sel_version: u64,
 
     pub selection: Vec<FeatureId>,
     pub sel_mode: SelMode,
@@ -710,6 +751,8 @@ pub struct AppState {
     pub ref_ghost: bool,
     /// X-ray (Alt + X, Maya): the part drawn see-through, the scan behind it shown.
     pub xray: bool,
+    /// Isolate (Maya): the elements shown alone, see `Isolate`.
+    pub isolate: Option<Isolate>,
     /// The Cylinder dragged across a round part of the reference (`scan.rs`).
     pub scan_round: Option<crate::scan::ScanRound>,
     /// The Slot tool's drag along a slot of the reference.
@@ -746,6 +789,9 @@ impl AppState {
             undo: vec![],
             redo: vec![],
             live_before: None,
+            live_sel: None,
+            sel_seen: SelState { mode: SelMode::Object, selection: vec![], faces: vec![], edges: vec![], verts: vec![] },
+            sel_version: u64::MAX,
             selection: vec![],
             sel_mode: SelMode::Object,
             face_sel: vec![],
@@ -825,6 +871,7 @@ impl AppState {
             ref_shown: true,
             ref_ghost: false,
             xray: false,
+            isolate: None,
             scan_round: None,
             scan_slot: None,
             scan_box_from: None,
@@ -869,6 +916,91 @@ impl AppState {
         }
     }
 
+    /// The elements of what is picked: the shapes selected (an
+    /// operation: its element), else those of the picked faces and edges.
+    pub fn picked_elements(&self) -> Vec<FeatureId> {
+        let mut out: Vec<FeatureId> = vec![];
+        let add = |id: FeatureId, out: &mut Vec<FeatureId>| {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        };
+        for id in &self.selection {
+            add(self.element_of(*id), &mut out);
+        }
+        let tags = self.face_sel.iter().map(|r| r.tag).chain(self.edge_sel.iter().flat_map(|e| e.faces));
+        for t in tags {
+            if let Some(ft) = FaceTag::unpack(t) {
+                add(self.element_of(ft.feature), &mut out);
+            }
+        }
+        out
+    }
+
+    /// Isolate on (what is picked shown alone, framed) or off.
+    pub fn toggle_isolate(&mut self) {
+        if let Some(iso) = self.isolate.take() {
+            self.ref_shown = iso.ref_shown;
+            self.version += 1;
+            self.toast("Isolate off: everything shown", false);
+            return;
+        }
+        let ids = self.picked_elements();
+        if ids.is_empty() {
+            self.toast("Isolate: select what to show alone first", true);
+            return;
+        }
+        self.isolate = Some(Isolate { ids, from: self.doc.next_id, ref_shown: self.ref_shown });
+        self.ref_shown = false;
+        self.version += 1;
+        let keep = self.isolated_ids();
+        let b = self.doc.features.iter().filter(|f| keep.contains(&f.id) && f.is_solid() && f.op != Op::Carve).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
+        if let Some((lo, hi)) = b {
+            self.camera.frame(lo.as_vec3(), hi.as_vec3());
+        }
+        self.toast("Isolate: the selection alone (its icon again: everything)", false);
+    }
+
+    /// The features the kernel builds while Isolate is on.
+    pub fn isolated_ids(&self) -> Vec<FeatureId> {
+        let Some(iso) = &self.isolate else { return self.doc.features.iter().map(|f| f.id).collect() };
+        let mut keep: Vec<FeatureId> = self.doc.with_operands(&iso.ids);
+        for el in &iso.ids {
+            keep.extend(self.element_ops(*el));
+        }
+        // the Carve shapes that cut them, with their operations
+        let solid = |f: &&Feature| keep.contains(&f.id) && f.is_solid() && !f.is_path() && f.op == Op::Add;
+        if let Some((lo, hi)) = self.doc.features.iter().filter(solid).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1))) {
+            let cuts: Vec<FeatureId> = self
+                .doc
+                .features
+                .iter()
+                .filter(|f| f.op == Op::Carve && f.is_solid() && !f.is_path() && !keep.contains(&f.id))
+                .filter(|f| {
+                    let (a, b) = f.bounds();
+                    a.cmple(hi).all() && b.cmpge(lo).all()
+                })
+                .map(|f| f.id)
+                .collect();
+            for c in cuts {
+                keep.push(c);
+                keep.extend(self.element_ops(c));
+            }
+        }
+        keep.extend(self.doc.features.iter().filter(|f| f.id >= iso.from).map(|f| f.id));
+        keep
+    }
+
+    /// The document the kernel builds: the whole one, or with Isolate on
+    /// only what it shows.
+    fn build_doc(&self) -> Option<Doc> {
+        self.isolate.as_ref()?;
+        let keep = self.isolated_ids();
+        let mut d = self.doc.clone();
+        d.features.retain(|f| keep.contains(&f.id));
+        Some(d)
+    }
+
     pub fn frame_selection(&mut self) {
         let b = self.doc.features.iter().filter(|f| self.selection.contains(&f.id)).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
         match b {
@@ -889,12 +1021,12 @@ impl AppState {
     /// One change, one step of undo.
     pub fn edit(&mut self, label: &str, f: impl FnOnce(&mut Doc)) {
         let before = self.doc.clone();
+        let sel0 = self.sel_state();
         f(&mut self.doc);
         if self.doc != before {
             let fresh = self.live_before.is_none();
             if fresh {
-                self.undo.push((label.to_string(), before.clone()));
-                self.redo.clear();
+                self.push_undo(label, before.clone(), sel0);
             }
             self.touched();
             if fresh {
@@ -908,6 +1040,7 @@ impl AppState {
     pub fn begin_live(&mut self, label: &str) {
         if self.live_before.is_none() {
             self.live_before = Some((label.to_string(), self.doc.clone()));
+            self.live_sel = Some(self.sel_state());
         }
     }
 
@@ -922,9 +1055,9 @@ impl AppState {
     pub fn end_live(&mut self) {
         if let Some((label, before)) = self.live_before.take() {
             let changed = before != self.doc;
+            let sel = self.live_sel.take().unwrap_or_else(|| self.sel_seen.clone());
             if changed {
-                self.undo.push((label.clone(), before.clone()));
-                self.redo.clear();
+                self.push_undo(&label, before.clone(), sel);
             }
             // fine meshing now
             self.touched();
@@ -1015,7 +1148,7 @@ impl AppState {
         }
         let failed = steps.iter().filter_map(|id| self.doc.feature(*id)).filter(|f| f.tweak.as_ref().map(|t| !t.copy).unwrap_or(false)).find_map(|f| new.iter().find(|e| e.starts_with(&format!("{}:", f.name))).cloned());
         if let Some(err) = failed {
-            self.undo();
+            self.undo_doc();
             self.record("auto-undo", &err);
             self.toast(&format!("{err} · undone"), true);
         }
@@ -1023,14 +1156,81 @@ impl AppState {
 
     pub fn cancel_live(&mut self) {
         if let Some((_, before)) = self.live_before.take() {
+            self.live_sel = None;
             self.doc = before;
             self.touched();
         }
     }
 
-    /// The undo steps' names, oldest first.
+    /// The undo steps' names, oldest first (the document's; selection
+    /// changes left out).
     pub fn undo_labels(&self) -> Vec<String> {
-        self.undo.iter().map(|u| u.0.clone()).collect()
+        self.undo.iter().filter(|u| u.doc.is_some()).map(|u| u.label.clone()).collect()
+    }
+
+    /// The selection now, as an undo step keeps it.
+    pub fn sel_state(&self) -> SelState {
+        SelState { mode: self.sel_mode, selection: self.selection.clone(), faces: self.face_sel.clone(), edges: self.edge_sel.clone(), verts: self.vert_sel.clone() }
+    }
+
+    fn set_sel_state(&mut self, s: &SelState) {
+        self.sel_mode = s.mode;
+        self.selection = s.selection.clone();
+        self.face_sel = s.faces.clone();
+        self.edge_sel = s.edges.clone();
+        self.vert_sel = s.verts.clone();
+        self.clean_selection_ids();
+    }
+
+    /// A change of the document kept as an undo step.
+    pub(crate) fn push_undo(&mut self, label: &str, before: Doc, sel: SelState) {
+        self.undo.push(UndoStep { label: label.to_string(), doc: Some(before), sel });
+        self.redo.clear();
+    }
+
+    /// Once per frame: a selection changed by itself (a click, a
+    /// rectangle, a mode) becomes an undo step of its own; one changed
+    /// with the document (an edit, an undo) goes with that step. Not while
+    /// a gesture is under way (it ends as one step).
+    fn sync_selection(&mut self) {
+        let now = self.sel_state();
+        if self.version != self.sel_version {
+            self.sel_version = self.version;
+            self.sel_seen = now;
+            return;
+        }
+        if now == self.sel_seen {
+            return;
+        }
+        if self.is_live() || self.drag.is_some() || self.creation.is_some() || self.marquee.is_some() || self.push.is_some() || self.face_drag.is_some() || self.round_drag.is_some() || self.curve_pull.is_some() {
+            return;
+        }
+        let before = std::mem::replace(&mut self.sel_seen, now);
+        self.undo.push(UndoStep { label: "Select".into(), doc: None, sel: before });
+        self.redo.clear();
+    }
+
+    /// Redoes up to the next change of the document.
+    pub fn redo_doc(&mut self) {
+        while let Some(u) = self.redo.last() {
+            let doc = u.doc.is_some();
+            self.redo();
+            if doc {
+                break;
+            }
+        }
+    }
+
+    /// Undoes up to the last change of the document (the selection steps
+    /// after it too).
+    pub fn undo_doc(&mut self) {
+        while let Some(u) = self.undo.last() {
+            let doc = u.doc.is_some();
+            self.undo();
+            if doc {
+                break;
+            }
+        }
     }
 
     pub fn is_live(&self) -> bool {
@@ -1039,26 +1239,38 @@ impl AppState {
 
     pub fn undo(&mut self) {
         self.abort_gestures();
-        if let Some((label, d)) = self.undo.pop() {
-            let now = std::mem::replace(&mut self.doc, d);
-            self.redo.push((label.clone(), now));
-            self.touched();
-            self.clean_selection();
-            self.custom_pivot = None;
+        if let Some(u) = self.undo.pop() {
+            let back = self.step_back(u);
+            let label = if back.doc.is_some() { back.label.clone() } else { "selection".into() };
+            self.redo.push(back);
             self.toast(&format!("Undo: {label}"), false);
         }
     }
 
     pub fn redo(&mut self) {
         self.abort_gestures();
-        if let Some((label, d)) = self.redo.pop() {
-            let now = std::mem::replace(&mut self.doc, d);
-            self.undo.push((label.clone(), now));
-            self.touched();
-            self.clean_selection();
-            self.custom_pivot = None;
+        if let Some(u) = self.redo.pop() {
+            let back = self.step_back(u);
+            let label = if back.doc.is_some() { back.label.clone() } else { "selection".into() };
+            self.undo.push(back);
             self.toast(&format!("Redo: {label}"), false);
         }
+    }
+
+    /// Puts back the document and selection of a step; the step that
+    /// leads to what was on screen.
+    fn step_back(&mut self, u: UndoStep) -> UndoStep {
+        let sel = self.sel_state();
+        let doc = u.doc.map(|d| {
+            let now = std::mem::replace(&mut self.doc, d);
+            self.touched();
+            now
+        });
+        self.set_sel_state(&u.sel);
+        self.custom_pivot = None;
+        self.sel_seen = self.sel_state();
+        self.sel_version = self.version;
+        UndoStep { label: u.label, doc, sel }
     }
 
     pub fn can_undo(&self) -> bool {
@@ -2790,6 +3002,9 @@ impl AppState {
         self.selection.contains(&b.id) || b.shape_bool.as_ref().map(|s| s.operands.iter().any(|o| self.selection.contains(o))).unwrap_or(false)
     }
 
+    /// How far from a curve's line the pointer still catches it, in points.
+    const PATH_CATCH: f32 = 12.0;
+
     /// The path drawn under the pointer (within a few points), in Object
     /// mode: paths have no faces for the picker. A 2D boolean's operands
     /// only once it is open (it selected, a click again: the operand under
@@ -2813,7 +3028,8 @@ impl AppState {
                     let l = dx * dx + dy * dy;
                     let t = if l > 0.0 { (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l).clamp(0.0, 1.0) } else { 0.0 };
                     let d = (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy);
-                    if d < 7.0 && best.map(|b| d - bias < b.1).unwrap_or(true) {
+                    // a few points either side (Maya's pre-selection)
+                    if d < Self::PATH_CATCH && best.map(|b| d - bias < b.1).unwrap_or(true) {
                         best = Some((f.id, d - bias));
                     }
                 }
@@ -3228,6 +3444,7 @@ impl AppState {
     /// it changed (coarse meshing while a gesture is live, fine after).
     pub fn tick(&mut self, now: f64) {
         self.now = now;
+        self.sync_selection();
         if self.toast.as_ref().map(|t| now > t.until).unwrap_or(false) {
             self.toast = None;
         }
@@ -3261,7 +3478,8 @@ impl AppState {
         // couper"), and until each of its models arrives the shapes added
         // are drawn moved from the model on screen (`drag_preview`)
         if want != self.submitted && self.kernel.status() != Status::Missing {
-            self.kernel.submit(want, &self.doc, fine, quads);
+            let iso = self.build_doc();
+            self.kernel.submit(want, iso.as_ref().unwrap_or(&self.doc), fine, quads);
             self.submitted = want;
             let frames = self.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()).map(|f| (f.id, shape_frame(f))).collect();
             self.sent_frames.push((want, frames));
@@ -3535,8 +3753,8 @@ impl AppState {
     pub fn new_doc(&mut self) {
         self.abort_gestures();
         let before = std::mem::take(&mut self.doc);
-        self.undo.push(("New".into(), before));
-        self.redo.clear();
+        let sel = self.sel_state();
+        self.push_undo("New", before, sel);
         self.selection.clear();
         self.doc_name = "Untitled".into();
         self.save_name = self.doc_name.clone();
@@ -3563,8 +3781,8 @@ impl AppState {
         };
         self.abort_gestures();
         let before = std::mem::take(&mut self.doc);
-        self.undo.push(("New gun scene".into(), before));
-        self.redo.clear();
+        let sel = self.sel_state();
+        self.push_undo("New gun scene", before, sel);
         self.selection.clear();
         self.doc.reference = Some(nurbs_kernel::RefMesh { path });
         self.ref_failed = None;
@@ -3578,8 +3796,8 @@ impl AppState {
     pub fn open(&mut self, name: &str, doc: Doc) {
         self.abort_gestures();
         let before = std::mem::replace(&mut self.doc, doc);
-        self.undo.push(("Open".into(), before));
-        self.redo.clear();
+        let sel = self.sel_state();
+        self.push_undo("Open", before, sel);
         self.selection.clear();
         self.doc_name = name.to_string();
         self.save_name = name.to_string();

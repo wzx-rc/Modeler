@@ -252,6 +252,10 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     st.settings.grid = !st.settings.grid;
                     st.save_settings();
                 }
+                let tip = if st.isolate.is_some() { "Isolate on: click to show everything again (Ctrl + 1)" } else { "Isolate: show the selection alone (Ctrl + 1, Maya)" };
+                if icon_btn(ui, Icon::Isolate, st.isolate.is_some(), tip, 28.0).clicked() {
+                    st.toggle_isolate();
+                }
             });
         });
     });
@@ -2748,6 +2752,11 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     use egui::Key;
     let (ctrl, shift) = ctx.input(|i| (i.modifiers.ctrl || i.modifiers.mac_cmd, i.modifiers.shift));
     let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
+    // Ctrl + 1: Isolate (Maya)
+    if ctrl && pressed(Key::Num1) {
+        st.toggle_isolate();
+        return;
+    }
     if ctrl {
         if pressed(Key::Z) {
             if shift {

@@ -189,11 +189,19 @@ impl Drawer {
             if inside.is_some_and(|b| !shown(b)) && !selected {
                 continue;
             }
+            // a curve of a 2D boolean being moved, turned or scaled: hidden
+            // again, only the result shows (Romain 20 nov., 9 h 45)
+            if inside.is_some() && st.drag.is_some() {
+                continue;
+            }
+            // the curve under the pointer (pre-selection, Maya): lighter
+            // and wider
+            let pre = egui::Color32::from_rgb(0xd8, 0xf6, 0xfa);
             let (c, a, w) = match (selected, hovered, inside) {
                 (true, _, _) => (theme::accent(), 240, 2.2),
-                (_, true, Some(_)) => (theme::PATH, 170, 1.6),
+                (_, true, Some(_)) => (pre, 200, 2.0),
                 (_, false, Some(b)) => (theme::PATH, if st.boolean_open(b) { 120 } else { 70 }, 1.2),
-                (_, true, None) => (theme::PATH, 240, 2.2),
+                (_, true, None) => (pre, 250, 2.6),
                 _ => (theme::PATH, 240, 1.6),
             };
             let lines: Vec<Vec<[f32; 3]>> = st.curve_lines(f).iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
