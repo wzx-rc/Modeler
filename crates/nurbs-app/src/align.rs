@@ -114,7 +114,7 @@ impl AppState {
     pub fn align_pick(&mut self, p: [f32; 2]) {
         let Some(a) = self.align.as_ref() else { return };
         let ids = a.ids.clone();
-        let hit = self.pick_path(p).or_else(|| self.pick_at(p).and_then(|h| self.feature_of_face(h.face))).map(|id| self.element_of(id));
+        let hit = self.pick_object(p).map(|id| self.element_of(id));
         let Some(t) = hit else {
             self.toast("Align: click a shape", false);
             return;
@@ -146,7 +146,14 @@ impl AppState {
         // the shape's own outline (its faces in the part may be merged
         // with a flush neighbour's, which then takes them), and the faces
         // its operations made (an extrusion goes past its box)
-        let mut pts: Vec<DVec3> = if f.is_path() { self.curve_lines(f).concat() } else { f.outline().concat() };
+        // a mesh (clay, Poly, linked, SDF): its own points
+        let mut pts: Vec<DVec3> = if f.is_mesh() {
+            crate::meshes::world_points(f).iter().map(|p| p.as_dvec3()).collect()
+        } else if f.is_path() {
+            self.curve_lines(f).concat()
+        } else {
+            f.outline().concat()
+        };
         if let Some(m) = self.model.as_ref().filter(|_| f.is_solid() && f.op == nurbs_kernel::Op::Add) {
             let ops: Vec<bool> = m.faces.iter().map(|g| g.tag.map(|t| t.feature != id && self.element_of(t.feature) == id).unwrap_or(false)).collect();
             for (t, tri) in m.triangles.iter().enumerate() {

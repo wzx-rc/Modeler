@@ -1222,6 +1222,17 @@ impl AppState {
                 return bounds(&pts);
             }
         }
+        // a shape picked in an SDF object: that shape
+        if self.sdf_comp() {
+            if let Some((f, n)) = self.sdf_picked() {
+                if let Some(sc) = crate::sdf::scene_of(f) {
+                    let pts: Vec<Vec3> = crate::sdf::node_lines(f, sc, n).concat().into_iter().map(Vec3::from).collect();
+                    if !pts.is_empty() {
+                        return bounds(&pts);
+                    }
+                }
+            }
+        }
         let ids = self.doc.with_operands(&self.selection);
         if let Some(m) = m {
             let faces: Vec<bool> = m
@@ -2026,6 +2037,11 @@ impl AppState {
     /// What a material ball let go at `p` (screen) lands on: in Face mode
     /// the face under it, else the element the face comes from.
     pub fn drop_target(&self, p: [f32; 2]) -> Option<DropTarget> {
+        // a mesh in front (clay, Poly, linked, SDF): the whole object, as
+        // any shape (one path for every kind of object)
+        if let Some(id) = self.mesh_in_front(p) {
+            return Some(DropTarget::Shape(id));
+        }
         let h = self.pick_at(p)?;
         let t = self.model.as_ref()?.faces.get(h.face)?.tag?;
         if self.sel_mode == SelMode::Face {

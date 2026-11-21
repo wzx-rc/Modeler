@@ -753,8 +753,16 @@ fn sdf_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     let Some(nd) = scene.node(n).cloned() else { return };
     let Some(sh) = nd.shape().cloned() else { return };
     section(ui, &nd.name);
-    if let Some(m) = segmented(ui, &[(CombineMode::Add, "Add", accent()), (CombineMode::Carve, "Carve", carve()), (CombineMode::Intersect, "Intersect", TEXT())], nd.combine.mode, 28.0) {
-        st.sdf.mode = m;
+    let mut mode_pick = segmented(ui, &[(CombineMode::Add, "Add", accent()), (CombineMode::Carve, "Carve", carve()), (CombineMode::Intersect, "Intersect", TEXT())], nd.combine.mode, 28.0);
+    // Groove and Tongue (Forme SDF's): a line cut in, or raised, where the
+    // shape's surface crosses what is before it
+    if let Some(m) = ui.push_id("sdf-groove", |ui| segmented(ui, &[(CombineMode::Groove, "Groove", carve()), (CombineMode::Tongue, "Tongue", accent())], nd.combine.mode, 26.0)).inner {
+        mode_pick = Some(m);
+    }
+    if let Some(m) = mode_pick {
+        if crate::sdf::SDF_MODES.contains(&m) {
+            st.sdf.mode = m;
+        }
         st.sdf_edit_node(&format!("Make it {}", m.label()), |x| x.combine.mode = m);
     }
     let mut live = false;
@@ -762,6 +770,18 @@ fn sdf_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     if slider_row(ui, "Blend", &mut b, 0.0..=30.0, 0.1, "mm").0 && (b - nd.combine.blend).abs() > 1e-5 {
         st.sdf_live_node("Blend", |x| x.combine.blend = b);
         live = true;
+    }
+    if matches!(nd.combine.mode, CombineMode::Groove | CombineMode::Tongue) {
+        let mut v = nd.combine.depth;
+        if slider_row(ui, "Depth", &mut v, 0.05..=20.0, 0.05, "mm").0 && (v - nd.combine.depth).abs() > 1e-5 {
+            st.sdf_live_node("Groove depth", |x| x.combine.depth = v);
+            live = true;
+        }
+        let mut v = nd.combine.width;
+        if slider_row(ui, "Width", &mut v, 0.05..=20.0, 0.05, "mm").0 && (v - nd.combine.width).abs() > 1e-5 {
+            st.sdf_live_node("Groove width", |x| x.combine.width = v);
+            live = true;
+        }
     }
     // sizes are half sizes in the engine: shown whole
     let rows: Vec<(&str, usize)> = match sh.kind {
@@ -800,6 +820,76 @@ fn sdf_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
             });
             live = true;
         }
+    }
+    // Mirror and Repeat (the engine's, per shape): across the object's own
+    // middle planes (through its first shape's base), copies in a line or
+    // round its up axis
+    section(ui, "Mirror · Repeat");
+    ui.horizontal(|ui| {
+        let mut mi = nd.mirror;
+        let mut changed = false;
+        for (k, label) in [(0usize, "X"), (1, "Y"), (2, "Z")] {
+            let on = [mi.x, mi.y, mi.z][k];
+            if chip(ui, Some(Icon::Mirror), &format!("Mirror {label}"), on, "Mirrored across the object's middle plane").clicked() {
+                match k {
+                    0 => mi.x = !mi.x,
+                    1 => mi.y = !mi.y,
+                    _ => mi.z = !mi.z,
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            st.sdf_edit_node("Mirror", |x| x.mirror = mi);
+        }
+    });
+    use forme_core::{Axis, Repeat};
+    let rk = match nd.repeat {
+        Repeat::None => 0u8,
+        Repeat::Linear { .. } => 1,
+        Repeat::Radial { .. } => 2,
+    };
+    if let Some(k) = ui.push_id("sdf-repeat", |ui| segmented(ui, &[(0u8, "Single", TEXT()), (1, "Line", accent()), (2, "Round", accent())], rk, 26.0)).inner {
+        if k != rk {
+            let w = sh.size.x * 2.0;
+            let r = match k {
+                1 => Repeat::Linear { count: 4, step: forme_core::glam::Vec3::X * (w * 1.5).max(1.0) },
+                2 => Repeat::Radial { count: 6, axis: Axis::Y },
+                _ => Repeat::None,
+            };
+            st.sdf_edit_node("Repeat", |x| x.repeat = r);
+        }
+    }
+    match nd.repeat {
+        Repeat::Linear { count, step } => {
+            let mut c = count as f32;
+            if slider_row(ui, "Count", &mut c, 2.0..=40.0, 1.0, "").0 && c.round() as u32 != count {
+                let c = c.round().max(2.0) as u32;
+                st.sdf_live_node("Repeat", |x| x.repeat = Repeat::Linear { count: c, step });
+                live = true;
+            }
+            for (a, label) in [(0usize, "Step X"), (1, "Step Y"), (2, "Step Z")] {
+                let mut v = step[a];
+                if slider_row(ui, label, &mut v, -200.0..=200.0, 0.1, "mm").0 && (v - step[a]).abs() > 1e-5 {
+                    let mut s2 = step;
+                    s2[a] = v;
+                    st.sdf_live_node("Repeat", |x| x.repeat = Repeat::Linear { count, step: s2 });
+                    live = true;
+                }
+            }
+        }
+        Repeat::Radial { count, axis } => {
+            let mut c = count as f32;
+            if slider_row(ui, "Count", &mut c, 2.0..=60.0, 1.0, "").0 && c.round() as u32 != count {
+                let c = c.round().max(2.0) as u32;
+                st.sdf_live_node("Repeat", |x| x.repeat = Repeat::Radial { count: c, axis });
+                live = true;
+            }
+            if let Some(a) = ui.push_id("sdf-axis", |ui| segmented(ui, &[(Axis::X, "Round X", TEXT()), (Axis::Y, "Round Y", TEXT()), (Axis::Z, "Round Z", TEXT())], axis, 24.0)).inner {
+                st.sdf_edit_node("Repeat axis", |x| x.repeat = Repeat::Radial { count, axis: a });
+            }
+        }
+        Repeat::None => {}
     }
     if !any_down && !live && st.is_live() && st.sdf_drag.is_none() {
         st.end_live();
@@ -2823,7 +2913,7 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     // the second column, beside the panel
     let feats = st.doc.features.clone();
     let ops_of = |st: &AppState, id: FeatureId| feats.iter().filter(|g| !g.is_solid() && !g.is_path() && st.owner_of(g.id) == Some(id)).count();
-    let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 8] = [
+    let groups: [(&str, Box<dyn Fn(&Feature) -> bool>); 9] = [
         ("PRIMITIVES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && !f.is_mesh() && f.form.is_none() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }))),
         ("FORMS", Box::new(|f: &Feature| f.form.is_some())),
         ("SHAPES", Box::new(|f: &Feature| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Profile { .. }))),
@@ -2832,6 +2922,7 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
         ("OPERATIONS", Box::new(|_: &Feature| false)),
         ("SCULPT", Box::new(|f: &Feature| f.mesh.as_ref().map(|m| m.kind == nurbs_kernel::mesh::MeshKind::Sculpt).unwrap_or(false))),
         ("POLY", Box::new(|f: &Feature| f.mesh.as_ref().map(|m| m.kind == nurbs_kernel::mesh::MeshKind::Poly).unwrap_or(false))),
+        ("SDF", Box::new(|f: &Feature| crate::sdf::is_sdf(f))),
     ];
     let focus = st.outline_element();
     egui::ScrollArea::vertical().id_salt("tree-scroll").max_height(height - 32.0).min_scrolled_height(height - 32.0).auto_shrink([false, true]).show(ui, |ui| {
@@ -2870,10 +2961,64 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
                 if f.shape_bool.is_some() {
                     operand_rows(ui, st, f, 1);
                 }
+                // an SDF object's shapes under it, as a 2D boolean's curves
+                if crate::sdf::is_sdf(f) {
+                    sdf_shape_rows(ui, st, f);
+                }
             }
             ui.add_space(3.0);
         }
     });
+}
+
+/// An SDF object's shapes in the outliner, under it, indented: a click
+/// picks the shape (the SDF tab's gizmo on it), as in its window.
+fn sdf_shape_rows(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    use forme_core::CombineMode;
+    let Some(scene) = crate::sdf::scene_of(f).cloned() else { return };
+    let picked = st.sdf_sel.filter(|(id, _)| *id == f.id).map(|(_, n)| n);
+    for n in crate::sdf::shapes(&scene) {
+        let Some(nd) = scene.node(n) else { continue };
+        let Some(sh) = nd.shape() else { continue };
+        let on = picked == Some(n);
+        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+        let r = Rect::from_min_max(pos2(r.min.x + 14.0, r.min.y), r.max);
+        let p = ui.painter();
+        if on {
+            p.rect(r, 5.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+        } else if resp.hovered() {
+            p.rect_filled(r, 5.0, RAISED());
+        }
+        let c = match nd.combine.mode {
+            CombineMode::Carve => carve(),
+            CombineMode::Add => crate::workspace::Workspace::Sdf.swatch(),
+            _ => TEXT2(),
+        };
+        let dim = if f.visible { 1.0 } else { 0.4 };
+        icons::paint(p, Rect::from_min_size(pos2(r.min.x + 6.0, r.center().y - 6.0), vec2(12.0, 12.0)), crate::sdf::prim_icon(sh.kind), tint(c, dim));
+        p.text(pos2(r.min.x + 24.0, r.center().y), Align2::LEFT_CENTER, &nd.name, regular(12.0), tint(if on { accent_text() } else { TEXT() }, dim));
+        p.text(pos2(r.max.x - 40.0, r.center().y), Align2::RIGHT_CENTER, nd.combine.mode.label(), mono(10.0), tint(c, dim));
+        // the shape shown or not (the engine leaves a hidden one out)
+        let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(14.0, 14.0));
+        let eresp = ui.interact(er.expand(5.0), Id::new(("sdf-eye", f.id, n)), Sense::click()).on_hover_text("Show / hide this shape");
+        icons::paint(ui.painter(), er, if nd.visible { Icon::Eye } else { Icon::EyeOff }, tint(TEXT2(), 0.8));
+        if eresp.clicked() {
+            let (id, show) = (f.id, !nd.visible);
+            st.edit(if show { "Show shape" } else { "Hide shape" }, |d| {
+                if let Some(x) = d.feature_mut(id).and_then(|ft| ft.mesh.as_mut()).and_then(|m| m.make_mut().sdf.as_mut()).and_then(|md| md.scene.node_mut(n)) {
+                    x.visible = show;
+                }
+            });
+            continue;
+        }
+        if resp.clicked() {
+            if st.workspace != Workspace::Sdf {
+                st.set_workspace(Workspace::Sdf);
+            }
+            st.selection = vec![f.id];
+            st.sdf_sel = Some((f.id, n));
+        }
+    }
 }
 
 /// A 2D boolean's curves in the outliner, under it, indented.

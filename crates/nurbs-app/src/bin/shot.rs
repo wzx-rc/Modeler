@@ -323,6 +323,12 @@ fn main() {
     if want("sdf") {
         sdf_tab(&mut h);
     }
+    if want("sdfx") {
+        sdf_more(&mut h);
+    }
+    if want("common") {
+        common_base(&mut h);
+    }
     if want("pbevel") {
         poly_bevel(&mut h);
     }
@@ -5725,6 +5731,172 @@ fn sdf_tab(h: &mut Harness) {
     h.st.settings.light = true;
     h.steps(3);
     h.shot("sdf-12-light");
+}
+
+/// The SDF tab's shape settings from the engine: Groove / Tongue, Mirror,
+/// Repeat in a line and round; the shapes in the outliner.
+fn sdf_more(h: &mut Harness) {
+    use egui::Key;
+    use forme_core::{Axis, CombineMode, Mirror, Repeat};
+    h.reset(Doc::default(), "SDF more");
+    h.key(Key::F4);
+    h.steps(2);
+    // a slab
+    h.key(Key::B);
+    h.st.sdf_edit_node("Size", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::new(30.0, 4.0, 20.0);
+            s.round = 1.0;
+        }
+        n.transform.pos = Vec3::new(0.0, 4.0, 0.0);
+    });
+    h.st.sdf_settle();
+    h.st.frame_current();
+    h.settle();
+    h.st.camera.dist *= 1.6;
+    h.steps(2);
+    // a groove: a cylinder lying across it, its surface cuts a line
+    h.st.sdf.blend = 0.0;
+    h.key(Key::C);
+    h.st.sdf_edit_node("Groove", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::new(12.0, 40.0, 0.0);
+        }
+        n.transform.pos = Vec3::new(0.0, 0.0, 0.0);
+        n.transform.rot = glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        n.combine.mode = CombineMode::Groove;
+        n.combine.depth = 1.0;
+        n.combine.width = 0.8;
+        n.combine.blend = 0.0;
+    });
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("sdfx-01-groove");
+    // a boss off the middle, mirrored across X
+    h.st.sdf.mode = CombineMode::Add;
+    h.st.sdf.blend = 2.0;
+    h.key(Key::O);
+    h.st.sdf_edit_node("Mirror", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::splat(4.0);
+        }
+        n.transform.pos = Vec3::new(18.0, 8.0, 8.0);
+        n.mirror = Mirror { x: true, y: false, z: false };
+    });
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("sdfx-02-mirror");
+    // a row of holes: one carved cylinder repeated 5 times along X
+    h.st.sdf.mode = CombineMode::Carve;
+    h.st.sdf.blend = 0.5;
+    h.key(Key::C);
+    h.st.sdf_edit_node("Repeat", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::new(1.5, 10.0, 0.0);
+        }
+        n.transform.pos = Vec3::new(-20.0, 4.0, -12.0);
+        n.transform.rot = glam::Quat::IDENTITY;
+        n.repeat = Repeat::Linear { count: 5, step: Vec3::new(10.0, 0.0, 0.0) };
+    });
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("sdfx-03-repeat-line");
+    // a tongue ring round a capsule repeated 8 times round Y
+    h.st.sdf.mode = CombineMode::Add;
+    h.st.sdf.blend = 1.0;
+    h.key(Key::P);
+    h.st.sdf_edit_node("Repeat", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::new(1.2, 3.0, 0.0);
+        }
+        n.transform.pos = Vec3::new(0.0, 9.0, 9.0);
+        n.repeat = Repeat::Radial { count: 8, axis: Axis::Y };
+    });
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("sdfx-04-repeat-round");
+    eprintln!("sdfx: {} triangles", h.st.doc.features.iter().filter_map(|f| f.mesh.as_ref()).map(|m| m.faces.len()).sum::<usize>());
+    h.key(Key::F);
+    h.settle();
+    h.shot("sdfx-05-frame-shape");
+}
+
+/// One base for every object (Romain, 21 nov., 0 h 39): the NURBS part,
+/// a clay, a Poly cube and an SDF object given materials and a look the
+/// same way, listed in one outliner, aligned one onto another.
+fn common_base(h: &mut Harness) {
+    use egui::Key;
+    h.reset(test_part(), "Common");
+    // a clay, a Poly cube, an SDF object beside the part
+    h.key(Key::F2);
+    h.st.camera.target = Vec3::new(-60.0, 0.0, 0.0);
+    h.key(Key::O);
+    h.settle();
+    let clay = h.st.selection.first().copied();
+    h.key(Key::F3);
+    h.st.camera.target = Vec3::new(60.0, 0.0, 0.0);
+    h.key(Key::B);
+    h.settle();
+    let poly = h.st.selection.first().copied();
+    h.key(Key::F4);
+    h.st.camera.target = Vec3::new(0.0, 0.0, 60.0);
+    h.st.sdf_sel = None;
+    h.st.selection.clear();
+    h.key(Key::B);
+    h.st.sdf.blend = 3.0;
+    h.key(Key::O);
+    h.st.sdf_settle();
+    let sdf = h.st.selection.first().copied();
+    eprintln!("common: clay {clay:?} poly {poly:?} sdf {sdf:?}");
+    h.key(Key::F1);
+    h.st.sdf_sel = None;
+    // materials: one ball each, the same call as for the part
+    for (id, m) in [(clay, 1u32), (poly, 3), (sdf, 4)] {
+        if let Some(id) = id {
+            h.st.selection = vec![id];
+            h.st.apply_material(m);
+        }
+    }
+    h.st.selection.clear();
+    h.st.camera.target = Vec3::ZERO;
+    h.st.frame_all();
+    h.settle();
+    h.shot("common-01-materials");
+    // the clay's ball made see-through and glossy: the clay takes it
+    let m = clay.and_then(|id| h.st.doc.feature(id)).map(|f| f.material).unwrap_or(1);
+    h.st.edit_look(m, "Transparency", |l| {
+        l.transparency = 0.55;
+        l.specular = 0.9;
+    });
+    h.st.end_look();
+    h.steps(3);
+    h.shot("common-02-look-on-clay");
+    // Align: the Poly cube onto the SDF object's Max X (3ds Max's Align)
+    if let (Some(p), Some(s)) = (poly, sdf) {
+        h.st.selection = vec![p];
+        h.st.begin_align();
+        let c = h.st.doc.feature(s).map(|f| f.origin.as_vec3()).unwrap_or(Vec3::ZERO);
+        let at = h.screen_of(c + Vec3::Y * 4.0);
+        h.st.align_pick([at.x, at.y]);
+        if let Some(a) = h.st.align.as_mut() {
+            a.axes = [true, false, true];
+            a.cur = nurbs_app::align::AlignPoint::Min;
+            a.tgt = nurbs_app::align::AlignPoint::Max;
+        }
+        h.st.align_update();
+        h.steps(3);
+        h.shot("common-03-align-window");
+        h.st.align_ok();
+        eprintln!("common: poly now at {:?}, sdf at {:?}", h.st.doc.feature(p).map(|f| f.origin), h.st.doc.feature(s).map(|f| f.origin));
+        h.steps(2);
+        h.shot("common-04-aligned");
+    }
+    // the outliner with the SDF object's shapes under it
+    if let Some(s) = sdf {
+        h.st.selection = vec![s];
+    }
+    h.steps(3);
+    h.shot("common-05-outliner");
 }
 
 fn multi(h: &mut Harness) {
