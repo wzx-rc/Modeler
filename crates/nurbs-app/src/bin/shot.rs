@@ -1736,10 +1736,11 @@ fn main() {
         h.key(egui::Key::R);
         h.settle();
         h.shot("zero-qwer-4-scale");
-        let pivot = h.st.pivot().unwrap().as_vec3();
-        let v = h.st.view();
-        let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0;
-        let (a, b) = (h.screen_of(pivot + Vec3::Y * k), h.screen_of(pivot + Vec3::Y * k * 1.5));
+        // R is the cage now (plan point 26 on): its top face's grip pulled
+        // up 5 mm, then a corner grip out (all three sizes)
+        let cage = h.st.cage().expect("the boss's cage");
+        let top = cage.point([0, 1, 0]).as_vec3();
+        let (a, b) = (h.screen_of(top), h.screen_of(top + Vec3::Y * 5.0));
         h.move_to(a);
         h.steps(2);
         h.drag(a, b, 12, false);
@@ -1748,13 +1749,15 @@ fn main() {
         eprintln!("  scale readout {:?}", h.st.gizmo_readout);
         h.press(b, false);
         h.settle();
-        // the centre: dragged to the right, bigger all round
-        let c = h.screen_of(h.st.pivot().unwrap().as_vec3());
+        eprintln!("  boss after the top grip {:?}", h.st.doc.features[2].prim);
+        let cage = h.st.cage().expect("the boss's cage");
+        let corner = cage.point([1, 1, 1]).as_vec3();
+        let c = h.screen_of(corner);
         h.move_to(c);
         h.steps(2);
         h.drag(c, c + vec2(40.0, 0.0), 8, false);
         h.settle();
-        eprintln!("  scale all readout {:?}", h.st.gizmo_readout);
+        eprintln!("  corner readout {:?}", h.st.gizmo_readout);
         h.press(c + vec2(40.0, 0.0), false);
         h.settle();
         h.shot("zero-qwer-6-scaled");

@@ -345,6 +345,127 @@ impl AppState {
     }
 }
 
+impl AppState {
+    /// Renames an item (one undo step).
+    pub fn rename_item(&mut self, it: Item, name: &str) {
+        let name = name.trim().to_string();
+        if name.is_empty() || name == self.item_name(it) {
+            return;
+        }
+        self.edit("Rename", |d| match it {
+            Item::Feature(id) => {
+                if let Some(f) = d.feature_mut(id) {
+                    f.name = name;
+                }
+            }
+            Item::Shape(id, n) => {
+                if let Some(x) = sdf_node_mut(d, id, n) {
+                    x.name = name;
+                }
+            }
+        });
+    }
+
+    /// Moves an item earlier (-1) or later (+1): a feature in the document's
+    /// history, an SDF shape among its object's (the marker stays put).
+    pub fn reorder_item(&mut self, it: Item, delta: i32) {
+        match it {
+            Item::Feature(id) => self.reorder(id, delta),
+            Item::Shape(id, n) => self.edit("Reorder", |d| {
+                let Some(md) = sdf_model_mut(d, id) else { return };
+                let Some(parent) = md.scene.parent_of(n) else { return };
+                let Some(i) = md.scene.node(parent).and_then(|p| p.children().iter().position(|c| *c == n)) else { return };
+                let len = md.scene.node(parent).map(|p| p.children().len()).unwrap_or(0);
+                let j = i as i32 + delta;
+                if j < 0 || j as usize >= len {
+                    return;
+                }
+                md.scene.reparent(n, parent, j as usize);
+            }),
+        }
+    }
+
+    /// The triangles an element shows (world, mm): a mesh's (Sculpt, Poly,
+    /// SDF), or a NURBS element's faces in the kernel's mesh.
+    pub fn element_triangles(&self, el: FeatureId) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+        let Some(f) = self.doc.feature(el) else { return (vec![], vec![]) };
+        if let Some(m) = &f.mesh {
+            let pts = crate::meshes::world_points(f);
+            let mut tris = vec![];
+            for q in &m.faces {
+                for k in 1..q.len().saturating_sub(1) {
+                    tris.push([q[0], q[k], q[k + 1]]);
+                }
+            }
+            return (pts, tris);
+        }
+        let Some(m) = self.model.as_ref() else { return (vec![], vec![]) };
+        let mut map = std::collections::HashMap::new();
+        let mut pts = vec![];
+        let mut tris = vec![];
+        for (t, tri) in m.triangles.iter().enumerate() {
+            let Some(tag) = m.faces.get(m.tri_face[t] as usize).and_then(|x| x.tag) else { continue };
+            if self.element_of(tag.feature) != el {
+                continue;
+            }
+            let mut out = [0u32; 3];
+            for (k, v) in tri.iter().enumerate() {
+                out[k] = *map.entry(*v).or_insert_with(|| {
+                    pts.push(Vec3::from(m.positions[*v as usize]));
+                    pts.len() as u32 - 1
+                });
+            }
+            tris.push(out);
+        }
+        (pts, tris)
+    }
+
+    /// Exports elements as an .obj (one object each, millimetres, Y up) to
+    /// Documents/Forme NURBS: the same for every kind (a NURBS shape's
+    /// faces as the kernel meshes them, a clay, a Poly mesh, an SDF object).
+    pub fn export_elements(&mut self, ids: &[FeatureId]) -> Option<std::path::PathBuf> {
+        let mut s = String::from("# Forme: elements as shown (mm, Y up)\n");
+        let mut base = 1u32;
+        let mut n_tri = 0;
+        for id in ids {
+            let (pts, tris) = self.element_triangles(*id);
+            if tris.is_empty() {
+                continue;
+            }
+            let name = self.doc.feature(*id).map(|f| crate::files::sanitize(&f.name).replace(' ', "_")).unwrap_or_default();
+            s.push_str(&format!("o {name}\n"));
+            for p in &pts {
+                s.push_str(&format!("v {:.5} {:.5} {:.5}\n", p.x, p.y, p.z));
+            }
+            for t in &tris {
+                s.push_str(&format!("f {} {} {}\n", t[0] + base, t[1] + base, t[2] + base));
+            }
+            base += pts.len() as u32;
+            n_tri += tris.len();
+        }
+        if n_tri == 0 {
+            self.toast("Nothing to export: no triangles yet", true);
+            return None;
+        }
+        let what = match ids {
+            [one] => self.doc.feature(*one).map(|f| crate::files::sanitize(&f.name)).unwrap_or_default(),
+            _ => format!("{} elements", ids.len()),
+        };
+        let path = crate::files::documents_dir().join(format!("{}-{}.obj", crate::files::sanitize(&self.doc_name), what));
+        match std::fs::write(&path, s) {
+            Ok(()) => {
+                let text = format!("Saved {n_tri} triangles to {}", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                self.toast(&text, false);
+                Some(path)
+            }
+            Err(e) => {
+                self.toast(&format!("Export failed: {e}"), true);
+                None
+            }
+        }
+    }
+}
+
 /// An SDF object's model in a document, to change it.
 pub fn sdf_model_mut(d: &mut nurbs_kernel::Doc, id: FeatureId) -> Option<&mut nurbs_kernel::mesh::SdfModel> {
     d.feature_mut(id)?.mesh.as_mut()?.make_mut().sdf.as_mut()

@@ -2209,15 +2209,19 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
         ui.painter().text(lr.left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, "SCENE", semibold(10.5), TEXT2());
         ui.painter().text(lr.left_center() + vec2(52.0, 0.0), Align2::LEFT_CENTER, format!("{n} shape{}", if n == 1 { "" } else { "s" }), regular(11.5), pick(Color32::from_rgb(0x64, 0x6B, 0x75), Color32::from_rgb(0x8A, 0x90, 0x99)));
         ui.spacing_mut().item_spacing.x = 2.0;
-        let one = st.single().map(|f| f.id);
+        // the picked SDF shape among its object's, else the selected feature
+        let one = match st.sdf_sel.filter(|_| st.sdf_comp()) {
+            Some((id, n)) => Some(crate::common::Item::Shape(id, n)),
+            None => st.single().map(|f| crate::common::Item::Feature(f.id)),
+        };
         if icon_btn(ui, Icon::Up, false, "Earlier in the history", 26.0).clicked() {
-            if let Some(id) = one {
-                st.reorder(id, -1);
+            if let Some(it) = one {
+                st.reorder_item(it, -1);
             }
         }
         if icon_btn(ui, Icon::Down, false, "Later in the history", 26.0).clicked() {
-            if let Some(id) = one {
-                st.reorder(id, 1);
+            if let Some(it) = one {
+                st.reorder_item(it, 1);
             }
         }
     });
@@ -2524,14 +2528,36 @@ fn row_menu(ui: &mut Ui, st: &mut AppState, f: &Feature) {
                 ui.close();
             }
         }
-    } else if ui.button(if f.visible { "Hide" } else { "Show" }).clicked() {
-        st.toggle_visible(f.id);
-        ui.close();
+    } else {
+        if ui.button(if f.visible { "Hide" } else { "Show" }).clicked() {
+            st.toggle_visible(f.id);
+            ui.close();
+        }
+        // every kind of element the same way (`common`): its triangles
+        if ui.button("Export .obj").clicked() {
+            st.export_elements(&[f.id]);
+            ui.close();
+        }
     }
+    rename_field(ui, st, crate::common::Item::Feature(f.id));
     if ui.button("Delete").clicked() {
         st.select(Some(f.id), false);
         st.delete_selected();
         ui.close();
+    }
+}
+
+/// A name field in a right-click menu (Enter or leaving it keeps it).
+fn rename_field(ui: &mut Ui, st: &mut AppState, it: crate::common::Item) {
+    let key = Id::new(("rename", format!("{it:?}")));
+    let mut name = ui.data(|d| d.get_temp::<String>(key)).unwrap_or_else(|| st.item_name(it));
+    let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(150.0).font(regular(12.5)).hint_text("Name"));
+    if r.changed() {
+        ui.data_mut(|d| d.insert_temp(key, name.clone()));
+    }
+    if r.lost_focus() {
+        st.rename_item(it, &name);
+        ui.data_mut(|d| d.remove::<String>(key));
     }
 }
 
@@ -2647,6 +2673,15 @@ fn item_menu(ui: &mut Ui, st: &mut AppState, it: crate::common::Item) {
         }
     }
     if let Item::Shape(..) = it {
+        ui.horizontal(|ui| {
+            if ui.button("Earlier").clicked() {
+                st.reorder_item(it, -1);
+            }
+            if ui.button("Later").clicked() {
+                st.reorder_item(it, 1);
+            }
+        });
+        rename_field(ui, st, it);
         if ui.button("Duplicate").clicked() {
             st.select_item(it);
             st.sdf_duplicate();
