@@ -2826,16 +2826,11 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     let total = screen.max.y - EDGE - top;
     let rows = st.doc.features.len().max(1) as f32;
     // the groups' headers, and the reference's group (header and row)
+    // the same groups as the outliner's (`common::kind_of`), and the
+    // operations whose element cannot be told
     let fs = &st.doc.features;
-    let mesh_of = |f: &Feature, k: nurbs_kernel::mesh::MeshKind| f.mesh.as_ref().map(|m| m.kind == k).unwrap_or(false);
-    let groups = [
-        fs.iter().any(|f| f.is_solid() && !f.is_path() && !f.is_mesh() && !matches!(f.prim, Prim::Profile { .. })),
-        fs.iter().any(|f| f.is_solid() && !f.is_path() && matches!(f.prim, Prim::Profile { .. })),
-        fs.iter().any(|f| f.is_path()),
-        fs.iter().any(|f| !f.is_solid() && !f.is_path()),
-        fs.iter().any(|f| mesh_of(f, nurbs_kernel::mesh::MeshKind::Sculpt)),
-        fs.iter().any(|f| mesh_of(f, nurbs_kernel::mesh::MeshKind::Poly)),
-    ];
+    let mut groups: Vec<bool> = crate::common::Kind::ALL.iter().map(|k| fs.iter().any(|f| crate::common::kind_of(f) == Some(*k))).collect();
+    groups.push(fs.iter().any(|f| !f.is_solid() && !f.is_path()));
     // a header is 22 points, a row 28, each with 1 between, a group 3 after
     let extra = groups.iter().filter(|g| **g).count() as f32 * 27.0 + if st.doc.reference.is_some() { 53.0 } else { 0.0 };
     let tree_h = if st.settings.show_tree { (rows * 29.0 + 36.0 + extra).clamp(96.0, (total * 0.36).max(120.0)) } else { 0.0 };
@@ -4704,13 +4699,16 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.begin_align();
         return;
     }
+    // Mirror and Shell are NURBS steps: the Forme tab's (Alt + S is the Poly
+    // tab's smooth preview)
+    let forme = st.workspace == Workspace::Forme;
     // Mirror (Alt + M): across X, the steps after it made on both sides
-    if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::M) {
+    if forme && ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::M) {
         st.add_mirror(0);
         return;
     }
     // Shell (Alt + S): hollowed, the faces picked in Face mode left open
-    if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::S) {
+    if forme && ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::S) {
         st.add_shell();
         return;
     }
