@@ -4616,6 +4616,92 @@ int focc_face_box(const FShape* s, int index, double* out) {
         -1);
 }
 
+// A shape with its faces of one surface made one, as a union or a cut
+// leaves the whole part (`simplify_keeping`: the edges between two faces of
+// one tag kept, the Knife's lines). The tags follow: of the faces made one,
+// the last one's, as `carry_tags` leaves them after a boolean. (The kernel
+// builds the part island by island: a boolean made in one island joined the
+// faces of the others too when the part was one history.)
+FShape* focc_simplified(const FShape* s) {
+    return guard(
+        [&]() -> FShape* {
+            ShapeUpgrade_UnifySameDomain u(s->s, Standard_True, Standard_True, Standard_True);
+            u.AllowInternalEdges(Standard_False);
+            TopTools_IndexedMapOfShape fin;
+            face_map(s->s, fin);
+            if (!s->tags.empty()) {
+                TopTools_IndexedDataMapOfShapeListOfShape e2f;
+                TopExp::MapShapesAndAncestors(s->s, TopAbs_EDGE, TopAbs_FACE, e2f);
+                for (int i = 1; i <= e2f.Extent(); i++) {
+                    const TopTools_ListOfShape& fl = e2f(i);
+                    if (fl.Extent() != 2 || fl.First().IsSame(fl.Last())) continue;
+                    int fa = fin.FindIndex(fl.First()), fb = fin.FindIndex(fl.Last());
+                    if (fa < 1 || fb < 1 || fa > (int)s->tags.size() || fb > (int)s->tags.size()) continue;
+                    long long ta = s->tags[fa - 1], tb = s->tags[fb - 1];
+                    if (ta < 0 || ta != tb) continue;
+                    u.KeepShape(e2f.FindKey(i));
+                }
+            }
+            u.Build();
+            TopoDS_Shape out = u.Shape();
+            if (out.IsNull()) {
+                set_err("nothing left of it");
+                return nullptr;
+            }
+            FShape* r = wrap(out);
+            if (!r) return nullptr;
+            TopTools_IndexedMapOfShape fout;
+            face_map(out, fout);
+            r->tags.assign(fout.Extent(), -1);
+            opencascade::handle<BRepTools_History> h = u.History();
+            for (int i = 1; i <= fin.Extent(); i++) {
+                long long t = i - 1 < (int)s->tags.size() ? s->tags[i - 1] : -1;
+                if (t < 0) continue;
+                const TopoDS_Shape& f = fin(i);
+                bool found = false;
+                if (!h.IsNull())
+                    for (TopTools_ListIteratorOfListOfShape it(h->Modified(f)); it.More(); it.Next()) {
+                        int j = fout.FindIndex(it.Value());
+                        if (j > 0) {
+                            r->tags[j - 1] = t;
+                            found = true;
+                        }
+                    }
+                if (!found) {
+                    int j = fout.FindIndex(f);
+                    if (j > 0) r->tags[j - 1] = t;
+                }
+            }
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
+// The boxes of a shape's lumps (each solid, and each shell or face beside
+// them: what a compound holds, compounds opened): 6 numbers each (min, max),
+// from the geometry (no mesh needed; a spline's box is its poles', a little
+// wide). Returns how many there are; fills at most `cap` of them.
+int focc_lump_boxes(const FShape* s, double* out, int cap) {
+    return guard(
+        [&] {
+            int n = 0;
+            std::function<void(const TopoDS_Shape&)> flat = [&](const TopoDS_Shape& x) {
+                if (x.ShapeType() == TopAbs_COMPOUND || x.ShapeType() == TopAbs_COMPSOLID) {
+                    for (TopoDS_Iterator it(x); it.More(); it.Next()) flat(it.Value());
+                    return;
+                }
+                Bnd_Box b;
+                BRepBndLib::Add(x, b, Standard_False);
+                if (b.IsVoid()) return;
+                if (n < cap) b.Get(out[6 * n], out[6 * n + 1], out[6 * n + 2], out[6 * n + 3], out[6 * n + 4], out[6 * n + 5]);
+                n++;
+            };
+            flat(s->s);
+            return n;
+        },
+        -1);
+}
+
 void focc_set_tags(FShape* s, const long long* tags, int n) { s->tags.assign(tags, tags + (n > 0 ? n : 0)); }
 
 long long focc_face_tag(const FShape* s, int index) { return index >= 0 && index < (int)s->tags.size() ? s->tags[index] : -1; }

@@ -84,6 +84,8 @@ extern "C" {
     fn focc_face_count(s: *const FShape) -> c_int;
     fn focc_face_info(s: *const FShape, index: c_int, out: *mut c_double) -> c_int;
     fn focc_face_box(s: *const FShape, index: c_int, out: *mut c_double) -> c_int;
+    fn focc_lump_boxes(s: *const FShape, out: *mut c_double, cap: c_int) -> c_int;
+    fn focc_simplified(s: *const FShape) -> *mut FShape;
     fn focc_set_tags(s: *mut FShape, tags: *const i64, n: c_int);
     fn focc_face_tag(s: *const FShape, index: c_int) -> i64;
     fn focc_topo(s: *const FShape, defl: c_double, angle: c_double) -> *mut FBuf;
@@ -830,6 +832,24 @@ impl Shape {
         let mut d = [0.0f64; 6];
         let k = unsafe { focc_face_box(self.0, index as c_int, d.as_mut_ptr()) };
         (k >= 0).then(|| ([d[0], d[1], d[2]], [d[3], d[4], d[5]]))
+    }
+
+    /// Its faces of one surface made one, as a union or a cut leaves the
+    /// whole part (the edges between two faces of one tag kept).
+    pub fn simplified(&self) -> Result<Shape, String> {
+        shape(unsafe { focc_simplified(self.0) })
+    }
+
+    /// The boxes (min, max) of its lumps: each solid, and each shell or
+    /// face beside them (from the geometry, a little wide on splines).
+    pub fn lump_boxes(&self) -> Vec<([f64; 3], [f64; 3])> {
+        let mut d = vec![0.0f64; 6 * 16];
+        let mut n = unsafe { focc_lump_boxes(self.0, d.as_mut_ptr(), 16) };
+        if n > 16 {
+            d = vec![0.0f64; 6 * n as usize];
+            n = unsafe { focc_lump_boxes(self.0, d.as_mut_ptr(), n) };
+        }
+        (0..n.max(0) as usize).map(|i| ([d[6 * i], d[6 * i + 1], d[6 * i + 2]], [d[6 * i + 3], d[6 * i + 4], d[6 * i + 5]])).collect()
     }
 
     /// Names the faces (one tag per face, in face order). Transforms,

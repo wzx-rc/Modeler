@@ -589,8 +589,9 @@ pub struct Isolate {
     pub from: FeatureId,
     /// Whether the scan was shown (put back after).
     pub ref_shown: bool,
-    /// The view and the whole part's model then: both come back at once
-    /// when it ends (the model if the document did not change meanwhile).
+    /// The view then (kept for the journal; since 21 nov. the camera does
+    /// not move in or out of Isolate) and the whole part's model, which
+    /// comes back at once when it ends if the document did not change.
     pub camera: OrbitCamera,
     pub model: Option<Arc<Model>>,
     pub version: u64,
@@ -1013,7 +1014,8 @@ impl AppState {
             if let Some(m) = iso.model.filter(|_| iso.version + 1 == self.version) {
                 self.show_model(&m);
             }
-            self.fly_to(iso.camera);
+            // the camera stays where it is (Romain, 21 nov.: "NE PAS BOUGER
+            // LA CAMERA, pas de focus")
             self.toast("Isolate off: everything shown", false);
             return;
         }
@@ -1035,17 +1037,7 @@ impl AppState {
         if let Some(i) = self.isolate.as_mut() {
             i.version = self.version;
         }
-        // framed on what it shows (its faces in the part), else on its shapes
-        let shown = self.model.as_ref().and_then(|m| {
-            m.triangles.iter().flatten().map(|&v| Vec3::from_array(m.positions[v as usize])).fold(None, |b: Option<(Vec3, Vec3)>, p| Some(b.map_or((p, p), |(lo, hi)| (lo.min(p), hi.max(p)))))
-        });
-        let b = shown.or_else(|| {
-            let ids = &self.isolate.as_ref()?.ids;
-            self.doc.features.iter().filter(|f| ids.contains(&f.id) && f.is_solid()).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1))).map(|(lo, hi)| (lo.as_vec3(), hi.as_vec3()))
-        });
-        if let Some((lo, hi)) = b {
-            self.fly_frame(lo, hi);
-        }
+        // no framing: the view stays as it is, in and out (F frames)
         self.toast("Isolate: the selection alone (Ctrl + I again: everything)", false);
     }
 
@@ -3869,12 +3861,19 @@ impl AppState {
         if m.serial / 4 == self.version {
             return None;
         }
-        // after a Mirror the faces on both sides carry the same tags (one
-        // side would move the wrong way): the kernel's model only
-        // (an Array's copies too, each moved its own way round a circle; a
-        // Shell's inner walls carry the step's tags, they would stay behind)
-        if self.doc.features.iter().any(|f| (f.mirror.is_some() || f.array.is_some() || f.shell.is_some()) && f.visible && !f.suspended) {
-            return None;
+        // an Array's shapes are left to the kernel's model (their copies
+        // carry their tags and each moves its own way), a Shell's too (its
+        // inner walls carry the step's tags: they would stay behind). After
+        // a Mirror the faces on the other side move the mirrored way: the
+        // drawer tells them apart (`draw::preview_faces`).
+        let mut off: Vec<FeatureId> = vec![];
+        for f in self.doc.features.iter().filter(|f| f.visible && !f.suspended) {
+            if let Some(a) = &f.array {
+                off.extend(a.sources.iter().copied());
+            }
+            if f.shell.as_ref().is_some_and(|s| !s.faces.is_empty()) {
+                off.push(self.element_of(f.id));
+            }
         }
         // the shapes' frames when the model on screen was asked for
         let (_, then) = self.sent_frames.iter().find(|(s, _)| *s == m.serial)?;
@@ -3882,13 +3881,25 @@ impl AppState {
         for (id, t) in then {
             // a shape carved out is the part's hole: the kernel's model
             // shows it, its cage where the pointer takes it
-            let Some(now) = self.doc.feature(*id).filter(|f| f.op != Op::Carve && Some(f.id) != self.form_shown) else { continue };
+            let Some(now) = self.doc.feature(*id).filter(|f| f.op != Op::Carve && Some(f.id) != self.form_shown && !off.contains(&f.id)) else { continue };
             let x = shape_frame(now) * t.inverse();
             if !x.abs_diff_eq(DMat4::IDENTITY, 1e-9) && x.is_finite() {
                 out.insert(*id, x);
             }
         }
         Some(out)
+    }
+
+    /// The planes of the document's Mirrors (axis, offset), each once.
+    pub fn mirror_planes(&self) -> Vec<(usize, f64)> {
+        let mut out: Vec<(usize, f64)> = vec![];
+        for m in self.doc.features.iter().filter(|f| f.visible && !f.suspended).filter_map(|f| f.mirror.as_ref()) {
+            let p = (m.axis.min(2) as usize, m.offset);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
     }
 
     pub fn end_drag(&mut self) {

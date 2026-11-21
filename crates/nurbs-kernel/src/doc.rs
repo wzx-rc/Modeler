@@ -1661,7 +1661,7 @@ fn tag_in(tag: i64, ids: &[FeatureId]) -> bool {
 }
 
 /// The features whose faces an operation names.
-fn named_features(f: &Feature) -> Vec<FeatureId> {
+pub(crate) fn named_features(f: &Feature) -> Vec<FeatureId> {
     let mut tags: Vec<i64> = vec![];
     if let Some(r) = &f.round {
         tags.extend(r.edges.iter().flat_map(|e| e.faces));

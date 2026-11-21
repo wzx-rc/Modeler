@@ -228,6 +228,29 @@ impl Harness {
         }
     }
 
+    /// One frame as the app makes it, drawn but not read back: the time of
+    /// the tick (the kernel's answers taken), of the interface and of the
+    /// drawing (ms). `perf` uses it.
+    fn frame_timed(&mut self) -> [f64; 3] {
+        self.t += 1.0 / 60.0;
+        let raw = self.raw();
+        let t0 = Instant::now();
+        self.st.tick(self.t);
+        let t1 = Instant::now();
+        let st = &mut self.st;
+        let mut out = self.ctx.run_pass(raw, |ctx| nurbs_app::run(ctx, st));
+        let t2 = Instant::now();
+        let paint = self.ctx.tessellate(std::mem::take(&mut out.shapes), out.pixels_per_point);
+        let mut tex = std::mem::take(&mut self.pending_tex);
+        tex.append(out.textures_delta);
+        let (w, h) = ((self.size[0] * self.ppp) as u32, (self.size[1] * self.ppp) as u32);
+        let target = self.gpu.target(w, h);
+        let view = target.create_view(&Default::default());
+        self.drawer.render(&self.gpu.device, &self.gpu.queue, &view, [w, h], self.ppp, &self.st, &paint, &mut tex);
+        let t3 = Instant::now();
+        [(t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, (t3 - t2).as_secs_f64() * 1e3]
+    }
+
     fn screen_of(&self, w: Vec3) -> Pos2 {
         let p = self.st.view().project(w).expect("in front");
         pos2(p[0], p[1])
@@ -1280,6 +1303,46 @@ fn main() {
         h.settle();
         eprintln!("  faces after Ctrl {}", h.st.face_sel.len());
         h.shot("zero-marquee-4-faces");
+        // a thin wall (2 mm): only what the camera sees, its far side never
+        // (Romain 21 nov., 0 h 11: "un rectangle de sélection sélectionne
+        // les faces arrières"); in X-ray the same. A box seen from a corner
+        // shows 3 faces, 9 edges and 7 vertices.
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 60.0, y: 40.0, z: 2.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Thin wall");
+        h.settle();
+        let (a, b) = (pos2(420.0, 120.0), pos2(1500.0, 800.0));
+        for xray in [false, true] {
+            if h.st.xray != xray {
+                h.hold(Modifiers::ALT);
+                h.key(egui::Key::X);
+                h.hold(Modifiers::NONE);
+                h.settle();
+            }
+            h.key(egui::Key::F11);
+            h.drag(a, b, 10, true);
+            h.settle();
+            let faces = h.st.face_sel.len();
+            if !xray {
+                h.shot("zero-marquee-5-thin-faces");
+            }
+            h.key(egui::Key::F10);
+            h.drag(a, b, 10, true);
+            h.settle();
+            let edges = h.st.edge_sel.len();
+            if xray {
+                h.shot("zero-marquee-6-thin-xray-edges");
+            }
+            h.key(egui::Key::F9);
+            h.drag(a, b, 10, true);
+            h.settle();
+            eprintln!("  thin wall, x-ray {}: {faces} faces, {edges} edges, {} vertices picked (seen: 3, 9, 7)", h.st.xray, h.st.vert_sel.len());
+        }
+        if h.st.xray {
+            h.hold(Modifiers::ALT);
+            h.key(egui::Key::X);
+            h.hold(Modifiers::NONE);
+        }
     }
 
     if want("direct") {
@@ -1416,14 +1479,14 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
-    if want("cage") {
-        // R (Romain 20 nov., 11 h 44: "un Scale Tool en mode cage à
-        // poignées"): a face's grip scales one axis about the face across,
-        // a corner's with Shift all three alike; then picked faces
+    if want("scale") {
+        // R: the classic gizmo again (Romain 21 nov., 0 h 11: "oublie la box
+        // à poignées et reviens au classique"): a cube per axis of the
+        // shape's own frame, the centre for all three; then picked faces
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         d.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(-45.0, 0.0, 0.0), DQuat::IDENTITY);
-        h.reset(d, "Cage");
+        h.reset(d, "Scale");
         h.settle();
         h.st.selection = vec![b];
         h.key(egui::Key::R);
@@ -1432,61 +1495,59 @@ fn main() {
             let f = h.st.doc.feature(b).unwrap();
             eprintln!("  {what}: {:?} at {:?} readout {:?}", f.prim, f.origin, h.st.gizmo_readout);
         };
-        let c = h.st.cage().expect("a cage");
-        eprintln!("  cage {:?} grips {}", c, c.grips().len());
-        // the +Z face's grip (the +X side is under the shape's window here)
-        let g = h.screen_of(c.point([0, 0, 1]).as_vec3());
-        let out = h.screen_of((c.point([0, 0, 1]) + DVec3::Z * 10.0).as_vec3());
+        // where the gizmo's cube along an axis is on screen, and a point
+        // further along it
+        let tip = |h: &Harness, a: usize, far: f32| {
+            let pivot = h.st.pivot().unwrap().as_vec3();
+            let v = h.st.view();
+            let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0;
+            (h.screen_of(pivot + Vec3::AXES[a] * k), h.screen_of(pivot + Vec3::AXES[a] * k * far))
+        };
+        let (g, out) = tip(&h, 2, 1.5);
         h.move_to(g);
         h.steps(2);
         eprintln!("  hot {:?}", h.st.hot_handle);
-        h.shot("zero-cage-1-hover");
+        h.shot("zero-scale-1-hover");
         h.drag(g, out, 10, false);
         h.steps(2);
-        say(&h, "+Z grip dragged 10 out");
-        h.shot("zero-cage-2-face-grip");
+        say(&h, "the Z cube dragged out");
+        h.shot("zero-scale-2-axis");
         h.press(out, false);
         h.settle();
         say(&h, "let go");
-        let c = h.st.cage().unwrap();
-        let (k0, k1) = (c.point([-1, -1, -1]), c.point([1, 1, 1]));
-        let g = h.screen_of(k1.as_vec3());
-        let to = h.screen_of((k1 + (k1 - k0) * 0.25).as_vec3());
-        h.hold(Modifiers::SHIFT);
-        h.drag(g, to, 10, false);
+        // the centre: to the right, bigger all round
+        let c = h.screen_of(h.st.pivot().unwrap().as_vec3());
+        h.move_to(c);
         h.steps(2);
-        say(&h, "corner with Shift");
-        h.shot("zero-cage-3-corner-shift");
-        h.press(to, false);
-        h.hold(Modifiers::NONE);
+        eprintln!("  hot {:?}", h.st.hot_handle);
+        h.drag(c, c + vec2(60.0, 0.0), 10, false);
+        h.steps(2);
+        say(&h, "the centre dragged right");
+        h.shot("zero-scale-3-all");
+        h.press(c + vec2(60.0, 0.0), false);
         h.settle();
         say(&h, "let go");
-        // Face mode: the block's top and its +Z side picked, the cage round
-        // them, the grip of their shared edge pulled up and out
+        // Face mode: the block's top picked, R, its X cube pulled out: the
+        // face scaled round its middle
         h.key(egui::Key::F11);
-        let top = h.screen_of((k1 * DVec3::new(0.3, 1.0, 0.3)).as_vec3());
+        let (_, hi) = h.st.doc.feature(b).unwrap().bounds();
+        let top = h.screen_of(Vec3::new(hi.x as f32 * 0.3, hi.y as f32, hi.z as f32 * 0.3));
         h.click(top);
-        h.hold(Modifiers::SHIFT);
-        let side = h.screen_of(Vec3::new((k0.x + k1.x) as f32 * 0.5, (k1.y * 0.5) as f32, k1.z as f32));
-        h.click(side);
-        h.hold(Modifiers::NONE);
         h.key(egui::Key::R);
         h.settle();
-        if let Some(c) = h.st.cage() {
-            eprintln!("  faces {} cage {:?}", h.st.face_sel.len(), c);
-            let g = h.screen_of(c.point([0, 1, 1]).as_vec3());
-            let to = h.screen_of((c.point([0, 1, 1]) + DVec3::new(0.0, 4.0, 8.0)).as_vec3());
-            h.move_to(g);
-            h.steps(2);
-            eprintln!("  hot {:?}", h.st.hot_handle);
-            h.drag(g, to, 10, false);
-            h.steps(2);
-            h.shot("zero-cage-4-faces-drag");
-            h.press(to, false);
-            h.settle();
-            eprintln!("  scale faces {:?} errors {:?}", h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| (f.name.clone(), t.scale, t.delta, t.about))).collect::<Vec<_>>(), h.st.model.as_ref().map(|m| m.errors.clone()));
-            h.shot("zero-cage-5-faces-done");
-        }
+        eprintln!("  faces {} gizmo {:?} cage drawn: no", h.st.face_sel.len(), h.st.gizmo);
+        let (g, out) = tip(&h, 0, 0.6);
+        h.move_to(g);
+        h.steps(2);
+        eprintln!("  hot {:?}", h.st.hot_handle);
+        h.shot("zero-scale-4-face");
+        h.drag(g, out, 10, false);
+        h.steps(2);
+        h.shot("zero-scale-5-face-drag");
+        h.press(out, false);
+        h.settle();
+        eprintln!("  scale faces {:?} errors {:?}", h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| (f.name.clone(), t.scale, t.delta, t.about))).collect::<Vec<_>>(), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-scale-6-face-done");
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
@@ -1702,31 +1763,29 @@ fn main() {
         h.key(egui::Key::R);
         h.settle();
         h.shot("zero-qwer-4-scale");
-        // R is the scale cage (20 nov.): the top face's grip pulled up half
-        // the height again (the bottom stays)
-        let c = h.st.cage().expect("a cage");
-        let (top, bottom) = (c.point([0, 1, 0]), c.point([0, -1, 0]));
-        let (a, b) = (h.screen_of(top.as_vec3()), h.screen_of((top + (top - bottom) * 0.5).as_vec3()));
+        // the classic gizmo again (21 nov.): the Y cube pulled up half as far
+        // again
+        let pivot = h.st.pivot().unwrap().as_vec3();
+        let v = h.st.view();
+        let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0;
+        let (a, b) = (h.screen_of(pivot + Vec3::Y * k), h.screen_of(pivot + Vec3::Y * k * 1.5));
         h.move_to(a);
         h.steps(2);
+        eprintln!("  hot {:?}", h.st.hot_handle);
         h.drag(a, b, 12, false);
         h.settle();
         h.shot("zero-qwer-5-scaling");
         eprintln!("  scale readout {:?}", h.st.gizmo_readout);
         h.press(b, false);
         h.settle();
-        // a corner with Shift: bigger all round
-        let c = h.st.cage().expect("a cage");
-        let (k0, k1) = (c.point([-1, -1, -1]), c.point([1, 1, 1]));
-        let (g, to) = (h.screen_of(k1.as_vec3()), h.screen_of((k1 + (k1 - k0) * 0.13).as_vec3()));
-        h.move_to(g);
+        // the centre: dragged to the right, bigger all round
+        let c = h.screen_of(h.st.pivot().unwrap().as_vec3());
+        h.move_to(c);
         h.steps(2);
-        h.hold(Modifiers::SHIFT);
-        h.drag(g, to, 8, false);
+        h.drag(c, c + vec2(40.0, 0.0), 8, false);
         h.settle();
         eprintln!("  scale all readout {:?}", h.st.gizmo_readout);
-        h.press(to, false);
-        h.hold(Modifiers::NONE);
+        h.press(c + vec2(40.0, 0.0), false);
         h.settle();
         h.shot("zero-qwer-6-scaled");
         eprintln!("  boss {:?}", h.st.doc.features[2].prim);
@@ -3756,6 +3815,12 @@ fn main() {
         h.settle();
         h.st.camera.frame(Vec3::new(-15.0, 0.0, -15.0), Vec3::new(15.0, 25.0, 15.0));
         h.steps(2);
+        // (the shape's window took its place before the view was framed and
+        // stays there, over the cube now: picked again, it is placed again)
+        let sel = std::mem::take(&mut h.st.selection);
+        h.steps(2);
+        h.st.selection = sel;
+        h.steps(2);
         say(&h, "cube");
         let mid = h.screen_of(Vec3::new(0.0, 10.0, 10.0));
         flick(&mut h, mid, vec2(-80.0, 0.0));
@@ -4355,6 +4420,174 @@ fn main() {
         h.shot("zero-only-4-off");
     }
 
+    if want("preview-mirror") {
+        // 21 nov.: whole shapes dragged show at once where they go even
+        // with a Mirror in the scene: a block with a filleted edge on the +X
+        // side, a Mirror across X, a block across the plane. The block and
+        // its image as the app draws them at once (before the kernel's
+        // answer), against the kernel's model of the same document.
+        let mut d = Doc::default();
+        let a = d.add(Op::Add, Prim::Box { x: 20.0, y: 12.0, z: 20.0 }, DVec3::new(40.0, 0.0, 0.0), DQuat::IDENTITY);
+        let mid = d.add(Op::Add, Prim::Box { x: 30.0, y: 6.0, z: 30.0 }, DVec3::new(0.0, 0.0, 0.0), DQuat::IDENTITY);
+        h.reset(d, "Preview");
+        h.settle();
+        let e = h.st.model.as_ref().and_then(|m| m.edges.iter().position(|e| e.pts.iter().all(|p| (p[1] - 12.0).abs() < 1e-3 && (p[2] - 10.0).abs() < 1e-3))).and_then(|i| h.st.edge_ref(i));
+        if let Some(e) = e {
+            h.st.sel_mode = SelMode::Edge;
+            h.st.edge_sel = vec![e];
+            h.st.set_round(3.0, false, true);
+            h.settle();
+            h.key(egui::Key::Num4);
+            h.key(egui::Key::Escape);
+        }
+        h.st.selection.clear();
+        h.hold(Modifiers::ALT);
+        h.key(egui::Key::M);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.key(egui::Key::Escape);
+        h.st.frame_all();
+        h.settle();
+        // the boxes of an element's faces on each side of the plane
+        let boxes = |m: &nurbs_kernel::Model, fm: &[Option<glam::Mat4>], st: &AppState, el: u32| {
+            let mut b = [[f32::MAX, f32::MIN, f32::MAX, f32::MIN, f32::MAX, f32::MIN]; 2];
+            for (t, tri) in m.triangles.iter().enumerate() {
+                let f = m.tri_face[t] as usize;
+                if m.faces[f].tag.map(|t| st.element_of(t.feature)) != Some(el) {
+                    continue;
+                }
+                for &v in tri {
+                    let mut p = Vec3::from(m.positions[v as usize]);
+                    if let Some(Some(x)) = fm.get(f) {
+                        p = x.transform_point3(p);
+                    }
+                    let s = (p.x < 0.0) as usize;
+                    for a in 0..3 {
+                        b[s][2 * a] = b[s][2 * a].min(p[a]);
+                        b[s][2 * a + 1] = b[s][2 * a + 1].max(p[a]);
+                    }
+                }
+            }
+            b
+        };
+        for (id, name) in [(a, "the block on one side"), (mid, "the block across the plane")] {
+            h.st.selection = vec![id];
+            h.key(egui::Key::W);
+            h.settle();
+            let pivot = h.st.pivot().unwrap().as_vec3();
+            let v = h.st.view();
+            let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0;
+            let (p0, p1) = (h.screen_of(pivot + Vec3::X * k * 0.8), h.screen_of(pivot + Vec3::X * k * 1.6));
+            h.move_to(p0);
+            h.steps(2);
+            h.press(p0, true);
+            // (the pointer moved in one frame: the kernel has not answered)
+            h.pending.push(Event::PointerMoved(p1));
+            h.step();
+            let m = h.st.model.clone().unwrap();
+            let pv = h.st.drag_preview();
+            let fm = pv.as_ref().map(|pv| nurbs_app::draw::preview_faces(&h.st, &m, pv)).unwrap_or_default();
+            let shown = boxes(&m, &fm, &h.st, id);
+            eprintln!("  {name}: handle {:?}, moved to x {:.2}, preview {} (faces moved {})", h.st.hot_handle, h.st.doc.feature(id).unwrap().origin.x, pv.is_some(), fm.iter().flatten().count());
+            if id == a {
+                h.shot("zero-preview-mirror-1-at-once");
+            }
+            h.settle();
+            let m2 = h.st.model.clone().unwrap();
+            let real = boxes(&m2, &[], &h.st, id);
+            let same = (0..2).all(|s| (0..6).all(|i| (shown[s][i] - real[s][i]).abs() < 2e-3));
+            eprintln!("    as drawn at once  +X {:?}  −X {:?}", shown[0], shown[1]);
+            eprintln!("    the kernel's      +X {:?}  −X {:?}  (the same: {same})", real[0], real[1]);
+            if id == a {
+                h.shot("zero-preview-mirror-2-kernel");
+            }
+            h.press(p1, false);
+            h.settle();
+            h.st.undo();
+            h.settle();
+        }
+    }
+
+    if want("perf") {
+        // FORME_DOC = a scene, FORME_DRAG = ids ("157,132"; else its last
+        // shape): each selected and dragged along X by the move gizmo's
+        // arrow for 60 frames at 60 a second; per frame the time of the
+        // tick, of the interface and of the drawing (a software GPU here:
+        // the drawing says little), how many answers the kernel gave
+        // meanwhile and how long the last took; then the fine model
+        if let Ok(p) = std::env::var("FORME_DOC") {
+            let d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+            let t0 = Instant::now();
+            h.reset(d, "Scene");
+            let m = h.st.model.clone();
+            eprintln!("  loaded and built in {:.2} s: {} faces, {} triangles, {} edges, {} errors", t0.elapsed().as_secs_f64(), m.as_ref().map_or(0, |m| m.faces.len()), m.as_ref().map_or(0, |m| m.triangles.len()), m.as_ref().map_or(0, |m| m.edges.len()), m.as_ref().map_or(0, |m| m.errors.len()));
+            let last = h.st.doc.features.iter().rev().find(|f| f.is_solid()).map(|f| f.id).unwrap_or(1);
+            let ids: Vec<u32> = std::env::var("FORME_DRAG").ok().map(|v| v.split(',').filter_map(|w| w.parse().ok()).collect()).unwrap_or_else(|| vec![last]);
+            let stats = |v: &[f64]| {
+                let mut s = v.to_vec();
+                s.sort_by(|a, b| a.total_cmp(b));
+                (s.iter().sum::<f64>() / s.len().max(1) as f64, s[s.len() / 2], *s.last().unwrap_or(&0.0))
+            };
+            for id in ids {
+                h.key(egui::Key::Escape);
+                h.key(egui::Key::Num4);
+                h.st.selection = vec![id];
+                h.key(egui::Key::W);
+                h.key(egui::Key::F);
+                h.settle();
+                let name = h.st.doc.feature(id).map(|f| f.name.clone()).unwrap_or_default();
+                // at rest
+                let rest: Vec<[f64; 3]> = (0..10).map(|_| h.frame_timed()).collect();
+                let Some(pivot) = h.st.pivot() else {
+                    eprintln!("  {id} {name}: no pivot");
+                    continue;
+                };
+                let pivot = pivot.as_vec3();
+                let v = h.st.view();
+                let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0;
+                let (a, b) = (h.screen_of(pivot + Vec3::X * k * 0.8), h.screen_of(pivot + Vec3::X * k * 1.8));
+                h.move_to(a);
+                h.steps(2);
+                let hot = h.st.hot_handle;
+                h.press(a, true);
+                let gen0 = h.st.model_gen;
+                let mut frames: Vec<[f64; 3]> = vec![];
+                let mut answers: Vec<f64> = vec![];
+                let mut seen = gen0;
+                let n = 60;
+                let t0 = Instant::now();
+                for i in 1..=n {
+                    let f0 = Instant::now();
+                    h.pending.push(Event::PointerMoved(a + (b - a) * (i as f32 / n as f32)));
+                    frames.push(h.frame_timed());
+                    if h.st.model_gen != seen {
+                        seen = h.st.model_gen;
+                        answers.push(h.st.round_ms as f64);
+                    }
+                    // 60 frames a second at most (the kernel works meanwhile)
+                    if let Some(left) = Duration::from_millis(16).checked_sub(f0.elapsed()) {
+                        std::thread::sleep(left);
+                    }
+                }
+                let took = t0.elapsed().as_secs_f64();
+                h.press(b, false);
+                let t1 = Instant::now();
+                h.settle();
+                let fine = t1.elapsed().as_secs_f64();
+                let col = |v: &[[f64; 3]], c: usize| stats(&v.iter().map(|f| f[c]).collect::<Vec<_>>());
+                let (tk, ui, dr) = (col(&frames, 0), col(&frames, 1), col(&frames, 2));
+                let (rt, ru, rd) = (col(&rest, 0), col(&rest, 1), col(&rest, 2));
+                eprintln!("  {id} {name} (handle {hot:?}): {n} frames in {took:.2} s ({:.0} a second)", n as f64 / took);
+                eprintln!("    at rest   tick {:.1} ms, interface {:.1}, drawing {:.1} (medians)", rt.1, ru.1, rd.1);
+                eprintln!("    dragging  tick {:.1} / {:.1} max, interface {:.1} / {:.1} max, drawing {:.1} / {:.1} max", tk.1, tk.2, ui.1, ui.2, dr.1, dr.2);
+                eprintln!("    kernel    {} answers during the drag ({:.1} a second), each {:?} ms; fine model {:.2} s after the release", answers.len(), answers.len() as f64 / took, answers.iter().map(|a| a.round() as i64).collect::<Vec<_>>(), fine);
+                eprintln!("    errors {:?}", h.st.model.as_ref().map(|m| m.errors.len()));
+                h.st.undo();
+                h.settle();
+            }
+        }
+    }
+
     if want("isopc") {
         // his scene of 10 h 50 (FORME_DOC), his camera, the Pill picked,
         // Ctrl + I with the pointer over the view
@@ -4398,9 +4631,11 @@ fn main() {
         h.hold(Modifiers::NONE);
         eprintln!("  at once: faces {} (animating {})", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.cam_anim.is_some());
         h.steps(6);
-        h.shot("zero-isolate-0-flying");
+        h.shot("zero-isolate-0-at-once");
         h.settle();
-        eprintln!("  camera {:?} {} → {:?} {}", cam0.target, cam0.dist, h.st.camera.target, h.st.camera.dist);
+        // (Romain 21 nov., 0 h 11: "NE PAS BOUGER LA CAMERA, pas de focus")
+        let still = |a: &nurbs_app::camera::OrbitCamera, b: &nurbs_app::camera::OrbitCamera| (a.target - b.target).length() < 1e-4 && (a.dist - b.dist).abs() < 1e-4 && (a.yaw - b.yaw).abs() < 1e-5 && (a.pitch - b.pitch).abs() < 1e-5;
+        eprintln!("  camera {:?} {} → {:?} {} (unmoved: {})", cam0.target, cam0.dist, h.st.camera.target, h.st.camera.dist, still(&cam0, &h.st.camera));
         eprintln!("  isolated {:?}: faces {}", h.st.isolate.as_ref().map(|i| i.ids.clone()), h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0));
         h.shot("zero-isolate-1-on");
         // the part's block picked by a face (Face mode), isolated with its hole, boss, slot
@@ -4425,7 +4660,7 @@ fn main() {
         h.settle();
         eprintln!("  off: faces {}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0));
         h.shot("zero-isolate-3-off");
-        eprintln!("  camera back {:?} {}", h.st.camera.target, h.st.camera.dist);
+        eprintln!("  camera after {:?} {}", h.st.camera.target, h.st.camera.dist);
         // F in Edge mode: the edge picked framed
         h.key(egui::Key::Num2);
         h.click(h.screen_of(Vec3::new(80.0, 20.0, 0.0)));

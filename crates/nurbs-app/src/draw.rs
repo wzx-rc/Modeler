@@ -23,8 +23,12 @@ pub struct Drawer {
     quads_shown: bool,
     flags: Vec<FaceGpu>,
     overlay: Vec<LineVertex>,
-    /// The part was uploaded moved by a drag's preview.
+    /// The part was uploaded with a form drawn from its poles.
     previewed: bool,
+    /// The drag's preview the part was uploaded with (`preview_key`).
+    preview_key: Option<u64>,
+    /// Each face's matrix in that preview (none: empty).
+    face_m: Vec<Option<glam::Mat4>>,
 }
 
 fn rgb(c: egui::Color32) -> [f32; 3] {
@@ -33,7 +37,7 @@ fn rgb(c: egui::Color32) -> [f32; 3] {
 
 impl Drawer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Drawer {
-        Drawer { r: Renderer::new(device, format), model_gen: u64::MAX, ref_gen: u64::MAX, quads_shown: false, flags: vec![], overlay: vec![], previewed: false }
+        Drawer { r: Renderer::new(device, format), model_gen: u64::MAX, ref_gen: u64::MAX, quads_shown: false, flags: vec![], overlay: vec![], previewed: false, preview_key: None, face_m: vec![] }
     }
 
     fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, st: &AppState) {
@@ -48,9 +52,14 @@ impl Drawer {
         let preview = if quads.is_none() { st.drag_preview().filter(|p| !p.is_empty()) } else { None };
         // a form pulled by a brush: drawn from its poles (`forms.rs`)
         let form = if quads.is_none() { st.form_preview() } else { None };
-        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() || preview.is_some() || form.is_some() || self.previewed {
+        // (a preview that did not change since it was uploaded, the pointer
+        // held still or the same grid step: nothing to upload again; on a
+        // heavy part that is every vertex, each frame)
+        let pkey = preview.as_ref().map(preview_key);
+        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() || pkey != self.preview_key || form.is_some() || self.previewed {
             self.model_gen = st.model_gen;
-            self.previewed = preview.is_some() || form.is_some();
+            self.previewed = form.is_some();
+            self.preview_key = pkey;
             self.quads_shown = quads.is_some();
             let mut verts = vec![];
             let mut edges = vec![];
@@ -99,10 +108,7 @@ impl Drawer {
                 }
                 // the dragged elements' faces and edges, moved
                 let face_m: Vec<Option<glam::Mat4>> = match &preview {
-                    Some(pv) => {
-                        let els = element_map(st, m);
-                        m.faces.iter().map(|f| f.tag.and_then(|t| pv.get(els.get(&t.feature).unwrap_or(&t.feature))).map(|x| x.as_mat4())).collect()
-                    }
+                    Some(pv) => preview_faces(st, m, pv),
                     None => vec![],
                 };
                 if !face_m.is_empty() && dev_none(st) {
@@ -124,6 +130,7 @@ impl Drawer {
                     None => e.pts.clone(),
                 }).collect();
                 line_vertices(&lines, [24, 26, 30, 210], 1.0, &mut edges);
+                self.face_m = face_m;
             }
             self.r.upload_part(device, queue, &verts, &edges);
             self.flags.clear();
@@ -270,13 +277,10 @@ impl Drawer {
                     Some(elements.get(&t.feature).copied().unwrap_or(t.feature))
                 };
                 // moved with the drag's preview, as the faces are
-                let pv = st.drag_preview().unwrap_or_default();
-                let place = |e: &nurbs_kernel::Edge, els: &[Option<nurbs_kernel::FeatureId>; 2]| -> Vec<[f32; 3]> {
-                    match els.iter().flatten().find_map(|x| pv.get(x)) {
-                        Some(x) => {
-                            let x = x.as_mat4();
-                            e.pts.iter().map(|p| x.transform_point3(glam::Vec3::from(*p)).to_array()).collect()
-                        }
+                let face_m = &self.face_m;
+                let place = |e: &nurbs_kernel::Edge, _els: &[Option<nurbs_kernel::FeatureId>; 2]| -> Vec<[f32; 3]> {
+                    match e.faces.iter().find_map(|f| usize::try_from(*f).ok().and_then(|f| face_m.get(f).copied().flatten())) {
+                        Some(x) => e.pts.iter().map(|p| x.transform_point3(glam::Vec3::from(*p)).to_array()).collect(),
                         None => e.pts.clone(),
                     }
                 };
@@ -345,6 +349,97 @@ impl Drawer {
 /// The part is drawn from the kernel's triangles (not the deviation's).
 fn dev_none(st: &AppState) -> bool {
     st.deviation_shown().is_none()
+}
+
+/// A preview's matrices as one number (the same again: nothing to upload).
+fn preview_key(pv: &std::collections::HashMap<nurbs_kernel::FeatureId, glam::DMat4>) -> u64 {
+    let mut ids: Vec<&nurbs_kernel::FeatureId> = pv.keys().collect();
+    ids.sort();
+    let mut h = 0xcbf29ce484222325u64;
+    let mut eat = |v: u64| {
+        h ^= v;
+        h = h.wrapping_mul(0x100000001b3);
+    };
+    for id in ids {
+        eat(*id as u64);
+        for c in pv[id].to_cols_array() {
+            eat(c.to_bits());
+        }
+    }
+    h
+}
+
+/// Each face's matrix while whole shapes are dragged (`drag_preview`): its
+/// element's. After a Mirror the faces on both sides carry the same tags:
+/// those on the other side of the plane from the shape itself move the
+/// mirrored way (R X R, R the plane's reflection; several planes: each one
+/// the face is across). A shape whose faces lie across a plane is left to
+/// the kernel's model (its two halves are one there).
+pub fn preview_faces(st: &AppState, m: &nurbs_kernel::Model, pv: &std::collections::HashMap<nurbs_kernel::FeatureId, glam::DMat4>) -> Vec<Option<glam::Mat4>> {
+    use glam::{DMat4, DVec3};
+    let els = element_map(st, m);
+    let el: Vec<Option<nurbs_kernel::FeatureId>> = m.faces.iter().map(|f| f.tag.map(|t| *els.get(&t.feature).unwrap_or(&t.feature)).filter(|e| pv.contains_key(e))).collect();
+    let planes = st.mirror_planes();
+    if planes.is_empty() {
+        return el.iter().map(|e| e.and_then(|e| pv.get(&e)).map(|x| x.as_mat4())).collect();
+    }
+    // each moved face's extent along the axes
+    let mut lo = vec![[f32::MAX; 3]; m.faces.len()];
+    let mut hi = vec![[f32::MIN; 3]; m.faces.len()];
+    for (t, tri) in m.triangles.iter().enumerate() {
+        let f = m.tri_face[t] as usize;
+        if el.get(f).copied().flatten().is_none() {
+            continue;
+        }
+        for &v in tri {
+            let p = m.positions[v as usize];
+            for a in 0..3 {
+                lo[f][a] = lo[f][a].min(p[a]);
+                hi[f][a] = hi[f][a].max(p[a]);
+            }
+        }
+    }
+    // where each moved shape itself was when the model was made (its box's
+    // middle brought back): the side its own faces are on
+    let home: std::collections::HashMap<nurbs_kernel::FeatureId, DVec3> = pv
+        .iter()
+        .filter_map(|(id, x)| {
+            let (a, b) = st.doc.feature(*id)?.bounds();
+            Some((*id, x.inverse().transform_point3((a + b) * 0.5)))
+        })
+        .collect();
+    const EPS: f64 = 1e-3;
+    let mut across: std::collections::HashSet<nurbs_kernel::FeatureId> = Default::default();
+    let mut flips = vec![0u8; m.faces.len()];
+    for f in 0..m.faces.len() {
+        let (Some(e), true) = (el[f], lo[f][0] <= hi[f][0]) else { continue };
+        let Some(h) = home.get(&e) else { continue };
+        for (k, (a, off)) in planes.iter().enumerate().take(8) {
+            let (l, u) = (lo[f][*a] as f64 - off, hi[f][*a] as f64 - off);
+            if l < -EPS && u > EPS {
+                across.insert(e);
+            } else if (l + u > 0.0) != (h[*a] - off >= 0.0) {
+                flips[f] |= 1 << k;
+            }
+        }
+    }
+    (0..m.faces.len())
+        .map(|f| {
+            let e = el[f].filter(|e| !across.contains(e))?;
+            let x = pv.get(&e)?;
+            let mut r = DMat4::IDENTITY;
+            for (k, (a, off)) in planes.iter().enumerate().take(8) {
+                if flips[f] & (1 << k) != 0 {
+                    let (mut s, mut t) = (DVec3::ONE, DVec3::ZERO);
+                    s[*a] = -1.0;
+                    t[*a] = 2.0 * off;
+                    r = DMat4::from_translation(t) * DMat4::from_scale(s) * r;
+                }
+            }
+            // (reflections across planes square to the axes: r is its own inverse)
+            Some((r * *x * r).as_mat4())
+        })
+        .collect()
 }
 
 /// Each feature whose faces the model shows, with its element.
