@@ -458,7 +458,13 @@ fn back_to(h: &mut Harness, log: &mut Vec<String>, before: &Doc) {
     if h.st.doc != *before {
         // (a change whose build brought an error may have been undone by
         // the app already, `check_build`, and the undo then went one further)
-        let line = "  NOT BACK: the document differs after the undo, loaded again".to_string();
+        let d = &h.st.doc;
+        let mut what: Vec<String> = d.features.iter().filter(|f| before.feature(f.id) != Some(*f)).map(|f| format!("{} {}", f.id, f.name)).collect();
+        what.extend(before.features.iter().filter(|f| d.feature(f.id).is_none()).map(|f| format!("{} {} gone", f.id, f.name)));
+        if d.groups != before.groups {
+            what.push("groups".into());
+        }
+        let line = format!("  NOT BACK: the document differs after the undo ({}), loaded again", what.join(", "));
         eprintln!("{line}");
         log.push(line);
         let name = h.st.doc_name.clone();
