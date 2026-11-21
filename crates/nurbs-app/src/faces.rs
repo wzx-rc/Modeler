@@ -36,22 +36,10 @@ impl AppState {
     /// The model face a reference names: among the faces with its tag, the
     /// one whose triangles come nearest its point.
     pub fn model_face_of(&self, r: &FaceRef) -> Option<usize> {
-        let m = self.model.as_ref()?;
-        let at = r.at.as_vec3();
-        let same: Vec<usize> = (0..m.faces.len()).filter(|i| m.faces[*i].tag.map(|t| t.pack()) == Some(r.tag)).collect();
-        if same.len() <= 1 {
-            return same.first().copied();
-        }
-        let mut best = vec![f32::MAX; m.faces.len()];
-        for (t, tri) in m.triangles.iter().enumerate() {
-            let f = m.tri_face[t] as usize;
-            if !same.contains(&f) {
-                continue;
-            }
-            let d = point_triangle(at, tri.map(|v| Vec3::from(m.positions[v as usize])));
-            best[f] = best[f].min(d);
-        }
-        same.into_iter().min_by(|a, b| best[*a].total_cmp(&best[*b]))
+        // (only the triangles of the faces with that tag: after a Mirror
+        // every face has a twin, and going through the whole mesh for each
+        // picked face froze a rectangle's release for 13 s on a heavy scene)
+        self.picker.face_near(self.model.as_ref()?, r.tag, r.at.as_vec3())
     }
 
     /// The faces picked in Face mode, as model faces.
@@ -288,16 +276,7 @@ impl AppState {
     /// The part's B-rep vertices: the ends of its edges (seams left out).
     pub fn part_vertices(&self) -> Vec<Vec3> {
         let Some(m) = &self.model else { return vec![] };
-        let mut out: Vec<Vec3> = vec![];
-        for e in m.edges.iter().filter(|e| !e.seam) {
-            let (Some(a), Some(b)) = (e.pts.first(), e.pts.last()) else { continue };
-            for p in [Vec3::from(*a), Vec3::from(*b)] {
-                if !out.iter().any(|q| q.distance(p) < 1e-3) {
-                    out.push(p);
-                }
-            }
-        }
-        out
+        self.picker.vertices(m).to_vec()
     }
 
     /// Whether the part hides a point, seen from the eye.
@@ -311,10 +290,40 @@ impl AppState {
         hit.map(|h| h.t < dist - tol).unwrap_or(false)
     }
 
+    /// Whether the part hides a point lying on its faces `own` (an edge's
+    /// two faces, the faces round a vertex), seen from the eye. Stricter
+    /// than `hidden`: a face that is not one of its own hides it as soon as
+    /// it is hit clearly before the point (a thin wall's far side, 2 mm
+    /// behind, was taken as seen); its own faces keep the looser margin,
+    /// the mesh lying a little off the edge's points on a curved face.
+    pub fn hidden_on(&self, q: Vec3, own: &[i32]) -> bool {
+        let Some(m) = &self.model else { return false };
+        let v = self.view();
+        let to = q - v.eye;
+        let dist = to.length();
+        let Some(h) = self.picker.pick(m, v.eye, to / dist.max(1e-6)) else { return false };
+        let tol = if own.contains(&(h.face as i32)) { 0.3 + dist * 0.004 } else { 0.02 + dist * 2e-4 };
+        h.t < dist - tol
+    }
+
     /// The vertices the eye sees, with their place on screen.
     pub fn visible_vertices(&self) -> Vec<(Vec3, [f32; 2])> {
         let v = self.view();
-        self.vertices().into_iter().filter(|q| self.xray || !self.hidden(*q)).filter_map(|q| v.project(q).map(|s| (q, s))).collect()
+        let all = self.vertices();
+        if self.xray {
+            return all.into_iter().filter_map(|q| v.project(q).map(|s| (q, s))).collect();
+        }
+        // which ones the part hides: kept while the model, the eye and the
+        // vertices stay the same (asked every frame in Vertex mode)
+        let mut key = (self.model_gen, [v.eye.x.to_bits(), v.eye.y.to_bits(), v.eye.z.to_bits()], all.len() as u64);
+        for q in &all {
+            key.2 = key.2.wrapping_mul(0x100000001b3) ^ (q.x.to_bits() as u64) ^ ((q.y.to_bits() as u64) << 20) ^ ((q.z.to_bits() as u64) << 40);
+        }
+        let mut memo = self.vert_hidden.borrow_mut();
+        if memo.0 != key || memo.1.len() != all.len() {
+            *memo = (key, all.iter().map(|q| self.hidden(*q)).collect());
+        }
+        all.into_iter().zip(memo.1.iter()).filter(|(_, h)| !**h).filter_map(|(q, _)| v.project(q).map(|s| (q, s))).collect()
     }
 
     /// The vertex under the pointer (within a few points, not hidden).
@@ -331,6 +340,10 @@ impl AppState {
     /// components the eye sees inside it. Shift adds them, Ctrl takes them
     /// away, else they replace the picks. A vertex counts by its point, an
     /// edge by its middle, a face by any of its triangles seen there.
+    /// **Only what the camera sees** (Romain 21 nov., 0 h 11: "un rectangle
+    /// de sélection sélectionne les faces arrières"): nothing behind the
+    /// part is taken, in X-ray too (a click there takes the front one as
+    /// well), and a thin wall's far side is hidden (`hidden_on`).
     pub fn marquee_components(&mut self, a: [f32; 2], b: [f32; 2], shift: bool, ctrl: bool) {
         let (lo, hi) = ([a[0].min(b[0]), a[1].min(b[1])], [a[0].max(b[0]), a[1].max(b[1])]);
         let inside = |s: [f32; 2]| s[0] >= lo[0] && s[0] <= hi[0] && s[1] >= lo[1] && s[1] <= hi[1];
@@ -338,7 +351,34 @@ impl AppState {
         self.selection.clear();
         match self.sel_mode {
             SelMode::Vertex => {
-                let found: Vec<DVec3> = self.visible_vertices().into_iter().filter(|(_, s)| inside(*s)).map(|(q, _)| q.as_dvec3()).collect();
+                // the part's vertices with the faces round each (its edges'),
+                // the curves' points as they are
+                let mut found: Vec<DVec3> = vec![];
+                if let Some(m) = self.model.as_ref() {
+                    let mut seen: Vec<(Vec3, Vec<i32>)> = vec![];
+                    for e in m.edges.iter().filter(|e| !e.seam) {
+                        let (Some(a), Some(b)) = (e.pts.first(), e.pts.last()) else { continue };
+                        for p in [Vec3::from(*a), Vec3::from(*b)] {
+                            if !v.project(p).map(inside).unwrap_or(false) {
+                                continue;
+                            }
+                            match seen.iter_mut().find(|q| q.0.distance(p) < 1e-3) {
+                                Some(q) => q.1.extend(e.faces),
+                                None => seen.push((p, e.faces.to_vec())),
+                            }
+                        }
+                    }
+                    found.extend(seen.iter().filter(|(p, own)| !self.hidden_on(*p, own)).map(|(p, _)| p.as_dvec3()));
+                }
+                let part = self.part_vertices();
+                for q in self.vertices() {
+                    if part.iter().any(|p| p.distance(q) < 1e-3) {
+                        continue;
+                    }
+                    if v.project(q).map(inside).unwrap_or(false) && !self.hidden(q) {
+                        found.push(q.as_dvec3());
+                    }
+                }
                 if !(shift || ctrl) {
                     self.vert_sel.clear();
                 }
@@ -359,7 +399,7 @@ impl AppState {
                 for i in 0..m.edges.len() {
                     let Some(r) = self.edge_ref(i) else { continue };
                     let mid = r.at.as_vec3();
-                    if v.project(mid).map(inside).unwrap_or(false) && (self.xray || !self.hidden(mid)) {
+                    if v.project(mid).map(inside).unwrap_or(false) && !self.hidden_on(mid, &m.edges[i].faces) {
                         found.push(r);
                     }
                 }
@@ -381,33 +421,49 @@ impl AppState {
                 let Some(m) = self.model.as_ref() else { return };
                 // per face, a few of its triangles inside the rectangle,
                 // seen there (the ray through it hits that face first)
-                let mut tries = vec![0u8; m.faces.len()];
                 let mut found: Vec<(usize, DVec3)> = vec![];
-                for (t, tri) in m.triangles.iter().enumerate() {
-                    let f = m.tri_face[t] as usize;
-                    if tries[f] >= 16 || found.iter().any(|x| x.0 == f) {
-                        continue;
+                let mut inside_tris: Vec<(Vec3, [f32; 2])> = vec![];
+                for f in 0..m.faces.len() {
+                    // its triangles inside the rectangle
+                    inside_tris.clear();
+                    for t in self.picker.range(f) {
+                        if m.tri_face[t] as usize != f {
+                            continue;
+                        }
+                        let c = m.triangles[t].iter().map(|k| Vec3::from(m.positions[*k as usize])).sum::<Vec3>() / 3.0;
+                        if let Some(s) = v.project(c).filter(|s| inside(*s)) {
+                            inside_tris.push((c, s));
+                        }
                     }
-                    let c = tri.iter().map(|k| Vec3::from(m.positions[*k as usize])).sum::<Vec3>() / 3.0;
-                    let Some(s) = v.project(c).filter(|s| inside(*s)) else { continue };
-                    tries[f] += 1;
-                    // in X-ray the faces behind are taken too
-                    if self.xray || self.pick_at(s).map(|h| h.face) == Some(f) {
-                        found.push((f, c.as_dvec3()));
+                    // up to 16 of them, spread over the face: only where
+                    // the eye sees it (the faces behind are not taken, in
+                    // X-ray either)
+                    let n = inside_tris.len();
+                    for k in 0..n.min(16) {
+                        let (c, s) = inside_tris[k * n / n.min(16)];
+                        if self.pick_at(s).map(|h| h.face) == Some(f) {
+                            found.push((f, c.as_dvec3()));
+                            break;
+                        }
                     }
                 }
                 if !(shift || ctrl) {
                     self.face_sel.clear();
                 }
+                // the faces picked so far, as model faces (in step with
+                // `face_sel`)
+                let mut picked: Vec<Option<usize>> = self.face_sel.iter().map(|x| self.model_face_of(x)).collect();
                 for (f, c) in found {
-                    let at = self.face_sel.iter().position(|x| self.model_face_of(x) == Some(f));
+                    let at = picked.iter().position(|x| *x == Some(f));
                     match (ctrl, at) {
                         (true, Some(i)) => {
                             self.face_sel.remove(i);
+                            picked.remove(i);
                         }
                         (false, None) => {
                             if let Some(r) = self.face_ref(f, c) {
                                 self.face_sel.push(r);
+                                picked.push(Some(f));
                             }
                         }
                         _ => {}
@@ -732,7 +788,7 @@ impl AppState {
         let (ro, rd) = self.ray(p);
         let Some(t) = closest_on_line(line.0, line.1, ro, rd) else { return };
         self.begin_live(f.kind_label());
-        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![], carried: Default::default(), pivot: line.0, custom: false, keep: vec![], cage: None, pts: vec![] });
+        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![], carried: Default::default(), pivot: line.0, custom: false, keep: vec![], cage: None, pts: vec![], groups: vec![] });
     }
 
     pub(crate) fn update_push_drag(&mut self, d: &Drag, p: [f32; 2]) {
@@ -787,7 +843,7 @@ impl AppState {
 }
 
 /// Distance from a point to a triangle.
-fn point_triangle(p: Vec3, t: [Vec3; 3]) -> f32 {
+pub(crate) fn point_triangle(p: Vec3, t: [Vec3; 3]) -> f32 {
     let [a, b, c] = t;
     let n = (b - a).cross(c - a);
     let nl = n.length();
@@ -1097,7 +1153,7 @@ impl AppState {
             }
         };
         let Some(f) = self.doc.feature(id).cloned() else { return };
-        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried, pivot, custom, keep: vec![], cage, pts: vec![] });
+        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried, pivot, custom, keep: vec![], cage, pts: vec![], groups: vec![] });
         // the move step now selected: the pivot put by hand goes on with it
         if custom {
             self.custom_pivot = Some((self.pivot_key(), pivot));

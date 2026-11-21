@@ -65,6 +65,71 @@ struct Stage {
     /// The move just made took its mirror image with it (one move of
     /// both: a face across the plane bends once): the image step is done.
     paired: bool,
+    /// Where it has been: the boxes (min, max) of its lumps after each
+    /// step, and of the shapes added to it or cut from it (`build_islands`:
+    /// islands whose boxes come near each other are built as one).
+    ext: Vec<[f64; 6]>,
+    /// The shape `ext` was last told of (its address; 0: none).
+    noted: usize,
+    /// The Mirrors made on it: false when none of it was on the side kept
+    /// (an island: it is gone from there on).
+    mirrors: Vec<(FeatureId, bool)>,
+    /// The plane it was last made symmetric across (a Mirror's axis and
+    /// offset) and how many errors it had then: the same Mirror again,
+    /// with no error since, changes nothing.
+    even: Option<(u8, u64, usize)>,
+    /// Its faces of one surface may not be one yet: the last step that
+    /// changed it was no union or cut (a fillet, a move, the Knife, a first
+    /// shape). In one history the next union or cut anywhere joins them:
+    /// an island does it when one is made in another island meanwhile.
+    rough: bool,
+}
+
+impl Stage {
+    fn new() -> Stage {
+        Stage { shape: None, errors: vec![], limits: vec![], conic: vec![], tension_limits: vec![], paired: false, ext: vec![], noted: 0, mirrors: vec![], even: None, rough: false }
+    }
+    /// Its faces of one surface made one (the shape kept when none is).
+    /// The faces of one surface made one, as a union or a cut made
+    /// anywhere in one history does to the whole part; `times`: how many of
+    /// them were made meanwhile (one pass may leave more to merge: a face
+    /// that took another's tag is then no longer kept from its neighbour).
+    /// How many passes changed it (fewer than `times`: nothing is left to
+    /// merge, `rough` is off).
+    fn join_faces(&mut self, times: usize) -> usize {
+        let mut n = 0;
+        for _ in 0..times {
+            let (true, Some(s)) = (self.rough, self.shape.clone()) else { break };
+            match s.simplified() {
+                Ok(t) if t.face_count() != s.face_count() || t.edge_faces().len() != s.edge_faces().len() => {
+                    self.shape = Some(Rc::new(t));
+                    n += 1;
+                }
+                // (nothing left to merge)
+                _ => self.rough = false,
+            }
+        }
+        if self.shape.is_none() {
+            self.rough = false;
+        }
+        n
+    }
+    /// Its shape's lumps added to where it has been, once per shape.
+    fn note(&mut self) {
+        let p = self.shape.as_ref().map(|s| Rc::as_ptr(s) as usize).unwrap_or(0);
+        if p != self.noted {
+            self.noted = p;
+            if let Some(s) = &self.shape {
+                boxes_add(&mut self.ext, &s.lump_boxes());
+            }
+        }
+    }
+}
+
+/// The stage after a feature, kept for the next builds.
+fn keep(cache: &mut Cache, key: u64, stage: &mut Stage) {
+    stage.note();
+    cache.stages.insert(key, stage.clone());
 }
 
 #[derive(Default)]
@@ -78,6 +143,19 @@ pub struct Cache {
     /// (they do not depend on the part, so a drag of a shape does not make
     /// them again).
     regions: HashMap<u64, Result<Vec<Vec<[f32; 3]>>, String>>,
+    /// Pairs of features whose islands turned out to touch though their
+    /// boxes in the document do not (an extrusion, a mirror image, a copy):
+    /// built as one from the start the next times (`build_islands`).
+    hints: Vec<(FeatureId, FeatureId)>,
+    /// By the key of a stage: how many passes of `join_faces` change it
+    /// before nothing is left to merge. An island's keys then do not depend
+    /// on how many unions and cuts are made in the others (a shape deleted,
+    /// Isolate: the islands that did not change are found again).
+    passes: HashMap<u64, usize>,
+    /// The stages the last fine builds used (documents at rest: the undo
+    /// steps), the newest last: kept, so going back a few steps builds
+    /// nothing again.
+    rest: std::collections::VecDeque<Vec<u64>>,
 }
 
 fn rows(m: DMat4) -> [[f64; 4]; 3] {
@@ -826,8 +904,9 @@ fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> Option<Shape> {
 
 /// The last stop of the fillet searches (`round_search`, `one_by_one`): they
 /// end on their count of tries first, this only keeps a pathological case
-/// from holding the kernel.
-const SEARCH_STOP: f64 = 6.0;
+/// from holding the kernel. (Ten times longer in the tests: run in
+/// parallel on a loaded PC, three of them passed the 6 s and failed.)
+const SEARCH_STOP: f64 = if cfg!(test) { 60.0 } else { 6.0 };
 
 /// A fillet that blends its corners: rebuilt in one operation with the run
 /// of fillets just before it (from the first one it touches, through shared
@@ -837,11 +916,18 @@ const SEARCH_STOP: f64 = 6.0;
 fn blend(befores: &[(&Feature, Stage)], f: &Feature, r: &Round) -> Option<(Shape, Vec<(u32, f64)>)> {
     let n = befores.len().checked_sub(1)?;
     let mut k = n;
-    while k > 0 && befores[k - 1].0.round.as_ref().map(|g| !g.chamfer && !g.only).unwrap_or(false) {
+    while k > 0 && befores[k - 1].0.round.as_ref().map(|g| !g.chamfer && !g.only).unwrap_or(false) && !gap(befores[k - 1].0, befores[k].0, true) {
         k -= 1;
     }
     if k == n {
         return None;
+    }
+    // (an island: a fillet of another island in the same run that is not
+    // found before the run stops every blend of the run in one history)
+    if let Some(p) = place_of(f) {
+        if strangers_lost(run_start(p), p) {
+            return None;
+        }
     }
     let base = befores[k].1.shape.clone()?;
     let limits = &befores[n].1.limits;
@@ -884,6 +970,11 @@ fn blend(befores: &[(&Feature, Stage)], f: &Feature, r: &Round) -> Option<(Shape
     if first == last {
         return None;
     }
+    if let (Some(a), Some(p)) = (place_of(befores[k + first].0), place_of(f)) {
+        if strangers_lost(a, p) {
+            return None;
+        }
+    }
     // the run from the first fillet it touches (the ones in between too, so
     // none is lost), all in one operation
     let base = befores[k + first].1.shape.clone()?;
@@ -912,13 +1003,15 @@ fn blend(befores: &[(&Feature, Stage)], f: &Feature, r: &Round) -> Option<(Shape
 /// `errors`. For each fillet: Some(true) when every face took it, None when
 /// none did. A tension too full or too flat for a fillet running round it
 /// stops at the nearest that works (Romain: "il bute et stop", as a fillet's
-/// size does): `limits` gets (fillet, the tension it was made at).
-fn tension(s: Rc<Shape>, ts: &[(u32, f64)], name_of: &dyn Fn(u32) -> String, errors: &mut Vec<String>, limits: &mut Vec<(u32, f64)>) -> (Rc<Shape>, Vec<Option<bool>>) {
+/// size does): `limits` gets (fillet, the tension it was made at). `before`:
+/// the solid the fillets were made on; their faces that were there already
+/// (another copy's of an Array, same tags) are left as they are.
+fn tension(s: Rc<Shape>, before: Option<&Shape>, ts: &[(u32, f64)], name_of: &dyn Fn(u32) -> String, errors: &mut Vec<String>, limits: &mut Vec<(u32, f64)>) -> (Rc<Shape>, Vec<Option<bool>>) {
     if ts.is_empty() {
         return (s, vec![]);
     }
     let tagged: Vec<(i64, f64)> = ts.iter().map(|&(id, t)| (FaceTag { feature: id, sub: 0 }.pack(), t)).collect();
-    match s.fillet_tension(&tagged) {
+    match s.fillet_tension_since(before, &tagged) {
         Ok((t, counts)) => {
             // too tight for a fillet running round it: again at the nearest
             // tension that works, kept when it then takes everywhere
@@ -933,7 +1026,7 @@ fn tension(s: Rc<Shape>, ts: &[(u32, f64)], name_of: &dyn Fn(u32) -> String, err
                 .collect();
             if stops.iter().any(|x| x.is_some()) {
                 let again: Vec<(i64, f64)> = tagged.iter().zip(&stops).map(|(&(tag, rho), x)| (tag, x.unwrap_or(rho))).collect();
-                if let Ok((t2, c2)) = s.fillet_tension(&again) {
+                if let Ok((t2, c2)) = s.fillet_tension_since(before, &again) {
                     if stops.iter().zip(&c2).all(|(x, c)| x.is_none() || c.done == c.total) {
                         let mut took = vec![];
                         for ((&(id, _), x), c) in ts.iter().zip(&stops).zip(&c2) {
@@ -975,7 +1068,7 @@ fn tension(s: Rc<Shape>, ts: &[(u32, f64)], name_of: &dyn Fn(u32) -> String, err
             let mut s = s;
             let mut took = vec![];
             for t in ts {
-                let (n, k) = tension(s, std::slice::from_ref(t), name_of, errors, limits);
+                let (n, k) = tension(s, before, std::slice::from_ref(t), name_of, errors, limits);
                 s = n;
                 took.extend(k);
             }
@@ -1447,7 +1540,7 @@ fn shape_box(s: &Shape) -> Option<(DVec3, DVec3)> {
 /// faces of one surface across the plane made one by the union); the
 /// sheets beside them mirrored whole. Faces keep their tags on both sides,
 /// so a click on either side names the same shape.
-fn mirror_part(acc: &Shape, id: FeatureId, m: &Mirror) -> Result<Shape, String> {
+fn mirror_part(acc: &Shape, id: FeatureId, m: &Mirror, island: bool) -> Result<Option<Shape>, String> {
     let sheets = acc.lumps_of(false).ok();
     let solids = match &sheets {
         Some(_) => acc.lumps_of(true).ok(),
@@ -1455,7 +1548,43 @@ fn mirror_part(acc: &Shape, id: FeatureId, m: &Mirror) -> Result<Shape, String> 
     };
     let solids: Option<&Shape> = if sheets.is_some() { solids.as_ref() } else { Some(acc) };
     let mut out: Option<Shape> = None;
-    if let Some(sol) = solids {
+    // its lumps' boxes first (quick, never smaller than the lumps): all of
+    // it clearly on one side of the plane needs no exact box, which costs
+    // tens of ms on a part with curved faces
+    let (mut near, mut far) = (f64::MAX, f64::MIN);
+    for (lo, hi) in solids.map(|s| s.lump_boxes()).unwrap_or_default() {
+        let (k0, k1) = (m.side(DVec3::from_array(lo)), m.side(DVec3::from_array(hi)));
+        near = near.min(k0.min(k1));
+        far = far.max(k0.max(k1));
+    }
+    // (off the plane on the kept side: nothing to cut, and its image does
+    // not touch it)
+    let apart = near > 1e-3 && near.is_finite() && std::env::var_os("FORME_MIRROR_FUSE").is_none();
+    // (an island all on the side dropped: its solids are gone, as the cut
+    // at the plane takes them when the part has more on the side kept)
+    let dropped = |sol: &Shape| {
+        if apart || (far < -1e-3 && far.is_finite()) {
+            return !apart;
+        }
+        let Some((lo, hi)) = shape_box(sol) else { return false };
+        let (k0, k1) = (m.side(lo), m.side(hi));
+        k0.max(k1) <= 1e-6 * (hi - lo).max_element().max(1.0)
+    };
+    if std::env::var_os("FORME_ISLANDS_DEBUG").is_some() {
+        eprintln!("MIRROR {id}: acc {} faces, solids {:?} box {:?} dropped {:?}, sheets {:?}", acc.face_count(), solids.map(|s| s.face_count()), solids.and_then(shape_box), solids.map(|s| dropped(s)), sheets.as_ref().map(|s| s.face_count()));
+    }
+    let solids = solids.filter(|s| !(island && dropped(s)));
+    if solids.is_none() && sheets.is_none() && island {
+        return Ok(None);
+    }
+    // the part and its image side by side, no union: its faces of one
+    // surface made one as the union does (a union of two solids that do not
+    // touch took 250 ms for a pill with 15 operations, at each step of its
+    // drag: Romain's scene of 21 nov.)
+    if let Some(half) = solids.filter(|_| apart).and_then(|sol| sol.simplified().ok()) {
+        out = Some(half.compound(&half.transformed(m.rows())?)?);
+    }
+    if let Some(sol) = solids.filter(|_| out.is_none()) {
         let (lo, hi) = shape_box(sol).ok_or("nothing to mirror")?;
         let n = m.normal();
         let a = m.axis.min(2) as usize;
@@ -1494,7 +1623,7 @@ fn mirror_part(acc: &Shape, id: FeatureId, m: &Mirror) -> Result<Shape, String> 
             None => both,
         });
     }
-    out.ok_or_else(|| "nothing to mirror".to_string())
+    out.map(Some).ok_or_else(|| "nothing to mirror".to_string())
 }
 
 /// A shape made after a Mirror: the tool and its image as one (an Add on
@@ -1621,8 +1750,12 @@ fn twin_same(acc0: Option<&Shape>, a: &Feature, b: &Feature) -> bool {
             v
         };
         // the same components (across the plane): a move of them is not
-        // made twice, even one that leaves the part lopsided
-        return verts(t) == verts(u);
+        // made twice, even one that leaves the part lopsided. (Components
+        // found on neither side, a fillet made before having taken them,
+        // are not "the same": the move made before that fillet takes its
+        // image with it, else the image side stayed as it was, in silence.)
+        let (x, y) = (verts(t), verts(u));
+        return !x.is_empty() && x == y;
     }
     if let (Some(k), Some(l)) = (&a.cut, &b.cut) {
         let near = |p: DVec3, set: &[DVec3]| set.iter().any(|q| q.distance(p) < 1e-6);
@@ -1641,16 +1774,68 @@ fn hash2(a: u64, b: u64) -> u64 {
 /// Builds the features `feats` in this order: the stage after the last
 /// (the stages on the way cached by the hash of what comes before).
 fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Stage {
-    let mut stage = Stage { shape: None, errors: vec![], limits: vec![], conic: vec![], tension_limits: vec![], paired: false };
+    let mut stage = Stage::new();
+    let island = in_island();
     let mut key = 0u64;
     // the stage before each feature (blended fillets start again from there)
     let mut befores: Vec<(&Feature, Stage)> = vec![];
     // the Mirror the steps from here on are made on both sides of
     let mut sym: Option<Mirror> = None;
+    // (an island) the place in the whole history of the step before
+    let mut last: Option<usize> = None;
+    // a union or a cut made in another island since: this island's faces
+    // of one surface made one too, as in one history (a stage of its own)
+    // Its key says how many passes changed it, not how many were asked: one
+    // that changes nothing leaves the key as it is, so the steps after it
+    // are found again whatever is made, deleted or left out elsewhere.
+    let join = |times: usize, key: &mut u64, stage: &mut Stage, cache: &mut Cache, used_stages: &mut Vec<u64>| {
+        let pre = *key;
+        let name = |n: usize| if n == 0 { pre } else { hash2(hash2(pre, 0x6a6f696e), n as u64) };
+        if let Some(&full) = cache.passes.get(&pre) {
+            let n = times.min(full);
+            if n == 0 {
+                stage.rough = false;
+                return;
+            }
+            if let Some(s) = cache.stages.get(&name(n)) {
+                *stage = s.clone();
+                *key = name(n);
+                used_stages.push(*key);
+                return;
+            }
+        }
+        let n = stage.join_faces(times);
+        if !stage.rough {
+            cache.passes.insert(pre, n);
+        }
+        if n > 0 {
+            *key = name(n);
+            used_stages.push(*key);
+            keep(cache, *key, stage);
+        }
+    };
     for (i, &f) in feats.iter().enumerate() {
+        let here = if island { place_of(f) } else { None };
+        if let (Some(a), Some(b)) = (last, here) {
+            let n = strangers_join(a, Some(b));
+            if n > 0 {
+                join(n, &mut key, &mut stage, cache, used_stages);
+            }
+        }
+        last = here.or(last);
         befores.push((f, stage.clone()));
-        let fh = deep_hash(doc, f);
+        let fh = hash_of(doc, f);
         key = hash2(key, fh);
+        // (a move made in one go with its image, the step after it: not the
+        // stage the move alone gives, which an island built up to it keeps)
+        if f.tweak.is_some() && feats.get(i + 1).is_some_and(|g| g.id == f.id) {
+            key = hash2(key, 0x70616972);
+        }
+        // (an island's Mirror may leave nothing of it: not the same step as
+        // in one history, where that is an error)
+        if island && f.mirror.is_some() {
+            key = hash2(key, 0x69736c616e64);
+        }
         let skipped = |what: &str| skip.iter().any(|s| *s == step(what, f));
         if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") || skipped("cut") || skipped("mirror") || skipped("shell") {
             key = hash2(key, 1);
@@ -1667,29 +1852,66 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         // the part made symmetric
         if let Some(m) = &f.mirror {
             if let Some(acc) = stage.shape.clone() {
+                // the same plane as the Mirror before it and nothing gone
+                // wrong since (every step after a Mirror is made on both
+                // sides): the part is symmetric already (Romain's scene of
+                // 21 nov.: three Mirrors across X, 0.9 s each)
+                let plane = (m.axis, m.offset.to_bits());
+                if stage.even.is_some_and(|e| (e.0, e.1) == plane && e.2 == stage.errors.len()) && !skipped("mirror") && std::env::var_os("FORME_MIRROR_AGAIN").is_none() {
+                    stage.mirrors.push((f.id, true));
+                    keep(cache, key, &mut stage);
+                    continue;
+                }
                 let res = if skipped("mirror") {
                     Err("skipped, it crashed the kernel".to_string())
                 } else {
                     mark(&step("mirror", f));
-                    mirror_part(&acc, f.id, m)
+                    mirror_part(&acc, f.id, m, island)
                 };
                 match res {
-                    Ok(s) => {
+                    // (nothing came out of the cut at the plane: gone too)
+                    Ok(Some(s)) if island && s.face_count() == 0 => {
+                        stage.shape = None;
+                        stage.mirrors.push((f.id, false));
+                        stage.even = None;
+                    }
+                    Ok(Some(s)) => {
                         model.booleans += 1;
                         stage.shape = Some(Rc::new(s));
+                        stage.rough = true;
+                        stage.mirrors.push((f.id, true));
+                        stage.even = Some((plane.0, plane.1, stage.errors.len()));
                     }
-                    Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
+                    // an island all on the side the Mirror drops
+                    Ok(None) => {
+                        stage.shape = None;
+                        stage.mirrors.push((f.id, false));
+                        stage.even = None;
+                    }
+                    Err(e) => {
+                        stage.errors.push(format!("{}: {e}", f.name));
+                        stage.even = None;
+                    }
                 }
             }
-            cache.stages.insert(key, stage.clone());
+            keep(cache, key, &mut stage);
             continue;
         }
         // the image of the step before (after a Mirror) that names what it
         // named (a face across the plane): nothing more to make
         if let Some(a) = twin_of(feats, i) {
-            if stage.paired || twin_same(befores[i - 1].1.shape.as_deref(), a, f) {
+            // (a move that failed: its image would fail the same way, one
+            // error says it)
+            let failed = a.tweak.is_some() && befores[i].1.errors.len() > befores[i - 1].1.errors.len();
+            if stage.paired || failed || twin_same(befores[i - 1].1.shape.as_deref(), a, f) {
+                // a move of components across the plane, made once: it may
+                // leave the part lopsided (the same Mirror again would even
+                // it out)
+                if !stage.paired && a.tweak.is_some() {
+                    stage.even = None;
+                }
                 stage.paired = false;
-                cache.stages.insert(key, stage.clone());
+                keep(cache, key, &mut stage);
                 continue;
             }
         }
@@ -1711,7 +1933,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                         mark(&step("round", f));
                     }
                     let (mut errs, mut stops) = (vec![], vec![]);
-                    let (t, took) = tension(Rc::new(p), &all, &name_of, &mut errs, &mut stops);
+                    let (t, took) = tension(Rc::new(p), Some(acc.as_ref()), &all, &name_of, &mut errs, &mut stops);
                     let full: Vec<u32> = all.iter().zip(&took).filter(|(_, k)| **k == Some(true)).map(|(a, _)| a.0).collect();
                     let lost = ts.iter().filter(|(id, _)| conic.contains(id) && !full.contains(id)).count() + own.filter(|o| !full.contains(&o.0)).iter().count();
                     (t, full, lost, (errs, stops))
@@ -1745,7 +1967,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                         // them, they made again on what it gives
                         if let Some(s) = replay_round(doc, &feats[..i], f, r, &stage, skip, cache, model, used_tools, used_stages) {
                             stage = s;
-                            cache.stages.insert(key, stage.clone());
+                            keep(cache, key, &mut stage);
                             continue;
                         }
                         // too big? the largest size that works
@@ -1793,7 +2015,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                             let (edges, _) = resolve(&acc, &r.edges);
                             let msg = match crowded(&acc, &edges) {
                                 Some((all, k)) => format!("{}: OpenCascade cannot round {k} of the {n} edges meeting at one corner here: try one of them, or all {n}", f.name, n = all.len()),
-                                None => format!("{}: OpenCascade cannot make it at {} mm ({e})", f.name, r.size),
+                                None => format!("{}: OpenCascade cannot make it at {} mm ({e})", f.name, (r.size * 1000.0).round() / 1000.0),
                             };
                             stage.errors.push(msg)
                         }
@@ -1803,11 +2025,12 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                 if let Some((s, full)) = made {
                     model.booleans += 1;
                     stage.shape = Some(s);
+                    stage.rough = true;
                     stage.conic.retain(|id| *id != f.id && !full.contains(id));
                     stage.conic.extend(full);
                 }
             }
-            cache.stages.insert(key, stage.clone());
+            keep(cache, key, &mut stage);
             continue;
         }
         // an inset or extrusion of a face: on the solid built so far
@@ -1822,12 +2045,13 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                     Ok(Some(s)) => {
                         model.booleans += 1;
                         stage.shape = Some(Rc::new(s));
+                        stage.rough = true;
                     }
                     Ok(None) => {}
                     Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
                 }
             }
-            cache.stages.insert(key, stage.clone());
+            keep(cache, key, &mut stage);
             continue;
         }
         // a face, edge or vertex moved: on the solid built so far
@@ -1835,36 +2059,57 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
             if let Some(acc) = stage.shape.clone() {
                 // with its mirror image next (after a Mirror): both moved
                 // in one go when they do not name the same components
-                if let Some(u) = feats.get(i + 1).filter(|g| g.id == f.id && twin_of(feats, i).is_none() && !skipped("tweak")).and_then(|g| g.tweak.as_ref().filter(|_| !twin_same(Some(&acc), f, g))) {
+                let image = feats.get(i + 1).copied().filter(|g| g.id == f.id && twin_of(feats, i).is_none() && !skipped("tweak") && g.tweak.is_some() && !twin_same(Some(&acc), f, g));
+                if let Some((g, u)) = image.and_then(|g| Some((g, g.tweak.as_ref()?))) {
                     if let Ok(Some(s)) = tweak_pair(&acc, f, t, u) {
                         model.booleans += 1;
                         stage.shape = Some(Rc::new(s));
+                        stage.rough = true;
                         stage.paired = true;
-                        cache.stages.insert(key, stage.clone());
+                        keep(cache, key, &mut stage);
                         continue;
+                    }
+                    // both where fillets made just before run along them:
+                    // made before those, in one go there (the image alone,
+                    // after its move, would find no fillet just before it)
+                    if !t.copy {
+                        if let Some(mut s) = replay(doc, &feats[..i], f, Some(g), t, &stage, skip, cache, model, used_tools, used_stages) {
+                            s.paired = true;
+                            stage = s;
+                            keep(cache, key, &mut stage);
+                            continue;
+                        }
                     }
                 }
                 let res = if skipped("tweak") { Err("skipped, it crashed the kernel".to_string()) } else { tweak(&acc, f, t) };
+                // (the image of a move that was made where it stood: both
+                // made again before the fillets)
+                let twin = twin_of(feats, i).filter(|a| a.tweak.is_some() && i > 0);
                 match res {
                     Ok(Some(s)) => {
                         model.booleans += 1;
                         stage.shape = Some(Rc::new(s));
+                        stage.rough = true;
                     }
                     Ok(None) => {}
                     Err(e) if t.copy => stage.errors.push(format!("{}: {e}", f.name)),
-                    Err(e) => match replay(doc, &feats[..i], f, t, &stage, skip, cache, model, used_tools, used_stages) {
+                    Err(e) => match match twin.and_then(|a| Some((a, a.tweak.as_ref()?))) {
+                        Some((a, at)) => replay(doc, &feats[..i - 1], a, Some(f), at, &stage, skip, cache, model, used_tools, used_stages),
+                        None => replay(doc, &feats[..i], f, None, t, &stage, skip, cache, model, used_tools, used_stages),
+                    } {
                         Some(s) => stage = s,
                         None => match tweak_unrounded(doc, &acc, f, t) {
                             Ok(s) => {
                                 model.booleans += 1;
                                 stage.shape = Some(Rc::new(s));
+                                stage.rough = true;
                             }
                             Err(_) => stage.errors.push(format!("{}: {e}", f.name)),
                         },
                     },
                 }
             }
-            cache.stages.insert(key, stage.clone());
+            keep(cache, key, &mut stage);
             continue;
         }
         // the part hollowed: on the solid built so far
@@ -1882,12 +2127,13 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                     Ok(Some(s)) => {
                         model.booleans += 1;
                         stage.shape = Some(Rc::new(s));
+                        stage.rough = true;
                     }
                     Ok(None) => {}
                     Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
                 }
             }
-            cache.stages.insert(key, stage.clone());
+            keep(cache, key, &mut stage);
             continue;
         }
         // the Knife: on the solid built so far
@@ -1898,12 +2144,13 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                     Ok(Some(s)) => {
                         model.booleans += 1;
                         stage.shape = Some(Rc::new(s));
+                        stage.rough = true;
                     }
                     Ok(None) => {}
                     Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
                 }
             }
-            cache.stages.insert(key, stage.clone());
+            keep(cache, key, &mut stage);
             continue;
         }
         // the feature's solid
@@ -1924,7 +2171,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
             Ok(t) => t,
             Err(e) => {
                 stage.errors.push(format!("{}: {e}", f.name));
-                cache.stages.insert(key, stage.clone());
+                keep(cache, key, &mut stage);
                 continue;
             }
         };
@@ -1970,15 +2217,34 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
             (Some(acc), op) => {
                 mark(&step("boolean", f));
                 model.booleans += 1;
+                // (where the tool reaches: a Carve's box is not in the result's)
+                boxes_add(&mut stage.ext, &t.lump_boxes());
                 Some(if op == Op::Add { acc.fuse(&t) } else { acc.cut(&t) }.map(Rc::new))
             }
         };
+        let first = stage.shape.is_none();
         match next {
-            Some(Ok(s)) => stage.shape = Some(s),
+            Some(Ok(s)) => {
+                stage.shape = Some(s);
+                // an island's first shape: in one history it is joined to
+                // what is built before it, its faces of one surface made one
+                // (a union or a cut of its own unifies once: one more pass,
+                // another island's step, may still join faces)
+                stage.rough = true;
+                if first && here.is_some_and(joins_here) {
+                    stage.join_faces(1);
+                }
+            }
             Some(Err(e)) => stage.errors.push(format!("{}: {} failed ({e})", f.name, if f.op == Op::Add { "union" } else { "subtraction" })),
             None => {}
         }
-        cache.stages.insert(key, stage.clone());
+        keep(cache, key, &mut stage);
+    }
+    if let Some(a) = last {
+        let n = strangers_join(a, None);
+        if n > 0 {
+            join(n, &mut key, &mut stage, cache, used_stages);
+        }
     }
     stage
 }
@@ -1987,9 +2253,10 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
 /// chamfers made just before it run along it: made before them instead,
 /// they made again on what it gives (as if it had come first; their edges
 /// are found again by their faces' tags). The stage, when that adds no
-/// error.
+/// error. `image`: its mirror image (the step after it, after a Mirror),
+/// made there with it.
 #[allow(clippy::too_many_arguments)]
-fn replay<'a>(doc: &'a Doc, before: &[&'a Feature], f: &'a Feature, t: &Tweak, stage: &Stage, skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Option<Stage> {
+fn replay<'a>(doc: &'a Doc, before: &[&'a Feature], f: &'a Feature, image: Option<&'a Feature>, t: &Tweak, stage: &Stage, skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Option<Stage> {
     let mut tags: Vec<i64> = vec![];
     for c in t.comps() {
         match c {
@@ -1999,14 +2266,14 @@ fn replay<'a>(doc: &'a Doc, before: &[&'a Feature], f: &'a Feature, t: &Tweak, s
         }
     }
     let mut j = before.len();
-    while j > 0 && before[j - 1].round.is_some() {
+    while j > 0 && before[j - 1].round.is_some() && !gap(before[j - 1], before.get(j).copied().unwrap_or(f), false) {
         j -= 1;
     }
     let touches = before[j..].iter().any(|g| g.round.as_ref().is_some_and(|r| r.edges.iter().any(|e| e.faces.iter().any(|x| tags.contains(x)))));
     if !touches {
         return None;
     }
-    let order: Vec<&Feature> = before[..j].iter().copied().chain(std::iter::once(f)).chain(before[j..].iter().copied()).collect();
+    let order: Vec<&Feature> = before[..j].iter().copied().chain(std::iter::once(f)).chain(image).chain(before[j..].iter().copied()).collect();
     let s = run(doc, &order, skip, cache, model, used_tools, used_stages);
     (s.shape.is_some() && s.errors.len() <= stage.errors.len()).then_some(s)
 }
@@ -2030,7 +2297,7 @@ fn replay_round<'a>(doc: &'a Doc, before: &[&'a Feature], f: &'a Feature, r: &Ro
         return None;
     }
     let mut j = before.len();
-    while j > 0 && before[j - 1].round.is_some() {
+    while j > 0 && before[j - 1].round.is_some() && !gap(before[j - 1], before.get(j).copied().unwrap_or(f), false) {
         j -= 1;
     }
     let names = |g: &Feature| r.edges.iter().any(|e| e.faces.iter().any(|t| FaceTag::unpack(*t).is_some_and(|x| x.feature == g.id)));
@@ -2082,6 +2349,456 @@ fn crowded(acc: &Shape, edges: &[i32]) -> Option<(Vec<i32>, usize)> {
     best
 }
 
+// --------------------------------------------------------------- islands
+//
+// Romain, 21 nov. 2026: "la scène ouverte commence à être lourde et quand on
+// déplace un cube c'est en 1 fps". His scene: 90 steps in one history, eight
+// groups of shapes that do not touch; moving one made every step after it
+// again (5.5 s a step of the drag). The history is now built island by
+// island: the shapes that touch, with the operations on their faces, each
+// island a history of its own (its stages cached by what comes before in
+// it), the results side by side in one compound. A change is made again in
+// its island only, and the meshing keeps the other islands' triangles.
+//
+// What is in an island: the shapes whose boxes come within `APART`; an
+// operation with the features whose faces it names; copies and mirror
+// images (the same id); a move of vertices with the island that has the
+// vertex. A Mirror is a step of every island. The islands are then checked
+// by where their solids and tools really went (`Stage.ext`): two that come
+// near each other are joined and built again (and remembered,
+// `Cache.hints`), so the result is that of one history.
+
+/// How near two islands may come before they are built as one (mm): more
+/// than `THIN` + `PAST` (a shape's face put on a face of the part near it)
+/// and than the 0.1 mm a carving starts outside its face.
+const APART: f64 = 1.0;
+/// How many documents at rest keep their stages (`Cache.rest`).
+const REST: usize = 8;
+
+/// The whole history, for the islands being built.
+struct Whole {
+    /// Each feature's place in the whole list, by its address.
+    place: HashMap<usize, usize>,
+    /// Per place: 1 a fillet that blends with the run before it (no
+    /// chamfer, not Only selected), 2 another fillet or chamfer, 0 the rest.
+    kinds: Vec<u8>,
+    /// Per place of an operation: the places of the features it names
+    /// (None: one that is not there).
+    names: Vec<Vec<Option<usize>>>,
+    /// Per place: a step that makes a union or a cut on the part (a shape
+    /// after the first, an extrusion, a copy fused, a fillet on its edges
+    /// only): in one history it joins every island's faces of one surface.
+    joins: Vec<bool>,
+}
+
+/// What `run` needs to know of the whole history while it builds one island.
+struct Island {
+    whole: Rc<Whole>,
+    /// Per place: one of this island's (the Mirrors are every island's).
+    own: Vec<bool>,
+    /// The places built (the whole list, or its start).
+    upto: usize,
+}
+
+thread_local! {
+    static ISLAND: std::cell::RefCell<Option<Island>> = const { std::cell::RefCell::new(None) };
+    /// The features' hashes during one build, by address (an island's list
+    /// is run several times).
+    static HASHES: std::cell::RefCell<HashMap<usize, u64>> = std::cell::RefCell::new(HashMap::new());
+    /// One history, as before the islands (the tests compare both).
+    static ONE_CHAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn addr(f: &Feature) -> usize {
+    f as *const Feature as usize
+}
+
+fn hash_of(doc: &Doc, f: &Feature) -> u64 {
+    // (kept by address for the whole history's features only, which live
+    // as long as the build: a replay's own features come and go, and the
+    // next may take the address of one gone)
+    if place_of(f).is_none() {
+        return deep_hash(doc, f);
+    }
+    if let Some(h) = HASHES.with(|m| m.borrow().get(&addr(f)).copied()) {
+        return h;
+    }
+    let h = deep_hash(doc, f);
+    HASHES.with(|m| m.borrow_mut().insert(addr(f), h));
+    h
+}
+
+fn in_island() -> bool {
+    ISLAND.with(|c| c.borrow().is_some())
+}
+
+/// A feature's place in the whole history (an island being built).
+fn place_of(f: &Feature) -> Option<usize> {
+    ISLAND.with(|c| c.borrow().as_ref().and_then(|il| il.whole.place.get(&addr(f)).copied()))
+}
+
+/// Between two neighbours of an island's list, a step of another island
+/// that ends a run of fillets in the whole history (`blend`: anything but
+/// a fillet that blends; else anything but a fillet or chamfer).
+fn gap(a: &Feature, b: &Feature, blend: bool) -> bool {
+    ISLAND.with(|c| {
+        let c = c.borrow();
+        let Some(il) = c.as_ref() else { return false };
+        let (Some(&pa), Some(&pb)) = (il.whole.place.get(&addr(a)), il.whole.place.get(&addr(b))) else { return false };
+        (pa.min(pb) + 1..pa.max(pb)).any(|p| !il.own[p] && (il.whole.kinds[p] == 0 || (blend && il.whole.kinds[p] != 1)))
+    })
+}
+
+/// Where the run of blending fillets that ends just before place `p`
+/// starts in the whole history.
+fn run_start(p: usize) -> usize {
+    ISLAND.with(|c| {
+        let c = c.borrow();
+        let Some(il) = c.as_ref() else { return p };
+        let mut w = p;
+        while w > 0 && il.whole.kinds[w - 1] == 1 {
+            w -= 1;
+        }
+        w
+    })
+}
+
+/// A fillet of another island among the places `from..to` that names a
+/// feature made in that span or one that is not there: it cannot be found
+/// on the solid from before `from`.
+fn strangers_lost(from: usize, to: usize) -> bool {
+    ISLAND.with(|c| {
+        let c = c.borrow();
+        let Some(il) = c.as_ref() else { return false };
+        (from..to).any(|p| !il.own[p] && il.whole.kinds[p] == 1 && il.whole.names[p].iter().any(|n| n.map_or(true, |q| q >= from)))
+    })
+}
+
+/// How many unions and cuts are made in other islands between two places
+/// of this one's list (`b` None: after `a`, up to the end of what is
+/// built): each one unifies the whole part once more in one history, and a
+/// second pass may join faces the first left.
+fn strangers_join(a: usize, b: Option<usize>) -> usize {
+    ISLAND.with(|c| {
+        let c = c.borrow();
+        let Some(il) = c.as_ref() else { return 0 };
+        let b = b.unwrap_or(il.upto);
+        (a.min(b) + 1..a.max(b)).filter(|&p| !il.own[p] && il.whole.joins[p]).count()
+    })
+}
+
+/// This place's step makes a union or a cut in one history (a shape with
+/// one added before it).
+fn joins_here(p: usize) -> bool {
+    ISLAND.with(|c| c.borrow().as_ref().is_some_and(|il| il.whole.joins[p]))
+}
+
+/// A box added to a list of boxes (those inside another are left out).
+fn boxes_add(ext: &mut Vec<[f64; 6]>, new: &[([f64; 3], [f64; 3])]) {
+    let inside = |a: &[f64; 6], b: &[f64; 6]| (0..3).all(|i| a[i] >= b[i] && a[i + 3] <= b[i + 3]);
+    for (lo, hi) in new {
+        let b = [lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]];
+        if b.iter().any(|x| !x.is_finite()) || ext.iter().any(|e| inside(&b, e)) {
+            continue;
+        }
+        ext.retain(|e| !inside(e, &b));
+        ext.push(b);
+    }
+}
+
+/// Two lists of boxes that come within `d` of each other.
+fn boxes_near(a: &[[f64; 6]], b: &[[f64; 6]], d: f64) -> bool {
+    a.iter().any(|p| b.iter().any(|q| (0..3).all(|i| p[i] - d <= q[i + 3] && q[i] - d <= p[i + 3])))
+}
+
+/// Disjoint sets of places.
+struct Sets(Vec<usize>);
+
+impl Sets {
+    fn find(&mut self, mut a: usize) -> usize {
+        while self.0[a] != a {
+            self.0[a] = self.0[self.0[a]];
+            a = self.0[a];
+        }
+        a
+    }
+    /// True when they were apart.
+    fn join(&mut self, a: usize, b: usize) -> bool {
+        let (a, b) = (self.find(a), self.find(b));
+        if a != b {
+            self.0[a.max(b)] = a.min(b);
+        }
+        a != b
+    }
+}
+
+/// The islands of the first `upto` features, each built (`run`): its
+/// places and its stage. Islands that turn out to come near each other are
+/// joined and built again, until none does. None when a Mirror keeps
+/// nothing of any island (one history then: its error says to flip it).
+#[allow(clippy::too_many_arguments)]
+fn islands_upto<'a>(doc: &'a Doc, feats: &[&'a Feature], upto: usize, global: &[bool], sets: &mut Sets, whole: &Rc<Whole>, skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Option<Vec<(Vec<usize>, Stage)>> {
+    loop {
+        let mut groups: Vec<Vec<usize>> = vec![];
+        let mut at: HashMap<usize, usize> = HashMap::new();
+        for i in (0..upto).filter(|&i| !global[i]) {
+            let r = sets.find(i);
+            let g = *at.entry(r).or_insert_with(|| {
+                groups.push(vec![]);
+                groups.len() - 1
+            });
+            groups[g].push(i);
+        }
+        let mut out: Vec<(Vec<usize>, Stage)> = vec![];
+        for g in groups {
+            let mut list = g.clone();
+            list.extend((0..upto).filter(|&i| global[i]));
+            list.sort_unstable();
+            let mut own = vec![false; feats.len()];
+            for &i in &list {
+                own[i] = true;
+            }
+            let fs: Vec<&Feature> = list.iter().map(|&i| feats[i]).collect();
+            ISLAND.with(|c| *c.borrow_mut() = Some(Island { whole: whole.clone(), own, upto }));
+            let st = run(doc, &fs, skip, cache, model, used_tools, used_stages);
+            ISLAND.with(|c| *c.borrow_mut() = None);
+            out.push((g, st));
+        }
+        if upto == feats.len() && std::env::var_os("FORME_ISLANDS_DEBUG").is_some() {
+            for (g, st) in &out {
+                eprintln!("ISLAND {:?}: {} faces, boxes {}, errors {:?}", g.iter().map(|&i| format!("{} {}", feats[i].id, feats[i].name)).collect::<Vec<_>>(), st.shape.as_ref().map_or(0, |s| s.face_count()), st.ext.len(), st.errors);
+            }
+        }
+        for i in (0..upto).filter(|&i| global[i]) {
+            let id = feats[i].id;
+            let seen = out.iter().any(|(_, s)| s.mirrors.iter().any(|m| m.0 == id));
+            let kept = out.iter().any(|(_, s)| s.mirrors.iter().any(|m| m.0 == id && m.1));
+            if seen && !kept {
+                return None;
+            }
+        }
+        let mut hit = false;
+        for a in 0..out.len() {
+            for b in a + 1..out.len() {
+                if boxes_near(&out[a].1.ext, &out[b].1.ext, APART) && sets.join(out[a].0[0], out[b].0[0]) {
+                    hit = true;
+                    let pair = (feats[out[a].0[0]].id, feats[out[b].0[0]].id);
+                    if !cache.hints.contains(&pair) {
+                        cache.hints.push(pair);
+                    }
+                }
+            }
+        }
+        if !hit {
+            return Some(out);
+        }
+    }
+}
+
+/// The features built island by island (see above): the stage of the whole
+/// part, as `run` gives it for one history.
+fn build_islands<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Stage {
+    let n = feats.len();
+    // FORME_ONE_CHAIN=1: one history, as before (to compare)
+    if n < 2 || ONE_CHAIN.with(|c| c.get()) || std::env::var_os("FORME_ONE_CHAIN").is_some() {
+        return run(doc, feats, skip, cache, model, used_tools, used_stages);
+    }
+    let global: Vec<bool> = feats.iter().map(|f| f.mirror.is_some()).collect();
+    let mut sets = Sets((0..n).collect());
+    // copies and mirror images carry their step's id
+    let mut first_of: HashMap<FeatureId, usize> = HashMap::new();
+    for (i, f) in feats.iter().enumerate() {
+        match first_of.get(&f.id) {
+            Some(&j) if !global[i] => {
+                sets.join(i, j);
+            }
+            Some(_) => {}
+            None => {
+                first_of.insert(f.id, i);
+            }
+        }
+    }
+    let names: Vec<Vec<Option<usize>>> = feats.iter().enumerate().map(|(i, f)| if global[i] || f.is_solid() { vec![] } else { crate::doc::named_features(f).iter().map(|id| first_of.get(id).copied()).collect() }).collect();
+    let kinds: Vec<u8> = feats.iter().map(|f| f.round.as_ref().map_or(0, |r| if !r.chamfer && !r.only { 1 } else { 2 })).collect();
+    // an operation nothing of which is found: with the shape added last
+    // before it (in one history it fails on the part built so far; with
+    // nothing built yet it is passed over)
+    let lone = |sets: &mut Sets, i: usize| {
+        if let Some(j) = (0..i).rev().find(|&j| !global[j] && feats[j].is_solid() && feats[j].op == Op::Add) {
+            sets.join(i, j);
+        }
+    };
+    let mut all = false;
+    let mut floating: Vec<usize> = vec![];
+    for i in 0..n {
+        let f = feats[i];
+        if global[i] || f.is_solid() {
+            continue;
+        }
+        // a Shell with no opening hollows every solid
+        all |= f.shell.as_ref().is_some_and(|s| s.faces.is_empty());
+        let mut found = false;
+        for &p in names[i].iter().flatten() {
+            if global[p] {
+                // (a face a Mirror's cut left: any island's)
+                all = true;
+            } else {
+                sets.join(i, p);
+                found = true;
+            }
+        }
+        if f.tweak.as_ref().is_some_and(|t| t.comps().any(|c| matches!(c, Comp::Vertex(_)))) {
+            floating.push(i);
+        } else if !found {
+            lone(&mut sets, i);
+        }
+    }
+    // the shapes whose boxes come near each other, their mirror images too
+    let mut planes: Vec<Mirror> = vec![];
+    for f in feats.iter().filter_map(|f| f.mirror.as_ref()) {
+        if !planes.iter().any(|m| m.axis == f.axis && m.offset == f.offset) {
+            planes.push(*f);
+        }
+    }
+    let boxes: Vec<Vec<[f64; 6]>> = feats
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            if global[i] || !f.is_solid() {
+                return vec![];
+            }
+            let (lo, hi) = f.bounds();
+            let mut list = vec![[lo.x, lo.y, lo.z, hi.x, hi.y, hi.z]];
+            for m in planes.iter().take(3) {
+                let a = m.axis.min(2) as usize;
+                let more: Vec<[f64; 6]> = list
+                    .iter()
+                    .map(|b| {
+                        let mut r = *b;
+                        r[a] = 2.0 * m.offset - b[a + 3];
+                        r[a + 3] = 2.0 * m.offset - b[a];
+                        r
+                    })
+                    .collect();
+                list.extend(more);
+            }
+            list
+        })
+        .collect();
+    for i in 0..n {
+        for j in i + 1..n {
+            if !boxes[i].is_empty() && !boxes[j].is_empty() && boxes_near(&boxes[i], &boxes[j], APART) {
+                sets.join(i, j);
+            }
+        }
+    }
+    // those found to touch in the builds before
+    cache.hints.retain(|(a, b)| a != b);
+    if cache.hints.len() > 512 {
+        let cut = cache.hints.len() - 512;
+        cache.hints.drain(..cut);
+    }
+    for (a, b) in cache.hints.clone() {
+        if let (Some(&i), Some(&j)) = (first_of.get(&a), first_of.get(&b)) {
+            if !global[i] && !global[j] {
+                sets.join(i, j);
+            }
+        }
+    }
+    if all {
+        if let Some(k) = (0..n).find(|&i| !global[i]) {
+            for i in (0..n).filter(|&i| !global[i]) {
+                sets.join(i, k);
+            }
+        }
+    }
+    let place: HashMap<usize, usize> = feats.iter().enumerate().map(|(i, f)| (addr(f), i)).collect();
+    let mut added = false;
+    let joins: Vec<bool> = feats
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let found = names[i].iter().any(|n| n.is_some());
+            if global[i] {
+                false
+            } else if f.is_solid() {
+                let j = added;
+                added |= f.op == Op::Add;
+                j
+            } else if let Some(p) = &f.push {
+                found && p.depth.abs() > 1e-6
+            } else if let Some(t) = &f.tweak {
+                found && t.copy && (t.delta.length() > 1e-6 || (t.scale - DVec3::ONE).abs().max_element() > 1e-9)
+            } else {
+                found && f.round.as_ref().is_some_and(|r| r.only)
+            }
+        })
+        .collect();
+    let shared = Rc::new(Whole { place, kinds, names, joins });
+    // a move of vertices: with the island that has the vertex nearest each
+    // point (`comp_vertices`), on the islands as they are just before it
+    for &i in &floating {
+        // (a copy's or the mirror side's: with its step, joined above)
+        if first_of.get(&feats[i].id) != Some(&i) {
+            continue;
+        }
+        let Some(gs) = islands_upto(doc, feats, i, &global, &mut sets, &shared, skip, cache, model, used_tools, used_stages) else {
+            return run(doc, feats, skip, cache, model, used_tools, used_stages);
+        };
+        let mut found = shared.names[i].iter().flatten().any(|&p| !global[p]);
+        let comps: Vec<DVec3> = feats[i].tweak.iter().flat_map(|t| t.comps()).filter_map(|c| if let Comp::Vertex(p) = c { Some(*p) } else { None }).collect();
+        for p in comps {
+            let mut best: Option<(f64, usize)> = None;
+            for (g, s) in &gs {
+                let Some(sh) = &s.shape else { continue };
+                for q in sh.vertex_points() {
+                    let d = DVec3::from_array(q).distance(p);
+                    if best.map_or(true, |b| d < b.0) {
+                        best = Some((d, g[0]));
+                    }
+                }
+            }
+            if let Some((d, j)) = best {
+                if d < 1.0 {
+                    sets.join(i, j);
+                    found = true;
+                }
+            }
+        }
+        if !found {
+            lone(&mut sets, i);
+        }
+    }
+    let Some(gs) = islands_upto(doc, feats, n, &global, &mut sets, &shared, skip, cache, model, used_tools, used_stages) else {
+        return run(doc, feats, skip, cache, model, used_tools, used_stages);
+    };
+    // side by side
+    let mut out = Stage::new();
+    let shared_names: Vec<String> = (0..n).filter(|&i| global[i]).map(|i| format!("{}: ", feats[i].name)).collect();
+    for (_, s) in gs {
+        out.shape = match (out.shape.take(), s.shape) {
+            (Some(a), Some(b)) => match a.compound(&b) {
+                Ok(c) => Some(Rc::new(c)),
+                Err(e) => {
+                    out.errors.push(format!("a part of the scene is left out ({e})"));
+                    Some(a)
+                }
+            },
+            (a, b) => a.or(b),
+        };
+        for e in s.errors {
+            // (a Mirror's error once, not once per island)
+            if !(shared_names.iter().any(|h| e.starts_with(h)) && out.errors.contains(&e)) {
+                out.errors.push(e);
+            }
+        }
+        out.limits.extend(s.limits);
+        out.tension_limits.extend(s.tension_limits);
+        boxes_add(&mut out.ext, &s.ext.iter().map(|b| ([b[0], b[1], b[2]], [b[3], b[4], b[5]])).collect::<Vec<_>>());
+    }
+    out
+}
+
 pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Cache) -> Model {
     let t0 = Instant::now();
     let mut model = Model { fine, ..Default::default() };
@@ -2093,7 +2810,14 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let mirrored = mirrored_doc(doc);
     let doc = mirrored.as_ref().unwrap_or(doc);
     let feats: Vec<&Feature> = doc.features.iter().filter(|f| f.visible && !f.suspended && doc.makes(f) == Makes::Solid).collect();
-    let mut stage = run(doc, &feats, skip, cache, &mut model, &mut used_tools, &mut used_stages);
+    // an inset left as a line: its inside lies on the surface of the face
+    // round it, and the next union or cut made anywhere (or a Mirror) made
+    // them one again; its face keeps its outline
+    let lines: Vec<i64> = feats.iter().filter(|f| f.push.as_ref().is_some_and(|p| p.inset > 0.0 && p.depth.abs() < 1e-6)).map(|f| FaceTag { feature: f.id, sub: 1 }.pack()).collect();
+    forme_occt::keep_lines(&lines);
+    HASHES.with(|m| m.borrow_mut().clear());
+    let mut stage = build_islands(doc, &feats, skip, cache, &mut model, &mut used_tools, &mut used_stages);
+    HASHES.with(|m| m.borrow_mut().clear());
     // the surfaces, beside the part (no boolean)
     // a curve filled, turned open, a loft of open curves (cached as tools)
     for f in doc.features.iter().filter(|f| f.visible && !f.suspended && f.sheet.is_none() && doc.makes(f) == Makes::Sheet) {
@@ -2151,9 +2875,24 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     }
     // keep what this document uses (the next request is most often the same
     // document with one feature changed)
-    let prev = std::mem::take(&mut cache.prev);
-    cache.stages.retain(|k, _| used_stages.contains(k) || prev.contains(k));
-    cache.prev = used_stages;
+    let prev: std::collections::HashSet<u64> = std::mem::take(&mut cache.prev).into_iter().collect();
+    let used: std::collections::HashSet<u64> = used_stages.iter().copied().collect();
+    // (a fine build: the document at rest, one of the undo steps)
+    if fine {
+        let mut now: Vec<u64> = used.iter().copied().collect();
+        now.sort_unstable();
+        if cache.rest.back() != Some(&now) {
+            cache.rest.push_back(now);
+        }
+        while cache.rest.len() > REST {
+            cache.rest.pop_front();
+        }
+    }
+    let rest: std::collections::HashSet<u64> = cache.rest.iter().flatten().copied().collect();
+    cache.stages.retain(|k, _| used.contains(k) || prev.contains(k) || rest.contains(k));
+    let stages = &cache.stages;
+    cache.passes.retain(|k, _| stages.contains_key(k));
+    cache.prev = used.into_iter().collect();
     if cache.tools.len() > 256 {
         cache.tools.retain(|k, _| used_tools.contains(k));
     }
@@ -3935,6 +4674,307 @@ mod tests {
         }
     }
 
+    /// One model's errors (sorted), faces, edges, volume and bounds.
+    fn digest(m: &Model) -> (Vec<String>, usize, usize, f64, Option<([f32; 3], [f32; 3])>) {
+        let mut e = m.errors.clone();
+        e.sort();
+        (e, m.faces.len(), m.edges.len(), mesh_volume(m), m.bounds())
+    }
+
+    /// The document built island by island and as one history: the same
+    /// part (errors, faces, edges, volume, bounds). The differences, if any.
+    fn islands_against_one(d: &Doc) -> Vec<String> {
+        let a = build(d, true, false, &[], &mut Cache::default());
+        ONE_CHAIN.with(|c| c.set(true));
+        let b = build(d, true, false, &[], &mut Cache::default());
+        ONE_CHAIN.with(|c| c.set(false));
+        let (da, db) = (digest(&a), digest(&b));
+        let mut out = vec![];
+        if da.0 != db.0 {
+            out.push(format!("errors: islands {:?}, one history {:?}", da.0.iter().filter(|e| !db.0.contains(e)).collect::<Vec<_>>(), db.0.iter().filter(|e| !da.0.contains(e)).collect::<Vec<_>>()));
+        }
+        if (da.1, da.2) != (db.1, db.2) {
+            out.push(format!("faces {} / {}, edges {} / {}", da.1, db.1, da.2, db.2));
+        }
+        if (da.3 - db.3).abs() > 1e-3 * db.3.abs().max(1.0) {
+            out.push(format!("volume {:.3} / {:.3}", da.3, db.3));
+        }
+        if let (Some(x), Some(y)) = (da.4, db.4) {
+            if (0..3).any(|i| (x.0[i] - y.0[i]).abs() > 0.01 || (x.1[i] - y.1[i]).abs() > 0.01) {
+                out.push(format!("bounds {x:?} / {y:?}"));
+            }
+        } else if da.4.is_some() != db.4.is_some() {
+            out.push("one of them is empty".into());
+        }
+        out
+    }
+
+    /// Found by the islands battery with a Mirror (21 nov.). An inset left
+    /// as a line was taken away by the next shape added anywhere and by a
+    /// Mirror (its inside and the face round it lie on one surface). A flat
+    /// face moved along its normal past a hole failed as soon as the part
+    /// held another object beside it (the union had to give one solid).
+    #[test]
+    fn inset_line_kept_and_face_moved_beside_another_object() {
+        // a block, its front inset 2 mm as a line
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::new(100.0, 0.0, 0.0), DQuat::IDENTITY);
+        let i = d.add_push(Push { face: FaceRef { tag: tag(b, 4), at: DVec3::new(100.0, 10.0, 15.0) }, inset: 2.0, depth: 0.0 });
+        // its inside: 36 × 16, the ring round it still the block's front
+        let line = |m: &Model| {
+            let inner: Vec<usize> = (0..m.faces.len()).filter(|k| m.faces[*k].tag == Some(FaceTag { feature: i, sub: 1 })).collect();
+            let ring = m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: b, sub: 4 })).count();
+            let wide: Vec<f32> = inner
+                .iter()
+                .map(|k| {
+                    let xs: Vec<f32> = m.triangles.iter().enumerate().filter(|(t, _)| m.tri_face[*t] as usize == *k).flat_map(|(_, tri)| tri.iter().map(|v| m.positions[*v as usize][0])).collect();
+                    xs.iter().cloned().fold(f32::MIN, f32::max) - xs.iter().cloned().fold(f32::MAX, f32::min)
+                })
+                .collect();
+            (inner.len(), ring, wide)
+        };
+        for one in [false, true] {
+            ONE_CHAIN.with(|c| c.set(one));
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert_eq!(line(&m), (1, 1, vec![36.0]), "{:?}", m.errors);
+            // a block added apart: the line stays
+            let mut d2 = d.clone();
+            d2.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            let m = build(&d2, true, false, &[], &mut Cache::default());
+            assert_eq!(line(&m), (1, 1, vec![36.0]), "one history {one}: {:?}", m.errors);
+            // a Mirror: the line on both sides
+            d2.add_mirror(crate::doc::Mirror { axis: 0, offset: 40.0, flip: false });
+            let m = build(&d2, true, false, &[], &mut Cache::default());
+            assert_eq!(line(&m), (2, 2, vec![36.0, 36.0]), "one history {one}: {:?}", m.errors);
+            // sunk 1 mm after all: a pocket, as before
+            let mut d3 = d2.clone();
+            d3.feature_mut(i).unwrap().push.as_mut().unwrap().depth = -1.0;
+            let m = build(&d3, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{:?}", m.errors);
+            assert_eq!(m.faces.iter().filter(|f| f.tag.is_some_and(|t| t.feature == i)).count(), 10);
+        }
+        // the test part (its top left of the slot has the hole in it) and a
+        // block beside it: the top moved up 3 mm, in one history (the part
+        // is two lumps) and by islands
+        let (mut d, b, _) = test_part();
+        let v0 = {
+            let mut alone = d.clone();
+            alone.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 2), at: DVec3::new(-12.0, 20.0, 8.0) }), delta: DVec3::new(0.0, 3.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None });
+            let m = build(&alone, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{:?}", m.errors);
+            mesh_volume(&m)
+        };
+        d.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(100.0, 0.0, 0.0), DQuat::IDENTITY);
+        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 2), at: DVec3::new(-12.0, 20.0, 8.0) }), delta: DVec3::new(0.0, 3.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None });
+        for one in [false, true] {
+            ONE_CHAIN.with(|c| c.set(one));
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "one history {one}: {:?}", m.errors);
+            assert!((mesh_volume(&m) - v0 - 1000.0).abs() < 1.0, "{} / {}", mesh_volume(&m), v0 + 1000.0);
+        }
+        ONE_CHAIN.with(|c| c.set(false));
+    }
+
+    #[test]
+    fn islands_live() {
+        use crate::doc::Mirror;
+        // (the suite run with one history: nothing of this applies)
+        if std::env::var_os("FORME_ONE_CHAIN").is_some() {
+            return;
+        }
+        // two blocks 40 mm apart, each with a hole and a fillet on a top
+        // edge, the steps of one between the other's; a third block apart
+        let mut d = Doc::default();
+        let a = d.add(Op::Add, Prim::Box { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 10.0, z: 20.0 }, DVec3::new(60.0, 0.0, 0.0), DQuat::IDENTITY);
+        let ha = d.add(Op::Carve, Prim::Cylinder { radius: 3.0, height: 20.0 }, DVec3::new(0.0, -5.0, 0.0), DQuat::IDENTITY);
+        let hb = d.add(Op::Carve, Prim::Cylinder { radius: 3.0, height: 20.0 }, DVec3::new(60.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Box { x: 20.0, y: 10.0, z: 20.0 }, DVec3::new(0.0, 0.0, 60.0), DQuat::IDENTITY);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        let fa = d.add_round(2.0, false, vec![edge_near(&m, DVec3::new(0.0, 10.0, 10.0))]);
+        let fb = d.add_round(2.0, false, vec![edge_near(&m, DVec3::new(60.0, 10.0, 10.0))]);
+        let same = |d: &Doc| assert_eq!(islands_against_one(d), Vec::<String>::new());
+        same(&d);
+        // one block's hole moved: the other blocks' steps are kept (in one
+        // history the second hole is cut again)
+        let made = |d: &Doc, one: bool, id: FeatureId| {
+            ONE_CHAIN.with(|c| c.set(one));
+            let mut cache = Cache::default();
+            let m = build(d, true, false, &[], &mut cache);
+            assert!(m.errors.is_empty(), "{:?}", m.errors);
+            let mut e = d.clone();
+            e.feature_mut(id).unwrap().origin.x += 2.0;
+            let m = build(&e, true, false, &[], &mut cache);
+            ONE_CHAIN.with(|c| c.set(false));
+            assert!(m.errors.is_empty(), "{:?}", m.errors);
+            (m.booleans, m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(fb)).count())
+        };
+        let (isl, one) = (made(&d, false, ha), made(&d, true, ha));
+        // (its cut and its fillet)
+        assert_eq!((isl.0, isl.1), (2, 1), "{isl:?}");
+        assert!(one.0 > isl.0, "{one:?} {isl:?}");
+        let _ = (hb, fa);
+        // a corner of the third block moved up: found on its island
+        d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::new(10.0, 10.0, 70.0)), delta: DVec3::new(0.0, 4.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((m.bounds().unwrap().1[1] - 14.0).abs() < 1e-3);
+        same(&d);
+        // the first block's +X face pulled out into the second: they are one
+        // lump, as in one history (found by their boxes once built)
+        let mut e = d.clone();
+        e.add_push(Push { face: FaceRef { tag: tag(a, 0), at: DVec3::new(10.0, 4.0, 0.0) }, inset: 0.0, depth: 45.0 });
+        let mut cache = Cache::default();
+        let m = build(&e, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(!cache.hints.is_empty());
+        same(&e);
+        // a Mirror across X: the first and third blocks lie across it, the
+        // second gets its image
+        let mi = d.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false });
+        let m1 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m1.errors.is_empty(), "{:?}", m1.errors);
+        assert!((m1.bounds().unwrap().0[0] + 70.0).abs() < 1e-3);
+        same(&d);
+        // a hole made after it in the second block: in its image too
+        let h2 = d.add(Op::Carve, Prim::Cylinder { radius: 1.5, height: 20.0 }, DVec3::new(66.0, -5.0, 6.0), DQuat::IDENTITY);
+        let m2 = build(&d, true, false, &[], &mut Cache::default());
+        assert_eq!(m2.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(h2)).count(), 2);
+        same(&d);
+        // the same Mirror again: nothing to make, the same part
+        let mut cache = Cache::default();
+        build(&d, true, false, &[], &mut cache);
+        let mut e = d.clone();
+        e.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false });
+        let m3 = build(&e, true, false, &[], &mut cache);
+        assert_eq!(m3.booleans, 0);
+        assert_eq!(digest(&m3), digest(&m2));
+        same(&e);
+        // flipped: the second block is all on the side dropped, gone (the
+        // hole made in it after the Mirror is passed over)
+        d.remove(&[h2]);
+        d.feature_mut(mi).unwrap().mirror.as_mut().unwrap().flip = true;
+        let m4 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m4.errors.is_empty(), "{:?}", m4.errors);
+        assert!(!m4.faces.iter().any(|f| f.tag.map(|t| t.feature) == Some(b)));
+        assert!((m4.bounds().unwrap().1[0] - 10.0).abs() < 1e-3);
+        same(&d);
+    }
+
+    #[test]
+    #[ignore]
+    fn islands_probe() {
+        // FORME_DOC=file.fnurbs (several: a comma between them): built island
+        // by island and as one history, compared; FORME_UPTO=n: its first n
+        // features, then n + 1… (where the two part ways)
+        let Ok(list) = std::env::var("FORME_DOC") else { return };
+        for p in list.split(',') {
+            let d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+            let t = std::time::Instant::now();
+            let diff = islands_against_one(&d);
+            eprintln!("{p}: {} features, {:.1} s: {}", d.features.len(), t.elapsed().as_secs_f64(), if diff.is_empty() { "the same".to_string() } else { diff.join(" · ") });
+            if std::env::var("FORME_TAGS").is_ok() {
+                // faces per feature, both ways
+                let count = |m: &Model| {
+                    let mut c: std::collections::BTreeMap<u32, usize> = Default::default();
+                    for f in &m.faces {
+                        *c.entry(f.tag.map(|t| t.feature).unwrap_or(0)).or_default() += 1;
+                    }
+                    c
+                };
+                let ma = build(&d, true, false, &[], &mut Cache::default());
+                let a = count(&ma);
+                ONE_CHAIN.with(|c| c.set(true));
+                let mb = build(&d, true, false, &[], &mut Cache::default());
+                ONE_CHAIN.with(|c| c.set(false));
+                let b = count(&mb);
+                // FORME_SUBS=id: that feature's faces one by one (its face
+                // and where its triangles lie), both ways
+                if let Some(id) = std::env::var("FORME_SUBS").ok().and_then(|v| v.parse::<u32>().ok()) {
+                    for (name, m) in [("islands", &ma), ("one history", &mb)] {
+                        for (i, f) in m.faces.iter().enumerate().filter(|(_, f)| id == 0 || f.tag.is_some_and(|t| t.feature == id)) {
+                            let (mut lo, mut hi, mut n) = ([f32::MAX; 3], [f32::MIN; 3], 0);
+                            for (t, tri) in m.triangles.iter().enumerate().filter(|(t, _)| m.tri_face[*t] as usize == i) {
+                                let _ = t;
+                                for v in tri {
+                                    let p = m.positions[*v as usize];
+                                    for k in 0..3 {
+                                        lo[k] = lo[k].min(p[k]);
+                                        hi[k] = hi[k].max(p[k]);
+                                    }
+                                }
+                                n += 1;
+                            }
+                            eprintln!("  {name}: feature {} sub {} · {n} triangles · {:.1?} to {:.1?}", f.tag.map_or(0, |t| t.feature), f.tag.map_or(0, |t| t.sub), lo, hi);
+                        }
+                    }
+                }
+                eprintln!("one history: {} faces, volume {:.1}", mb.faces.len(), mesh_volume(&mb));
+                for id in a.keys().chain(b.keys()).collect::<std::collections::BTreeSet<_>>() {
+                    let (x, y) = (a.get(id).copied().unwrap_or(0), b.get(id).copied().unwrap_or(0));
+                    if x != y || std::env::var("FORME_IDS").is_ok_and(|v| v.split(',').any(|w| w.parse::<u32>() == Ok(*id))) {
+                        eprintln!("  feature {id} ({}): {x} faces in islands, {y} in one history", d.feature(*id).map(|f| f.name.as_str()).unwrap_or("?"));
+                    }
+                }
+            }
+            if let Some(from) = std::env::var("FORME_UPTO").ok().and_then(|v| v.parse::<usize>().ok()) {
+                for n in from..=d.features.len() {
+                    let mut d2 = d.clone();
+                    d2.features.truncate(n);
+                    let diff = islands_against_one(&d2);
+                    if !diff.is_empty() {
+                        eprintln!("  first {n} ({}): {}", d2.features.last().map(|f| f.name.as_str()).unwrap_or(""), diff.join(" · "));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// FORME_DOC=file.fnurbs with FORME_DELETE=id (that shape and its
+    /// operations taken out) or FORME_KEEP=id (they alone kept, as Isolate
+    /// does; FORME_MIRRORS=1: the Mirrors too): the build after it, timed,
+    /// against the whole document built before; then the whole one again.
+    #[test]
+    #[ignore]
+    fn edit_probe() {
+        let Ok(p) = std::env::var("FORME_DOC") else { return };
+        let d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+        let mut cache = Cache::default();
+        let t = std::time::Instant::now();
+        let m = build(&d, true, false, &[], &mut cache);
+        eprintln!("whole: {:.0} ms, {} faces, {} triangles, errors {}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.triangles.len(), m.errors.len());
+        for id in std::env::var("FORME_KEEP").ok().and_then(|v| v.parse::<u32>().ok()) {
+            let fs: Vec<usize> = (0..m.faces.len()).filter(|k| m.faces[*k].tag.is_some_and(|t| t.feature == id)).collect();
+            eprintln!("  feature {id}: {} faces, {} triangles in the whole part", fs.len(), m.tri_face.iter().filter(|f| fs.contains(&(**f as usize))).count());
+        }
+        let with_ops = |id: FeatureId| {
+            let mut ids = vec![id];
+            for f in &d.features {
+                if !f.is_solid() && f.mirror.is_none() && crate::doc::named_features(f).iter().any(|n| ids.contains(n)) {
+                    ids.push(f.id);
+                }
+            }
+            ids
+        };
+        let mut e = d.clone();
+        if let Some(id) = std::env::var("FORME_DELETE").ok().and_then(|v| v.parse().ok()) {
+            e.remove(&with_ops(id));
+        } else if let Some(id) = std::env::var("FORME_KEEP").ok().and_then(|v| v.parse().ok()) {
+            let ids = with_ops(id);
+            let mirrors = std::env::var("FORME_MIRRORS").is_ok();
+            e.features.retain(|f| ids.contains(&f.id) || (mirrors && f.mirror.is_some()));
+        }
+        for k in 0..2 {
+            let t = std::time::Instant::now();
+            let m = build(&e, true, false, &[], &mut cache);
+            eprintln!("edited ({} features){}: {:.0} ms, {} faces, {} triangles, cached {}, errors {}", e.features.len(), if k == 1 { " again" } else { "" }, t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.triangles.len(), m.cached, m.errors.len());
+        }
+        let t = std::time::Instant::now();
+        let m = build(&d, true, false, &[], &mut cache);
+        eprintln!("whole again: {:.0} ms, {} faces, cached {}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.cached);
+    }
+
     #[test]
     #[ignore]
     fn drag_probe() {
@@ -3947,17 +4987,38 @@ mod tests {
         let t = std::time::Instant::now();
         let m = build(&d, false, false, &[], &mut cache);
         eprintln!("first coarse build {:.0} ms, {} faces, cached {}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.cached);
+        if std::env::var("FORME_ERRORS").is_ok() {
+            for e in &m.errors {
+                eprintln!("  ERROR {e}");
+            }
+        }
         let t = std::time::Instant::now();
         let m = build(&d, true, false, &[], &mut cache);
         eprintln!("fine build {:.0} ms, {} faces, cached {}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.cached);
+        // the shape's operations go with it, as the app carries them
+        let mut ids = vec![id];
+        for f in &d.features {
+            if !f.is_solid() && crate::doc::named_features(f).iter().any(|n| ids.contains(n)) {
+                ids.push(f.id);
+            }
+        }
+        let mut worst = 0.0f64;
         for i in 0..8 {
-            if let Some(f) = d.features.iter_mut().find(|f| f.id == id) {
-                f.origin.x += 1.0;
+            for f in d.features.iter_mut().filter(|f| ids.contains(&f.id)) {
+                if f.id == id {
+                    f.origin.x += 1.0;
+                } else {
+                    *f = f.carried_by(&|p| p + DVec3::X);
+                }
             }
             let t = std::time::Instant::now();
             let m = build(&d, false, false, &[], &mut cache);
+            worst = worst.max(t.elapsed().as_secs_f64() * 1e3);
             eprintln!("drag {i}: {:.0} ms, cached {} of {}, errors {}", t.elapsed().as_secs_f64() * 1e3, m.cached, d.features.len(), m.errors.len());
         }
+        let t = std::time::Instant::now();
+        let m = build(&d, true, false, &[], &mut cache);
+        eprintln!("fine build after the drag {:.0} ms, {} faces, errors {} (worst drag step {worst:.0} ms)", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.errors.len());
         if std::env::var("FORME_PROFILE").is_ok() {
             let _ = build(&d, false, false, &[], &mut Cache::default());
         }
@@ -4450,18 +5511,14 @@ mod tests {
         assert!(bad.is_empty(), "{} failed:\n{}", bad.len(), bad.join("\n"));
     }
 
-    /// The tools one after another on the test part: every ordered pair of
-    /// a list of operations (fillets, chamfers, insets, extrusions, moves,
-    /// a tilt, the Knife), each pair built on its own; prints what fails.
-    /// `FORME_COMBO=name` keeps the pairs whose names contain it.
-    #[test]
-    #[ignore]
-    fn combo_battery() {
-        let (base, b, s) = test_part();
-        let h = 2u32;
-        let er = |a: i64, c: i64, x: f64, y: f64, z: f64| EdgeRef { faces: [a, c], at: DVec3::new(x, y, z) };
-        let fr = |t: i64, x: f64, y: f64, z: f64| FaceRef { tag: t, at: DVec3::new(x, y, z) };
-        type Op_ = Box<dyn Fn(&mut Doc)>;
+    type ComboOp = Box<dyn Fn(&mut Doc)>;
+
+    /// The battery's 14 operations on a test part: its block `b`, hole `h`,
+    /// boss `s` and slot `sl`, the part moved by `off`.
+    fn combo_ops(b: u32, h: u32, s: u32, sl: u32, off: DVec3) -> Vec<(&'static str, ComboOp)> {
+        let er = move |a: i64, c: i64, x: f64, y: f64, z: f64| EdgeRef { faces: [a, c], at: DVec3::new(x, y, z) + off };
+        let fr = move |t: i64, x: f64, y: f64, z: f64| FaceRef { tag: t, at: DVec3::new(x, y, z) + off };
+        type Op_ = ComboOp;
         let round = |size: f64, chamfer: bool, tension: f64, e: EdgeRef| -> Op_ {
             Box::new(move |d: &mut Doc| {
                 let r = d.add_round(size, chamfer, vec![e.clone()]);
@@ -4470,7 +5527,7 @@ mod tests {
         };
         let push = |face: FaceRef, inset: f64, depth: f64| -> Op_ { Box::new(move |d: &mut Doc| { d.add_push(Push { face: face.clone(), inset, depth }); }) };
         let tweak = |comp: Comp, delta: DVec3| -> Op_ { Box::new(move |d: &mut Doc| { d.add_tweak(Tweak { comp: comp.clone(), delta , more: vec![], scale: DVec3::ONE, copy: false, about: None }); }) };
-        let ops: Vec<(&str, Op_)> = vec![
+        vec![
             ("fillet top-front", round(2.0, false, 0.0, er(tag(b, 2), tag(b, 4), -12.0, 20.0, 15.0))),
             ("tension fillet top -X", round(3.0, false, 0.7, er(tag(b, 2), tag(b, 1), -20.0, 20.0, 0.0))),
             ("chamfer side vertical", round(2.0, true, 0.0, er(tag(b, 0), tag(b, 4), 20.0, 10.0, 15.0))),
@@ -4480,32 +5537,155 @@ mod tests {
             ("extrude front", push(fr(tag(b, 4), -12.0, 6.0, 15.0), 0.0, 3.0)),
             ("extrude +X in", push(fr(tag(b, 0), 20.0, 8.0, 0.0), 0.0, -2.0)),
             ("extrude boss side", push(fr(tag(s, 0), 17.0, 25.0, 0.0), 0.0, 1.0)),
-            ("inset slot floor", push(fr(tag(4, 3), 0.0, 14.0, 0.0), 1.0, -1.0)),
+            ("inset slot floor", push(fr(tag(sl, 3), 0.0, 14.0, 0.0), 1.0, -1.0)),
             ("move top-left up", tweak(Comp::Face(fr(tag(b, 2), -12.0, 20.0, 8.0)), DVec3::new(0.0, 3.0, 0.0))),
             ("tilt top-left", tweak(Comp::Edge(er(tag(b, 2), tag(b, 1), -20.0, 20.0, 0.0)), DVec3::new(0.0, 3.0, 0.0))),
             ("move +X out", tweak(Comp::Face(fr(tag(b, 0), 20.0, 8.0, 0.0)), DVec3::new(4.0, 0.0, 0.0))),
             ("knife front", Box::new(move |d: &mut Doc| {
                 let pts = vec![
-                    KnifePoint { edge: er(tag(b, 1), tag(b, 4), -20.0, 10.0, 15.0), f: 0.5, at: DVec3::new(-20.0, 10.0, 15.0) },
-                    KnifePoint { edge: er(tag(b, 0), tag(b, 4), 20.0, 10.0, 15.0), f: 0.5, at: DVec3::new(20.0, 10.0, 15.0) },
+                    KnifePoint { edge: er(tag(b, 1), tag(b, 4), -20.0, 10.0, 15.0), f: 0.5, at: DVec3::new(-20.0, 10.0, 15.0) + off },
+                    KnifePoint { edge: er(tag(b, 0), tag(b, 4), 20.0, 10.0, 15.0), f: 0.5, at: DVec3::new(20.0, 10.0, 15.0) + off },
                 ];
                 d.add_knife(Knife { pts, segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
             })),
-        ];
+        ]
+    }
+
+    /// Two test parts 100 mm apart, the battery's operations made on one
+    /// then the other in turn (A on the first, B on the second, B on the
+    /// first, A on the second), every ordered pair: built island by island,
+    /// the same part as one history. `FORME_COMBO=name` filters.
+    #[test]
+    #[ignore]
+    fn islands_battery() {
+        let (mut base, b, s) = test_part();
+        let off = DVec3::new(100.0, 0.0, 0.0);
+        let b2 = base.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, off, DQuat::IDENTITY);
+        let h2 = base.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-10.0, -5.0, 0.0) + off, DQuat::IDENTITY);
+        let s2 = base.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0) + off, DQuat::IDENTITY);
+        let sl2 = base.add(Op::Carve, Prim::Box { x: 8.0, y: 8.0, z: 40.0 }, DVec3::new(0.0, 14.0, 0.0) + off, DQuat::IDENTITY);
+        let (one, two) = (combo_ops(b, 2, s, 4, DVec3::ZERO), combo_ops(b2, h2, s2, sl2, off));
+        // FORME_BATTERY=mirror-first / mirror-last: a Mirror across X through
+        // the first part (cut at the plane; the second lies off it) before
+        // the operations (each then made on both sides) or after them
+        // array-first / array-last: an Array of the first part (2 in a line,
+        // 80 mm along Z: its copy is the first part's island too, by its
+        // ids), before the operations (those on the first part then brought
+        // before it, as the app does) or after them
+        let mode = std::env::var("FORME_BATTERY").unwrap_or_default();
+        let mirror = crate::doc::Mirror { axis: 0, offset: 0.0, flip: false };
+        let array = crate::doc::Array { sources: vec![b, 2, s, 4], kind: crate::doc::ArrayKind::Line, count: 2, step: DVec3::new(0.0, 0.0, 80.0), count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 };
+        if mode == "mirror-first" {
+            base.add_mirror(mirror);
+        }
+        if mode == "array-first" {
+            base.add_array(array.clone());
+        }
+        assert_eq!(islands_against_one(&base), Vec::<String>::new());
         let only = std::env::var("FORME_COMBO").ok();
+        let (mut bad, mut n) = (vec![], 0);
+        let t0 = Instant::now();
+        for i in 0..one.len() {
+            for j in 0..one.len() {
+                if i == j {
+                    continue;
+                }
+                let name = format!("{} / {}", one[i].0, one[j].0);
+                if only.as_ref().is_some_and(|o| !name.contains(o.as_str())) {
+                    continue;
+                }
+                let mut d = base.clone();
+                (one[i].1)(&mut d);
+                (two[j].1)(&mut d);
+                (one[j].1)(&mut d);
+                (two[i].1)(&mut d);
+                if mode == "mirror-last" {
+                    d.add_mirror(mirror);
+                }
+                if mode == "array-first" {
+                    d.keep_arrays();
+                }
+                if mode == "array-last" {
+                    d.add_array(array.clone());
+                }
+                let diff = islands_against_one(&d);
+                n += 1;
+                if !diff.is_empty() {
+                    eprintln!("DIFFERENT {name}: {}", diff.join(" · "));
+                    // FORME_DUMP=dir: the document, for `islands_probe`
+                    if let Ok(dir) = std::env::var("FORME_DUMP") {
+                        std::fs::write(format!("{dir}/islands-{i}-{j}.fnurbs"), d.to_json()).ok();
+                    }
+                    bad.push(name);
+                }
+            }
+        }
+        eprintln!("{} of {n} pairs differ ({:.0} s)", bad.len(), t0.elapsed().as_secs_f64());
+        assert!(bad.is_empty(), "{} differ:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    /// The tools one after another on the test part: every ordered pair of
+    /// a list of operations (fillets, chamfers, insets, extrusions, moves,
+    /// a tilt, the Knife), each pair built on its own; prints what fails.
+    /// `FORME_COMBO=name` keeps the pairs whose names contain it.
+    /// `FORME_BATTERY=mirror-first`: a Mirror across X 20 mm off the part
+    /// before them (the part and its image apart, each step on both),
+    /// `mirror-touch`: across Z on the part's back face (one part, faces
+    /// across the plane), `mirror-last`: across X through the part after
+    /// them. `array-last`: an Array of the whole part after them (2 in a
+    /// line, 100 mm apart: twice the pair), `array-first`: the Array first
+    /// and both tools made on its copy, brought back to the original as the
+    /// app does (`Doc::keep_arrays`: twice the pair again).
+    #[test]
+    #[ignore]
+    fn combo_battery() {
+        let (mut base, b, s) = test_part();
+        let only = std::env::var("FORME_COMBO").ok();
+        let mode = std::env::var("FORME_BATTERY").unwrap_or_default();
+        let step = DVec3::new(100.0, 0.0, 0.0);
+        let plain_ops = combo_ops(b, 2, s, 4, DVec3::ZERO);
+        let ops = combo_ops(b, 2, s, 4, if mode == "array-first" { step } else { DVec3::ZERO });
+        let plain = base.clone();
+        let array = |d: &mut Doc| {
+            d.add_array(crate::doc::Array { sources: vec![b, 2, s, 4], kind: crate::doc::ArrayKind::Line, count: 2, step, count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 });
+        };
+        match mode.as_str() {
+            "mirror-first" => { base.add_mirror(crate::doc::Mirror { axis: 0, offset: -40.0, flip: false }); }
+            "mirror-touch" => { base.add_mirror(crate::doc::Mirror { axis: 2, offset: -15.0, flip: false }); }
+            "array-first" => array(&mut base),
+            _ => {}
+        }
+        let twice = mode == "mirror-first" || mode.starts_with("array");
+        // an operation made on a copy goes back to the original
+        let kept = |d: &mut Doc| {
+            if mode == "array-first" {
+                d.keep_arrays();
+            }
+        };
+        let last = |d: &mut Doc| {
+            if mode == "mirror-last" {
+                d.add_mirror(crate::doc::Mirror { axis: 0, offset: 0.0, flip: false });
+            }
+            if mode == "array-last" {
+                array(d);
+            }
+        };
         let mut bad = vec![];
         let mut n = 0;
-        for (an, a) in &ops {
+        let mut unstable = 0;
+        for (ai, (an, a)) in ops.iter().enumerate() {
             // each alone first
             let mut d = base.clone();
             a(&mut d);
+            kept(&mut d);
+            last(&mut d);
             let m = build(&d, true, false, &[], &mut Cache::default());
             if !m.errors.is_empty() {
                 eprintln!("ALONE {an}: {:?}", m.errors);
                 bad.push(format!("{an}: {:?}", m.errors));
                 continue;
             }
-            for (bn, bo) in &ops {
+            for (bi, (bn, bo)) in ops.iter().enumerate() {
                 if an == bn {
                     continue;
                 }
@@ -4515,10 +5695,43 @@ mod tests {
                 }
                 let mut d = base.clone();
                 a(&mut d);
+                kept(&mut d);
                 bo(&mut d);
+                kept(&mut d);
+                last(&mut d);
                 let t = Instant::now();
                 let m = build(&d, true, false, &[], &mut Cache::default());
                 n += 1;
+                // a shape added far away changes nothing of the part (its
+                // faces of one surface were made one when they came to be,
+                // not at the next union anywhere: a face named meanwhile
+                // would be gone then)
+                if mode.is_empty() || mode == "stable" {
+                    let mut far = d.clone();
+                    far.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(300.0, 0.0, 0.0), DQuat::IDENTITY);
+                    let (x, y) = (digest(&m), digest(&build(&far, true, false, &[], &mut Cache::default())));
+                    if x.1 + 6 != y.1 || x.2 + 12 != y.2 {
+                        eprintln!("UNSTABLE {name}: faces {} then {} − 6, edges {} then {} − 12", x.1, y.1, x.2, y.2);
+                        unstable += 1;
+                    }
+                }
+                // the part and its image apart: twice the pair made with no
+                // Mirror (a step made on one side only would show here)
+                if twice && m.errors.is_empty() {
+                    let mut p = plain.clone();
+                    (plain_ops[ai].1)(&mut p);
+                    (plain_ops[bi].1)(&mut p);
+                    let (x, y) = (digest(&m), digest(&build(&p, true, false, &[], &mut Cache::default())));
+                    if y.0.is_empty() && (x.1 != 2 * y.1 || x.2 != 2 * y.2 || (x.3 - 2.0 * y.3).abs() > 1e-3 * y.3.abs().max(1.0)) {
+                        eprintln!("LOPSIDED {name}: faces {} / 2 × {}, edges {} / 2 × {}, volume {:.3} / 2 × {:.3}", x.1, y.1, x.2, y.2, x.3, y.3);
+                        // FORME_DUMP=dir: both documents, for `islands_probe`
+                        if let Ok(dir) = std::env::var("FORME_DUMP") {
+                            std::fs::write(format!("{dir}/lop-{n}-mirror.fnurbs"), d.to_json()).ok();
+                            std::fs::write(format!("{dir}/lop-{n}-plain.fnurbs"), p.to_json()).ok();
+                        }
+                        bad.push(format!("{name}: not twice the part"));
+                    }
+                }
                 // (the second naming a face or an edge the first took away
                 // is no fault: listed apart)
                 let lost = |e: &String| e.contains("is gone") || e.contains("are gone") || e.contains("not found");
@@ -4530,8 +5743,74 @@ mod tests {
                 }
             }
         }
-        eprintln!("{} of {n} pairs failed", bad.len());
+        eprintln!("{} of {n} pairs failed, {unstable} changed by a shape added far away", bad.len());
         assert!(bad.is_empty(), "{} failed:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    /// Found by the tools' battery with a Mirror (21 nov.). With the part
+    /// and its image apart, every pair of tools gives twice what it gives
+    /// with no Mirror: an edge tilted next to a hole's rounded mouth (the
+    /// move and its image made before the fillet, together), and an edge
+    /// tilted after its own fillet (its image was passed over in silence:
+    /// neither was found, which counted as "the same"). And a curved face
+    /// extruded leaves its top one face at once, not at the next union made
+    /// anywhere (a face named meanwhile was gone then).
+    #[test]
+    fn mirror_side_moves_and_faces_made_one_at_once() {
+        let (base, b, s) = test_part();
+        let ops = combo_ops(b, 2, s, 4, DVec3::ZERO);
+        let op = |name: &str| &ops.iter().find(|(n, _)| *n == name).unwrap().1;
+        for (first, second) in [("fillet hole mouth", "tilt top-left"), ("tension fillet top -X", "tilt top-left"), ("fillet top-front", "extrude boss side")] {
+            let mut plain = base.clone();
+            op(first)(&mut plain);
+            op(second)(&mut plain);
+            let mut both = base.clone();
+            both.add_mirror(crate::doc::Mirror { axis: 0, offset: -40.0, flip: false });
+            op(first)(&mut both);
+            op(second)(&mut both);
+            let (x, y) = (digest(&build(&plain, true, false, &[], &mut Cache::default())), digest(&build(&both, true, false, &[], &mut Cache::default())));
+            assert!(x.0.is_empty() && y.0.is_empty(), "{first} then {second}: {:?}, with a Mirror {:?}", x.0, y.0);
+            assert_eq!((y.1, y.2), (2 * x.1, 2 * x.2), "{first} then {second}: faces and edges, twice with a Mirror");
+            assert!((y.3 - 2.0 * x.3).abs() < 1e-3 * x.3, "{first} then {second}: volume {} with a Mirror, {} without", y.3, x.3);
+            // a shape added far away changes nothing of the part
+            let mut far = plain.clone();
+            far.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(300.0, 0.0, 0.0), DQuat::IDENTITY);
+            let z = digest(&build(&far, true, false, &[], &mut Cache::default()));
+            assert_eq!((z.1, z.2), (x.1 + 6, x.2 + 12), "{first} then {second}: faces and edges after a shape added far away");
+        }
+        // the boss's side extruded: its top is one face (the ring made with
+        // it and the boss's own top)
+        let mut d = base.clone();
+        op("extrude boss side")(&mut d);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert_eq!(m.errors, Vec::<String>::new());
+        let tops = m.faces.iter().filter(|f| f.kind == SurfKind::Plane && (f.point[1] - 30.0).abs() < 1e-6 && f.normal[1] > 0.9).count();
+        assert_eq!(tops, 1, "the boss's top after its side is extruded");
+    }
+
+    /// Found by the tools' battery with an Array (21 nov.). A copy carries
+    /// the original's tags, so a copy's fillet with tension found the
+    /// original's faces, conic already, among its own: it made them conic
+    /// again (their exact surface lost a little more at each copy) and said
+    /// "tension on 1 of 2 faces" where that could not be done again (after
+    /// an Extrude at the fillet's end, next to another fillet). They are
+    /// left alone now: with the Array, twice the part and no error.
+    #[test]
+    fn tension_on_the_copies_of_an_array() {
+        let (base, b, s) = test_part();
+        let ops = combo_ops(b, 2, s, 4, DVec3::ZERO);
+        let op = |name: &str| &ops.iter().find(|(n, _)| *n == name).unwrap().1;
+        for (first, second) in [("fillet top-front", "tension fillet top -X"), ("tension fillet top -X", "fillet top-front"), ("tension fillet top -X", "extrude front")] {
+            let mut plain = base.clone();
+            op(first)(&mut plain);
+            op(second)(&mut plain);
+            let mut both = plain.clone();
+            both.add_array(crate::doc::Array { sources: vec![b, 2, s, 4], kind: crate::doc::ArrayKind::Line, count: 2, step: DVec3::new(100.0, 0.0, 0.0), count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 });
+            let (x, y) = (digest(&build(&plain, true, false, &[], &mut Cache::default())), digest(&build(&both, true, false, &[], &mut Cache::default())));
+            assert!(x.0.is_empty() && y.0.is_empty(), "{first} then {second}: {:?}, with an Array {:?}", x.0, y.0);
+            assert_eq!((y.1, y.2), (2 * x.1, 2 * x.2), "{first} then {second}: faces and edges, twice with an Array");
+            assert!((y.3 - 2.0 * x.3).abs() < 1e-3 * x.3, "{first} then {second}: volume {} with an Array, {} without", y.3, x.3);
+        }
     }
 
     #[test]

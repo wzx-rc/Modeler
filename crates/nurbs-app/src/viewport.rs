@@ -153,11 +153,14 @@ fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
     match st.gizmo {
         GizmoMode::Select => return None,
         GizmoMode::Rotate if st.sel_mode == SelMode::Object || st.poly_comp() || st.sdf_comp() => return ring_at(st, p),
-        GizmoMode::Scale => return cage_at(st, p),
+        // the classic scale (a cube per axis and the centre, Romain 21 nov.)
+        // on shapes; the cage still sizes a Poly component or an SDF shape
+        GizmoMode::Scale if st.poly_comp() || st.sdf_comp() => return cage_at(st, p),
+        GizmoMode::Scale => return scale_at(st, p),
         _ => {}
     }
     // (the move gizmo has no size dots: Romain 20 nov., 11 h 44, "enlève
-    // les 4 points de scale avec le translate"; R's cage sizes)
+    // les 4 points de scale avec le translate"; R scales)
     let (c, tips) = gizmo_points(st)?;
     // the centre (Maya): a move on all three axes
     if (p - c).length() < 9.0 {
@@ -221,8 +224,39 @@ fn ring_at(st: &AppState, p: Pos2) -> Option<Handle> {
     best.map(|(_, a)| Handle::Rot(a))
 }
 
+/// The scale gizmo (the classic one again: Romain 21 nov., 0 h 11, "oublie
+/// la box à poignées et reviens au classique"): the pivot, the tips along
+/// the shape's own axes.
+fn scale_points(st: &AppState) -> Option<(Pos2, [Option<Pos2>; 3])> {
+    let pivot = st.pivot()?;
+    let frame = st.scale_frame()?;
+    let c = world(st, pivot)?;
+    let v = st.view();
+    let k = v.pixel_size_at((pivot.as_vec3() - v.eye).length()) as f64 * ARROW as f64;
+    Some((c, [0, 1, 2].map(|a| world(st, pivot + frame * DVec3::AXES[a] * k))))
+}
+
+fn scale_at(st: &AppState, p: Pos2) -> Option<Handle> {
+    let (c, tips) = scale_points(st)?;
+    if (p - c).length() < 10.0 {
+        return Some(Handle::ScaleAll);
+    }
+    let mut best: Option<(f32, usize)> = None;
+    for (a, t) in tips.iter().enumerate() {
+        if let Some(t) = t {
+            let d = dist_seg(p, c + (*t - c) * 0.2, *t).min((p - *t).length() - 3.0);
+            if d < 8.0 && best.map(|b| d < b.0).unwrap_or(true) {
+                best = Some((d, a));
+            }
+        }
+    }
+    best.map(|(_, a)| Handle::Scale(a))
+}
+
 /// The scale cage's grip under the pointer (corners first, then edges,
-/// then faces, when they lie as near).
+/// then faces, when they lie as near). Not used since 21 nov. (the classic
+/// gizmo is back); kept with `cage.rs` should the cage be asked again.
+#[allow(dead_code)]
 fn cage_at(st: &AppState, p: Pos2) -> Option<Handle> {
     let c = st.cage()?;
     let mut best: Option<(f32, [i8; 3])> = None;
@@ -377,6 +411,11 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         st.hover_face = None;
         st.hover_vertex = None;
     }
+    // a closed group lights whole under the pointer (a click takes it all)
+    st.hover_also = match st.hover_feature {
+        Some(id) if select && st.sel_mode == SelMode::Object => Some(st.pick_ids(id)).filter(|v| v.len() > 1).unwrap_or_default(),
+        _ => vec![],
+    };
 
     // an inset or extrusion under way, whatever started it
     if st.push.is_some() {
@@ -908,7 +947,9 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                     if !(shift || ctrl) {
                         st.selection.clear();
                     }
-                    for id in inside {
+                    st.group_sel = None;
+                    // a shape of a closed group brings the whole group
+                    for id in inside.into_iter().flat_map(|id| st.pick_ids(id)).collect::<Vec<_>>() {
                         if !st.selection.contains(&id) {
                             st.selection.push(id);
                         }
@@ -920,7 +961,8 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 let id = at.and_then(|p| st.pick_object(p2(p)));
                 // the element, not the operation whose face was clicked
                 let id = id.map(|id| st.element_of(id));
-                st.select(id, shift || ctrl);
+                // (a closed group's shape: the whole group)
+                st.click_shape(id, shift || ctrl);
             }
         }
         Tool::Sculpt | Tool::PolyLoop | Tool::PolyCut => {}
@@ -1158,43 +1200,19 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
             }
         }
     } else {
-        // the cage: its edges thin, a grip per face, edge and corner; the
-        // grip dragged alone in the accent, the value beside it
-        let Some(cg) = st.cage() else { return };
-        for (a, b) in cg.edges() {
-            if let (Some(a), Some(b)) = (world(st, a), world(st, b)) {
-                p.line_segment([a, b], Stroke::new(1.0, Color32::from_white_alpha(150)));
-            }
-        }
-        let dark = Color32::from_rgb(0x20, 0x22, 0x26);
-        let mut at_grip = None;
-        for s in cg.grips() {
-            let h = Handle::Cage(s);
-            if dragging.is_some() && dragging != Some(h) {
+        let Some((_, tips)) = scale_points(st) else { return };
+        for (a, t) in tips.iter().enumerate() {
+            if dragging.is_some() && dragging != Some(Handle::Scale(a)) && dragging != Some(Handle::ScaleAll) {
                 continue;
             }
-            let Some(q) = world(st, cg.point(s)) else { continue };
-            let on = hot == Some(h) || dragging == Some(h);
-            let n = s.iter().filter(|v| **v != 0).count();
-            let r = match n {
-                1 => 4.5,
-                2 => 3.0,
-                _ => 3.5,
-            } + if on { 1.5 } else { 0.0 };
-            let fill = if on { HOT } else { Color32::WHITE };
-            if n == 2 {
-                p.circle(q, r, fill, Stroke::new(1.0, dark));
-            } else {
-                p.rect(Rect::from_center_size(q, vec2(r * 2.0, r * 2.0)), 1.0, fill, Stroke::new(1.0, dark), egui::StrokeKind::Middle);
-            }
-            if on {
-                at_grip = Some(q);
-            }
+            let Some(t) = t else { continue };
+            let on = hot == Some(Handle::Scale(a)) || hot == Some(Handle::ScaleAll);
+            let col = if on { HOT } else { colors[a] };
+            p.line_segment([c + (*t - c) * 0.18, *t], Stroke::new(if on { 3.0 } else { 2.2 }, col));
+            p.rect_filled(Rect::from_center_size(*t, vec2(10.0, 10.0)), 2.0, col);
         }
-        if let (Some(q), Some(t)) = (at_grip, &st.gizmo_readout) {
-            chip(p, q + vec2(14.0, 14.0), Align2::LEFT_TOP, t, HOT, HOT);
-        }
-        return;
+        let on = hot == Some(Handle::ScaleAll);
+        p.rect(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, if on { tint(HOT, 0.5) } else { tint(Color32::WHITE, 0.25) }, Stroke::new(1.5, if on { HOT } else { Color32::WHITE }), egui::StrokeKind::Middle);
     }
     p.circle(c, 2.25, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
     if let Some(t) = &st.gizmo_readout {
@@ -2094,6 +2112,15 @@ fn status(p: &Painter, st: &AppState) {
 
 /// What the help box says: "Key: what it does" parts joined by " · ".
 pub fn hint(st: &AppState) -> String {
+    let h = hint_of(st);
+    // a component mode with R: the gizmo's cubes scale what is picked
+    if st.gizmo == GizmoMode::Scale && st.sel_mode != SelMode::Object {
+        return h.replace("Arrows: move it · Centre square: on all three axes", "Cubes: scale it along X, Y or Z · Centre: all at once");
+    }
+    h
+}
+
+fn hint_of(st: &AppState) -> String {
     if st.mat_drag.is_some() {
         return if st.sel_mode == SelMode::Face {
             "Release on a face: that face takes it · Off the part: nothing".into()
@@ -2260,9 +2287,12 @@ pub fn hint(st: &AppState) -> String {
             } else {
                 match st.gizmo {
                     GizmoMode::Select => "W: move · E: rotate · R: scale · Right button: menu · Del: delete · Esc: deselect".into(),
+                    _ if st.selected_group().is_some_and(|g| g.open) => "An open group: click one of its shapes to work on it alone · Its bar: close it again · Arrows: move the whole group · D + click: its pivot on a point · Ctrl + Shift + G: ungroup".into(),
+                    _ if st.selected_group().is_some() => "A group: its shapes move, turn and scale together, about its pivot · Its bar: open it to pick its shapes one by one · D + click: its pivot on a point · Ctrl + Shift + G: ungroup · Ctrl + D: a copy".into(),
+                    GizmoMode::Move if st.selection.len() > 1 => "Arrows and squares: move · Centre square: on all three axes · Ctrl + G: group them · D + click: pivot on a point · Alt + A: align · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · Alt + M: mirror · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
-                    GizmoMode::Scale => "Cage: a face's grip one side, an edge's two, a corner all three · Shift: proportions kept · Alt: from the middle · W: move · E: rotate".into(),
+                    GizmoMode::Scale => "Cubes: along the shape's axes · Centre: all at once · W: move · E: rotate".into(),
                 }
             }
         }

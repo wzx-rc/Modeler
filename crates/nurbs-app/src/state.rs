@@ -481,6 +481,9 @@ pub struct Drag {
     /// Path points moved in Vertex mode (curve, point), `start` their
     /// curves as they were.
     pub pts: Vec<(FeatureId, usize)>,
+    /// The groups whose shapes are all moved, as they were: their own
+    /// transform goes with them (`groups.rs`).
+    pub groups: Vec<nurbs_kernel::Group>,
 }
 
 /// A fillet or chamfer sized by a drag on screen (Rectify's Radius
@@ -606,8 +609,9 @@ pub struct Isolate {
     pub from: FeatureId,
     /// Whether the scan was shown (put back after).
     pub ref_shown: bool,
-    /// The view and the whole part's model then: both come back at once
-    /// when it ends (the model if the document did not change meanwhile).
+    /// The view then (kept for the journal; since 21 nov. the camera does
+    /// not move in or out of Isolate) and the whole part's model, which
+    /// comes back at once when it ends if the document did not change.
     pub camera: OrbitCamera,
     pub model: Option<Arc<Model>>,
     pub version: u64,
@@ -725,6 +729,12 @@ pub struct AppState {
     /// The last tool armed (G calls it again).
     pub last_tool: Option<Tool>,
     pub hover_feature: Option<FeatureId>,
+    /// The shapes lit with the one under the pointer: its closed group's.
+    pub hover_also: Vec<FeatureId>,
+    /// The group selected as a group (its row clicked, just made): an open
+    /// group's shapes all picked one by one are not the group. A closed
+    /// group needs none: its shapes selected are the group.
+    pub group_sel: Option<FeatureId>,
     pub hover_hit: Option<Hit>,
     pub tool: Tool,
     /// Add or Carve for new shapes.
@@ -760,6 +770,9 @@ pub struct AppState {
     /// Bumped when a new model arrives (the renderer uploads it).
     pub model_gen: u64,
     pub picker: Picker,
+    /// Which of Vertex mode's vertices the part hides, for a model, an eye
+    /// and a list of vertices (`visible_vertices`).
+    pub vert_hidden: std::cell::RefCell<((u64, [u32; 3], u64), Vec<bool>)>,
     submitted: u64,
     /// Each request sent lately, with its shapes' frames (the drag's
     /// preview, `drag_preview`).
@@ -949,6 +962,8 @@ impl AppState {
             knife_preview: None,
             last_tool: None,
             hover_feature: None,
+            hover_also: vec![],
+            group_sel: None,
             hover_hit: None,
             tool: Tool::Select,
             mode: Op::Add,
@@ -970,6 +985,7 @@ impl AppState {
             model: None,
             model_gen: 0,
             picker: Picker::default(),
+            vert_hidden: Default::default(),
             submitted: 0,
             sent_frames: vec![],
             round_ms: 0.0,
@@ -1110,7 +1126,8 @@ impl AppState {
             if let Some(m) = iso.model.filter(|_| iso.version + 1 == self.version) {
                 self.show_model(&m);
             }
-            self.fly_to(iso.camera);
+            // the camera stays where it is (Romain, 21 nov.: "NE PAS BOUGER
+            // LA CAMERA, pas de focus")
             self.toast("Isolate off: everything shown", false);
             return;
         }
@@ -1132,17 +1149,7 @@ impl AppState {
         if let Some(i) = self.isolate.as_mut() {
             i.version = self.version;
         }
-        // framed on what it shows (its faces in the part), else on its shapes
-        let shown = self.model.as_ref().and_then(|m| {
-            m.triangles.iter().flatten().map(|&v| Vec3::from_array(m.positions[v as usize])).fold(None, |b: Option<(Vec3, Vec3)>, p| Some(b.map_or((p, p), |(lo, hi)| (lo.min(p), hi.max(p)))))
-        });
-        let b = shown.or_else(|| {
-            let ids = &self.isolate.as_ref()?.ids;
-            self.doc.features.iter().filter(|f| ids.contains(&f.id) && f.is_solid()).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1))).map(|(lo, hi)| (lo.as_vec3(), hi.as_vec3()))
-        });
-        if let Some((lo, hi)) = b {
-            self.fly_frame(lo, hi);
-        }
+        // no framing: the view stays as it is, in and out (F frames)
         self.toast("Isolate: the selection alone (Ctrl + I again: everything)", false);
     }
 
@@ -1153,7 +1160,9 @@ impl AppState {
         let mut m = m.clone();
         m.serial = self.version * 4;
         self.picker = Picker::new(&m);
-        self.model = Some(Arc::new(m));
+        let m = Arc::new(m);
+        self.picker.start(&m);
+        self.model = Some(m);
         self.model_gen += 1;
     }
 
@@ -1339,6 +1348,11 @@ impl AppState {
             }
         }
         keep.extend(self.doc.features.iter().filter(|f| f.id >= iso.from).map(|f| f.id));
+        // the Mirrors: they are no element's, and what is kept is as it is
+        // in the whole part (both sides; the kernel then finds its stages
+        // again and builds nothing)
+        let mirrors: Vec<FeatureId> = self.doc.features.iter().filter(|f| f.mirror.is_some() && !keep.contains(&f.id)).map(|f| f.id).collect();
+        keep.extend(mirrors);
         keep
     }
 
@@ -1361,6 +1375,8 @@ impl AppState {
     pub(crate) fn touched(&mut self) {
         // the curves follow their settings and boxes
         self.doc.regen_curves();
+        // a shape gone leaves its group
+        self.doc.clean_groups();
         self.keep_markers();
         // an operation made on an Array's copy: on every copy
         if self.doc.keep_arrays() {
@@ -1383,6 +1399,20 @@ impl AppState {
             if fresh {
                 self.after_change(label, &before);
             }
+        }
+    }
+
+    /// One change of what the kernel does not use (the groups: made,
+    /// opened, closed, named), one step of undo: the part is not built
+    /// again.
+    pub fn edit_quiet(&mut self, label: &str, f: impl FnOnce(&mut Doc)) {
+        let before = self.doc.clone();
+        let sel0 = self.sel_state();
+        f(&mut self.doc);
+        if self.doc != before {
+            self.push_undo(label, before, sel0);
+            self.looks_rev += 1;
+            self.record("edit", label);
         }
     }
 
@@ -1535,6 +1565,7 @@ impl AppState {
         self.edge_sel = s.edges.clone();
         self.vert_sel = s.verts.clone();
         self.sdf_sel = s.shape;
+        self.group_sel = None;
         self.clean_selection_ids();
     }
 
@@ -1631,8 +1662,15 @@ impl AppState {
     fn step_back(&mut self, u: UndoStep) -> UndoStep {
         let sel = self.sel_state();
         let doc = u.doc.map(|d| {
+            // only the groups differ (the kernel does not use them): the
+            // part is not built again
+            let quiet = d.features == self.doc.features && d.paint == self.doc.paint && d.looks == self.doc.looks && d.reference == self.doc.reference;
             let now = std::mem::replace(&mut self.doc, d);
-            self.touched();
+            if quiet {
+                self.looks_rev += 1;
+            } else {
+                self.touched();
+            }
             now
         });
         self.set_sel_state(&u.sel);
@@ -1678,6 +1716,7 @@ impl AppState {
             (None, true) => {}
             (None, false) => self.selection.clear(),
         }
+        self.group_sel = None;
         self.renaming = false;
     }
 
@@ -1754,6 +1793,20 @@ impl AppState {
         self.toast(&format!("{what} deleted"), false);
     }
 
+    /// Takes away the operations whose shapes are gone (`Doc::orphans`: a
+    /// document from before 20 nov., when a shape deleted left them), one
+    /// undo step.
+    pub fn remove_orphans(&mut self) {
+        let ids = self.doc.orphans();
+        if ids.is_empty() {
+            return;
+        }
+        let n = ids.len();
+        self.edit("Remove leftover operations", |d| d.remove(&ids));
+        self.selection.retain(|s| !ids.contains(s));
+        self.toast(&format!("{n} operation{} of deleted shapes removed · Ctrl + Z brings {} back", if n > 1 { "s" } else { "" }, if n > 1 { "them" } else { "it" }), false);
+    }
+
     pub fn duplicate_selected(&mut self) {
         if self.sdf_duplicate() {
             return;
@@ -1817,6 +1870,9 @@ impl AppState {
             }
         }
         let mut new = vec![];
+        // a whole group copied: its copies make a group like it
+        let groups = if comps { vec![] } else { self.whole_groups(&plan.iter().map(|p| p.0).collect::<Vec<_>>()) };
+        let mut new_groups: Vec<FeatureId> = vec![];
         self.edit("Duplicate", |d| {
             let mut map: std::collections::HashMap<FeatureId, FeatureId> = Default::default();
             for (el, ops) in &plan {
@@ -1836,8 +1892,21 @@ impl AppState {
                     d.features.push(f);
                 }
             }
+            for g in &groups {
+                let members: Vec<FeatureId> = g.members.iter().filter_map(|m| map.get(m).copied()).collect();
+                if members.len() == g.members.len() {
+                    let id = d.next_id;
+                    d.next_id += 1;
+                    d.groups.push(nurbs_kernel::Group { id, name: d.fresh_group_name(), members, origin: g.origin + offset, ..g.clone() });
+                    new_groups.push(id);
+                }
+            }
         });
         self.selection = new;
+        self.group_sel = match new_groups.as_slice() {
+            [g] => Some(*g),
+            _ => None,
+        };
         if comps {
             self.face_sel.clear();
             self.edge_sel.clear();
@@ -3799,6 +3868,12 @@ impl AppState {
             return;
         }
         let at = self.pivot_target(p);
+        // a group: the pivot is its own (kept in the document)
+        if let Some(id) = self.selected_group().map(|g| g.id) {
+            self.custom_pivot = None;
+            self.put_group_pivot(id, at.map(|s| s.pos));
+            return;
+        }
         self.custom_pivot = at.map(|s| (self.pivot_key(), s.pos));
     }
 
@@ -3837,6 +3912,10 @@ impl AppState {
         }
         if self.sel_mode != SelMode::Object {
             return self.comp_pivot();
+        }
+        // a group: its own transform's
+        if let Some(g) = self.selected_group() {
+            return Some(g.origin);
         }
         let fs: Vec<&Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).collect();
         if fs.is_empty() {
@@ -3938,7 +4017,9 @@ impl AppState {
             .collect();
         let keep: Vec<(FeatureId, FeatureId)> = start.iter().filter(|s| s.op == Op::Carve).flat_map(|s| self.later_overlaps(s.id).into_iter().map(move |h| (s.id, h))).collect();
         let cage = if matches!(h, Handle::Cage(_)) { self.cage() } else { None };
-        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom, keep, cage, pts: vec![] });
+        // a group moved, turned or scaled: its transform with its shapes
+        let groups = if matches!(h, Handle::Size(_)) { vec![] } else { self.whole_groups(&start.iter().map(|s| s.id).collect::<Vec<_>>()) };
+        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom, keep, cage, pts: vec![], groups });
     }
 
     /// The point a handle sits on.
@@ -4040,6 +4121,11 @@ impl AppState {
                             f.origin = s.origin + delta;
                         }
                     }
+                    for g0 in &d.groups {
+                        if let Some(g) = doc.group_mut(g0.id) {
+                            g.origin = g0.origin + delta;
+                        }
+                    }
                 });
             }
             Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick => {}
@@ -4065,6 +4151,12 @@ impl AppState {
                             // turned round the pivot: its centre too
                             let c = pivot0 + dq * (s.centre() - pivot0);
                             f.origin = c - f.rot * DVec3::Y * s.prim.height() * 0.5;
+                        }
+                    }
+                    for g0 in &d.groups {
+                        if let Some(g) = doc.group_mut(g0.id) {
+                            g.rot = (dq * g0.rot).normalize();
+                            g.origin = pivot0 + dq * (g0.origin - pivot0);
                         }
                     }
                 });
@@ -4110,6 +4202,12 @@ impl AppState {
                     for s in &start {
                         if let Some(f) = doc.feature_mut(s.id) {
                             *f = scaled(s, pivot0, frame, k);
+                        }
+                    }
+                    for g0 in &d.groups {
+                        if let Some(g) = doc.group_mut(g0.id) {
+                            g.origin = pivot0 + frame * ((frame.inverse() * (g0.origin - pivot0)) * k);
+                            g.scale = g0.scale * k;
                         }
                     }
                 });
@@ -4162,6 +4260,9 @@ impl AppState {
     }
 
     fn scale_frame_of(&self, fs: &[Feature]) -> Option<DQuat> {
+        if let Some(g) = self.selected_group() {
+            return Some(g.rot);
+        }
         let last = self.selection.last().copied();
         fs.iter().find(|f| Some(f.id) == last).or(fs.first()).map(|f| f.rot)
     }
@@ -4188,26 +4289,84 @@ impl AppState {
         if m.serial / 4 == self.version {
             return None;
         }
-        // after a Mirror the faces on both sides carry the same tags (one
-        // side would move the wrong way): the kernel's model only
-        // (an Array's copies too, each moved its own way round a circle; a
-        // Shell's inner walls carry the step's tags, they would stay behind)
-        if self.doc.features.iter().any(|f| (f.mirror.is_some() || f.array.is_some() || f.shell.is_some()) && f.visible && !f.suspended) {
-            return None;
+        // an Array's shapes are left to the kernel's model (their copies
+        // carry their tags and each moves its own way), a Shell's too (its
+        // inner walls carry the step's tags: they would stay behind). After
+        // a Mirror the faces on the other side move the mirrored way: the
+        // drawer tells them apart (`draw::preview_faces`).
+        let mut off: Vec<FeatureId> = vec![];
+        for f in self.doc.features.iter().filter(|f| f.visible && !f.suspended) {
+            if let Some(a) = &f.array {
+                off.extend(a.sources.iter().copied());
+            }
+            if f.shell.as_ref().is_some_and(|s| !s.faces.is_empty()) {
+                off.push(self.element_of(f.id));
+            }
         }
         // the shapes' frames when the model on screen was asked for
         let (_, then) = self.sent_frames.iter().find(|(s, _)| *s == m.serial)?;
-        let mut out = std::collections::HashMap::new();
+        let mut all = std::collections::HashMap::new();
         for (id, t) in then {
-            // a shape carved out is the part's hole: the kernel's model
-            // shows it, its cage where the pointer takes it
-            let Some(now) = self.doc.feature(*id).filter(|f| f.op != Op::Carve && Some(f.id) != self.form_shown) else { continue };
+            let Some(now) = self.doc.feature(*id).filter(|f| Some(f.id) != self.form_shown && !off.contains(&f.id)) else { continue };
             let x = shape_frame(now) * t.inverse();
             if !x.abs_diff_eq(DMat4::IDENTITY, 1e-9) && x.is_finite() {
-                out.insert(*id, x);
+                all.insert(*id, x);
             }
         }
+        // a shape carved out is the part's hole: the kernel's model shows
+        // it, its cage where the pointer takes it. Unless all it cuts goes
+        // with it as one (a group, a block picked with its holes: one
+        // move, turn or scale for all): then its walls move at once too
+        // (21 nov.: a group moved left its holes' walls behind until the
+        // kernel answered).
+        let boxes = |f: &Feature, x: Option<&DMat4>| -> [(DVec3, DVec3); 2] {
+            let now = f.bounds();
+            let before = match x.map(|x| x.inverse()) {
+                Some(inv) => {
+                    let c = f.corners().map(|p| inv.transform_point3(p));
+                    (c.iter().fold(DVec3::splat(f64::MAX), |a, b| a.min(*b)), c.iter().fold(DVec3::splat(f64::MIN), |a, b| a.max(*b)))
+                }
+                None => now,
+            };
+            [now, before]
+        };
+        let meet = |a: (DVec3, DVec3), b: (DVec3, DVec3)| a.0.cmple(b.1).all() && b.0.cmple(a.1).all();
+        let mut out = std::collections::HashMap::new();
+        for (id, x) in &all {
+            let Some(f) = self.doc.feature(*id) else { continue };
+            if f.op == Op::Carve {
+                let c = boxes(f, Some(x));
+                // (a shape it cuts must go with it: carved out of nothing
+                // whose box it meets, its faces stay the kernel's)
+                let mut with = false;
+                let as_one = self.doc.features.iter().filter(|s| s.id != f.id && s.is_solid() && !s.is_path() && s.visible && s.op != Op::Carve).all(|s| {
+                    let xs = all.get(&s.id);
+                    let b = boxes(s, xs);
+                    if !(meet(b[0], c[0]) || meet(b[1], c[1])) {
+                        return true;
+                    }
+                    with = true;
+                    xs.is_some_and(|m| m.abs_diff_eq(*x, 1e-6))
+                });
+                if !(as_one && with) {
+                    continue;
+                }
+            }
+            out.insert(*id, *x);
+        }
         Some(out)
+    }
+
+    /// The planes of the document's Mirrors (axis, offset), each once.
+    pub fn mirror_planes(&self) -> Vec<(usize, f64)> {
+        let mut out: Vec<(usize, f64)> = vec![];
+        for m in self.doc.features.iter().filter(|f| f.visible && !f.suspended).filter_map(|f| f.mirror.as_ref()) {
+            let p = (m.axis.min(2) as usize, m.offset);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
     }
 
     pub fn end_drag(&mut self) {
@@ -4245,7 +4404,9 @@ impl AppState {
             if self.model.as_ref().map(|m| b.model.serial >= m.serial).unwrap_or(true) {
                 self.picker = Picker::new(&b.model);
                 self.round_ms = b.round_ms;
-                self.model = Some(Arc::new(b.model));
+                let m = Arc::new(b.model);
+                self.picker.start(&m);
+                self.model = Some(m);
                 self.model_gen += 1;
                 self.clamp_rounds();
                 self.check_build();
@@ -4738,11 +4899,11 @@ fn size3(f: &Feature) -> DVec3 {
 }
 
 /// A point in a shape's own frame, divided by its sizes.
-fn to_norm(f: &Feature, p: DVec3) -> DVec3 {
+pub(crate) fn to_norm(f: &Feature, p: DVec3) -> DVec3 {
     (f.rot.inverse() * (p - f.origin)) / size3(f)
 }
 
-fn from_norm(f: &Feature, q: DVec3) -> DVec3 {
+pub(crate) fn from_norm(f: &Feature, q: DVec3) -> DVec3 {
     f.origin + f.rot * (q * size3(f))
 }
 

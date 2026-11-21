@@ -133,6 +133,7 @@
 #include <gp_Ax3.hxx>
 #include <TopoDS_Compound.hxx>
 #include <algorithm>
+#include <mutex>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -170,8 +171,16 @@ static thread_local std::string g_err;
 
 static void set_err(const std::string& s) { g_err = s; }
 
+// One call into OpenCascade at a time. Its fillets keep scratch data in
+// statics: two made at once in two threads now and then failed, or came out
+// smaller (21 nov.: `corner_of_four` and `tension_point_corner`, only when
+// the tests ran side by side on many cores). The kernel process builds in
+// one thread, where this costs nothing.
+static std::recursive_mutex g_occ;
+
 template <class F>
 static auto guard(F f, decltype(f()) fail) -> decltype(f()) {
+    std::lock_guard<std::recursive_mutex> lock(g_occ);
     try {
         return f();
     } catch (const Standard_Failure& e) {
@@ -804,11 +813,74 @@ struct OpAccess : BRepAlgoAPI_BooleanOperation {
     static opencascade::handle<BRepTools_History>& history(BRepAlgoAPI_BooleanOperation& o) { return o.*(&OpAccess::myHistory); }
 };
 
+// The tags of faces whose outline is a line drawn on purpose: an inset left
+// as a line, whose inside lies on the same surface as the face round it.
+// No clean-up makes such a face one with its neighbour (21 nov.: the next
+// shape added anywhere, or a Mirror, took the inset's line away). Given by
+// the kernel before each build, per thread.
+static thread_local std::vector<long long> g_lines;
+
+void focc_keep_lines(const long long* tags, int n) {
+    g_lines.assign(tags, tags + (n > 0 ? n : 0));
+    std::sort(g_lines.begin(), g_lines.end());
+}
+
+// Whether an edge between two faces carrying these tags stays through a
+// clean-up: two pieces of one face (the Knife's line), or a line face and
+// its neighbour.
+static bool kept_between(long long ta, long long tb) {
+    if (ta == tb) return ta >= 0;
+    auto line = [](long long t) { return t >= 0 && std::binary_search(g_lines.begin(), g_lines.end(), t); };
+    return line(ta) || line(tb);
+}
+
 static void simplify_keeping(BRepAlgoAPI_BooleanOperation& op, const FShape* a, const FShape* b) {
     ShapeUpgrade_UnifySameDomain u(op.Shape(), Standard_True, Standard_True, Standard_True);
     u.AllowInternalEdges(Standard_False);
     TopTools_IndexedMapOfShape rm;
     TopExp::MapShapes(op.Shape(), TopAbs_EDGE, rm);
+    // The result's faces by the tags `carry_tags` will give them (the tool's
+    // first, the part's over them), and its edges' faces: a line of an input
+    // is kept only while it still lies between two such faces in the result.
+    // (21 nov.: a curved face extruded. In its tool the top ring and the
+    // inner wall carry one tag; fused, their edge lies between the ring and
+    // the boss's top, which stayed two faces until the next union anywhere
+    // made them one, and a face named meanwhile was gone.)
+    TopTools_IndexedMapOfShape rf;
+    face_map(op.Shape(), rf);
+    std::vector<long long> rt(rf.Extent(), -1);
+    for (const FShape* in : {b, a}) {
+        if (!in) continue;
+        TopTools_IndexedMapOfShape fm;
+        face_map(in->s, fm);
+        for (int i = 1; i <= fm.Extent() && i <= (int)in->tags.size(); i++) {
+            long long t = in->tags[i - 1];
+            if (t < 0) continue;
+            bool any = false;
+            for (TopTools_ListOfShape::Iterator it(op.Modified(fm(i))); it.More(); it.Next()) {
+                int j = rf.FindIndex(it.Value());
+                if (j > 0) {
+                    rt[j - 1] = t;
+                    any = true;
+                }
+            }
+            if (!any) {
+                int j = rf.FindIndex(fm(i));
+                if (j > 0) rt[j - 1] = t;
+            }
+        }
+    }
+    TopTools_IndexedDataMapOfShapeListOfShape re2f;
+    TopExp::MapShapesAndAncestors(op.Shape(), TopAbs_EDGE, TopAbs_FACE, re2f);
+    auto still = [&](const TopoDS_Shape& e) {
+        int k = re2f.FindIndex(e);
+        if (k < 1) return true;
+        const TopTools_ListOfShape& fl = re2f(k);
+        if (fl.Extent() != 2) return true;
+        int fa = rf.FindIndex(fl.First()), fb = rf.FindIndex(fl.Last());
+        if (fa < 1 || fb < 1) return true;
+        return kept_between(rt[fa - 1], rt[fb - 1]);
+    };
     for (const FShape* in : {a, b}) {
         if (!in || in->tags.empty()) continue;
         TopTools_IndexedMapOfShape fm;
@@ -821,11 +893,11 @@ static void simplify_keeping(BRepAlgoAPI_BooleanOperation& op, const FShape* a, 
             int fa = fm.FindIndex(fl.First()), fb = fm.FindIndex(fl.Last());
             if (fa < 1 || fb < 1 || fa > (int)in->tags.size() || fb > (int)in->tags.size()) continue;
             long long ta = in->tags[fa - 1], tb = in->tags[fb - 1];
-            if (ta < 0 || ta != tb) continue;
+            if (!kept_between(ta, tb)) continue;
             const TopoDS_Shape& e = e2f.FindKey(i);
-            if (rm.Contains(e)) u.KeepShape(e);
+            if (rm.Contains(e) && still(e)) u.KeepShape(e);
             for (TopTools_ListOfShape::Iterator it(op.Modified(e)); it.More(); it.Next())
-                if (rm.Contains(it.Value())) u.KeepShape(it.Value());
+                if (rm.Contains(it.Value()) && still(it.Value())) u.KeepShape(it.Value());
         }
     }
     u.Build();
@@ -1542,7 +1614,13 @@ static opencascade::handle<Geom_BSplineSurface> ten_general_surf(const TenFace& 
     return g;
 }
 
-FShape* focc_fillet_tension(const FShape* s, const long long* tags, const double* rhos, int n, int* done, int* total, double* tight) {
+// `before`: the shape the fillets were made on (may be null). A face of an
+// asked fillet that was there already, as it is now, is another copy's (an
+// Array's copies carry the original's tags): it has its tension, it is left
+// alone and not counted (made conic again it lost its exact surface each
+// time, and could fail: "tension on 1 of 2 faces"). A face still round (a
+// cylinder, a torus, a sphere) is tried again as before.
+FShape* focc_fillet_tension(const FShape* s, const FShape* before, const long long* tags, const double* rhos, int n, int* done, int* total, double* tight) {
     return guard(
         [&]() -> FShape* {
             for (int k = 0; k < n; k++) done[k] = total[k] = 0;
@@ -1553,6 +1631,36 @@ FShape* focc_fillet_tension(const FShape* s, const long long* tags, const double
             }
             TopTools_IndexedMapOfShape fm;
             face_map(s->s, fm);
+            // the asked fillets' faces before: tag, area, centre
+            struct Print { long long tag; double area; gp_Pnt c; };
+            auto print_of = [](const TopoDS_Face& f, long long t) {
+                GProp_GProps g;
+                BRepGProp::SurfaceProperties(f, g);
+                return Print{t, g.Mass(), g.CentreOfMass()};
+            };
+            std::vector<Print> olds;
+            if (before) {
+                TopTools_IndexedMapOfShape bm;
+                face_map(before->s, bm);
+                for (int i = 1; i <= bm.Extent(); i++) {
+                    long long t = i - 1 < (int)before->tags.size() ? before->tags[i - 1] : -1;
+                    bool asked = false;
+                    for (int k = 0; k < n; k++) asked |= tags[k] == t;
+                    if (!asked) continue;
+                    GeomAbs_SurfaceType ty = BRepAdaptor_Surface(TopoDS::Face(bm(i)), Standard_False).GetType();
+                    if (ty == GeomAbs_Cylinder || ty == GeomAbs_Torus || ty == GeomAbs_Sphere) continue;
+                    olds.push_back(print_of(TopoDS::Face(bm(i)), t));
+                }
+            }
+            auto old_face = [&](const TopoDS_Face& f, long long t) {
+                if (olds.empty()) return false;
+                GeomAbs_SurfaceType ty = BRepAdaptor_Surface(f, Standard_False).GetType();
+                if (ty == GeomAbs_Cylinder || ty == GeomAbs_Torus || ty == GeomAbs_Sphere) return false;
+                Print p = print_of(f, t);
+                for (const Print& o : olds)
+                    if (o.tag == t && std::abs(o.area - p.area) <= 1e-6 * std::max(1.0, o.area) && o.c.Distance(p.c) <= 1e-6) return true;
+                return false;
+            };
             TopTools_IndexedDataMapOfShapeListOfShape e2f;
             TopExp::MapShapesAndAncestors(s->s, TopAbs_EDGE, TopAbs_FACE, e2f);
             TopTools_IndexedDataMapOfShapeListOfShape v2e;
@@ -1568,6 +1676,7 @@ FShape* focc_fillet_tension(const FShape* s, const long long* tags, const double
                 for (int k = 0; k < n && which < 0; k++)
                     if (tags[k] == t) which = k;
                 if (which < 0) continue;
+                if (old_face(TopoDS::Face(fm(i)), t)) continue;
                 total[which]++;
                 TenFace tf;
                 tf.f = TopoDS::Face(fm(i));
@@ -3099,7 +3208,84 @@ static FShape* unify_across(FShape* res, const TopTools_MapOfShape& across, cons
 // shorter: the prism the face sweeps fused (d > 0) or cut (d < 0), its
 // sides then made one with the faces they extend. Tags kept: the moved
 // face its own, each side its neighbour's.
+static FShape* move_face_of_solid(const FShape* s, int index, double d);
+
+// (A part of several lumps: the move is made on the lump that holds the
+// face, the others put back beside it as they are. The union below must
+// give one solid, so on a part with another object beside it every such
+// move failed, "the face could not be moved out": found on 21 nov. by the
+// islands battery with a Mirror, where one history failed and the island,
+// alone, did not.)
 FShape* focc_move_face(const FShape* s, int index, double d) {
+    return guard(
+        [&]() -> FShape* {
+            std::vector<TopoDS_Shape> lumps;
+            std::function<void(const TopoDS_Shape&)> flat = [&](const TopoDS_Shape& x) {
+                if (x.ShapeType() == TopAbs_COMPOUND || x.ShapeType() == TopAbs_COMPSOLID) {
+                    for (TopoDS_Iterator it(x); it.More(); it.Next()) flat(it.Value());
+                } else {
+                    lumps.push_back(x);
+                }
+            };
+            flat(s->s);
+            if (lumps.size() <= 1) return move_face_of_solid(s, index, d);
+            TopTools_IndexedMapOfShape fm0;
+            face_map(s->s, fm0);
+            if (index < 0 || index >= fm0.Extent()) {
+                set_err("no such face");
+                return nullptr;
+            }
+            int at = -1, local = -1;
+            for (size_t k = 0; k < lumps.size() && at < 0; k++) {
+                TopTools_IndexedMapOfShape lf;
+                face_map(lumps[k], lf);
+                int j = lf.FindIndex(fm0(index + 1));
+                if (j > 0) {
+                    at = (int)k;
+                    local = j - 1;
+                }
+            }
+            if (at < 0) return move_face_of_solid(s, index, d);
+            // that lump alone, with its faces' tags
+            std::unique_ptr<FShape> one(wrap(lumps[at]));
+            if (!one) return nullptr;
+            {
+                TopTools_IndexedMapOfShape lf;
+                face_map(lumps[at], lf);
+                one->tags.assign(lf.Extent(), -1);
+                for (int i = 1; i <= lf.Extent(); i++) {
+                    int k = fm0.FindIndex(lf(i));
+                    if (k > 0 && k - 1 < (int)s->tags.size()) one->tags[i - 1] = s->tags[k - 1];
+                }
+            }
+            std::unique_ptr<FShape> moved(move_face_of_solid(one.get(), local, d));
+            if (!moved) return nullptr;
+            // back among the others, in their order
+            BRep_Builder bb;
+            TopoDS_Compound c;
+            bb.MakeCompound(c);
+            for (size_t k = 0; k < lumps.size(); k++) bb.Add(c, (int)k == at ? moved->s : lumps[k]);
+            FShape* r = wrap(c);
+            if (!r) return nullptr;
+            TopTools_IndexedMapOfShape rf, mf;
+            face_map(c, rf);
+            face_map(moved->s, mf);
+            r->tags.assign(rf.Extent(), -1);
+            for (int i = 1; i <= rf.Extent(); i++) {
+                int j = mf.FindIndex(rf(i));
+                if (j > 0) {
+                    if (j - 1 < (int)moved->tags.size()) r->tags[i - 1] = moved->tags[j - 1];
+                    continue;
+                }
+                int k = fm0.FindIndex(rf(i));
+                if (k > 0 && k - 1 < (int)s->tags.size()) r->tags[i - 1] = s->tags[k - 1];
+            }
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
+static FShape* move_face_of_solid(const FShape* s, int index, double d) {
     return guard(
         [&]() -> FShape* {
             TopTools_IndexedMapOfShape fm0, fm;
@@ -4616,6 +4802,92 @@ int focc_face_box(const FShape* s, int index, double* out) {
         -1);
 }
 
+// A shape with its faces of one surface made one, as a union or a cut
+// leaves the whole part (`simplify_keeping`: the edges between two faces of
+// one tag kept, the Knife's lines). The tags follow: of the faces made one,
+// the last one's, as `carry_tags` leaves them after a boolean. (The kernel
+// builds the part island by island: a boolean made in one island joined the
+// faces of the others too when the part was one history.)
+FShape* focc_simplified(const FShape* s) {
+    return guard(
+        [&]() -> FShape* {
+            ShapeUpgrade_UnifySameDomain u(s->s, Standard_True, Standard_True, Standard_True);
+            u.AllowInternalEdges(Standard_False);
+            TopTools_IndexedMapOfShape fin;
+            face_map(s->s, fin);
+            if (!s->tags.empty()) {
+                TopTools_IndexedDataMapOfShapeListOfShape e2f;
+                TopExp::MapShapesAndAncestors(s->s, TopAbs_EDGE, TopAbs_FACE, e2f);
+                for (int i = 1; i <= e2f.Extent(); i++) {
+                    const TopTools_ListOfShape& fl = e2f(i);
+                    if (fl.Extent() != 2 || fl.First().IsSame(fl.Last())) continue;
+                    int fa = fin.FindIndex(fl.First()), fb = fin.FindIndex(fl.Last());
+                    if (fa < 1 || fb < 1 || fa > (int)s->tags.size() || fb > (int)s->tags.size()) continue;
+                    long long ta = s->tags[fa - 1], tb = s->tags[fb - 1];
+                    if (!kept_between(ta, tb)) continue;
+                    u.KeepShape(e2f.FindKey(i));
+                }
+            }
+            u.Build();
+            TopoDS_Shape out = u.Shape();
+            if (out.IsNull()) {
+                set_err("nothing left of it");
+                return nullptr;
+            }
+            FShape* r = wrap(out);
+            if (!r) return nullptr;
+            TopTools_IndexedMapOfShape fout;
+            face_map(out, fout);
+            r->tags.assign(fout.Extent(), -1);
+            opencascade::handle<BRepTools_History> h = u.History();
+            for (int i = 1; i <= fin.Extent(); i++) {
+                long long t = i - 1 < (int)s->tags.size() ? s->tags[i - 1] : -1;
+                if (t < 0) continue;
+                const TopoDS_Shape& f = fin(i);
+                bool found = false;
+                if (!h.IsNull())
+                    for (TopTools_ListIteratorOfListOfShape it(h->Modified(f)); it.More(); it.Next()) {
+                        int j = fout.FindIndex(it.Value());
+                        if (j > 0) {
+                            r->tags[j - 1] = t;
+                            found = true;
+                        }
+                    }
+                if (!found) {
+                    int j = fout.FindIndex(f);
+                    if (j > 0) r->tags[j - 1] = t;
+                }
+            }
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
+// The boxes of a shape's lumps (each solid, and each shell or face beside
+// them: what a compound holds, compounds opened): 6 numbers each (min, max),
+// from the geometry (no mesh needed; a spline's box is its poles', a little
+// wide). Returns how many there are; fills at most `cap` of them.
+int focc_lump_boxes(const FShape* s, double* out, int cap) {
+    return guard(
+        [&] {
+            int n = 0;
+            std::function<void(const TopoDS_Shape&)> flat = [&](const TopoDS_Shape& x) {
+                if (x.ShapeType() == TopAbs_COMPOUND || x.ShapeType() == TopAbs_COMPSOLID) {
+                    for (TopoDS_Iterator it(x); it.More(); it.Next()) flat(it.Value());
+                    return;
+                }
+                Bnd_Box b;
+                BRepBndLib::Add(x, b, Standard_False);
+                if (b.IsVoid()) return;
+                if (n < cap) b.Get(out[6 * n], out[6 * n + 1], out[6 * n + 2], out[6 * n + 3], out[6 * n + 4], out[6 * n + 5]);
+                n++;
+            };
+            flat(s->s);
+            return n;
+        },
+        -1);
+}
+
 void focc_set_tags(FShape* s, const long long* tags, int n) { s->tags.assign(tags, tags + (n > 0 ? n : 0)); }
 
 long long focc_face_tag(const FShape* s, int index) { return index >= 0 && index < (int)s->tags.size() ? s->tags[index] : -1; }
@@ -5059,6 +5331,25 @@ struct FBuf {
     std::vector<uint8_t> b;
 };
 
+// The part meshed lump by lump (each solid, or sheet beside them), a big
+// lump at a chord that grows with its size past 100 mm: `defl` is right for
+// a part of some centimetres, and on a sculpted form of 300 mm it made 125
+// of the scene's 174 thousand triangles (Romain's scene of 21 nov.: 3 s of
+// meshing whenever that form changed). The angle still keeps small rounds
+// round. A lump meshed before at the same chord keeps its triangles.
+static void mesh_lumps(const TopoDS_Shape& s, double defl, double angle) {
+    if (s.IsNull()) return;
+    if (s.ShapeType() == TopAbs_COMPOUND || s.ShapeType() == TopAbs_COMPSOLID) {
+        for (TopoDS_Iterator it(s); it.More(); it.Next()) mesh_lumps(it.Value(), defl, angle);
+        return;
+    }
+    Bnd_Box b;
+    BRepBndLib::Add(s, b, Standard_False);
+    double k = 1.0;
+    if (!b.IsVoid()) k = std::min(10.0, std::max(1.0, std::sqrt(b.SquareExtent()) / 100.0));
+    BRepMesh_IncrementalMesh mesher(s, defl * k, Standard_False, angle, Standard_True);
+}
+
 // Everything the app shows and picks, in one little-endian buffer:
 //   u32 faces, each: i64 tag, i32 kind, f64 info[13] (see face_info)
 //   u32 vertices, f32 xyz each, then f32 normals
@@ -5071,7 +5362,7 @@ struct FBuf {
 FBuf* focc_topo(const FShape* s, double defl, double angle) {
     return guard(
         [&]() -> FBuf* {
-            BRepMesh_IncrementalMesh mesher(s->s, defl, Standard_False, angle, Standard_True);
+            mesh_lumps(s->s, defl, angle);
             TopTools_IndexedMapOfShape faces;
             face_map(s->s, faces);
             Buf out;

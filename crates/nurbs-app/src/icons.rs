@@ -120,6 +120,11 @@ pub enum Icon {
     Subdivide,
     SmoothMesh,
     ToSculpt,
+    /// A group: two shapes inside the corners of a box.
+    Group,
+    /// A group closed (a padlock shut) or open (its shackle free).
+    Lock,
+    Unlock,
 }
 
 struct Pen<'a> {
@@ -724,6 +729,27 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 })
                 .collect();
             pen.line(&pts);
+        }
+        Icon::Group => {
+            for (cx, cy, dx, dy) in [(2.5, 2.5, 1.0, 1.0), (17.5, 2.5, -1.0, 1.0), (17.5, 17.5, -1.0, -1.0), (2.5, 17.5, 1.0, -1.0)] {
+                pen.line(&[(cx + 3.6 * dx, cy), (cx, cy), (cx, cy + 3.6 * dy)]);
+            }
+            pen.closed(&[(5.6, 5.6), (11.2, 5.6), (11.2, 11.2), (5.6, 11.2)]);
+            pen.circle(12.2, 12.2, 2.9);
+        }
+        Icon::Lock | Icon::Unlock => {
+            pen.closed(&[(4.5, 9.2), (15.5, 9.2), (15.5, 17.0), (4.5, 17.0)]);
+            pen.dot(10.0, 13.1, 1.15);
+            if icon == Icon::Lock {
+                pen.arc(10.0, 6.6, 3.4, 3.8, PI, 2.0 * PI);
+                pen.line(&[(6.6, 6.6), (6.6, 9.2)]);
+                pen.line(&[(13.4, 6.6), (13.4, 9.2)]);
+            } else {
+                // the shackle swung open: its left leg holds, the right end is free
+                pen.arc(10.0, 5.2, 3.4, 3.2, PI, 2.0 * PI);
+                pen.line(&[(6.6, 5.2), (6.6, 9.2)]);
+                pen.line(&[(13.4, 5.2), (13.4, 6.4)]);
+            }
         }
         Icon::Scale => {
             // a small square growing into a big one
