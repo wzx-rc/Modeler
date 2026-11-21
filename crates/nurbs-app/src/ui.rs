@@ -150,6 +150,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         inspector(ctx, st, screen);
     }
     context_bar(ctx, st);
+    group_bar(ctx, st);
     align_window(ctx, st);
     op_window(ctx, st);
     files_dialog(ctx, st, screen);
@@ -886,6 +887,8 @@ fn step_icon(label: &str) -> (Icon, Color32) {
         (Icon::Extrude, FACE_SEL)
     } else if has(&["shell", "open a face", "close a face"]) {
         (Icon::Shell, TEXT2())
+    } else if has(&["group"]) {
+        (Icon::Group, TEXT2())
     } else if has(&["mirror"]) {
         (Icon::Mirror, TEXT2())
     } else if has(&["array"]) {
@@ -1346,17 +1349,19 @@ fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 // ----------------------------------------------------- context bar
 
 /// The actions of the selection, floating just above it.
-fn context_bar(ctx: &egui::Context, st: &mut AppState) {
+/// Where the selection's small bar sits (its bottom centre): above the
+/// selected shapes' box on screen. None when it does not show.
+fn context_bar_at(st: &AppState) -> Option<egui::Pos2> {
     if st.tool != Tool::Select || st.creation.is_some() || st.drag.is_some() || st.selection.is_empty() {
-        return;
+        return None;
     }
     // an inset or extrusion, an Array: their handles are there instead (Del
     // deletes them; the bar sat on an Array's first copy, over its grip)
     if st.selected_push().is_some() || st.selected_array().is_some() {
-        return;
+        return None;
     }
     let b = st.doc.features.iter().filter(|f| st.selection.contains(&f.id)).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
-    let Some((lo, hi)) = b else { return };
+    let (lo, hi) = b?;
     let view = st.view();
     let mut top = f32::INFINITY;
     let (mut x0, mut x1) = (f32::INFINITY, f32::NEG_INFINITY);
@@ -1369,11 +1374,16 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
         }
     }
     if !top.is_finite() {
-        return;
+        return None;
     }
     let vr = st.view_rect;
-    // below the hint line at the top of the view
-    let at = pos2(((x0 + x1) * 0.5).clamp(vr[0] + 120.0, vr[2] - 120.0), (top - 16.0).clamp(vr[1] + 84.0, vr[3] - 40.0));
+    // below the hint line at the top of the view (a group's bar goes above it)
+    let room = if st.shown_group().is_some() { 126.0 } else { 84.0 };
+    Some(pos2(((x0 + x1) * 0.5).clamp(vr[0] + 120.0, vr[2] - 120.0), (top - 16.0).clamp(vr[1] + room, vr[3] - 40.0)))
+}
+
+fn context_bar(ctx: &egui::Context, st: &mut AppState) {
+    let Some(at) = context_bar_at(st) else { return };
     egui::Area::new(Id::new("ctx-bar")).order(Order::Middle).pivot(Align2::CENTER_BOTTOM).fixed_pos(at).show(ctx, |ui| {
         island().inner_margin(Margin::same(3)).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1393,6 +1403,14 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                     if icon_btn(ui, Icon::Duplicate, false, "Duplicate (Ctrl+D)", 28.0).clicked() {
                         st.duplicate_selected();
                     }
+                    // several shapes that are not one group yet
+                    if st.can_group() && st.selection.len() > 1 {
+                        let r = icon_btn(ui, Icon::Group, false, "Group (Ctrl+G): these shapes in one group with its own transform, closed (a click takes them all)", 28.0);
+                        ui.ctx().data_mut(|d| d.insert_temp(Id::new("ctx-group"), r.rect.center()));
+                        if r.clicked() {
+                            st.group_selection();
+                        }
+                    }
                     if icon_btn(ui, Icon::Align, st.tool == Tool::Align, "Align (Alt+A): then click the shape to align to", 28.0).clicked() {
                         st.begin_align();
                     }
@@ -1411,6 +1429,87 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                 }
                 if icon_btn(ui, Icon::Trash, false, "Delete (Del)", 28.0).clicked() {
                     st.delete_selected();
+                }
+            });
+        });
+    });
+}
+
+/// A group's small bar above it in the view (Romain 21 nov., 12 h 37:
+/// "quand tu sélectionnes un groupe, il y a un petit pop-up au-dessus,
+/// groupe est fermé"): its name, Closed or Open (a click opens it or
+/// closes it again), Ungroup. Shown for the selected group, and for the
+/// open group a selected shape is in.
+fn group_bar(ctx: &egui::Context, st: &mut AppState) {
+    if st.tool != Tool::Select || st.creation.is_some() || st.drag.is_some() || st.align.is_some() || st.marking.is_open() {
+        return;
+    }
+    let Some(g) = st.shown_group().cloned() else { return };
+    let Some(corners) = st.group_corners(&g) else { return };
+    let view = st.view();
+    let mut top = f32::INFINITY;
+    let (mut x0, mut x1) = (f32::INFINITY, f32::NEG_INFINITY);
+    for c in corners {
+        if let Some(p) = view.project(c.as_vec3()) {
+            top = top.min(p[1]);
+            x0 = x0.min(p[0]);
+            x1 = x1.max(p[0]);
+        }
+    }
+    if !top.is_finite() {
+        return;
+    }
+    let vr = st.view_rect;
+    let mut at = pos2(((x0 + x1) * 0.5).clamp(vr[0] + 130.0, vr[2] - 130.0), (top - 14.0).clamp(vr[1] + 84.0, vr[3] - 82.0));
+    // above the selection's own bar when they would meet
+    if let Some(b) = context_bar_at(st) {
+        if (b.x - at.x).abs() < 250.0 && (b.y - at.y).abs() < 42.0 || (b.x - at.x).abs() < 250.0 && at.y > b.y {
+            at.y = b.y - 42.0;
+        }
+    }
+    egui::Area::new(Id::new("group-bar")).order(Order::Middle).pivot(Align2::CENTER_BOTTOM).fixed_pos(at).show(ctx, |ui| {
+        island().inner_margin(Margin::same(3)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let n = g.members.len();
+                let name = ui.painter().layout_no_wrap(g.name.clone(), semibold(12.5), TEXT());
+                let count = ui.painter().layout_no_wrap(format!("{n} shape{}", if n > 1 { "s" } else { "" }), regular(11.5), TEXT2());
+                let w = 30.0 + name.size().x.min(150.0) + 8.0 + count.size().x + 8.0;
+                let (r, _) = ui.allocate_exact_size(vec2(w, 28.0), Sense::hover());
+                icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 15.0, r.center().y), vec2(15.0, 15.0)), Icon::Group, TEXT());
+                let nx = r.min.x + 30.0;
+                ui.painter().with_clip_rect(Rect::from_min_max(pos2(nx, r.min.y), pos2(nx + 150.0, r.max.y))).galley(pos2(nx, r.center().y - name.size().y * 0.5), name.clone(), TEXT());
+                ui.painter().galley(pos2(nx + name.size().x.min(150.0) + 8.0, r.center().y - count.size().y * 0.5), count, TEXT2());
+                let (sr, _) = ui.allocate_exact_size(vec2(7.0, 28.0), Sense::hover());
+                ui.painter().rect_filled(Rect::from_center_size(sr.center(), vec2(1.0, 18.0)), 0.0, DIVIDER());
+                // Closed / Open: the state, and the switch
+                let label = if g.open { "Open" } else { "Closed" };
+                let lg = ui.painter().layout_no_wrap(label.to_string(), semibold(12.0), TEXT());
+                let (r, resp) = ui.allocate_exact_size(vec2(34.0 + lg.size().x + 8.0, 28.0), Sense::click());
+                let on = g.open;
+                let bg = match (on, resp.hovered()) {
+                    (true, _) => accent_bg(),
+                    (false, true) => RAISED(),
+                    _ => Color32::TRANSPARENT,
+                };
+                ui.painter().rect(r, 7.0, bg, Stroke::new(1.0, if on { accent_border() } else { DIVIDER() }), StrokeKind::Inside);
+                let fg = if on { accent() } else { TEXT() };
+                icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 16.0, r.center().y), vec2(15.0, 15.0)), if on { Icon::Unlock } else { Icon::Lock }, fg);
+                ui.painter().galley(pos2(r.min.x + 30.0, r.center().y - lg.size().y * 0.5), lg, fg);
+                ui.ctx().data_mut(|d| d.insert_temp(Id::new("group-bar-toggle"), r.center()));
+                let tip = if on { "Open: its shapes are picked and moved one by one. Click: close it again" } else { "Closed: a click on one of its shapes takes the whole group. Click: open it, to pick its shapes one by one" };
+                if resp.on_hover_text(tip).clicked() {
+                    st.set_group_open(g.id, !g.open);
+                }
+                let ug = ui.painter().layout_no_wrap("Ungroup".to_string(), regular(12.0), TEXT2());
+                let (r, resp) = ui.allocate_exact_size(vec2(ug.size().x + 18.0, 28.0), Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(r, 7.0, RAISED());
+                }
+                ui.painter().galley(pos2(r.min.x + 9.0, r.center().y - ug.size().y * 0.5), ug, if resp.hovered() { TEXT() } else { TEXT2() });
+                ui.ctx().data_mut(|d| d.insert_temp(Id::new("group-bar-ungroup"), r.center()));
+                if resp.on_hover_text("Ungroup (Ctrl+Shift+G): the group goes, its shapes stay where they are").clicked() {
+                    st.ungroup(g.id);
                 }
             });
         });
@@ -1464,6 +1563,10 @@ fn op_pop(st: &AppState) -> Option<OpPop> {
     // two curves or more: a 2D boolean (closed) or a loft
     if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.feature(*id).map(|f| f.is_path()).unwrap_or(false)) {
         return Some(OpPop::Curves);
+    }
+    // a group (of one shape): its transform is in the panel
+    if st.selected_group().is_some() {
+        return None;
     }
     let f = st.single()?;
     Some(if !f.is_solid() || f.is_path() || f.loft.is_some() { OpPop::Step(f.id) } else { OpPop::Shape(f.id) })
@@ -2230,7 +2333,7 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         fs.iter().any(|f| f.is_path()),
         fs.iter().any(|f| !f.is_solid() && !f.is_path()),
     ];
-    let extra = groups.iter().filter(|g| **g).count() as f32 * 25.0 + if st.doc.reference.is_some() { 53.0 } else { 0.0 };
+    let extra = groups.iter().filter(|g| **g).count() as f32 * 25.0 + if st.doc.reference.is_some() { 53.0 } else { 0.0 } + if st.doc.groups.is_empty() { 0.0 } else { 25.0 + st.doc.groups.len() as f32 * 29.0 };
     let tree_h = if st.settings.show_tree { (rows * 28.0 + 34.0 + extra).clamp(96.0, (total * 0.36).max(120.0)) } else { 0.0 };
     let off = panel_offset(ctx, "props");
     egui::Area::new(Id::new("props")).order(Order::Middle).fixed_pos(pos2(screen.min.x + EDGE, top) + off).show(ctx, |ui| {
@@ -2270,11 +2373,20 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     let v = st.vert_sel[0];
                     ui.label(egui::RichText::new(format!("X {}  Y {}  Z {} mm", fmt_mm(v.x as f32), fmt_mm(v.y as f32), fmt_mm(v.z as f32))).font(regular(12.0)).color(TEXT2()));
                     pop_note(ui);
+                } else if st.selected_group().is_some() {
+                    group_properties(ui, st);
                 } else if st.single().is_some() {
                     properties(ui, st);
                 } else if !st.selection.is_empty() {
                     ui.label(egui::RichText::new(format!("{} shapes selected", st.selection.len())).font(semibold(14.0)).color(TEXT()));
                     ui.label(egui::RichText::new("Move them with the arrows, or delete them (Del)").font(regular(12.0)).color(TEXT2()));
+                    if st.can_group() {
+                        ui.add_space(4.0);
+                        let w = ui.available_width();
+                        if secondary_btn(ui, "Group  ·  Ctrl + G", w).on_hover_text("These shapes in one group with its own transform, closed: a click takes them all").clicked() {
+                            st.group_selection();
+                        }
+                    }
                 } else {
                     defaults(ui, st);
                 }
@@ -2343,13 +2455,14 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             ui.add_space(2.0);
         }
         reference_rows(ui, st);
+        group_rows(ui, st, &ops_of, focus);
         for (gi, (title, keep)) in groups.iter().enumerate() {
             // the last group: operations whose shape cannot be told
             // a 2D boolean's curves under it, not on their own
             let members: Vec<&Feature> = if *title == "OPERATIONS" {
                 feats.iter().filter(|f| !f.is_solid() && !f.is_path() && st.owner_of(f.id).is_none()).collect()
             } else {
-                feats.iter().filter(|f| keep(f) && (*title != "CURVES" || st.doc.boolean_of(f.id).is_none())).collect()
+                feats.iter().filter(|f| keep(f) && (*title != "CURVES" || st.doc.boolean_of(f.id).is_none()) && st.doc.group_of(f.id).is_none()).collect()
             };
             if members.is_empty() {
                 continue;
@@ -2377,6 +2490,127 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             ui.add_space(3.0);
         }
     });
+}
+
+/// The outliner's GROUPS (Romain 21 nov.: "sous la même forme que Maya,
+/// une petite flèche qui dit que les 3 objets sont dans un groupe"): each
+/// group a row with its arrow, its shapes under it, indented. The row
+/// selects the group; its padlock opens or closes it.
+fn group_rows(ui: &mut Ui, st: &mut AppState, ops_of: &dyn Fn(&AppState, FeatureId) -> usize, focus: Option<FeatureId>) {
+    let groups = st.doc.groups.clone();
+    if groups.is_empty() {
+        return;
+    }
+    let fid = Id::new("tree-group-groups");
+    let folded = ui.data(|d| d.get_temp::<bool>(fid)).unwrap_or(false);
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+    let p = ui.painter();
+    icons::paint(p, Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(10.0, 10.0)), if folded { Icon::ChevronRight } else { Icon::Chevron }, TEXT2());
+    p.text(pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, "GROUPS", semibold(10.0), if resp.hovered() { TEXT() } else { TEXT2() });
+    p.text(pos2(r.max.x - 6.0, r.center().y), Align2::RIGHT_CENTER, groups.len().to_string(), regular(11.0), TEXT2());
+    if resp.clicked() {
+        ui.data_mut(|d| d.insert_temp(fid, !folded));
+    }
+    if folded {
+        return;
+    }
+    let selected_group = st.selected_group().map(|g| g.id);
+    for g in groups {
+        let gid = Id::new(("tree-group-fold", g.id));
+        let shut = ui.data(|d| d.get_temp::<bool>(gid)).unwrap_or(false);
+        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+        ui.ctx().data_mut(|d| d.insert_temp(Id::new(("group-row", g.id)), r.center()));
+        let selected = selected_group == Some(g.id);
+        let lit = !g.open && st.hover_feature.is_some_and(|h| g.members.contains(&h));
+        let shown = g.members.iter().any(|m| st.doc.feature(*m).is_some_and(|f| f.visible));
+        let dim = if shown { 1.0 } else { 0.4 };
+        let p = ui.painter();
+        if selected {
+            p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+        } else if resp.hovered() || lit {
+            p.rect_filled(r, 6.0, RAISED());
+        }
+        // its arrow (Maya): its shapes shown under it or not
+        let ar = Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(10.0, 10.0));
+        let aresp = ui.interact(ar.expand(5.0), Id::new(("group-arrow", g.id)), Sense::click());
+        icons::paint(ui.painter(), ar, if shut { Icon::ChevronRight } else { Icon::Chevron }, if aresp.hovered() { TEXT() } else { TEXT2() });
+        let p = ui.painter();
+        let x0 = r.min.x + 18.0;
+        let br = Rect::from_min_size(pos2(x0, r.center().y - 8.0), vec2(16.0, 16.0));
+        p.rect_filled(br, 4.0, tint(TEXT(), 0.12 * dim));
+        icons::paint(p, br.shrink(2.0), Icon::Group, tint(TEXT(), dim));
+        let name_color = if selected { TEXT_STRONG() } else { tint(TEXT(), dim) };
+        let n = g.members.len();
+        let info_g = p.layout_no_wrap(format!("{n} shape{}", if n > 1 { "s" } else { "" }), regular(12.0), tint(TEXT2(), dim));
+        let info_x = r.max.x - 62.0 - info_g.size().x;
+        p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
+        let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
+        let mut job = egui::text::LayoutJob::single_section(g.name.clone(), egui::TextFormat::simple(if selected { semibold(13.0) } else { regular(13.0) }, name_color));
+        job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+        let name_g = ui.painter().layout_job(job);
+        ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
+        // closed or open, then the eye
+        let lr = Rect::from_center_size(pos2(r.max.x - 42.0, r.center().y), vec2(15.0, 15.0));
+        let lresp = ui.interact(lr.expand(5.0), Id::new(("group-lock", g.id)), Sense::click());
+        if g.open {
+            ui.painter().rect_filled(lr.expand(3.0), 4.0, accent_bg());
+        }
+        icons::paint(ui.painter(), lr, if g.open { Icon::Unlock } else { Icon::Lock }, if g.open { accent() } else { tint(TEXT2(), if lresp.hovered() { 1.0 } else { 0.8 }) });
+        let lresp = lresp.on_hover_text(if g.open { "Open: its shapes are picked one by one. Click: close it" } else { "Closed: a click takes the whole group. Click: open it" });
+        let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
+        let eresp = ui.interact(er.expand(6.0), Id::new(("group-eye", g.id)), Sense::click()).on_hover_text("Show / hide its shapes");
+        icons::paint(ui.painter(), er, if shown { Icon::Eye } else { Icon::EyeOff }, tint(TEXT2(), 0.8));
+        resp.context_menu(|ui| {
+            ui.set_min_width(160.0);
+            ui.spacing_mut().button_padding = vec2(8.0, 3.0);
+            ui.spacing_mut().interact_size.y = 24.0;
+            ui.style_mut().override_font_id = Some(regular(12.5));
+            if ui.button(if g.open { "Close" } else { "Open" }).clicked() {
+                st.set_group_open(g.id, !g.open);
+                ui.close();
+            }
+            if ui.button("Ungroup").clicked() {
+                st.ungroup(g.id);
+                ui.close();
+            }
+            if ui.button(if shown { "Hide" } else { "Show" }).clicked() {
+                st.toggle_group_visible(g.id);
+                ui.close();
+            }
+            if ui.button("Delete").clicked() {
+                st.set_sel_mode(SelMode::Object);
+                st.select_group(g.id, false);
+                st.delete_selected();
+                ui.close();
+            }
+        });
+        if aresp.clicked() {
+            ui.data_mut(|d| d.insert_temp(gid, !shut));
+        } else if lresp.clicked() {
+            st.set_group_open(g.id, !g.open);
+        } else if eresp.clicked() {
+            st.toggle_group_visible(g.id);
+        } else if resp.clicked() {
+            let add = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
+            st.set_sel_mode(SelMode::Object);
+            st.select_group(g.id, add);
+        }
+        if shut {
+            continue;
+        }
+        for m in &g.members {
+            let Some(f) = st.doc.feature(*m).cloned() else { continue };
+            let n = ops_of(st, f.id);
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.vertical(|ui| tree_row(ui, st, &f, n, focus == Some(f.id)));
+            });
+            if f.shape_bool.is_some() {
+                operand_rows(ui, st, &f, 2);
+            }
+        }
+    }
+    ui.add_space(3.0);
 }
 
 /// A 2D boolean's curves in the outliner, under it, indented.
@@ -2511,11 +2745,16 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
     let w = ui.available_width();
     let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
     ui.ctx().data_mut(|d| d.insert_temp(Id::new(("row", f.id)), r.center()));
-    let selected = st.is_selected(f.id);
+    // a group selected: its row is the one selected (Maya), its shapes'
+    // rows only lit
+    let in_group = st.selected_group().is_some_and(|g| g.members.contains(&f.id));
+    let selected = st.is_selected(f.id) && !in_group;
     let hovered_3d = st.hover_feature == Some(f.id);
     let p = ui.painter();
     if selected {
         p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+    } else if in_group {
+        p.rect_filled(r, 6.0, RAISED());
     } else if focused {
         p.rect(r, 6.0, RAISED(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
     } else if resp.hovered() || hovered_3d {
@@ -2590,7 +2829,12 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
             st.edge_sel.clear();
         }
         let add = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
-        st.select(Some(f.id), add);
+        if f.is_solid() {
+            // (a closed group's shape: the whole group)
+            st.click_shape(Some(f.id), add);
+        } else {
+            st.select(Some(f.id), add);
+        }
     }
 }
 
@@ -2754,6 +2998,135 @@ fn feature_edit(st: &mut AppState, id: FeatureId, label: &str, started: bool, f:
             f(x);
         }
     });
+}
+
+/// The selected group in the panel: its name, closed or open, and its
+/// transform properties (Maya: "il y a des propriétés de transform"):
+/// position (its pivot), rotation, scale. Changing them moves, turns or
+/// scales its shapes.
+fn group_properties(ui: &mut Ui, st: &mut AppState) {
+    let Some(g) = st.selected_group().cloned() else { return };
+    let id = g.id;
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 4.0;
+        ui.label(egui::RichText::new("Selection").font(regular(12.0)).color(TEXT2()));
+        ui.horizontal(|ui| {
+            let buf = Id::new("group-rename");
+            if st.renaming {
+                let mut name = ui.data(|d| d.get_temp::<String>(buf)).unwrap_or_else(|| g.name.clone());
+                let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0).font(semibold(15.0)));
+                ui.data_mut(|d| d.insert_temp(buf, name.clone()));
+                if r.lost_focus() {
+                    if !name.trim().is_empty() {
+                        st.rename_group(id, name.trim());
+                    }
+                    st.renaming = false;
+                    ui.data_mut(|d| d.remove::<String>(buf));
+                } else if !r.has_focus() {
+                    r.request_focus();
+                }
+            } else {
+                let r = ui.add(egui::Label::new(egui::RichText::new(&g.name).font(semibold(15.0)).color(TEXT())).sense(Sense::click()).truncate());
+                if r.on_hover_text("Double-click to rename").double_clicked() {
+                    st.renaming = true;
+                }
+            }
+            chip_label(ui, "Group", RAISED(), LABEL());
+            if g.open {
+                chip_label(ui, "Open", accent_bg(), accent());
+            } else {
+                chip_label(ui, "Closed", RAISED(), LABEL());
+            }
+        });
+    });
+    let shown = g.members.iter().any(|m| st.doc.feature(*m).is_some_and(|f| f.visible));
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        if icon_btn(ui, if g.open { Icon::Unlock } else { Icon::Lock }, g.open, if g.open { "Open: its shapes are picked one by one. Click: close it" } else { "Closed: a click takes the whole group. Click: open it" }, 30.0).clicked() {
+            st.set_group_open(id, !g.open);
+        }
+        if icon_btn(ui, Icon::Duplicate, false, "Duplicate (Ctrl+D): a copy of the group", 30.0).clicked() {
+            st.duplicate_selected();
+        }
+        if icon_btn(ui, Icon::Align, st.tool == Tool::Align, "Align (Alt+A): then click the shape to align to", 30.0).clicked() {
+            st.begin_align();
+        }
+        if icon_btn(ui, if shown { Icon::Eye } else { Icon::EyeOff }, false, "Show / hide its shapes", 30.0).clicked() {
+            st.toggle_group_visible(id);
+        }
+        if icon_btn(ui, Icon::Frame, false, "Frame", 30.0).clicked() {
+            st.frame_selection();
+        }
+        if icon_btn(ui, Icon::Trash, false, "Delete the group and its shapes", 30.0).clicked() {
+            st.delete_selected();
+        }
+    });
+    let Some(g) = st.selected_group().cloned() else { return };
+    let w = ui.available_width();
+    if secondary_btn(ui, "Ungroup  ·  Ctrl + Shift + G", w).on_hover_text("The group goes, its shapes stay where they are").clicked() {
+        st.ungroup(id);
+        return;
+    }
+    divider(ui);
+    let any_down = ui.input(|i| i.pointer.any_down());
+    if fold_section(ui, "Transform", "group-transform-open") {
+        let colors = [AXIS_X, AXIS_Y, AXIS_Z];
+        let (ex, ey, ez) = g.rot.to_euler(EulerRot::XYZ);
+        let mut e = [ex.to_degrees() as f32, ey.to_degrees() as f32, ez.to_degrees() as f32];
+        let row = |ui: &mut Ui, title: &str| {
+            ui.label(egui::RichText::new(title).font(regular(11.0)).color(TEXT2()));
+        };
+        row(ui, "Position");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for k in 0..3 {
+                let mut v = g.origin[k] as f32;
+                let r = axis_field(ui, ["X", "Y", "Z"][k], colors[k], &mut v, "");
+                if r.changed() {
+                    let mut o = g.origin;
+                    o[k] = v as f64;
+                    st.set_group_transform(id, o, g.rot, g.scale, "Move group", r.drag_started());
+                }
+            }
+        });
+        row(ui, "Rotation");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for k in 0..3 {
+                let r = axis_field(ui, ["X", "Y", "Z"][k], colors[k], &mut e[k], "°");
+                if r.changed() {
+                    let q = DQuat::from_euler(EulerRot::XYZ, (e[0] as f64).to_radians(), (e[1] as f64).to_radians(), (e[2] as f64).to_radians());
+                    st.set_group_transform(id, g.origin, q, g.scale, "Rotate group", r.drag_started());
+                }
+            }
+        });
+        row(ui, "Scale");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for k in 0..3 {
+                let mut v = g.scale[k] as f32;
+                let (lr, _) = ui.allocate_exact_size(vec2(18.0, 22.0), Sense::hover());
+                ui.painter().text(lr.center(), Align2::CENTER_CENTER, ["X", "Y", "Z"][k], semibold(12.0), colors[k]);
+                let r = value_field(ui, &mut v, 0.01..=1000.0, 0.01, "", 66.0);
+                if r.changed() {
+                    let mut sc = g.scale;
+                    sc[k] = (v as f64).max(0.01);
+                    st.set_group_transform(id, g.origin, g.rot, sc, "Scale group", r.drag_started());
+                }
+            }
+        });
+        ui.label(egui::RichText::new("Position: the group's pivot · D + click in the view puts it on a point").font(regular(11.0)).color(TEXT2()));
+        let w = ui.available_width();
+        if secondary_btn(ui, "Centre pivot", w).on_hover_text("The pivot back at the middle of its shapes (they do not move)").clicked() {
+            st.put_group_pivot(id, None);
+        }
+    }
+    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+        st.end_live();
+    }
+    divider(ui);
+    let names: Vec<String> = g.members.iter().filter_map(|m| st.doc.feature(*m)).map(|f| f.name.clone()).collect();
+    ui.label(egui::RichText::new(format!("{} shape{}: {}", names.len(), if names.len() > 1 { "s" } else { "" }, names.join(", "))).font(regular(11.5)).color(TEXT2()));
 }
 
 fn properties(ui: &mut Ui, st: &mut AppState) {
@@ -3763,6 +4136,14 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         }
         if pressed(Key::S) {
             st.files_open = true;
+        }
+        // Ctrl + G: group (Maya, 3ds Max); Ctrl + Shift + G: ungroup
+        if pressed(Key::G) {
+            if shift {
+                st.ungroup_selection();
+            } else {
+                st.group_selection();
+            }
         }
         if pressed(Key::B) {
             st.make_bevel();

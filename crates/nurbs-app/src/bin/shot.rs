@@ -1656,6 +1656,229 @@ fn main() {
         }
     }
 
+    if want("groups") {
+        // Romain (21 nov., 12 h 37): groups, "le meilleur de Maya et de 3ds
+        // Max": three objects grouped (closed: a click takes them all), the
+        // group's own transform (moved, turned, scaled), opened to move one
+        // shape alone, closed again, copied, ungrouped, deleted
+        let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        let mut d = Doc::default();
+        let block = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let hole = d.add(Op::Carve, Prim::Cylinder { radius: 6.0, height: 30.0 }, DVec3::new(-8.0, -5.0, 0.0), DQuat::IDENTITY);
+        let post = d.add(Op::Add, Prim::Cylinder { radius: 9.0, height: 32.0 }, DVec3::new(42.0, 0.0, -4.0), DQuat::IDENTITY);
+        let small = d.add(Op::Add, Prim::Box { x: 14.0, y: 14.0, z: 14.0 }, DVec3::new(30.0, 0.0, 34.0), DQuat::IDENTITY);
+        let far = d.add(Op::Add, Prim::Box { x: 18.0, y: 10.0, z: 18.0 }, DVec3::new(-50.0, 0.0, 30.0), DQuat::IDENTITY);
+        let fillet = d.add_round(4.0, false, vec![EdgeRef { faces: [tag(block, 0), tag(block, 2)], at: DVec3::new(20.0, 20.0, 0.0) }]);
+        h.reset(d, "Groups");
+        h.st.camera.frame(Vec3::new(-70.0, 0.0, -40.0), Vec3::new(120.0, 45.0, 60.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::F8);
+        let say = |h: &Harness, what: &str| {
+            let e = |q: DQuat| {
+                let (x, y, z) = q.to_euler(glam::EulerRot::XYZ);
+                format!("{:.1} {:.1} {:.1}", x.to_degrees(), y.to_degrees(), z.to_degrees())
+            };
+            eprintln!("  {what}: {} group(s), selection {:?}, selected group {:?}, errors {}, version {}", h.st.doc.groups.len(), h.st.selection, h.st.selected_group().map(|g| g.name.clone()), h.st.model.as_ref().map(|m| m.errors.len()).unwrap_or(99), h.st.version);
+            for g in &h.st.doc.groups {
+                eprintln!("    {} {:?} at ({:.2} {:.2} {:.2}) rot ({}) scale ({:.2} {:.2} {:.2}) {}", g.name, g.members, g.origin.x, g.origin.y, g.origin.z, e(g.rot), g.scale.x, g.scale.y, g.scale.z, if g.open { "open" } else { "closed" });
+            }
+            if let Some(t) = h.st.toast.as_ref() {
+                eprintln!("    toast: {}", t.text);
+            }
+        };
+        let at = |h: &Harness, id: u32| h.st.doc.feature(id).map(|f| format!("({:.2} {:.2} {:.2})", f.origin.x, f.origin.y, f.origin.z)).unwrap_or_default();
+        let on = |h: &Harness, id: u32| {
+            let f = h.st.doc.feature(id).unwrap();
+            h.screen_of((f.origin + f.axis() * f.prim.height()).as_vec3())
+        };
+        // the block, then the hole's, the post and the small cube added
+        h.click(on(&h, block));
+        h.hold(Modifiers::SHIFT);
+        h.click(on(&h, post));
+        h.click(on(&h, small));
+        h.hold(Modifiers::NONE);
+        h.st.selection.push(hole);
+        h.settle();
+        h.shot("zero-groups-1-picked");
+        // Ctrl + G
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::G);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        say(&h, "grouped");
+        let gid = h.st.doc.groups[0].id;
+        h.shot("zero-groups-2-grouped");
+        // deselected; the pointer on the post lights the whole group
+        h.key(egui::Key::Escape);
+        h.steps(2);
+        let p = on(&h, post);
+        h.move_to(p);
+        h.steps(3);
+        eprintln!("  hover {:?} with {:?}", h.st.hover_feature, h.st.hover_also);
+        h.shot("zero-groups-3-hover");
+        // a click on one of its shapes takes the group
+        h.click(p);
+        h.settle();
+        say(&h, "clicked the post");
+        // moved by its arrow: every shape, the hole and the fillet with it
+        let c = h.st.pivot().expect("a gizmo").as_vec3();
+        let s0 = h.screen_of(c);
+        let dir = (h.screen_of(c + Vec3::X) - s0).normalized();
+        let grab = s0 + dir * 55.0;
+        let to = h.screen_of(c + Vec3::X * 30.0) - s0;
+        h.drag(grab, grab + to, 10, false);
+        h.steps(3);
+        h.shot("zero-groups-4-moving");
+        h.press(grab + to, false);
+        h.settle();
+        say(&h, "moved 30 along X");
+        eprintln!("    block {} hole {} post {} small {} far {} fillet at {:?}", at(&h, block), at(&h, hole), at(&h, post), at(&h, small), at(&h, far), h.st.doc.feature(fillet).and_then(|f| f.round.as_ref()).map(|r| r.edges[0].at));
+        h.shot("zero-groups-5-moved");
+        // E: turned round its pivot
+        h.key(egui::Key::E);
+        h.settle();
+        let pivot = h.st.pivot().unwrap().as_vec3();
+        let v = h.st.view();
+        let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0 * 0.9;
+        let eye = v.eye - pivot;
+        let ring = |t: f32| pivot + (Vec3::Z * t.cos() + Vec3::X * t.sin()) * k;
+        let t0 = [45f32, 135.0, 225.0, 315.0].into_iter().map(f32::to_radians).max_by(|a, b| (ring(*a) - pivot).dot(eye).total_cmp(&(ring(*b) - pivot).dot(eye))).unwrap();
+        let (a, b) = (h.screen_of(ring(t0)), h.screen_of(ring(t0 + 33f32.to_radians())));
+        h.move_to(a);
+        h.steps(2);
+        h.drag(a, b, 12, true);
+        h.settle();
+        say(&h, "turned");
+        eprintln!("    block {} post {} small {}", at(&h, block), at(&h, post), at(&h, small));
+        h.shot("zero-groups-6-turned");
+        // D + click: its pivot on the block's corner (kept in the document),
+        // then back at the middle from the panel's "Centre pivot"
+        h.key(egui::Key::W);
+        h.settle();
+        let corner = h.st.doc.feature(block).unwrap().corners()[1].as_vec3();
+        h.key_hold(egui::Key::D, true);
+        h.move_to(h.screen_of(corner) + vec2(3.0, -2.0));
+        h.steps(2);
+        h.click(h.screen_of(corner) + vec2(3.0, -2.0));
+        h.key_hold(egui::Key::D, false);
+        h.steps(2);
+        say(&h, "its pivot put with D on the block's corner");
+        eprintln!("    corner {corner:?} pivot {:?}", h.st.pivot());
+        h.shot("zero-groups-6b-pivot");
+        h.st.put_group_pivot(gid, None);
+        h.steps(2);
+        say(&h, "pivot centred again");
+        // its transform properties: scale 1.25 from the panel
+        let g = h.st.doc.group(gid).unwrap().clone();
+        h.st.set_group_transform(gid, g.origin, g.rot, DVec3::splat(1.25), "Scale group", true);
+        h.st.end_live();
+        h.key(egui::Key::W);
+        h.settle();
+        say(&h, "scaled 1.25 from its properties");
+        eprintln!("    block {:?} post {:?}", h.st.doc.feature(block).map(|f| f.prim), h.st.doc.feature(post).map(|f| f.prim));
+        h.shot("zero-groups-7-scaled");
+        // its bar: Closed, a click opens it
+        let toggle = |h: &Harness| h.ctx.data(|d| d.get_temp::<Pos2>(egui::Id::new("group-bar-toggle"))).expect("the group's bar");
+        let t = toggle(&h);
+        h.move_to(t);
+        h.steps(2);
+        h.click(t);
+        h.settle();
+        say(&h, "opened from its bar");
+        h.shot("zero-groups-8-open");
+        // open: the small cube alone, moved up 12; the group's bar stays
+        h.click(on(&h, small));
+        h.settle();
+        say(&h, "the small cube picked alone");
+        let c = h.st.pivot().expect("a gizmo").as_vec3();
+        let s0 = h.screen_of(c);
+        let dir = (h.screen_of(c + Vec3::Y) - s0).normalized();
+        let grab = s0 + dir * 55.0;
+        let to = h.screen_of(c + Vec3::Y * 12.0) - s0;
+        h.drag(grab, grab + to, 10, true);
+        h.settle();
+        say(&h, "the small cube moved up");
+        eprintln!("    small {} block {}", at(&h, small), at(&h, block));
+        h.shot("zero-groups-9-member-moved");
+        // closed again from the bar: the group is one thing again, selected
+        let t = toggle(&h);
+        h.move_to(t);
+        h.steps(2);
+        h.click(t);
+        h.settle();
+        say(&h, "closed again");
+        h.shot("zero-groups-10-closed");
+        // a rectangle over the far cube and one shape of the group: the whole group comes
+        h.key(egui::Key::Escape);
+        h.steps(2);
+        let (a, b) = (on(&h, far), on(&h, small));
+        let lo = pos2(a.x.min(b.x) - 30.0, a.y.min(b.y) - 40.0);
+        let hi = pos2(a.x.max(b.x) + 12.0, a.y.max(b.y) + 30.0);
+        h.drag(lo, hi, 8, false);
+        h.steps(2);
+        h.shot("zero-groups-11-rectangle");
+        h.press(hi, false);
+        h.settle();
+        say(&h, "rectangle over the far cube and the small one");
+        // Ctrl + D on the group: a copy, a group too, moved aside
+        h.key(egui::Key::Escape);
+        h.steps(2);
+        h.click(on(&h, post));
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::D);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        say(&h, "duplicated");
+        let c = h.st.pivot().expect("a gizmo").as_vec3();
+        let s0 = h.screen_of(c);
+        let dir = (h.screen_of(c - Vec3::Z) - s0).normalized();
+        let to = h.screen_of(c - Vec3::Z * 110.0) - s0;
+        // the arrow points along +Z: grabbed there, pulled back
+        let grab = s0 - dir * 55.0;
+        h.move_to(grab);
+        h.steps(2);
+        h.drag(grab, grab + to, 10, true);
+        h.settle();
+        say(&h, "the copy moved along -Z");
+        h.st.frame_all();
+        h.steps(30);
+        h.settle();
+        h.shot("zero-groups-12-copy");
+        // Ctrl + Shift + G: the copy ungrouped, its shapes stay
+        let before = h.st.version;
+        h.hold(Modifiers::CTRL | Modifiers::SHIFT);
+        h.key(egui::Key::G);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        say(&h, "the copy ungrouped");
+        h.shot("zero-groups-13-ungrouped");
+        // undone: the group is back, the part not built again
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::Z);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        say(&h, "ungroup undone");
+        eprintln!("    builds asked meanwhile: {}", h.st.version - before);
+        // the first group selected by its row in the outliner, deleted, undone
+        let row = h.ctx.data(|d| d.get_temp::<Pos2>(egui::Id::new(("group-row", gid)))).expect("the group's row");
+        h.click(row);
+        h.settle();
+        say(&h, "its row clicked");
+        h.shot("zero-groups-14-row");
+        h.key(egui::Key::Delete);
+        h.settle();
+        say(&h, "deleted");
+        eprintln!("    features left {}", h.st.doc.features.len());
+        h.shot("zero-groups-15-deleted");
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::Z);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        say(&h, "delete undone");
+        eprintln!("    features {}", h.st.doc.features.len());
+    }
+
     if want("orphans") {
         // operations left by a shape deleted in a document from before
         // 20 nov. (FORME_DOC: a saved scene): the outliner's row takes them

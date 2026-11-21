@@ -164,7 +164,7 @@ impl Drawer {
                     } else {
                         match f.tag {
                             Some(t) if st.selection.contains(&t.feature) || st.selection.contains(&el(t)) => FACE_SELECTED,
-                            Some(t) if st.hover_feature == Some(t.feature) || st.hover_feature == Some(el(t)) => FACE_HOVERED,
+                            Some(t) if st.hover_feature == Some(t.feature) || st.hover_feature == Some(el(t)) || st.hover_also.contains(&el(t)) => FACE_HOVERED,
                             _ => 0,
                         }
                     };
@@ -198,7 +198,7 @@ impl Drawer {
         // shows (a click picks it)
         for f in st.doc.features.iter().filter(|f| f.visible && f.is_path()) {
             let selected = st.selection.contains(&f.id);
-            let hovered = st.hover_feature == Some(f.id);
+            let hovered = st.hover_feature == Some(f.id) || st.hover_also.contains(&f.id);
             let inside = st.curve_inside(f.id);
             let shown = |b: &nurbs_kernel::Feature| {
                 b.visible && (b.shape_bool.as_ref().is_some_and(|s| s.operands.iter().any(|o| st.selection.contains(o))) || (hovered && st.boolean_open(b)))
@@ -257,7 +257,7 @@ impl Drawer {
             let selected = st.selection.contains(&f.id);
             // an Object-mode drag shows the faces themselves (no cage)
             let moving = moving && st.dragged_shapes().is_none();
-            let show = creating || (selected && (moving || f.op == Op::Carve || !f.visible)) || (st.tool == Tool::Select && st.hover_feature == Some(f.id) && f.op == Op::Carve);
+            let show = creating || (selected && (moving || f.op == Op::Carve || !f.visible)) || (st.tool == Tool::Select && (st.hover_feature == Some(f.id) || st.hover_also.contains(&f.id)) && f.op == Op::Carve);
             if !show || (creating && !f.visible) {
                 continue;
             }
@@ -289,7 +289,7 @@ impl Drawer {
                     let els = [of(e.faces[0]), of(e.faces[1])];
                     if els.iter().flatten().any(|x| st.selection.contains(x)) {
                         sel.push(place(e, &els));
-                    } else if st.hover_feature.map(|h| els.contains(&Some(h))).unwrap_or(false) {
+                    } else if st.hover_feature.map(|h| els.contains(&Some(h))).unwrap_or(false) || els.iter().flatten().any(|x| st.hover_also.contains(x)) {
                         hov.push(e.pts.clone());
                     }
                 }
@@ -297,6 +297,12 @@ impl Drawer {
                 line_vertices(&sel, [a.r(), a.g(), a.b(), 240], 1.7, &mut over);
                 line_vertices(&hov, [a.r(), a.g(), a.b(), 120], 1.4, &mut over);
             }
+        }
+        // the groups: the selected one's box by its corners, an open one's
+        // whole box (`groups.rs`)
+        for (lines, alpha) in st.group_lines() {
+            let lines: Vec<Vec<[f32; 3]>> = lines.iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
+            line_vertices(&lines, [accent.r(), accent.g(), accent.b(), alpha], 1.3, &mut over);
         }
         // Edge mode: the picked edges, whole, and the one under the pointer
         if st.sel_mode == SelMode::Edge {

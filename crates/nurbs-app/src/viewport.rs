@@ -395,6 +395,11 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         st.hover_face = None;
         st.hover_vertex = None;
     }
+    // a closed group lights whole under the pointer (a click takes it all)
+    st.hover_also = match st.hover_feature {
+        Some(id) if select && st.sel_mode == SelMode::Object => Some(st.pick_ids(id)).filter(|v| v.len() > 1).unwrap_or_default(),
+        _ => vec![],
+    };
 
     // an inset or extrusion under way, whatever started it
     if st.push.is_some() {
@@ -714,7 +719,9 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                     if !(shift || ctrl) {
                         st.selection.clear();
                     }
-                    for id in inside {
+                    st.group_sel = None;
+                    // a shape of a closed group brings the whole group
+                    for id in inside.into_iter().flat_map(|id| st.pick_ids(id)).collect::<Vec<_>>() {
                         if !st.selection.contains(&id) {
                             st.selection.push(id);
                         }
@@ -726,7 +733,8 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 let id = at.and_then(|p| st.pick_path(p2(p))).or_else(|| at.and_then(|p| st.pick_at(p2(p))).and_then(|h| st.feature_of_face(h.face)));
                 // the element, not the operation whose face was clicked
                 let id = id.map(|id| st.element_of(id));
-                st.select(id, shift || ctrl);
+                // (a closed group's shape: the whole group)
+                st.click_shape(id, shift || ctrl);
             }
         }
         Tool::Create(PrimKind::Profile | PrimKind::Path | PrimKind::Surface) if st.creation.is_none() => {
@@ -1869,6 +1877,9 @@ fn hint_of(st: &AppState) -> String {
             } else {
                 match st.gizmo {
                     GizmoMode::Select => "W: move · E: rotate · R: scale · Right button: menu · Del: delete · Esc: deselect".into(),
+                    _ if st.selected_group().is_some_and(|g| g.open) => "An open group: click one of its shapes to work on it alone · Its bar: close it again · Arrows: move the whole group · D + click: its pivot on a point · Ctrl + Shift + G: ungroup".into(),
+                    _ if st.selected_group().is_some() => "A group: its shapes move, turn and scale together, about its pivot · Its bar: open it to pick its shapes one by one · D + click: its pivot on a point · Ctrl + Shift + G: ungroup · Ctrl + D: a copy".into(),
+                    GizmoMode::Move if st.selection.len() > 1 => "Arrows and squares: move · Centre square: on all three axes · Ctrl + G: group them · D + click: pivot on a point · Alt + A: align · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · Alt + M: mirror · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
                     GizmoMode::Scale => "Cubes: along the shape's axes · Centre: all at once · W: move · E: rotate".into(),

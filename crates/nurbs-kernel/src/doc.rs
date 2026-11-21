@@ -1758,6 +1758,42 @@ pub struct Doc {
     /// kernel does not use it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub looks: Vec<MaterialLook>,
+    /// The groups (Romain, 21 nov., 12 h 37: "des groupes avec le meilleur
+    /// de Maya et de 3ds Max"). The kernel does not use them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Group>,
+}
+
+/// A group: shapes put in a transform of their own (Maya), closed or open
+/// (3ds Max). Closed, as it is made, a click on one of its shapes takes
+/// them all; open, they are picked one by one. Its shapes keep their own
+/// places in the document: moving, turning or scaling the group changes
+/// them and its transform together.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Group {
+    /// From the document's `next_id`, as a feature's: no feature has it.
+    pub id: FeatureId,
+    pub name: String,
+    /// Its shapes (elements: their operations follow them).
+    pub members: Vec<FeatureId>,
+    /// Its pivot: where its gizmo sits, what its Position shows.
+    pub origin: DVec3,
+    pub rot: DQuat,
+    #[serde(default = "group_scale")]
+    pub scale: DVec3,
+    #[serde(default)]
+    pub open: bool,
+}
+
+fn group_scale() -> DVec3 {
+    DVec3::ONE
+}
+
+impl Group {
+    /// Its frame: its own space to the world (no scale).
+    pub fn matrix(&self) -> DMat4 {
+        DMat4::from_rotation_translation(self.rot, self.origin)
+    }
 }
 
 /// A material ball's look as the document has it.
@@ -1787,7 +1823,7 @@ pub struct Paint {
 
 impl Default for Doc {
     fn default() -> Self {
-        Doc { version: VERSION, features: vec![], next_id: 1, paint: vec![], reference: None, looks: vec![] }
+        Doc { version: VERSION, features: vec![], next_id: 1, paint: vec![], reference: None, looks: vec![], groups: vec![] }
     }
 }
 
@@ -2127,6 +2163,68 @@ impl Doc {
             out.extend(empty.iter().copied());
             self.features.retain(|f| !empty.contains(&f.id));
         }
+        self.clean_groups();
+    }
+    pub fn group(&self, id: FeatureId) -> Option<&Group> {
+        self.groups.iter().find(|g| g.id == id)
+    }
+    pub fn group_mut(&mut self, id: FeatureId) -> Option<&mut Group> {
+        self.groups.iter_mut().find(|g| g.id == id)
+    }
+    /// The group a shape is in.
+    pub fn group_of(&self, member: FeatureId) -> Option<&Group> {
+        self.groups.iter().find(|g| g.members.contains(&member))
+    }
+    /// The shapes gone leave their groups; a group left with none goes.
+    pub fn clean_groups(&mut self) {
+        if self.groups.is_empty() {
+            return;
+        }
+        let ids: Vec<FeatureId> = self.features.iter().map(|f| f.id).collect();
+        for g in self.groups.iter_mut() {
+            g.members.retain(|m| ids.contains(m));
+        }
+        self.groups.retain(|g| !g.members.is_empty());
+    }
+    /// The box round a group's shapes in its own frame (lo, hi), from the
+    /// shapes' own boxes.
+    pub fn group_box(&self, g: &Group) -> Option<(DVec3, DVec3)> {
+        let inv = g.matrix().inverse();
+        g.members.iter().filter_map(|m| self.feature(*m)).flat_map(|f| f.corners()).map(|c| inv.transform_point3(c)).fold(None, |b: Option<(DVec3, DVec3)>, p| Some(b.map_or((p, p), |(lo, hi)| (lo.min(p), hi.max(p)))))
+    }
+    /// These shapes made a group, closed, its pivot at the middle of their
+    /// box, square to the world. One already in a group leaves it (groups
+    /// are not nested yet). None when no shape of these is in the document.
+    pub fn add_group(&mut self, members: &[FeatureId]) -> Option<FeatureId> {
+        let mut ms: Vec<FeatureId> = vec![];
+        for m in members {
+            if self.feature(*m).is_some_and(|f| f.is_solid()) && !ms.contains(m) {
+                ms.push(*m);
+            }
+        }
+        if ms.is_empty() {
+            return None;
+        }
+        for g in self.groups.iter_mut() {
+            g.members.retain(|m| !ms.contains(m));
+        }
+        self.groups.retain(|g| !g.members.is_empty());
+        let (lo, hi) = ms.iter().filter_map(|m| self.feature(*m)).map(|f| f.bounds()).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))?;
+        let id = self.next_id;
+        self.next_id += 1;
+        let name = self.fresh_group_name();
+        self.groups.push(Group { id, name, members: ms, origin: (lo + hi) * 0.5, rot: DQuat::IDENTITY, scale: DVec3::ONE, open: false });
+        Some(id)
+    }
+    /// "Group", "Group 2"…: the first no group has.
+    pub fn fresh_group_name(&self) -> String {
+        (1..).map(|i| if i == 1 { "Group".to_string() } else { format!("Group {i}") }).find(|n| !self.groups.iter().any(|g| &g.name == n)).unwrap()
+    }
+    /// Takes a group away; its shapes stay where they are. Returns them.
+    pub fn ungroup(&mut self, id: FeatureId) -> Vec<FeatureId> {
+        let ms = self.group(id).map(|g| g.members.clone()).unwrap_or_default();
+        self.groups.retain(|g| g.id != id);
+        ms
     }
     /// Copies of the shapes (after the last feature), with fresh ids; returns
     /// the new ids. Fillets and chamfers are not copied (their edges belong
@@ -2201,6 +2299,41 @@ impl Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Groups (21 nov.): made closed with their pivot at the middle of
+    /// their shapes, a shape in one group only, cleaned when shapes go,
+    /// kept by the file, absent from a file that has none.
+    #[test]
+    fn groups_made_cleaned_and_ungrouped() {
+        let mut d = Doc::default();
+        let a = d.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let b = d.add(Op::Add, Prim::Box { x: 10.0, y: 20.0, z: 10.0 }, DVec3::new(30.0, 0.0, 0.0), DQuat::IDENTITY);
+        let c = d.add(Op::Add, Prim::Cylinder { radius: 5.0, height: 10.0 }, DVec3::new(0.0, 0.0, 40.0), DQuat::IDENTITY);
+        assert!(!d.to_json().contains("groups"), "no groups: the file as before");
+        let fillet = d.add_round(1.0, false, vec![]);
+        assert_eq!(d.add_group(&[fillet]), None, "an operation alone is no group");
+        let g = d.add_group(&[a, b, a]).expect("a group");
+        let gr = d.group(g).unwrap().clone();
+        assert_eq!((gr.name.as_str(), gr.members.clone(), gr.open), ("Group", vec![a, b], false));
+        assert!(gr.origin.distance(DVec3::new(15.0, 10.0, 0.0)) < 1e-9, "its pivot at the middle of its shapes' box: {:?}", gr.origin);
+        assert_eq!(d.group_of(b).map(|x| x.id), Some(g));
+        let (lo, hi) = d.group_box(&gr).unwrap();
+        assert!(lo.distance(DVec3::new(-20.0, -10.0, -5.0)) < 1e-9 && hi.distance(DVec3::new(20.0, 10.0, 5.0)) < 1e-9, "its box in its own frame: {lo:?} {hi:?}");
+        // b goes to a new group: it leaves the first
+        let g2 = d.add_group(&[b, c]).expect("a second group");
+        assert_eq!(d.group(g).unwrap().members, vec![a]);
+        assert_eq!(d.group(g2).unwrap().name, "Group 2");
+        // the file keeps them
+        let back = Doc::from_json(&d.to_json()).unwrap();
+        assert_eq!(back.groups, d.groups);
+        // a shape deleted leaves its group; a group left empty goes
+        d.remove(&[a]);
+        assert!(d.group(g).is_none() && d.groups.len() == 1);
+        d.remove(&[b]);
+        assert_eq!(d.group(g2).unwrap().members, vec![c]);
+        assert_eq!(d.ungroup(g2), vec![c]);
+        assert!(d.groups.is_empty() && d.feature(c).is_some(), "ungrouped: the shape stays");
+    }
 
     #[test]
     fn json_round_trip() {
