@@ -13,6 +13,9 @@ use crate::widgets::*;
 use crate::workspace::Workspace;
 use egui::{pos2, vec2, Align2, Color32, Id, Margin, Order, Rect, Response, Sense, Stroke, StrokeKind, Ui};
 use glam::{DQuat, DVec3, EulerRot};
+
+/// The iPad's layout (the mock-up of 21 nov.).
+mod tablet;
 use nurbs_kernel::doc::{CurveKind, CurveOp, PrimKind};
 use nurbs_kernel::{Feature, FeatureId, Op, Prim};
 
@@ -155,6 +158,15 @@ pub fn prim_key(k: PrimKind) -> &'static str {
 }
 
 pub fn show(ctx: &egui::Context, st: &mut AppState) {
+    // the iPad: the layout of the mock-up (tablet.rs)
+    set_tablet(st.touch.on);
+    if st.touch.on {
+        tablet::show(ctx, st);
+        if st.tool != Tool::Select {
+            st.last_tool = Some(st.tool);
+        }
+        return;
+    }
     let screen = ctx.content_rect();
     let left = if st.panel_visible { 2.0 * EDGE + LEFT_W } else { EDGE };
     st.view_rect = [left, TOP + ISLAND_H, screen.width() - 2.0 * EDGE - CARDS_W, screen.height() - HISTORY_H];
@@ -1073,31 +1085,40 @@ fn current_material(st: &AppState) -> Option<u32> {
 fn materials_island(ctx: &egui::Context, st: &mut AppState) {
     let Some(rail) = ctx.memory(|m| m.area_rect(Id::new("rail"))) else { return };
     let off = panel_offset(ctx, "materials");
-    egui::Area::new(Id::new("materials")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(rail.max.x, rail.max.y + 8.0) + off).show(ctx, |ui| {
-        island().inner_margin(Margin::same(6)).show(ui, |ui| {
-            ui.set_width(CARDS_W - 12.0);
-            grip(ui, "materials");
+    materials_island_at(ctx, st, pos2(rail.max.x, rail.max.y + 8.0) + off, Align2::RIGHT_TOP, CARDS_W - 12.0);
+}
+
+/// The materials island at a place (the iPad: a pop-over beside the dock's
+/// ball), `w` points wide.
+fn materials_island_at(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2, pivot: Align2, w: f32) {
+    let big = tablet();
+    let (bs, br_h) = if big { (34.0, 40.0) } else { (22.0, 24.0) };
+    egui::Area::new(Id::new("materials")).order(Order::Middle).pivot(pivot).fixed_pos(at).show(ctx, |ui| {
+        island().inner_margin(Margin::same(if big { 12 } else { 6 })).show(ui, |ui| {
+            ui.set_width(w);
+            if !big {
+                grip(ui, "materials");
+            }
             let cur = current_material(st);
-            let w = CARDS_W - 12.0;
-            let (hr, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
-            let (br, _) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
+            let (hr, _) = ui.allocate_exact_size(vec2(w, if big { 22.0 } else { 16.0 }), Sense::hover());
+            let (br, _) = ui.allocate_exact_size(vec2(w, br_h), Sense::hover());
             let mats = &materials::MATERIALS;
             let n = mats.len();
-            let gap = (w - 4.0 - 22.0 * n as f32) / (n - 1) as f32;
+            let gap = (w - 4.0 - bs * n as f32) / (n - 1) as f32;
             let mut hovered: Option<usize> = None;
             for (i, m) in mats.iter().enumerate() {
-                let c = pos2(br.min.x + 2.0 + 11.0 + i as f32 * (22.0 + gap), br.center().y);
-                let r = Rect::from_center_size(c, vec2(22.0, 22.0));
+                let c = pos2(br.min.x + 2.0 + bs * 0.5 + i as f32 * (bs + gap), br.center().y);
+                let r = Rect::from_center_size(c, vec2(bs, bs));
                 ui.ctx().data_mut(|d| d.insert_temp(Id::new(("mat-ball", i)), c));
                 let resp = ui.interact(r, Id::new(("mat-ball", i)), Sense::click_and_drag());
                 let dragging = st.mat_drag.map(|d| d.material as usize == i).unwrap_or(false);
                 let p = ui.painter();
                 if cur == Some(i as u32) {
-                    p.circle_stroke(c, 10.5, Stroke::new(1.2, accent()));
+                    p.circle_stroke(c, bs * 0.48, Stroke::new(1.2, accent()));
                 } else if resp.hovered() || dragging {
-                    p.circle_stroke(c, 10.5, Stroke::new(1.0, DIVIDER()));
+                    p.circle_stroke(c, bs * 0.48, Stroke::new(1.0, DIVIDER()));
                 }
-                material_ball(p, c, 8.0, &st.look(i as u32));
+                material_ball(p, c, bs * 0.36, &st.look(i as u32));
                 if resp.hovered() || dragging {
                     hovered = Some(i);
                 }
@@ -1382,7 +1403,11 @@ struct Cell {
 }
 
 /// The history strip's icons, square like the component modes' at the top.
-const CELL: f32 = 28.0;
+/// A history cell (28 points; 48 on the iPad, the mock-up's) and the gap
+/// between two.
+fn cell_size() -> f32 {
+    if tablet() { 48.0 } else { 28.0 }
+}
 const CELL_GAP: f32 = 6.0;
 
 /// An undo step's icon and colour, from its name.
@@ -1490,12 +1515,12 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             // as wide as its icons (the grip would take 400 points)
             let n = cells.len() as f32;
             let empty = el.is_none() && cells.len() == 1 && st.doc.features.is_empty();
-            let content = if empty { 420.0 } else { 78.0 + 8.0 + 1.0 + 8.0 + (max_w - 140.0).min(n * (CELL + CELL_GAP) + 4.0) };
+            let content = if empty { 420.0 } else { 78.0 + 8.0 + 1.0 + 8.0 + (max_w - 140.0).min(n * (cell_size() + CELL_GAP) + 4.0) };
             ui.set_width(content.max(160.0));
             grip(ui, "history");
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                let (tr, _) = ui.allocate_exact_size(vec2(78.0, CELL), Sense::hover());
+                let (tr, _) = ui.allocate_exact_size(vec2(78.0, cell_size()), Sense::hover());
                 let p = ui.painter();
                 p.text(pos2(tr.min.x, tr.center().y - 6.5), Align2::LEFT_CENTER, "HISTORY", mono(9.5), LABEL());
                 let sub = match el {
@@ -1506,18 +1531,18 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 job.wrap = egui::text::TextWrapping { max_width: tr.width(), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
                 let g = p.layout_job(job);
                 p.galley(pos2(tr.min.x, tr.center().y + 7.0 - g.size().y * 0.5), g, TEXT());
-                let (sep, _) = ui.allocate_exact_size(vec2(1.0, CELL - 4.0), Sense::hover());
+                let (sep, _) = ui.allocate_exact_size(vec2(1.0, cell_size() - 4.0), Sense::hover());
                 ui.painter().rect_filled(sep, 0.0, DIVIDER());
                 if el.is_none() && cells.len() == 1 && st.doc.features.is_empty() {
                     ui.label(egui::RichText::new("Pick a shape on the right, then drag in the view").font(regular(12.5)).color(TEXT2()));
                     return;
                 }
                 let n = cells.len();
-                let w = n as f32 * (CELL + CELL_GAP);
+                let w = n as f32 * (cell_size() + CELL_GAP);
                 egui::ScrollArea::horizontal().id_salt("history-scroll").max_width((max_w - 140.0).min(w + 4.0)).show(ui, |ui| {
-                    let (row, resp) = ui.allocate_exact_size(vec2(w, CELL), Sense::click_and_drag());
-                    let cell = |i: usize| Rect::from_min_size(pos2(row.min.x + i as f32 * (CELL + CELL_GAP), row.min.y), vec2(CELL, CELL));
-                    let idx = |x: f32| ((x - row.min.x + CELL_GAP * 0.5) / (CELL + CELL_GAP)).floor().clamp(0.0, n as f32 - 1.0) as usize;
+                    let (row, resp) = ui.allocate_exact_size(vec2(w, cell_size()), Sense::click_and_drag());
+                    let cell = |i: usize| Rect::from_min_size(pos2(row.min.x + i as f32 * (cell_size() + CELL_GAP), row.min.y), vec2(cell_size(), cell_size()));
+                    let idx = |x: f32| ((x - row.min.x + CELL_GAP * 0.5) / (cell_size() + CELL_GAP)).floor().clamp(0.0, n as f32 - 1.0) as usize;
                     let under = resp.interact_pointer_pos().or(resp.hover_pos()).map(|q| idx(q.x));
                     if resp.drag_started() && el.is_some() {
                         st.end_live();
@@ -1567,7 +1592,8 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                         }
                         let dim = if past { 0.32 } else if !c.on { 0.45 } else { 1.0 };
                         let ic = if i == now_at { accent() } else { tint(TEXT_ICON(), dim) };
-                        icons::paint(p, Rect::from_center_size(r.center(), vec2(15.0, 15.0)), c.icon, ic);
+                        let isz = if tablet() { 20.0 } else { 15.0 };
+                        icons::paint(p, Rect::from_center_size(r.center(), vec2(isz, isz)), c.icon, ic);
                         let dot = r.right_bottom() - vec2(4.5, 4.5);
                         p.circle_filled(dot, 4.0, PANEL());
                         p.circle_filled(dot, 2.6, tint(c.color, dim));
@@ -1578,7 +1604,7 @@ fn history_strip(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     }
                     // the marker: a white bar after the current step
                     let m = cell(now_at);
-                    p.rect_filled(Rect::from_center_size(pos2(m.max.x + CELL_GAP * 0.5, m.center().y), vec2(2.0, CELL - 6.0)), 1.0, TEXT_STRONG());
+                    p.rect_filled(Rect::from_center_size(pos2(m.max.x + CELL_GAP * 0.5, m.center().y), vec2(2.0, cell_size() - 6.0)), 1.0, TEXT_STRONG());
                     if resp.hovered() || resp.dragged() {
                         hovered = under.map(|i| (i, cell(i)));
                     }
@@ -2397,6 +2423,12 @@ fn op_place(ctx: &egui::Context, st: &AppState, k: OpPop, anchor: Rect, h: f32) 
             .filter(|r| r.is_positive() && r.area() < (vr[2] - vr[0]) * (vr[3] - vr[1]) * 0.5)
             .collect()
     });
+    // the iPad's action bar, shown this frame for the first time (a new
+    // area is not listed as visible on its first frame)
+    let mut islands = islands;
+    if let Some(r) = ctx.data(|d| d.get_temp::<Rect>(Id::new("t-actions-rect"))) {
+        islands.push(r);
+    }
     let gap = 28.0;
     let y_by = anchor.center().y - 60.0;
     let x_by = anchor.center().x - full * 0.5;
@@ -2483,7 +2515,7 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
         op_island().show(ui, |ui| {
             ui.set_width(OP_W);
             grip(ui, "op-pop");
-            match k {
+            let mut body = |ui: &mut Ui| match k {
                 OpPop::Edges => round_card(ui, st),
                 OpPop::Faces => face_card(ui, st),
                 OpPop::Verts => {
@@ -2537,6 +2569,16 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     op_title(ui, &f.name, f.kind_label());
                     shape_card(ui, st, &f);
                 }
+            };
+            if tablet() {
+                // the iPad: a tall window (an SDF object's) scrolls in the
+                // view's height, under the top islands
+                egui::ScrollArea::vertical().id_salt("op-pop-scroll").max_height((bottom - top - 120.0).max(200.0)).min_scrolled_height((bottom - top - 120.0).max(200.0)).auto_shrink([false, true]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui, |ui| {
+                    ui.set_width(OP_W);
+                    body(ui)
+                });
+            } else {
+                body(ui);
             }
         });
     });
@@ -2978,6 +3020,21 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             // an Area's Ui starts at last frame's size: without a minimum the scroll area never grows
             egui::ScrollArea::vertical().id_salt("props-scroll").max_height(props_max).min_scrolled_height(props_max).auto_shrink([false, true]).show(ui, |ui| {
                 ui.set_width(inner_w);
+                selection_props(ui, st);
+            });
+        });
+    });
+    if st.settings.show_tree && !st.settings.sub_fixed && !st.doc.features.is_empty() {
+        // as tall as its operations need (it hid those past the shape
+        // list's height: "La Sub Outliner ne se rafraîchit pas")
+        let room = (screen.max.y - top - off.y - 140.0).max(tree_h);
+        components_column(ctx, st, pos2(screen.min.x + EDGE + LEFT_W + 8.0, top) + off, room);
+    }
+}
+
+/// The panel's lower part: what is picked or selected (its position and
+/// rotation, a group's transform), else the defaults for new shapes.
+fn selection_props(ui: &mut Ui, st: &mut AppState) {
                 if st.selection.is_empty() && !st.edge_sel.is_empty() {
                     let n = st.edge_sel.len();
                     ui.label(egui::RichText::new(if n > 1 { format!("{n} edges picked") } else { "Edge picked".to_string() }).font(semibold(14.0)).color(TEXT()));
@@ -3009,36 +3066,41 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 } else {
                     defaults(ui, st);
                 }
-            });
-        });
-    });
-    if st.settings.show_tree && !st.settings.sub_fixed && !st.doc.features.is_empty() {
-        // as tall as its operations need (it hid those past the shape
-        // list's height: "La Sub Outliner ne se rafraîchit pas")
-        let room = (screen.max.y - top - off.y - 140.0).max(tree_h);
-        components_column(ctx, st, pos2(screen.min.x + EDGE + LEFT_W + 8.0, top) + off, room);
-    }
 }
 
 fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     let n = st.doc.features.iter().filter(|f| f.is_solid()).count();
+    let tab = tablet();
     ui.horizontal(|ui| {
-        ui.set_height(26.0);
-        let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 2.0 * 28.0, 26.0), Sense::hover());
-        ui.painter().text(lr.left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, "SCENE", semibold(10.5), TEXT2());
-        ui.painter().text(lr.left_center() + vec2(52.0, 0.0), Align2::LEFT_CENTER, format!("{n} shape{}", if n == 1 { "" } else { "s" }), regular(11.5), pick(Color32::from_rgb(0x64, 0x6B, 0x75), Color32::from_rgb(0x8A, 0x90, 0x99)));
+        ui.set_height(if tab { 44.0 } else { 26.0 });
+        if tab {
+            // the iPad: the sidebar folds from its header (the mock-up)
+            if icon_btn(ui, Icon::Sidebar, false, "Fold the scene list", 44.0).clicked() {
+                st.panel_visible = false;
+            }
+            let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 2.0 * 40.0, 44.0), Sense::hover());
+            let g = ui.painter().layout_no_wrap("Scene".into(), semibold(17.0), TEXT_STRONG());
+            let gw = g.size().x;
+            ui.painter().galley(pos2(lr.min.x + 4.0, lr.center().y - g.size().y * 0.5), g, TEXT_STRONG());
+            ui.painter().text(pos2(lr.min.x + 12.0 + gw, lr.center().y + 1.0), Align2::LEFT_CENTER, format!("{n} shape{}", if n == 1 { "" } else { "s" }), regular(13.0), TEXT2());
+        } else {
+            let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 2.0 * 28.0, 26.0), Sense::hover());
+            ui.painter().text(lr.left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, "SCENE", semibold(10.5), TEXT2());
+            ui.painter().text(lr.left_center() + vec2(52.0, 0.0), Align2::LEFT_CENTER, format!("{n} shape{}", if n == 1 { "" } else { "s" }), regular(11.5), pick(Color32::from_rgb(0x64, 0x6B, 0x75), Color32::from_rgb(0x8A, 0x90, 0x99)));
+        }
         ui.spacing_mut().item_spacing.x = 2.0;
         // the picked SDF shape among its object's, else the selected feature
         let one = match st.sdf_sel.filter(|_| st.sdf_comp()) {
             Some((id, n)) => Some(crate::common::Item::Shape(id, n)),
             None => st.single().map(|f| crate::common::Item::Feature(f.id)),
         };
-        if icon_btn(ui, Icon::Up, false, "Earlier in the history", 26.0).clicked() {
+        let bs = if tab { 38.0 } else { 26.0 };
+        if icon_btn(ui, Icon::Up, false, "Earlier in the history", bs).clicked() {
             if let Some(it) = one {
                 st.reorder_item(it, -1);
             }
         }
-        if icon_btn(ui, Icon::Down, false, "Later in the history", 26.0).clicked() {
+        if icon_btn(ui, Icon::Down, false, "Later in the history", bs).clicked() {
             if let Some(it) = one {
                 st.reorder_item(it, 1);
             }
@@ -3064,8 +3126,9 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     // a group's members' counts: their items (operations, an SDF object's shapes)
     let ops_of = |st: &AppState, id: FeatureId| st.element_items(id).len();
     let focus = st.outline_element();
-    egui::ScrollArea::vertical().id_salt("tree-scroll").max_height(height - 32.0).min_scrolled_height(height - 32.0).auto_shrink([false, true]).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 1.0;
+    let head = if tab { 50.0 } else { 32.0 };
+    egui::ScrollArea::vertical().id_salt("tree-scroll").max_height(height - head).min_scrolled_height(height - head).auto_shrink([false, true]).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = if tab { 2.0 } else { 1.0 };
         if feats.is_empty() && st.doc.reference.is_none() {
             ui.label(egui::RichText::new("Empty · pick a shape on the right (B, C), or drop an .obj here").font(regular(12.0)).color(TEXT2()));
         }
@@ -3098,12 +3161,7 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             }
             let fid = Id::new(("tree-group", gi));
             let folded = ui.data(|d| d.get_temp::<bool>(fid)).unwrap_or(false);
-            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
-            let p = ui.painter();
-            icons::paint(p, Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(10.0, 10.0)), if folded { Icon::ChevronRight } else { Icon::Chevron }, TEXT2());
-            p.text(pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, *title, semibold(10.0), if resp.hovered() { TEXT() } else { TEXT2() });
-            p.text(pos2(r.max.x - 6.0, r.center().y), Align2::RIGHT_CENTER, members.len().to_string(), regular(11.0), TEXT2());
-            if resp.clicked() {
+            if group_header(ui, title, members.len(), folded) {
                 ui.data_mut(|d| d.insert_temp(fid, !folded));
             }
             if folded {
@@ -3116,10 +3174,55 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
                 if f.shape_bool.is_some() {
                     operand_rows(ui, st, f, 1);
                 }
+                // the iPad: the element clicked shows its operations under
+                // it (the mock-up; no Sub Outliner beside the list)
+                if tablet() && focus == Some(f.id) && kind.is_some() {
+                    nested_items(ui, st, f.id);
+                }
             }
             ui.add_space(3.0);
         }
     });
+}
+
+/// A group's header in the outliner (PRIMITIVES, GROUPS…): its arrow, its
+/// title and count; true when clicked (folded or unfolded).
+fn group_header(ui: &mut Ui, title: &str, n: usize, folded: bool) -> bool {
+    let tab = tablet();
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), if tab { 34.0 } else { 22.0 }), Sense::click());
+    let p = ui.painter();
+    let c = if resp.hovered() { TEXT() } else { TEXT2() };
+    icons::paint(p, Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), if tab { vec2(12.0, 12.0) } else { vec2(10.0, 10.0) }), if folded { Icon::ChevronRight } else { Icon::Chevron }, TEXT2());
+    if tab {
+        p.text(pos2(r.min.x + 24.0, r.center().y), Align2::LEFT_CENTER, title, mono(11.0), c);
+        p.text(pos2(r.max.x - 8.0, r.center().y), Align2::RIGHT_CENTER, n.to_string(), mono(11.0), TEXT2());
+    } else {
+        p.text(pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, title, semibold(10.0), c);
+        p.text(pos2(r.max.x - 6.0, r.center().y), Align2::RIGHT_CENTER, n.to_string(), regular(11.0), TEXT2());
+    }
+    resp.clicked()
+}
+
+/// The iPad: an element's items (its operations, an SDF object's shapes)
+/// under its row, indented, with the history marker.
+fn nested_items(ui: &mut Ui, st: &mut AppState, id: FeatureId) {
+    let items = st.element_items(id);
+    if items.is_empty() {
+        return;
+    }
+    let marker = st.item_marker(id);
+    for (k, it) in items.iter().enumerate() {
+        if k == marker {
+            ui.horizontal(|ui| {
+                ui.add_space(36.0);
+                ui.vertical(|ui| history_marker_line(ui));
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(36.0);
+            ui.vertical(|ui| item_row(ui, st, *it));
+        });
+    }
 }
 
 /// The outliner's GROUPS (Romain 21 nov.: "sous la même forme que Maya,
@@ -3133,22 +3236,18 @@ fn group_rows(ui: &mut Ui, st: &mut AppState, ops_of: &dyn Fn(&AppState, Feature
     }
     let fid = Id::new("tree-group-groups");
     let folded = ui.data(|d| d.get_temp::<bool>(fid)).unwrap_or(false);
-    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
-    let p = ui.painter();
-    icons::paint(p, Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(10.0, 10.0)), if folded { Icon::ChevronRight } else { Icon::Chevron }, TEXT2());
-    p.text(pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, "GROUPS", semibold(10.0), if resp.hovered() { TEXT() } else { TEXT2() });
-    p.text(pos2(r.max.x - 6.0, r.center().y), Align2::RIGHT_CENTER, groups.len().to_string(), regular(11.0), TEXT2());
-    if resp.clicked() {
+    if group_header(ui, "GROUPS", groups.len(), folded) {
         ui.data_mut(|d| d.insert_temp(fid, !folded));
     }
     if folded {
         return;
     }
+    let tab = tablet();
     let selected_group = st.selected_group().map(|g| g.id);
     for g in groups {
         let gid = Id::new(("tree-group-fold", g.id));
         let shut = ui.data(|d| d.get_temp::<bool>(gid)).unwrap_or(false);
-        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), if tab { 52.0 } else { 28.0 }), Sense::click());
         ui.ctx().data_mut(|d| d.insert_temp(Id::new(("group-row", g.id)), r.center()));
         let selected = selected_group == Some(g.id);
         let lit = !g.open && st.hover_feature.is_some_and(|h| g.members.contains(&h));
@@ -3165,30 +3264,32 @@ fn group_rows(ui: &mut Ui, st: &mut AppState, ops_of: &dyn Fn(&AppState, Feature
         let aresp = ui.interact(ar.expand(5.0), Id::new(("group-arrow", g.id)), Sense::click());
         icons::paint(ui.painter(), ar, if shut { Icon::ChevronRight } else { Icon::Chevron }, if aresp.hovered() { TEXT() } else { TEXT2() });
         let p = ui.painter();
+        let bs = if tab { 28.0 } else { 16.0 };
         let x0 = r.min.x + 18.0;
-        let br = Rect::from_min_size(pos2(x0, r.center().y - 8.0), vec2(16.0, 16.0));
-        p.rect_filled(br, 4.0, tint(TEXT(), 0.12 * dim));
-        icons::paint(p, br.shrink(2.0), Icon::Group, tint(TEXT(), dim));
+        let br = Rect::from_min_size(pos2(x0, r.center().y - bs * 0.5), vec2(bs, bs));
+        p.rect_filled(br, if tab { 8.0 } else { 4.0 }, tint(TEXT(), 0.12 * dim));
+        icons::paint(p, br.shrink(if tab { 6.0 } else { 2.0 }), Icon::Group, tint(TEXT(), dim));
         let name_color = if selected { TEXT_STRONG() } else { tint(TEXT(), dim) };
         let n = g.members.len();
-        let info_g = p.layout_no_wrap(format!("{n} shape{}", if n > 1 { "s" } else { "" }), regular(12.0), tint(TEXT2(), dim));
-        let info_x = r.max.x - 62.0 - info_g.size().x;
+        let (fs, fi) = if tab { (15.0, 13.0) } else { (13.0, 12.0) };
+        let info_g = p.layout_no_wrap(format!("{n} shape{}", if n > 1 { "s" } else { "" }), regular(fi), tint(TEXT2(), dim));
+        let info_x = r.max.x - if tab { 92.0 } else { 62.0 } - info_g.size().x;
         p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
-        let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
-        let mut job = egui::text::LayoutJob::single_section(g.name.clone(), egui::TextFormat::simple(if selected { semibold(13.0) } else { regular(13.0) }, name_color));
+        let max_w = (info_x - 8.0 - (x0 + bs + 8.0)).max(20.0);
+        let mut job = egui::text::LayoutJob::single_section(g.name.clone(), egui::TextFormat::simple(if selected { semibold(fs) } else { regular(fs) }, name_color));
         job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
         let name_g = ui.painter().layout_job(job);
-        ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
+        ui.painter().galley(pos2(x0 + bs + 8.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
         // closed or open, then the eye
-        let lr = Rect::from_center_size(pos2(r.max.x - 42.0, r.center().y), vec2(15.0, 15.0));
-        let lresp = ui.interact(lr.expand(5.0), Id::new(("group-lock", g.id)), Sense::click());
+        let lr = if tab { Rect::from_center_size(pos2(r.max.x - 66.0, r.center().y), vec2(20.0, 20.0)) } else { Rect::from_center_size(pos2(r.max.x - 42.0, r.center().y), vec2(15.0, 15.0)) };
+        let lresp = ui.interact(lr.expand(if tab { 10.0 } else { 5.0 }), Id::new(("group-lock", g.id)), Sense::click());
         if g.open {
             ui.painter().rect_filled(lr.expand(3.0), 4.0, accent_bg());
         }
         icons::paint(ui.painter(), lr, if g.open { Icon::Unlock } else { Icon::Lock }, if g.open { accent() } else { tint(TEXT2(), if lresp.hovered() { 1.0 } else { 0.8 }) });
         let lresp = lresp.on_hover_text(if g.open { "Open: its shapes are picked one by one. Click: close it" } else { "Closed: a click takes the whole group. Click: open it" });
-        let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
-        let eresp = ui.interact(er.expand(6.0), Id::new(("group-eye", g.id)), Sense::click()).on_hover_text("Show / hide its shapes");
+        let er = if tab { Rect::from_center_size(pos2(r.max.x - 28.0, r.center().y), vec2(22.0, 22.0)) } else { Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0)) };
+        let eresp = ui.interact(er.expand(if tab { 10.0 } else { 6.0 }), Id::new(("group-eye", g.id)), Sense::click()).on_hover_text("Show / hide its shapes");
         icons::paint(ui.painter(), er, if shown { Icon::Eye } else { Icon::EyeOff }, tint(TEXT2(), 0.8));
         resp.context_menu(|ui| {
             ui.set_min_width(160.0);
@@ -3375,8 +3476,11 @@ fn reference_rows(ui: &mut Ui, st: &mut AppState) {
 /// many operations an element has (shown as a small count); `focused`: its
 /// operations are in the second column.
 fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bool) {
+    // the iPad: the mock-up's rows (52 points, a 28-point badge, a switch)
+    let tab = tablet();
+    let (h, rr, bs) = if tab { (52.0, 12.0, 28.0) } else { (28.0, 6.0, 16.0) };
     let w = ui.available_width();
-    let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
+    let (r, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
     ui.ctx().data_mut(|d| d.insert_temp(Id::new(("row", f.id)), r.center()));
     // a group selected: its row is the one selected (Maya), its shapes'
     // rows only lit
@@ -3385,24 +3489,24 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
     let hovered_3d = st.hover_feature == Some(f.id);
     let p = ui.painter();
     if selected {
-        p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+        p.rect(r, rr, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
     } else if in_group {
-        p.rect_filled(r, 6.0, RAISED());
+        p.rect_filled(r, rr, RAISED());
     } else if focused {
-        p.rect(r, 6.0, RAISED(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+        p.rect(r, rr, RAISED(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
     } else if resp.hovered() || hovered_3d {
-        p.rect_filled(r, 6.0, RAISED());
+        p.rect_filled(r, rr, RAISED());
     }
-    let x0 = r.min.x + 6.0;
+    let x0 = r.min.x + if tab { 8.0 } else { 6.0 };
     let is_op = !f.is_solid() && !f.is_path();
     let dim = if f.visible && !f.suspended { 1.0 } else { 0.4 };
     let c = feature_color(f);
-    let br = Rect::from_min_size(pos2(x0, r.center().y - 8.0), vec2(16.0, 16.0));
-    p.rect_filled(br, 4.0, tint(c, 0.16 * dim));
+    let br = Rect::from_min_size(pos2(x0, r.center().y - bs * 0.5), vec2(bs, bs));
+    p.rect_filled(br, if tab { 8.0 } else { 4.0 }, tint(c, 0.16 * dim));
     if f.is_solid() {
-        paint_op_glyph(p, br.center(), f.op, tint(c, dim), 9.0);
+        paint_op_glyph(p, br.center(), f.op, tint(c, dim), if tab { 13.0 } else { 9.0 });
     } else {
-        icons::paint(p, br.shrink(2.0), feature_icon(f), tint(c, dim));
+        icons::paint(p, br.shrink(if tab { 6.0 } else { 2.0 }), feature_icon(f), tint(c, dim));
     }
     let name_color = if selected { TEXT_STRONG() } else { tint(TEXT(), dim) };
     let info = if ops > 0 {
@@ -3413,17 +3517,20 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
     } else {
         step_info(f)
     };
-    let info_g = p.layout_no_wrap(info, regular(12.0), tint(TEXT2(), dim));
-    let info_x = r.max.x - 40.0 - info_g.size().x;
+    let (fs, fi) = if tab { (15.0, 13.0) } else { (13.0, 12.0) };
+    let info_g = p.layout_no_wrap(info, regular(fi), tint(TEXT2(), dim));
+    let info_x = r.max.x - if tab { 62.0 } else { 40.0 } - info_g.size().x;
     p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
-    let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
-    let mut job = egui::text::LayoutJob::single_section(f.name.clone(), egui::TextFormat::simple(if selected { semibold(13.0) } else { regular(13.0) }, name_color));
+    let max_w = (info_x - 8.0 - (x0 + bs + 8.0)).max(20.0);
+    let mut job = egui::text::LayoutJob::single_section(f.name.clone(), egui::TextFormat::simple(if selected { semibold(fs) } else { regular(fs) }, name_color));
     job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
     let name_g = ui.painter().layout_job(job);
-    ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
-    let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
-    let eresp = ui.interact(er.expand(6.0), Id::new(("eye", f.id)), Sense::click());
-    if is_op {
+    ui.painter().galley(pos2(x0 + bs + 8.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
+    let er = if tab { Rect::from_center_size(pos2(r.max.x - 28.0, r.center().y), vec2(if is_op { 42.0 } else { 22.0 }, 22.0)) } else { Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0)) };
+    let eresp = ui.interact(er.expand(if tab { 10.0 } else { 6.0 }), Id::new(("eye", f.id)), Sense::click());
+    if is_op && tab {
+        switch(ui.painter(), er, f.visible, if f.suspended { 0.45 } else { 1.0 });
+    } else if is_op {
         // an operation: on or off (Romain, 19 nov.: "activer ou désactiver
         // chacune des opérations… sans casser la chaîne")
         let b = Rect::from_center_size(er.center(), vec2(13.0, 13.0));
@@ -3565,39 +3672,44 @@ fn item_row(ui: &mut Ui, st: &mut AppState, it: crate::common::Item) {
         }
         Item::Shape(id, n) => (id, n),
     };
+    let tab = tablet();
+    let (h, rr, bs) = if tab { (44.0, 10.0, 24.0) } else { (28.0, 6.0, 16.0) };
     let w = ui.available_width();
-    let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
+    let (r, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
     let selected = st.item_selected(it);
     let on = st.item_on(it);
     let past = st.item_marker(id) <= st.element_items(id).iter().position(|x| *x == it).unwrap_or(0);
     let p = ui.painter();
     if selected {
-        p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+        p.rect(r, rr, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
     } else if resp.hovered() {
-        p.rect_filled(r, 6.0, RAISED());
+        p.rect_filled(r, rr, RAISED());
     }
     let dim = if on && !past { 1.0 } else { 0.4 };
     let (icon, c) = item_look(st, it);
     let x0 = r.min.x + 6.0;
-    let br = Rect::from_min_size(pos2(x0, r.center().y - 8.0), vec2(16.0, 16.0));
-    p.rect_filled(br, 4.0, tint(c, 0.16 * dim));
-    icons::paint(p, br.shrink(2.0), icon, tint(c, dim));
+    let br = Rect::from_min_size(pos2(x0, r.center().y - bs * 0.5), vec2(bs, bs));
+    p.rect_filled(br, if tab { 7.0 } else { 4.0 }, tint(c, 0.16 * dim));
+    icons::paint(p, br.shrink(if tab { 5.0 } else { 2.0 }), icon, tint(c, dim));
     let name_color = if selected { TEXT_STRONG() } else { tint(TEXT(), dim) };
     let info = if past { "past the marker".to_string() } else { st.item_info(it).1 };
-    let info_g = p.layout_no_wrap(info, regular(12.0), tint(TEXT2(), dim));
-    let info_x = r.max.x - 40.0 - info_g.size().x;
+    let (fs, fi) = if tab { (15.0, 13.0) } else { (13.0, 12.0) };
+    let info_g = p.layout_no_wrap(info, regular(fi), tint(TEXT2(), dim));
+    let info_x = r.max.x - if tab { 62.0 } else { 40.0 } - info_g.size().x;
     p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
-    let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
-    let mut job = egui::text::LayoutJob::single_section(st.item_name(it), egui::TextFormat::simple(if selected { semibold(13.0) } else { regular(13.0) }, name_color));
+    let max_w = (info_x - 8.0 - (x0 + bs + 8.0)).max(20.0);
+    let mut job = egui::text::LayoutJob::single_section(st.item_name(it), egui::TextFormat::simple(if selected { semibold(fs) } else { regular(fs) }, name_color));
     job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
     let name_g = ui.painter().layout_job(job);
-    ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
+    ui.painter().galley(pos2(x0 + bs + 8.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
     // on / off, as an operation's
-    let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
-    let eresp = ui.interact(er.expand(6.0), Id::new(("item-on", id, n)), Sense::click());
+    let er = if tab { Rect::from_center_size(pos2(r.max.x - 28.0, r.center().y), vec2(42.0, 22.0)) } else { Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0)) };
+    let eresp = ui.interact(er.expand(if tab { 10.0 } else { 6.0 }), Id::new(("item-on", id, n)), Sense::click());
     let b = Rect::from_center_size(er.center(), vec2(13.0, 13.0));
     let p = ui.painter();
-    if on {
+    if tab {
+        switch(p, er, on, if past { 0.45 } else { 1.0 });
+    } else if on {
         p.rect_filled(b, 3.0, tint(accent(), if past { 0.45 } else { 1.0 }));
         p.line_segment([b.min + vec2(3.0, 6.8), b.min + vec2(5.6, 9.4)], Stroke::new(1.6, on_accent()));
         p.line_segment([b.min + vec2(5.6, 9.4), b.min + vec2(10.2, 3.8)], Stroke::new(1.6, on_accent()));
@@ -4693,9 +4805,9 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
         for q in [0.5, 1.0, 2.0, 3.0, 5.0] {
             let on = (size - q).abs() < 1e-6;
             let g = ui.painter().layout_no_wrap(fmt_mm(q as f32), medium(12.0), if on { on_accent() } else { TEXT() });
-            let (r, resp) = ui.allocate_exact_size(vec2(cw, 24.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(cw, if tablet() { 36.0 } else { 24.0 }), Sense::click());
             let p = ui.painter();
-            p.rect(r, 6.0, if on { EDGE_SEL } else if resp.hovered() { RAISED() } else { WELL() }, Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+            p.rect(r, if tablet() { 9.0 } else { 6.0 }, if on { EDGE_SEL } else if resp.hovered() { RAISED() } else { WELL() }, Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
             p.galley(r.center() - g.size() * 0.5, g, TEXT());
             if resp.on_hover_text(format!("{} {} mm", if chamfer { "Chamfer" } else { "Fillet" }, fmt_mm(q as f32))).clicked() {
                 st.set_round(q, chamfer, true);

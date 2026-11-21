@@ -1733,67 +1733,7 @@ fn main() {
     }
 
     if want("ipad") {
-        // iPad Pro 12.9" (1366 × 1024 points, 2 pixels each) with the app's
-        // iPad zoom 0.85: the layout as on the device
-        use nurbs_app::touch::Phase;
-        let (w, h0, ppp) = (h.size, h.ppp, 0.85f32);
-        h.size = [1366.0 / ppp, 1024.0 / ppp];
-        h.ppp = 2.0 * ppp;
-        h.reset(test_part(), "Test part");
-        h.st.touch.on = true;
-        h.st.manual_only = true;
-        h.steps(3);
-        h.shot("ipad/ipad-1-layout");
-        // a finger tap on the boss selects it
-        let boss = h.screen_of(Vec3::new(10.0, 30.0, 0.0));
-        h.touch(1, Phase::Start, boss, false);
-        h.touch(1, Phase::End, boss, false);
-        h.steps(3);
-        h.shot("ipad/ipad-2-tap-select");
-        // one finger orbits
-        let c = pos2(h.size[0] * 0.6, h.size[1] * 0.75);
-        h.touch_drag(&[(2, c)], &[c + vec2(-180.0, -60.0)], 12, true);
-        h.settle();
-        h.shot("ipad/ipad-3-orbit");
-        // two fingers: pinch out (zoom in) and pan
-        let (a, b) = (c + vec2(-60.0, 0.0), c + vec2(60.0, 0.0));
-        h.touch_drag(&[(3, a), (4, b)], &[a + vec2(-90.0, -40.0), b + vec2(90.0, -40.0)], 12, true);
-        h.settle();
-        h.shot("ipad/ipad-4-pinch");
-        // Shift held by a finger, Ctrl latched by a tap
-        let key = |h: &Harness, k: nurbs_app::touch::BarKey| h.st.touch.keys.iter().find(|(_, x)| *x == k).map(|(r, _)| r.center()).unwrap();
-        let shift = key(&h, nurbs_app::touch::BarKey::Shift);
-        let ctrl = key(&h, nurbs_app::touch::BarKey::Ctrl);
-        h.touch(5, Phase::Start, ctrl, false);
-        h.touch(5, Phase::End, ctrl, false);
-        h.touch(6, Phase::Start, shift, false);
-        h.steps(2);
-        h.shot("ipad/ipad-5-keys");
-        h.touch(6, Phase::End, shift, false);
-        h.touch(5, Phase::Start, ctrl, false);
-        h.touch(5, Phase::End, ctrl, false);
-        // a finger held still on the block: the marking menu, then a flick
-        h.st.selection.clear();
-        let block = h.screen_of(Vec3::new(14.0, 6.0, 15.0));
-        h.touch(7, Phase::Start, block, false);
-        for _ in 0..40 {
-            h.step();
-        }
-        h.touch(7, Phase::Move, block + vec2(4.0, -70.0), false);
-        h.steps(20);
-        h.shot("ipad/ipad-6-marking");
-        h.touch(7, Phase::Cancel, block + vec2(0.0, 0.0), false);
-        h.steps(3);
-        // the Pencil on the left panel's slider and in the view
-        h.key(egui::Key::Escape);
-        let fillet = pos2(120.0, 200.0);
-        let _ = fillet;
-        // two-finger tap: undo
-        let before = h.st.doc.features.len();
-        h.touch_drag(&[(8, c), (9, c + vec2(80.0, 0.0))], &[c, c + vec2(80.0, 0.0)], 1, true);
-        eprintln!("ipad: two-finger tap, features {before} -> {}", h.st.doc.features.len());
-        h.size = w;
-        h.ppp = h0;
+        ipad(&mut h);
     }
 
     if want("groups") {
@@ -8181,4 +8121,272 @@ fn linked_complex(h: &mut Harness) {
     h.steps(8);
     h.shot("lsurfx-18-back-poly");
     eprintln!("lsurfx: undo {:?}", h.st.undo_labels().iter().rev().take(12).collect::<Vec<_>>());
+}
+
+/// The iPad (12.9", 1366 × 1024 points, 2 pixels each), the layout of the
+/// mock-up of 21 nov. (`ui::tablet`): the Pencil and the fingers as
+/// main.rs hands them over, the islands found by their areas' widgets.
+fn ipad(h: &mut Harness) {
+    use egui::{Id, Key, LayerId, Order};
+    use nurbs_app::touch::Phase;
+    let (w0, p0) = (h.size, h.ppp);
+    h.size = [1366.0, 1024.0];
+    h.ppp = 2.0;
+    // a tap (the Pencil or a finger), and the clickable widgets of an area
+    // (in the order they were laid out)
+    fn tap(h: &mut Harness, p: Pos2, pencil: bool) {
+        h.touch(31, Phase::Start, p, pencil);
+        h.touch(31, Phase::End, p, pencil);
+        h.steps(3);
+    }
+    fn widgets(h: &Harness, area: &str, order: Order) -> Vec<Rect> {
+        let layer = LayerId::new(order, Id::new(area));
+        h.ctx.viewport(|v| {
+            let w = &v.this_pass.widgets;
+            let mut out: Vec<Rect> = w.get_layer(layer).filter(|w| w.sense.senses_click() && w.enabled).map(|w| w.rect).collect();
+            if out.is_empty() {
+                out = v.prev_pass.widgets.get_layer(layer).filter(|w| w.sense.senses_click() && w.enabled).map(|w| w.rect).collect();
+            }
+            out
+        })
+    }
+    fn sized(rs: &[Rect], w: f32, hh: f32) -> Vec<Rect> {
+        rs.iter().copied().filter(|r| (r.width() - w).abs() < 0.6 && (r.height() - hh).abs() < 0.6).collect()
+    }
+    let mut d = test_part();
+    let boss = d.features.iter().find(|f| f.name == "Boss").unwrap().id;
+    let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+    d.add_round(1.5, false, vec![EdgeRef { faces: [tag(boss, 0), tag(boss, 1)], at: DVec3::new(17.0, 30.0, 0.0) }]);
+    h.reset(d, "Test part");
+    h.st.touch.on = true;
+    h.st.manual_only = true;
+    h.steps(3);
+    // framed in the iPad's view (the reset framed it in the PC's)
+    h.st.frame_all();
+    h.settle();
+    h.shot("ipad/ipad-01-layout");
+    // the Pencil taps the boss: its action bar, its window, its row
+    let boss_at = h.screen_of(Vec3::new(10.0, 30.0, 0.0));
+    tap(h, boss_at, true);
+    h.settle();
+    eprintln!("ipad: Pencil tap on the boss, selection {:?}", h.st.selection);
+    h.shot("ipad/ipad-02-shape");
+    // its Radius typed on the keypad: 8.5
+    let fields = sized(&widgets(h, "op-pop", Order::Foreground), 96.0, 36.0);
+    eprintln!("ipad: {} value fields in the operation window", fields.len());
+    if let Some(f) = fields.iter().min_by(|a, b| a.min.y.total_cmp(&b.min.y)).copied() {
+        tap(h, f.center(), true);
+        let kp = h.ctx.memory(|m| m.area_rect(Id::new("keypad-area")));
+        eprintln!("ipad: keypad {:?}", kp.map(|r| r.min));
+        if let Some(k) = kp {
+            // the keys from the bottom: row 4 Cancel / Done, row 3 . 0 ⌫, …
+            let key = |row: usize, col: usize| pos2(k.min.x + 12.0 + 36.0 + col as f32 * 80.0, k.max.y - 12.0 - 25.0 - (4 - row) as f32 * 58.0);
+            tap(h, key(2, 2), true); // nothing yet: replaced… then 8
+            tap(h, key(3, 2), true); // ⌫
+            tap(h, key(0, 1), true); // 8
+            tap(h, key(3, 0), true); // .
+            tap(h, key(1, 1), true); // 5
+            h.shot("ipad/ipad-03-keypad");
+            tap(h, pos2(k.max.x - 12.0 - 60.0, k.max.y - 12.0 - 25.0), true); // Done
+            h.settle();
+            let r = h.st.doc.feature(boss).map(|f| match f.prim {
+                Prim::Cylinder { radius, .. } => radius,
+                _ => 0.0,
+            });
+            eprintln!("ipad: Boss radius after the keypad {r:?} (8.5 asked)");
+        }
+    }
+    // the − / + steps: one + on the height
+    let plus = h.ctx.viewport(|v| v.this_pass.widgets.get_layer(LayerId::new(Order::Foreground, Id::new("op-pop"))).filter(|w| w.sense.senses_click() && (w.rect.width() - 40.0).abs() < 0.6 && (w.rect.height() - 36.0).abs() < 0.6).map(|w| w.rect).collect::<Vec<_>>());
+    if plus.len() >= 4 {
+        let before = h.st.doc.feature(boss).map(|f| f.prim.clone());
+        tap(h, plus[3].center(), true);
+        h.settle();
+        eprintln!("ipad: + on the second row: {:?} -> {:?}", before, h.st.doc.feature(boss).map(|f| f.prim.clone()));
+    }
+    h.shot("ipad/ipad-04-stepped");
+    // its position and rotation, unfolded at the bottom of the sidebar
+    if let Some(r) = sized(&widgets(h, "t-side", Order::Middle), 316.0 - 24.0, 48.0).first().copied() {
+        tap(h, r.center(), true);
+    }
+    h.steps(3);
+    h.shot("ipad/ipad-05-position");
+    if let Some(r) = sized(&widgets(h, "t-side", Order::Middle), 316.0 - 24.0, 48.0).first().copied() {
+        tap(h, r.center(), true);
+    }
+    // Edge mode from the top island, two edges picked by the Pencil
+    let modes = sized(&widgets(h, "t-modes", Order::Middle), 64.0, 46.0);
+    eprintln!("ipad: {} mode buttons", modes.len());
+    if modes.len() == 4 {
+        tap(h, modes[1].center(), true);
+    }
+    h.st.selection.clear();
+    h.steps(2);
+    for p in [Vec3::new(14.0, 20.0, 15.0), Vec3::new(20.0, 20.0, 8.0)] {
+        let at = h.screen_of(p);
+        h.hold(Modifiers::SHIFT);
+        tap(h, at, true);
+        h.hold(Modifiers::NONE);
+    }
+    eprintln!("ipad: mode {:?}, {} edges picked", h.st.sel_mode, h.st.edge_sel.len());
+    h.steps(3);
+    h.shot("ipad/ipad-06-edges");
+    // the action bar's Fillet
+    let acts: Vec<Rect> = widgets(h, "t-actions", Order::Middle).into_iter().filter(|r| (r.height() - 52.0).abs() < 0.6).collect();
+    eprintln!("ipad: {} buttons in the action bar", acts.len());
+    if let Some(r) = acts.first().copied() {
+        tap(h, r.center(), true);
+        h.settle();
+    }
+    eprintln!("ipad: after Fillet, {} features, selection {:?}", h.st.doc.features.len(), h.st.selection);
+    h.steps(3);
+    h.shot("ipad/ipad-07-fillet");
+    // Object mode, the sidebar folded
+    let modes = sized(&widgets(h, "t-modes", Order::Middle), 64.0, 46.0);
+    if modes.len() == 4 {
+        tap(h, modes[3].center(), true);
+    }
+    h.st.selection.clear();
+    h.st.panel_visible = false;
+    h.steps(3);
+    h.shot("ipad/ipad-08-folded");
+    h.st.panel_visible = true;
+    // the view menu, the settings
+    if let Some(r) = h.ctx.data(|d| d.get_temp::<Rect>(Id::new("t-view-btn"))) {
+        tap(h, r.center(), true);
+        h.steps(8);
+        h.shot("ipad/ipad-09-view-menu");
+        tap(h, r.center(), true);
+    }
+    if let Some(r) = h.ctx.data(|d| d.get_temp::<Rect>(Id::new("t-settings-btn"))) {
+        tap(h, r.center(), true);
+        h.steps(8);
+        h.shot("ipad/ipad-10-settings");
+        tap(h, r.center(), true);
+    }
+    // the dock's fly-outs: Shapes (the 3ds Max shapes, Surface, Slot) and
+    // More (Shell, Mirror, Array, Align)
+    for (btn, name) in [("t-curves-btn", "ipad/ipad-10b-shapes"), ("t-more-btn", "ipad/ipad-10c-more")] {
+        if let Some(r) = h.ctx.data(|d| d.get_temp::<Rect>(Id::new(btn))) {
+            tap(h, r.center(), true);
+            h.steps(8);
+            h.shot(name);
+            tap(h, r.center(), true);
+            h.steps(2);
+        } else {
+            eprintln!("ipad: no {btn}");
+        }
+    }
+    // the Touch & Pencil sheet ("?")
+    let help = pos2(h.size[0] - 16.0 - 30.0, h.size[1] - 16.0 - 30.0);
+    tap(h, help, true);
+    h.steps(8);
+    h.shot("ipad/ipad-11-gestures");
+    tap(h, help, true);
+    h.steps(2);
+    // a finger held still on the block: the marking menu
+    let block = h.screen_of(Vec3::new(14.0, 6.0, 15.0));
+    h.touch(7, Phase::Start, block, false);
+    for _ in 0..40 {
+        h.step();
+    }
+    h.touch(7, Phase::Move, block + vec2(4.0, -70.0), false);
+    h.steps(20);
+    h.shot("ipad/ipad-12-marking");
+    h.touch(7, Phase::Cancel, block, false);
+    h.steps(3);
+    h.key(Key::Escape);
+    // gestures: a double tap frames what is under it
+    let c = pos2((h.st.view_rect[0] + h.st.view_rect[2]) * 0.5, h.st.view_rect[3] - 120.0);
+    let d0 = h.st.camera.dist;
+    h.st.camera.dist *= 2.0;
+    let d1 = h.st.camera.dist;
+    tap(h, c, false);
+    tap(h, c, false);
+    h.settle();
+    eprintln!("ipad: double tap in empty space: distance {d0:.1} -> {d1:.1} -> {:.1} (framed all)", h.st.camera.dist);
+    // the palm: the Pencil down, a finger dragged in the view turns nothing
+    let yaw = h.st.camera.yaw;
+    let pen = h.screen_of(Vec3::new(-14.0, 20.0, 5.0));
+    h.touch(40, Phase::Start, pen, true);
+    let palm = pos2(c.x - 150.0, c.y - 40.0);
+    h.touch(41, Phase::Start, palm, false);
+    for i in 1..=10 {
+        h.touch(41, Phase::Move, palm + vec2(-12.0 * i as f32, 0.0), false);
+    }
+    h.touch(41, Phase::End, palm + vec2(-120.0, 0.0), false);
+    h.touch(40, Phase::End, pen, true);
+    h.steps(3);
+    eprintln!("ipad: palm while the Pencil is down: yaw {yaw:.3} -> {:.3} (unchanged)", h.st.camera.yaw);
+    // Pencil only: a finger tap on the boss picks nothing
+    h.st.selection.clear();
+    h.st.settings.pencil_only = true;
+    h.steps(30);
+    let boss_at = h.screen_of(Vec3::new(10.0, 30.0, 0.0));
+    tap(h, boss_at, false);
+    h.steps(30);
+    eprintln!("ipad: Pencil only, a finger tap on the boss: selection {:?} (empty)", h.st.selection);
+    h.st.settings.pencil_only = false;
+    tap(h, boss_at, false);
+    eprintln!("ipad: a finger tap on the boss: selection {:?}", h.st.selection);
+    // two-finger tap: undo
+    let before = h.st.doc.features.len();
+    h.touch_drag(&[(8, c), (9, c + vec2(80.0, 0.0))], &[c, c + vec2(80.0, 0.0)], 1, true);
+    h.settle();
+    eprintln!("ipad: two-finger tap (undo), features {before} -> {}, selection {:?} (the tap's pick undone)", h.st.doc.features.len(), h.st.selection);
+    // left-handed: the dock on the left, the scene list and Shift / Ctrl
+    // on the right
+    h.st.settings.left_handed = true;
+    h.steps(3);
+    let boss_at = h.screen_of(Vec3::new(10.0, 30.0, 0.0));
+    tap(h, boss_at, true);
+    h.settle();
+    h.steps(8);
+    h.shot("ipad/ipad-13-left-handed");
+    h.st.settings.left_handed = false;
+    // the SDF tab: a sphere, a box blended on it, a cylinder carved
+    h.reset(Doc::default(), "SDF part");
+    h.st.touch.on = true;
+    h.st.manual_only = true;
+    h.steps(3);
+    let tabs = sized(&widgets(h, "t-view", Order::Middle), 70.0, 46.0);
+    eprintln!("ipad: {} tabs", tabs.len());
+    if tabs.len() == 2 {
+        tap(h, tabs[1].center(), true);
+    }
+    h.steps(3);
+    eprintln!("ipad: workspace {:?}", h.st.workspace);
+    h.key(Key::B);
+    h.st.sdf_edit_node("Size", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::new(24.0, 8.0, 16.0);
+            s.round = 1.5;
+        }
+        n.transform.pos = Vec3::new(0.0, 8.0, 0.0);
+    });
+    h.st.sdf.blend = 3.0;
+    h.key(Key::O);
+    h.st.sdf_edit_node("Size", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::splat(9.0);
+        }
+        n.transform.pos = Vec3::new(0.0, 17.0, 0.0);
+    });
+    h.st.sdf.mode = forme_core::CombineMode::Carve;
+    h.st.sdf.blend = 1.0;
+    h.key(Key::C);
+    h.st.sdf_edit_node("Size", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::new(4.0, 30.0, 0.0);
+        }
+        n.transform.pos = Vec3::new(0.0, 10.0, 0.0);
+        n.transform.rot = glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    });
+    h.st.sdf_settle();
+    h.st.frame_all();
+    h.settle();
+    h.steps(8);
+    h.shot("ipad/ipad-14-sdf");
+    h.size = w0;
+    h.ppp = p0;
 }

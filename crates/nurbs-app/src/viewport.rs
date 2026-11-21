@@ -2086,9 +2086,11 @@ fn status(p: &Painter, st: &AppState) {
     if st.link.served > 0 {
         parts.push(format!("Claude · {} request{}", st.link.served, if st.link.served == 1 { "" } else { "s" }));
     }
-    // just above the history strip
-    let at = pos2(st.view_rect[0] + 12.0, st.view_rect[3] - 4.0);
-    let r = chip(p, at, Align2::LEFT_BOTTOM, &parts.join(" · "), PANEL_BORDER(), color);
+    // just above the history strip; on the iPad at the view's bottom right,
+    // above the "?" button
+    let tablet = crate::widgets::tablet();
+    let (at, align) = if tablet { (pos2(st.view_rect[2] - 4.0, st.view_rect[3] - 76.0), Align2::RIGHT_BOTTOM) } else { (pos2(st.view_rect[0] + 12.0, st.view_rect[3] - 4.0), Align2::LEFT_BOTTOM) };
+    let r = chip(p, at, align, &parts.join(" · "), PANEL_BORDER(), color);
     // what could not be made
     if let Some(m) = &st.model {
         let mut y = r.min.y - 6.0;
@@ -2101,11 +2103,11 @@ fn status(p: &Painter, st: &AppState) {
             }
         }
         for e in lines.iter().take(4) {
-            let rr = chip(p, pos2(at.x, y), Align2::LEFT_BOTTOM, e, carve(), carve_light());
+            let rr = chip(p, pos2(at.x, y), align, e, carve(), carve_light());
             y = rr.min.y - 4.0;
         }
         if lines.len() > 4 {
-            chip(p, pos2(at.x, y), Align2::LEFT_BOTTOM, &format!("and {} more", lines.len() - 4), carve(), carve_light());
+            chip(p, pos2(at.x, y), align, &format!("and {} more", lines.len() - 4), carve(), carve_light());
         }
     }
 }

@@ -125,6 +125,32 @@ pub enum Icon {
     /// A group closed (a padlock shut) or open (its shackle free).
     Lock,
     Unlock,
+    // the iPad's layout
+    Minus,
+    Plus,
+    Backspace,
+    /// The scene list shown or folded (a panel's edge).
+    Sidebar,
+    /// The Touch & Pencil sheet.
+    Help,
+    /// Settings (three sliders).
+    Sliders,
+    Close,
+    /// An edge loop picked (a dashed ring).
+    Loop,
+    /// Gestures: one finger orbiting, two panning, a pinch, a tap, a hold,
+    /// two and three fingers tapping, a double tap, the Pencil, a box, a palm.
+    Orbit,
+    Pan,
+    Pinch,
+    Tap,
+    Hold,
+    TwoTap,
+    ThreeTap,
+    DoubleTap,
+    Pencil,
+    Marquee,
+    Palm,
 }
 
 struct Pen<'a> {
@@ -757,6 +783,100 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(7.0, 3.0), (17.0, 3.0), (17.0, 13.0)]);
             pen.line(&[(11.0, 9.0), (16.5, 3.5)]);
             pen.line(&[(13.0, 3.5), (16.5, 3.5), (16.5, 7.0)]);
+        }
+        Icon::Minus => pen.line(&[(4.0, 10.0), (16.0, 10.0)]),
+        Icon::Plus => {
+            pen.line(&[(4.0, 10.0), (16.0, 10.0)]);
+            pen.line(&[(10.0, 4.0), (10.0, 16.0)]);
+        }
+        Icon::Backspace => {
+            pen.closed(&[(7.0, 4.5), (17.5, 4.5), (17.5, 15.5), (7.0, 15.5), (2.5, 10.0)]);
+            pen.line(&[(9.5, 7.5), (14.5, 12.5)]);
+            pen.line(&[(14.5, 7.5), (9.5, 12.5)]);
+        }
+        Icon::Sidebar => {
+            pen.closed(&[(2.5, 3.5), (17.5, 3.5), (17.5, 16.5), (2.5, 16.5)]);
+            pen.line(&[(7.5, 3.5), (7.5, 16.5)]);
+        }
+        Icon::Help => {
+            pen.circle(10.0, 10.0, 7.5);
+            pen.arc(10.0, 8.0, 2.6, 2.4, PI, 2.3 * PI);
+            pen.line(&[(11.4, 9.9), (10.0, 11.0), (10.0, 12.2)]);
+            pen.dot(10.0, 14.6, 0.9);
+        }
+        Icon::Sliders => {
+            for (y, x) in [(5.0, 12.5), (10.0, 6.5), (15.0, 11.0)] {
+                pen.line(&[(2.5, y), (x - 2.0, y)]);
+                pen.line(&[(x + 2.0, y), (17.5, y)]);
+                pen.circle(x, y, 2.0);
+            }
+        }
+        Icon::Close => {
+            pen.line(&[(5.0, 5.0), (15.0, 15.0)]);
+            pen.line(&[(15.0, 5.0), (5.0, 15.0)]);
+        }
+        Icon::Loop => {
+            for i in 0..8 {
+                let a = i as f32 * PI / 4.0;
+                pen.arc(10.0, 10.0, 6.5, 6.5, a + 0.12, a + PI / 4.0 - 0.28);
+            }
+        }
+        Icon::Orbit => {
+            pen.arc(10.0, 10.0, 7.0, 3.5, PI * 1.05, PI * 2.1);
+            pen.line(&[(15.0, 5.4), (17.3, 7.4), (14.8, 8.6)]);
+            pen.dot(10.0, 13.5, 1.8);
+        }
+        Icon::Pan => {
+            for x in [6.5f32, 13.5] {
+                pen.line(&[(x, 13.0), (x, 3.5)]);
+                pen.line(&[(x - 2.0, 5.5), (x, 3.5), (x + 2.0, 5.5)]);
+                pen.dot(x, 15.5, 1.8);
+            }
+        }
+        Icon::Pinch => {
+            pen.line(&[(3.5, 16.5), (8.0, 12.0)]);
+            pen.line(&[(3.5, 12.5), (3.5, 16.5), (7.5, 16.5)]);
+            pen.line(&[(16.5, 3.5), (12.0, 8.0)]);
+            pen.line(&[(12.5, 3.5), (16.5, 3.5), (16.5, 7.5)]);
+            pen.dot(10.0, 10.0, 1.6);
+        }
+        Icon::Tap => {
+            pen.circle(10.0, 10.0, 6.5);
+            pen.dot(10.0, 10.0, 2.4);
+        }
+        Icon::Hold => {
+            pen.arc(10.0, 10.0, 6.5, 6.5, -PI * 0.5, PI * 1.0);
+            pen.dot(10.0, 10.0, 2.4);
+        }
+        Icon::TwoTap => {
+            pen.circle(7.0, 10.0, 4.2);
+            pen.circle(13.0, 10.0, 4.2);
+            pen.dot(7.0, 10.0, 1.6);
+            pen.dot(13.0, 10.0, 1.6);
+        }
+        Icon::ThreeTap => {
+            pen.dot(4.5, 11.0, 1.9);
+            pen.dot(10.0, 8.5, 1.9);
+            pen.dot(15.5, 11.0, 1.9);
+        }
+        Icon::DoubleTap => {
+            pen.circle(10.0, 10.0, 7.5);
+            pen.circle(10.0, 10.0, 4.5);
+            pen.dot(10.0, 10.0, 2.0);
+        }
+        Icon::Pencil => {
+            pen.closed(&[(13.5, 3.0), (17.0, 6.5), (7.5, 16.0), (3.0, 17.0), (4.0, 12.5)]);
+            pen.line(&[(11.5, 5.0), (15.0, 8.5)]);
+        }
+        Icon::Marquee => {
+            for (a, b) in [((3.0, 3.0), (7.0, 3.0)), ((10.0, 3.0), (14.0, 3.0)), ((17.0, 6.0), (17.0, 10.0)), ((17.0, 13.0), (17.0, 17.0)), ((13.0, 17.0), (9.0, 17.0)), ((6.0, 17.0), (3.0, 17.0)), ((3.0, 14.0), (3.0, 10.0)), ((3.0, 7.0), (3.0, 3.0))] {
+                pen.line(&[a, b]);
+            }
+            pen.dot(17.0, 17.0, 1.4);
+        }
+        Icon::Palm => {
+            pen.line(&[(4.0, 4.0), (4.0, 16.0), (16.0, 16.0)]);
+            pen.line(&[(4.0, 16.0), (12.0, 8.0)]);
         }
     }
 }

@@ -5,8 +5,22 @@ use crate::icons::{self, Icon};
 use crate::theme::*;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, Frame, Id, Margin, Order, Rect, Response, Sense, Stroke, StrokeKind, Ui};
 
-/// Desktop layout: compact rows for the mouse.
-const DESK: bool = true;
+/// The iPad's layout (`ui::tablet`): larger rows, sliders with − / +
+/// steps, a value typed on the keypad. Else the desktop's, compact rows for
+/// the mouse.
+static TABLET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn tablet() -> bool {
+    TABLET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_tablet(on: bool) {
+    TABLET.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn desk() -> bool {
+    !tablet()
+}
 
 /// 12,5 (French decimals, like the first app).
 pub fn fmt_mm(v: f32) -> String {
@@ -62,7 +76,7 @@ pub fn secondary_btn(ui: &mut Ui, label: &str, width: f32) -> Response {
 
 /// Segmented control. Returns the picked value.
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, items: &[(T, &str, Color32)], current: T, height: f32) -> Option<T> {
-    let height = if DESK { height.min(28.0) } else { height };
+    let height = if desk() { height.min(28.0) } else { height.max(38.0) };
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     ui.painter().rect_filled(rect, 11.0, WELL());
@@ -80,7 +94,7 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, items: &[(T, &str, Color32)],
         } else if resp.hovered() {
             p.rect_filled(r, 8.0, RAISED());
         }
-        p.text(r.center(), Align2::CENTER_CENTER, *label, semibold(if DESK { 11.5 } else { 12.0 }), if on { TEXT_STRONG() } else { pick(Color32::from_rgb(0xAE, 0xB3, 0xBA), Color32::from_rgb(0x6A, 0x71, 0x7B)) });
+        p.text(r.center(), Align2::CENTER_CENTER, *label, semibold(if desk() { 11.5 } else { 13.5 }), if on { TEXT_STRONG() } else { pick(Color32::from_rgb(0xAE, 0xB3, 0xBA), Color32::from_rgb(0x6A, 0x71, 0x7B)) });
         if resp.clicked() {
             picked = Some(*v);
         }
@@ -166,8 +180,8 @@ pub fn round3(v: f32) -> f32 {
 /// Sizes use an adaptive range so the knob sits mid-track whatever the
 /// scale; the range is frozen while dragging.
 pub fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adaptive: bool, step: f32, width: f32) -> (bool, bool) {
-    let (rect, _) = ui.allocate_exact_size(vec2(width, if DESK { 22.0 } else { 34.0 }), Sense::click_and_drag());
-    let resp = ui.interact(rect.expand2(vec2(0.0, 5.0)), id, Sense::click_and_drag());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, if desk() { 22.0 } else { 32.0 }), Sense::click_and_drag());
+    let resp = ui.interact(rect.expand2(vec2(0.0, if desk() { 5.0 } else { 8.0 })), id, Sense::click_and_drag());
     let key = id.with("frozen-max");
     let soft = if adaptive { nice_ceil((v.abs() * 2.0).max(max)) } else { max };
     let mut hi = soft;
@@ -178,7 +192,7 @@ pub fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adapti
         hi = ui.data(|d| d.get_temp::<f32>(key)).unwrap_or(soft);
     }
     let wide = op_style(ui);
-    let rail = Rect::from_center_size(rect.center(), vec2(width - if DESK { 10.0 } else { 20.0 }, if wide { 2.0 } else if DESK { 1.5 } else { 4.0 }));
+    let rail = Rect::from_center_size(rect.center(), vec2(width - if desk() { 10.0 } else { 28.0 }, if desk() && wide { 2.0 } else if desk() { 1.5 } else { 4.0 }));
     let mut changed = false;
     let started = resp.drag_started() || resp.clicked();
     if resp.dragged() || resp.clicked() || resp.drag_started() {
@@ -203,7 +217,7 @@ pub fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adapti
     p.rect_filled(rail, 1.0, pick(Color32::from_rgb(0x3A, 0x3D, 0x44), Color32::from_rgb(0xCF, 0xD3, 0xD9)));
     let zero = if min < 0.0 { rail.min.x + (-min / (hi - min)) * rail.width() } else { rail.min.x };
     p.rect_filled(Rect::from_x_y_ranges(zero.min(kx)..=zero.max(kx), rail.y_range()), 1.0, pick(Color32::from_rgb(0xC8, 0xCC, 0xD2), Color32::from_rgb(0x5A, 0x60, 0x6A)));
-    if DESK {
+    if desk() {
         // the knob: a small upright pill, light grey with a fine dark edge
         // and a thin light ring round it when hovered or held
         let k = Rect::from_center_size(pos2(kx, rail.center().y), if wide { vec2(7.0, 14.0) } else { vec2(6.0, 12.0) });
@@ -213,9 +227,10 @@ pub fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adapti
             p.rect_stroke(k.expand(2.5), 4.5, Stroke::new(1.0, pick(Color32::from_rgba_unmultiplied(0xE8, 0xEA, 0xEE, 120), Color32::from_rgba_unmultiplied(0x30, 0x34, 0x3A, 110))), StrokeKind::Outside);
         }
     } else {
+        // the iPad: a round knob of 26 points
         let k = pos2(kx, rail.center().y);
-        p.circle_filled(k + vec2(0.0, 1.0), 10.5, tint(Color32::BLACK, 0.35));
-        p.circle(k, if active { 11.0 } else { 9.5 }, Color32::from_rgb(0xF2, 0xF3, 0xF5), Stroke::new(if active { 2.5 } else { 0.0 }, accent()));
+        p.circle_filled(k + vec2(0.0, 2.0), 14.0, tint(Color32::BLACK, 0.35));
+        p.circle(k, 13.0, Color32::from_rgb(0xF2, 0xF3, 0xF5), Stroke::new(if active { 2.5 } else { 0.0 }, accent()));
     }
     (changed, started && changed || resp.drag_started())
 }
@@ -225,14 +240,30 @@ pub fn touch_slider(ui: &mut Ui, id: Id, v: &mut f32, min: f32, max: f32, adapti
 /// click away keeps it, Esc drops it); a drag left / right with the left or
 /// the middle button changes it (Shift: ten times finer).
 pub fn value_field(ui: &mut Ui, v: &mut f32, range: std::ops::RangeInclusive<f32>, step: f64, suffix: &str, width: f32) -> egui::Response {
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click_and_drag());
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(width, if tablet() { 36.0 } else { 22.0 }), Sense::click_and_drag());
     let edit_key = resp.id.with("edit");
     let raw_key = resp.id.with("raw");
     let (lo, hi) = (*range.start(), *range.end());
     // a whole-number field (step 1 or more: segments, counts) shows no decimals
     let num = |x: f32| if step >= 1.0 && x.fract() == 0.0 { format!("{}", x as i64) } else { fmt3(x as f64) };
     let text_of = |x: f32| if suffix.is_empty() { num(x) } else { format!("{} {suffix}", num(x)) };
-    let editing: Option<String> = ui.data(|d| d.get_temp(edit_key));
+    if tablet() {
+        // the iPad: a tap opens the keypad beside the field, its Done gives
+        // the value here the next frame
+        let (lo, hi) = (*range.start(), *range.end());
+        if let Some(x) = ui.data_mut(|d| d.remove_temp::<f32>(resp.id.with("kp-result"))) {
+            let nv = round3(x.clamp(lo, hi));
+            if (nv - *v).abs() > 1e-7 {
+                *v = nv;
+                resp.mark_changed();
+            }
+        }
+        if resp.clicked() {
+            let kp = Keypad { owner: resp.id, text: fmt3(*v as f64), fresh: true, suffix: suffix.to_string(), lo, hi, anchor: rect };
+            ui.data_mut(|d| d.insert_temp(Id::new("keypad"), kp));
+        }
+    }
+    let editing: Option<String> = if tablet() { None } else { ui.data(|d| d.get_temp(edit_key)) };
     if let Some(mut text) = editing {
         let tid = resp.id.with("text");
         let te = ui.put(
@@ -286,16 +317,235 @@ pub fn value_field(ui: &mut Ui, v: &mut f32, range: std::ops::RangeInclusive<f32
     }
     let p = ui.painter();
     let hot = resp.hovered() || resp.dragged();
+    if tablet() {
+        // typed on the keypad: its text, a caret, the field ringed
+        let typing = ui.data(|d| d.get_temp::<Keypad>(Id::new("keypad"))).filter(|k| k.owner == resp.id);
+        let ring = if typing.is_some() { Stroke::new(1.6, TEXT_STRONG()) } else { Stroke::new(1.0, if resp.dragged() { TEXT2() } else { DIVIDER() }) };
+        p.rect(rect, 10.0, WELL(), ring, StrokeKind::Inside);
+        let (txt, caret) = match &typing {
+            Some(k) => (if suffix.is_empty() { k.text.clone() } else { format!("{} {suffix}", k.text) }, true),
+            None => (text_of(*v), false),
+        };
+        let g = p.layout_no_wrap(txt, mono(14.0), TEXT_STRONG());
+        let at = pos2(rect.max.x - 10.0 - g.size().x, rect.center().y - g.size().y * 0.5);
+        let gw = g.size().x;
+        p.galley(at, g, TEXT_STRONG());
+        if caret && !suffix.is_empty() {
+            let sw = p.layout_no_wrap(format!(" {suffix}"), mono(14.0), TEXT_STRONG()).size().x;
+            let x = at.x + gw - sw + 1.0;
+            p.line_segment([pos2(x, rect.center().y - 9.0), pos2(x, rect.center().y + 9.0)], Stroke::new(1.5, TEXT_STRONG()));
+        }
+        return resp;
+    }
     p.rect(rect, 6.0, if hot { RAISED() } else { WELL() }, Stroke::new(1.0, if resp.dragged() { TEXT2() } else { DIVIDER() }), StrokeKind::Inside);
     p.text(rect.right_center() - vec2(6.0, 0.0), Align2::RIGHT_CENTER, text_of(*v), regular(12.5), TEXT_STRONG());
     resp
+}
+
+/// The keypad of a value field on the iPad (the field that opened it, what
+/// is typed, the field's range and unit, where the field is on screen).
+#[derive(Clone, Debug)]
+pub struct Keypad {
+    pub owner: Id,
+    pub text: String,
+    /// Nothing typed yet: the first key replaces the value shown.
+    pub fresh: bool,
+    pub suffix: String,
+    pub lo: f32,
+    pub hi: f32,
+    pub anchor: Rect,
+}
+
+/// One − / + step of a slider row on the iPad.
+fn step_of(v: f32, step: f64, suffix: &str) -> f32 {
+    if step >= 1.0 {
+        return step as f32;
+    }
+    match suffix {
+        "mm" if v.abs() < 1.0 => 0.1,
+        "mm" => 0.5,
+        "°" => 5.0,
+        _ => (step as f32 * 5.0).max(0.01),
+    }
+}
+
+/// The keypad (iPad), beside the field that opened it: digits, the point,
+/// back, the sign when the field takes negatives, Cancel and Done. Drawn
+/// over everything; Done hands the value to the field.
+pub fn keypad(ctx: &egui::Context) {
+    let key = Id::new("keypad");
+    let Some(mut kp) = ctx.data(|d| d.get_temp::<Keypad>(key)) else { return };
+    let screen = ctx.content_rect();
+    let (kw, kh, gap) = (72.0, 50.0, 8.0);
+    let w = 3.0 * kw + 2.0 * gap + 24.0;
+    let h = 5.0 * kh + 4.0 * gap + 24.0 + 30.0;
+    // below the field, else above it; inside the screen
+    let a = kp.anchor;
+    let mut at = pos2(a.max.x - w, a.max.y + 8.0);
+    if at.y + h > screen.max.y - 8.0 {
+        at.y = a.min.y - 8.0 - h;
+    }
+    if at.y < screen.min.y + 8.0 {
+        // neither: beside it
+        at = pos2(a.min.x - w - 12.0, (a.center().y - h * 0.5).clamp(screen.min.y + 8.0, screen.max.y - 8.0 - h));
+    }
+    at.x = at.x.clamp(screen.min.x + 8.0, screen.max.x - 8.0 - w);
+    let mut done = None;
+    let mut close = false;
+    let area = egui::Area::new(Id::new("keypad-area")).order(Order::Tooltip).fixed_pos(at).show(ctx, |ui| {
+        op_island().inner_margin(Margin::same(12)).show(ui, |ui| {
+            ui.set_width(w - 24.0);
+            ui.spacing_mut().item_spacing = vec2(gap, gap);
+            let range = if kp.lo > f32::MIN / 2.0 && kp.hi < f32::MAX / 2.0 { format!("{} to {} {}", fmt3(kp.lo as f64), fmt3(kp.hi as f64), kp.suffix) } else { String::new() };
+            ui.label(egui::RichText::new(range).font(regular(12.0)).color(LABEL()));
+            let keys = [["7", "8", "9"], ["4", "5", "6"], ["1", "2", "3"], [",", "0", "⌫"]];
+            for row in keys {
+                ui.horizontal(|ui| {
+                    for k in row {
+                        let (r, resp) = ui.allocate_exact_size(vec2(kw, kh), Sense::click());
+                        let p = ui.painter();
+                        p.rect_filled(r, 10.0, if resp.is_pointer_button_down_on() { DIVIDER() } else { RAISED() });
+                        if k == "⌫" {
+                            icons::paint(p, Rect::from_center_size(r.center(), vec2(20.0, 20.0)), Icon::Backspace, TEXT());
+                        } else {
+                            p.text(r.center(), Align2::CENTER_CENTER, k, mono(19.0), TEXT_STRONG());
+                        }
+                        if resp.clicked() {
+                            match k {
+                                "⌫" => {
+                                    if kp.fresh {
+                                        kp.text.clear();
+                                    } else {
+                                        kp.text.pop();
+                                    }
+                                }
+                                // French decimals, as the fields show them
+                                "," => {
+                                    if kp.fresh {
+                                        kp.text = "0,".into();
+                                    } else if !kp.text.contains(',') && !kp.text.contains('.') {
+                                        kp.text.push(',');
+                                    }
+                                }
+                                d => {
+                                    if kp.fresh || kp.text == "0" {
+                                        kp.text = d.into();
+                                    } else if kp.text == "-0" {
+                                        kp.text = format!("-{d}");
+                                    } else {
+                                        kp.text.push_str(d);
+                                    }
+                                }
+                            }
+                            kp.fresh = false;
+                        }
+                    }
+                });
+            }
+            ui.horizontal(|ui| {
+                let half = (w - 24.0 - gap) * 0.5;
+                // the sign, when the field takes negatives
+                let cancel_w = if kp.lo < 0.0 { half - kh - gap } else { half };
+                if kp.lo < 0.0 {
+                    let (r, resp) = ui.allocate_exact_size(vec2(kh, kh), Sense::click());
+                    ui.painter().rect_filled(r, 10.0, RAISED());
+                    ui.painter().text(r.center(), Align2::CENTER_CENTER, "±", mono(19.0), TEXT_STRONG());
+                    if resp.clicked() {
+                        kp.text = match kp.text.strip_prefix('-') {
+                            Some(t) => t.to_string(),
+                            None => format!("-{}", kp.text),
+                        };
+                        kp.fresh = false;
+                    }
+                }
+                let (r, resp) = ui.allocate_exact_size(vec2(cancel_w, kh), Sense::click());
+                ui.painter().rect_filled(r, 10.0, RAISED());
+                ui.painter().text(r.center(), Align2::CENTER_CENTER, "Cancel", medium(15.0), TEXT());
+                if resp.clicked() {
+                    close = true;
+                }
+                let (r, resp) = ui.allocate_exact_size(vec2(half, kh), Sense::click());
+                ui.painter().rect_filled(r, 10.0, Color32::from_rgb(0xF2, 0xF3, 0xF5));
+                ui.painter().text(r.center(), Align2::CENTER_CENTER, "Done", semibold(15.0), Color32::from_rgb(0x0F, 0x11, 0x14));
+                if resp.clicked() {
+                    done = kp.text.replace(',', ".").parse::<f32>().ok();
+                    close = true;
+                }
+            });
+        });
+    });
+    // a hardware keyboard's Enter and Esc
+    let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+    if enter {
+        done = kp.text.replace(',', ".").parse::<f32>().ok();
+        close = true;
+    }
+    if esc {
+        close = true;
+    }
+    // a tap elsewhere (not on its field) closes it as Cancel
+    let away = ctx.input(|i| i.pointer.any_pressed()) && ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| !area.response.rect.contains(p) && !kp.anchor.contains(p));
+    if let Some(x) = done {
+        ctx.data_mut(|d| d.insert_temp(kp.owner.with("kp-result"), x));
+    }
+    if close || away {
+        ctx.data_mut(|d| d.remove::<Keypad>(key));
+    } else {
+        ctx.data_mut(|d| d.insert_temp(key, kp));
+    }
+    ctx.request_repaint();
 }
 
 /// label · slider · value. Returns (changed, gesture started).
 pub fn slider_row(ui: &mut Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, step: f64, suffix: &str) -> (bool, bool) {
     let mut out = (false, false);
     let id = ui.make_persistent_id(("slider", label));
-    if DESK && op_style(ui) {
+    if tablet() {
+        // the iPad (the mock-up's operation window): the label, − the value
+        // +, then the slider the whole width with a round knob
+        let (min, max) = (*range.start(), *range.end());
+        let adaptive = suffix == "mm" && min >= 0.0 && max > 20.0;
+        let hint = if adaptive { 10.0 } else { max };
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let (vw, sw) = (96.0, 40.0);
+            let (lr, _) = ui.allocate_exact_size(vec2((ui.available_width() - vw - 2.0 * sw - 18.0).max(20.0), 36.0), Sense::hover());
+            ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(15.0), LABEL());
+            let inc = step_of(*v, step, suffix);
+            for (sign, icon) in [(-1.0f32, Icon::Minus), (1.0, Icon::Plus)] {
+                if sign > 0.0 {
+                    let r = value_field(ui, v, range.clone(), step, suffix, vw);
+                    if r.changed() {
+                        out = (true, true);
+                    }
+                }
+                let (r, resp) = ui.allocate_exact_size(vec2(sw, 36.0), Sense::click());
+                let p = ui.painter();
+                p.rect_filled(r, 10.0, if resp.is_pointer_button_down_on() { DIVIDER() } else { RAISED() });
+                icons::paint(p, Rect::from_center_size(r.center(), vec2(16.0, 16.0)), icon, TEXT());
+                if resp.clicked() {
+                    // on the step's grid, then one step
+                    let base = (*v / inc).round() * inc;
+                    let nv = round3((if (base - *v).abs() > 1e-4 && (base - *v).signum() == sign { base } else { base + sign * inc }).clamp(min, max));
+                    if (nv - *v).abs() > 1e-7 {
+                        *v = nv;
+                        out = (true, true);
+                    }
+                }
+            }
+        });
+        let w = ui.available_width();
+        let (ch, started) = touch_slider(ui, id, v, min, hint.min(max), adaptive, step as f32, w);
+        if ch {
+            out = (true, out.1 || started);
+        } else if started {
+            out.1 = true;
+        }
+        *v = v.clamp(min, max);
+        return out;
+    }
+    if desk() && op_style(ui) {
         // the operation window: the label and its value on one line, the
         // slider the window's whole width under them
         let (min, max) = (*range.start(), *range.end());
@@ -322,7 +572,7 @@ pub fn slider_row(ui: &mut Ui, label: &str, v: &mut f32, range: std::ops::RangeI
         *v = v.clamp(min, max);
         return out;
     }
-    if DESK {
+    if desk() {
         // desktop: compact row, the value is a field you can type into
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -365,10 +615,10 @@ pub fn toggle_row(ui: &mut Ui, label: &str, on: bool) -> bool {
     let mut clicked = false;
     ui.horizontal(|ui| {
         // desktop: a small switch on a 28 pt row; iPad: 44 pt touch target
-        let (row, tw, th, kr) = if DESK { (28.0, 34.0, 18.0, 7.0) } else { (44.0, 52.0, 32.0, 13.0) };
+        let (row, tw, th, kr) = if desk() { (28.0, 34.0, 18.0, 7.0) } else { (44.0, 52.0, 32.0, 13.0) };
         ui.set_height(row);
         let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - tw - ui.spacing().item_spacing.x, row - 4.0), Sense::hover());
-        ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(if DESK { 12.5 } else { 13.0 }), LABEL());
+        ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, label, regular(if desk() { 12.5 } else { 13.0 }), LABEL());
         let (r, resp) = ui.allocate_exact_size(vec2(tw, th), Sense::click());
         let p = ui.painter();
         p.rect_filled(r, th * 0.5, if on { accent() } else { RAISED() });
@@ -451,7 +701,7 @@ pub fn island_sep(ui: &mut Ui) {
 
 /// The shortcut letter, small, in the bottom-right corner of a tool button.
 pub fn key_hint(ui: &Ui, r: &Response, key: &str) {
-    if !DESK {
+    if !desk() {
         return;
     }
     let at = r.rect.right_bottom() - vec2(4.0, 3.0);
@@ -472,7 +722,7 @@ pub fn grip(ui: &mut Ui, key: &str) {
     // (a wide panel such as the history strip keeps its own width)
     let w = ui.available_width().min(400.0);
     let (r, _) = ui.allocate_exact_size(vec2(w, 12.0), Sense::hover());
-    let hit = Rect::from_center_size(r.center(), vec2(64.0, 14.0));
+    let hit = Rect::from_center_size(r.center(), if tablet() { vec2(96.0, 26.0) } else { vec2(64.0, 14.0) });
     let resp = ui.interact(hit, Id::new(("panel-grip", key)), Sense::click_and_drag());
     let id = Id::new(("panel-offset", key));
     if resp.dragged() {
@@ -514,3 +764,14 @@ pub fn dim(ctx: &egui::Context, screen: Rect, id: &str) -> bool {
     close
 }
 
+
+/// An on / off switch (the iPad's rows): 42 × 26 at most, white when on.
+pub fn switch(p: &egui::Painter, r: Rect, on: bool, alpha: f32) {
+    let r = Rect::from_center_size(r.center(), vec2(r.width().min(42.0), r.height().min(26.0)));
+    let h = r.height();
+    let (bg, knob) = if on { (Color32::from_rgb(0xF2, 0xF3, 0xF5), Color32::from_rgb(0x0F, 0x11, 0x14)) } else { (pick(Color32::from_rgb(0x2A, 0x2E, 0x35), Color32::from_rgb(0xD5, 0xD9, 0xDE)), Color32::from_rgb(0x7D, 0x84, 0x8E)) };
+    let bg = if on { pick(bg, accent()) } else { bg };
+    p.rect_filled(r, h * 0.5, tint(bg, alpha));
+    let k = if on { r.right_center() - vec2(h * 0.5, 0.0) } else { r.left_center() + vec2(h * 0.5, 0.0) };
+    p.circle_filled(k, h * 0.5 - 3.0, if on { pick(knob, on_accent()) } else { knob });
+}

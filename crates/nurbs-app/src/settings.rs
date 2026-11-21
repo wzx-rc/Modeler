@@ -27,11 +27,20 @@ pub struct Settings {
     /// tab_anim: the change of tab animated (colours fading, the pill
     /// sliding, the new tools coming in).
     pub tab_anim: bool,
+    /// iPad: Shift / Ctrl on the right, the tool dock on the left and the
+    /// scene list on the right (left-handed: the Pencil in the left hand).
+    pub left_handed: bool,
+    /// iPad: a finger tap never picks (the fingers only move the view, the
+    /// Pencil does the work; a double tap still frames).
+    pub pencil_only: bool,
+    /// iPad: a finger held still this long (seconds) in the view is the
+    /// right button (the marking menu).
+    pub hold_time: f64,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, tab_anim: true }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, tab_anim: true, left_handed: false, pencil_only: false, hold_time: 0.45 }
     }
 }
 

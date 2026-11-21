@@ -11,7 +11,11 @@
 //!   0.45 s it is the right button: the marking menu opens there, the
 //!   finger flicks to an item and lets go (the Knife's cut ends); while a
 //!   Sketch or Path is drawn it is Enter (closes it, a path ends open). Two-finger tap: Undo; three-finger
-//!   tap: Redo.
+//!   tap: Redo. A double tap frames what is under it (empty space: all).
+//!   Settings: Pencil only (a finger tap never picks), the hold time,
+//!   left-handed (Shift / Ctrl on the right).
+//! - **Palm on the glass**: while the Pencil is down, a finger that comes
+//!   down in the view is ignored.
 //! - **Shift and Ctrl** (`show_bar`, Romain 19 nov.: two round floating
 //!   buttons, upright on the left, no Alt: the fingers turn the view): held
 //!   by a finger while the Pencil works, or tapped to stay on until tapped
@@ -57,11 +61,12 @@ impl BarKey {
 const BAR_KEYS: [BarKey; 2] = [BarKey::Shift, BarKey::Ctrl];
 /// The round buttons' size, their gap and their margin to the screen's
 /// edges (the left panel stops above them).
-const KEY_D: f32 = 76.0;
-const KEY_GAP: f32 = 14.0;
-const BAR_EDGE: f32 = 16.0;
-/// A finger held this long without moving is the right button.
-const LONG_PRESS: f64 = 0.45;
+pub const KEY_D: f32 = 76.0;
+pub const KEY_GAP: f32 = 14.0;
+pub const BAR_EDGE: f32 = 16.0;
+/// Two taps this close in time (seconds) and space (points): a double tap.
+const DOUBLE_TAP: f64 = 0.35;
+const DOUBLE_SLOP: f32 = 40.0;
 /// Moved this far (points) it is no longer a tap.
 const SLOP: f32 = 10.0;
 /// Taps of 2 or 3 fingers shorter than this undo / redo.
@@ -81,6 +86,7 @@ enum Role {
 #[derive(Clone, Copy, Debug)]
 struct Finger {
     role: Role,
+    pencil: bool,
     start: Pos2,
     pos: Pos2,
     t0: f64,
@@ -121,11 +127,15 @@ pub struct TouchInput {
     pub keys: Vec<(Rect, BarKey)>,
     /// The modifiers egui was last told.
     sent_mods: Modifiers,
+    /// The last one-finger tap in the view (time, place): a double tap.
+    last_tap: Option<(f64, Pos2)>,
+    /// A double tap asked to frame (done by `tick`).
+    frame_asked: bool,
 }
 
 impl Default for TouchInput {
     fn default() -> Self {
-        TouchInput { on: false, fingers: HashMap::new(), pointer: None, cam_ids: vec![], cam: Cam::Idle, gesture: (0, 0.0, false), events: vec![], next: vec![], held: [None; 2], latched: [false; 2], keys: vec![], sent_mods: Modifiers::NONE }
+        TouchInput { on: false, fingers: HashMap::new(), pointer: None, cam_ids: vec![], cam: Cam::Idle, gesture: (0, 0.0, false), events: vec![], next: vec![], held: [None; 2], latched: [false; 2], keys: vec![], sent_mods: Modifiers::NONE, last_tap: None, frame_asked: false }
     }
 }
 
@@ -155,6 +165,9 @@ impl TouchInput {
     }
 
     fn press_key(&mut self, k: Key, mods: Modifiers) {
+        // the shortcuts read egui's modifiers, not the key event's: they
+        // are held for this frame (`apply` puts the real ones back next)
+        self.events.push(Event::ModifiersChanged(mods));
         for pressed in [true, false] {
             self.events.push(Event::Key { key: k, physical_key: None, pressed, repeat: false, modifiers: mods });
         }
@@ -172,6 +185,11 @@ impl TouchInput {
         for mut e in self.events.drain(..) {
             match &mut e {
                 Event::PointerButton { modifiers, .. } | Event::Key { modifiers, .. } => *modifiers = *modifiers | m,
+                // a key pressed with its own modifiers (`press_key`)
+                Event::ModifiersChanged(x) => {
+                    *x = *x | m;
+                    self.sent_mods = *x;
+                }
                 _ => {}
             }
             raw.events.push(e);
@@ -211,7 +229,10 @@ fn two(fingers: &HashMap<u64, Finger>, ids: &[u64]) -> Option<(Pos2, f32)> {
 /// altitude angle, fingers do not).
 pub fn on_touch(ctx: &egui::Context, st: &mut AppState, id: u64, phase: Phase, p: Pos2, pencil: bool, now: f64) {
     let view_h = st.screen[1].max(1.0);
+    let (pencil_only, long_press) = (st.settings.pencil_only, st.settings.hold_time.clamp(0.2, 1.5));
     let (t, cam) = (&mut st.touch, &mut st.camera);
+    // the Pencil is down: a palm (a finger) on the view is not a gesture
+    let pencil_down = t.fingers.values().any(|f| f.pencil && matches!(f.role, Role::Pointer { .. }));
     match phase {
         Phase::Start => {
             let role = if let Some(k) = t.key_at(p) {
@@ -231,6 +252,8 @@ pub fn on_touch(ctx: &egui::Context, st: &mut AppState, id: u64, phase: Phase, p
                 t.pointer = Some(id);
                 pointer_down(t, p, PointerButton::Primary);
                 Role::Pointer { button: PointerButton::Primary, in_view: in_view(ctx, p) }
+            } else if pencil_down && in_view(ctx, p) {
+                Role::Ignored
             } else if in_view(ctx, p) {
                 if t.cam_ids.is_empty() {
                     t.gesture = (0, now, false);
@@ -246,7 +269,7 @@ pub fn on_touch(ctx: &egui::Context, st: &mut AppState, id: u64, phase: Phase, p
             } else {
                 Role::Ignored
             };
-            t.fingers.insert(id, Finger { role, start: p, pos: p, t0: now, moved: false });
+            t.fingers.insert(id, Finger { role, pencil, start: p, pos: p, t0: now, moved: false });
             if role == Role::Camera && t.cam_ids.len() == 2 {
                 // a second finger: pan and zoom (a held menu is let go)
                 if let Some((center, dist)) = two(&t.fingers, &t.cam_ids) {
@@ -314,10 +337,20 @@ pub fn on_touch(ctx: &egui::Context, st: &mut AppState, id: u64, phase: Phase, p
                     let quick = now - t.gesture.1 < TAP && !t.gesture.2 && phase == Phase::End;
                     if t.cam_ids.is_empty() {
                         match t.gesture.0 {
-                            // a tap: a click there (released next frame)
-                            1 if t.cam == Cam::Pending && !f.moved && now - f.t0 < LONG_PRESS && t.pointer.is_none() && phase == Phase::End => {
-                                pointer_down(t, f.start, PointerButton::Primary);
-                                t.next.push(Event::PointerButton { pos: f.start, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+                            // a tap: a click there (released next frame); a
+                            // second one close by: frame (not a click)
+                            1 if t.cam == Cam::Pending && !f.moved && now - f.t0 < long_press && t.pointer.is_none() && phase == Phase::End => {
+                                let double = t.last_tap.is_some_and(|(t0, q)| now - t0 < DOUBLE_TAP && q.distance(f.start) < DOUBLE_SLOP);
+                                if double {
+                                    t.last_tap = None;
+                                    t.frame_asked = true;
+                                } else {
+                                    t.last_tap = Some((now, f.start));
+                                    if !pencil_only {
+                                        pointer_down(t, f.start, PointerButton::Primary);
+                                        t.next.push(Event::PointerButton { pos: f.start, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+                                    }
+                                }
                             }
                             2 if quick => t.press_key(Key::Z, Modifiers { ctrl: true, command: true, ..Default::default() }),
                             3 if quick => t.press_key(Key::Z, Modifiers { ctrl: true, command: true, shift: true, ..Default::default() }),
@@ -343,13 +376,18 @@ pub fn on_touch(ctx: &egui::Context, st: &mut AppState, id: u64, phase: Phase, p
 /// Each frame, before the pass: a finger held still long enough in the view
 /// becomes the right button (the marking menu).
 pub fn tick(st: &mut AppState, now: f64) {
+    if std::mem::take(&mut st.touch.frame_asked) {
+        // on a shape (the first tap picked it): it framed; else all
+        st.frame_current();
+    }
+    let long_press = st.settings.hold_time.clamp(0.2, 1.5);
     let t = &mut st.touch;
     if t.cam != Cam::Pending || t.cam_ids.len() != 1 || t.pointer.is_some() {
         return;
     }
     let id = t.cam_ids[0];
     let Some(f) = t.fingers.get(&id).copied() else { return };
-    if f.moved || now - f.t0 < LONG_PRESS {
+    if f.moved || now - f.t0 < long_press {
         return;
     }
     t.cam_ids.clear();
@@ -382,8 +420,10 @@ pub fn show_bar(ctx: &egui::Context, st: &mut AppState) {
     let mods = st.touch.modifiers();
     let latched = st.touch.latched;
     let mut keys = vec![];
+    // left-handed: on the right, under the other thumb
+    let x = if st.settings.left_handed { screen.max.x - BAR_EDGE - KEY_D * 0.5 } else { screen.min.x + BAR_EDGE + KEY_D * 0.5 };
     for (i, k) in BAR_KEYS.iter().enumerate() {
-        let c = pos2(screen.min.x + BAR_EDGE + KEY_D * 0.5, screen.max.y - BAR_EDGE - KEY_D * 0.5 - i as f32 * (KEY_D + KEY_GAP));
+        let c = pos2(x, screen.max.y - BAR_EDGE - KEY_D * 0.5 - i as f32 * (KEY_D + KEY_GAP));
         let r = Rect::from_center_size(c, vec2(KEY_D, KEY_D));
         let on = match k {
             BarKey::Shift => mods.shift,
