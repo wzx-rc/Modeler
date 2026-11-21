@@ -79,12 +79,35 @@ pub struct SdfModel {
     pub scene: forme_core::Scene,
     pub offset: [f32; 3],
     pub size: [f32; 3],
+    /// The object's history marker (the history strip, as a NURBS
+    /// element's): only its first `n` shapes are built, the others kept
+    /// past it. None: all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<usize>,
 }
 
 impl SdfModel {
     /// A scene with nothing in it yet, its origin at the frame's.
     pub fn new() -> SdfModel {
-        SdfModel { scene: forme_core::Scene::new(), offset: [0.0; 3], size: [0.0; 3] }
+        SdfModel { scene: forme_core::Scene::new(), offset: [0.0; 3], size: [0.0; 3], marker: None }
+    }
+
+    /// The shapes in order (depth first, groups left out).
+    pub fn shapes(&self) -> Vec<forme_core::NodeId> {
+        sdf_shapes(&self.scene)
+    }
+
+    /// The scene as built: the shapes past the marker left out.
+    pub fn built_scene(&self) -> forme_core::Scene {
+        let mut s = self.scene.clone();
+        if let Some(m) = self.marker {
+            for id in self.shapes().into_iter().skip(m) {
+                if let Some(n) = s.node_mut(id) {
+                    n.visible = false;
+                }
+            }
+        }
+        s
     }
 
     /// The scene's point to the feature's frame (mm).
@@ -142,6 +165,25 @@ impl Default for SdfModel {
     fn default() -> Self {
         SdfModel::new()
     }
+}
+
+/// A scene's shapes in order (depth first, groups left out, folded or not).
+pub fn sdf_shapes(scene: &forme_core::Scene) -> Vec<forme_core::NodeId> {
+    let mut out = vec![];
+    fn walk(s: &forme_core::Scene, id: forme_core::NodeId, out: &mut Vec<forme_core::NodeId>, depth: usize) {
+        let Some(n) = s.node(id) else { return };
+        if depth > 64 {
+            return;
+        }
+        for c in n.children() {
+            if s.node(*c).map(|x| x.shape().is_some()).unwrap_or(false) {
+                out.push(*c);
+            }
+            walk(s, *c, out, depth + 1);
+        }
+    }
+    walk(scene, scene.root, &mut out, 0);
+    out
 }
 
 /// Maya's default normal angle.

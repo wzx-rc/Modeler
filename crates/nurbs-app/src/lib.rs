@@ -41,6 +41,7 @@ pub mod poly;
 pub mod linked;
 pub mod tab_anim;
 pub mod sdf;
+pub mod common;
 
 pub use state::AppState;
 

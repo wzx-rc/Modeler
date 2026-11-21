@@ -100,11 +100,14 @@ pub struct SdfJob {
 }
 
 /// A scene meshed: the model it was made from (its scale taken in), the
-/// points in the feature's frame, the triangles.
+/// points in the feature's frame, the triangles, and each triangle's
+/// material as the engine gives it (the shape's own, a Carve's on the walls
+/// it cuts, blended ones by the nearer; 0: the object's).
 pub struct Meshed {
     pub model: SdfModel,
     pub pts: Vec<Vec3>,
     pub faces: Vec<Vec<u32>>,
+    pub mats: Vec<u32>,
 }
 
 /// What the mesh was made from: the scene and the box's sizes.
@@ -113,6 +116,7 @@ pub fn key_of(f: &Feature) -> Option<u64> {
     let md = f.mesh.as_ref()?.sdf.as_ref()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     serde_json::to_string(&md.scene).unwrap_or_default().hash(&mut h);
+    md.marker.hash(&mut h);
     for v in size(f).to_array() {
         v.to_bits().hash(&mut h);
     }
@@ -134,22 +138,33 @@ fn cell_for(lo: Vec3, hi: Vec3, fine: bool) -> f32 {
 pub fn mesh_model(model: &SdfModel, now: Vec3, fine: bool) -> Meshed {
     let mut model = model.clone();
     model.take_scale(now);
-    let (lo, hi) = model.scene.bounds();
+    // the shapes past the history marker left out
+    let built = model.built_scene();
+    let (lo, hi) = built.bounds();
     if !(lo.x <= hi.x) {
-        return Meshed { model, pts: vec![], faces: vec![] };
+        return Meshed { model, pts: vec![], faces: vec![], mats: vec![] };
     }
-    let prog = forme_core::compile(&model.scene);
+    let prog = forme_core::compile(&built);
     let m = forme_core::mesh::dual_contour(&prog, lo, hi, cell_for(lo, hi, fine));
+    let mats = m
+        .indices
+        .chunks(3)
+        .map(|t| {
+            let c = t.iter().map(|i| m.positions[*i as usize]).fold(Vec3::ZERO, |a, b| a + b) / 3.0;
+            prog.eval(c).1
+        })
+        .collect();
     let pts = m.positions.iter().map(|p| model.to_frame(*p)).collect();
     let faces = m.indices.chunks(3).map(|t| t.to_vec()).collect();
-    Meshed { model, pts, faces }
+    Meshed { model, pts, faces, mats }
 }
 
 /// A meshing put into the feature: the unit box fitted to the surface, the
 /// frame's base moved there, the shapes kept where they were.
-pub fn apply(f: &mut Feature, m: Meshed) {
+pub fn apply(f: &mut Feature, mut m: Meshed) -> Vec<u32> {
+    let mats = std::mem::take(&mut m.mats);
     let now = size(f);
-    let Some(mesh) = f.mesh.as_mut() else { return };
+    let Some(mesh) = f.mesh.as_mut() else { return mats };
     let md = mesh.make_mut();
     let mut model = m.model;
     if m.pts.is_empty() {
@@ -158,7 +173,7 @@ pub fn apply(f: &mut Feature, m: Meshed) {
         md.faces.clear();
         model.size = now.to_array();
         md.sdf = Some(model);
-        return;
+        return mats;
     }
     md.faces = m.faces;
     let (s2, base) = md.store(&m.pts, now);
@@ -167,6 +182,7 @@ pub fn apply(f: &mut Feature, m: Meshed) {
     md.sdf = Some(model);
     f.origin += f.rot * base.as_dvec3();
     f.prim = Prim::Box { x: s2.x as f64, y: s2.y as f64, z: s2.z as f64 };
+    mats
 }
 
 /// The feature's frame with its box's stretch since the last meshing, from
@@ -193,7 +209,20 @@ pub fn is_sdf(f: &Feature) -> bool {
 
 /// The shapes of a scene in order (no groups).
 pub fn shapes(scene: &Scene) -> Vec<NodeId> {
-    scene.rows().into_iter().map(|(id, _)| id).filter(|id| scene.node(*id).map(|n| n.shape().is_some()).unwrap_or(false)).collect()
+    nurbs_kernel::mesh::sdf_shapes(scene)
+}
+
+/// The object's model (its shapes, its marker).
+pub fn model_of(f: &Feature) -> Option<&SdfModel> {
+    f.mesh.as_ref()?.sdf.as_ref()
+}
+
+/// The shapes built (before the object's history marker).
+pub fn built_shapes(f: &Feature) -> Vec<NodeId> {
+    let Some(md) = model_of(f) else { return vec![] };
+    let all = md.shapes();
+    let n = md.marker.unwrap_or(all.len()).min(all.len());
+    all[..n].to_vec()
 }
 
 /// A shape's outline as lines in the world: its box's 12 edges, and for a
@@ -341,10 +370,11 @@ impl AppState {
             }
         }
         let f = self.doc.feature(hit.id)?;
-        let scene = scene_of(f)?;
+        // the shapes built (those past the marker or turned off are not seen)
+        let scene = model_of(f)?.built_scene();
         let q = frame_matrix(f).inverse().transform_point3(hit.point);
         let d = (size(f).length() * 0.04).clamp(0.3, 4.0);
-        let n = forme_core::pick_node(scene, q, d)?;
+        let n = forme_core::pick_node(&scene, q, d)?;
         Some((f.id, n))
     }
 
@@ -398,7 +428,21 @@ impl AppState {
                     }
                 };
                 let label = d_name(s, name);
-                made = s.add(s.root, NodeSpec::shape(&label, sh.clone()).at(pos).mode(mode).blend(if mode == CombineMode::Add || mode == CombineMode::Carve { blend } else { blend.min(1.0) }));
+                let spec = NodeSpec::shape(&label, sh.clone()).at(pos).mode(mode).blend(if mode == CombineMode::Add || mode == CombineMode::Carve { blend } else { blend.min(1.0) });
+                // the history marker back: the new shape goes in at the
+                // marker, before those left out (as an operation on a NURBS
+                // shape, Fusion's timeline)
+                match md.marker {
+                    Some(m) => {
+                        let root = s.root;
+                        let at = s.node(root).map(|r| r.children().len()).unwrap_or(0);
+                        let shapes = nurbs_kernel::mesh::sdf_shapes(s);
+                        let index = shapes.get(m).and_then(|x| s.node(root).and_then(|r| r.children().iter().position(|c| c == x))).unwrap_or(at);
+                        made = s.insert(root, spec, Some(index));
+                        md.marker = Some(m + 1);
+                    }
+                    None => made = s.add(s.root, spec),
+                }
             });
             if made != 0 {
                 self.sdf_sel = Some((id, made));
@@ -461,11 +505,7 @@ impl AppState {
             self.selection = vec![id];
             return false;
         }
-        self.edit("Delete shape", |d| {
-            if let Some(md) = d.feature_mut(id).and_then(|ft| ft.mesh.as_mut()).and_then(|m| m.make_mut().sdf.as_mut()) {
-                md.scene.remove(n);
-            }
-        });
+        self.delete_item(crate::common::Item::Shape(id, n));
         self.sdf_sel = None;
         true
     }
@@ -479,7 +519,14 @@ impl AppState {
         let mut made = None;
         self.edit("Duplicate shape", |d| {
             if let Some(md) = d.feature_mut(id).and_then(|ft| ft.mesh.as_mut()).and_then(|m| m.make_mut().sdf.as_mut()) {
+                let at = md.shapes().iter().position(|x| *x == n);
                 made = md.scene.duplicate(n);
+                // the copy right after it: the marker stays after the same shapes
+                if let (Some(m), Some(at)) = (md.marker, at) {
+                    if at < m {
+                        md.marker = Some(m + 1);
+                    }
+                }
             }
         });
         if let Some(m) = made {
@@ -555,8 +602,20 @@ impl AppState {
                 if self.settings.snap && !self.snap_off {
                     delta = delta.map(|x| self.snap(x));
                 }
+                // the pointer on a point of interest (the part's corners and
+                // centres, the other shapes' centres, tops and bases): the
+                // shape's centre lined up with it along what the handle moves
+                let own = wpos.as_dvec3();
+                let h0 = node0.shape().map(|s| s.local_half_extents().y).unwrap_or(0.0);
+                let mine = [Vec3::ZERO, Vec3::Y * h0, -Vec3::Y * h0].map(|q| w0.transform_point3(q).as_dvec3());
+                let caught = self.pick_snap(p, &[]).filter(|s| mine.iter().all(|m| s.pos.distance(*m) > 1e-3)).map(|s| (s.pos, s.kind));
+                if let Some((pos, kind)) = caught {
+                    delta = (pos - own) * mask;
+                    self.gizmo_readout = Some(format!("{} · {} mm", kind.label(), crate::widgets::fmt_mm(delta.length() as f32)));
+                } else {
+                    self.gizmo_readout = Some(format!("{} mm", crate::widgets::fmt_mm(delta.length() as f32)));
+                }
                 node.transform.pos = inv.transform_point3(wpos + delta.as_vec3());
-                self.gizmo_readout = Some(format!("{} mm", crate::widgets::fmt_mm(delta.length() as f32)));
             }
         }
         let (id, nid) = (d.id, d.node);
@@ -599,9 +658,10 @@ impl AppState {
             if key_of(f) != Some(key) {
                 continue;
             }
-            apply(f, m);
+            let mats = apply(f, m);
             let k = key_of(f).unwrap_or(0);
             self.sdf_meshed.insert(id, (k, true));
+            self.sdf_mats.insert(id, mats);
             self.mesh_gen += 1;
         }
         let ids: Vec<FeatureId> = self.doc.features.iter().filter(|f| is_sdf(f) && f.mesh.as_ref().map(|m| m.sdf.is_some()).unwrap_or(false)).map(|f| f.id).collect();
@@ -613,9 +673,10 @@ impl AppState {
                 // changed (or never meshed here): coarse now
                 let m = mesh_model(f.mesh.as_ref().unwrap().sdf.as_ref().unwrap(), size(f), false);
                 let f = self.doc.feature_mut(id).unwrap();
-                apply(f, m);
+                let mats = apply(f, m);
                 let k = key_of(f).unwrap_or(0);
                 self.sdf_meshed.insert(id, (k, false));
+                self.sdf_mats.insert(id, mats);
                 self.mesh_gen += 1;
                 continue;
             }
@@ -631,6 +692,8 @@ impl AppState {
             self.sdf_jobs.push(SdfJob { id, key, rx });
         }
         self.sdf_meshed.retain(|id, _| self.doc.feature(*id).is_some());
+        let alive: std::collections::HashSet<FeatureId> = self.sdf_meshed.keys().copied().collect();
+        self.sdf_mats.retain(|id, _| alive.contains(id));
         if self.sdf_sel.is_some() && !self.sdf_comp() && self.workspace == crate::workspace::Workspace::Sdf {
             self.sdf_sel = None;
         }
@@ -672,4 +735,153 @@ fn d_name(s: &Scene, base: &str) -> String {
         return base.to_string();
     }
     (2..).map(|i| format!("{base} {i}")).find(|n| !taken(n)).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::Workspace;
+    use nurbs_kernel::client::Kernel;
+    use nurbs_kernel::Doc;
+
+    fn app() -> AppState {
+        let mut st = AppState::new(Doc::default(), "t", Kernel::start(None));
+        st.set_workspace(Workspace::Sdf);
+        st
+    }
+
+    fn object_box(st: &AppState, id: FeatureId) -> (Vec3, Vec3) {
+        crate::meshes::world_bounds(st.doc.feature(id).unwrap()).expect("meshed")
+    }
+
+    /// Every shape in every operation: added, meshed, the object's box sane.
+    #[test]
+    fn every_shape_in_every_mode() {
+        for k in SDF_PRIMS {
+            for mode in SDF_MODES {
+                let mut st = app();
+                st.sdf_add(PrimKind::Box);
+                let id = st.sdf_target().unwrap();
+                st.sdf.mode = mode;
+                st.sdf_add(k);
+                st.sdf_tick();
+                let f = st.doc.feature(id).unwrap();
+                let n = f.mesh.as_ref().unwrap().faces.len();
+                let what = format!("{} {}", prim_label(k), mode.label());
+                assert!(n > 50, "{what}: {n} triangles");
+                let (lo, hi) = object_box(&st, id);
+                let d = hi - lo;
+                assert!(d.min_element() > 1.0 && d.max_element() < 80.0, "{what}: box {d:?}");
+                // standing on the ground (the cube's base at y 0; an Intersect
+                // keeps the common part only, higher)
+                assert!(mode == forme_core::CombineMode::Intersect || lo.y.abs() < 1.0, "{what}: base at {}", lo.y);
+            }
+        }
+    }
+
+    /// A Carve through the cube leaves a hole: the ray down its axis
+    /// reaches the ground.
+    #[test]
+    fn a_carve_makes_a_hole() {
+        let mut st = app();
+        st.sdf_add(PrimKind::Box);
+        let id = st.sdf_target().unwrap();
+        st.sdf.mode = forme_core::CombineMode::Carve;
+        st.sdf.blend = 0.0;
+        st.sdf_sel = None;
+        st.sdf_add(PrimKind::Cylinder);
+        st.sdf_edit_node("Size", |n| {
+            if let Some(s) = n.shape_mut() {
+                s.size = Vec3::new(3.0, 30.0, 0.0);
+            }
+        });
+        let f = st.doc.feature(id).unwrap();
+        let prog = forme_core::compile(&model_of(f).unwrap().built_scene());
+        let cube_c = model_of(f).unwrap().scene.node(shapes(scene_of(f).unwrap())[0]).unwrap().transform.pos;
+        assert!(prog.dist(cube_c) > 0.0, "the cube's centre is carved");
+        assert!(prog.dist(cube_c + Vec3::new(7.0, 0.0, 0.0)) < 0.0, "the rest is solid");
+    }
+
+    /// Undo and redo go through the shapes; the mesh follows.
+    #[test]
+    fn undo_redo_follow() {
+        let mut st = app();
+        st.sdf_add(PrimKind::Box);
+        let id = st.sdf_target().unwrap();
+        st.sdf_tick();
+        let one = object_box(&st, id);
+        st.sdf_add(PrimKind::Sphere);
+        st.sdf_tick();
+        let two = object_box(&st, id);
+        assert!(two.1.y > one.1.y + 5.0, "the sphere on top: {two:?} vs {one:?}");
+        st.undo();
+        st.sdf_tick();
+        assert_eq!(shapes(scene_of(st.doc.feature(id).unwrap()).unwrap()).len(), 1);
+        assert!((object_box(&st, id).1.y - one.1.y).abs() < 0.5);
+        st.redo();
+        st.sdf_tick();
+        assert_eq!(shapes(scene_of(st.doc.feature(id).unwrap()).unwrap()).len(), 2);
+    }
+
+    /// The last shape is not deleted alone (its object is); a copy is
+    /// picked, the cage scales a shape along its axes.
+    #[test]
+    fn delete_copy_scale() {
+        let mut st = app();
+        st.sdf_add(PrimKind::Box);
+        assert!(!st.sdf_delete(), "the last shape: the object instead");
+        st.sdf_sel = st.selection.first().and_then(|id| st.doc.feature(*id)).and_then(scene_of).map(|s| (st.selection[0], shapes(s)[0]));
+        assert!(st.sdf_duplicate());
+        let id = st.selection[0];
+        assert_eq!(shapes(scene_of(st.doc.feature(id).unwrap()).unwrap()).len(), 2);
+        let mut s = Shape::new(PrimKind::Cylinder);
+        s.size = Vec3::new(5.0, 10.0, 0.0);
+        scale_shape(&mut s, Vec3::new(2.0, 3.0, 2.0));
+        assert_eq!(s.size, Vec3::new(10.0, 30.0, 0.0));
+        let mut t = Shape::new(PrimKind::Torus);
+        t.size = Vec3::new(8.0, 0.0, 2.0);
+        scale_shape(&mut t, Vec3::new(2.0, 0.5, 2.0));
+        assert_eq!(t.size, Vec3::new(16.0, 0.0, 1.0));
+    }
+
+    /// The object scaled as a whole (R in Object mode): its shapes take the
+    /// scale at the next meshing, the surface where the stretched mesh was.
+    #[test]
+    fn object_scale_goes_into_the_shapes() {
+        let mut st = app();
+        st.sdf_add(PrimKind::Sphere);
+        let id = st.sdf_target().unwrap();
+        st.sdf_tick();
+        let (lo, hi) = object_box(&st, id);
+        st.edit("Scale", |d| {
+            if let Some(f) = d.feature_mut(id) {
+                if let Prim::Box { x, y, z } = &mut f.prim {
+                    *x *= 2.0;
+                    *y *= 2.0;
+                    *z *= 2.0;
+                }
+            }
+        });
+        st.sdf_tick();
+        let (lo2, hi2) = object_box(&st, id);
+        let r = (hi2 - lo2) / (hi - lo);
+        assert!((r - Vec3::splat(2.0)).abs().max_element() < 0.08, "scaled ×2: {r:?}");
+        let sh = scene_of(st.doc.feature(id).unwrap()).unwrap();
+        let r0 = sh.node(shapes(sh)[0]).unwrap().shape().unwrap().size.x;
+        assert!((r0 - 20.0).abs() < 0.5, "the sphere's radius 10 → 20: {r0}");
+    }
+
+    /// The fine meshing in a thread arrives and is finer.
+    #[test]
+    fn fine_meshing_arrives() {
+        let mut st = app();
+        st.sdf_add(PrimKind::Torus);
+        let id = st.sdf_target().unwrap();
+        st.sdf_tick();
+        let coarse = st.doc.feature(id).unwrap().mesh.as_ref().unwrap().faces.len();
+        st.sdf_settle();
+        let fine = st.doc.feature(id).unwrap().mesh.as_ref().unwrap().faces.len();
+        assert!(st.sdf_meshed.get(&id).map(|s| s.1).unwrap_or(false), "fine");
+        assert!(fine > coarse * 2, "{fine} vs {coarse}");
+    }
 }

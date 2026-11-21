@@ -141,7 +141,7 @@ impl Drawer {
             for f in st.shown_meshes() {
                 // a linked surface: the Carves after it cut it
                 let solids = if crate::linked::patch_of(f).is_some() { st.patch_solids(f.id) } else { vec![] };
-                let n = crate::meshes::mesh_vertices(f, slot, &solids, &mut verts);
+                let n = crate::meshes::mesh_vertices(f, slot, &solids, st.sdf_mats.get(&f.id).map(|v| v.as_slice()), &mut verts);
                 self.mesh_slots.push((f.id, slot, n));
                 slot += n as u32;
                 if crate::linked::shows_nurbs(f) {
@@ -236,7 +236,15 @@ impl Drawer {
                 flags.push(FaceGpu { color: linear(ghost), flags: 0, metal: 0.0, rough: 0.75, spec: materials::SPECULAR, alpha: 1.0 });
                 continue;
             }
+            let sdf = crate::sdf::is_sdf(f);
             for k in 0..*n as u32 {
+                // an SDF object: slot k > 0 is material k - 1 (a shape's own),
+                // unless a ball is dragged over the whole object
+                let look = if sdf && k > 0 && st.mat_drag.as_ref().filter(|d| d.target == Some(crate::state::DropTarget::Shape(*id))).is_none() {
+                    st.look(k - 1)
+                } else {
+                    look
+                };
                 let fl = if st.tool == Tool::Sculpt {
                     0
                 } else if poly_target == Some(*id) {
@@ -351,7 +359,10 @@ impl Drawer {
             if let Some(f) = st.sdf_target().and_then(|id| st.doc.feature(id)).filter(|f| f.visible) {
                 if let Some(scene) = crate::sdf::scene_of(f) {
                     let picked = st.sdf_sel.map(|(_, n)| n);
-                    for n in crate::sdf::shapes(scene) {
+                    // the shapes built only (not those past the history
+                    // marker, nor those turned off)
+                    let built = crate::sdf::built_shapes(f);
+                    for n in crate::sdf::shapes(scene).into_iter().filter(|n| built.contains(n) && scene.node(*n).map(|x| x.visible).unwrap_or(false)) {
                         let carve_mode = scene.node(n).map(|x| x.combine.mode != forme_core::CombineMode::Add).unwrap_or(false);
                         let c = if carve_mode { carve } else { accent };
                         let on = picked == Some(n);

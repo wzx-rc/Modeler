@@ -326,7 +326,10 @@ fn main() {
     if want("sdfx") {
         sdf_more(&mut h);
     }
-    if want("common") {
+    if want("commonm") {
+        common_meshes(&mut h);
+    }
+    if want("common-") || only.iter().any(|o| o == "common") {
         common_base(&mut h);
     }
     if want("pbevel") {
@@ -5824,9 +5827,9 @@ fn sdf_more(h: &mut Harness) {
 /// One base for every object (Romain, 21 nov., 0 h 39): the NURBS part,
 /// a clay, a Poly cube and an SDF object given materials and a look the
 /// same way, listed in one outliner, aligned one onto another.
-fn common_base(h: &mut Harness) {
+fn common_meshes(h: &mut Harness) {
     use egui::Key;
-    h.reset(test_part(), "Common");
+    h.reset(test_part(), "Common meshes");
     // a clay, a Poly cube, an SDF object beside the part
     h.key(Key::F2);
     h.st.camera.target = Vec3::new(-60.0, 0.0, 0.0);
@@ -5861,7 +5864,7 @@ fn common_base(h: &mut Harness) {
     h.st.camera.target = Vec3::ZERO;
     h.st.frame_all();
     h.settle();
-    h.shot("common-01-materials");
+    h.shot("commonm-01-materials");
     // the clay's ball made see-through and glossy: the clay takes it
     let m = clay.and_then(|id| h.st.doc.feature(id)).map(|f| f.material).unwrap_or(1);
     h.st.edit_look(m, "Transparency", |l| {
@@ -5870,7 +5873,7 @@ fn common_base(h: &mut Harness) {
     });
     h.st.end_look();
     h.steps(3);
-    h.shot("common-02-look-on-clay");
+    h.shot("commonm-02-look-on-clay");
     // Align: the Poly cube onto the SDF object's Max X (3ds Max's Align)
     if let (Some(p), Some(s)) = (poly, sdf) {
         h.st.selection = vec![p];
@@ -5885,18 +5888,98 @@ fn common_base(h: &mut Harness) {
         }
         h.st.align_update();
         h.steps(3);
-        h.shot("common-03-align-window");
+        h.shot("commonm-03-align-window");
         h.st.align_ok();
         eprintln!("common: poly now at {:?}, sdf at {:?}", h.st.doc.feature(p).map(|f| f.origin), h.st.doc.feature(s).map(|f| f.origin));
         h.steps(2);
-        h.shot("common-04-aligned");
+        h.shot("commonm-04-aligned");
     }
     // the outliner with the SDF object's shapes under it
     if let Some(s) = sdf {
         h.st.selection = vec![s];
     }
     h.steps(3);
-    h.shot("common-05-outliner");
+    h.shot("commonm-05-outliner");
+}
+
+/// The base shared by the tabs (Romain, 21 nov.: "tout feature commune…
+/// doit marcher sur une base commune"): an SDF object next to the NURBS
+/// test part, in the outliner's SDF group, its shapes in the Sub Outliner
+/// and the history strip (marker, on / off), a shape's own material, the
+/// materials' shader settings, the marking menu in the SDF tab.
+fn common_base(h: &mut Harness) {
+    use egui::Key;
+    use nurbs_app::common::Item;
+    h.reset(test_part(), "Common");
+    h.key(Key::F4);
+    h.steps(2);
+    h.key(Key::B);
+    h.st.sdf.blend = 3.0;
+    h.key(Key::O);
+    h.st.sdf.mode = forme_core::CombineMode::Carve;
+    h.st.sdf.blend = 1.0;
+    h.key(Key::C);
+    h.st.sdf_edit_node("Size", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::new(4.0, 30.0, 0.0);
+        }
+    });
+    let id = h.st.sdf_target().expect("an SDF object");
+    h.st.edit("Move", |d| d.feature_mut(id).unwrap().origin.x += 55.0);
+    h.st.sdf_settle();
+    h.st.frame_all();
+    h.settle();
+    let items = h.st.element_items(id);
+    eprintln!("SDF object {id}: {} shapes {:?}, marker {}", items.len(), items, h.st.item_marker(id));
+    assert_eq!(items.len(), 3);
+    h.shot("common-01-sdf-items");
+    // the sphere picked, Orange on it alone
+    if let Item::Shape(_, n) = items[1] {
+        h.st.select_item(Item::Shape(id, n));
+    }
+    h.st.apply_material(2);
+    h.st.sdf_settle();
+    h.steps(2);
+    eprintln!("sphere's material {}, mats {:?}", h.st.item_material(items[1]), h.st.sdf_mats.get(&id).map(|m| m.iter().filter(|x| **x == 3).count()));
+    h.shot("common-02-shape-material");
+    // the shader settings of Green, edited: the NURBS block wears it too
+    h.st.edit("Material", |d| d.features[0].material = 1);
+    h.st.edit_look(1, "Material color", |l| {
+        l.color = [0.22, 0.48, 0.78];
+        l.specular = 0.8;
+    });
+    h.st.end_look();
+    h.steps(3);
+    h.shot("common-03-shader-settings");
+    // the history marker back to the cube alone, then all back
+    h.st.select_item(Item::Feature(id));
+    h.st.set_item_marker(id, 1);
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("common-04-marker");
+    h.st.set_item_marker(id, 3);
+    // the carve turned off from the Sub Outliner's switch
+    h.st.toggle_item(items[2]);
+    h.st.sdf_settle();
+    h.steps(2);
+    h.shot("common-05-carve-off");
+    h.st.toggle_item(items[2]);
+    h.st.sdf_settle();
+    // the marking menu on the sphere (SDF tab), held open
+    let pv = h.st.item_points(items[1]);
+    let c = pv.iter().fold(glam::DVec3::ZERO, |a, b| a + *b) / pv.len().max(1) as f64;
+    let at = h.screen_of(c.as_vec3());
+    h.rpress(at, true);
+    h.steps(16);
+    eprintln!("marking menu on {:?}", h.st.marking.menu.as_ref().map(|m| m.ctx));
+    h.shot("common-06-marking");
+    h.rpress(at, false);
+    h.steps(2);
+    // the NURBS block: its own items, the same lists
+    h.key(Key::F1);
+    h.st.select_item(Item::Feature(h.st.doc.features[0].id));
+    h.steps(3);
+    h.shot("common-07-nurbs");
 }
 
 fn multi(h: &mut Harness) {

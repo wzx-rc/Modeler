@@ -219,11 +219,32 @@ impl AppState {
     /// gesture is live (while a shape is moved or created they stay as they
     /// were: it does not snap to itself).
     pub fn refresh_snaps(&mut self) {
-        if self.is_live() || self.snaps_gen == self.model_gen {
+        // the part's model and the meshes (SDF shapes) as they are now
+        let key = self.model_gen.wrapping_mul(1_000_003).wrapping_add(self.mesh_gen);
+        if self.is_live() || self.snaps_gen == key {
             return;
         }
-        self.snaps_gen = self.model_gen;
+        self.snaps_gen = key;
         self.snaps = self.model.as_ref().map(|m| snap_points(m)).unwrap_or_default();
+        // every tab's elements give points (the common base): an SDF
+        // shape's centre, the middles of its top and base (shown, built)
+        let mut more = vec![];
+        for f in self.shown_meshes() {
+            if !crate::sdf::is_sdf(f) {
+                continue;
+            }
+            let Some(scene) = crate::sdf::scene_of(f) else { continue };
+            for n in crate::sdf::built_shapes(f) {
+                let Some(sh) = scene.node(n).filter(|x| x.visible).and_then(|x| x.shape()) else { continue };
+                let m = crate::sdf::node_world(f, scene, n);
+                let h = sh.local_half_extents().y;
+                for (q, kind) in [(glam::Vec3::ZERO, SnapKind::Center), (glam::Vec3::Y * h, SnapKind::FaceCenter), (-glam::Vec3::Y * h, SnapKind::FaceCenter)] {
+                    let pos = m.transform_point3(q).as_dvec3();
+                    more.push(SnapPoint { pos, kind, faces: vec![], features: vec![] });
+                }
+            }
+        }
+        self.snaps.extend(more);
     }
 
     /// The point of interest under the pointer: the nearest on screen
