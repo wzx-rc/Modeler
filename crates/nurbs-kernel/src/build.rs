@@ -85,15 +85,25 @@ impl Stage {
     /// anywhere in one history does to the whole part; `times`: how many of
     /// them were made meanwhile (one pass may leave more to merge: a face
     /// that took another's tag is then no longer kept from its neighbour).
-    fn join_faces(&mut self, times: usize) {
+    /// How many passes changed it (fewer than `times`: nothing is left to
+    /// merge, `rough` is off).
+    fn join_faces(&mut self, times: usize) -> usize {
+        let mut n = 0;
         for _ in 0..times {
             let (true, Some(s)) = (self.rough, self.shape.clone()) else { break };
             match s.simplified() {
-                Ok(t) if t.face_count() != s.face_count() || t.edge_faces().len() != s.edge_faces().len() => self.shape = Some(Rc::new(t)),
+                Ok(t) if t.face_count() != s.face_count() || t.edge_faces().len() != s.edge_faces().len() => {
+                    self.shape = Some(Rc::new(t));
+                    n += 1;
+                }
                 // (nothing left to merge)
                 _ => self.rough = false,
             }
         }
+        if self.shape.is_none() {
+            self.rough = false;
+        }
+        n
     }
     /// Its shape's lumps added to where it has been, once per shape.
     fn note(&mut self) {
@@ -128,6 +138,15 @@ pub struct Cache {
     /// boxes in the document do not (an extrusion, a mirror image, a copy):
     /// built as one from the start the next times (`build_islands`).
     hints: Vec<(FeatureId, FeatureId)>,
+    /// By the key of a stage: how many passes of `join_faces` change it
+    /// before nothing is left to merge. An island's keys then do not depend
+    /// on how many unions and cuts are made in the others (a shape deleted,
+    /// Isolate: the islands that did not change are found again).
+    passes: HashMap<u64, usize>,
+    /// The stages the last fine builds used (documents at rest: the undo
+    /// steps), the newest last: kept, so going back a few steps builds
+    /// nothing again.
+    rest: std::collections::VecDeque<Vec<u64>>,
 }
 
 fn rows(m: DMat4) -> [[f64; 4]; 3] {
@@ -1755,15 +1774,33 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
     let mut last: Option<usize> = None;
     // a union or a cut made in another island since: this island's faces
     // of one surface made one too, as in one history (a stage of its own)
+    // Its key says how many passes changed it, not how many were asked: one
+    // that changes nothing leaves the key as it is, so the steps after it
+    // are found again whatever is made, deleted or left out elsewhere.
     let join = |times: usize, key: &mut u64, stage: &mut Stage, cache: &mut Cache, used_stages: &mut Vec<u64>| {
-        *key = hash2(hash2(*key, 0x6a6f696e), times as u64);
-        used_stages.push(*key);
-        match cache.stages.get(key) {
-            Some(s) => *stage = s.clone(),
-            None => {
-                stage.join_faces(times);
-                keep(cache, *key, stage);
+        let pre = *key;
+        let name = |n: usize| if n == 0 { pre } else { hash2(hash2(pre, 0x6a6f696e), n as u64) };
+        if let Some(&full) = cache.passes.get(&pre) {
+            let n = times.min(full);
+            if n == 0 {
+                stage.rough = false;
+                return;
             }
+            if let Some(s) = cache.stages.get(&name(n)) {
+                *stage = s.clone();
+                *key = name(n);
+                used_stages.push(*key);
+                return;
+            }
+        }
+        let n = stage.join_faces(times);
+        if !stage.rough {
+            cache.passes.insert(pre, n);
+        }
+        if n > 0 {
+            *key = name(n);
+            used_stages.push(*key);
+            keep(cache, *key, stage);
         }
     };
     for (i, &f) in feats.iter().enumerate() {
@@ -2324,6 +2361,8 @@ fn crowded(acc: &Shape, edges: &[i32]) -> Option<(Vec<i32>, usize)> {
 /// than `THIN` + `PAST` (a shape's face put on a face of the part near it)
 /// and than the 0.1 mm a carving starts outside its face.
 const APART: f64 = 1.0;
+/// How many documents at rest keep their stages (`Cache.rest`).
+const REST: usize = 8;
 
 /// The whole history, for the islands being built.
 struct Whole {
@@ -2827,7 +2866,21 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     // document with one feature changed)
     let prev: std::collections::HashSet<u64> = std::mem::take(&mut cache.prev).into_iter().collect();
     let used: std::collections::HashSet<u64> = used_stages.iter().copied().collect();
-    cache.stages.retain(|k, _| used.contains(k) || prev.contains(k));
+    // (a fine build: the document at rest, one of the undo steps)
+    if fine {
+        let mut now: Vec<u64> = used.iter().copied().collect();
+        now.sort_unstable();
+        if cache.rest.back() != Some(&now) {
+            cache.rest.push_back(now);
+        }
+        while cache.rest.len() > REST {
+            cache.rest.pop_front();
+        }
+    }
+    let rest: std::collections::HashSet<u64> = cache.rest.iter().flatten().copied().collect();
+    cache.stages.retain(|k, _| used.contains(k) || prev.contains(k) || rest.contains(k));
+    let stages = &cache.stages;
+    cache.passes.retain(|k, _| stages.contains_key(k));
     cache.prev = used.into_iter().collect();
     if cache.tools.len() > 256 {
         cache.tools.retain(|k, _| used_tools.contains(k));
@@ -4865,6 +4918,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// FORME_DOC=file.fnurbs with FORME_DELETE=id (that shape and its
+    /// operations taken out) or FORME_KEEP=id (they alone kept, as Isolate
+    /// does; FORME_MIRRORS=1: the Mirrors too): the build after it, timed,
+    /// against the whole document built before; then the whole one again.
+    #[test]
+    #[ignore]
+    fn edit_probe() {
+        let Ok(p) = std::env::var("FORME_DOC") else { return };
+        let d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+        let mut cache = Cache::default();
+        let t = std::time::Instant::now();
+        let m = build(&d, true, false, &[], &mut cache);
+        eprintln!("whole: {:.0} ms, {} faces, {} triangles, errors {}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.triangles.len(), m.errors.len());
+        for id in std::env::var("FORME_KEEP").ok().and_then(|v| v.parse::<u32>().ok()) {
+            let fs: Vec<usize> = (0..m.faces.len()).filter(|k| m.faces[*k].tag.is_some_and(|t| t.feature == id)).collect();
+            eprintln!("  feature {id}: {} faces, {} triangles in the whole part", fs.len(), m.tri_face.iter().filter(|f| fs.contains(&(**f as usize))).count());
+        }
+        let with_ops = |id: FeatureId| {
+            let mut ids = vec![id];
+            for f in &d.features {
+                if !f.is_solid() && f.mirror.is_none() && crate::doc::named_features(f).iter().any(|n| ids.contains(n)) {
+                    ids.push(f.id);
+                }
+            }
+            ids
+        };
+        let mut e = d.clone();
+        if let Some(id) = std::env::var("FORME_DELETE").ok().and_then(|v| v.parse().ok()) {
+            e.remove(&with_ops(id));
+        } else if let Some(id) = std::env::var("FORME_KEEP").ok().and_then(|v| v.parse().ok()) {
+            let ids = with_ops(id);
+            let mirrors = std::env::var("FORME_MIRRORS").is_ok();
+            e.features.retain(|f| ids.contains(&f.id) || (mirrors && f.mirror.is_some()));
+        }
+        for k in 0..2 {
+            let t = std::time::Instant::now();
+            let m = build(&e, true, false, &[], &mut cache);
+            eprintln!("edited ({} features){}: {:.0} ms, {} faces, {} triangles, cached {}, errors {}", e.features.len(), if k == 1 { " again" } else { "" }, t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.triangles.len(), m.cached, m.errors.len());
+        }
+        let t = std::time::Instant::now();
+        let m = build(&d, true, false, &[], &mut cache);
+        eprintln!("whole again: {:.0} ms, {} faces, cached {}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.cached);
     }
 
     #[test]

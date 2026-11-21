@@ -5294,6 +5294,25 @@ struct FBuf {
     std::vector<uint8_t> b;
 };
 
+// The part meshed lump by lump (each solid, or sheet beside them), a big
+// lump at a chord that grows with its size past 100 mm: `defl` is right for
+// a part of some centimetres, and on a sculpted form of 300 mm it made 125
+// of the scene's 174 thousand triangles (Romain's scene of 21 nov.: 3 s of
+// meshing whenever that form changed). The angle still keeps small rounds
+// round. A lump meshed before at the same chord keeps its triangles.
+static void mesh_lumps(const TopoDS_Shape& s, double defl, double angle) {
+    if (s.IsNull()) return;
+    if (s.ShapeType() == TopAbs_COMPOUND || s.ShapeType() == TopAbs_COMPSOLID) {
+        for (TopoDS_Iterator it(s); it.More(); it.Next()) mesh_lumps(it.Value(), defl, angle);
+        return;
+    }
+    Bnd_Box b;
+    BRepBndLib::Add(s, b, Standard_False);
+    double k = 1.0;
+    if (!b.IsVoid()) k = std::min(10.0, std::max(1.0, std::sqrt(b.SquareExtent()) / 100.0));
+    BRepMesh_IncrementalMesh mesher(s, defl * k, Standard_False, angle, Standard_True);
+}
+
 // Everything the app shows and picks, in one little-endian buffer:
 //   u32 faces, each: i64 tag, i32 kind, f64 info[13] (see face_info)
 //   u32 vertices, f32 xyz each, then f32 normals
@@ -5306,7 +5325,7 @@ struct FBuf {
 FBuf* focc_topo(const FShape* s, double defl, double angle) {
     return guard(
         [&]() -> FBuf* {
-            BRepMesh_IncrementalMesh mesher(s->s, defl, Standard_False, angle, Standard_True);
+            mesh_lumps(s->s, defl, angle);
             TopTools_IndexedMapOfShape faces;
             face_map(s->s, faces);
             Buf out;

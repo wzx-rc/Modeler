@@ -1227,6 +1227,11 @@ impl AppState {
             }
         }
         keep.extend(self.doc.features.iter().filter(|f| f.id >= iso.from).map(|f| f.id));
+        // the Mirrors: they are no element's, and what is kept is as it is
+        // in the whole part (both sides; the kernel then finds its stages
+        // again and builds nothing)
+        let mirrors: Vec<FeatureId> = self.doc.features.iter().filter(|f| f.mirror.is_some() && !keep.contains(&f.id)).map(|f| f.id).collect();
+        keep.extend(mirrors);
         keep
     }
 
