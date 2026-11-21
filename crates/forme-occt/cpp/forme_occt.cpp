@@ -133,6 +133,7 @@
 #include <gp_Ax3.hxx>
 #include <TopoDS_Compound.hxx>
 #include <algorithm>
+#include <mutex>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -170,8 +171,16 @@ static thread_local std::string g_err;
 
 static void set_err(const std::string& s) { g_err = s; }
 
+// One call into OpenCascade at a time. Its fillets keep scratch data in
+// statics: two made at once in two threads now and then failed, or came out
+// smaller (21 nov.: `corner_of_four` and `tension_point_corner`, only when
+// the tests ran side by side on many cores). The kernel process builds in
+// one thread, where this costs nothing.
+static std::recursive_mutex g_occ;
+
 template <class F>
 static auto guard(F f, decltype(f()) fail) -> decltype(f()) {
+    std::lock_guard<std::recursive_mutex> lock(g_occ);
     try {
         return f();
     } catch (const Standard_Failure& e) {
@@ -830,6 +839,48 @@ static void simplify_keeping(BRepAlgoAPI_BooleanOperation& op, const FShape* a, 
     u.AllowInternalEdges(Standard_False);
     TopTools_IndexedMapOfShape rm;
     TopExp::MapShapes(op.Shape(), TopAbs_EDGE, rm);
+    // The result's faces by the tags `carry_tags` will give them (the tool's
+    // first, the part's over them), and its edges' faces: a line of an input
+    // is kept only while it still lies between two such faces in the result.
+    // (21 nov.: a curved face extruded. In its tool the top ring and the
+    // inner wall carry one tag; fused, their edge lies between the ring and
+    // the boss's top, which stayed two faces until the next union anywhere
+    // made them one, and a face named meanwhile was gone.)
+    TopTools_IndexedMapOfShape rf;
+    face_map(op.Shape(), rf);
+    std::vector<long long> rt(rf.Extent(), -1);
+    for (const FShape* in : {b, a}) {
+        if (!in) continue;
+        TopTools_IndexedMapOfShape fm;
+        face_map(in->s, fm);
+        for (int i = 1; i <= fm.Extent() && i <= (int)in->tags.size(); i++) {
+            long long t = in->tags[i - 1];
+            if (t < 0) continue;
+            bool any = false;
+            for (TopTools_ListOfShape::Iterator it(op.Modified(fm(i))); it.More(); it.Next()) {
+                int j = rf.FindIndex(it.Value());
+                if (j > 0) {
+                    rt[j - 1] = t;
+                    any = true;
+                }
+            }
+            if (!any) {
+                int j = rf.FindIndex(fm(i));
+                if (j > 0) rt[j - 1] = t;
+            }
+        }
+    }
+    TopTools_IndexedDataMapOfShapeListOfShape re2f;
+    TopExp::MapShapesAndAncestors(op.Shape(), TopAbs_EDGE, TopAbs_FACE, re2f);
+    auto still = [&](const TopoDS_Shape& e) {
+        int k = re2f.FindIndex(e);
+        if (k < 1) return true;
+        const TopTools_ListOfShape& fl = re2f(k);
+        if (fl.Extent() != 2) return true;
+        int fa = rf.FindIndex(fl.First()), fb = rf.FindIndex(fl.Last());
+        if (fa < 1 || fb < 1) return true;
+        return kept_between(rt[fa - 1], rt[fb - 1]);
+    };
     for (const FShape* in : {a, b}) {
         if (!in || in->tags.empty()) continue;
         TopTools_IndexedMapOfShape fm;
@@ -844,9 +895,9 @@ static void simplify_keeping(BRepAlgoAPI_BooleanOperation& op, const FShape* a, 
             long long ta = in->tags[fa - 1], tb = in->tags[fb - 1];
             if (!kept_between(ta, tb)) continue;
             const TopoDS_Shape& e = e2f.FindKey(i);
-            if (rm.Contains(e)) u.KeepShape(e);
+            if (rm.Contains(e) && still(e)) u.KeepShape(e);
             for (TopTools_ListOfShape::Iterator it(op.Modified(e)); it.More(); it.Next())
-                if (rm.Contains(it.Value())) u.KeepShape(it.Value());
+                if (rm.Contains(it.Value()) && still(it.Value())) u.KeepShape(it.Value());
         }
     }
     u.Build();

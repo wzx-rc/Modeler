@@ -1720,8 +1720,12 @@ fn twin_same(acc0: Option<&Shape>, a: &Feature, b: &Feature) -> bool {
             v
         };
         // the same components (across the plane): a move of them is not
-        // made twice, even one that leaves the part lopsided
-        return verts(t) == verts(u);
+        // made twice, even one that leaves the part lopsided. (Components
+        // found on neither side, a fillet made before having taken them,
+        // are not "the same": the move made before that fillet takes its
+        // image with it, else the image side stayed as it was, in silence.)
+        let (x, y) = (verts(t), verts(u));
+        return !x.is_empty() && x == y;
     }
     if let (Some(k), Some(l)) = (&a.cut, &b.cut) {
         let near = |p: DVec3, set: &[DVec3]| set.iter().any(|q| q.distance(p) < 1e-6);
@@ -1848,7 +1852,10 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         // the image of the step before (after a Mirror) that names what it
         // named (a face across the plane): nothing more to make
         if let Some(a) = twin_of(feats, i) {
-            if stage.paired || twin_same(befores[i - 1].1.shape.as_deref(), a, f) {
+            // (a move that failed: its image would fail the same way, one
+            // error says it)
+            let failed = a.tweak.is_some() && befores[i].1.errors.len() > befores[i - 1].1.errors.len();
+            if stage.paired || failed || twin_same(befores[i - 1].1.shape.as_deref(), a, f) {
                 // a move of components across the plane, made once: it may
                 // leave the part lopsided (the same Mirror again would even
                 // it out)
@@ -2004,7 +2011,8 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
             if let Some(acc) = stage.shape.clone() {
                 // with its mirror image next (after a Mirror): both moved
                 // in one go when they do not name the same components
-                if let Some(u) = feats.get(i + 1).filter(|g| g.id == f.id && twin_of(feats, i).is_none() && !skipped("tweak")).and_then(|g| g.tweak.as_ref().filter(|_| !twin_same(Some(&acc), f, g))) {
+                let image = feats.get(i + 1).copied().filter(|g| g.id == f.id && twin_of(feats, i).is_none() && !skipped("tweak") && g.tweak.is_some() && !twin_same(Some(&acc), f, g));
+                if let Some((g, u)) = image.and_then(|g| Some((g, g.tweak.as_ref()?))) {
                     if let Ok(Some(s)) = tweak_pair(&acc, f, t, u) {
                         model.booleans += 1;
                         stage.shape = Some(Rc::new(s));
@@ -2013,8 +2021,22 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                         keep(cache, key, &mut stage);
                         continue;
                     }
+                    // both where fillets made just before run along them:
+                    // made before those, in one go there (the image alone,
+                    // after its move, would find no fillet just before it)
+                    if !t.copy {
+                        if let Some(mut s) = replay(doc, &feats[..i], f, Some(g), t, &stage, skip, cache, model, used_tools, used_stages) {
+                            s.paired = true;
+                            stage = s;
+                            keep(cache, key, &mut stage);
+                            continue;
+                        }
+                    }
                 }
                 let res = if skipped("tweak") { Err("skipped, it crashed the kernel".to_string()) } else { tweak(&acc, f, t) };
+                // (the image of a move that was made where it stood: both
+                // made again before the fillets)
+                let twin = twin_of(feats, i).filter(|a| a.tweak.is_some() && i > 0);
                 match res {
                     Ok(Some(s)) => {
                         model.booleans += 1;
@@ -2023,7 +2045,10 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                     }
                     Ok(None) => {}
                     Err(e) if t.copy => stage.errors.push(format!("{}: {e}", f.name)),
-                    Err(e) => match replay(doc, &feats[..i], f, t, &stage, skip, cache, model, used_tools, used_stages) {
+                    Err(e) => match match twin.and_then(|a| Some((a, a.tweak.as_ref()?))) {
+                        Some((a, at)) => replay(doc, &feats[..i - 1], a, Some(f), at, &stage, skip, cache, model, used_tools, used_stages),
+                        None => replay(doc, &feats[..i], f, None, t, &stage, skip, cache, model, used_tools, used_stages),
+                    } {
                         Some(s) => stage = s,
                         None => match tweak_unrounded(doc, &acc, f, t) {
                             Ok(s) => {
@@ -2180,9 +2205,10 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
 /// chamfers made just before it run along it: made before them instead,
 /// they made again on what it gives (as if it had come first; their edges
 /// are found again by their faces' tags). The stage, when that adds no
-/// error.
+/// error. `image`: its mirror image (the step after it, after a Mirror),
+/// made there with it.
 #[allow(clippy::too_many_arguments)]
-fn replay<'a>(doc: &'a Doc, before: &[&'a Feature], f: &'a Feature, t: &Tweak, stage: &Stage, skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Option<Stage> {
+fn replay<'a>(doc: &'a Doc, before: &[&'a Feature], f: &'a Feature, image: Option<&'a Feature>, t: &Tweak, stage: &Stage, skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Option<Stage> {
     let mut tags: Vec<i64> = vec![];
     for c in t.comps() {
         match c {
@@ -2199,7 +2225,7 @@ fn replay<'a>(doc: &'a Doc, before: &[&'a Feature], f: &'a Feature, t: &Tweak, s
     if !touches {
         return None;
     }
-    let order: Vec<&Feature> = before[..j].iter().copied().chain(std::iter::once(f)).chain(before[j..].iter().copied()).collect();
+    let order: Vec<&Feature> = before[..j].iter().copied().chain(std::iter::once(f)).chain(image).chain(before[j..].iter().copied()).collect();
     let s = run(doc, &order, skip, cache, model, used_tools, used_stages);
     (s.shape.is_some() && s.errors.len() <= stage.errors.len()).then_some(s)
 }
@@ -5480,18 +5506,37 @@ mod tests {
     /// a list of operations (fillets, chamfers, insets, extrusions, moves,
     /// a tilt, the Knife), each pair built on its own; prints what fails.
     /// `FORME_COMBO=name` keeps the pairs whose names contain it.
+    /// `FORME_BATTERY=mirror-first`: a Mirror across X 20 mm off the part
+    /// before them (the part and its image apart, each step on both),
+    /// `mirror-touch`: across Z on the part's back face (one part, faces
+    /// across the plane), `mirror-last`: across X through the part after
+    /// them.
     #[test]
     #[ignore]
     fn combo_battery() {
-        let (base, b, s) = test_part();
+        let (mut base, b, s) = test_part();
         let ops = combo_ops(b, 2, s, 4, DVec3::ZERO);
         let only = std::env::var("FORME_COMBO").ok();
+        let mode = std::env::var("FORME_BATTERY").unwrap_or_default();
+        let plain = base.clone();
+        match mode.as_str() {
+            "mirror-first" => { base.add_mirror(crate::doc::Mirror { axis: 0, offset: -40.0, flip: false }); }
+            "mirror-touch" => { base.add_mirror(crate::doc::Mirror { axis: 2, offset: -15.0, flip: false }); }
+            _ => {}
+        }
+        let last = |d: &mut Doc| {
+            if mode == "mirror-last" {
+                d.add_mirror(crate::doc::Mirror { axis: 0, offset: 0.0, flip: false });
+            }
+        };
         let mut bad = vec![];
         let mut n = 0;
+        let mut unstable = 0;
         for (an, a) in &ops {
             // each alone first
             let mut d = base.clone();
             a(&mut d);
+            last(&mut d);
             let m = build(&d, true, false, &[], &mut Cache::default());
             if !m.errors.is_empty() {
                 eprintln!("ALONE {an}: {:?}", m.errors);
@@ -5509,9 +5554,40 @@ mod tests {
                 let mut d = base.clone();
                 a(&mut d);
                 bo(&mut d);
+                last(&mut d);
                 let t = Instant::now();
                 let m = build(&d, true, false, &[], &mut Cache::default());
                 n += 1;
+                // a shape added far away changes nothing of the part (its
+                // faces of one surface were made one when they came to be,
+                // not at the next union anywhere: a face named meanwhile
+                // would be gone then)
+                if mode.is_empty() || mode == "stable" {
+                    let mut far = d.clone();
+                    far.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(300.0, 0.0, 0.0), DQuat::IDENTITY);
+                    let (x, y) = (digest(&m), digest(&build(&far, true, false, &[], &mut Cache::default())));
+                    if x.1 + 6 != y.1 || x.2 + 12 != y.2 {
+                        eprintln!("UNSTABLE {name}: faces {} then {} − 6, edges {} then {} − 12", x.1, y.1, x.2, y.2);
+                        unstable += 1;
+                    }
+                }
+                // the part and its image apart: twice the pair made with no
+                // Mirror (a step made on one side only would show here)
+                if mode == "mirror-first" && m.errors.is_empty() {
+                    let mut p = plain.clone();
+                    a(&mut p);
+                    bo(&mut p);
+                    let (x, y) = (digest(&m), digest(&build(&p, true, false, &[], &mut Cache::default())));
+                    if y.0.is_empty() && (x.1 != 2 * y.1 || x.2 != 2 * y.2 || (x.3 - 2.0 * y.3).abs() > 1e-3 * y.3.abs().max(1.0)) {
+                        eprintln!("LOPSIDED {name}: faces {} / 2 × {}, edges {} / 2 × {}, volume {:.3} / 2 × {:.3}", x.1, y.1, x.2, y.2, x.3, y.3);
+                        // FORME_DUMP=dir: both documents, for `islands_probe`
+                        if let Ok(dir) = std::env::var("FORME_DUMP") {
+                            std::fs::write(format!("{dir}/lop-{n}-mirror.fnurbs"), d.to_json()).ok();
+                            std::fs::write(format!("{dir}/lop-{n}-plain.fnurbs"), p.to_json()).ok();
+                        }
+                        bad.push(format!("{name}: not twice the part"));
+                    }
+                }
                 // (the second naming a face or an edge the first took away
                 // is no fault: listed apart)
                 let lost = |e: &String| e.contains("is gone") || e.contains("are gone") || e.contains("not found");
@@ -5523,8 +5599,49 @@ mod tests {
                 }
             }
         }
-        eprintln!("{} of {n} pairs failed", bad.len());
+        eprintln!("{} of {n} pairs failed, {unstable} changed by a shape added far away", bad.len());
         assert!(bad.is_empty(), "{} failed:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    /// Found by the tools' battery with a Mirror (21 nov.). With the part
+    /// and its image apart, every pair of tools gives twice what it gives
+    /// with no Mirror: an edge tilted next to a hole's rounded mouth (the
+    /// move and its image made before the fillet, together), and an edge
+    /// tilted after its own fillet (its image was passed over in silence:
+    /// neither was found, which counted as "the same"). And a curved face
+    /// extruded leaves its top one face at once, not at the next union made
+    /// anywhere (a face named meanwhile was gone then).
+    #[test]
+    fn mirror_side_moves_and_faces_made_one_at_once() {
+        let (base, b, s) = test_part();
+        let ops = combo_ops(b, 2, s, 4, DVec3::ZERO);
+        let op = |name: &str| &ops.iter().find(|(n, _)| *n == name).unwrap().1;
+        for (first, second) in [("fillet hole mouth", "tilt top-left"), ("tension fillet top -X", "tilt top-left"), ("fillet top-front", "extrude boss side")] {
+            let mut plain = base.clone();
+            op(first)(&mut plain);
+            op(second)(&mut plain);
+            let mut both = base.clone();
+            both.add_mirror(crate::doc::Mirror { axis: 0, offset: -40.0, flip: false });
+            op(first)(&mut both);
+            op(second)(&mut both);
+            let (x, y) = (digest(&build(&plain, true, false, &[], &mut Cache::default())), digest(&build(&both, true, false, &[], &mut Cache::default())));
+            assert!(x.0.is_empty() && y.0.is_empty(), "{first} then {second}: {:?}, with a Mirror {:?}", x.0, y.0);
+            assert_eq!((y.1, y.2), (2 * x.1, 2 * x.2), "{first} then {second}: faces and edges, twice with a Mirror");
+            assert!((y.3 - 2.0 * x.3).abs() < 1e-3 * x.3, "{first} then {second}: volume {} with a Mirror, {} without", y.3, x.3);
+            // a shape added far away changes nothing of the part
+            let mut far = plain.clone();
+            far.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(300.0, 0.0, 0.0), DQuat::IDENTITY);
+            let z = digest(&build(&far, true, false, &[], &mut Cache::default()));
+            assert_eq!((z.1, z.2), (x.1 + 6, x.2 + 12), "{first} then {second}: faces and edges after a shape added far away");
+        }
+        // the boss's side extruded: its top is one face (the ring made with
+        // it and the boss's own top)
+        let mut d = base.clone();
+        op("extrude boss side")(&mut d);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert_eq!(m.errors, Vec::<String>::new());
+        let tops = m.faces.iter().filter(|f| f.kind == SurfKind::Plane && (f.point[1] - 30.0).abs() < 1e-6 && f.normal[1] > 0.9).count();
+        assert_eq!(tops, 1, "the boss's top after its side is extruded");
     }
 
     #[test]
