@@ -326,6 +326,344 @@ fn serve(mesh: Option<&str>) {
     }
 }
 
+/// A shape added and named (the `object` scenario).
+fn named(d: &mut Doc, op: Op, prim: Prim, origin: DVec3, rot: DQuat, name: &str) -> u32 {
+    let id = d.add(op, prim, origin, rot);
+    d.feature_mut(id).unwrap().name = name.into();
+    id
+}
+
+/// The model's edges between a face of `a` and a face of `b` (feature,
+/// sub), as a click would name them (`object`).
+fn edges_between(h: &Harness, a: (u32, u16), b: (u32, u16)) -> Vec<EdgeRef> {
+    let Some(m) = h.st.model.as_ref() else { return vec![] };
+    let tag = |i: i32| m.faces.get(i as usize).and_then(|f| f.tag);
+    let (ta, tb) = (FaceTag { feature: a.0, sub: a.1 }, FaceTag { feature: b.0, sub: b.1 });
+    let mut out = vec![];
+    for e in &m.edges {
+        let (x, y) = (tag(e.faces[0]), tag(e.faces[1]));
+        let hit = (x == Some(ta) && y == Some(tb)) || (x == Some(tb) && y == Some(ta));
+        if hit && !e.pts.is_empty() {
+            let p = e.pts[e.pts.len() / 2];
+            out.push(EdgeRef { faces: [ta.pack(), tb.pack()], at: DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64) });
+        }
+    }
+    out
+}
+
+/// One modelling step as the app makes it (one edit, one undo step),
+/// timed until the fine model is shown (`object`).
+fn timed<T: Default>(h: &mut Harness, log: &mut Vec<String>, label: &str, f: impl FnOnce(&mut Doc) -> T) -> T {
+    let mut r = T::default();
+    let t0 = Instant::now();
+    h.st.edit(label, |d| r = f(d));
+    h.settle();
+    let wall = t0.elapsed().as_secs_f64() * 1e3;
+    let m = h.st.model.as_ref();
+    let errs = m.map(|m| m.errors.clone()).unwrap_or_default();
+    let line = format!("{:<34} {:>6.0} ms  kernel {:>6.0} ms  {:>3} features  {:>4} faces  {:>6} triangles  {} errors {}", label, wall, m.map_or(0.0, |m| m.ms), h.st.doc.features.len(), m.map_or(0, |m| m.faces.len()), m.map_or(0, |m| m.triangles.len()), errs.len(), if errs.is_empty() { String::new() } else { format!("{errs:?}") });
+    eprintln!("  {line}");
+    log.push(line);
+    r
+}
+
+fn stats(v: &[f64]) -> (f64, f64, f64) {
+    let mut s = v.to_vec();
+    if s.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    s.sort_by(|a, b| a.total_cmp(b));
+    (s.iter().sum::<f64>() / s.len() as f64, s[s.len() / 2], *s.last().unwrap())
+}
+
+/// The shapes `ids` selected and dragged by the move gizmo's arrow along
+/// `axis` (X, Y or Z) for 60 frames at 60 a second, as `perf`: the frames'
+/// app time, the kernel's answers meanwhile, the fine model after the
+/// release; then undone (`object`).
+fn gizmo_drag(h: &mut Harness, log: &mut Vec<String>, label: &str, ids: &[u32], axis: Vec3, shot: &str) {
+    // FORME_DRAGS=hub,dome: only the drags whose label has one of these
+    if let Ok(only) = std::env::var("FORME_DRAGS") {
+        let l = label.to_lowercase();
+        if !only.split(',').any(|w| !w.is_empty() && l.contains(&w.to_lowercase())) {
+            return;
+        }
+    }
+    h.key(egui::Key::Escape);
+    h.key(egui::Key::Num4);
+    h.st.selection = ids.to_vec();
+    h.key(egui::Key::W);
+    h.steps(2);
+    h.settle();
+    let Some(pivot) = h.st.pivot() else {
+        eprintln!("  {label}: no pivot");
+        return;
+    };
+    let pivot = pivot.as_vec3();
+    let v = h.st.view();
+    let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0;
+    let (a, b) = (h.screen_of(pivot + axis * k * 0.8), h.screen_of(pivot + axis * k * 1.8));
+    h.move_to(a);
+    h.steps(2);
+    let hot = h.st.hot_handle;
+    let before = h.st.doc.clone();
+    let origin0 = h.st.doc.feature(ids[0]).map(|f| f.origin);
+    let abandoned0 = h.st.kernel.abandoned();
+    h.press(a, true);
+    let mut frames: Vec<[f64; 3]> = vec![];
+    let mut answers: Vec<f64> = vec![];
+    let mut seen = h.st.model_gen;
+    let n = 60;
+    let t0 = Instant::now();
+    for i in 1..=n {
+        let f0 = Instant::now();
+        h.pending.push(Event::PointerMoved(a + (b - a) * (i as f32 / n as f32)));
+        frames.push(h.frame_timed());
+        if h.st.model_gen != seen {
+            seen = h.st.model_gen;
+            answers.push(h.st.round_ms as f64);
+        }
+        if let Some(left) = Duration::from_millis(16).checked_sub(f0.elapsed()) {
+            std::thread::sleep(left);
+        }
+    }
+    let took = t0.elapsed().as_secs_f64();
+    h.press(b, false);
+    let t1 = Instant::now();
+    h.settle();
+    let fine = t1.elapsed().as_secs_f64();
+    if !shot.is_empty() {
+        h.shot(shot);
+    }
+    let moved = h.st.doc.feature(ids[0]).zip(origin0).map(|(f, o)| (f.origin - o).length()).unwrap_or(0.0);
+    let app = stats(&frames.iter().map(|f| f[0] + f[1]).collect::<Vec<_>>());
+    let ans = stats(&answers);
+    let errs = h.st.model.as_ref().map_or(0, |m| m.errors.len());
+    let gave_up = h.st.kernel.abandoned() - abandoned0;
+    let line = format!("{label} ({hot:?}, {moved:.1} mm): {} kernel answers in {took:.1} s ({:.1}/s), each {:.0} ms median, {:.0} max; app {:.1} ms a frame median, {:.1} max; fine model {:.2} s after release; {errs} errors{}", answers.len(), answers.len() as f64 / took, ans.1, ans.2, app.1, app.2, fine, if gave_up > 0 { format!("; {gave_up} builds given up") } else { String::new() });
+    eprintln!("  {line}");
+    log.push(line);
+    back_to(h, log, &before);
+}
+
+/// The document's steps undone until it is `before` again (a selection
+/// step is not one); said in the log when it is not (`object`).
+fn back_to(h: &mut Harness, log: &mut Vec<String>, before: &Doc) {
+    for _ in 0..4 {
+        if h.st.doc == *before {
+            break;
+        }
+        h.st.undo_doc();
+    }
+    h.settle();
+    if h.st.doc != *before {
+        // (a change whose build brought an error may have been undone by
+        // the app already, `check_build`, and the undo then went one further)
+        let line = "  NOT BACK: the document differs after the undo, loaded again".to_string();
+        eprintln!("{line}");
+        log.push(line);
+        let name = h.st.doc_name.clone();
+        h.reset(before.clone(), &name);
+    }
+}
+
+/// A setting changed live as a slider does (`begin_live`, then a change a
+/// frame for 30 frames, `end_live`): the kernel's answers meanwhile and
+/// the fine model after; then undone (`object`).
+fn live_change(h: &mut Harness, log: &mut Vec<String>, label: &str, f: impl Fn(&mut Doc, f64)) {
+    let before = h.st.doc.clone();
+    h.st.begin_live(label);
+    let mut answers: Vec<f64> = vec![];
+    let mut seen = h.st.model_gen;
+    let n = 30;
+    let t0 = Instant::now();
+    for i in 1..=n {
+        let f0 = Instant::now();
+        let t = i as f64 / n as f64;
+        h.st.live(|d| f(d, t));
+        h.frame_timed();
+        if h.st.model_gen != seen {
+            seen = h.st.model_gen;
+            answers.push(h.st.round_ms as f64);
+        }
+        if let Some(left) = Duration::from_millis(16).checked_sub(f0.elapsed()) {
+            std::thread::sleep(left);
+        }
+    }
+    let took = t0.elapsed().as_secs_f64();
+    let t1 = Instant::now();
+    h.st.end_live();
+    h.settle();
+    let fine = t1.elapsed().as_secs_f64();
+    let ans = stats(&answers);
+    let errs = h.st.model.as_ref().map(|m| m.errors.clone()).unwrap_or_default();
+    let line = format!("{label}: {} kernel answers in {took:.1} s, each {:.0} ms median, {:.0} max; fine model {:.2} s after; errors {errs:?}", answers.len(), ans.1, ans.2, fine);
+    eprintln!("  {line}");
+    log.push(line);
+    back_to(h, log, &before);
+}
+
+/// One app action timed until the fine model (`object`).
+fn timed_act(h: &mut Harness, log: &mut Vec<String>, label: &str, f: impl FnOnce(&mut Harness)) {
+    let t0 = Instant::now();
+    f(h);
+    h.settle();
+    let wall = t0.elapsed().as_secs_f64() * 1e3;
+    let m = h.st.model.as_ref();
+    let line = format!("{:<34} {:>6.0} ms  kernel {:>6.0} ms  {:>4} faces  {} errors", label, wall, m.map_or(0.0, |m| m.ms), m.map_or(0, |m| m.faces.len()), m.map_or(0, |m| m.errors.len()));
+    eprintln!("  {line}");
+    log.push(line);
+}
+
+/// `object` (Romain 21 nov., 20 h 22: "une passe de test de performance en
+/// essayant de modéliser un objet"): a quadcopter modelled as a user
+/// would, each step one edit timed until its fine model; then the
+/// gestures on the finished part (gizmo drags on a late shape, an Array's
+/// source, the first shape; a fillet's size and an Array's count changed
+/// live; undo, redo, Isolate, Duplicate, Delete). The document is written
+/// to `<out>/drone.fnurbs` (FORME_SAVE: elsewhere) for `drag_probe`.
+fn object(h: &mut Harness) {
+    let mut log: Vec<String> = vec![];
+    h.reset(Doc::default(), "Drone");
+    let up = DQuat::IDENTITY;
+    let t_all = Instant::now();
+    eprintln!("  -- modelling");
+    let hub = timed(h, &mut log, "Hub (cylinder)", |d| named(d, Op::Add, Prim::Cylinder { radius: 35.0, height: 18.0 }, DVec3::ZERO, up, "Hub"));
+    let dome = timed(h, &mut log, "Dome (cylinder)", |d| named(d, Op::Add, Prim::Cylinder { radius: 28.0, height: 8.0 }, DVec3::new(0.0, 18.0, 0.0), up, "Dome"));
+    let e = edges_between(h, (dome, 0), (dome, 1));
+    let dome_fillet = timed(h, &mut log, "Fillet dome top 4", |d| d.add_round(4.0, false, e));
+    let e = edges_between(h, (hub, 0), (hub, 1));
+    timed(h, &mut log, "Fillet hub top 3", |d| d.add_round(3.0, false, e));
+    let e = edges_between(h, (hub, 0), (hub, 2));
+    timed(h, &mut log, "Fillet hub bottom 2", |d| d.add_round(2.0, false, e));
+    let arm = timed(h, &mut log, "Arm (box)", |d| named(d, Op::Add, Prim::Box { x: 70.0, y: 10.0, z: 14.0 }, DVec3::new(60.0, 4.0, 0.0), up, "Arm"));
+    let motor = timed(h, &mut log, "Motor (cylinder)", |d| named(d, Op::Add, Prim::Cylinder { radius: 13.0, height: 16.0 }, DVec3::new(100.0, 0.0, 0.0), up, "Motor"));
+    let recess = timed(h, &mut log, "Motor recess (carve)", |d| named(d, Op::Carve, Prim::Cylinder { radius: 9.0, height: 2.0 }, DVec3::new(100.0, 15.0, 0.0), up, "Recess"));
+    let shaft = timed(h, &mut log, "Shaft (cylinder)", |d| named(d, Op::Add, Prim::Cylinder { radius: 3.0, height: 8.0 }, DVec3::new(100.0, 15.0, 0.0), up, "Shaft"));
+    let slot = timed(h, &mut log, "Arm lightening cut (carve)", |d| named(d, Op::Carve, Prim::Box { x: 30.0, y: 20.0, z: 6.0 }, DVec3::new(58.0, 0.0, 0.0), up, "Cut"));
+    let mut e = edges_between(h, (arm, 2), (arm, 4));
+    e.extend(edges_between(h, (arm, 2), (arm, 5)));
+    timed(h, &mut log, "Fillet arm top edges 2", |d| d.add_round(2.0, false, e));
+    let mut e = vec![];
+    for (a, b) in [(0, 4), (0, 5), (1, 4), (1, 5)] {
+        e.extend(edges_between(h, (slot, a), (slot, b)));
+    }
+    timed(h, &mut log, "Fillet cut corners 2.5", |d| d.add_round(2.5, false, e));
+    let e = edges_between(h, (motor, 0), (motor, 1));
+    timed(h, &mut log, "Fillet motor top 1.5", |d| d.add_round(1.5, false, e));
+    let arms = timed(h, &mut log, "Array circle x4 (arm, motor)", |d| {
+        d.add_array(nurbs_kernel::Array { sources: vec![arm, motor, recess, shaft, slot], kind: nurbs_kernel::ArrayKind::Circle, count: 4, step: DVec3::ZERO, count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 })
+    });
+    timed(h, &mut log, "Battery bay (carve)", |d| named(d, Op::Carve, Prim::Box { x: 40.0, y: 8.0, z: 24.0 }, DVec3::new(0.0, -2.0, 0.0), up, "Bay"));
+    let cam = timed(h, &mut log, "Camera (box)", |d| named(d, Op::Add, Prim::Box { x: 20.0, y: 12.0, z: 14.0 }, DVec3::new(0.0, 4.0, 40.0), up, "Camera"));
+    let mut e = edges_between(h, (cam, 4), (cam, 0));
+    e.extend(edges_between(h, (cam, 4), (cam, 1)));
+    timed(h, &mut log, "Fillet camera front corners 2", |d| d.add_round(2.0, false, e));
+    let lens = timed(h, &mut log, "Lens (carve, turned)", |d| named(d, Op::Carve, Prim::Cylinder { radius: 4.0, height: 6.0 }, DVec3::new(0.0, 10.0, 44.0), DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2), "Lens"));
+    let e = edges_between(h, (lens, 0), (cam, 4));
+    timed(h, &mut log, "Chamfer lens mouth 0.8", |d| d.add_round(0.8, true, e));
+    let vent = timed(h, &mut log, "Vent (carve)", |d| named(d, Op::Carve, Prim::Box { x: 2.0, y: 4.0, z: 16.0 }, DVec3::new(-12.0, 24.0, 0.0), up, "Vent"));
+    timed(h, &mut log, "Array line x5 (vent)", |d| {
+        d.add_array(nurbs_kernel::Array { sources: vec![vent], kind: nurbs_kernel::ArrayKind::Line, count: 5, step: DVec3::new(6.0, 0.0, 0.0), count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 })
+    });
+    timed(h, &mut log, "Inset camera top 2, -1", |d| d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: cam, sub: 2 }.pack(), at: DVec3::new(0.0, 16.0, 40.0) }, inset: 2.0, depth: -1.0 }));
+    timed(h, &mut log, "Mirror X", |d| d.add_mirror(nurbs_kernel::Mirror { axis: 0, offset: 0.0, flip: false }));
+    let ant = timed(h, &mut log, "Antenna (cylinder)", |d| named(d, Op::Add, Prim::Cylinder { radius: 1.5, height: 20.0 }, DVec3::new(15.0, 24.0, -12.0), up, "Antenna"));
+    let e = edges_between(h, (ant, 0), (ant, 1));
+    timed(h, &mut log, "Fillet antenna tip 0.75", |d| d.add_round(0.75, false, e));
+    let leg1 = timed(h, &mut log, "Leg front (box)", |d| named(d, Op::Add, Prim::Box { x: 4.0, y: 22.0, z: 4.0 }, DVec3::new(22.0, -20.0, 22.0), up, "Leg"));
+    let leg2 = timed(h, &mut log, "Leg back (box)", |d| named(d, Op::Add, Prim::Box { x: 4.0, y: 22.0, z: 4.0 }, DVec3::new(22.0, -20.0, -22.0), up, "Leg 2"));
+    let mut e = vec![];
+    for leg in [leg1, leg2] {
+        for (a, b) in [(0, 4), (0, 5), (1, 4), (1, 5)] {
+            e.extend(edges_between(h, (leg, a), (leg, b)));
+        }
+    }
+    timed(h, &mut log, "Fillet legs 1", |d| d.add_round(1.0, false, e));
+    let t0 = Instant::now();
+    h.st.edit_quiet("Group", |d| {
+        d.add_group(&[leg1, leg2]);
+    });
+    h.settle();
+    log.push(format!("Group (legs) {:.0} ms", t0.elapsed().as_secs_f64() * 1e3));
+    let total = t_all.elapsed().as_secs_f64();
+    log.push(format!("modelled in {total:.1} s, {} features", h.st.doc.features.len()));
+    eprintln!("  modelled in {total:.1} s");
+    h.st.frame_all();
+    h.settle();
+    h.shot("object/object-1-drone");
+    let (yaw, pitch) = (h.st.camera.yaw, h.st.camera.pitch);
+    h.st.camera.pitch = 1.2;
+    h.st.frame_all();
+    h.settle();
+    h.shot("object/object-2-top");
+    h.st.camera.yaw = yaw + 2.6;
+    h.st.camera.pitch = -0.35;
+    h.st.frame_all();
+    h.settle();
+    h.shot("object/object-3-under");
+    h.st.camera.yaw = yaw;
+    h.st.camera.pitch = pitch;
+    h.st.xray = true;
+    h.st.frame_all();
+    h.settle();
+    h.shot("object/object-4-xray");
+    h.st.xray = false;
+    h.st.frame_all();
+    h.settle();
+    let save = std::env::var("FORME_SAVE").unwrap_or_else(|_| format!("{}/drone.fnurbs", h.out));
+    std::fs::write(&save, h.st.doc.to_json()).ok();
+    eprintln!("  saved {save}");
+
+    eprintln!("  -- the whole part built again from nothing");
+    let d = h.st.doc.clone();
+    let t0 = Instant::now();
+    h.reset(d, "Drone");
+    log.push(format!("loaded and built from nothing {:.2} s", t0.elapsed().as_secs_f64()));
+    eprintln!("  {}", log.last().unwrap());
+
+    eprintln!("  -- gestures");
+    gizmo_drag(h, &mut log, "Drag the antenna (late, after the Mirror) along Z", &[ant], Vec3::Z, "object/object-5-antenna-dragged");
+    gizmo_drag(h, &mut log, "Drag the camera along Z", &[cam], Vec3::Z, "");
+    gizmo_drag(h, &mut log, "Drag the camera along X (across the Mirror's plane)", &[cam], Vec3::X, "object/object-6-camera-across");
+    gizmo_drag(h, &mut log, "Drag the vent (an Array's source) along Z", &[vent], Vec3::Z, "");
+    gizmo_drag(h, &mut log, "Drag the arm (an Array's source) along X", &[arm], Vec3::X, "object/object-7-arms-longer");
+    gizmo_drag(h, &mut log, "Drag the dome (second shape) along Y", &[dome], Vec3::Y, "");
+    gizmo_drag(h, &mut log, "Drag the hub (first shape) along X", &[hub], Vec3::X, "");
+    live_change(h, &mut log, "Dome fillet 4 to 6 live", |d, t| {
+        if let Some(r) = d.feature_mut(dome_fillet).and_then(|f| f.round.as_mut()) {
+            r.size = 4.0 + 2.0 * t;
+        }
+    });
+    live_change(h, &mut log, "Arms Array 4 to 6 live", |d, t| {
+        if let Some(a) = d.feature_mut(arms).and_then(|f| f.array.as_mut()) {
+            a.count = 4 + (t * 2.0).round() as u32;
+        }
+    });
+    timed_act(h, &mut log, "Undo (the legs' fillet)", |h| h.st.undo_doc());
+    timed_act(h, &mut log, "Redo", |h| h.st.redo_doc());
+    timed_act(h, &mut log, "Isolate the camera", |h| {
+        h.st.selection = vec![cam];
+        h.steps(1);
+        h.st.toggle_isolate();
+    });
+    timed_act(h, &mut log, "Isolate off", |h| h.st.toggle_isolate());
+    timed_act(h, &mut log, "Duplicate the antenna", |h| {
+        h.st.selection = vec![ant];
+        h.steps(1);
+        h.st.duplicate_selected();
+    });
+    timed_act(h, &mut log, "Undo the copy", |h| h.st.undo_doc());
+    timed_act(h, &mut log, "Delete the camera", |h| {
+        h.st.selection = vec![cam];
+        h.steps(1);
+        h.st.delete_selected();
+    });
+    timed_act(h, &mut log, "Undo the delete", |h| h.st.undo_doc());
+    let path = format!("{}/object.txt", h.out);
+    std::fs::write(&path, log.join("\n") + "\n").ok();
+    eprintln!("  written {path}");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(|a| a == "--serve").unwrap_or(false) {
@@ -4844,6 +5182,10 @@ fn main() {
                 h.settle();
             }
         }
+    }
+
+    if want("object") {
+        object(&mut h);
     }
 
     if want("heavy") {

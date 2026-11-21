@@ -9,6 +9,11 @@ use nurbs_kernel::proto::{read_frame, write_frame, Request};
 use std::io::{BufReader, BufWriter};
 
 fn main() {
+    // a crash inside OpenCascade is an error of that step, not the end of
+    // the process (and of its caches)
+    if std::env::var_os("FORME_NO_SIGNALS").is_none() {
+        forme_occt::catch_signals();
+    }
     let mut input = BufReader::new(std::io::stdin().lock());
     let mut output = BufWriter::new(std::io::stdout().lock());
     let mut cache = Cache::default();

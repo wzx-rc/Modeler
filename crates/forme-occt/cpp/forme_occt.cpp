@@ -82,6 +82,10 @@
 #include <functional>
 #include <memory>
 #include <Geom_CylindricalSurface.hxx>
+#include <Geom_ConicalSurface.hxx>
+#include <Geom_SphericalSurface.hxx>
+#include <Geom_ToroidalSurface.hxx>
+#include <Geom_ElementarySurface.hxx>
 #include <Geom_Line.hxx>
 #include <Geom2d_Line.hxx>
 #include <Geom2d_BSplineCurve.hxx>
@@ -107,6 +111,10 @@
 #include <TColgp_Array1OfPnt.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Standard_Failure.hxx>
+#include <Standard_ErrorHandler.hxx>
+#include <chrono>
+#include <cstdarg>
+#include <OSD.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -182,6 +190,9 @@ template <class F>
 static auto guard(F f, decltype(f()) fail) -> decltype(f()) {
     std::lock_guard<std::recursive_mutex> lock(g_occ);
     try {
+        // an access violation inside it comes back here as an exception
+        // once `focc_catch_signals` ran (on Windows through /EHa)
+        OCC_CATCH_SIGNALS
         return f();
     } catch (const Standard_Failure& e) {
         const char* m = e.GetMessageString();
@@ -308,11 +319,26 @@ static void dump_check(const TopoDS_Shape& solid) {
         for (TopExp_Explorer x(solid, t); x.More(); x.Next()) {
             opencascade::handle<BRepCheck_Result> res = an.Result(x.Current());
             if (res.IsNull()) continue;
+            auto where = [](const TopoDS_Shape& sh) {
+                Bnd_Box bb;
+                BRepBndLib::Add(sh, bb);
+                if (bb.IsVoid()) return std::string("?");
+                double x0, y0, z0, x1, y1, z1;
+                bb.Get(x0, y0, z0, x1, y1, z1);
+                char buf[200];
+                snprintf(buf, sizeof buf, "(%.2f %.2f %.2f)-(%.2f %.2f %.2f)", x0, y0, z0, x1, y1, z1);
+                std::string out = buf;
+                if (sh.ShapeType() == TopAbs_FACE) {
+                    BRepAdaptor_Surface su(TopoDS::Face(sh));
+                    out += " surface " + std::to_string((int)su.GetType());
+                }
+                return out;
+            };
             for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More(); it.Next())
-                if (it.Value() != BRepCheck_NoError) fprintf(stderr, "check: shape type %d status %d\n", (int)t, (int)it.Value());
+                if (it.Value() != BRepCheck_NoError) fprintf(stderr, "check: shape type %d status %d at %s\n", (int)t, (int)it.Value(), where(x.Current()).c_str());
             for (res->InitContextIterator(); res->MoreShapeInContext(); res->NextShapeInContext())
                 for (BRepCheck_ListOfStatus::Iterator it(res->StatusOnShape()); it.More(); it.Next())
-                    if (it.Value() != BRepCheck_NoError) fprintf(stderr, "check: shape type %d in context status %d\n", (int)t, (int)it.Value());
+                    if (it.Value() != BRepCheck_NoError) fprintf(stderr, "check: shape type %d in context status %d at %s, in %s\n", (int)t, (int)it.Value(), where(x.Current()).c_str(), where(res->ContextualShape()).c_str());
         }
 }
 
@@ -820,6 +846,20 @@ struct OpAccess : BRepAlgoAPI_BooleanOperation {
 // the kernel before each build, per thread.
 static thread_local std::vector<long long> g_lines;
 
+// OpenCascade's signal handlers set: an access violation inside one of its
+// algorithms (21 nov.: ChFi3d's PerformIntersectionAtEnd on a null edge, a
+// fillet of the drone's arm once its hub was moved) becomes an exception
+// that `guard` turns into an error, instead of killing the kernel process
+// (restarted with that step skipped, its caches lost: 2 to 3 s at each
+// step of a drag). Floating-point traps stay off.
+void focc_catch_signals() {
+    try {
+        OSD::SetSignal(OSD_SignalMode_Set, Standard_False);
+        OSD::SetThreadLocalSignal(OSD_SignalMode_Set, Standard_False);
+    } catch (...) {
+    }
+}
+
 void focc_keep_lines(const long long* tags, int n) {
     g_lines.assign(tags, tags + (n > 0 ? n : 0));
     std::sort(g_lines.begin(), g_lines.end());
@@ -834,9 +874,24 @@ static bool kept_between(long long ta, long long tb) {
     return line(ta) || line(tb);
 }
 
+// Set by `focc_fuse_checked` (a Mirror's union): the clean-up's result is
+// checked (BRepCheck, tens of ms on a big part: not for every boolean).
+static thread_local bool g_check_unify = false;
+
+// FORME_OCCT_DEBUG=1: a line on stderr with the ms since the process began
+static void dbg(const char* fmt, ...) {
+    if (!getenv("FORME_OCCT_DEBUG")) return;
+    static const auto t0 = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    fprintf(stderr, "[%9.1f] ", ms);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
+
 static void simplify_keeping(BRepAlgoAPI_BooleanOperation& op, const FShape* a, const FShape* b) {
-    ShapeUpgrade_UnifySameDomain u(op.Shape(), Standard_True, Standard_True, Standard_True);
-    u.AllowInternalEdges(Standard_False);
+    TopTools_MapOfShape keeps;
     TopTools_IndexedMapOfShape rm;
     TopExp::MapShapes(op.Shape(), TopAbs_EDGE, rm);
     // The result's faces by the tags `carry_tags` will give them (the tool's
@@ -849,6 +904,7 @@ static void simplify_keeping(BRepAlgoAPI_BooleanOperation& op, const FShape* a, 
     TopTools_IndexedMapOfShape rf;
     face_map(op.Shape(), rf);
     std::vector<long long> rt(rf.Extent(), -1);
+    std::vector<char> rfrom(rf.Extent(), 0); // 1: from a, 2: from b
     for (const FShape* in : {b, a}) {
         if (!in) continue;
         TopTools_IndexedMapOfShape fm;
@@ -861,12 +917,16 @@ static void simplify_keeping(BRepAlgoAPI_BooleanOperation& op, const FShape* a, 
                 int j = rf.FindIndex(it.Value());
                 if (j > 0) {
                     rt[j - 1] = t;
+                    rfrom[j - 1] |= in == a ? 1 : 2;
                     any = true;
                 }
             }
             if (!any) {
                 int j = rf.FindIndex(fm(i));
-                if (j > 0) rt[j - 1] = t;
+                if (j > 0) {
+                    rt[j - 1] = t;
+                    rfrom[j - 1] |= in == a ? 1 : 2;
+                }
             }
         }
     }
@@ -895,18 +955,107 @@ static void simplify_keeping(BRepAlgoAPI_BooleanOperation& op, const FShape* a, 
             long long ta = in->tags[fa - 1], tb = in->tags[fb - 1];
             if (!kept_between(ta, tb)) continue;
             const TopoDS_Shape& e = e2f.FindKey(i);
-            if (rm.Contains(e) && still(e)) u.KeepShape(e);
+            if (rm.Contains(e) && still(e)) keeps.Add(e);
             for (TopTools_ListOfShape::Iterator it(op.Modified(e)); it.More(); it.Next())
-                if (rm.Contains(it.Value()) && still(it.Value())) u.KeepShape(it.Value());
+                if (rm.Contains(it.Value()) && still(it.Value())) keeps.Add(it.Value());
         }
     }
-    u.Build();
-    OpAccess::shape(op) = u.Shape();
-    if (op.HasHistory()) OpAccess::history(op)->Merge(u.History());
+    // A Mirror's union: a face on a periodic surface (a cylinder, a cone,
+    // a torus) is never made one with its own image across the plane.
+    // (21 nov.: a camera with a round lens moved across the plane: the
+    // clean-up, joining a wall's half with its mirrored half, walked round
+    // their pcurves for ever, OpenCascade's RelocatePCurvesToNewUorigin.)
+    // The edge stays between two faces of one tag, so every clean-up after
+    // keeps it; the model calls it a seam (`build`: on a Mirror's plane).
+    if (g_check_unify) {
+        auto periodic = [](const TopoDS_Shape& f) {
+            BRepAdaptor_Surface sf(TopoDS::Face(f), Standard_False);
+            return sf.IsUPeriodic() || sf.IsVPeriodic();
+        };
+        for (int i = 1; i <= re2f.Extent(); i++) {
+            const TopTools_ListOfShape& fl = re2f(i);
+            if (fl.Extent() != 2 || fl.First().IsSame(fl.Last())) continue;
+            int fa = rf.FindIndex(fl.First()), fb = rf.FindIndex(fl.Last());
+            if (fa < 1 || fb < 1) continue;
+            if (rt[fa - 1] < 0 || rt[fa - 1] != rt[fb - 1]) continue;
+            if ((rfrom[fa - 1] | rfrom[fb - 1]) != 3 || rfrom[fa - 1] == 3 || rfrom[fb - 1] == 3) continue;
+            if (!periodic(fl.First()) || !periodic(fl.Last())) continue;
+            keeps.Add(re2f.FindKey(i));
+        }
+    }
+    const TopoDS_Shape raw = op.Shape();
+    auto unify = [&](const TopoDS_Shape& sh, const TopTools_MapOfShape& k) {
+        opencascade::handle<ShapeUpgrade_UnifySameDomain> u = new ShapeUpgrade_UnifySameDomain(sh, Standard_True, Standard_True, Standard_True);
+        u->AllowInternalEdges(Standard_False);
+        for (TopTools_MapOfShape::Iterator it(k); it.More(); it.Next()) u->KeepShape(it.Value());
+        u->Build();
+        return u;
+    };
+    if (!g_check_unify) {
+        dbg("clean-up: unify\n");
+        opencascade::handle<ShapeUpgrade_UnifySameDomain> u = unify(raw, keeps);
+        dbg("clean-up: done\n");
+        OpAccess::shape(op) = u->Shape();
+        if (op.HasHistory()) OpAccess::history(op)->Merge(u->History());
+        return;
+    }
+    // Checked (21 nov.: a Mirror through a lens's hole, a motor's recess:
+    // the two halves of their walls, one of them mirrored, made one face
+    // whose wire did not close in the face's parameters; the solid was
+    // invalid and every fillet after it failed). A wrong face is mended by
+    // ShapeFix_Face; else the union as it came, before the clean-up (a copy
+    // kept aside: the clean-up changes the edges of the shape it is given).
+    BRepBuilderAPI_Copy backup(raw, Standard_False, Standard_False);
+    dbg("clean-up: unify\n");
+    opencascade::handle<ShapeUpgrade_UnifySameDomain> u = unify(raw, keeps);
+    TopoDS_Shape res = u->Shape();
+    opencascade::handle<BRepTools_ReShape> rs = new BRepTools_ReShape();
+    dbg("clean-up: check\n");
+    bool ok = valid(res);
+    if (!ok) {
+        int n = 0;
+        for (TopExp_Explorer x(res, TopAbs_FACE); x.More(); x.Next()) {
+            if (BRepCheck_Analyzer(x.Current()).IsValid()) continue;
+            ShapeFix_Face fix(TopoDS::Face(x.Current()));
+            fix.Perform();
+            if (fix.Status(ShapeExtend_DONE)) {
+                rs->Replace(x.Current(), fix.Face());
+                n++;
+            }
+        }
+        // (ShapeFix_Face mends the face's edges in place, its status not
+        // always saying so: checked again either way)
+        TopoDS_Shape fixed = n > 0 ? rs->Apply(res) : res;
+        ok = valid(fixed);
+        dbg("clean-up: a wrong face, %d replaced, valid %d\n", n, (int)ok);
+        if (ok) res = fixed;
+    }
+    if (ok) {
+        OpAccess::shape(op) = res;
+        if (op.HasHistory()) {
+            OpAccess::history(op)->Merge(u->History());
+            OpAccess::history(op)->Merge(rs->History());
+        }
+        return;
+    }
+    dbg("clean-up: still wrong, left out\n");
+    OpAccess::shape(op) = backup.Shape();
+    if (op.HasHistory()) {
+        TopTools_ListOfShape args;
+        args.Append(raw);
+        opencascade::handle<BRepTools_History> hc = new BRepTools_History(args, backup);
+        OpAccess::history(op)->Merge(hc);
+    }
 }
 
 static FShape* boolean(BRepAlgoAPI_BooleanOperation& op, const char* what, const FShape* a, const FShape* b) {
+    dbg("boolean %s: build\n", what);
+    // FORME_BOP_PARALLEL=1: OpenCascade's own threads (21 nov.: the
+    // drone's hub dragged 26 mm, a step 156 s → 78 s on 4 cores; not on by
+    // default, its results not checked against the batteries)
+    if (getenv("FORME_BOP_PARALLEL")) op.SetRunParallel(Standard_True);
     op.Build();
+    dbg("boolean %s: built\n", what);
     if (!op.IsDone() || op.HasErrors()) {
         set_err(std::string(what) + " failed");
         return nullptr;
@@ -953,6 +1102,15 @@ FShape* focc_fuse(const FShape* a, const FShape* b) {
             return boolean(op, "union", a, b);
         },
         (FShape*)nullptr);
+}
+
+// A union whose clean-up is checked (`g_check_unify`): a Mirror's half
+// and its image.
+FShape* focc_fuse_checked(const FShape* a, const FShape* b) {
+    g_check_unify = true;
+    FShape* r = focc_fuse(a, b);
+    g_check_unify = false;
+    return r;
 }
 
 FShape* focc_cut(const FShape* a, const FShape* b) {

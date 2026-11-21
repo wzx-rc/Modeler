@@ -30,15 +30,24 @@ fn main() {
     let lib = root.join("lib");
     let inc = if root.join("include").join("opencascade").is_dir() { root.join("include").join("opencascade") } else { root.join("include") };
     println!("cargo:rerun-if-changed=cpp/forme_occt.cpp");
-    cc::Build::new()
-        .cpp(true)
+    // A crash inside OpenCascade (an access violation in a fillet) caught as
+    // an exception, as OpenCascade itself is built: on Windows structured
+    // exceptions (/EHa), elsewhere signals turned into jumps.
+    let msvc = std::env::var("TARGET").unwrap_or_default().contains("msvc");
+    let mut b = cc::Build::new();
+    b.cpp(true)
         .file("cpp/forme_occt.cpp")
         .include(&inc)
         .flag_if_supported("-std=c++17")
         .flag_if_supported("/std:c++17")
         .flag_if_supported("-w")
-        .define("_USE_MATH_DEFINES", None)
-        .compile("forme_occt");
+        .define("_USE_MATH_DEFINES", None);
+    if msvc {
+        b.flag("/EHa");
+    } else {
+        b.define("OCC_CONVERT_SIGNALS", None);
+    }
+    b.compile("forme_occt");
     println!("cargo:rustc-link-search=native={}", lib.display());
     for l in LIBS {
         println!("cargo:rustc-link-lib=static={l}");

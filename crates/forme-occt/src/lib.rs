@@ -47,6 +47,7 @@ extern "C" {
     fn focc_bevel(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
     fn focc_transform(s: *const FShape, m: *const c_double) -> *mut FShape;
     fn focc_fuse(a: *const FShape, b: *const FShape) -> *mut FShape;
+    fn focc_fuse_checked(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_cut(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_common(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_region_cut(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int) -> *mut FShape;
@@ -87,6 +88,7 @@ extern "C" {
     fn focc_lump_boxes(s: *const FShape, out: *mut c_double, cap: c_int) -> c_int;
     fn focc_simplified(s: *const FShape) -> *mut FShape;
     fn focc_keep_lines(tags: *const i64, n: c_int);
+    fn focc_catch_signals();
     fn focc_set_tags(s: *mut FShape, tags: *const i64, n: c_int);
     fn focc_face_tag(s: *const FShape, index: c_int) -> i64;
     fn focc_topo(s: *const FShape, defl: c_double, angle: c_double) -> *mut FBuf;
@@ -174,6 +176,13 @@ pub struct Shape(*mut FShape);
 /// clean-up makes such a face one with the face round it.
 pub fn keep_lines(tags: &[i64]) {
     unsafe { focc_keep_lines(tags.as_ptr(), tags.len() as c_int) }
+}
+
+/// OpenCascade's signal handlers set for this process (and this thread):
+/// an access violation inside one of its algorithms is then an `Err`, not
+/// a dead process. For the kernel process; floating-point traps stay off.
+pub fn catch_signals() {
+    unsafe { focc_catch_signals() }
 }
 
 // the C++ side keeps no global state per shape: a shape can move to another thread
@@ -610,6 +619,14 @@ impl Shape {
     }
     pub fn fuse(&self, other: &Shape) -> Result<Shape, String> {
         self.solid_boolean(other, focc_fuse)
+    }
+    /// A union whose clean-up (faces of one surface made one) is checked
+    /// with BRepCheck, tens of ms on a big part: where it gives an invalid
+    /// face, the faces that went into it stay apart (a Mirror's half and
+    /// its image, whose two halves of a hole's wall, one of them mirrored,
+    /// made a face with an open wire).
+    pub fn fuse_checked(&self, other: &Shape) -> Result<Shape, String> {
+        self.solid_boolean(other, focc_fuse_checked)
     }
     pub fn cut(&self, tool: &Shape) -> Result<Shape, String> {
         self.solid_boolean(tool, focc_cut)

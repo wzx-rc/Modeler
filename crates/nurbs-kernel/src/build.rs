@@ -147,6 +147,9 @@ pub struct Cache {
     /// steps), the newest last: kept, so going back a few steps builds
     /// nothing again.
     rest: std::collections::VecDeque<Vec<u64>>,
+    /// The last request's features (id, hash): what a drag changes from one
+    /// step to the next (`drag_order`).
+    last: Vec<(FeatureId, u64)>,
 }
 
 fn rows(m: DMat4) -> [[f64; 4]; 3] {
@@ -643,6 +646,12 @@ fn round(acc: &Shape, f: &Feature, r: &Round, search: bool, one: bool) -> (Optio
     mark(&step("round", f));
     let make = |size: f64| made_on(acc, &edges, r, size, fresh);
     let mut res = make(r.size).map_err(|e| plain_error(&e));
+    // on a part that is not a valid solid no order or size will do (21 nov.:
+    // the drone's hub dragged, its arms' fillets each searched 12 sizes,
+    // 13 s for one step of the drag)
+    if res.as_ref().is_err_and(|e| !e.starts_with("its edges are smooth")) && !acc.is_valid() {
+        return (Some(Err(NOT_VALID.to_string())), missing, None);
+    }
     // two or three of the edges meeting at a corner of four (Romain 20 nov.,
     // a cap standing flush with a pocket's end): OpenCascade rounds one of
     // them, or all four, but not two or three in one go; one at a time in
@@ -665,6 +674,9 @@ fn round(acc: &Shape, f: &Feature, r: &Round, search: bool, one: bool) -> (Optio
         None => (Some(res), missing, None),
     }
 }
+
+/// A fillet's error when what it is made on is not a valid solid.
+const NOT_VALID: &str = "the part before it is not a valid solid";
 
 /// OpenCascade's words for a fillet it cannot make, put plainly when they say
 /// nothing to the user.
@@ -1601,11 +1613,21 @@ fn mirror_part(acc: &Shape, id: FeatureId, m: &Mirror, island: bool) -> Result<O
             b.set_tags(&vec![FaceTag { feature: id, sub: 0 }.pack(); b.face_count()]);
             let b = b.transformed(rows(DMat4::from_translation(c)))?;
             let _ = n;
+            let t = Instant::now();
             cut = sol.common(&b)?;
+            if std::env::var_os("FORME_STAGE_MS").is_some() {
+                eprintln!("  mirror {id}: half {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+            }
             &cut
         };
         let image = half.transformed(m.rows())?;
-        out = Some(half.fuse(&image)?);
+        // (its clean-up checked: a hole's wall across the plane, its two
+        // halves one face again, made an invalid solid, 21 nov.)
+        let t = Instant::now();
+        out = Some(half.fuse_checked(&image)?);
+        if std::env::var_os("FORME_STAGE_MS").is_some() {
+            eprintln!("  mirror {id}: union {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        }
     }
     if let Some(sh) = &sheets {
         let both = sh.compound(&sh.transformed(m.rows())?)?;
@@ -1953,7 +1975,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                     let (mut res, missing, mut limit) = if skipped("round") { (Some(Err("skipped, it crashed the kernel".to_string())), 0, None) } else { round(&acc, f, r, false, !skip.contains(&step("onebyone", f))) };
                     // (with a blended result at hand, a smaller size made on
                     // its own would not be taken: no search for it)
-                    if matches!(res, Some(Err(_))) && partial.is_none() && !skipped("round") {
+                    if matches!(&res, Some(Err(e)) if e != NOT_VALID) && partial.is_none() && !skipped("round") {
                         // next to fillets made just before it: made before
                         // them, they made again on what it gives
                         if let Some(s) = replay_round(doc, &feats[..i], f, r, &stage, skip, cache, model, used_tools, used_stages) {
@@ -2790,11 +2812,242 @@ fn build_islands<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache
     out
 }
 
+/// While a shape is dragged (a coarse build: a slider moved live too), the
+/// features that changed since the last request, with every later step
+/// that touches them, are built after the others; the others' stages are
+/// then found in the cache at each step of the drag instead of being made
+/// again (21 nov.: the drone's camera, 16th of 28 steps, 1.5 s a step, all
+/// of it after the camera made again, its Mirror 0.6 s). The fine build
+/// keeps the document's order.
+///
+/// A later step joins them (in their order) when it names one of their
+/// faces, when its box meets one of theirs (a union commutes with a union,
+/// a cut or a fillet far from them with anything), when it is an Array
+/// repeating one of them, a Shell, or a Mirror that would treat one of them
+/// otherwise once it comes after it (made on both sides then, not cut at
+/// the plane): one off the side kept, unless a box or a cylinder centred
+/// on the plane and square to it, a fillet whose edges there are the
+/// images of its edges on the side kept.
+fn drag_order(doc: &Doc, last: &[(FeatureId, u64)]) -> Option<Doc> {
+    let n = doc.features.len();
+    if n < 3 || last.len() != n || doc.features.iter().zip(last).any(|(f, l)| f.id != l.0) {
+        return None;
+    }
+    let mut inc: Vec<bool> = doc.features.iter().zip(last).map(|(f, l)| f.hash() != l.1).collect();
+    let k = inc.iter().position(|c| *c)?;
+    let built = |f: &Feature| f.visible && !f.suspended;
+    let mut regs: Vec<Option<Option<(DVec3, DVec3)>>> = vec![None; n];
+    let mut reg = |i: usize| -> Option<(DVec3, DVec3)> {
+        if regs[i].is_none() {
+            regs[i] = Some(reach(doc, &doc.features[i], 0));
+        }
+        regs[i].unwrap()
+    };
+    let meet = |a: Option<(DVec3, DVec3)>, b: Option<(DVec3, DVec3)>| match (a, b) {
+        (Some((l0, h0)), Some((l1, h1))) => l0.cmple(h1).all() && l1.cmple(h0).all(),
+        _ => true,
+    };
+    for j in k + 1..n {
+        if inc[j] || !built(&doc.features[j]) {
+            continue;
+        }
+        let g = &doc.features[j];
+        let members: Vec<usize> = (k..j).filter(|&i| inc[i] && built(&doc.features[i])).collect();
+        if members.is_empty() {
+            continue;
+        }
+        let ids: Vec<FeatureId> = members.iter().map(|&i| doc.features[i].id).collect();
+        let join = if g.shell.is_some() {
+            true
+        } else if let Some(m) = &g.mirror {
+            members.iter().any(|&i| !mirror_safe(doc, &doc.features[i], m, 0))
+        } else if g.array.is_some() {
+            let pat: Vec<FeatureId> = doc.array_pattern(j).iter().map(|f| f.id).collect();
+            let rg = reg(j);
+            ids.iter().any(|id| pat.contains(id)) || members.iter().any(|&i| meet(reg(i), rg))
+        } else if g.round.is_some() || g.push.is_some() || g.tweak.is_some() || g.cut.is_some() {
+            let named = crate::doc::named_features(g);
+            let rg = reg(j);
+            named.iter().any(|id| ids.contains(id)) || members.iter().any(|&i| meet(reg(i), rg))
+        } else if doc.makes(g) == Makes::Nothing {
+            false
+        } else {
+            let rg = reg(j);
+            members.iter().any(|&i| meet(reg(i), rg))
+        };
+        if join {
+            inc[j] = true;
+        }
+    }
+    // nothing left before them that was after them: no gain
+    if !(k..n).any(|i| !inc[i] && built(&doc.features[i])) {
+        return None;
+    }
+    let mut out = doc.clone();
+    out.features = (0..n).filter(|&i| !inc[i]).chain((0..n).filter(|&i| inc[i])).map(|i| doc.features[i].clone()).collect();
+    if std::env::var_os("FORME_ISLANDS_DEBUG").is_some() {
+        eprintln!("DRAG ORDER: last {:?}", (0..n).filter(|&i| inc[i]).map(|i| doc.features[i].id).collect::<Vec<_>>());
+    }
+    Some(out)
+}
+
+/// Where a feature can change the part, in world space (`drag_order`):
+/// None, anywhere (a Mirror, a Shell, what cannot be told).
+fn reach(doc: &Doc, f: &Feature, depth: u32) -> Option<(DVec3, DVec3)> {
+    if depth > 6 || f.mirror.is_some() || f.shell.is_some() {
+        return None;
+    }
+    let grow = |(lo, hi): (DVec3, DVec3), d: f64| (lo - DVec3::splat(d), hi + DVec3::splat(d));
+    let add = |a: Option<(DVec3, DVec3)>, b: (DVec3, DVec3)| Some(match a {
+        Some((l, h)) => (l.min(b.0), h.max(b.1)),
+        None => b,
+    });
+    let named = |f: &Feature| -> Option<Option<(DVec3, DVec3)>> {
+        let mut b = None;
+        for id in crate::doc::named_features(f) {
+            let g = doc.features.iter().find(|g| g.id == id && g.id != f.id)?;
+            b = add(b, reach(doc, g, depth + 1)?);
+        }
+        Some(b)
+    };
+    if let Some(a) = &f.array {
+        let at = doc.features.iter().position(|g| g.id == f.id)?;
+        let copies = a.copies();
+        let mut b = None;
+        for p in doc.array_pattern(at) {
+            let r = reach(doc, &p, depth + 1)?;
+            b = add(b, r);
+            for (_, m) in &copies {
+                let c: Vec<DVec3> = (0..8).map(|i| m.transform_point3(DVec3::new(if i & 1 == 0 { r.0.x } else { r.1.x }, if i & 2 == 0 { r.0.y } else { r.1.y }, if i & 4 == 0 { r.0.z } else { r.1.z }))).collect();
+                let lo = c.iter().fold(DVec3::splat(f64::MAX), |a, q| a.min(*q));
+                let hi = c.iter().fold(DVec3::splat(f64::MIN), |a, q| a.max(*q));
+                b = add(b, (lo, hi));
+            }
+        }
+        return b;
+    }
+    if let Some(r) = &f.round {
+        return named(f)?.map(|b| grow(b, r.size.abs() * 2.0 + 0.5));
+    }
+    if let Some(p) = &f.push {
+        return named(f)?.map(|b| grow(b, p.depth.abs() + p.inset.abs() + 0.5));
+    }
+    if let Some(t) = &f.tweak {
+        if (t.scale - DVec3::ONE).abs().max_element() > 1e-9 || t.copy {
+            return None;
+        }
+        return named(f)?.map(|b| grow(b, t.delta.length() + 0.5));
+    }
+    if f.cut.is_some() {
+        return named(f)?.map(|b| grow(b, 0.5));
+    }
+    Some(grow(f.bounds(), 0.5))
+}
+
+/// Whether a feature made after this Mirror instead of before it (on both
+/// sides then) gives the same part (`drag_order`).
+fn mirror_safe(doc: &Doc, f: &Feature, m: &Mirror, depth: u32) -> bool {
+    let tol = 1e-6;
+    let kept = |r: Option<(DVec3, DVec3)>| r.is_some_and(|(lo, hi)| m.side(lo).min(m.side(hi)) >= -tol);
+    if f.mirror.is_some() || f.shell.is_some() || depth > 6 {
+        return false;
+    }
+    // a face's image across the plane, for a face of a plain shape centred
+    // on it (a box's ±side across the plane swapped, the rest its own)
+    let sigma = |tag: i64| -> Option<i64> {
+        let g = doc.features.iter().find(|g| g.id == (tag >> 16) as FeatureId)?;
+        let a = sym_axis(g, m)? as i64;
+        let sub = tag & 0xffff;
+        let s2 = match g.prim {
+            Prim::Box { .. } if sub <= 5 => {
+                if sub / 2 == a {
+                    sub ^ 1
+                } else {
+                    sub
+                }
+            }
+            Prim::Cylinder { .. } if sub <= 2 => {
+                if a == 1 && sub > 0 {
+                    3 - sub
+                } else {
+                    sub
+                }
+            }
+            _ => return None,
+        };
+        Some((tag & !0xffff) | s2)
+    };
+    if let Some(r) = &f.round {
+        // each edge on the side kept, the image of another edge, or its own
+        // image (between two faces of shapes centred on the plane that are
+        // their own images or each other's)
+        return r.edges.iter().all(|e| {
+            m.side(e.at) >= -tol
+                || r.edges.iter().any(|o| o.at.distance(m.reflect(e.at)) < 1e-3)
+                || match (sigma(e.faces[0]), sigma(e.faces[1])) {
+                    (Some(x), Some(y)) => (x, y) == (e.faces[0], e.faces[1]) || (x, y) == (e.faces[1], e.faces[0]),
+                    _ => false,
+                }
+        });
+    }
+    if let Some(p) = &f.push {
+        return m.side(p.face.at) >= -tol || sigma(p.face.tag) == Some(p.face.tag);
+    }
+    if f.tweak.is_some() || f.cut.is_some() || f.array.is_some() {
+        return kept(reach(doc, f, 0));
+    }
+    kept(Some(f.bounds())) || sym_axis(f, m).is_some()
+}
+
+/// A plain box or cylinder centred on a Mirror's plane, one of its own axes
+/// square to it: that axis (0 X, 1 Y, 2 Z), it is its own image.
+fn sym_axis(f: &Feature, m: &Mirror) -> Option<usize> {
+    let plain = matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }) && f.is_solid() && f.profile.is_none() && f.form.is_none() && f.curve.is_none() && f.sheet.is_none() && f.revolve.is_none() && f.loft.is_none() && f.shape_bool.is_none();
+    if !plain {
+        return None;
+    }
+    let (lo, hi) = f.bounds();
+    let size = (hi - lo).max_element().max(1.0);
+    if m.side((lo + hi) * 0.5).abs() > 1e-6 * size {
+        return None;
+    }
+    let n = m.normal();
+    [DVec3::X, DVec3::Y, DVec3::Z].iter().position(|a| (f.rot * *a).dot(n).abs() > 1.0 - 1e-9)
+}
+
+/// The edges a Mirror's union keeps between a curved face and its own image
+/// (`simplify_keeping`: never joined, OpenCascade could loop for ever there)
+/// are drawn and picked as a seam: both faces of one tag, curved, the edge
+/// on a Mirror's plane.
+fn mirror_seams(doc: &Doc, model: &mut Model) {
+    let planes: Vec<(DVec3, f64)> = doc.features.iter().filter(|f| f.visible && !f.suspended).filter_map(|f| f.mirror.as_ref()).map(|m| (m.normal(), m.offset)).collect();
+    if planes.is_empty() {
+        return;
+    }
+    for e in model.edges.iter_mut() {
+        if e.seam || e.faces[0] < 0 || e.faces[1] < 0 || e.faces[0] == e.faces[1] || e.pts.is_empty() {
+            continue;
+        }
+        let (fa, fb) = (&model.faces[e.faces[0] as usize], &model.faces[e.faces[1] as usize]);
+        if fa.tag.is_none() || fa.tag != fb.tag || fa.kind == SurfKind::Plane || fb.kind == SurfKind::Plane {
+            continue;
+        }
+        let on = |(n, o): &(DVec3, f64)| e.pts.iter().all(|p| (DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64).dot(*n) - o).abs() < 0.01);
+        if planes.iter().any(on) {
+            e.seam = true;
+        }
+    }
+}
+
 pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Cache) -> Model {
     let t0 = Instant::now();
     let mut model = Model { fine, ..Default::default() };
     let mut used_tools = vec![];
     let mut used_stages = vec![];
+    // during a drag, what it changes built last
+    let ordered = if fine || quads || std::env::var_os("FORME_NO_DRAG_ORDER").is_some() { None } else { drag_order(doc, &cache.last) };
+    cache.last = doc.features.iter().map(|f| (f.id, f.hash())).collect();
+    let doc = ordered.as_ref().unwrap_or(doc);
     // each Array's copies, then after a Mirror each step on both sides
     let arrayed = arrayed_doc(doc);
     let doc = arrayed.as_ref().unwrap_or(doc);
@@ -2955,6 +3208,7 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
                         pts: e.pts.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect(),
                     })
                     .collect();
+                mirror_seams(doc, &mut model);
             }
             Err(e) => model.errors.push(format!("meshing failed ({e})")),
         }
@@ -4968,10 +5222,39 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn valid_probe() {
+        // FORME_DOC=file.fnurbs: the document's first n features built
+        // for each n (a cache of its own), whether the part is a valid
+        // solid for BRepCheck (a fillet on an invalid part fails with
+        // "invalid solid" whatever its edges), and the errors
+        let Ok(p) = std::env::var("FORME_DOC") else { return };
+        let d0 = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+        let from: usize = std::env::var("FORME_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        for n in from..=d0.features.len() {
+            let mut d = d0.clone();
+            d.features.truncate(n);
+            let arrayed = arrayed_doc(&d);
+            let doc = arrayed.as_ref().unwrap_or(&d);
+            let mirrored = mirrored_doc(doc);
+            let doc = mirrored.as_ref().unwrap_or(doc);
+            let feats: Vec<&Feature> = doc.features.iter().filter(|f| f.visible && !f.suspended && doc.makes(f) == Makes::Solid).collect();
+            let mut model = Model::default();
+            let (mut ut, mut us) = (vec![], vec![]);
+            let st = build_islands(doc, &feats, &[], &mut Cache::default(), &mut model, &mut ut, &mut us);
+            let s = st.shape.as_ref();
+            eprintln!("{n:>3} {:<14} valid {:?} faces {:?} lumps {:?} errors {:?}", d.features[n - 1].name, s.map(|s| s.is_valid()), s.map(|s| s.face_count()), s.map(|s| s.lump_boxes().len()), st.errors);
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn drag_probe() {
         // FORME_DOC=file.fnurbs FORME_DRAG=id: the coarse builds a drag of
         // that shape makes (8 steps of 1 mm along X), timed
         let Ok(p) = std::env::var("FORME_DOC") else { return };
+        if std::env::var_os("FORME_SIGNALS").is_some() {
+            forme_occt::catch_signals();
+        }
         let id: FeatureId = std::env::var("FORME_DRAG").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
         let mut d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
         let mut cache = Cache::default();
@@ -4994,18 +5277,31 @@ mod tests {
             }
         }
         let mut worst = 0.0f64;
-        for i in 0..8 {
+        // FORME_STEP: mm a step along X (1), FORME_AXIS: x, y or z
+        let step: f64 = std::env::var("FORME_STEP").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let dir = match std::env::var("FORME_AXIS").as_deref() {
+            Ok("y") => DVec3::Y,
+            Ok("z") => DVec3::Z,
+            _ => DVec3::X,
+        } * step;
+        let steps: usize = std::env::var("FORME_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+        for i in 0..steps {
             for f in d.features.iter_mut().filter(|f| ids.contains(&f.id)) {
                 if f.id == id {
-                    f.origin.x += 1.0;
+                    f.origin += dir;
                 } else {
-                    *f = f.carried_by(&|p| p + DVec3::X);
+                    *f = f.carried_by(&|p| p + dir);
                 }
             }
             let t = std::time::Instant::now();
             let m = build(&d, false, false, &[], &mut cache);
             worst = worst.max(t.elapsed().as_secs_f64() * 1e3);
             eprintln!("drag {i}: {:.0} ms, cached {} of {}, errors {}", t.elapsed().as_secs_f64() * 1e3, m.cached, d.features.len(), m.errors.len());
+            if std::env::var("FORME_ERRORS").is_ok() {
+                for e in &m.errors {
+                    eprintln!("  ERROR {e}");
+                }
+            }
         }
         let t = std::time::Instant::now();
         let m = build(&d, true, false, &[], &mut cache);
