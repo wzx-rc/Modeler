@@ -742,6 +742,9 @@ pub struct AppState {
     /// Bumped when a new model arrives (the renderer uploads it).
     pub model_gen: u64,
     pub picker: Picker,
+    /// Which of Vertex mode's vertices the part hides, for a model, an eye
+    /// and a list of vertices (`visible_vertices`).
+    pub vert_hidden: std::cell::RefCell<((u64, [u32; 3], u64), Vec<bool>)>,
     submitted: u64,
     /// Each request sent lately, with its shapes' frames (the drag's
     /// preview, `drag_preview`).
@@ -904,6 +907,7 @@ impl AppState {
             model: None,
             model_gen: 0,
             picker: Picker::default(),
+            vert_hidden: Default::default(),
             submitted: 0,
             sent_frames: vec![],
             round_ms: 0.0,
@@ -1048,7 +1052,9 @@ impl AppState {
         let mut m = m.clone();
         m.serial = self.version * 4;
         self.picker = Picker::new(&m);
-        self.model = Some(Arc::new(m));
+        let m = Arc::new(m);
+        self.picker.start(&m);
+        self.model = Some(m);
         self.model_gen += 1;
     }
 
@@ -3937,7 +3943,9 @@ impl AppState {
             if self.model.as_ref().map(|m| b.model.serial >= m.serial).unwrap_or(true) {
                 self.picker = Picker::new(&b.model);
                 self.round_ms = b.round_ms;
-                self.model = Some(Arc::new(b.model));
+                let m = Arc::new(b.model);
+                self.picker.start(&m);
+                self.model = Some(m);
                 self.model_gen += 1;
                 self.clamp_rounds();
                 self.check_build();

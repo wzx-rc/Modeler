@@ -804,6 +804,27 @@ struct OpAccess : BRepAlgoAPI_BooleanOperation {
     static opencascade::handle<BRepTools_History>& history(BRepAlgoAPI_BooleanOperation& o) { return o.*(&OpAccess::myHistory); }
 };
 
+// The tags of faces whose outline is a line drawn on purpose: an inset left
+// as a line, whose inside lies on the same surface as the face round it.
+// No clean-up makes such a face one with its neighbour (21 nov.: the next
+// shape added anywhere, or a Mirror, took the inset's line away). Given by
+// the kernel before each build, per thread.
+static thread_local std::vector<long long> g_lines;
+
+void focc_keep_lines(const long long* tags, int n) {
+    g_lines.assign(tags, tags + (n > 0 ? n : 0));
+    std::sort(g_lines.begin(), g_lines.end());
+}
+
+// Whether an edge between two faces carrying these tags stays through a
+// clean-up: two pieces of one face (the Knife's line), or a line face and
+// its neighbour.
+static bool kept_between(long long ta, long long tb) {
+    if (ta == tb) return ta >= 0;
+    auto line = [](long long t) { return t >= 0 && std::binary_search(g_lines.begin(), g_lines.end(), t); };
+    return line(ta) || line(tb);
+}
+
 static void simplify_keeping(BRepAlgoAPI_BooleanOperation& op, const FShape* a, const FShape* b) {
     ShapeUpgrade_UnifySameDomain u(op.Shape(), Standard_True, Standard_True, Standard_True);
     u.AllowInternalEdges(Standard_False);
@@ -821,7 +842,7 @@ static void simplify_keeping(BRepAlgoAPI_BooleanOperation& op, const FShape* a, 
             int fa = fm.FindIndex(fl.First()), fb = fm.FindIndex(fl.Last());
             if (fa < 1 || fb < 1 || fa > (int)in->tags.size() || fb > (int)in->tags.size()) continue;
             long long ta = in->tags[fa - 1], tb = in->tags[fb - 1];
-            if (ta < 0 || ta != tb) continue;
+            if (!kept_between(ta, tb)) continue;
             const TopoDS_Shape& e = e2f.FindKey(i);
             if (rm.Contains(e)) u.KeepShape(e);
             for (TopTools_ListOfShape::Iterator it(op.Modified(e)); it.More(); it.Next())
@@ -3099,7 +3120,84 @@ static FShape* unify_across(FShape* res, const TopTools_MapOfShape& across, cons
 // shorter: the prism the face sweeps fused (d > 0) or cut (d < 0), its
 // sides then made one with the faces they extend. Tags kept: the moved
 // face its own, each side its neighbour's.
+static FShape* move_face_of_solid(const FShape* s, int index, double d);
+
+// (A part of several lumps: the move is made on the lump that holds the
+// face, the others put back beside it as they are. The union below must
+// give one solid, so on a part with another object beside it every such
+// move failed, "the face could not be moved out": found on 21 nov. by the
+// islands battery with a Mirror, where one history failed and the island,
+// alone, did not.)
 FShape* focc_move_face(const FShape* s, int index, double d) {
+    return guard(
+        [&]() -> FShape* {
+            std::vector<TopoDS_Shape> lumps;
+            std::function<void(const TopoDS_Shape&)> flat = [&](const TopoDS_Shape& x) {
+                if (x.ShapeType() == TopAbs_COMPOUND || x.ShapeType() == TopAbs_COMPSOLID) {
+                    for (TopoDS_Iterator it(x); it.More(); it.Next()) flat(it.Value());
+                } else {
+                    lumps.push_back(x);
+                }
+            };
+            flat(s->s);
+            if (lumps.size() <= 1) return move_face_of_solid(s, index, d);
+            TopTools_IndexedMapOfShape fm0;
+            face_map(s->s, fm0);
+            if (index < 0 || index >= fm0.Extent()) {
+                set_err("no such face");
+                return nullptr;
+            }
+            int at = -1, local = -1;
+            for (size_t k = 0; k < lumps.size() && at < 0; k++) {
+                TopTools_IndexedMapOfShape lf;
+                face_map(lumps[k], lf);
+                int j = lf.FindIndex(fm0(index + 1));
+                if (j > 0) {
+                    at = (int)k;
+                    local = j - 1;
+                }
+            }
+            if (at < 0) return move_face_of_solid(s, index, d);
+            // that lump alone, with its faces' tags
+            std::unique_ptr<FShape> one(wrap(lumps[at]));
+            if (!one) return nullptr;
+            {
+                TopTools_IndexedMapOfShape lf;
+                face_map(lumps[at], lf);
+                one->tags.assign(lf.Extent(), -1);
+                for (int i = 1; i <= lf.Extent(); i++) {
+                    int k = fm0.FindIndex(lf(i));
+                    if (k > 0 && k - 1 < (int)s->tags.size()) one->tags[i - 1] = s->tags[k - 1];
+                }
+            }
+            std::unique_ptr<FShape> moved(move_face_of_solid(one.get(), local, d));
+            if (!moved) return nullptr;
+            // back among the others, in their order
+            BRep_Builder bb;
+            TopoDS_Compound c;
+            bb.MakeCompound(c);
+            for (size_t k = 0; k < lumps.size(); k++) bb.Add(c, (int)k == at ? moved->s : lumps[k]);
+            FShape* r = wrap(c);
+            if (!r) return nullptr;
+            TopTools_IndexedMapOfShape rf, mf;
+            face_map(c, rf);
+            face_map(moved->s, mf);
+            r->tags.assign(rf.Extent(), -1);
+            for (int i = 1; i <= rf.Extent(); i++) {
+                int j = mf.FindIndex(rf(i));
+                if (j > 0) {
+                    if (j - 1 < (int)moved->tags.size()) r->tags[i - 1] = moved->tags[j - 1];
+                    continue;
+                }
+                int k = fm0.FindIndex(rf(i));
+                if (k > 0 && k - 1 < (int)s->tags.size()) r->tags[i - 1] = s->tags[k - 1];
+            }
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
+static FShape* move_face_of_solid(const FShape* s, int index, double d) {
     return guard(
         [&]() -> FShape* {
             TopTools_IndexedMapOfShape fm0, fm;
@@ -4638,7 +4736,7 @@ FShape* focc_simplified(const FShape* s) {
                     int fa = fin.FindIndex(fl.First()), fb = fin.FindIndex(fl.Last());
                     if (fa < 1 || fb < 1 || fa > (int)s->tags.size() || fb > (int)s->tags.size()) continue;
                     long long ta = s->tags[fa - 1], tb = s->tags[fb - 1];
-                    if (ta < 0 || ta != tb) continue;
+                    if (!kept_between(ta, tb)) continue;
                     u.KeepShape(e2f.FindKey(i));
                 }
             }

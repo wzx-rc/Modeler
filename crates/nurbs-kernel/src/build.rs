@@ -876,8 +876,9 @@ fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> Option<Shape> {
 
 /// The last stop of the fillet searches (`round_search`, `one_by_one`): they
 /// end on their count of tries first, this only keeps a pathological case
-/// from holding the kernel.
-const SEARCH_STOP: f64 = 6.0;
+/// from holding the kernel. (Ten times longer in the tests: run in
+/// parallel on a loaded PC, three of them passed the 6 s and failed.)
+const SEARCH_STOP: f64 = if cfg!(test) { 60.0 } else { 6.0 };
 
 /// A fillet that blends its corners: rebuilt in one operation with the run
 /// of fillets just before it (from the first one it touches, through shared
@@ -1517,9 +1518,24 @@ fn mirror_part(acc: &Shape, id: FeatureId, m: &Mirror, island: bool) -> Result<O
     };
     let solids: Option<&Shape> = if sheets.is_some() { solids.as_ref() } else { Some(acc) };
     let mut out: Option<Shape> = None;
+    // its lumps' boxes first (quick, never smaller than the lumps): all of
+    // it clearly on one side of the plane needs no exact box, which costs
+    // tens of ms on a part with curved faces
+    let (mut near, mut far) = (f64::MAX, f64::MIN);
+    for (lo, hi) in solids.map(|s| s.lump_boxes()).unwrap_or_default() {
+        let (k0, k1) = (m.side(DVec3::from_array(lo)), m.side(DVec3::from_array(hi)));
+        near = near.min(k0.min(k1));
+        far = far.max(k0.max(k1));
+    }
+    // (off the plane on the kept side: nothing to cut, and its image does
+    // not touch it)
+    let apart = near > 1e-3 && near.is_finite() && std::env::var_os("FORME_MIRROR_FUSE").is_none();
     // (an island all on the side dropped: its solids are gone, as the cut
     // at the plane takes them when the part has more on the side kept)
     let dropped = |sol: &Shape| {
+        if apart || (far < -1e-3 && far.is_finite()) {
+            return !apart;
+        }
         let Some((lo, hi)) = shape_box(sol) else { return false };
         let (k0, k1) = (m.side(lo), m.side(hi));
         k0.max(k1) <= 1e-6 * (hi - lo).max_element().max(1.0)
@@ -1531,7 +1547,14 @@ fn mirror_part(acc: &Shape, id: FeatureId, m: &Mirror, island: bool) -> Result<O
     if solids.is_none() && sheets.is_none() && island {
         return Ok(None);
     }
-    if let Some(sol) = solids {
+    // the part and its image side by side, no union: its faces of one
+    // surface made one as the union does (a union of two solids that do not
+    // touch took 250 ms for a pill with 15 operations, at each step of its
+    // drag: Romain's scene of 21 nov.)
+    if let Some(half) = solids.filter(|_| apart).and_then(|sol| sol.simplified().ok()) {
+        out = Some(half.compound(&half.transformed(m.rows())?)?);
+    }
+    if let Some(sol) = solids.filter(|_| out.is_none()) {
         let (lo, hi) = shape_box(sol).ok_or("nothing to mirror")?;
         let n = m.normal();
         let a = m.axis.min(2) as usize;
@@ -2711,6 +2734,11 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let mirrored = mirrored_doc(doc);
     let doc = mirrored.as_ref().unwrap_or(doc);
     let feats: Vec<&Feature> = doc.features.iter().filter(|f| f.visible && !f.suspended && doc.makes(f) == Makes::Solid).collect();
+    // an inset left as a line: its inside lies on the surface of the face
+    // round it, and the next union or cut made anywhere (or a Mirror) made
+    // them one again; its face keeps its outline
+    let lines: Vec<i64> = feats.iter().filter(|f| f.push.as_ref().is_some_and(|p| p.inset > 0.0 && p.depth.abs() < 1e-6)).map(|f| FaceTag { feature: f.id, sub: 1 }.pack()).collect();
+    forme_occt::keep_lines(&lines);
     HASHES.with(|m| m.borrow_mut().clear());
     let mut stage = build_islands(doc, &feats, skip, cache, &mut model, &mut used_tools, &mut used_stages);
     HASHES.with(|m| m.borrow_mut().clear());
@@ -4591,6 +4619,72 @@ mod tests {
         out
     }
 
+    /// Found by the islands battery with a Mirror (21 nov.). An inset left
+    /// as a line was taken away by the next shape added anywhere and by a
+    /// Mirror (its inside and the face round it lie on one surface). A flat
+    /// face moved along its normal past a hole failed as soon as the part
+    /// held another object beside it (the union had to give one solid).
+    #[test]
+    fn inset_line_kept_and_face_moved_beside_another_object() {
+        // a block, its front inset 2 mm as a line
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::new(100.0, 0.0, 0.0), DQuat::IDENTITY);
+        let i = d.add_push(Push { face: FaceRef { tag: tag(b, 4), at: DVec3::new(100.0, 10.0, 15.0) }, inset: 2.0, depth: 0.0 });
+        // its inside: 36 × 16, the ring round it still the block's front
+        let line = |m: &Model| {
+            let inner: Vec<usize> = (0..m.faces.len()).filter(|k| m.faces[*k].tag == Some(FaceTag { feature: i, sub: 1 })).collect();
+            let ring = m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: b, sub: 4 })).count();
+            let wide: Vec<f32> = inner
+                .iter()
+                .map(|k| {
+                    let xs: Vec<f32> = m.triangles.iter().enumerate().filter(|(t, _)| m.tri_face[*t] as usize == *k).flat_map(|(_, tri)| tri.iter().map(|v| m.positions[*v as usize][0])).collect();
+                    xs.iter().cloned().fold(f32::MIN, f32::max) - xs.iter().cloned().fold(f32::MAX, f32::min)
+                })
+                .collect();
+            (inner.len(), ring, wide)
+        };
+        for one in [false, true] {
+            ONE_CHAIN.with(|c| c.set(one));
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert_eq!(line(&m), (1, 1, vec![36.0]), "{:?}", m.errors);
+            // a block added apart: the line stays
+            let mut d2 = d.clone();
+            d2.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            let m = build(&d2, true, false, &[], &mut Cache::default());
+            assert_eq!(line(&m), (1, 1, vec![36.0]), "one history {one}: {:?}", m.errors);
+            // a Mirror: the line on both sides
+            d2.add_mirror(crate::doc::Mirror { axis: 0, offset: 40.0, flip: false });
+            let m = build(&d2, true, false, &[], &mut Cache::default());
+            assert_eq!(line(&m), (2, 2, vec![36.0, 36.0]), "one history {one}: {:?}", m.errors);
+            // sunk 1 mm after all: a pocket, as before
+            let mut d3 = d2.clone();
+            d3.feature_mut(i).unwrap().push.as_mut().unwrap().depth = -1.0;
+            let m = build(&d3, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{:?}", m.errors);
+            assert_eq!(m.faces.iter().filter(|f| f.tag.is_some_and(|t| t.feature == i)).count(), 10);
+        }
+        // the test part (its top left of the slot has the hole in it) and a
+        // block beside it: the top moved up 3 mm, in one history (the part
+        // is two lumps) and by islands
+        let (mut d, b, _) = test_part();
+        let v0 = {
+            let mut alone = d.clone();
+            alone.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 2), at: DVec3::new(-12.0, 20.0, 8.0) }), delta: DVec3::new(0.0, 3.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None });
+            let m = build(&alone, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "{:?}", m.errors);
+            mesh_volume(&m)
+        };
+        d.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(100.0, 0.0, 0.0), DQuat::IDENTITY);
+        d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 2), at: DVec3::new(-12.0, 20.0, 8.0) }), delta: DVec3::new(0.0, 3.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None });
+        for one in [false, true] {
+            ONE_CHAIN.with(|c| c.set(one));
+            let m = build(&d, true, false, &[], &mut Cache::default());
+            assert!(m.errors.is_empty(), "one history {one}: {:?}", m.errors);
+            assert!((mesh_volume(&m) - v0 - 1000.0).abs() < 1.0, "{} / {}", mesh_volume(&m), v0 + 1000.0);
+        }
+        ONE_CHAIN.with(|c| c.set(false));
+    }
+
     #[test]
     fn islands_live() {
         use crate::doc::Mirror;
@@ -4698,11 +4792,33 @@ mod tests {
                     }
                     c
                 };
-                let a = count(&build(&d, true, false, &[], &mut Cache::default()));
+                let ma = build(&d, true, false, &[], &mut Cache::default());
+                let a = count(&ma);
                 ONE_CHAIN.with(|c| c.set(true));
                 let mb = build(&d, true, false, &[], &mut Cache::default());
                 ONE_CHAIN.with(|c| c.set(false));
                 let b = count(&mb);
+                // FORME_SUBS=id: that feature's faces one by one (its face
+                // and where its triangles lie), both ways
+                if let Some(id) = std::env::var("FORME_SUBS").ok().and_then(|v| v.parse::<u32>().ok()) {
+                    for (name, m) in [("islands", &ma), ("one history", &mb)] {
+                        for (i, f) in m.faces.iter().enumerate().filter(|(_, f)| id == 0 || f.tag.is_some_and(|t| t.feature == id)) {
+                            let (mut lo, mut hi, mut n) = ([f32::MAX; 3], [f32::MIN; 3], 0);
+                            for (t, tri) in m.triangles.iter().enumerate().filter(|(t, _)| m.tri_face[*t] as usize == i) {
+                                let _ = t;
+                                for v in tri {
+                                    let p = m.positions[*v as usize];
+                                    for k in 0..3 {
+                                        lo[k] = lo[k].min(p[k]);
+                                        hi[k] = hi[k].max(p[k]);
+                                    }
+                                }
+                                n += 1;
+                            }
+                            eprintln!("  {name}: feature {} sub {} · {n} triangles · {:.1?} to {:.1?}", f.tag.map_or(0, |t| t.feature), f.tag.map_or(0, |t| t.sub), lo, hi);
+                        }
+                    }
+                }
                 eprintln!("one history: {} faces, volume {:.1}", mb.faces.len(), mesh_volume(&mb));
                 for id in a.keys().chain(b.keys()).collect::<std::collections::BTreeSet<_>>() {
                     let (x, y) = (a.get(id).copied().unwrap_or(0), b.get(id).copied().unwrap_or(0));
@@ -4737,6 +4853,11 @@ mod tests {
         let t = std::time::Instant::now();
         let m = build(&d, false, false, &[], &mut cache);
         eprintln!("first coarse build {:.0} ms, {} faces, cached {}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.cached);
+        if std::env::var("FORME_ERRORS").is_ok() {
+            for e in &m.errors {
+                eprintln!("  ERROR {e}");
+            }
+        }
         let t = std::time::Instant::now();
         let m = build(&d, true, false, &[], &mut cache);
         eprintln!("fine build {:.0} ms, {} faces, cached {}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.cached);
@@ -5310,6 +5431,14 @@ mod tests {
         let s2 = base.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0) + off, DQuat::IDENTITY);
         let sl2 = base.add(Op::Carve, Prim::Box { x: 8.0, y: 8.0, z: 40.0 }, DVec3::new(0.0, 14.0, 0.0) + off, DQuat::IDENTITY);
         let (one, two) = (combo_ops(b, 2, s, 4, DVec3::ZERO), combo_ops(b2, h2, s2, sl2, off));
+        // FORME_BATTERY=mirror-first / mirror-last: a Mirror across X through
+        // the first part (cut at the plane; the second lies off it) before
+        // the operations (each then made on both sides) or after them
+        let mode = std::env::var("FORME_BATTERY").unwrap_or_default();
+        let mirror = crate::doc::Mirror { axis: 0, offset: 0.0, flip: false };
+        if mode == "mirror-first" {
+            base.add_mirror(mirror);
+        }
         assert_eq!(islands_against_one(&base), Vec::<String>::new());
         let only = std::env::var("FORME_COMBO").ok();
         let (mut bad, mut n) = (vec![], 0);
@@ -5328,6 +5457,9 @@ mod tests {
                 (two[j].1)(&mut d);
                 (one[j].1)(&mut d);
                 (two[i].1)(&mut d);
+                if mode == "mirror-last" {
+                    d.add_mirror(mirror);
+                }
                 let diff = islands_against_one(&d);
                 n += 1;
                 if !diff.is_empty() {

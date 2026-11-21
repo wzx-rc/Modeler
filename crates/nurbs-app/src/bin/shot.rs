@@ -4579,12 +4579,143 @@ fn main() {
                 let (rt, ru, rd) = (col(&rest, 0), col(&rest, 1), col(&rest, 2));
                 eprintln!("  {id} {name} (handle {hot:?}): {n} frames in {took:.2} s ({:.0} a second)", n as f64 / took);
                 eprintln!("    at rest   tick {:.1} ms, interface {:.1}, drawing {:.1} (medians)", rt.1, ru.1, rd.1);
-                eprintln!("    dragging  tick {:.1} / {:.1} max, interface {:.1} / {:.1} max, drawing {:.1} / {:.1} max", tk.1, tk.2, ui.1, ui.2, dr.1, dr.2);
+                eprintln!("    dragging  tick {:.1} / {:.1} max, interface {:.1} / {:.1} max ({} frames over 8 ms), drawing {:.1} / {:.1} max", tk.1, tk.2, ui.1, ui.2, frames.iter().filter(|f| f[0] + f[1] > 8.0).count(), dr.1, dr.2);
                 eprintln!("    kernel    {} answers during the drag ({:.1} a second), each {:?} ms; fine model {:.2} s after the release", answers.len(), answers.len() as f64 / took, answers.iter().map(|a| a.round() as i64).collect::<Vec<_>>(), fine);
                 eprintln!("    errors {:?}", h.st.model.as_ref().map(|m| m.errors.len()));
                 h.st.undo();
                 h.settle();
             }
+        }
+    }
+
+    if want("heavy") {
+        // FORME_DOC = a scene: the tools tried on it as it is (nothing kept),
+        // each frame's tick + interface time in ms (the drawing is left out:
+        // a software GPU here). Hover and rectangle in each mode, X-ray, the
+        // Knife and the Cube over the part, a click, a double-click, Isolate,
+        // hide, delete, undo.
+        if let Ok(p) = std::env::var("FORME_DOC") {
+            let d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+            h.reset(d, "Scene");
+            let n0 = h.st.doc.features.len();
+            let m = h.st.model.clone();
+            eprintln!("  {} features, {} faces, {} triangles, {} edges", n0, m.as_ref().map_or(0, |m| m.faces.len()), m.as_ref().map_or(0, |m| m.triangles.len()), m.as_ref().map_or(0, |m| m.edges.len()));
+            let stats = |v: &[f64]| {
+                let mut s = v.to_vec();
+                s.sort_by(|a, b| a.total_cmp(b));
+                (s[s.len() / 2], *s.last().unwrap_or(&0.0))
+            };
+            let c = h.screen_of(h.st.camera.target);
+            let (a, b) = (pos2(c.x - 300.0, c.y - 220.0), pos2(c.x + 300.0, c.y + 220.0));
+            // the pointer swept over the part, a frame per move
+            let sweep = |h: &mut Harness, n: usize| -> Vec<f64> {
+                (0..=n)
+                    .map(|i| {
+                        h.pending.push(Event::PointerMoved(a + (b - a) * (i as f32 / n as f32)));
+                        let f = h.frame_timed();
+                        f[0] + f[1]
+                    })
+                    .collect()
+            };
+            // a rectangle from the view's corner over the part
+            let marquee = |h: &mut Harness, n: usize| -> Vec<f64> {
+                let from = pos2(a.x - 60.0, a.y - 40.0);
+                h.press(from, true);
+                let v: Vec<f64> = (1..=n)
+                    .map(|i| {
+                        h.pending.push(Event::PointerMoved(from + (b - from) * (i as f32 / n as f32)));
+                        let f = h.frame_timed();
+                        f[0] + f[1]
+                    })
+                    .collect();
+                let t = Instant::now();
+                h.press(b, false);
+                h.step();
+                let mut v = v;
+                v.push(t.elapsed().as_secs_f64() * 1e3);
+                v
+            };
+            for xray in [false, true] {
+                if h.st.xray != xray {
+                    h.hold(Modifiers::ALT);
+                    h.key(egui::Key::X);
+                    h.hold(Modifiers::NONE);
+                    h.settle();
+                }
+                for (k, name) in [(egui::Key::F8, "Object"), (egui::Key::F11, "Face"), (egui::Key::F10, "Edge"), (egui::Key::F9, "Vertex")] {
+                    h.key(k);
+                    h.steps(3);
+                    let hv = stats(&sweep(&mut h, 40));
+                    let mq = marquee(&mut h, 30);
+                    let (release, mv) = (*mq.last().unwrap(), stats(&mq[..mq.len() - 1]));
+                    let picked = match name {
+                        "Object" => h.st.selection.len(),
+                        "Face" => h.st.face_sel.len(),
+                        "Edge" => h.st.edge_sel.len(),
+                        _ => h.st.vert_sel.len(),
+                    };
+                    eprintln!("  {name}{}: hover {:.1} ms / {:.1} max · rectangle {:.1} / {:.1} max, release {:.1} ms, {picked} picked", if xray { " (X-ray)" } else { "" }, hv.0, hv.1, mv.0, mv.1, release);
+                    h.key(egui::Key::Escape);
+                    h.steps(2);
+                }
+            }
+            h.hold(Modifiers::ALT);
+            h.key(egui::Key::X);
+            h.hold(Modifiers::NONE);
+            h.settle();
+            // tools over the part
+            for (k, name) in [(egui::Key::K, "Knife"), (egui::Key::B, "Cube"), (egui::Key::C, "Cylinder"), (egui::Key::L, "Sketch"), (egui::Key::M, "Forms")] {
+                h.key(egui::Key::F8);
+                h.key(k);
+                h.steps(3);
+                let hv = stats(&sweep(&mut h, 40));
+                eprintln!("  {name} over the part: {:.1} ms / {:.1} max", hv.0, hv.1);
+                h.key(egui::Key::Escape);
+                h.key(egui::Key::Q);
+                h.steps(2);
+            }
+            // a click on the part in Object mode, a double-click in Face mode
+            h.key(egui::Key::F8);
+            h.move_to(c);
+            h.steps(2);
+            let t = Instant::now();
+            h.click(c);
+            let click = t.elapsed().as_secs_f64() * 1e3 / 4.0;
+            let sel = h.st.selection.clone();
+            let rest = stats(&(0..10).map(|_| { let f = h.frame_timed(); f[0] + f[1] }).collect::<Vec<_>>());
+            eprintln!("  click in Object mode: {:.1} ms a frame, selected {:?}, then at rest {:.1} ms / {:.1} max", click, sel, rest.0, rest.1);
+            h.key(egui::Key::F11);
+            let t = Instant::now();
+            h.click(c);
+            h.click(c);
+            let dbl = t.elapsed().as_secs_f64() * 1e3 / 8.0;
+            eprintln!("  double-click in Face mode: {:.1} ms a frame, {} faces linked", dbl, h.st.face_sel.len());
+            h.key(egui::Key::Escape);
+            h.key(egui::Key::F8);
+            // Isolate on and off, hide and show, delete and undo: until the
+            // kernel's model is there
+            if let Some(&id) = sel.first() {
+                h.st.selection = vec![id];
+                h.steps(2);
+                let timed = |h: &mut Harness, what: &str, f: &mut dyn FnMut(&mut Harness)| {
+                    let t = Instant::now();
+                    f(h);
+                    h.step();
+                    let first = t.elapsed().as_secs_f64() * 1e3;
+                    h.settle();
+                    eprintln!("  {what}: first frame {:.0} ms, the kernel's model after {:.0} ms ({} errors)", first, t.elapsed().as_secs_f64() * 1e3, h.st.model.as_ref().map_or(0, |m| m.errors.len()));
+                };
+                timed(&mut h, "Isolate on", &mut |h| h.st.toggle_isolate());
+                timed(&mut h, "Isolate off", &mut |h| h.st.toggle_isolate());
+                timed(&mut h, "Duplicate", &mut |h| h.st.duplicate_selected());
+                timed(&mut h, "undo", &mut |h| h.st.undo_doc());
+                h.st.selection = vec![id];
+                timed(&mut h, "Delete", &mut |h| h.st.delete_selected());
+                timed(&mut h, "undo", &mut |h| h.st.undo_doc());
+                timed(&mut h, "redo", &mut |h| h.st.redo_doc());
+                timed(&mut h, "undo", &mut |h| h.st.undo_doc());
+            }
+            eprintln!("  features {} (were {n0})", h.st.doc.features.len());
         }
     }
 

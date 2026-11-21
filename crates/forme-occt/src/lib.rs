@@ -86,6 +86,7 @@ extern "C" {
     fn focc_face_box(s: *const FShape, index: c_int, out: *mut c_double) -> c_int;
     fn focc_lump_boxes(s: *const FShape, out: *mut c_double, cap: c_int) -> c_int;
     fn focc_simplified(s: *const FShape) -> *mut FShape;
+    fn focc_keep_lines(tags: *const i64, n: c_int);
     fn focc_set_tags(s: *mut FShape, tags: *const i64, n: c_int);
     fn focc_face_tag(s: *const FShape, index: c_int) -> i64;
     fn focc_topo(s: *const FShape, defl: c_double, angle: c_double) -> *mut FBuf;
@@ -167,6 +168,13 @@ pub struct Tight {
 
 /// A B-rep shape (solid) owned on the C++ side.
 pub struct Shape(*mut FShape);
+
+/// The tags of the faces whose outline is a line drawn on purpose (an
+/// inset left as a line): from now on, on this thread, no union, cut or
+/// clean-up makes such a face one with the face round it.
+pub fn keep_lines(tags: &[i64]) {
+    unsafe { focc_keep_lines(tags.as_ptr(), tags.len() as c_int) }
+}
 
 // the C++ side keeps no global state per shape: a shape can move to another thread
 unsafe impl Send for Shape {}
