@@ -17,8 +17,14 @@ path = "src/main.rs"
 name = "forme-nurbs-shot"
 path = "src/bin/shot.rs"
 
+[[bin]]
+name = "forme-nurbs-mcp"
+path = "src/bin/mcp.rs"
+
 [dependencies]
 nurbs-kernel = { path = "../nurbs-kernel" }
+forme-core = { path = "../forme-core" }
+rectify-core = { path = "../rectify-core" }
 glam.workspace = true
 bytemuck.workspace = true
 egui.workspace = true
@@ -31,6 +37,10 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 image.workspace = true
+
+[build-dependencies]
+# the .exe's icon on Windows (rc.exe from the Windows SDK; a warning if missing)
+winresource = "0.1"
 
 # iPad: no child process on iOS, the OpenCascade kernel is linked in the app
 # (FORME_OCCT_ROOT = OpenCascade built for iOS, ios/build_occt_ios.sh)

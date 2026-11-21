@@ -307,7 +307,23 @@ pub fn planes_near_bend(m: &Mesh, topo: &Topo, t0: u32, p: DVec3, reach: f64, h:
 /// scan's tangent plane at `p` (the normals of its triangles round it,
 /// averaged). The bool: a flat face of the scan.
 pub fn plane_under(m: &Mesh, topo: &Topo, t0: u32, p: DVec3, reach: f64, h: f64) -> (Plane, bool) {
-    // the triangles round p, a few edges wide
+    let local = tangent_under(m, topo, t0, p, reach, h);
+    let tol = (h * 1.5).max(0.08);
+    let flat = planes_near(m, topo, t0, p, reach, h)
+        .into_iter()
+        .filter(|pl| pl.dist(p).abs() <= tol + pl.rms * 3.0 && pl.gap(p) <= (h * 4.0).max(reach * 0.15) && pl.n.dot(local) > 20f64.to_radians().cos())
+        .min_by(|a, b| a.dist(p).abs().partial_cmp(&b.dist(p).abs()).unwrap());
+    if let Some(pl) = flat {
+        return (pl, true);
+    }
+    (Plane { c: p, n: local, rms: 0.0, area: 0.0, pts: vec![p] }, false)
+}
+
+/// The scan's tangent plane's normal at `p` (on the triangle `t0`): the
+/// normals of its triangles round it, a few edges wide (at least 0.12 of
+/// `reach`), averaged by area. Cheap: `plane_under` without the search for
+/// a flat face.
+pub fn tangent_under(m: &Mesh, topo: &Topo, t0: u32, p: DVec3, reach: f64, h: f64) -> DVec3 {
     let r = (h * 5.0).max(reach * 0.12);
     let mut tris = vec![t0];
     let mut seen: HashMap<u32, ()> = HashMap::from([(t0, ())]);
@@ -323,16 +339,11 @@ pub fn plane_under(m: &Mesh, topo: &Topo, t0: u32, p: DVec3, reach: f64, h: f64)
         }
     }
     let local = tris.iter().map(|&t| m.tri_cross(t as usize)).sum::<DVec3>().normalize_or_zero();
-    let local = if local == DVec3::ZERO { m.tri_normal(t0 as usize) } else { local };
-    let tol = (h * 1.5).max(0.08);
-    let flat = planes_near(m, topo, t0, p, reach, h)
-        .into_iter()
-        .filter(|pl| pl.dist(p).abs() <= tol + pl.rms * 3.0 && pl.gap(p) <= (h * 4.0).max(reach * 0.15) && pl.n.dot(local) > 20f64.to_radians().cos())
-        .min_by(|a, b| a.dist(p).abs().partial_cmp(&b.dist(p).abs()).unwrap());
-    if let Some(pl) = flat {
-        return (pl, true);
+    if local == DVec3::ZERO {
+        m.tri_normal(t0 as usize)
+    } else {
+        local
     }
-    (Plane { c: p, n: local, rms: 0.0, area: 0.0, pts: vec![p] }, false)
 }
 
 /// The way most of the scan faces within `reach` of `p` (the triangles

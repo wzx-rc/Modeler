@@ -3,23 +3,32 @@
 //! the outlines over the part.
 
 use crate::materials;
-use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, Renderer, FACE_HOVERED, FACE_SELECTED};
+use crate::render::{line_vertices, linear, FaceGpu, Frame, LineVertex, MeshVertex, RefDraw, Renderer, FACE_HOVERED, FACE_SELECTED, NO_DEV};
 use crate::state::{AppState, SelMode, Tool};
 use crate::theme;
 use nurbs_kernel::Op;
 
 /// The part's colour: grey clay (sRGB).
 pub const CLAY: [f32; 3] = [0.50, 0.50, 0.49];
+/// The reference mesh: a cooler, darker grey than the part (sRGB).
+pub const REF_GREY: [f32; 3] = [0.30, 0.315, 0.345];
 /// Quads view: the fillet and chamfer bands (sRGB).
 pub const BAND: [f32; 3] = [0.92, 0.47, 0.15];
 
 pub struct Drawer {
     pub r: Renderer,
     model_gen: u64,
+    ref_gen: u64,
     /// The part was uploaded as quads.
     quads_shown: bool,
     flags: Vec<FaceGpu>,
     overlay: Vec<LineVertex>,
+    /// The part was uploaded moved by a drag's preview.
+    previewed: bool,
+    /// The meshes (Sculpt, Poly) uploaded with the part: what they were
+    /// keyed on, and each one's face slots (first, count) after the part's.
+    meshes_key: u64,
+    mesh_slots: Vec<(nurbs_kernel::FeatureId, u32, usize)>,
 }
 
 fn rgb(c: egui::Color32) -> [f32; 3] {
@@ -28,14 +37,26 @@ fn rgb(c: egui::Color32) -> [f32; 3] {
 
 impl Drawer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Drawer {
-        Drawer { r: Renderer::new(device, format), model_gen: u64::MAX, quads_shown: false, flags: vec![], overlay: vec![] }
+        Drawer { r: Renderer::new(device, format), model_gen: u64::MAX, ref_gen: u64::MAX, quads_shown: false, flags: vec![], overlay: vec![], previewed: false, meshes_key: u64::MAX, mesh_slots: vec![] }
     }
 
     fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, st: &AppState) {
+        // the reference mesh
+        if self.ref_gen != st.ref_gen {
+            self.ref_gen = st.ref_gen;
+            self.r.upload_reference(device, queue, st.reference.as_ref().map(|r| r.verts.as_slice()).unwrap_or(&[]));
+        }
         // the part
         let quads = st.quad_mesh();
-        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() {
+        // whole shapes dragged in Object mode: their faces follow at once
+        let preview = if quads.is_none() { st.drag_preview().filter(|p| !p.is_empty()) } else { None };
+        // a form pulled by a brush: drawn from its poles (`forms.rs`)
+        let form = if quads.is_none() { st.form_preview() } else { None };
+        let mkey = st.meshes_key();
+        if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() || preview.is_some() || form.is_some() || self.previewed || self.meshes_key != mkey {
             self.model_gen = st.model_gen;
+            self.meshes_key = mkey;
+            self.previewed = preview.is_some() || form.is_some();
             self.quads_shown = quads.is_some();
             let mut verts = vec![];
             let mut edges = vec![];
@@ -45,14 +66,26 @@ impl Drawer {
                     Some(q) => q.skipped.iter().map(|(f, _)| *f).collect(),
                     None => (0..m.faces.len() as u32).collect(),
                 };
-                verts.reserve(m.triangles.len() * 3);
-                for (t, tri) in m.triangles.iter().enumerate() {
-                    let face = m.tri_face[t];
-                    if !left.contains(&face) {
-                        continue;
-                    }
-                    for &v in tri {
-                        verts.push(MeshVertex { pos: m.positions[v as usize], nrm: m.normals[v as usize], face });
+                // the distance to the reference, when shown and measured on
+                // this model: its finer triangles instead
+                let dev = st.deviation_shown().filter(|_| quads.is_none() && form.is_none());
+                // the form's own faces: drawn from its poles instead
+                let form_faces: std::collections::HashSet<u32> = match &form {
+                    Some((id, _)) => m.faces.iter().enumerate().filter(|(_, f)| f.tag.map(|t| t.feature == *id).unwrap_or(false)).map(|(i, _)| i as u32).collect(),
+                    None => Default::default(),
+                };
+                if let Some(d) = dev {
+                    verts.extend_from_slice(d);
+                } else {
+                    verts.reserve(m.triangles.len() * 3);
+                    for (t, tri) in m.triangles.iter().enumerate() {
+                        let face = m.tri_face[t];
+                        if !left.contains(&face) || form_faces.contains(&face) {
+                            continue;
+                        }
+                        for &v in tri {
+                            verts.push(MeshVertex { pos: m.positions[v as usize], nrm: m.normals[v as usize], face, dev: NO_DEV });
+                        }
                     }
                 }
                 if let Some(q) = quads {
@@ -70,9 +103,57 @@ impl Drawer {
                     }
                     line_vertices(&wire, [16, 18, 22, 150], 0.8, &mut edges);
                 }
+                // the dragged elements' faces and edges, moved
+                let face_m: Vec<Option<glam::Mat4>> = match &preview {
+                    Some(pv) => {
+                        let els = element_map(st, m);
+                        m.faces.iter().map(|f| f.tag.and_then(|t| pv.get(els.get(&t.feature).unwrap_or(&t.feature))).map(|x| x.as_mat4())).collect()
+                    }
+                    None => vec![],
+                };
+                if !face_m.is_empty() && dev_none(st) {
+                    for v in verts.iter_mut() {
+                        if let Some(Some(x)) = face_m.get(v.face as usize) {
+                            v.pos = x.transform_point3(glam::Vec3::from(v.pos)).to_array();
+                            v.nrm = x.inverse().transpose().transform_vector3(glam::Vec3::from(v.nrm)).normalize_or_zero().to_array();
+                        }
+                    }
+                }
+                if let (Some((_, tris)), Some(face)) = (&form, form_faces.iter().min()) {
+                    verts.extend(tris.iter().map(|(p, n)| MeshVertex { pos: *p, nrm: *n, face: *face, dev: NO_DEV }));
+                }
                 // the edges a person draws: dark and thin like a CAD view
-                let lines: Vec<Vec<[f32; 3]>> = m.edges.iter().filter(|e| !e.seam).map(|e| e.pts.clone()).collect();
+                let moved = |e: &nurbs_kernel::Edge| e.faces.iter().find_map(|f| usize::try_from(*f).ok().and_then(|f| face_m.get(f).copied().flatten()));
+                let on_form = |e: &nurbs_kernel::Edge| e.faces.iter().any(|f| u32::try_from(*f).map(|f| form_faces.contains(&f)).unwrap_or(false));
+                let lines: Vec<Vec<[f32; 3]>> = m.edges.iter().filter(|e| !e.seam && !on_form(e)).map(|e| match moved(e) {
+                    Some(x) => e.pts.iter().map(|p| x.transform_point3(glam::Vec3::from(*p)).to_array()).collect(),
+                    None => e.pts.clone(),
+                }).collect();
                 line_vertices(&lines, [24, 26, 30, 210], 1.0, &mut edges);
+            }
+            // the meshes (Sculpt, Poly) in the same scene, their face slots
+            // after the part's; a Poly mesh's cage (in the Poly tab, or when
+            // it is not smoothed), its picked edges in the accent
+            let mut slot = st.model.as_ref().map(|m| m.faces.len() as u32).unwrap_or(0);
+            self.mesh_slots.clear();
+            let poly_tab = st.workspace == crate::workspace::Workspace::Poly;
+            let target = st.poly_target();
+            for f in st.shown_meshes() {
+                // a linked surface: the Carves after it cut it
+                let solids = if crate::linked::patch_of(f).is_some() { st.patch_solids(f.id) } else { vec![] };
+                let n = crate::meshes::mesh_vertices(f, slot, &solids, st.sdf_mats.get(&f.id).map(|v| v.as_slice()), &mut verts);
+                self.mesh_slots.push((f.id, slot, n));
+                slot += n as u32;
+                if crate::linked::shows_nurbs(f) {
+                    crate::meshes::linked_lines(f, &solids, &mut edges);
+                    continue;
+                }
+                let smooth = f.mesh.as_ref().map(|m| m.smooth && m.patch.is_none()).unwrap_or(false);
+                if poly_tab || !smooth {
+                    let picked = st.poly_sel.as_ref().filter(|s| s.id == f.id).map(|s| s.edges.clone()).unwrap_or_default();
+                    let a = theme::accent();
+                    crate::meshes::cage_lines(f, &solids, &picked, poly_tab && target == Some(f.id), [a.r(), a.g(), a.b(), 245], &mut edges);
+                }
             }
             self.r.upload_part(device, queue, &verts, &edges);
             self.flags.clear();
@@ -81,7 +162,11 @@ impl Drawer {
         // Extrude tools) face by face, else by the feature they come from
         let by_face = face_mode(st);
         let picked = if by_face { st.picked_faces() } else { vec![] };
-        let flags: Vec<FaceGpu> = match &st.model {
+        // Object mode: a face lights with its element (the shape and all
+        // its operations), a selected operation alone with its own faces
+        let elements = st.model.as_ref().map(|m| element_map(st, m)).unwrap_or_default();
+        let el = |t: nurbs_kernel::FaceTag| elements.get(&t.feature).copied().unwrap_or(t.feature);
+        let mut flags: Vec<FaceGpu> = match &st.model {
             Some(m) => m
                 .faces
                 .iter()
@@ -89,8 +174,7 @@ impl Drawer {
                 .map(|(i, f)| {
                     // a material ball dragged over it: shown on it already
                     if let Some(d) = st.mat_drag.as_ref().filter(|d| d.target.map(|t| st.face_in_target(i, &t)).unwrap_or(false)) {
-                        let mat = materials::get(d.material);
-                        return FaceGpu { color: linear(mat.color), flags: 0, metal: mat.metal, rough: mat.rough, pad: [0.0; 2] };
+                        return face_gpu(&st.look(d.material), 0);
                     }
                     let flags = if by_face {
                         if picked.contains(&i) || f.tag.map(|t| st.selection.contains(&t.feature)).unwrap_or(false) {
@@ -102,22 +186,88 @@ impl Drawer {
                         }
                     } else {
                         match f.tag {
-                            Some(t) if st.selection.contains(&t.feature) => FACE_SELECTED,
-                            Some(t) if st.hover_feature == Some(t.feature) => FACE_HOVERED,
+                            Some(t) if st.selection.contains(&t.feature) || st.selection.contains(&el(t)) => FACE_SELECTED,
+                            Some(t) if st.hover_feature == Some(t.feature) || st.hover_feature == Some(el(t)) => FACE_HOVERED,
                             _ => 0,
                         }
                     };
-                    let mat = materials::get(st.face_material(i));
+                    let sheet = f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| st.doc.makes(x) == nurbs_kernel::Makes::Sheet).unwrap_or(false);
+                    let flags = if sheet { flags | crate::render::FACE_SHEET } else { flags };
+                    let mat = st.look(st.face_material(i));
                     // Quads view: the fillet and chamfer bands in orange
                     let band = self.quads_shown && f.tag.and_then(|t| st.doc.feature(t.feature)).map(|x| x.round.is_some()).unwrap_or(false);
                     if band {
-                        return FaceGpu { color: linear(BAND), flags, metal: 0.0, rough: 0.6, pad: [0.0; 2] };
+                        return FaceGpu { color: linear(BAND), flags, metal: 0.0, rough: 0.6, spec: materials::SPECULAR, alpha: 1.0 };
                     }
-                    FaceGpu { color: linear(mat.color), flags, metal: mat.metal, rough: mat.rough, pad: [0.0; 2] }
+                    face_gpu(&mat, flags)
                 })
                 .collect(),
             None => vec![],
         };
+        // the meshes' slots: the material of the mesh; lit as a whole in
+        // Object mode, face by face for a Poly mesh's picked faces; never
+        // while the brush sculpts
+        let poly_target = if st.poly_comp() { st.poly_target() } else { None };
+        for (id, _first, n) in &self.mesh_slots {
+            let Some(f) = st.doc.feature(*id) else { continue };
+            // the same look as the part's faces (colour, specular,
+            // transparency set under the balls): one path for every object
+            let look = match st.mat_drag.as_ref().filter(|d| d.target == Some(crate::state::DropTarget::Shape(*id))) {
+                Some(d) => st.look(d.material),
+                None => st.look(f.material),
+            };
+            // a linked surface in NURBS: the surface lit as a whole, the
+            // Poly layer's own shapes in the Poly tab's colour (shown, not
+            // editable)
+            if crate::linked::shows_nurbs(f) {
+                // its contour's points worked on: the surface not tinted
+                let fl = if st.patch_comp() {
+                    0
+                } else if st.selection.contains(id) {
+                    FACE_SELECTED
+                } else if st.hover_feature == Some(*id) {
+                    FACE_HOVERED
+                } else {
+                    0
+                };
+                flags.push(face_gpu(&look, fl));
+                let g = crate::workspace::Workspace::Poly.swatch();
+                let ghost = [g.r() as f32 / 255.0 * 0.62, g.g() as f32 / 255.0 * 0.66, g.b() as f32 / 255.0 * 0.72];
+                flags.push(FaceGpu { color: linear(ghost), flags: 0, metal: 0.0, rough: 0.75, spec: materials::SPECULAR, alpha: 1.0 });
+                continue;
+            }
+            let sdf = crate::sdf::is_sdf(f);
+            for k in 0..*n as u32 {
+                // an SDF object: slot k > 0 is material k - 1 (a shape's own),
+                // unless a ball is dragged over the whole object
+                let look = if sdf && k > 0 && st.mat_drag.as_ref().filter(|d| d.target == Some(crate::state::DropTarget::Shape(*id))).is_none() {
+                    st.look(k - 1)
+                } else {
+                    look
+                };
+                let fl = if st.tool == Tool::Sculpt {
+                    0
+                } else if poly_target == Some(*id) {
+                    let picked = st.poly_sel.as_ref().map(|s| s.faces.contains(&k)).unwrap_or(false);
+                    if picked {
+                        FACE_SELECTED
+                    } else if st.poly_hover == Some(crate::poly::PolyHover::Face(*id, k)) && st.poly_drag.is_none() && st.hot_handle.is_none() {
+                        FACE_HOVERED
+                    } else {
+                        0
+                    }
+                } else if st.poly_comp() {
+                    0
+                } else if st.selection.contains(id) {
+                    FACE_SELECTED
+                } else if st.hover_feature == Some(*id) {
+                    FACE_HOVERED
+                } else {
+                    0
+                };
+                flags.push(face_gpu(&look, fl));
+            }
+        }
         if flags != self.flags || flags.is_empty() {
             self.r.upload_faces(device, queue, &flags);
             self.flags = flags;
@@ -128,25 +278,134 @@ impl Drawer {
         let carve = theme::carve();
         let accent = theme::accent();
         let moving = st.drag.is_some();
-        // paths: always drawn (they have no faces), white when selected
+        // paths: always drawn (they have no faces), white when selected;
+        // a 2D boolean as the kernel made it, its curves hidden (Romain 20
+        // nov., 9 h 25: "n'avoir que le résultat de visible") while none of
+        // them is picked; the boolean selected, the one under the pointer
+        // shows (a click picks it)
         for f in st.doc.features.iter().filter(|f| f.visible && f.is_path()) {
             let selected = st.selection.contains(&f.id);
             let hovered = st.hover_feature == Some(f.id);
-            let (c, w) = if selected { (theme::accent(), 2.2) } else if hovered { (theme::PATH, 2.2) } else { (theme::PATH, 1.6) };
-            let lines: Vec<Vec<[f32; 3]>> = f.outline().iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
-            line_vertices(&lines, [c.r(), c.g(), c.b(), 240], w, &mut over);
+            let inside = st.curve_inside(f.id);
+            let shown = |b: &nurbs_kernel::Feature| {
+                b.visible && (b.shape_bool.as_ref().is_some_and(|s| s.operands.iter().any(|o| st.selection.contains(o))) || (hovered && st.boolean_open(b)))
+            };
+            if inside.is_some_and(|b| !shown(b)) && !selected {
+                continue;
+            }
+            // a curve of a 2D boolean being moved, turned or scaled: hidden
+            // again, only the result shows (Romain 20 nov., 9 h 45)
+            if inside.is_some() && st.drag.is_some() {
+                continue;
+            }
+            // the curve under the pointer (pre-selection, Maya): lighter
+            // and wider
+            let pre = egui::Color32::from_rgb(0xd8, 0xf6, 0xfa);
+            let (c, a, w) = match (selected, hovered, inside) {
+                (true, _, _) => (theme::accent(), 240, 2.2),
+                (_, true, Some(_)) => (pre, 200, 2.0),
+                (_, false, Some(b)) => (theme::PATH, if st.boolean_open(b) { 120 } else { 70 }, 1.2),
+                (_, true, None) => (pre, 250, 2.6),
+                _ => (theme::PATH, 240, 1.6),
+            };
+            let lines: Vec<Vec<[f32; 3]>> = st.curve_lines(f).iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
+            line_vertices(&lines, [c.r(), c.g(), c.b(), a], w, &mut over);
         }
-        for f in st.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()) {
+        // the Slot dragged along a slot of the reference: the drag, and a
+        // tick across each end on the scan's face
+        if let Some(ss) = &st.scan_slot {
+            let e = ss.b - ss.a;
+            let across = ss.n.cross(e).normalize_or_zero() * (e.length() * 0.12).max(0.3);
+            let lines = vec![
+                vec![ss.a.as_vec3().to_array(), ss.b.as_vec3().to_array()],
+                vec![(ss.a - across).as_vec3().to_array(), (ss.a + across).as_vec3().to_array()],
+                vec![(ss.b - across).as_vec3().to_array(), (ss.b + across).as_vec3().to_array()],
+            ];
+            line_vertices(&lines, [accent.r(), accent.g(), accent.b(), 235], 1.8, &mut over);
+        }
+        // the Slot drawn by hand: its outline on the plane
+        if let Some(sd) = &st.slot_draw {
+            let o: Vec<[f32; 3]> = sd.outline().iter().map(|p| p.as_vec3().to_array()).collect();
+            let line = vec![sd.plane.at(sd.a).as_vec3().to_array(), sd.plane.at(sd.b).as_vec3().to_array()];
+            line_vertices(&[o, line], [accent.r(), accent.g(), accent.b(), 235], 1.6, &mut over);
+        }
+        // the Cylinder dragged across a round part of the reference
+        if let Some(sr) = &st.scan_round {
+            let lines = vec![sr.ring(96).iter().map(|p| p.as_vec3().to_array()).collect::<Vec<_>>(), vec![sr.a.as_vec3().to_array(), sr.b.as_vec3().to_array()]];
+            line_vertices(&lines, [accent.r(), accent.g(), accent.b(), 235], 1.8, &mut over);
+        }
+        // the arcs read on the scan for the selected fillet (Fit to scan)
+        if let Some(fs) = st.fillet_show.as_ref().filter(|fs| st.selection == [fs.id] && st.doc.feature(fs.id).is_some()) {
+            let lines: Vec<Vec<[f32; 3]>> = fs.arcs.iter().map(|a| a.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
+            line_vertices(&lines, [accent.r(), accent.g(), accent.b(), 235], 1.8, &mut over);
+        }
+        for f in st.doc.features.iter().filter(|f| f.is_solid() && !f.is_path() && !f.is_mesh()) {
             let creating = st.creation.as_ref().map(|c| c.id == f.id).unwrap_or(false);
             let selected = st.selection.contains(&f.id);
+            // an Object-mode drag shows the faces themselves (no cage)
+            let moving = moving && st.dragged_shapes().is_none();
             let show = creating || (selected && (moving || f.op == Op::Carve || !f.visible)) || (st.tool == Tool::Select && st.hover_feature == Some(f.id) && f.op == Op::Carve);
             if !show || (creating && !f.visible) {
                 continue;
             }
             let c = if f.op == Op::Carve { carve } else { accent };
             let alpha = if selected || creating { 230 } else { 140 };
-            let lines: Vec<Vec<[f32; 3]>> = f.outline().iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
+            let lines: Vec<Vec<[f32; 3]>> = st.shape_outline(f).iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
             line_vertices(&lines, [c.r(), c.g(), c.b(), alpha], 1.2, &mut over);
+        }
+        // the SDF tab: the shapes of the SDF object worked on, the picked one
+        // bright (a Carve's in orange: it is a hole, its outline shows it)
+        if st.workspace == crate::workspace::Workspace::Sdf {
+            if let Some(f) = st.sdf_target().and_then(|id| st.doc.feature(id)).filter(|f| f.visible) {
+                if let Some(scene) = crate::sdf::scene_of(f) {
+                    let picked = st.sdf_sel.map(|(_, n)| n);
+                    // the shapes built only (not those past the history
+                    // marker, nor those turned off)
+                    let built = crate::sdf::built_shapes(f);
+                    for n in crate::sdf::shapes(scene).into_iter().filter(|n| built.contains(n) && scene.node(*n).map(|x| x.visible).unwrap_or(false)) {
+                        let carve_mode = scene.node(n).map(|x| x.combine.mode != forme_core::CombineMode::Add).unwrap_or(false);
+                        let c = if carve_mode { carve } else { accent };
+                        let on = picked == Some(n);
+                        let (alpha, w) = if on { (240, 1.6) } else { (70, 1.0) };
+                        line_vertices(&crate::sdf::node_lines(f, scene, n), [c.r(), c.g(), c.b(), alpha], w, &mut over);
+                    }
+                }
+            }
+        }
+        // Object mode (Maya): the selected element drawn by all its edges in
+        // the accent, its faces only lightly tinted; the one under the
+        // pointer fainter. Components are never drawn in this mode.
+        if object_mode(st) && (!st.selection.is_empty() || st.hover_feature.is_some()) {
+            if let Some(m) = &st.model {
+                let elements = element_map(st, m);
+                let of = |fi: i32| -> Option<nurbs_kernel::FeatureId> {
+                    let t = m.faces.get(usize::try_from(fi).ok()?)?.tag?;
+                    Some(elements.get(&t.feature).copied().unwrap_or(t.feature))
+                };
+                // moved with the drag's preview, as the faces are
+                let pv = st.drag_preview().unwrap_or_default();
+                let place = |e: &nurbs_kernel::Edge, els: &[Option<nurbs_kernel::FeatureId>; 2]| -> Vec<[f32; 3]> {
+                    match els.iter().flatten().find_map(|x| pv.get(x)) {
+                        Some(x) => {
+                            let x = x.as_mat4();
+                            e.pts.iter().map(|p| x.transform_point3(glam::Vec3::from(*p)).to_array()).collect()
+                        }
+                        None => e.pts.clone(),
+                    }
+                };
+                let (mut sel, mut hov) = (vec![], vec![]);
+                for e in m.edges.iter().filter(|e| !e.seam) {
+                    let els = [of(e.faces[0]), of(e.faces[1])];
+                    if els.iter().flatten().any(|x| st.selection.contains(x)) {
+                        sel.push(place(e, &els));
+                    } else if st.hover_feature.map(|h| els.contains(&Some(h))).unwrap_or(false) {
+                        hov.push(e.pts.clone());
+                    }
+                }
+                let a = theme::accent();
+                line_vertices(&sel, [a.r(), a.g(), a.b(), 240], 1.7, &mut over);
+                line_vertices(&hov, [a.r(), a.g(), a.b(), 120], 1.4, &mut over);
+            }
         }
         // Edge mode: the picked edges, whole, and the one under the pointer
         if st.sel_mode == SelMode::Edge {
@@ -159,6 +418,31 @@ impl Drawer {
                     line_vertices(&[m.edges[i].pts.clone()], [y.r(), y.g(), y.b(), 150], 1.6, &mut over);
                 }
             }
+        }
+        // a linked surface selected in its NURBS state: its contour in the
+        // accent, and in Vertex mode the lines to its tangent points
+        for f in st.shown_meshes().into_iter().filter(|f| st.selection.contains(&f.id) && crate::linked::shows_nurbs(f)) {
+            let Some(p) = crate::linked::patch_of(f) else { continue };
+            let Some(cv) = crate::linked::cvs_world(f) else { continue };
+            let x = crate::linked::to_world(f);
+            let sides: Vec<Vec<[f32; 3]>> = p
+                .surfaces(crate::meshes::size(f))
+                .iter()
+                .flat_map(|pc| (0..4).map(|k| nurbs_kernel::patch::side(pc, k, 48).iter().map(|q| x.transform_point3(*q).to_array()).collect::<Vec<_>>()).collect::<Vec<_>>())
+                .collect();
+            line_vertices(&sides, [accent.r(), accent.g(), accent.b(), 240], 1.8, &mut over);
+            if st.sel_mode == SelMode::Vertex {
+                let mut hull = vec![];
+                for (c, t) in p.hull() {
+                    hull.push(vec![cv[c].to_array(), cv[t].to_array()]);
+                }
+                line_vertices(&hull, [accent.r(), accent.g(), accent.b(), 150], 1.0, &mut over);
+            }
+        }
+        // Insert Edge Loop: the loop a click would cut
+        if !st.poly_loop.is_empty() {
+            let lines: Vec<Vec<[f32; 3]>> = st.poly_loop.iter().map(|(a, b)| vec![a.to_array(), b.to_array()]).collect();
+            line_vertices(&lines, [accent.r(), accent.g(), accent.b(), 235], 1.8, &mut over);
         }
         if over.len() != self.overlay.len() || bytemuck::cast_slice::<_, u8>(&over) != bytemuck::cast_slice::<_, u8>(&self.overlay) {
             self.r.upload_overlay(device, queue, &over);
@@ -179,13 +463,42 @@ impl Drawer {
             grid: st.settings.grid,
             origin: st.settings.origin,
             base: CLAY,
-            sel: (sel, 0.45),
-            hover: (sel, 0.2),
+            sel: (sel, if object_mode(st) { 0.18 } else { 0.45 }),
+            hover: (sel, if object_mode(st) { 0.08 } else { 0.2 }),
+            reference: match (st.reference.is_some(), st.ref_shown, st.ref_ghost) {
+                (true, true, false) => RefDraw::Solid,
+                (true, true, true) => RefDraw::Ghost,
+                _ => RefDraw::Hidden,
+            },
+            ref_color: REF_GREY,
+            xray: st.xray,
+            deviation: st.deviation_shown().map(|_| (st.dev_range as f32, st.dev_tol as f32)),
             paint,
             textures,
         };
         self.r.render(device, queue, target, size, frame);
     }
+}
+
+/// The part is drawn from the kernel's triangles (not the deviation's).
+fn dev_none(st: &AppState) -> bool {
+    st.deviation_shown().is_none()
+}
+
+/// Each feature whose faces the model shows, with its element.
+pub fn element_map(st: &AppState, m: &nurbs_kernel::Model) -> std::collections::HashMap<nurbs_kernel::FeatureId, nurbs_kernel::FeatureId> {
+    let mut out = std::collections::HashMap::new();
+    for f in &m.faces {
+        if let Some(t) = f.tag {
+            out.entry(t.feature).or_insert_with(|| st.element_of(t.feature));
+        }
+    }
+    out
+}
+
+/// Object mode with the Select tool: whole elements, Maya's look.
+fn object_mode(st: &AppState) -> bool {
+    st.tool == Tool::Select && st.sel_mode == SelMode::Object && st.push.is_none() && st.selected_push().is_none()
 }
 
 /// Faces light up one by one: Face mode, or the Inset / Extrude tool waiting
@@ -211,7 +524,12 @@ fn quad_vertices(q: &nurbs_kernel::Quads, out: &mut Vec<MeshVertex>) {
         for i in [0, 1, 2, 0, 2, 3] {
             let v = k[i];
             let n = sums[&(*f, v)].normalize_or_zero();
-            out.push(MeshVertex { pos: q.positions[v as usize], nrm: n.to_array(), face: *f });
+            out.push(MeshVertex { pos: q.positions[v as usize], nrm: n.to_array(), face: *f, dev: NO_DEV });
         }
     }
+}
+
+/// A face as the shader reads it, from its material's look.
+fn face_gpu(l: &materials::Look, flags: u32) -> FaceGpu {
+    FaceGpu { color: linear(l.color), flags, metal: l.metal, rough: l.rough, spec: l.specular, alpha: l.opacity() }
 }

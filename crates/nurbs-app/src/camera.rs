@@ -116,6 +116,22 @@ impl OrbitCamera {
         }
     }
 
+    /// On the way from this view to `to` (s from 0 to 1): the target in a
+    /// straight line, the distance by the same ratio each instant, the
+    /// angles the short way round.
+    pub fn lerp(&self, to: &OrbitCamera, s: f32) -> OrbitCamera {
+        let tau = std::f32::consts::TAU;
+        let dy = (to.yaw - self.yaw + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI;
+        OrbitCamera {
+            target: self.target.lerp(to.target, s),
+            yaw: self.yaw + dy * s,
+            pitch: self.pitch + (to.pitch - self.pitch) * s,
+            dist: self.dist * (to.dist / self.dist.max(1e-3)).powf(s),
+            fov_y: self.fov_y + (to.fov_y - self.fov_y) * s,
+            ortho: if s >= 1.0 { to.ortho } else { self.ortho },
+        }
+    }
+
     /// Frames a bounding box.
     pub fn frame(&mut self, lo: Vec3, hi: Vec3) {
         self.target = (lo + hi) * 0.5;
@@ -123,4 +139,17 @@ impl OrbitCamera {
         // some air around it: the islands cover the view's edges
         self.dist = (r / (self.fov_y * 0.5).sin() * 1.3).clamp(30.0, 4000.0);
     }
+}
+
+/// A short eased move of the camera (Romain 20 nov., 10 h 43: F "avec une
+/// très légère animation"; Isolate in and out): any navigation meanwhile
+/// stops it where it is.
+#[derive(Clone, Copy, Debug)]
+pub struct CamAnim {
+    pub from: OrbitCamera,
+    pub to: OrbitCamera,
+    pub t0: f64,
+    pub dur: f64,
+    /// The view it set last (another one means the user moved it).
+    pub last: OrbitCamera,
 }

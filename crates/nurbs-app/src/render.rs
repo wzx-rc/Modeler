@@ -20,16 +20,19 @@ struct U {
     sel: vec4<f32>,      // selection colour (linear), mix
     hover: vec4<f32>,    // pre-selection colour (linear), mix
     base: vec4<f32>,     // part colour (linear), w = grid
-    misc: vec4<f32>,     // x = world origin shown
+    misc: vec4<f32>,     // x = world origin shown, y = deviation shown, z = its range (mm), w = its tolerance (mm)
+    refc: vec4<f32>,     // reference mesh colour (linear), w = ghost opacity
 };
 @group(0) @binding(0) var<uniform> u: U;
-// per face: its material (linear colour, metal, roughness) and its state
+// per face: its material (linear colour, metal, roughness, specular 0..1
+// with 0.5 as the balls come, opacity) and its state
 struct FaceGpu {
     color: vec3<f32>,
     flags: u32,
     metal: f32,
     rough: f32,
-    pad: vec2<f32>,
+    spec: f32,
+    alpha: f32,
 };
 @group(0) @binding(1) var<storage, read> faces: array<FaceGpu>;
 
@@ -136,54 +139,185 @@ struct MIn {
     @location(0) pos: vec3<f32>,
     @location(1) nrm: vec3<f32>,
     @location(2) face: u32,
+    @location(3) dev: f32,
 };
 struct MOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) nrm: vec3<f32>,
     @location(1) wpos: vec3<f32>,
     @location(2) @interpolate(flat) face: u32,
+    @location(3) dev: f32,
 };
 
 @vertex fn vs_mesh(i: MIn) -> MOut {
     var o: MOut;
     o.clip = project(i.pos);
+    // a surface with no thickness laid on the scan: pulled a little
+    // towards the eye so the scan under it does not hide it
+    if (i.face != 0xFFFFFFFFu && (faces[i.face].flags & 4u) != 0u) {
+        let d = u.eye.xyz - i.pos;
+        o.clip = project(i.pos + d * 0.02);
+    }
     o.nrm = i.nrm;
     o.wpos = i.pos;
     o.face = i.face;
+    o.dev = i.dev;
     return o;
 }
 
-@fragment fn fs_mesh(i: MOut) -> @location(0) vec4<f32> {
+// the part's distance to the reference (mm, + outside it): green within
+// the tolerance, then yellow to red outside, cyan to blue inside (linear)
+fn deviation_color(d: f32) -> vec3<f32> {
+    let range = max(u.misc.z, 1e-4);
+    let tol = u.misc.w;
+    let green = vec3<f32>(0.05, 0.45, 0.10);
+    if (abs(d) <= tol) {
+        return green;
+    }
+    let t = clamp((abs(d) - tol) / max(range - tol, 1e-4), 0.0, 1.0);
+    if (d > 0.0) {
+        let yellow = vec3<f32>(0.80, 0.62, 0.02);
+        let red = vec3<f32>(0.75, 0.04, 0.03);
+        return select(mix(yellow, red, (t - 0.5) * 2.0), mix(green, yellow, t * 2.0), t < 0.5);
+    }
+    let cyan = vec3<f32>(0.03, 0.50, 0.70);
+    let blue = vec3<f32>(0.04, 0.08, 0.75);
+    return select(mix(cyan, blue, (t - 0.5) * 2.0), mix(green, cyan, t * 2.0), t < 0.5);
+}
+
+// the light on a face: what it scatters and its highlights (linear)
+struct Lit {
+    diff: vec3<f32>,
+    spec: vec3<f32>,
+};
+
+fn tone(c: vec3<f32>) -> vec3<f32> {
+    return pow(aces(c * 0.9), vec3<f32>(1.0 / 2.2));
+}
+
+// the part's faces, or the reference mesh (face 0xFFFFFFFF: its colour,
+// matte)
+fn light(i: MOut) -> Lit {
     var n = normalize(i.nrm);
     let v = normalize(u.eye.xyz - i.wpos);
     if (dot(n, v) < 0.0) {
         n = -n;
     }
-    let fc = faces[i.face];
-    var base = fc.color;
-    let flags = fc.flags;
-    if ((flags & 1u) != 0u) {
-        base = mix(base, u.sel.rgb, u.sel.a);
-    } else if ((flags & 2u) != 0u) {
-        base = mix(base, u.hover.rgb, u.hover.a);
+    var base = u.refc.rgb;
+    var metal = 0.0;
+    var rough = 0.85;
+    // the material's specular: 1 as the balls come, 0 none, 2 twice
+    var k = 1.0;
+    if (i.face != 0xFFFFFFFFu) {
+        let fc = faces[i.face];
+        base = fc.color;
+        if (u.misc.y > 0.5 && abs(i.dev) < 1e8) {
+            base = deviation_color(i.dev);
+        }
+        let flags = fc.flags;
+        if ((flags & 1u) != 0u) {
+            base = mix(base, u.sel.rgb, u.sel.a);
+        } else if ((flags & 2u) != 0u) {
+            base = mix(base, u.hover.rgb, u.hover.a);
+        }
+        metal = fc.metal;
+        rough = fc.rough;
+        k = fc.spec * 2.0;
     }
-    let metal = fc.metal;
-    let rough = fc.rough;
     let key = normalize(-u.right.xyz * 0.45 + u.up.xyz * 0.8 - u.fwd.xyz * 0.55);
     let fill = normalize(u.right.xyz * 0.7 - u.up.xyz * 0.2 - u.fwd.xyz * 0.6);
     let h = normalize(key + v);
     let sky = 0.5 + 0.5 * dot(n, u.up.xyz);
     let diff = max(dot(n, key), 0.0) * 0.95 + max(dot(n, fill), 0.0) * 0.18 + 0.05 + 0.07 * sky;
     // sharper, stronger and tinted highlights on metals; a sky / ground
-    // reflection gives them their look
-    let shine = mix(110.0, 8.0, rough);
-    let spec = pow(max(dot(n, h), 0.0), shine) * mix(0.18, 0.9, metal) * (1.0 - 0.6 * rough);
+    // reflection gives them their look. Past its usual specular a
+    // material gets glossier: a sharper highlight and a clear coat
+    // reflecting the sky at grazing angles
+    let gloss = max(k - 1.0, 0.0);
+    let shine = mix(110.0, 8.0, rough) * (1.0 + 2.0 * gloss);
+    let spec = pow(max(dot(n, h), 0.0), shine) * mix(0.18, 0.9, metal) * (1.0 - 0.6 * rough) * k * (1.0 + gloss);
     let rim = pow(1.0 - max(dot(n, v), 0.0), 4.0) * 0.08;
     let r = reflect(-v, n);
     let env = mix(vec3<f32>(0.10, 0.10, 0.11), vec3<f32>(0.85, 0.87, 0.9), clamp(0.5 + 0.5 * dot(r, u.up.xyz), 0.0, 1.0));
     let spec_col = mix(vec3<f32>(1.0), base, metal);
-    let c = base * diff * (1.0 - 0.75 * metal) + base * env * metal * 0.85 + spec_col * spec + vec3<f32>(rim);
-    return vec4<f32>(pow(aces(c * 0.9), vec3<f32>(1.0 / 2.2)), 1.0);
+    let fres = pow(1.0 - max(dot(n, v), 0.0), 5.0);
+    let coat = env * (0.04 + 0.6 * fres) * gloss * (1.0 - metal) * 0.7;
+    var o: Lit;
+    o.diff = base * diff * (1.0 - 0.75 * metal) + base * env * metal * 0.85 * mix(0.35, 1.0, min(k, 1.0)) + vec3<f32>(rim);
+    o.spec = spec_col * spec + coat;
+    return o;
+}
+
+fn shade(i: MOut) -> vec3<f32> {
+    let l = light(i);
+    return tone(l.diff + l.spec);
+}
+
+@fragment fn fs_mesh(i: MOut) -> @location(0) vec4<f32> {
+    // a transparent material is drawn after, see-through (`glass`)
+    if (i.face != 0xFFFFFFFFu && faces[i.face].alpha < 0.995) {
+        discard;
+    }
+    // a surface with no thickness is seen from both sides: light the side facing the eye
+    var j = i;
+    if (dot(j.nrm, u.eye.xyz - j.wpos) < 0.0) { j.nrm = -j.nrm; }
+    return vec4<f32>(shade(j), 1.0);
+}
+
+// a transparent material (Romain, 20 nov., 15 h 42): its faces turned
+// away from the eye first, then those facing it, blended over what the
+// opaque faces left (premultiplied: the highlights stay bright); denser at
+// grazing angles, as glass is
+fn glass(i: MOut, front: bool) -> vec4<f32> {
+    if (i.face == 0xFFFFFFFFu) {
+        discard;
+    }
+    let fc = faces[i.face];
+    if (fc.alpha >= 0.995) {
+        discard;
+    }
+    var j = i;
+    let facing = dot(j.nrm, u.eye.xyz - j.wpos) >= 0.0;
+    if (facing != front) {
+        discard;
+    }
+    if (!facing) { j.nrm = -j.nrm; }
+    let l = light(j);
+    let nv = abs(dot(normalize(j.nrm), normalize(u.eye.xyz - j.wpos)));
+    var a = fc.alpha + (1.0 - fc.alpha) * pow(1.0 - nv, 3.0) * 0.55;
+    if (!front) {
+        a = a * 0.7;
+    }
+    let body = tone(l.diff + l.spec);
+    let hl = tone(l.spec);
+    return vec4<f32>(body * a + hl * (1.0 - a), a);
+}
+
+@fragment fn fs_glass_back(i: MOut) -> @location(0) vec4<f32> {
+    return glass(i, false);
+}
+
+@fragment fn fs_glass_front(i: MOut) -> @location(0) vec4<f32> {
+    return glass(i, true);
+}
+
+// X-ray: the part's nearest layer see-through, a little denser at its
+// outline, so the scan behind it shows
+@fragment fn fs_xray(i: MOut) -> @location(0) vec4<f32> {
+    var j = i;
+    if (dot(j.nrm, u.eye.xyz - j.wpos) < 0.0) { j.nrm = -j.nrm; }
+    let n = normalize(j.nrm);
+    let v = normalize(u.eye.xyz - j.wpos);
+    let edge = pow(1.0 - abs(dot(n, v)), 2.0);
+    return vec4<f32>(shade(j), mix(0.38, 0.7, edge));
+}
+
+// the reference seen through (Ghost): faint face on, denser at its outline
+@fragment fn fs_ref_ghost(i: MOut) -> @location(0) vec4<f32> {
+    let n = normalize(i.nrm);
+    let v = normalize(u.eye.xyz - i.wpos);
+    let edge = pow(1.0 - abs(dot(n, v)), 2.0);
+    return vec4<f32>(shade(i), mix(u.refc.a, min(u.refc.a * 3.0, 0.8), edge));
 }
 
 // ----------------------------------------------------------------- lines
@@ -201,11 +335,16 @@ struct LOut {
     @location(1) @interpolate(linear) across: vec2<f32>,
 };
 
-// pulled a little towards the eye so a line wins over the faces it lies on
+// pulled a little towards the eye so a line wins over the faces it lies on:
+// by about three pixels' worth at its depth (it was 0.03 mm + 0.4 % of the
+// distance, about ten pixels: an edge just behind a face near its outline
+// showed through it; Romain 20 nov., 9 h 30)
 fn pulled(p: vec3<f32>) -> vec4<f32> {
     let d = u.eye.xyz - p;
     let dist = length(d);
-    return project(p + d / max(dist, 1e-6) * (0.03 + 0.004 * dist));
+    let z = max(dot(p - u.eye.xyz, u.fwd.xyz), 1e-3);
+    let px = 2.0 * z * u.eye.w / max(u.view.y, 1.0);
+    return project(p + d / max(dist, 1e-6) * (0.005 + 3.0 * px));
 }
 
 // a segment is a quad `width` pixels wide plus one pixel of fringe on each
@@ -249,7 +388,13 @@ pub struct MeshVertex {
     pub pos: [f32; 3],
     pub nrm: [f32; 3],
     pub face: u32,
+    /// The distance to the reference mesh (mm, + outside it), `NO_DEV`
+    /// when none.
+    pub dev: f32,
 }
+
+/// A vertex with no distance to the reference (not coloured).
+pub const NO_DEV: f32 = 1e9;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -287,11 +432,14 @@ struct Uniforms {
     hover: [f32; 4],
     base: [f32; 4],
     misc: [f32; 4],
+    refc: [f32; 4],
 }
 
 /// Face flags read by the shader.
 pub const FACE_SELECTED: u32 = 1;
 pub const FACE_HOVERED: u32 = 2;
+/// A surface with no thickness (drawn a little towards the eye).
+pub const FACE_SHEET: u32 = 4;
 
 /// One face as the shader reads it: its material (linear colour) and flags.
 #[repr(C)]
@@ -301,7 +449,10 @@ pub struct FaceGpu {
     pub flags: u32,
     pub metal: f32,
     pub rough: f32,
-    pub pad: [f32; 2],
+    /// The highlights' strength, 0..1 (0.5 as the balls come).
+    pub spec: f32,
+    /// Opacity (below 1: drawn see-through after the opaque faces).
+    pub alpha: f32,
 }
 
 /// sRGB 0..1 to linear.
@@ -326,8 +477,25 @@ pub struct Frame<'a> {
     /// Selection and pre-selection tints (sRGB 0..1) and their strength.
     pub sel: ([f32; 3], f32),
     pub hover: ([f32; 3], f32),
+    /// The reference mesh: not drawn, solid, or see-through (Ghost); its
+    /// colour (sRGB 0..1).
+    pub reference: RefDraw,
+    pub ref_color: [f32; 3],
+    /// X-ray: the part see-through (its nearest layer), what is behind it shown.
+    pub xray: bool,
+    /// The part coloured by its distance to the reference: the range and
+    /// the tolerance (mm).
+    pub deviation: Option<(f32, f32)>,
     pub paint: &'a [egui::ClippedPrimitive],
     pub textures: &'a mut egui::TexturesDelta,
+}
+
+/// How the reference mesh is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefDraw {
+    Hidden,
+    Solid,
+    Ghost,
 }
 
 struct Targets {
@@ -368,6 +536,19 @@ pub struct Renderer {
     lines: wgpu::RenderPipeline,
     over_hidden: wgpu::RenderPipeline,
     over_visible: wgpu::RenderPipeline,
+    /// The reference: solid (pushed back a little in depth, so the part's
+    /// faces laid on it win), its depth alone, and seen through.
+    ref_solid: wgpu::RenderPipeline,
+    ref_depth: wgpu::RenderPipeline,
+    ref_ghost: wgpu::RenderPipeline,
+    /// X-ray: the part's depth, then its colour see-through.
+    xray_depth: wgpu::RenderPipeline,
+    xray: wgpu::RenderPipeline,
+    /// Transparent materials: their back faces, then their front faces.
+    glass_back: wgpu::RenderPipeline,
+    glass_front: wgpu::RenderPipeline,
+    /// Some face has a transparent material.
+    glass: bool,
     uniforms: wgpu::Buffer,
     faces: wgpu::Buffer,
     faces_cap: u64,
@@ -375,9 +556,11 @@ pub struct Renderer {
     mesh_buf: Buf,
     edge_buf: Buf,
     over_buf: Buf,
+    ref_buf: Buf,
     /// Bounds of what is uploaded (depth range).
     mesh_bounds: Option<([f32; 3], [f32; 3])>,
     over_bounds: Option<([f32; 3], [f32; 3])>,
+    ref_bounds: Option<([f32; 3], [f32; 3])>,
     targets: Option<Targets>,
     pub egui: egui_wgpu::Renderer,
 }
@@ -414,7 +597,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
                 },
@@ -429,9 +612,18 @@ impl Renderer {
         let depth = |write: bool, cmp: wgpu::CompareFunction| {
             Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(write), depth_compare: Some(cmp), stencil: Default::default(), bias: Default::default() })
         };
-        let mesh_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Uint32];
+        let pushed = |write: bool| {
+            Some(wgpu::DepthStencilState {
+                format: DEPTH,
+                depth_write_enabled: Some(write),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 8, slope_scale: 1.5, clamp: 0.0 },
+            })
+        };
+        let mesh_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Uint32, 3 => Float32];
         let line_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4, 3 => Unorm8x4];
-        let pipeline = |label: &str, vs: &str, fs: &str, attrs: Option<(&[wgpu::VertexAttribute], u64)>, blend: Option<wgpu::BlendState>, ds: Option<wgpu::DepthStencilState>| {
+        let pipeline_mask = |label: &str, vs: &str, fs: &str, attrs: Option<(&[wgpu::VertexAttribute], u64)>, blend: Option<wgpu::BlendState>, ds: Option<wgpu::DepthStencilState>, write_mask: wgpu::ColorWrites| {
             let layouts: Vec<Option<wgpu::VertexBufferLayout>> = match attrs {
                 Some((a, stride)) => vec![Some(wgpu::VertexBufferLayout { array_stride: stride, step_mode: wgpu::VertexStepMode::Vertex, attributes: a })],
                 None => vec![],
@@ -440,7 +632,7 @@ impl Renderer {
                 label: Some(label),
                 layout: Some(&pl),
                 vertex: wgpu::VertexState { module: &module, entry_point: Some(vs), buffers: &layouts, compilation_options: Default::default() },
-                fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some(fs), targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })], compilation_options: Default::default() }),
+                fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some(fs), targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask })], compilation_options: Default::default() }),
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: ds,
                 multisample: ms,
@@ -448,6 +640,7 @@ impl Renderer {
                 cache: None,
             })
         };
+        let pipeline = |label: &str, vs: &str, fs: &str, attrs: Option<(&[wgpu::VertexAttribute], u64)>, blend: Option<wgpu::BlendState>, ds: Option<wgpu::DepthStencilState>| pipeline_mask(label, vs, fs, attrs, blend, ds, wgpu::ColorWrites::ALL);
         let mstride = std::mem::size_of::<MeshVertex>() as u64;
         let lstride = std::mem::size_of::<LineVertex>() as u64;
         let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
@@ -456,6 +649,14 @@ impl Renderer {
         let lines = pipeline("edges", "vs_line", "fs_line", Some((&line_attrs, lstride)), alpha, depth(false, wgpu::CompareFunction::LessEqual));
         let over_hidden = pipeline("outline-hidden", "vs_line", "fs_line_hidden", Some((&line_attrs, lstride)), alpha, depth(false, wgpu::CompareFunction::Greater));
         let over_visible = pipeline("outline", "vs_line", "fs_line", Some((&line_attrs, lstride)), alpha, depth(false, wgpu::CompareFunction::LessEqual));
+        let ref_solid = pipeline("reference", "vs_mesh", "fs_mesh", Some((&mesh_attrs, mstride)), None, pushed(true));
+        let ref_depth = pipeline_mask("reference-depth", "vs_mesh", "fs_mesh", Some((&mesh_attrs, mstride)), None, pushed(true), wgpu::ColorWrites::empty());
+        let ref_ghost = pipeline("reference-ghost", "vs_mesh", "fs_ref_ghost", Some((&mesh_attrs, mstride)), alpha, depth(false, wgpu::CompareFunction::LessEqual));
+        let xray_depth = pipeline_mask("xray-depth", "vs_mesh", "fs_mesh", Some((&mesh_attrs, mstride)), None, depth(true, wgpu::CompareFunction::Less), wgpu::ColorWrites::empty());
+        let xray = pipeline("xray", "vs_mesh", "fs_xray", Some((&mesh_attrs, mstride)), alpha, depth(false, wgpu::CompareFunction::LessEqual));
+        let pre = Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+        let glass_back = pipeline("glass-back", "vs_mesh", "fs_glass_back", Some((&mesh_attrs, mstride)), pre, depth(false, wgpu::CompareFunction::LessEqual));
+        let glass_front = pipeline("glass-front", "vs_mesh", "fs_glass_front", Some((&mesh_attrs, mstride)), pre, depth(false, wgpu::CompareFunction::LessEqual));
         Renderer {
             format,
             layout,
@@ -464,6 +665,14 @@ impl Renderer {
             lines,
             over_hidden,
             over_visible,
+            ref_solid,
+            ref_depth,
+            ref_ghost,
+            xray_depth,
+            xray,
+            glass_back,
+            glass_front,
+            glass: false,
             uniforms,
             faces,
             faces_cap,
@@ -471,8 +680,10 @@ impl Renderer {
             mesh_buf: Buf::new(),
             edge_buf: Buf::new(),
             over_buf: Buf::new(),
+            ref_buf: Buf::new(),
             mesh_bounds: None,
             over_bounds: None,
+            ref_bounds: None,
             targets: None,
             egui: egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions::default()),
         }
@@ -493,6 +704,12 @@ impl Renderer {
         self.mesh_bounds = bounds_of(verts.iter().map(|v| &v.pos));
     }
 
+    /// The reference mesh's triangles (empty: none).
+    pub fn upload_reference(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, verts: &[MeshVertex]) {
+        self.ref_buf.upload(device, queue, bytemuck::cast_slice(verts), verts.len() as u32, "reference");
+        self.ref_bounds = bounds_of(verts.iter().map(|v| &v.pos));
+    }
+
     /// Each face's material and state (FACE_SELECTED, FACE_HOVERED).
     pub fn upload_faces(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, flags: &[FaceGpu]) {
         let size = std::mem::size_of::<FaceGpu>() as u64;
@@ -505,6 +722,7 @@ impl Renderer {
         if !flags.is_empty() {
             queue.write_buffer(&self.faces, 0, bytemuck::cast_slice(flags));
         }
+        self.glass = flags.iter().any(|f| f.alpha < 0.995);
     }
 
     /// Outlines drawn over the part (empty: none).
@@ -542,7 +760,8 @@ impl Renderer {
         // depth range from what is drawn
         let mut zmin = f32::MAX;
         let mut zmax = f32::MIN;
-        for (lo, hi) in [self.mesh_bounds, self.over_bounds].into_iter().flatten() {
+        let refb = if f.reference == RefDraw::Hidden { None } else { self.ref_bounds };
+        for (lo, hi) in [self.mesh_bounds, self.over_bounds, refb].into_iter().flatten() {
             for i in 0..8 {
                 let c = glam::Vec3::new(if i & 1 == 0 { lo[0] } else { hi[0] }, if i & 2 == 0 { lo[1] } else { hi[1] }, if i & 4 == 0 { lo[2] } else { hi[2] });
                 let z = (c - view.eye).dot(fwd);
@@ -569,7 +788,14 @@ impl Renderer {
             sel: [s[0], s[1], s[2], sa],
             hover: [h[0], h[1], h[2], ha],
             base: [b[0], b[1], b[2], f.grid as u32 as f32],
-            misc: [f.origin as u32 as f32, 0.0, 0.0, 0.0],
+            misc: match f.deviation {
+                Some((range, tol)) => [f.origin as u32 as f32, 1.0, range, tol],
+                None => [f.origin as u32 as f32, 0.0, 1.0, 0.0],
+            },
+            refc: {
+                let c = l3(f.ref_color);
+                [c[0], c[1], c[2], 0.22]
+            },
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
         for (id, deltas) in &f.textures.set {
@@ -596,11 +822,32 @@ impl Renderer {
             pass.set_bind_group(0, &self.bind, &[]);
             pass.set_pipeline(&self.bg);
             pass.draw(0..3, 0..1);
+            let refm = match (&self.ref_buf.buf, self.ref_buf.count) {
+                (Some(buf), n) if n > 0 => Some((buf, n)),
+                _ => None,
+            };
+            if let (Some((buf, n)), RefDraw::Solid) = (refm, f.reference) {
+                pass.set_pipeline(&self.ref_solid);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..n, 0..1);
+            }
             if let (Some(buf), n) = (&self.mesh_buf.buf, self.mesh_buf.count) {
-                if n > 0 {
+                if n > 0 && f.xray {
+                    pass.set_vertex_buffer(0, buf.slice(..));
+                    pass.set_pipeline(&self.xray_depth);
+                    pass.draw(0..n, 0..1);
+                    pass.set_pipeline(&self.xray);
+                    pass.draw(0..n, 0..1);
+                } else if n > 0 {
                     pass.set_pipeline(&self.mesh);
                     pass.set_vertex_buffer(0, buf.slice(..));
                     pass.draw(0..n, 0..1);
+                    if self.glass {
+                        pass.set_pipeline(&self.glass_back);
+                        pass.draw(0..n, 0..1);
+                        pass.set_pipeline(&self.glass_front);
+                        pass.draw(0..n, 0..1);
+                    }
                 }
             }
             if let (Some(buf), n) = (&self.edge_buf.buf, self.edge_buf.count) {
@@ -618,6 +865,15 @@ impl Renderer {
                     pass.set_pipeline(&self.over_visible);
                     pass.draw(0..n, 0..1);
                 }
+            }
+            // seen through: its nearest layer only (its depth first), over
+            // the part and the outlines
+            if let (Some((buf, n)), RefDraw::Ghost) = (refm, f.reference) {
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.set_pipeline(&self.ref_depth);
+                pass.draw(0..n, 0..1);
+                pass.set_pipeline(&self.ref_ghost);
+                pass.draw(0..n, 0..1);
             }
         }
         {

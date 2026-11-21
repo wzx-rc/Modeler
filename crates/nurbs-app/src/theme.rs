@@ -7,6 +7,29 @@ use std::sync::Arc;
 
 // Light theme (Romain, 17 nov.): every neutral below is a function of it.
 static LIGHT: AtomicBool = AtomicBool::new(false);
+// The workspace (Forme, Sculpt, Poly): the accent below follows it.
+static SPACE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+// tab_anim: while a change of tab is animated, the tab it comes from and how
+// far it is (f32 bits; 1 = none): the accent fades from that tab's.
+static BLEND_FROM: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static BLEND: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F80_0000);
+
+/// tab_anim: the tab the colours come from and how far (eased), or None.
+pub fn set_blend(b: Option<(crate::workspace::Workspace, f32)>) {
+    let (from, t) = b.map(|(w, t)| (w.index(), t.clamp(0.0, 1.0))).unwrap_or((0, 1.0));
+    BLEND_FROM.store(from, Ordering::Relaxed);
+    BLEND.store(t.to_bits(), Ordering::Relaxed);
+}
+
+/// tab_anim: Some((tab, t)) while the colours fade from that tab's.
+fn blend() -> Option<(u8, f32)> {
+    let t = f32::from_bits(BLEND.load(Ordering::Relaxed));
+    (t < 1.0).then(|| (BLEND_FROM.load(Ordering::Relaxed), t))
+}
+
+pub fn workspace() -> crate::workspace::Workspace {
+    crate::workspace::Workspace::from_index(SPACE.load(Ordering::Relaxed))
+}
 
 pub fn light() -> bool {
     LIGHT.load(Ordering::Relaxed)
@@ -180,13 +203,22 @@ fn apply_visuals(v: &mut egui::Visuals) {
     }
 }
 
-/// Switches the light / dark theme (called once per frame from the settings).
+/// Switches the light / dark theme and the workspace's accent (called once
+/// per frame from the settings and the tabs).
 pub fn set_light(ctx: &egui::Context, on: bool) {
+    set_theme(ctx, on, workspace());
+}
+
+pub fn set_theme(ctx: &egui::Context, on: bool, space: crate::workspace::Workspace) {
     let before = LIGHT.swap(on, Ordering::Relaxed);
+    let before_space = SPACE.swap(space.index(), Ordering::Relaxed);
     let key = egui::Id::new("theme-light-styled");
-    let styled: Option<bool> = ctx.data(|d| d.get_temp(key));
-    if before != on || styled != Some(on) {
-        ctx.data_mut(|d| d.insert_temp(key, on));
+    let styled: Option<(bool, u8)> = ctx.data(|d| d.get_temp(key));
+    // tab_anim: restyled every frame while the colours fade, once after
+    let blending = blend().is_some();
+    if before != on || before_space != space.index() || styled != Some((on, space.index())) || blending {
+        let k = if blending { (on, 255) } else { (on, space.index()) };
+        ctx.data_mut(|d| d.insert_temp(key, k));
         ctx.global_style_mut(|style| apply_visuals(&mut style.visuals));
     }
 }
@@ -195,26 +227,43 @@ pub fn set_light(ctx: &egui::Context, on: bool) {
 //
 // White on graphite (Forme NURBS, Romain 17 nov.): the accent marks Add, the
 // selection (also its tint in the 3D view) and the active tool; Carve is
-// orange.
+// orange. The Sculpt tab's accent is a light pastel copper, the Poly tab's a
+// pastel sky blue (Romain 20 nov.).
+
+/// One colour per workspace and theme: (Forme, Sculpt, Poly, SDF) × (dark,
+/// light). The SDF tab's is a pastel green (Romain 20 nov., 23 h 47).
+fn ws(c: [(u32, u32); 4]) -> Color32 {
+    let of = |i: usize| {
+        let (d, l) = c[i.min(3)];
+        let v = if light() { l } else { d };
+        Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+    };
+    let now = of(workspace().index() as usize);
+    // tab_anim: from the old tab's colour to the new one's
+    match blend() {
+        Some((from, t)) => of(from as usize).lerp_to_gamma(now, t),
+        None => now,
+    }
+}
 
 pub fn accent() -> Color32 {
-    pick(Color32::from_rgb(0xF2, 0xF3, 0xF5), Color32::from_rgb(0x2B, 0x2F, 0x35))
+    ws([(0xF2F3F5, 0x2B2F35), (0xECB48E, 0xB0643A), (0x9CD2F4, 0x2D7FB8), (0x9EE09A, 0x2E8B3E)])
 }
 pub fn accent_light() -> Color32 {
-    pick(Color32::from_rgb(0xFF, 0xFF, 0xFF), Color32::from_rgb(0x5A, 0x60, 0x69))
+    ws([(0xFFFFFF, 0x5A6069), (0xF7D3BA, 0xC9845C), (0xC6E6FA, 0x5A9FCF), (0xC8F0C4, 0x5BAF66)])
 }
 pub fn accent_bg() -> Color32 {
-    pick(Color32::from_rgb(0x2E, 0x32, 0x38), Color32::from_rgb(0xE4, 0xE7, 0xEB))
+    ws([(0x2E3238, 0xE4E7EB), (0x3B2E27, 0xF6E6DC), (0x24313C, 0xDDEBF5), (0x253626, 0xDFF1E0)])
 }
 pub fn accent_border() -> Color32 {
-    pick(Color32::from_rgb(0x6A, 0x70, 0x7A), Color32::from_rgb(0x9A, 0xA1, 0xAB))
+    ws([(0x6A707A, 0x9AA1AB), (0x93705A, 0xD3A587), (0x5B8098, 0x8DB8D6), (0x5F9A5D, 0x8FC897)])
 }
 pub fn accent_text() -> Color32 {
-    pick(Color32::from_rgb(0xFF, 0xFF, 0xFF), Color32::from_rgb(0x11, 0x13, 0x16))
+    ws([(0xFFFFFF, 0x111316), (0xFFE6D5, 0x5A2D14), (0xE2F3FF, 0x123A57), (0xE4FBE2, 0x123F1A)])
 }
 /// Text and icons drawn on a filled accent.
 pub fn on_accent() -> Color32 {
-    pick(Color32::from_rgb(0x15, 0x17, 0x1A), Color32::from_rgb(0xFF, 0xFF, 0xFF))
+    ws([(0x15171A, 0xFFFFFF), (0x24160E, 0xFFFFFF), (0x0E1A24, 0xFFFFFF), (0x0F1F10, 0xFFFFFF)])
 }
 pub fn carve() -> Color32 {
     pick(Color32::from_rgb(0xF0, 0x8A, 0x3C), Color32::from_rgb(0xD9, 0x66, 0x1A))
@@ -225,7 +274,7 @@ pub fn carve_light() -> Color32 {
 
 // ---------------------------------------------------------------- app icon
 
-/// The app icon (Recraft: a white drilled « F » on a graphite tile), 256 px.
+/// The app icon (a white drilled « F » on a graphite tile, redrawn 20 nov.), 256 px.
 const ICON_PNG: &[u8] = include_bytes!("../assets/forme-icon.png");
 /// The same, small, for the logo of the interfaces.
 const LOGO_PNG: &[u8] = include_bytes!("../assets/forme-logo-64.png");

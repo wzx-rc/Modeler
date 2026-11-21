@@ -36,7 +36,11 @@ pub fn path_of(name: &str) -> PathBuf {
 
 pub fn save(doc: &Doc, name: &str) -> std::io::Result<PathBuf> {
     let p = path_of(name);
-    std::fs::write(&p, doc.to_json())?;
+    // written aside then put in place: a crash while writing never leaves
+    // half a document
+    let tmp = p.with_extension(format!("{EXT}.tmp"));
+    std::fs::write(&tmp, doc.to_json())?;
+    std::fs::rename(&tmp, &p)?;
     Ok(p)
 }
 

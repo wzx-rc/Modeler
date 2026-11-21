@@ -9,7 +9,7 @@ use crate::widgets::fmt_mm;
 use egui::{pos2, vec2, Align2, Color32, Id, Order, Painter, PointerButton, Pos2, Rect, Sense, Shape, Stroke};
 use glam::DVec3;
 use nurbs_kernel::client::Status;
-use nurbs_kernel::doc::PrimKind;
+use nurbs_kernel::doc::{CurveKind, PrimKind};
 use nurbs_kernel::{Op, Prim};
 
 fn p2(v: Pos2) -> [f32; 2] {
@@ -28,8 +28,16 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         let p = ui.painter();
         draw_gizmo(p, st);
         draw_vertices(p, st);
+        draw_poly(p, st);
+        draw_patch(p, st);
+        draw_brush(p, st, ctx.input(|i| i.pointer.hover_pos()), resp.hovered() || resp.dragged());
         draw_push(p, st);
+        draw_shell(p, st);
+        draw_mirror(p, st);
+        draw_array(p, st);
         draw_knife(p, st, ctx.input(|i| i.pointer.hover_pos()));
+        draw_poly_cut(p, st, ctx.input(|i| i.pointer.hover_pos()));
+        draw_form_brush(p, st, ctx.input(|i| i.pointer.latest_pos()));
         if let (Some(g), Some(h)) = (&st.round_drag, ctx.input(|i| i.pointer.latest_pos())) {
             if g.size > 1e-9 {
                 let label = if g.chamfer { "Chamfer" } else { "Fillet" };
@@ -103,6 +111,14 @@ fn dist_seg(p: Pos2, a: Pos2, b: Pos2) -> f32 {
 
 /// The handle under the pointer: a size handle, an arrow, a plane square.
 fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
+    // the selected Shell's dot (or its line across the wall)
+    if let Some(g) = st.shell_grip() {
+        if let (Some(a), Some(b)) = (world(st, g.from), world(st, g.at)) {
+            if (b - p).length() < 10.0 || dist_seg(p, a, b) < 5.0 {
+                return Some(Handle::ShellThick);
+            }
+        }
+    }
     // the selected inset or extrusion: its dot, its arrow
     if let Some(hs) = st.push_handles() {
         if let Some((_, _, k)) = hs.inset {
@@ -116,26 +132,37 @@ fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
             }
         }
     }
+    // the selected Array's grips: its squares first, then its arrows
+    let grips = st.array_grips();
+    for g in grips.iter().filter(|g| g.from.is_none()) {
+        if world(st, g.at).map(|q| (q - p).length() < 9.0).unwrap_or(false) {
+            return Some(g.handle);
+        }
+    }
+    for g in grips.iter() {
+        if let (Some(f), Some(b)) = (g.from.and_then(|f| world(st, f)), world(st, g.at)) {
+            if dist_seg(p, f + (b - f) * 0.3, b + (b - f).normalized() * 10.0) < 8.0 {
+                return Some(g.handle);
+            }
+        }
+    }
     if st.tool != Tool::Select || st.creation.is_some() {
         return None;
     }
     // Q: no gizmo; E and R: rings and scale handles (shapes only)
     match st.gizmo {
         GizmoMode::Select => return None,
-        GizmoMode::Rotate if st.sel_mode == SelMode::Object => return ring_at(st, p),
-        GizmoMode::Scale if st.sel_mode == SelMode::Object => return scale_at(st, p),
+        GizmoMode::Rotate if st.sel_mode == SelMode::Object || st.poly_comp() || st.sdf_comp() => return ring_at(st, p),
+        GizmoMode::Scale => return cage_at(st, p),
         _ => {}
     }
-    if let Some(f) = st.single().filter(|_| st.sel_mode == SelMode::Object) {
-        for h in size_handles(f) {
-            if let Some(q) = size_handle_pos(f, h).and_then(|w| world(st, w)) {
-                if (q - p).length() < 9.0 {
-                    return Some(h);
-                }
-            }
-        }
-    }
+    // (the move gizmo has no size dots: Romain 20 nov., 11 h 44, "enlève
+    // les 4 points de scale avec le translate"; R's cage sizes)
     let (c, tips) = gizmo_points(st)?;
+    // the centre (Maya): a move on all three axes
+    if (p - c).length() < 9.0 {
+        return Some(Handle::Free);
+    }
     let mut best: Option<(f32, Handle)> = None;
     for (a, t) in tips.iter().enumerate() {
         if let Some(t) = t {
@@ -194,36 +221,25 @@ fn ring_at(st: &AppState, p: Pos2) -> Option<Handle> {
     best.map(|(_, a)| Handle::Rot(a))
 }
 
-/// The scale gizmo: the pivot, the tips along the shape's own axes.
-fn scale_points(st: &AppState) -> Option<(Pos2, [Option<Pos2>; 3])> {
-    let pivot = st.pivot()?;
-    let frame = st.scale_frame()?;
-    let c = world(st, pivot)?;
-    let v = st.view();
-    let k = v.pixel_size_at((pivot.as_vec3() - v.eye).length()) as f64 * ARROW as f64;
-    Some((c, [0, 1, 2].map(|a| world(st, pivot + frame * DVec3::AXES[a] * k))))
-}
-
-fn scale_at(st: &AppState, p: Pos2) -> Option<Handle> {
-    let (c, tips) = scale_points(st)?;
-    if (p - c).length() < 10.0 {
-        return Some(Handle::ScaleAll);
-    }
-    let mut best: Option<(f32, usize)> = None;
-    for (a, t) in tips.iter().enumerate() {
-        if let Some(t) = t {
-            let d = dist_seg(p, c + (*t - c) * 0.2, *t).min((p - *t).length() - 3.0);
-            if d < 8.0 && best.map(|b| d < b.0).unwrap_or(true) {
-                best = Some((d, a));
-            }
+/// The scale cage's grip under the pointer (corners first, then edges,
+/// then faces, when they lie as near).
+fn cage_at(st: &AppState, p: Pos2) -> Option<Handle> {
+    let c = st.cage()?;
+    let mut best: Option<(f32, [i8; 3])> = None;
+    for s in c.grips() {
+        let Some(q) = world(st, c.point(s)) else { continue };
+        let n = s.iter().filter(|v| **v != 0).count() as f32;
+        let d = (q - p).length() - n * 0.5;
+        if d < 9.0 && best.map(|b| d < b.0).unwrap_or(true) {
+            best = Some((d, s));
         }
     }
-    best.map(|(_, a)| Handle::Scale(a))
+    best.map(|(_, s)| Handle::Cage(s))
 }
 
 fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, rect: Rect) {
     let hover = ctx.input(|i| i.pointer.hover_pos());
-    st.interacting = st.drag.is_some() || st.creation.is_some();
+    st.interacting = st.drag.is_some() || st.creation.is_some() || st.scan_round.is_some() || st.scan_slot.is_some() || st.slot_draw.is_some();
 
     // Maya navigation: Alt + left = orbit, Alt + middle = pan, Alt + right =
     // zoom, whatever the tool
@@ -239,6 +255,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     let in_base = st.creation.as_ref().map(|c| c.phase == Phase::Base).unwrap_or(false);
     if alt && (resp.hovered() || resp.dragged() || l || m || r) && !in_base && st.drag.is_none() {
         if (l || m || r) && d != egui::Vec2::ZERO {
+            st.stop_flight();
             if l {
                 st.camera.orbit(d.x, d.y);
             } else if m {
@@ -259,13 +276,16 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     if resp.hovered() {
         let (scroll, zoom) = ctx.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
         if (zoom - 1.0).abs() > 1e-4 {
+            st.stop_flight();
             st.camera.zoom(zoom);
         } else if scroll.y.abs() > 0.0 {
+            st.stop_flight();
             st.camera.zoom((scroll.y * 0.0022).exp());
         }
     }
     // the middle button alone pans too (no tool uses it)
     if m && !alt && d != egui::Vec2::ZERO && (resp.hovered() || resp.dragged()) {
+        st.stop_flight();
         st.camera.pan(d.x, d.y, rect.height());
         st.interacting = true;
         return;
@@ -275,9 +295,30 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     // Ctrl held: no snapping to the part's points
     st.snap_off = ctrl;
     st.shift_held = shift;
+    st.alt_held = ctx.input(|i| i.modifiers.alt);
+    // D held (Maya): a click or a drag puts the gizmo's pivot on the point
+    // under the pointer; the moves then carry that point onto the points
+    // of interest
+    let d_held = !ctrl && !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_down(egui::Key::D));
+    let editing = d_held && st.tool == Tool::Select && st.drag.is_none() && st.push.is_none() && st.pivot().is_some();
+    if st.pivot_edit && !editing {
+        st.snap_shown = None;
+    }
+    st.pivot_edit = editing;
+    if editing {
+        let at = hover.or(resp.interact_pointer_pos()).map(p2);
+        st.snap_shown = at.and_then(|p| st.pivot_target(p));
+        if resp.clicked_by(PointerButton::Primary) || resp.dragged_by(PointerButton::Primary) {
+            if let Some(p) = at {
+                st.put_pivot(p);
+            }
+        }
+        st.hot_handle = None;
+        return;
+    }
     // the points of interest the pointer passes over: the guides line up
     // with them
-    let placing = matches!(st.tool, Tool::Create(_)) || st.drag.as_ref().map(|d| matches!(d.handle, Handle::Axis(_) | Handle::Plane(_) | Handle::Size(_))).unwrap_or(false);
+    let placing = matches!(st.tool, Tool::Create(_)) || st.drag.as_ref().map(|d| matches!(d.handle, Handle::Axis(_) | Handle::Plane(_) | Handle::Free | Handle::Size(_))).unwrap_or(false);
     if let (true, Some(h), true) = (placing, hover, resp.hovered() || resp.dragged()) {
         let mut skip: Vec<nurbs_kernel::FeatureId> = st.drag.as_ref().map(|d| d.start.iter().map(|f| f.id).collect()).unwrap_or_default();
         skip.extend(st.creation.as_ref().map(|c| c.id));
@@ -287,19 +328,44 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     // pre-selection: the feature under the pointer, the handle under it
     let over_ui = !resp.hovered() && !resp.dragged();
     st.hot_handle = if st.drag.is_none() && !over_ui { hover.and_then(|h| handle_at(st, h)) } else { st.drag.as_ref().map(|d| d.handle) };
-    let select = st.tool == Tool::Select;
+    let select = st.tool == Tool::Select && !st.poly_comp();
     let knife = matches!(st.tool, Tool::Knife | Tool::Point);
     let edges = (select && st.sel_mode == SelMode::Edge) || knife;
-    let faces = (select && st.sel_mode == SelMode::Face) || matches!(st.tool, Tool::Push(_));
+    let faces = (select && st.sel_mode == SelMode::Face) || matches!(st.tool, Tool::Push(_) | Tool::ShellPick);
     let verts = select && st.sel_mode == SelMode::Vertex;
     if st.drag.is_none() && st.round_drag.is_none() && st.face_drag.is_none() && st.creation.is_none() && st.marquee.is_none() && st.push.is_none() && !over_ui {
         st.hover_hit = hover.and_then(|h| st.pick_at(p2(h)));
         st.hover_edge = if edges { hover.and_then(|h| st.pick_edge(p2(h))) } else { None };
         st.hover_vertex = if verts { hover.and_then(|h| st.pick_vertex(p2(h))) } else { None };
         st.hover_face = if faces { st.hover_hit.map(|h| h.face) } else { None };
-        st.knife_hover = if knife { hover.and_then(|h| st.knife_pick(p2(h))).map(|k| k.1) } else { None };
-        let by_feature = select && matches!(st.sel_mode, SelMode::Object | SelMode::Edge);
-        st.hover_feature = if st.hot_handle.is_none() && by_feature { hover.and_then(|h| st.pick_path(p2(h))).or_else(|| st.hover_hit.and_then(|h| st.feature_of_face(h.face))) } else { None };
+        // Ctrl: a cut across the face from the edge under the pointer (no point catches)
+        let kp = match (knife, st.tool == Tool::Knife && ctrl) {
+            (false, _) => None,
+            (true, false) => hover.and_then(|h| st.knife_pick(p2(h))),
+            (true, true) => hover.and_then(|h| st.knife_pick_edge(p2(h))).map(|(e, q, f)| (e, q, f, false)),
+        };
+        st.knife_hover = kp.map(|k| k.1);
+        st.knife_hover_point = kp.map(|k| k.3).unwrap_or(false);
+        st.knife_preview = if st.tool == Tool::Knife && ctrl {
+            hover.and_then(|h| st.knife_loop_at(p2(h), shift)).map(|(v, closed)| (v.iter().map(|q| q.at).collect(), closed))
+        } else {
+            None
+        };
+        let by_feature = (select && matches!(st.sel_mode, SelMode::Object | SelMode::Edge)) || st.tool == Tool::Align;
+        st.hover_feature = if st.hot_handle.is_none() && by_feature {
+            if st.sel_mode == SelMode::Object {
+                // a mesh in front of the part counts too
+                hover.and_then(|h| st.pick_object(p2(h)))
+            } else {
+                hover.and_then(|h| st.pick_path(p2(h))).or_else(|| st.hover_hit.and_then(|h| st.feature_of_face(h.face)))
+            }
+        } else {
+            None
+        };
+        // Object mode (Maya): the whole element, its operations' faces too
+        if st.sel_mode == SelMode::Object {
+            st.hover_feature = st.hover_feature.map(|id| st.element_of(id));
+        }
         // edges: only a fillet's faces light up (a click there selects it)
         if edges && (st.hover_edge.is_some() || st.hover_feature.and_then(|id| st.doc.feature(id)).map(|f| f.round.is_none()).unwrap_or(true)) {
             st.hover_feature = None;
@@ -330,12 +396,276 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         return;
     }
 
+    // a curve pulled into a solid (Ctrl + E on a curve, or its window's
+    // Extrude): the pointer sets its height, a click keeps it
+    if st.curve_pull.is_some() {
+        if let Some(p) = hover.or(resp.interact_pointer_pos()).map(p2) {
+            st.update_curve_pull(p);
+            st.interacting = true;
+        }
+        if resp.clicked_by(PointerButton::Primary) || resp.drag_stopped() {
+            st.finish_curve_pull();
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            st.abort_gestures();
+        }
+        return;
+    }
+
+    // the Sculpt tab's brush: a press on the clay sculpts it (Ctrl digs,
+    // Shift smooths); a click off the clay picks what is there
+    if st.tool == Tool::Sculpt {
+        if st.stroke.is_some() {
+            if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                st.stroke_to(p2(p), false);
+            }
+            st.interacting = true;
+            if resp.drag_stopped() || !l {
+                st.end_stroke();
+            }
+            return;
+        }
+        if resp.drag_started_by(PointerButton::Primary) {
+            let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+            if st.begin_stroke(p2(origin), ctrl, shift) {
+                if let Some(p) = hover {
+                    st.stroke_to(p2(p), false);
+                }
+            }
+        } else if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover).map(p2) {
+                // a click on the clay: one dab; elsewhere: a pick
+                if st.begin_stroke(p, ctrl, shift) {
+                    st.end_stroke();
+                } else {
+                    let id = st.pick_object(p).map(|id| st.element_of(id));
+                    st.select(id, shift || ctrl);
+                }
+            }
+        }
+        return;
+    }
+    // the Poly tab: Extrude / Inset following the pointer until a click
+    if st.poly_pull.is_some() {
+        if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+            st.update_poly_pull(p2(p));
+            st.interacting = true;
+        }
+        if resp.clicked_by(PointerButton::Primary) || resp.drag_stopped() {
+            st.finish_poly_pull();
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            st.cancel_poly_pull();
+        }
+        return;
+    }
+    // the Bevel following the pointer: its travel sets the width, a click
+    // keeps it, a right click drops it
+    if st.poly_bevel.as_ref().map(|b| b.live).unwrap_or(false) {
+        if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+            st.update_poly_bevel(p2(p));
+            st.interacting = true;
+        }
+        if resp.clicked_by(PointerButton::Primary) || resp.drag_stopped() {
+            st.finish_poly_bevel();
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            st.cancel_poly_bevel();
+        }
+        return;
+    }
+    // the Cut tool (Maya's Multi-Cut): the point a click would put, the
+    // line from the cut's last point; Ctrl: the loop it would insert
+    if st.tool == Tool::PolyCut {
+        st.poly_cut_hover = if over_ui { None } else { hover.and_then(|h| st.poly_cut_at(p2(h))) };
+        st.poly_loop = match (ctrl, st.poly_cut_hover) {
+            (true, Some(at)) => st.poly_cut_loop_preview(at),
+            _ => vec![],
+        };
+        if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.poly_cut_click(p2(p), ctrl);
+                st.poly_cut_hover = st.poly_cut_at(p2(p));
+                st.poly_loop.clear();
+            }
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            if st.poly_cut.is_some() {
+                st.end_poly_cut();
+            } else {
+                st.select_tool();
+            }
+        }
+        return;
+    }
+    // Insert Edge Loop: the loop under the pointer, a click cuts it
+    if st.tool == Tool::PolyLoop {
+        st.poly_loop = if over_ui { vec![] } else { hover.map(|h| st.poly_loop_preview(p2(h))).unwrap_or_default() };
+        if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.poly_loop_at(p2(p));
+                st.poly_loop.clear();
+            }
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            st.select_tool();
+        }
+        return;
+    }
+    // the selected Shell's faces to open (`shell.rs`): a click opens one
+    if st.tool == Tool::ShellPick {
+        if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.shell_pick(p2(p));
+            }
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            st.select_tool();
+        }
+        return;
+    }
+    // a linked surface in its NURBS state, Vertex mode: its contour's
+    // points (clicks, rectangles, the gizmo on them; a drag on a point moves
+    // it at once, in the plane facing the eye)
+    if st.patch_comp() {
+        if st.patch_drag.is_none() && st.marquee.is_none() {
+            st.patch_hover = if over_ui { None } else { hover.and_then(|h| st.patch_hover_at(p2(h))) };
+        }
+        if resp.drag_started_by(PointerButton::Primary) {
+            let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+            if let Some(h) = handle_at(st, origin) {
+                st.begin_drag(h, p2(origin));
+            } else if let Some(k) = st.patch_hover_at(p2(origin)) {
+                if !st.patch_picked().contains(&k) {
+                    if let Some(id) = st.linked_target() {
+                        st.patch_sel = Some(crate::linked::PatchSel { id, cvs: vec![k] });
+                    }
+                }
+                st.begin_drag(Handle::Free, p2(origin));
+            } else {
+                st.marquee = Some((p2(origin), p2(origin)));
+            }
+        }
+        if resp.dragged_by(PointerButton::Primary) {
+            if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                if st.patch_drag.is_some() {
+                    st.update_patch_drag(p2(p));
+                    st.interacting = true;
+                } else if let Some(mq) = &mut st.marquee {
+                    mq.1 = p2(p);
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            if st.patch_drag.is_some() {
+                st.end_patch_drag();
+            } else if let Some((a, b)) = st.marquee.take() {
+                st.patch_marquee(a, b, shift, ctrl);
+            }
+        }
+        if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.patch_click(p2(p), shift, ctrl);
+            }
+        }
+        return;
+    }
+    // the Poly tab's Vertex, Edge and Face modes: a Poly mesh's components
+    // (clicks, rectangles, the gizmo on them)
+    if st.poly_comp() && st.tool == Tool::Select {
+        if st.poly_drag.is_none() && st.marquee.is_none() {
+            st.poly_hover = if over_ui { None } else { hover.and_then(|h| st.poly_hover_at(p2(h))) };
+        }
+        if resp.drag_started_by(PointerButton::Primary) {
+            let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+            if let Some(h) = handle_at(st, origin) {
+                st.begin_drag(h, p2(origin));
+            } else {
+                st.marquee = Some((p2(origin), p2(origin)));
+            }
+        }
+        if resp.dragged_by(PointerButton::Primary) {
+            if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                if st.poly_drag.is_some() {
+                    st.update_poly_drag(p2(p));
+                    st.interacting = true;
+                } else if let Some(mq) = &mut st.marquee {
+                    mq.1 = p2(p);
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            if st.poly_drag.is_some() {
+                st.end_poly_drag();
+            } else if let Some((a, b)) = st.marquee.take() {
+                st.poly_marquee(a, b, shift, ctrl);
+            }
+        }
+        if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.poly_click(p2(p), shift, ctrl);
+            }
+        }
+        return;
+    }
+
+    // the SDF tab: a click picks the shape under the pointer inside its SDF
+    // object; the gizmo then works on that shape (`sdf.rs`)
+    if st.workspace == crate::workspace::Workspace::Sdf && st.tool == Tool::Select {
+        if st.sdf_comp() || st.sdf_drag.is_some() {
+            if resp.drag_started_by(PointerButton::Primary) {
+                let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                if let Some(h) = handle_at(st, origin) {
+                    st.begin_drag(h, p2(origin));
+                }
+            }
+            if resp.dragged_by(PointerButton::Primary) && st.sdf_drag.is_some() {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.update_sdf_drag(p2(p));
+                    st.interacting = true;
+                }
+            }
+            if resp.drag_stopped() && st.sdf_drag.is_some() {
+                st.end_sdf_drag();
+            }
+        }
+        if st.sdf_drag.is_none() && st.drag.is_none() && resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.sdf_click(p2(p));
+            }
+            return;
+        }
+        if st.sdf_comp() || st.sdf_drag.is_some() {
+            return;
+        }
+    }
+
+
+    // Align (`align.rs`): the click on the target; its window open, the
+    // view only turns (the window's buttons end it)
+    if st.tool == Tool::Align {
+        if resp.clicked_by(PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                st.align_pick(p2(p));
+            }
+        } else if resp.clicked_by(PointerButton::Secondary) {
+            st.align_cancel();
+        }
+        return;
+    }
+    if st.align_open() {
+        return;
+    }
+
     // Vertex, Edge and Face modes: the selected inset's dot and arrow, the
     // gizmo of the picked component (a drag moves it, Plasticity style)
     if st.tool == Tool::Select && st.sel_mode != SelMode::Object {
         if resp.drag_started_by(PointerButton::Primary) {
             let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
-            if let Some(h) = handle_at(st, origin) {
+            // quick extrude (Romain 20 nov., 11 h 54: "Une Edge ou une Face >
+            // Shift + Drag"): Shift on a picked face or edge wins over the
+            // move gizmo sitting on it (not over the scale cage, whose Shift
+            // keeps the proportions)
+            let quick = shift && !ctrl && st.gizmo != GizmoMode::Scale && st.begin_face_drag(p2(origin), true, false);
+            if quick {
+                if st.push.is_some() {
+                    return;
+                }
+            } else if let Some(h) = handle_at(st, origin) {
                 st.begin_drag(h, p2(origin));
             } else {
                 // Rectify: a drag on an edge, a fillet or a sketch corner
@@ -395,11 +725,23 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                     _ => st.click_edge(edge, shift || ctrl),
                 }
             }
+            // a double-click: the edges linked to it (Maya's edge loop)
+            if resp.double_clicked_by(PointerButton::Primary) {
+                if let Some(e) = resp.interact_pointer_pos().or(hover).map(p2).and_then(|p| st.pick_edge(p)) {
+                    st.pick_linked_edges(e, shift || ctrl);
+                }
+            }
         }
         Tool::Select if st.sel_mode == SelMode::Face => {
             if resp.clicked_by(PointerButton::Primary) {
                 let at = resp.interact_pointer_pos().or(hover).map(p2);
                 st.click_face(at, shift || ctrl);
+            }
+            // a double-click: the faces linked to it (Maya's shell)
+            if resp.double_clicked_by(PointerButton::Primary) {
+                if let Some(p) = resp.interact_pointer_pos().or(hover).map(p2) {
+                    st.pick_linked_faces(p, shift || ctrl);
+                }
             }
         }
         Tool::Select if st.sel_mode == SelMode::Vertex => {
@@ -408,11 +750,110 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 let v = at.and_then(|p| st.pick_vertex(p));
                 st.click_vertex(v, shift || ctrl);
             }
+            if resp.double_clicked_by(PointerButton::Primary) {
+                if let Some(v) = resp.interact_pointer_pos().or(hover).map(p2).and_then(|p| st.pick_vertex(p)) {
+                    st.pick_linked_vertices(v, shift || ctrl);
+                }
+            }
+        }
+        Tool::Align | Tool::ShellPick => {}
+        Tool::Form => {
+            // a brush stroke on a form (`forms.rs`)
+            if st.form_brush.is_some() {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.form_drag(p2(p));
+                }
+                if resp.drag_stopped() || !l {
+                    st.form_release();
+                }
+                return;
+            }
+            if resp.drag_started_by(PointerButton::Primary) {
+                let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                if st.form_press(p2(origin), shift, ctrl) {
+                    if let Some(p) = hover {
+                        st.form_drag(p2(p));
+                    }
+                }
+            } else if resp.clicked_by(PointerButton::Primary) {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    st.form_click(p2(p));
+                }
+            }
+        }
+        Tool::Slot => {
+            // a drag along a slot of the reference (`scan.rs`): read there
+            // when released
+            if st.scan_slot.is_some() {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.scan_slot_move(p2(p));
+                }
+                if resp.drag_stopped() || !l {
+                    st.scan_slot_release();
+                }
+                return;
+            }
+            // by hand (the default): its length dragged, its width moved,
+            // a click, then its height as any shape
+            if !st.slot_on_scan {
+                if st.creation.is_some() {
+                    if let Some(p) = hover {
+                        st.update_creation(p2(p), shift);
+                    }
+                    if resp.clicked_by(PointerButton::Primary) || resp.drag_started_by(PointerButton::Primary) {
+                        st.finish_creation();
+                    }
+                    return;
+                }
+                let width = st.slot_draw.as_ref().map(|s| s.width);
+                match width {
+                    Some(false) => {
+                        if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                            st.slot_move(p2(p));
+                        }
+                        if resp.drag_stopped() || !l {
+                            let p = hover.or(resp.interact_pointer_pos()).unwrap_or(rect.center());
+                            st.slot_release(p2(p));
+                        }
+                    }
+                    Some(true) => {
+                        if let Some(p) = hover {
+                            st.slot_move(p2(p));
+                        }
+                        if resp.clicked_by(PointerButton::Primary) || resp.drag_started_by(PointerButton::Primary) {
+                            let p = resp.interact_pointer_pos().or(hover).unwrap_or(rect.center());
+                            st.slot_press(p2(p));
+                        }
+                    }
+                    None => {
+                        if resp.drag_started_by(PointerButton::Primary) {
+                            let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                            st.slot_press(p2(origin));
+                            if let Some(p) = hover {
+                                st.slot_move(p2(p));
+                            }
+                        } else if resp.clicked_by(PointerButton::Primary) {
+                            st.toast("Slot: drag from one end of the slot to the other, then set its width", false);
+                        }
+                    }
+                }
+                return;
+            }
+            if resp.drag_started_by(PointerButton::Primary) {
+                let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                if st.scan_slot_press(p2(origin)) {
+                    if let Some(p) = hover {
+                        st.scan_slot_move(p2(p));
+                    }
+                }
+            } else if resp.clicked_by(PointerButton::Primary) {
+                st.toast("Slot on the scan: drag along a slot of the scan, from one end to the other", false);
+            }
         }
         Tool::Knife | Tool::Point => {
             if resp.clicked_by(PointerButton::Primary) {
                 if let Some(p) = resp.interact_pointer_pos().or(hover) {
-                    st.knife_click(p2(p));
+                    st.knife_click_with(p2(p), shift, ctrl);
                 }
             } else if resp.clicked_by(PointerButton::Secondary) {
                 st.knife_end();
@@ -476,12 +917,15 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
             if resp.clicked_by(PointerButton::Primary) {
                 let at = resp.interact_pointer_pos().or(hover);
-                let id = at.and_then(|p| st.pick_path(p2(p))).or_else(|| at.and_then(|p| st.pick_at(p2(p))).and_then(|h| st.feature_of_face(h.face)));
+                let id = at.and_then(|p| st.pick_object(p2(p)));
+                // the element, not the operation whose face was clicked
+                let id = id.map(|id| st.element_of(id));
                 st.select(id, shift || ctrl);
             }
         }
-        Tool::Create(PrimKind::Profile | PrimKind::Path) if st.creation.is_none() => {
-            // the outline: a click puts a corner, a drag a curve point;
+        Tool::Sculpt | Tool::PolyLoop | Tool::PolyCut => {}
+        Tool::Create(PrimKind::Profile | PrimKind::Path | PrimKind::Surface) if st.creation.is_none() => {
+            // the outline: a click or a drag puts a corner;
             // Ctrl + drag from a point placed: its fillet
             let grabbed = st.sketch.as_ref().map(|k| k.grab.is_some()).unwrap_or(false);
             if resp.drag_started_by(PointerButton::Primary) {
@@ -508,17 +952,60 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
             if resp.clicked_by(PointerButton::Primary) {
                 if let Some(p) = resp.interact_pointer_pos() {
-                    st.sketch_press(p2(p));
-                    st.sketch_release();
+                    // Surface in Curve mode: Shift + click on a point placed
+                    // breaks the curve there (or no longer)
+                    if !(shift && st.sketch_toggle_sharp(p2(p))) {
+                        st.sketch_press(p2(p));
+                        st.sketch_release();
+                    }
                 }
             }
         }
+        Tool::Curve(kind) => match st.creation.as_ref().map(|c| c.phase) {
+            None => {
+                if resp.drag_started_by(PointerButton::Primary) {
+                    let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                    st.begin_curve(kind, p2(origin));
+                } else if resp.clicked_by(PointerButton::Primary) {
+                    // a click without a drag: 20 mm across, there
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        st.begin_curve(kind, p2(p));
+                        st.curve_released();
+                    }
+                }
+            }
+            Some(_) => {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.update_creation(p2(p), shift);
+                }
+                if resp.drag_stopped() || !l {
+                    st.curve_released();
+                }
+            }
+        },
         Tool::Create(kind) => {
+            // the Cylinder dragged across a round part of the reference
+            // (`scan.rs`): read there when released
+            if st.scan_round.is_some() {
+                if let Some(p) = hover.or(resp.interact_pointer_pos()) {
+                    st.scan_round_move(p2(p));
+                }
+                if resp.drag_stopped() || !l {
+                    st.scan_round_release();
+                }
+                return;
+            }
             let phase = st.creation.as_ref().map(|c| c.phase);
             match phase {
                 None => {
                     if resp.drag_started_by(PointerButton::Primary) {
                         let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                        if kind == PrimKind::Cylinder && st.scan_round_press(p2(origin)) {
+                            if let Some(p) = hover {
+                                st.scan_round_move(p2(p));
+                            }
+                            return;
+                        }
                         st.begin_creation(kind, p2(origin));
                     } else if resp.clicked_by(PointerButton::Primary) {
                         // a click without a drag: a 20 mm shape there
@@ -580,12 +1067,19 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
     if st.tool != Tool::Select || st.creation.is_some() {
         return;
     }
+    // a bevel being sized: the pointer sets its width, no handles
+    if st.poly_bevel.as_ref().map(|b| b.live).unwrap_or(false) {
+        if let (Some(t), Some(h)) = (&st.gizmo_readout, p.ctx().input(|i| i.pointer.hover_pos())) {
+            chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, t, HOT, HOT);
+        }
+        return;
+    }
     let hot = st.hot_handle;
-    let dragging = st.drag.as_ref().map(|d| d.handle);
+    let dragging = st.drag.as_ref().map(|d| d.handle).or(st.poly_drag.as_ref().map(|d| d.handle)).or(st.sdf_drag.as_ref().map(|d| d.handle)).or(st.patch_drag.as_ref().map(|d| d.handle));
     if st.gizmo == GizmoMode::Select {
         return;
     }
-    if st.sel_mode == SelMode::Object && matches!(st.gizmo, GizmoMode::Rotate | GizmoMode::Scale) {
+    if ((st.sel_mode == SelMode::Object || st.poly_comp()) && st.gizmo == GizmoMode::Rotate) || st.gizmo == GizmoMode::Scale {
         draw_rot_scale(p, st, hot, dragging);
         return;
     }
@@ -612,37 +1106,35 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
             arrow(p, c + (*t - c) * 0.18, *t, if on { HOT } else { colors[a] }, if on { 3.0 } else { 2.2 });
         }
     }
+    // the centre: a square (Maya's), a move on all three axes
+    {
+        let on = hot == Some(Handle::Free) || dragging == Some(Handle::Free);
+        let sq = Rect::from_center_size(c, vec2(12.0, 12.0));
+        if on {
+            p.rect_filled(sq, 1.5, tint(HOT, 0.35));
+        }
+        p.rect_stroke(sq, 1.5, Stroke::new(if on { 1.6 } else { 1.1 }, if on { HOT } else { Color32::from_gray(0xd8) }), egui::StrokeKind::Middle);
+    }
     p.circle(c, 2.5, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
+    // a pivot put by hand (D): ringed
+    if st.custom_pivot_on() {
+        p.circle_stroke(c, 10.5, Stroke::new(1.3, HOT));
+    }
     // the move under way
     if let Some(d) = &st.drag {
-        if matches!(d.handle, Handle::Axis(_) | Handle::Plane(_)) {
+        if matches!(d.handle, Handle::Axis(_) | Handle::Plane(_) | Handle::Free) {
             if let (Some(s), Some(f)) = (d.start.first(), d.start.first().and_then(|s| st.doc.feature(s.id))) {
-                let dv = f.origin - s.origin;
+                // a component move: its step's delta (its origin stays)
+                let dv = match (&f.tweak, &s.tweak) {
+                    (Some(t), Some(t0)) => t.delta - t0.delta,
+                    _ => f.origin - s.origin,
+                };
                 let txt = match d.handle {
                     Handle::Axis(a) => format!("{} {} mm", ["X", "Y", "Z"][a], fmt_mm(dv[a] as f32)),
                     _ => format!("{} × {} × {} mm", fmt_mm(dv.x as f32), fmt_mm(dv.y as f32), fmt_mm(dv.z as f32)),
                 };
                 chip(p, c + vec2(14.0, 14.0), Align2::LEFT_TOP, &txt, HOT, HOT);
             }
-        }
-    }
-    // size handles of the one selected shape
-    let Some(f) = st.single() else { return };
-    for h in size_handles(f) {
-        let Some(q) = size_handle_pos(f, h).and_then(|w| world(st, w)) else { continue };
-        let on = hot == Some(h);
-        if dragging.is_some() && dragging != Some(h) {
-            continue;
-        }
-        p.circle(q, if on { 4.0 } else { 3.0 }, if on { HOT } else { Color32::WHITE }, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
-        if on {
-            let (label, v) = match (h, f.prim) {
-                (Handle::Size(0), Prim::Box { x, .. } | Prim::Profile { x, .. } | Prim::Path { x, .. }) => ("W", x),
-                (Handle::Size(2), Prim::Box { z, .. } | Prim::Profile { z, .. } | Prim::Path { z, .. }) => ("D", z),
-                (Handle::Size(3), Prim::Cylinder { radius, .. }) => ("R", radius),
-                (_, pr) => ("H", pr.height()),
-            };
-            chip(p, q + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, &format!("{label} {} mm", fmt_mm(v as f32)), HOT, HOT);
         }
     }
 }
@@ -666,19 +1158,43 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
             }
         }
     } else {
-        let Some((_, tips)) = scale_points(st) else { return };
-        for (a, t) in tips.iter().enumerate() {
-            if dragging.is_some() && dragging != Some(Handle::Scale(a)) && dragging != Some(Handle::ScaleAll) {
+        // the cage: its edges thin, a grip per face, edge and corner; the
+        // grip dragged alone in the accent, the value beside it
+        let Some(cg) = st.cage() else { return };
+        for (a, b) in cg.edges() {
+            if let (Some(a), Some(b)) = (world(st, a), world(st, b)) {
+                p.line_segment([a, b], Stroke::new(1.0, Color32::from_white_alpha(150)));
+            }
+        }
+        let dark = Color32::from_rgb(0x20, 0x22, 0x26);
+        let mut at_grip = None;
+        for s in cg.grips() {
+            let h = Handle::Cage(s);
+            if dragging.is_some() && dragging != Some(h) {
                 continue;
             }
-            let Some(t) = t else { continue };
-            let on = hot == Some(Handle::Scale(a)) || hot == Some(Handle::ScaleAll);
-            let col = if on { HOT } else { colors[a] };
-            p.line_segment([c + (*t - c) * 0.18, *t], Stroke::new(if on { 3.0 } else { 2.2 }, col));
-            p.rect_filled(Rect::from_center_size(*t, vec2(10.0, 10.0)), 2.0, col);
+            let Some(q) = world(st, cg.point(s)) else { continue };
+            let on = hot == Some(h) || dragging == Some(h);
+            let n = s.iter().filter(|v| **v != 0).count();
+            let r = match n {
+                1 => 4.5,
+                2 => 3.0,
+                _ => 3.5,
+            } + if on { 1.5 } else { 0.0 };
+            let fill = if on { HOT } else { Color32::WHITE };
+            if n == 2 {
+                p.circle(q, r, fill, Stroke::new(1.0, dark));
+            } else {
+                p.rect(Rect::from_center_size(q, vec2(r * 2.0, r * 2.0)), 1.0, fill, Stroke::new(1.0, dark), egui::StrokeKind::Middle);
+            }
+            if on {
+                at_grip = Some(q);
+            }
         }
-        let on = hot == Some(Handle::ScaleAll);
-        p.rect(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, if on { tint(HOT, 0.5) } else { tint(Color32::WHITE, 0.25) }, Stroke::new(1.5, if on { HOT } else { Color32::WHITE }), egui::StrokeKind::Middle);
+        if let (Some(q), Some(t)) = (at_grip, &st.gizmo_readout) {
+            chip(p, q + vec2(14.0, 14.0), Align2::LEFT_TOP, t, HOT, HOT);
+        }
+        return;
     }
     p.circle(c, 2.25, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
     if let Some(t) = &st.gizmo_readout {
@@ -690,6 +1206,15 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
 /// the pointer as the next point, the side back to the first point dimmed.
 fn draw_sketch(p: &Painter, st: &AppState) {
     let Some(k) = &st.sketch else { return };
+    if st.tool == Tool::Create(PrimKind::Surface) {
+        draw_surface_outline(p, st, k, false);
+        return;
+    }
+    // the Path tool's CURVE: the spline through the points as it will be
+    if st.tool == Tool::Create(PrimKind::Path) && st.surface_curve {
+        draw_surface_outline(p, st, k, true);
+        return;
+    }
     let path = st.tool == Tool::Create(PrimKind::Path);
     let col = if path { PATH } else if st.mode == Op::Carve { carve() } else { accent() };
     let hover = p.ctx().input(|i| i.pointer.hover_pos());
@@ -750,30 +1275,147 @@ fn draw_sketch(p: &Painter, st: &AppState) {
         return;
     }
     if let Some(h) = hover {
-        let on = if k.plane.face.is_some() { "on the face" } else { "on the ground" };
+        let on = k.plane.label();
         let txt = if closing { "close".to_string() } else if path && k.pts.len() >= 2 { format!("{} points · Enter: an open path", k.pts.len()) } else { format!("{} point{} · {on}", k.pts.len(), if k.pts.len() == 1 { "" } else { "s" }) };
         chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, tint(col, 0.6), if closing { HOT } else { TEXT2() });
     }
 }
 
+/// The Surface tool's outline: straight sides through the points (on the
+/// plane, or on the scan "On scan"), the pointer as the next point, the side
+/// back to the first point dimmed.
+fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch, path: bool) {
+    let col = PATH;
+    let hover = p.ctx().input(|i| i.pointer.hover_pos());
+    let closing = hover.map(|h| st.sketch_on_first(p2(h))).unwrap_or(false);
+    let placed = k.pts.len();
+    let ctrl = p.ctx().input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
+    let mut next = None;
+    if k.held.is_none() && k.grab.is_none() && !ctrl && !closing {
+        if let Some(h) = hover {
+            next = if st.surface_on_scan { st.reference_at(p2(h)).map(|x| x.0) } else { st.sketch_snap(p2(h)).map(|(q, _)| k.plane.at(q)) };
+        }
+    }
+    // the outline with its fillets, closed once it has 3 points (a path:
+    // open, closed only when the pointer is on its first point)
+    let n = placed + next.is_some() as usize;
+    let closed = if path { closing && placed >= 3 } else { n >= 3 };
+    let line = st.surface_line(k, next, closed);
+    let sl: Vec<Option<Pos2>> = line.iter().map(|q| world(st, *q)).collect();
+    let m = sl.len();
+    for i in 0..m {
+        let j = (i + 1) % m;
+        if j == 0 && (n < 3 || (path && !closed)) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (sl[i], sl[j]) else { continue };
+        let back = j == 0;
+        let stroke = if back && !closing { Stroke::new(1.2, tint(col, 0.35)) } else { Stroke::new(2.0, col) };
+        p.line_segment([a, b], stroke);
+    }
+    let sp: Vec<Option<Pos2>> = (0..placed).map(|i| world(st, k.world(i))).collect();
+    for (i, s) in sp.iter().enumerate().take(placed) {
+        let Some(s) = s else { continue };
+        let first = i == 0 && placed >= 3;
+        let r = if first && closing { 3.5 } else { 2.5 };
+        let fill = if first && closing { HOT } else { chip_bg() };
+        // Curve mode: a point the curve goes round is a disc, a sharp one
+        // (a V) a square
+        let sharp = k.sharp.get(i).copied().unwrap_or(false);
+        if st.surface_curve && !sharp {
+            p.circle(*s, r + 0.5, fill, Stroke::new(1.5, col));
+        } else {
+            p.rect(Rect::from_center_size(*s, vec2(r * 2.0, r * 2.0)), 1.0, fill, Stroke::new(1.5, col), egui::StrokeKind::Middle);
+        }
+    }
+    if let Some(h) = hover {
+        let on = if st.surface_on_scan { "on the scan" } else { k.plane.label() };
+        let txt = if closing {
+            if path { "close".to_string() } else { "close: fill it".to_string() }
+        } else if path && placed >= 2 {
+            format!("{placed} points · Enter: an open curve")
+        } else {
+            format!("{} point{} · {on}", placed, if placed == 1 { "" } else { "s" })
+        };
+        chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, tint(col, 0.6), if closing { HOT } else { TEXT2() });
+    }
+}
+
 fn draw_creation(p: &Painter, st: &AppState) {
+    // a curve pulled into a solid: its height
+    if let Some(cp) = &st.curve_pull {
+        let col = if st.doc.feature(cp.id).map(|f| f.op == Op::Carve).unwrap_or(false) { carve() } else { accent() };
+        let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("H {} mm", fmt_mm(cp.h as f32)), col, col);
+        return;
+    }
     if st.sketch.is_some() {
         draw_sketch(p, st);
         return;
     }
+    // the Slot along a slot of the reference: its length
+    if let Some(ss) = &st.scan_slot {
+        let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("{} mm · release: read the scan", fmt_mm((ss.b - ss.a).length() as f32)), accent(), accent());
+        return;
+    }
+    // the Slot by hand: its length, then its width
+    if let Some(sd) = &st.slot_draw {
+        let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
+        let txt = if sd.width { format!("W {} mm · click: its height", fmt_mm(sd.w as f32)) } else { format!("L {} mm · release: its width", fmt_mm(sd.len() as f32)) };
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, accent(), accent());
+        return;
+    }
+    if st.tool == Tool::Slot && st.slot_on_scan && st.creation.is_none() {
+        if let Some(h) = p.ctx().input(|i| i.pointer.hover_pos()) {
+            let (txt, col) = if st.scan_under(p2(h)).is_some() { ("on the scan · drag along a slot, end to end", accent()) } else { ("the Slot reads the scan", TEXT2()) };
+            p.circle_stroke(h, 7.0, Stroke::new(1.5, col));
+            chip(p, h + vec2(12.0, 10.0), Align2::LEFT_TOP, txt, tint(col, 0.6), TEXT2());
+        }
+        return;
+    }
+    // the Cylinder across a round part of the reference: its diameter
+    if let Some(sr) = &st.scan_round {
+        let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("Ø {} mm · release: read the scan", fmt_mm(sr.radius() as f32 * 2.0)), accent(), accent());
+        return;
+    }
     let Some(c) = &st.creation else {
         // the tool armed: a small cross where the shape would start
-        if let (Tool::Create(_), Some(h)) = (st.tool, p.ctx().input(|i| i.pointer.hover_pos())) {
-            if let Some((plane, a, snapped)) = st.start_plane(p2(h)) {
+        if let (Tool::Create(k), Some(h)) = (st.tool, p.ctx().input(|i| i.pointer.hover_pos())) {
+            // the Cylinder over the reference: it reads the scan
+            if k == PrimKind::Cylinder && st.scan_under(p2(h)).is_some() {
+                p.circle_stroke(h, 7.0, Stroke::new(1.5, accent()));
+                chip(p, h + vec2(12.0, 10.0), Align2::LEFT_TOP, "on the scan · drag across a round part, rim to rim", tint(accent(), 0.6), TEXT2());
+                return;
+            }
+            if let Some((plane, a, snapped)) = st.start_plane_hover(p2(h)) {
                 let q = plane.at(a);
                 if let Some(s) = &snapped {
                     draw_snap(p, st, s);
                 }
                 if let Some(s) = world(st, q) {
                     let col = if st.mode == Op::Carve { carve() } else { accent() };
+                    if plane.scan.is_some() {
+                        // the scan's plane there: a square on it, about 60
+                        // points wide, and its normal, so its tilt shows
+                        // (dimmer for a tangent plane)
+                        let h = st.mm_per_point(q) * 30.0;
+                        let c: Vec<Pos2> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().filter_map(|&(i, j)| world(st, q + plane.u * (i * h) + plane.v * (j * h))).collect();
+                        let dim = if plane.scan == Some(true) { 0.9 } else { 0.5 };
+                        if c.len() == 4 {
+                            p.add(egui::Shape::convex_polygon(c.clone(), tint(col, 0.08), Stroke::NONE));
+                            p.add(egui::Shape::closed_line(c.clone(), Stroke::new(3.0, Color32::from_black_alpha(70))));
+                            p.add(egui::Shape::closed_line(c, Stroke::new(1.2, tint(col, dim))));
+                        }
+                        if let Some(t) = world(st, q + plane.n * h) {
+                            p.line_segment([s, t], Stroke::new(3.0, Color32::from_black_alpha(70)));
+                            p.line_segment([s, t], Stroke::new(1.2, tint(col, dim)));
+                        }
+                    }
                     p.line_segment([s - vec2(6.0, 0.0), s + vec2(6.0, 0.0)], Stroke::new(1.5, col));
                     p.line_segment([s - vec2(0.0, 6.0), s + vec2(0.0, 6.0)], Stroke::new(1.5, col));
-                    let on = if plane.face.is_some() { "on the face" } else { "on the ground" };
+                    let on = plane.label();
                     chip(p, s + vec2(12.0, 10.0), Align2::LEFT_TOP, on, tint(col, 0.6), TEXT2());
                 }
             }
@@ -784,6 +1426,8 @@ fn draw_creation(p: &Painter, st: &AppState) {
     let col = if f.op == Op::Carve { carve() } else { accent() };
     let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
     let txt = match (c.phase, f.prim) {
+        // a curve drawn from its centre: its radius
+        (_, Prim::Path { x, z }) if f.curve.is_some_and(|k| k.kind.from_centre()) => format!("R {} mm", fmt_mm(f.curve.map(|k| k.radius(x, z)).unwrap_or(0.0) as f32)),
         (Phase::Base, Prim::Box { x, z, .. } | Prim::Profile { x, z, .. } | Prim::Path { x, z }) => format!("{} × {} mm", fmt_mm(x as f32), fmt_mm(z as f32)),
         (Phase::Base, Prim::Cylinder { radius, .. }) => format!("R {} mm", fmt_mm(radius as f32)),
         (Phase::Height, _) => format!("H {} mm", fmt_mm(c.height as f32)),
@@ -875,6 +1519,234 @@ fn draw_vertices(p: &Painter, st: &AppState) {
     }
 }
 
+/// A linked surface in its NURBS state, Vertex mode: its contour's points,
+/// a corner a small square, a tangent point a dot; picked ones filled.
+fn draw_patch(p: &Painter, st: &AppState) {
+    if !st.patch_comp() {
+        return;
+    }
+    let Some((_, cv, contour)) = st.patch_points() else { return };
+    let picked = st.patch_picked();
+    let a = accent();
+    for k in contour {
+        let Some(s) = world(st, cv[k].as_dvec3()) else { continue };
+        let on = picked.contains(&k);
+        let hot = st.patch_hover == Some(k) && st.patch_drag.is_none();
+        let (fill, stroke) = if on {
+            (a, Stroke::new(1.0, chip_bg()))
+        } else if hot {
+            (chip_bg(), Stroke::new(1.6, a))
+        } else {
+            (chip_bg(), Stroke::new(1.2, tint(TEXT(), 0.9)))
+        };
+        if st.patch_is_corner(k) {
+            let r = if on || hot { 4.5 } else { 3.6 };
+            p.rect(Rect::from_center_size(s, vec2(r * 2.0, r * 2.0)), 1.0, fill, stroke, egui::StrokeKind::Middle);
+        } else {
+            p.circle(s, if on || hot { 3.6 } else { 2.8 }, fill, stroke);
+        }
+    }
+}
+
+/// The Poly tab's component modes: the target mesh's points (Vertex
+/// mode), the edge under the pointer, the picked points.
+fn draw_poly(p: &Painter, st: &AppState) {
+    if !st.poly_comp() || st.tool != Tool::Select {
+        return;
+    }
+    let Some(id) = st.poly_target().or(match st.poly_hover {
+        Some(crate::poly::PolyHover::Vert(id, _) | crate::poly::PolyHover::Edge(id, _) | crate::poly::PolyHover::Face(id, _)) => Some(id),
+        None => None,
+    }) else {
+        return;
+    };
+    let Some(f) = st.doc.feature(id) else { return };
+    let Some(m) = f.mesh.as_ref() else { return };
+    let pts = crate::meshes::world_points(f);
+    let v = st.view();
+    let a = accent();
+    // the edge under the pointer
+    if let Some(crate::poly::PolyHover::Edge(hid, e)) = st.poly_hover {
+        if hid == id && st.poly_drag.is_none() {
+            if let (Some(s0), Some(s1)) = (pts.get(e.0 as usize).and_then(|q| world(st, q.as_dvec3())), pts.get(e.1 as usize).and_then(|q| world(st, q.as_dvec3()))) {
+                p.line_segment([s0, s1], Stroke::new(2.4, tint(a, 0.75)));
+            }
+        }
+    }
+    if st.sel_mode != SelMode::Vertex {
+        return;
+    }
+    // the points facing the eye (their normal), the picked ones lit
+    let normals = m.vertex_normals(&pts);
+    let picked: Vec<u32> = st.poly_sel.as_ref().filter(|s| s.id == id).map(|s| s.verts.clone()).unwrap_or_default();
+    let hot = match st.poly_hover {
+        Some(crate::poly::PolyHover::Vert(hid, i)) if hid == id => Some(i),
+        _ => None,
+    };
+    for (i, q) in pts.iter().enumerate() {
+        let i = i as u32;
+        let facing = normals[i as usize].dot(v.eye - *q) > 0.0;
+        let is_picked = picked.contains(&i);
+        if !facing && !is_picked {
+            continue;
+        }
+        let Some(sp) = v.project(*q) else { continue };
+        let sp = pos2(sp[0], sp[1]);
+        if is_picked {
+            p.circle(sp, 3.0, a, Stroke::new(1.0, chip_bg()));
+        } else if hot == Some(i) {
+            p.circle(sp, 3.0, chip_bg(), Stroke::new(1.4, a));
+        } else {
+            p.circle(sp, 1.9, chip_bg(), Stroke::new(1.0, tint(TEXT(), 0.8)));
+        }
+    }
+}
+
+/// The Cut tool: the point a click would put (a ring on a point, a diamond
+/// on an edge), the line from the cut's last point to it (full when it
+/// would cut across a face, dashed when it would start again there).
+fn draw_poly_cut(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
+    if st.tool != Tool::PolyCut {
+        return;
+    }
+    let col = EDGE_SEL;
+    let hot = st.poly_cut_hover;
+    let at = hot.and_then(|h| st.cut_point(h)).and_then(|q| world(st, q.as_dvec3()));
+    if let (Some(a), Some(b)) = (st.poly_cut_last().and_then(|q| world(st, q.as_dvec3())), at.or(pointer)) {
+        if hot.map(|h| st.poly_cut_joins(h)).unwrap_or(false) {
+            p.line_segment([a, b], Stroke::new(1.8, col));
+        } else {
+            let n = ((b - a).length() / 6.0).ceil().max(1.0) as usize;
+            for i in (0..n).step_by(2) {
+                let (t0, t1) = (i as f32 / n as f32, ((i + 1) as f32 / n as f32).min(1.0));
+                p.line_segment([a + (b - a) * t0, a + (b - a) * t1], Stroke::new(1.2, tint(col, 0.6)));
+            }
+        }
+        p.circle(a, 3.0, col, Stroke::new(1.0, chip_bg()));
+    }
+    if let (Some(c), Some(h)) = (at, hot) {
+        match h {
+            crate::poly::CutAt::Vert(..) => {
+                p.circle(c, 4.5, chip_bg(), Stroke::new(1.6, col));
+            }
+            crate::poly::CutAt::Edge(_, _, _, t) => {
+                let r = 4.0;
+                let d = [c + vec2(0.0, -r), c + vec2(r, 0.0), c + vec2(0.0, r), c + vec2(-r, 0.0)];
+                p.add(egui::Shape::convex_polygon(d.to_vec(), col, Stroke::new(1.2, chip_bg())));
+                if (t - 0.5).abs() < 1e-4 {
+                    chip(p, c + vec2(10.0, -10.0), Align2::LEFT_BOTTOM, "middle", HOT, HOT);
+                }
+            }
+        }
+    }
+}
+
+/// The Sculpt tab's brush: a ring of its radius round the pointer, full on
+/// the clay, dashed off it (ZBrush's draw size is on screen).
+fn draw_brush(p: &Painter, st: &AppState, pointer: Option<Pos2>, in_view: bool) {
+    if st.tool != Tool::Sculpt || !in_view {
+        return;
+    }
+    let Some(c) = pointer else { return };
+    let on = st.stroke.is_some() || st.pick_mesh(p2(c), Some(nurbs_kernel::mesh::MeshKind::Sculpt)).is_some();
+    let a = accent();
+    let r = st.sculpt.radius;
+    // Clay Buildup: its square, along the stroke on screen
+    let brush = st.stroke.as_ref().map(|s| s.brush).unwrap_or(st.sculpt.brush);
+    if brush == crate::sculpt::Brush::Buildup {
+        let ang = st
+            .stroke
+            .as_ref()
+            .and_then(|s| {
+                let v = st.view();
+                let (q0, q1) = (v.project(s.last)?, v.project(s.last + s.dir * s.radius)?);
+                Some((q1[1] - q0[1]).atan2(q1[0] - q0[0]))
+            })
+            .unwrap_or(0.0);
+        let (cs, sn) = (ang.cos(), ang.sin());
+        let k = r * 0.84;
+        let sq: Vec<Pos2> = [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().map(|(x, y)| c + vec2(x * cs - y * sn, x * sn + y * cs) * k).collect();
+        let col = if on { a } else { tint(a, 0.6) };
+        p.add(egui::Shape::closed_line(sq, Stroke::new(if on { 1.6 } else { 1.2 }, col)));
+        if on {
+            p.circle_stroke(c, r * (0.15 + 0.5 * st.sculpt.strength), Stroke::new(1.0, tint(a, 0.55)));
+        }
+        p.circle_filled(c, 1.6, a);
+        return;
+    }
+    if on {
+        p.circle_stroke(c, r, Stroke::new(1.6, a));
+        // the strength, as an inner ring
+        p.circle_stroke(c, r * (0.15 + 0.5 * st.sculpt.strength), Stroke::new(1.0, tint(a, 0.55)));
+    } else {
+        let n = 48;
+        for i in (0..n).step_by(2) {
+            let t0 = i as f32 / n as f32 * std::f32::consts::TAU;
+            let t1 = (i + 1) as f32 / n as f32 * std::f32::consts::TAU;
+            p.line_segment([c + vec2(t0.cos(), t0.sin()) * r, c + vec2(t1.cos(), t1.sin()) * r], Stroke::new(1.2, tint(a, 0.6)));
+        }
+    }
+    p.circle_filled(c, 1.6, a);
+}
+
+/// The Forms tool's brush: a ring of its radius laid on the surface under
+/// the pointer (on screen off the part), and its mirror with the symmetry.
+fn draw_form_brush(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
+    if st.tool != Tool::Form {
+        return;
+    }
+    let Some(at) = pointer else { return };
+    let light = Color32::from_rgba_unmultiplied(240, 242, 245, 230);
+    let dark = Color32::from_rgba_unmultiplied(10, 12, 16, 150);
+    let ring = |pts: Vec<Pos2>, strong: bool| {
+        let (w, c) = if strong { (1.4, light) } else { (1.0, Color32::from_rgba_unmultiplied(240, 242, 245, 120)) };
+        p.add(egui::Shape::closed_line(pts.clone(), Stroke::new(w + 2.0, dark)));
+        p.add(egui::Shape::closed_line(pts, Stroke::new(w, c)));
+    };
+    // on a stroke: the ring on screen round the pointer
+    let (hit, strong) = match &st.form_brush {
+        Some(_) => (None, true),
+        None => (st.hover_hit.and_then(|h| st.feature_of_face(h.face).map(|id| (h.point.as_dvec3(), h.normal.as_dvec3(), id))), true),
+    };
+    let r_pts = st.form.radius;
+    match hit {
+        Some((h, n, id)) => {
+            let r = r_pts as f64 * st.mm_per_point(h);
+            let n = n.normalize_or(DVec3::Y);
+            let u = n.any_orthonormal_vector();
+            let v = n.cross(u);
+            let circle = |c: DVec3, u: DVec3, v: DVec3| -> Vec<Pos2> { (0..48).filter_map(|k| { let a = std::f64::consts::TAU * k as f64 / 48.0; world(st, c + (u * a.cos() + v * a.sin()) * r) }).collect() };
+            let pts = circle(h, u, v);
+            if pts.len() > 8 {
+                ring(pts, strong);
+            }
+            if let Some(c) = world(st, h) {
+                p.circle_filled(c, 2.0, light);
+            }
+            // the mirror, across the form's middle
+            if st.form.mirror {
+                if let Some(f) = st.doc.feature(id).filter(|f| f.form.is_some()) {
+                    let m = f.matrix();
+                    let (o, ax) = (m.transform_point3(DVec3::ZERO), m.transform_vector3(DVec3::X).normalize_or(DVec3::X));
+                    let refl = |q: DVec3| q - ax * (2.0 * (q - o).dot(ax));
+                    let refv = |q: DVec3| q - ax * (2.0 * q.dot(ax));
+                    let pts = circle(refl(h), refv(u), refv(v));
+                    if pts.len() > 8 {
+                        ring(pts, false);
+                    }
+                }
+            }
+        }
+        None => {
+            let pts: Vec<Pos2> = (0..48).map(|k| { let a = std::f32::consts::TAU * k as f32 / 48.0; at + vec2(a.cos(), a.sin()) * r_pts }).collect();
+            ring(pts, st.form_brush.is_some());
+        }
+    }
+    if let Some(s) = &st.form_brush {
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, s.brush.label(), HOT, HOT);
+    }
+}
+
 /// The Knife: the point the pointer catches on an edge (a diamond), the
 /// line from the cut's last point to it (or to the pointer, dashed).
 fn draw_knife(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
@@ -883,17 +1755,43 @@ fn draw_knife(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
     }
     let col = EDGE_SEL;
     let hot = st.knife_hover.and_then(|q| world(st, q));
+    // the loop cut a click would make
+    if let Some((pts, closed)) = &st.knife_preview {
+        let mut v: Vec<Pos2> = pts.iter().filter_map(|q| world(st, *q)).collect();
+        if *closed && v.len() > 2 {
+            v.push(v[0]);
+        }
+        if v.len() >= 2 {
+            p.add(egui::Shape::line(v.clone(), Stroke::new(1.6, col)));
+            for c in &v {
+                p.circle(*c, 1.6, col, Stroke::NONE);
+            }
+        }
+        if let Some(c) = hot {
+            let r = 3.5;
+            let d = [c + vec2(0.0, -r), c + vec2(r, 0.0), c + vec2(0.0, r), c + vec2(-r, 0.0)];
+            p.add(egui::Shape::convex_polygon(d.to_vec(), col, Stroke::new(1.2, chip_bg())));
+        }
+        return;
+    }
+    // the cut goes on from its last point (Romain 20 nov., 12 h 09: the
+    // faint dashed line read as no preview): a plain line to the pointer,
+    // full when it would cut there
     if st.tool == Tool::Knife {
         if let (Some(a), Some(b)) = (st.knife_last().and_then(|q| world(st, q)), hot.or(pointer)) {
             if hot.is_some() {
-                p.line_segment([a, b], Stroke::new(1.6, col));
+                p.line_segment([a, b], Stroke::new(1.8, col));
             } else {
-                p.extend(egui::Shape::dashed_line(&[a, b], Stroke::new(1.2, tint(col, 0.6)), 5.0, 4.0));
+                p.line_segment([a, b], Stroke::new(1.5, tint(col, 0.9)));
             }
         }
     }
     if let Some(a) = st.knife_last().and_then(|q| world(st, q)) {
-        p.circle(a, 2.0, col, Stroke::new(1.0, chip_bg()));
+        p.circle(a, 3.0, col, Stroke::new(1.0, chip_bg()));
+    }
+    // a vertex or an edge's middle caught: a ring round the diamond
+    if let (Some(c), true) = (hot, st.knife_hover_point) {
+        p.circle_stroke(c, 7.0, Stroke::new(1.4, col));
     }
     if let Some(c) = hot {
         let r = 3.5;
@@ -944,6 +1842,173 @@ fn draw_push(p: &Painter, st: &AppState) {
             let txt = if d.abs() < 1e-9 { "Depth 0 (the line only)".to_string() } else { format!("Depth {}{} mm", if d > 0.0 { "+" } else { "−" }, fmt_mm(d.abs() as f32)) };
             chip(p, b + vec2(14.0, -6.0), Align2::LEFT_BOTTOM, &txt, col, col);
         }
+    }
+}
+
+/// The selected Shell's grip: a line across the wall from the face it
+/// keeps, ticked at both ends, its dot at the thickness; hovered or
+/// dragged, the value by it.
+fn draw_shell(p: &Painter, st: &AppState) {
+    let Some(g) = st.shell_grip() else { return };
+    let Some(sh) = st.selected_shell().and_then(|f| f.shell.clone()) else { return };
+    let (Some(a), Some(b)) = (world(st, g.from), world(st, g.at)) else { return };
+    let col = accent();
+    let on = st.hot_handle == Some(Handle::ShellThick) || st.drag.as_ref().map(|d| d.handle == Handle::ShellThick).unwrap_or(false);
+    // seen short on screen: the line drawn on past the dot (dimmer), so it
+    // can be found and its way seen
+    let d = b - a;
+    let len = d.length();
+    let dir = if len > 1e-3 { d / len } else { vec2(0.0, -1.0) };
+    if len < 24.0 {
+        p.line_segment([b, b + dir * (24.0 - len)], Stroke::new(1.0, tint(col, 0.35)));
+    }
+    p.line_segment([a, b], Stroke::new(if on { 2.4 } else { 1.8 }, col));
+    let n = vec2(-dir.y, dir.x) * 5.0;
+    p.line_segment([a - n, a + n], Stroke::new(1.4, col));
+    p.circle(b, if on { 4.5 } else { 3.5 }, if on { HOT } else { chip_bg() }, Stroke::new(1.4, col));
+    if on {
+        let at = b + dir * 16.0;
+        let anchor = if dir.x >= 0.0 { Align2::LEFT_CENTER } else { Align2::RIGHT_CENTER };
+        let way = if sh.outward { " out" } else { "" };
+        chip(p, at, anchor, &format!("Wall {} mm{way}", fmt_mm(sh.thickness as f32)), col, col);
+    }
+}
+
+/// The selected Mirror's plane: a faint pane round the part, its border
+/// dashed, its axis and the side kept.
+fn draw_mirror(p: &Painter, st: &AppState) {
+    let Some((m, q)) = st.mirror_plane() else { return };
+    let col = match m.axis {
+        0 => AXIS_X,
+        1 => AXIS_Y,
+        _ => AXIS_Z,
+    };
+    let pts: Vec<Pos2> = q.iter().filter_map(|w| world(st, *w)).collect();
+    if pts.len() != 4 {
+        return;
+    }
+    p.add(egui::Shape::convex_polygon(pts.clone(), tint(col, 0.07), Stroke::NONE));
+    for i in 0..4 {
+        p.add(egui::Shape::dashed_line(&[pts[i], pts[(i + 1) % 4]], Stroke::new(1.2, tint(col, 0.75)), 6.0, 4.0));
+    }
+    // the side kept: an arrow from the pane's middle
+    let c = (q[0] + q[1] + q[2] + q[3]) * 0.25;
+    let n = m.normal() * if m.flip { -1.0 } else { 1.0 };
+    let reach = (q[0] - q[2]).length() * 0.08;
+    if let (Some(a), Some(b)) = (world(st, c), world(st, c + n * reach)) {
+        arrow(p, a, b, col, 2.0);
+        chip(p, b + vec2(10.0, -4.0), Align2::LEFT_BOTTOM, &format!("Mirror {} · keeps {}{}", m.axis_name(), if m.flip { "−" } else { "+" }, m.axis_name()), col, col);
+    }
+}
+
+/// The selected Array's places: a dot at each copy's middle (the
+/// original's ringed), joined in order by a dashed line (round a circle,
+/// an arc on its axis), with its count.
+fn draw_array(p: &Painter, st: &AppState) {
+    let Some((a, pts)) = st.array_marks() else { return };
+    let col = accent();
+    let screen: Vec<Option<Pos2>> = pts.iter().map(|w| world(st, *w)).collect();
+    let dash = |p: &Painter, line: &[Pos2]| {
+        if line.len() >= 2 {
+            p.add(egui::Shape::dashed_line(line, Stroke::new(1.2, tint(col, 0.6)), 5.0, 4.0));
+        }
+    };
+    match a.kind {
+        nurbs_kernel::ArrayKind::Circle => {
+            // the arc through the copies' middles, on the axis
+            let n = a.axis_dir();
+            let c0 = pts[0];
+            let centre = a.centre + n * (c0 - a.centre).dot(n);
+            let r0 = c0 - centre;
+            let total = if a.angle.abs() >= 359.999 { 360.0 } else { a.step_angle() * (a.count.max(1) - 1) as f64 };
+            let steps = ((total.abs() / 4.0).ceil() as usize).max(2);
+            let arc: Vec<Pos2> = (0..=steps).filter_map(|i| world(st, centre + glam::DQuat::from_axis_angle(n, (total * i as f64 / steps as f64).to_radians()) * r0)).collect();
+            dash(p, &arc);
+            // the axis, a little past the arc
+            let reach = r0.length().max(5.0) * 0.35;
+            if let (Some(u), Some(v)) = (world(st, centre - n * reach), world(st, centre + n * reach)) {
+                p.line_segment([u, v], Stroke::new(1.2, tint(col, 0.8)));
+                p.circle_filled(world(st, centre).unwrap_or(u), 2.5, col);
+            }
+        }
+        nurbs_kernel::ArrayKind::Line | nurbs_kernel::ArrayKind::Grid => {
+            let n = a.count.max(1) as usize;
+            let rows = if a.kind == nurbs_kernel::ArrayKind::Grid { a.count2.max(1) as usize } else { 1 };
+            // the places in rows: row j holds i = 0..n (the original first)
+            let at = |i: usize, j: usize| -> Option<Pos2> {
+                let k = j * n + i;
+                screen.get(k).copied().flatten()
+            };
+            for j in 0..rows {
+                let row: Vec<Pos2> = (0..n).filter_map(|i| at(i, j)).collect();
+                dash(p, &row);
+            }
+            if rows > 1 {
+                let col0: Vec<Pos2> = (0..rows).filter_map(|j| at(0, j)).collect();
+                dash(p, &col0);
+            }
+        }
+    }
+    for (k, s) in screen.iter().enumerate() {
+        let Some(s) = s else { continue };
+        if k == 0 {
+            p.circle_stroke(*s, 5.0, Stroke::new(1.5, col));
+        }
+        p.circle_filled(*s, 2.6, col);
+    }
+    // its grips: squares on the first copies, arrows past the ends; the
+    // one hovered or dragged lit, its value by it
+    let hot = st.hot_handle;
+    let dragging = st.drag.as_ref().map(|d| d.handle);
+    let dark = Color32::from_rgb(0x20, 0x22, 0x26);
+    let mut lit_at = None;
+    let grips = st.array_grips();
+    for g in &grips {
+        if dragging.is_some() && dragging != Some(g.handle) {
+            continue;
+        }
+        let on = hot == Some(g.handle) || dragging == Some(g.handle);
+        let Some(q) = world(st, g.at) else { continue };
+        match g.from.and_then(|f| world(st, f)) {
+            Some(f) => {
+                p.circle_filled(f, 2.0, col);
+                arrow(p, f, q, if on { HOT } else { col }, if on { 2.8 } else { 2.0 });
+            }
+            None => {
+                let r = if on { 5.5 } else { 4.5 };
+                p.rect(Rect::from_center_size(q, vec2(r * 2.0, r * 2.0)), 1.5, if on { HOT } else { Color32::WHITE }, Stroke::new(1.0, dark), egui::StrokeKind::Middle);
+            }
+        }
+        if on {
+            lit_at = Some((g.handle, q));
+        }
+    }
+    if let Some((h, q)) = lit_at {
+        let text = match (&st.gizmo_readout, dragging) {
+            (Some(t), Some(_)) => t.clone(),
+            _ => grip_value(&a, h),
+        };
+        // over the windows (the operation window stays put: the arrow may
+        // reach under it)
+        let top = p.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("array-grip-chip"))).with_clip_rect(p.clip_rect());
+        chip(&top, q + vec2(14.0, 12.0), Align2::LEFT_TOP, &text, HOT, HOT);
+    } else if let Some(Some(last)) = screen.last() {
+        let total = pts.len();
+        chip(p, *last + vec2(12.0, -10.0), Align2::LEFT_BOTTOM, &format!("Array · {} · {total}", a.kind_name()), col, col);
+    }
+}
+
+/// What an Array grip changes, as it is now (shown while hovered).
+fn grip_value(a: &nurbs_kernel::Array, h: Handle) -> String {
+    match h {
+        Handle::ArrayStep(w) => {
+            let s = if w == 0 { a.step } else { a.step2 };
+            format!("{} {} mm · drag", if w == 0 { "Step" } else { "Row step" }, crate::widgets::fmt3(s.length()))
+        }
+        Handle::ArrayCount(_) if a.kind == nurbs_kernel::ArrayKind::Circle => format!("Count {} · drag round", a.count),
+        Handle::ArrayCount(w) => format!("{} {} · pull: more", if w == 0 { "Count" } else { "Rows" }, if w == 0 { a.count } else { a.count2 }),
+        Handle::ArrayAngle => format!("Angle {}° · drag round", crate::widgets::fmt3(if a.angle.abs() >= 359.999 { 360.0 } else { a.angle }).trim_end_matches(",0")),
+        _ => String::new(),
     }
 }
 
@@ -999,6 +2064,10 @@ fn status(p: &Painter, st: &AppState) {
             }
         }
     }
+    // Claude drives the app through its link (`remote.rs`)
+    if st.link.served > 0 {
+        parts.push(format!("Claude · {} request{}", st.link.served, if st.link.served == 1 { "" } else { "s" }));
+    }
     // just above the history strip
     let at = pos2(st.view_rect[0] + 12.0, st.view_rect[3] - 4.0);
     let r = chip(p, at, Align2::LEFT_BOTTOM, &parts.join(" · "), PANEL_BORDER(), color);
@@ -1041,33 +2110,81 @@ pub fn hint(st: &AppState) -> String {
     if let Some(g) = &st.push {
         return if g.held { "Drag: out adds, in carves · Release: done · Esc: cancel".into() } else { "Move: out adds, in carves · Click: done · Esc: cancel".into() };
     }
+    if let Some(h) = sculpt_poly_hint(st) {
+        return h;
+    }
+    // shapes start on the scan's faces too
+    let on_scan = st.reference.is_some() && st.ref_shown;
     match (&st.creation, st.tool) {
+        (Some(c), _) if c.curve.is_some() => match c.curve {
+            Some(CurveKind::Rectangle) => "Drag: corner to corner · Shift: a square · Release: done".into(),
+            Some(CurveKind::Ellipse) => "Drag: corner to corner · Shift: a circle · Release: done".into(),
+            _ => "Drag: the radius · Release: done".into(),
+        },
         (Some(c), _) if c.phase == Phase::Base => match c.kind {
-            PrimKind::Box | PrimKind::Profile | PrimKind::Path => "Drag: the base · Shift: a square · Release: then the height".into(),
+            PrimKind::Box | PrimKind::Profile | PrimKind::Path | PrimKind::Surface => "Drag: the base · Shift: a square · Release: then the height".into(),
             PrimKind::Cylinder => "Drag: the radius · Release: then the height".into(),
         },
         (Some(_), _) => "Move: the height (up +, down −) · Click: done · Esc: cancel".into(),
+        (None, Tool::Sculpt | Tool::PolyLoop | Tool::PolyCut) => String::new(),
         (None, Tool::Create(PrimKind::Path)) => match &st.sketch {
+            None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),
             None => "Click: the first point, on a face or the ground".into(),
-            Some(k) if k.pts.len() < 2 => "Click: a corner · Drag: a curve point · Backspace: the last point off · Esc: drop it".into(),
-            Some(_) => "Enter: an open path · First point: a closed one · Drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
+            Some(k) if k.pts.len() < 2 => "Click or drag: a corner · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
+            Some(_) if st.surface_curve => "Enter: an open curve · First point: a closed one · Shift + click a point: sharp / smooth · Shift: 0°, 45°, 90°".into(),
+            Some(_) => "Enter: an open path · First point: a closed one · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
+        },
+        (None, Tool::Create(PrimKind::Surface)) => match &st.sketch {
+            None if st.surface_on_scan => "On scan: click the first point on the scan · Tab: On plane / On scan".into(),
+            None => "Click: the first point, on a face, the scan's face or the ground (its plane holds the others) · Tab: On plane / On scan".into(),
+            Some(k) if k.pts.len() < 3 => "Click or drag: a point · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
+            Some(_) if st.surface_curve => "First point or Enter: close it, filled · Shift + click a point: sharp / smooth · Ctrl + Z: the last point off · Tab: the next points on the plane / on the scan".into(),
+            Some(_) => "First point or Enter: close it, filled with a surface with no thickness · Ctrl + drag a point: its fillet · Ctrl + Z: the last point off · Tab: the next points on the plane / on the scan".into(),
         },
         (None, Tool::Create(PrimKind::Profile)) => match &st.sketch {
+            None if on_scan => "Click: the first point, on a face, the scan or the ground".into(),
             None => "Click: the first point, on a face or the ground".into(),
-            Some(k) if k.pts.len() < 3 => "Click: a corner · Drag: a curve point · Backspace: the last point off · Esc: drop it".into(),
-            Some(_) => "First point or Enter: close it · Drag: a curve point · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
+            Some(k) if k.pts.len() < 3 => "Click or drag: a corner · Ctrl + Z or Backspace: the last point off · Esc: drop it".into(),
+            Some(_) => "First point or Enter: close it · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
+        (None, Tool::Align) => "Click: the shape to align the selection to · Esc or right click: cancel".into(),
+        (None, Tool::ShellPick) => "Click: a face of the part to open · Esc, Enter or right click: done · The window's ×: close one again".into(),
+        (None, Tool::Select) if st.align_open() => "Min / Max: the box's sides · Center: its middle · Pivot: the base's centre (or the one put with D) · Apply: keep and go on · Enter: OK · Esc: cancel".into(),
+        (None, Tool::Form) if st.form_brush.is_some() => "Drag: the brush pulls the surface · Release: done (one undo step) · Esc: cancel".into(),
+        (None, Tool::Form) => format!(
+            "Press on a form and drag: {} · Shift + drag: Smooth · Ctrl: the other way · [ ]: radius · Click on the ground: a new form · A plain Cube or Cylinder becomes a form",
+            st.form.brush.label()
+        ),
+        (None, Tool::Slot) if !st.slot_on_scan => match &st.slot_draw {
+            Some(s) if s.width => "Move: its width · Click: on to its height · Esc: cancel".into(),
+            Some(_) => "To its other end · Shift: 0°, 45°, 90° · Release: then its width".into(),
+            None => "Drag from one end of the slot to the other on a face or the ground, then set its width and its height · ON SCAN (options): read a slot of the scan".into(),
+        },
+        (None, Tool::Slot) if st.scan_slot.is_some() => "Along the slot, to its other end · Release: the scan read there, a sketch made as read · Esc: cancel".into(),
+        (None, Tool::Slot) => "Drag along a slot of the scan (or a raised pill), from one end to the other · Release: read there, a Carve sketch (cut in) or an Add (raised) with round ends".into(),
+        (None, Tool::Create(PrimKind::Cylinder)) if st.scan_round.is_some() => "Across the round part, to the other side of its rim · Release: the scan read there, a cylinder made as read · Esc: cancel".into(),
+        (None, Tool::Create(PrimKind::Cylinder)) if st.reference.is_some() && st.ref_shown => {
+            format!("Drag on the scan, rim to rim: a hole or a boss read there · Drag off the scan: the base, on the ground or a face · Click: 20 mm, on the scan too · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(PrimKind::Cylinder))
+        }
+        (None, Tool::Create(PrimKind::Box)) if on_scan => "Drag: the base, on a face, the scan or the ground · On the scan, corner to corner across a block or a pocket: read when let go (else on to the height) · Click: 20 mm · B: one at once · Top bar: Add or Carve".into(),
+        (None, Tool::Create(k)) if on_scan => format!("Drag: the base, on a face, the scan's face under the pointer or the ground · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
         (None, Tool::Create(k)) => format!("Drag: the base, on the ground or a face · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
+        (None, Tool::Curve(k)) => {
+            let how = if k.from_centre() { "from its centre out" } else { "corner to corner" };
+            format!("Drag: a {} {how}, on a face or the ground · Click: 20 mm · Then its settings in its window · G: another", k.label().to_lowercase())
+        }
         (None, Tool::Push(k)) => match k {
             PushKind::Inset => "Click a flat face: 2 mm, then drag its dot · Press and drag: sized at once".into(),
-            PushKind::Extrude => "Press on a face and drag: out adds, in carves · A round face goes along its normals".into(),
+            PushKind::Extrude => "Press on a face and drag: out adds, in carves · A round face goes along its normals · On a closed curve: pulled into a solid".into(),
         },
-        (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => "Arrows: move it · Window: X, Y, Z · Del: delete it".into(),
+        (None, Tool::Select) if st.curve_pull.is_some() => "Move: its height along its normal (the other way goes into the face) · Click: keep it · Esc: drop it · Top bar: Add or Carve".into(),
+        (None, Tool::Select) if st.pivot_edit => "D held · Click: the pivot jumps onto the nearest corner, edge middle or circle centre (the moves then put it on the points) · Far from any: back to its own".into(),
+        (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => "Arrows: move it · Centre square: on all three axes · D + click: pivot on a point · Window: X, Y, Z · Del: delete it".into(),
         (None, Tool::Knife) => {
             if st.knife.is_some() {
-                "Click the next edge: a line across their face (a round one: along it) · Enter, Esc, right click: end the cut".into()
+                "Click the next edge: a line across their face (a round one: along it), the cut goes on · Corners and middles catch first · Esc, right click: end the cut · Enter, Q, W: done, back to Select".into()
             } else {
-                "Click an edge: the first point (its middle catches) · Then: the next edges".into()
+                "Click an edge: a point, then the next edges · Corners and middles catch first · Ctrl + click: a cut across the face · Ctrl + Shift + click: a loop round the part".into()
             }
         }
         (None, Tool::Point) => "Click an edge: a point cut into it (its middle catches) · Esc: Select".into(),
@@ -1075,11 +2192,11 @@ pub fn hint(st: &AppState) -> String {
         (None, Tool::Select) if st.round_drag.is_some() => "Away from the press: bigger · Ctrl held: chamfer · Shift held: tension (up fuller, down flatter)".into(),
         (None, Tool::Select) if st.sel_mode == SelMode::Vertex => {
             if st.vert_sel.is_empty() {
-                "Click: a vertex · Drag on empty: a rectangle · Drag a sketch corner: its fillet · Shift + click: add".into()
+                "Click: a vertex · Double-click: those of its piece · Drag on empty: a rectangle · Drag a sketch corner: its fillet · Shift + click: add".into()
             } else if !st.picked_profile_corners().is_empty() {
                 "Drag the corner: its fillet · Ctrl held: chamfer · Shift held: tension · Arrows: move it · Esc: deselect".into()
             } else {
-                "Arrows: move it · Shift + click or rectangle: add · Ctrl + rectangle: take away · Esc: deselect".into()
+                "Arrows: move it · Centre square: on all three axes · D + click: pivot on a point · Shift + click or rectangle: add · Ctrl + rectangle: take away · Esc: deselect".into()
             }
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Face => {
@@ -1090,28 +2207,50 @@ pub fn hint(st: &AppState) -> String {
                     "Arrow: out adds, in carves · Del: delete it".into()
                 }
             } else if st.face_sel.is_empty() {
-                "Click: a face · Drag on empty: a rectangle · Shift + click: add · I: inset · Ctrl + E: extrude".into()
+                "Click: a face · Double-click: its linked faces · Drag on empty: a rectangle · Shift + click: add · I: inset · Ctrl + E: extrude".into()
             } else {
-                "Shift + drag the face: extrude · Ctrl + drag: inset · Arrows: move it · I: inset · Ctrl + E: extrude · Esc: deselect".into()
+                "Double-click: its linked faces · Shift + drag the face: extrude · Ctrl + drag: inset · Arrows: move it · Centre square: on all three axes · D + click: pivot on a point · I: inset · Ctrl + E: extrude · Esc: deselect".into()
             }
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Edge => {
             if st.selected_round().is_some() {
                 "Drag on it: its size · Shift held: tension · Shift + click an edge: add it · Del: delete it".into()
             } else if st.edge_sel.is_empty() {
-                "Click: an edge · Drag on one: a fillet · Ctrl held: chamfer · Shift held: tension · Drag on empty: a rectangle · Ctrl + B: chamfer".into()
+                "Click: an edge · Double-click: its loop · Drag on one: a fillet · Ctrl held: chamfer · Shift held: tension · Drag on empty: a rectangle · Ctrl + B: chamfer".into()
             } else {
-                "Drag an edge: a fillet · Shift + drag a picked edge: pull it · Arrows: move it · Ctrl + B: chamfer · Esc: deselect".into()
+                "Drag an edge: a fillet · Shift + drag a picked edge: pull it · Arrows: move it · Centre square: on all three axes · D + click: pivot on a point · Ctrl + B: chamfer · Esc: deselect".into()
             }
         }
         (None, Tool::Select) => {
             if let Some(d) = &st.drag {
                 match d.handle {
                     Handle::Rot(_) => "Round the ring: turn · 15° steps while Snap is on · Release: keep it".into(),
+                    Handle::ArrayStep(_) => "Along the line: the step, the copies follow · Release: keep it".into(),
+                    Handle::ArrayCount(_) if st.selected_array().and_then(|f| f.array.as_ref()).map(|a| a.kind == nurbs_kernel::ArrayKind::Circle).unwrap_or(false) => "Round the axis: nearer the original, more copies · Release: keep it".into(),
+                    Handle::ArrayCount(_) => "Out: more copies, the same step · In: fewer · Release: keep it".into(),
+                    Handle::ArrayAngle => "Round the axis: the angle, the count kept · 15° steps while Snap is on · 360°: evenly all round · Release: keep it".into(),
+                    Handle::ShellThick => "Along the line: the walls' thickness, 0.1 mm steps while Snap is on · Release: keep it".into(),
                     Handle::Scale(_) => "Away from the centre: bigger · Release: keep it".into(),
                     Handle::ScaleAll => "To the right: bigger · To the left: smaller · Release: keep it".into(),
+                    Handle::Cage(_) => "The side facing the grip stays · Shift: proportions kept · Alt: from the middle · Ctrl: no snapping · Release: keep it".into(),
                     _ => "Moving: the kernel rebuilds the booleans live".into(),
                 }
+            } else if st.selected_array().is_some() {
+                "Square on the first copy: the step (round a circle: how many) · Arrow at the end: how many (round a circle: the angle) · A copy clicked is the original: an operation on it is made on all · Del: delete it".into()
+            } else if st.selected_shell().is_some() {
+                "Dot: the walls' thickness · Window: Inward / Outward, the faces open, Pick faces · Del: delete it".into()
+            } else if st.selected_mirror().is_some() {
+                "Window: the plane's axis, where it passes, the side kept · The steps after it are made on both sides · Del: delete it".into()
+            } else if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {
+                "Window: Union, Subtract (the first picked less the others), Intersect: one curve, kept live · Shift + click: add a curve".into()
+            } else if st.single().is_some_and(|f| f.is_extruded_curve()) {
+                "Ctrl + E: its height again · Window: its curve's settings, Amount, Flat · Arrow: its height · Del: delete it".into()
+            } else if st.single().is_some_and(|f| f.shape_bool.is_some()) {
+                "Ctrl + E: extrude it · Click one of its curves again: that curve (its settings, moved alone; the result follows) · Window: the operation and its curves · Del: it and its curves".into()
+            } else if st.pullable().is_some() && st.single().is_some_and(|f| st.curve_inside(f.id).is_none()) {
+                "Ctrl + E: extrude it (the pointer sets its height) · Window: its settings · Shift + click: add a curve (Union, Subtract, Intersect)".into()
+            } else if st.single().is_some_and(|f| st.curve_inside(f.id).is_some()) {
+                "A curve of a 2D boolean: moved or set, the result follows · Window: back to the boolean · Click on empty: deselect".into()
             } else if st.selection.is_empty() {
                 if st.doc.features.is_empty() {
                     "B: a cube · C: a cylinder · L: a sketch · Then: drag in the view".into()
@@ -1121,11 +2260,86 @@ pub fn hint(st: &AppState) -> String {
             } else {
                 match st.gizmo {
                     GizmoMode::Select => "W: move · E: rotate · R: scale · Right button: menu · Del: delete · Esc: deselect".into(),
-                    GizmoMode::Move => "Arrows and squares: move · Dots: resize · E: rotate · R: scale · Del: delete".into(),
+                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · Alt + M: mirror · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
-                    GizmoMode::Scale => "Cubes: along the shape's axes · Centre: all at once · W: move · E: rotate".into(),
+                    GizmoMode::Scale => "Cage: a face's grip one side, an edge's two, a corner all three · Shift: proportions kept · Alt: from the middle · W: move · E: rotate".into(),
                 }
             }
         }
     }
+}
+
+/// The help box's lines in the Sculpt and Poly tabs (None: as in Forme).
+fn sculpt_poly_hint(st: &AppState) -> Option<String> {
+    use crate::workspace::Workspace;
+    // a linked surface in NURBS: its contour's points
+    if st.patch_comp() {
+        return Some(if st.patch_drag.is_some() {
+            "Release: the contour kept (one undo step), the Poly layer follows".into()
+        } else {
+            "Click: a contour point (a square: a corner, it takes its tangents) · Shift: add · Drag a point: move it · W: the gizmo on the picked ones · 4: Object mode".into()
+        });
+    }
+    if st.tool == Tool::Sculpt {
+        let b = st.sculpt.brush;
+        let what = if st.stroke.is_some() {
+            "Release: the stroke kept (one undo step)".to_string()
+        } else if st.doc.features.iter().any(|f| f.mesh.as_ref().map(|m| m.kind == nurbs_kernel::mesh::MeshKind::Sculpt).unwrap_or(false)) {
+            format!("Drag on the clay: {} · Ctrl: the other way · Shift: smooth", b.label())
+        } else {
+            "O: a clay sphere · B: a clay block · Or a Poly mesh: Send to Sculpt".to_string()
+        };
+        return Some(format!("{what} · X C V S G I T P: brushes · [ ]: size · M: mirror {} · W E R: move, turn, scale", if st.sculpt.mirror { "off" } else { "on" }));
+    }
+    if let Some(b) = st.poly_bevel.as_ref().filter(|b| b.live) {
+        let kind = if b.chamfer { "chamfer" } else { "bevel" };
+        return Some(format!("Move left / right: the width · [ ]: segments ({}) · C: {} (now) or the other · Click: keep it · Right click or Esc: drop it", b.segments, kind));
+    }
+    if st.tool == Tool::PolyCut {
+        return Some(if st.poly_cut.is_some() {
+            "Click an edge or a point: on across the face · Ctrl + click: an edge loop there · Right click or a click off the mesh: this cut done · Enter or Esc: done".into()
+        } else {
+            "Click an edge or a point of a Poly mesh: the cut starts (a point catches at 12 points, an edge's middle at 6) · Ctrl + click an edge: an edge loop there".into()
+        });
+    }
+    if st.tool == Tool::PolyLoop {
+        return Some("Click an edge: a loop cut across its ring (shown under the pointer) · Esc or Q: done".into());
+    }
+    if let Some(g) = &st.poly_pull {
+        return Some(match g.kind {
+            crate::poly::PullKind::Extrude => "Move: out or in along the faces' normal · Click: keep it · Right click or Esc: drop it".into(),
+            crate::poly::PullKind::Inset => "Move: towards the faces' centre, deeper · Click: keep it · Right click or Esc: drop it".into(),
+        });
+    }
+    if st.poly_drag.is_some() {
+        return Some("Release: keep it · Ctrl: no snapping".into());
+    }
+    if st.poly_comp() && st.tool == Tool::Select {
+        if st.poly_target().is_none() {
+            return Some("Click a Poly mesh's component, or select one in Object mode (4) · B C O P: a new cube, cylinder, sphere, plane".into());
+        }
+        return Some(match st.sel_mode {
+            SelMode::Vertex => "Click: a point · Shift: add · Ctrl: take away · Drag on empty: a rectangle · W E R: move, turn, scale · Del: its faces".into(),
+            SelMode::Edge => "Click: an edge · Shift: add · Drag on empty: a rectangle · Ctrl + B: bevel · Ctrl + R: insert edge loop · K: cut · W E R: move, turn, scale".into(),
+            SelMode::Face => "Click: a face · Shift: add · Ctrl + E: extrude · I: inset · W E R: move, turn, scale · Del: delete".into(),
+            SelMode::Object => String::new(),
+        });
+    }
+    if st.workspace == Workspace::Poly && st.tool == Tool::Select && st.drag.is_none() && st.selection.is_empty() {
+        return Some("B: a cube · C: a cylinder · O: a sphere · P: a plane · Then 1 2 3: points, edges, faces · Alt + drag: orbit".into());
+    }
+    if st.sdf_drag.is_some() {
+        return Some("Release: keep it · the blend follows live · Ctrl: no snapping".into());
+    }
+    if st.workspace == Workspace::Sdf && st.tool == Tool::Select {
+        return Some(if st.sdf_comp() {
+            "Click: another shape · W E R: move, turn, size the shape · A X I: Add, Carve, Intersect · [ ]: blend · B C O P T: a shape more · Ctrl + D: copy · Del: delete".into()
+        } else {
+            "B C O P T: cube, cylinder, sphere, capsule, torus (a new SDF object, or into the selected one) · Click an SDF object: its shape under the pointer".into()
+        });
+    }
+    if st.workspace == Workspace::Sculpt && st.tool == Tool::Select && st.drag.is_none() {
+        return Some("X C V S G I T P or a brush card: sculpt again · W E R: move, turn, scale the selection · O / B: new clay".into());
+    }
+    None
 }

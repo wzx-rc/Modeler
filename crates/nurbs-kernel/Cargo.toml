@@ -8,6 +8,8 @@ description = "Forme NURBS: the document (features), the model the kernel sends 
 glam.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# the SDF tab's engine (Forme SDF's scene, compiler and dual contouring)
+forme-core = { path = "../forme-core" }
 forme-occt = { path = "../forme-occt", default-features = false, optional = true }
 
 [features]

@@ -44,7 +44,7 @@ impl SnapKind {
         }
     }
     /// Lower wins when two points are as close on screen.
-    fn rank(self) -> f32 {
+    pub fn rank(self) -> f32 {
         match self {
             SnapKind::End | SnapKind::Center | SnapKind::Origin => 0.0,
             SnapKind::Mid => 2.0,
@@ -79,6 +79,18 @@ pub struct Snapped {
     pub source: Option<DVec3>,
     /// Dotted guides (from, to) of an alignment.
     pub guides: Vec<(DVec3, DVec3)>,
+}
+
+/// What a move carries along (Romain, 20 nov., 7 h 22: "aligner ce point
+/// en rouge sur cette pièce sur le repère en jaune… pour l'instant ça le
+/// fait que avec le centre"): its points of interest where they were when
+/// the drag began, any of which lands on a point of interest it passes
+/// near, and which of the part's points they are (not targets meanwhile).
+#[derive(Clone, Debug, Default)]
+pub struct Carried {
+    pub pts: Vec<(DVec3, SnapKind)>,
+    /// Indices in `AppState::snaps` (frozen while the drag is live).
+    pub own: Vec<usize>,
 }
 
 /// Screen distance (points) under which a point of interest catches.
@@ -207,11 +219,32 @@ impl AppState {
     /// gesture is live (while a shape is moved or created they stay as they
     /// were: it does not snap to itself).
     pub fn refresh_snaps(&mut self) {
-        if self.is_live() || self.snaps_gen == self.model_gen {
+        // the part's model and the meshes (SDF shapes) as they are now
+        let key = self.model_gen.wrapping_mul(1_000_003).wrapping_add(self.mesh_gen);
+        if self.is_live() || self.snaps_gen == key {
             return;
         }
-        self.snaps_gen = self.model_gen;
+        self.snaps_gen = key;
         self.snaps = self.model.as_ref().map(|m| snap_points(m)).unwrap_or_default();
+        // every tab's elements give points (the common base): an SDF
+        // shape's centre, the middles of its top and base (shown, built)
+        let mut more = vec![];
+        for f in self.shown_meshes() {
+            if !crate::sdf::is_sdf(f) {
+                continue;
+            }
+            let Some(scene) = crate::sdf::scene_of(f) else { continue };
+            for n in crate::sdf::built_shapes(f) {
+                let Some(sh) = scene.node(n).filter(|x| x.visible).and_then(|x| x.shape()) else { continue };
+                let m = crate::sdf::node_world(f, scene, n);
+                let h = sh.local_half_extents().y;
+                for (q, kind) in [(glam::Vec3::ZERO, SnapKind::Center), (glam::Vec3::Y * h, SnapKind::FaceCenter), (-glam::Vec3::Y * h, SnapKind::FaceCenter)] {
+                    let pos = m.transform_point3(q).as_dvec3();
+                    more.push(SnapPoint { pos, kind, faces: vec![], features: vec![] });
+                }
+            }
+        }
+        self.snaps.extend(more);
     }
 
     /// The point of interest under the pointer: the nearest on screen
@@ -221,6 +254,11 @@ impl AppState {
         if !self.snapping() {
             return None;
         }
+        self.nearest_snap(p, skip)
+    }
+
+    /// The point of interest under the pointer, whatever the Snap setting.
+    fn nearest_snap(&self, p: [f32; 2], skip: &[FeatureId]) -> Option<&SnapPoint> {
         let v = self.view();
         let mut cands: Vec<(f32, &SnapPoint)> = self
             .snaps
@@ -249,6 +287,104 @@ impl AppState {
             Some(h) if h.t < dist - tol => self.feature_of_face(h.face).map(|f| skip.contains(&f)).unwrap_or(false) == false,
             _ => false,
         }
+    }
+
+    /// The points a move carries (see `Carried`): the points of interest on
+    /// the model faces `faces` or on the features `feats`, and the points
+    /// `extra` (a picked vertex, an edge's ends and middle). Called before
+    /// the drag goes live (the points of interest made current first).
+    pub fn carried(&mut self, feats: &[FeatureId], faces: &[usize], extra: &[DVec3]) -> Carried {
+        self.refresh_snaps();
+        let mut c = Carried::default();
+        for (i, s) in self.snaps.iter().enumerate() {
+            if s.kind == SnapKind::Origin {
+                continue;
+            }
+            let mine = s.features.iter().any(|f| feats.contains(f)) || s.faces.iter().any(|f| faces.contains(f)) || extra.iter().any(|e| e.distance(s.pos) < 1e-3);
+            if mine {
+                c.own.push(i);
+                c.pts.push((s.pos, s.kind));
+            }
+        }
+        for e in extra {
+            if !c.pts.iter().any(|(q, _)| q.distance(*e) < 1e-3) {
+                c.pts.push((*e, SnapKind::End));
+            }
+        }
+        c
+    }
+
+    /// The alignment of a move along an axis or in a plane (`mask`: the
+    /// directions it may take; `raw`: the move the pointer asks for). A
+    /// point the move carries that passes near a point of interest on
+    /// screen lands on it (lined up only, with a dotted line, when the axis
+    /// or the plane cannot take it there); when the pointer itself is on
+    /// one, the nearest of `keys` (the pivot; a shape's centre, base or
+    /// top) lines up with it. The nearest on screen wins, a carried point
+    /// that would stay far from it in depth last. The move and what to draw.
+    pub fn align_move(&self, p: [f32; 2], raw: DVec3, mask: DVec3, keys: &[DVec3], carried: &Carried, skip: &[FeatureId]) -> Option<(DVec3, Snapped)> {
+        if !self.snapping() {
+            return None;
+        }
+        let v = self.view();
+        // only the points near what moves, in space (Romain 20 nov., 11 h 53:
+        // "ne pas prendre en compte toute la scène", a block far behind
+        // lined up on screen along the eye's axis caught the move): within
+        // twice its size round it, at least 30 mm
+        let moved: Vec<DVec3> = carried.pts.iter().map(|(q, _)| *q + raw).chain(keys.iter().map(|k| *k + raw)).collect();
+        let (lo, hi) = moved.iter().fold((DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)), |(lo, hi), q| (lo.min(*q), hi.max(*q)));
+        let reach = ((hi - lo).length()).max(30.0);
+        let near = |q: DVec3| q.clamp(lo, hi).distance(q) <= reach;
+        let targets: Vec<(usize, [f32; 2])> = self
+            .snaps
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| !carried.own.contains(i) && !s.features.iter().any(|f| skip.contains(f)) && (s.kind == SnapKind::Origin || near(s.pos)))
+            .filter_map(|(i, s)| Some((i, v.project(s.pos.as_vec3())?)))
+            .collect();
+        // (score, the point moved, the move, the point of interest)
+        let mut cands: Vec<(f32, DVec3, DVec3, usize)> = vec![];
+        for (i, q) in &targets {
+            let d = (q[0] - p[0]).hypot(q[1] - p[1]);
+            if d >= CATCH {
+                continue;
+            }
+            let s = &self.snaps[*i];
+            if let Some((k, delta)) = keys.iter().map(|k| (*k, (s.pos - *k) * mask)).min_by(|x, y| x.1.distance(raw).total_cmp(&y.1.distance(raw))) {
+                cands.push((d + s.kind.rank(), k, delta, *i));
+            }
+        }
+        for (from, kind) in &carried.pts {
+            let Some(m) = v.project((*from + raw).as_vec3()) else { continue };
+            for (i, q) in &targets {
+                let d = (q[0] - m[0]).hypot(q[1] - m[1]);
+                if d >= CATCH {
+                    continue;
+                }
+                let s = &self.snaps[*i];
+                let delta = (s.pos - *from) * mask;
+                // near on screen only, far in depth: the piece would jump
+                let Some(k) = v.project((*from + delta).as_vec3()) else { continue };
+                if (k[0] - m[0]).hypot(k[1] - m[1]) > CATCH * 1.5 {
+                    continue;
+                }
+                // lined up only from far off in space: not taken
+                if s.pos.distance(*from + delta) > reach {
+                    continue;
+                }
+                // what the axis or plane leaves between them, in points
+                let gap = (s.pos.distance(*from + delta) / self.mm_per_point(s.pos)) as f32;
+                cands.push((d + s.kind.rank() + 0.5 * kind.rank() + (gap * 0.25).min(12.0), *from, delta, *i));
+            }
+        }
+        cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (_, from, delta, i) = cands.into_iter().take(12).find(|c| {
+            let s = &self.snaps[c.3];
+            s.kind == SnapKind::Origin || !self.hidden_but(s.pos.as_vec3(), skip)
+        })?;
+        let s = &self.snaps[i];
+        let pos = from + delta;
+        Some((delta, Snapped { pos, kind: s.kind, source: (pos.distance(s.pos) > 1e-3).then_some(s.pos), guides: vec![] }))
     }
 
     /// Remembers the point of interest under the pointer (the guides line
@@ -376,7 +512,17 @@ impl AppState {
     /// starts on the top face, not on the side the ray hit). Plane
     /// coordinates of the start, and what caught it.
     pub fn start_plane(&self, p: [f32; 2]) -> Option<(BasePlane, [f64; 2], Option<Snapped>)> {
-        let (mut plane, _) = self.base_plane_at(p)?;
+        self.start_plane_in(p, false)
+    }
+
+    /// The same while the pointer only hovers (the scan's flat faces are
+    /// searched less often).
+    pub fn start_plane_hover(&self, p: [f32; 2]) -> Option<(BasePlane, [f64; 2], Option<Snapped>)> {
+        self.start_plane_in(p, true)
+    }
+
+    fn start_plane_in(&self, p: [f32; 2], hover: bool) -> Option<(BasePlane, [f64; 2], Option<Snapped>)> {
+        let (mut plane, _) = self.base_plane_at(p, hover)?;
         if let (Some(s), Some(m)) = (self.pick_snap(p, &[]), self.model.as_ref()) {
             let on = |pl: &BasePlane| (s.pos - pl.origin).dot(pl.n).abs() < 1e-3;
             if !on(&plane) {

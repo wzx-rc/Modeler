@@ -83,22 +83,203 @@ impl AppState {
         }
     }
 
+    // ----------------------------------------------------- linked (Maya)
+
+    /// The faces linked to `face` (a double-click in Face mode, as Maya's
+    /// shell): those reached across the part's edges without leaving its
+    /// element. A piece of faces copied apart from the part is all of it.
+    pub fn linked_faces(&self, face: usize) -> Vec<usize> {
+        let Some(m) = &self.model else { return vec![] };
+        let el = |f: usize| m.faces.get(f).and_then(|x| x.tag).map(|t| self.element_of(t.feature));
+        let want = el(face);
+        if want.is_none() {
+            return vec![face];
+        }
+        let mut nb: Vec<Vec<usize>> = vec![vec![]; m.faces.len()];
+        for e in &m.edges {
+            let (a, b) = (e.faces[0], e.faces[1]);
+            if a >= 0 && b >= 0 && a != b {
+                nb[a as usize].push(b as usize);
+                nb[b as usize].push(a as usize);
+            }
+        }
+        let mut seen = vec![false; m.faces.len()];
+        let mut out = vec![face];
+        seen[face] = true;
+        let mut i = 0;
+        while i < out.len() {
+            for &g in &nb[out[i]] {
+                if !seen[g] && el(g) == want {
+                    seen[g] = true;
+                    out.push(g);
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// A point on a model face (its largest triangle's centre), to name it.
+    pub fn face_point(&self, face: usize) -> Option<DVec3> {
+        let m = self.model.as_ref()?;
+        let mut best: Option<(f32, Vec3)> = None;
+        for (t, tri) in m.triangles.iter().enumerate() {
+            if m.tri_face[t] as usize != face {
+                continue;
+            }
+            let [a, b, c] = tri.map(|v| Vec3::from(m.positions[v as usize]));
+            let area = (b - a).cross(c - a).length();
+            if best.map(|x| area > x.0).unwrap_or(true) {
+                best = Some((area, (a + b + c) / 3.0));
+            }
+        }
+        best.map(|b| b.1.as_dvec3())
+    }
+
+    /// A double-click in Face mode: the linked faces picked (Shift / Ctrl:
+    /// added to those picked).
+    pub fn pick_linked_faces(&mut self, at: [f32; 2], add: bool) {
+        let Some(h) = self.pick_at(at) else { return };
+        let refs: Vec<FaceRef> = self.linked_faces(h.face).into_iter().filter_map(|f| self.face_ref(f, self.face_point(f)?)).collect();
+        if refs.is_empty() {
+            return;
+        }
+        self.selection.clear();
+        if !add {
+            self.face_sel.clear();
+        }
+        for r in refs {
+            if !self.face_sel.iter().any(|x| x.tag == r.tag && x.at.distance(r.at) < 1e-3) {
+                self.face_sel.push(r);
+            }
+        }
+        let n = self.face_sel.len();
+        self.record("pick", &format!("double-click: {n} linked faces"));
+    }
+
+    /// The edges linked to edge `i` (a double-click in Edge mode, as
+    /// Maya's edge loop): on from each end through the edge that goes on
+    /// tangent to it (within 20°), or the only other edge there.
+    pub fn linked_edges(&self, i: usize) -> Vec<usize> {
+        let Some(m) = &self.model else { return vec![] };
+        let ok = |j: usize| {
+            let e = &m.edges[j];
+            !e.seam && e.faces[0] >= 0 && e.faces[1] >= 0 && e.pts.len() >= 2
+        };
+        if i >= m.edges.len() || !ok(i) {
+            return vec![i];
+        }
+        // an end of edge j: its point and the way out of the edge there
+        let end = |j: usize, last: bool| -> (Vec3, Vec3) {
+            let p = &m.edges[j].pts;
+            let (a, b) = if last { (p[p.len() - 1], p[p.len() - 2]) } else { (p[0], p[1]) };
+            let (a, b) = (Vec3::from(a), Vec3::from(b));
+            (a, (a - b).normalize_or_zero())
+        };
+        const TOL: f32 = 2e-3;
+        let cos = 20f32.to_radians().cos();
+        let mut out = vec![i];
+        for last in [false, true] {
+            let (mut p, mut d) = end(i, last);
+            let mut cur = i;
+            loop {
+                // the other edges ending at p: how many, and those that may
+                // go on (not taken yet), with the way into them
+                let mut others = 0;
+                let mut here: Vec<(usize, bool, Vec3)> = vec![];
+                for (j, e) in m.edges.iter().enumerate() {
+                    if j == cur || e.seam || e.pts.len() < 2 {
+                        continue;
+                    }
+                    for l in [false, true] {
+                        let (q, w) = end(j, l);
+                        if q.distance(p) < TOL {
+                            others += 1;
+                            if ok(j) && !out.contains(&j) {
+                                here.push((j, l, -w));
+                            }
+                        }
+                    }
+                }
+                let next = here
+                    .iter()
+                    .map(|&(j, l, w)| (j, l, w.dot(d)))
+                    .filter(|&(_, _, c)| c > cos || others == 1)
+                    .max_by(|a, b| a.2.total_cmp(&b.2));
+                let Some((j, l, _)) = next else { break };
+                out.push(j);
+                cur = j;
+                (p, d) = end(j, !l);
+            }
+        }
+        out
+    }
+
+    /// A double-click in Edge mode: the linked edges picked (Shift / Ctrl:
+    /// added to those picked).
+    pub fn pick_linked_edges(&mut self, edge: usize, add: bool) {
+        let refs: Vec<EdgeRef> = self.linked_edges(edge).into_iter().filter_map(|j| self.edge_ref(j)).collect();
+        if refs.is_empty() {
+            return;
+        }
+        self.selection.clear();
+        if !add {
+            self.edge_sel.clear();
+        }
+        for r in refs {
+            if !self.edge_sel.iter().any(|x| x.key() == r.key() && x.at.distance(r.at) < 1e-3) {
+                self.edge_sel.push(r);
+            }
+        }
+        let n = self.edge_sel.len();
+        self.record("pick", &format!("double-click: {n} linked edges"));
+    }
+
+    /// A double-click in Vertex mode: the vertices of the faces linked to
+    /// one face round the vertex (Shift / Ctrl: added).
+    pub fn pick_linked_vertices(&mut self, v: DVec3, add: bool) {
+        let Some(m) = &self.model else { return };
+        let v32 = v.as_vec3();
+        let near = |p: &[f32; 3]| Vec3::from(*p).distance(v32) < 2e-3;
+        let Some(face) = m.edges.iter().filter(|e| !e.seam && e.pts.len() >= 2 && (near(&e.pts[0]) || near(e.pts.last().unwrap()))).flat_map(|e| e.faces).find(|f| *f >= 0) else { return };
+        let faces = self.linked_faces(face as usize);
+        let Some(m) = &self.model else { return };
+        let mut pts: Vec<DVec3> = vec![];
+        for e in m.edges.iter().filter(|e| !e.seam && e.pts.len() >= 2 && e.faces.iter().any(|f| *f >= 0 && faces.contains(&(*f as usize)))) {
+            for p in [e.pts[0], *e.pts.last().unwrap()] {
+                let p = Vec3::from(p).as_dvec3();
+                if !pts.iter().any(|q| q.distance(p) < 1e-3) {
+                    pts.push(p);
+                }
+            }
+        }
+        self.selection.clear();
+        if !add {
+            self.vert_sel.clear();
+        }
+        for p in pts {
+            if !self.vert_sel.iter().any(|q| q.distance(p) < 1e-3) {
+                self.vert_sel.push(p);
+            }
+        }
+        let n = self.vert_sel.len();
+        self.record("pick", &format!("double-click: {n} linked vertices"));
+    }
+
     // ------------------------------------------------------------ vertices
 
     /// The vertices Vertex mode picks: the part's, and the paths' points
     /// (a cut corner by the middle of its cut).
     pub fn vertices(&self) -> Vec<Vec3> {
         let mut out = self.part_vertices();
-        for f in self.doc.features.iter().filter(|f| f.visible) {
-            let (Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { continue };
-            let m = f.matrix();
-            let cuts = pr.cuts(*x, *z);
-            for (i, q) in pr.scaled(*x, *z).iter().enumerate() {
-                if pr.smooth.get(i).copied().unwrap_or(false) && !(pr.open && (i == 0 || i + 1 == pr.points.len())) {
-                    continue;
+        // a curve's points, all of them (20 nov.: moved with the gizmo; a
+        // corner cut at its cut's middle)
+        for f in self.doc.features.iter().filter(|f| f.visible && f.is_path() && f.shape_bool.is_none()) {
+            let Some(pr) = &f.profile else { continue };
+            for i in 0..pr.points.len() {
+                if let Some(q) = crate::surfaces::path_point_pos(f, i) {
+                    out.push(q.as_vec3());
                 }
-                let q = cuts[i].map(|c| c.m).unwrap_or(*q);
-                out.push(m.transform_point3(DVec3::new(q[0], 0.0, q[1])).as_vec3());
             }
         }
         out
@@ -133,7 +314,7 @@ impl AppState {
     /// The vertices the eye sees, with their place on screen.
     pub fn visible_vertices(&self) -> Vec<(Vec3, [f32; 2])> {
         let v = self.view();
-        self.vertices().into_iter().filter(|q| !self.hidden(*q)).filter_map(|q| v.project(q).map(|s| (q, s))).collect()
+        self.vertices().into_iter().filter(|q| self.xray || !self.hidden(*q)).filter_map(|q| v.project(q).map(|s| (q, s))).collect()
     }
 
     /// The vertex under the pointer (within a few points, not hidden).
@@ -178,7 +359,7 @@ impl AppState {
                 for i in 0..m.edges.len() {
                     let Some(r) = self.edge_ref(i) else { continue };
                     let mid = r.at.as_vec3();
-                    if v.project(mid).map(inside).unwrap_or(false) && !self.hidden(mid) {
+                    if v.project(mid).map(inside).unwrap_or(false) && (self.xray || !self.hidden(mid)) {
                         found.push(r);
                     }
                 }
@@ -210,7 +391,8 @@ impl AppState {
                     let c = tri.iter().map(|k| Vec3::from(m.positions[*k as usize])).sum::<Vec3>() / 3.0;
                     let Some(s) = v.project(c).filter(|s| inside(*s)) else { continue };
                     tries[f] += 1;
-                    if self.pick_at(s).map(|h| h.face) == Some(f) {
+                    // in X-ray the faces behind are taken too
+                    if self.xray || self.pick_at(s).map(|h| h.face) == Some(f) {
                         found.push((f, c.as_dvec3()));
                     }
                 }
@@ -267,6 +449,16 @@ impl AppState {
     /// handle; Extrude follows the pointer (at `p`), a click ends it. Else
     /// the tool waits for a click on a flat face.
     pub fn arm_push(&mut self, kind: PushKind, p: Option<[f32; 2]>) {
+        // a closed curve selected: the Extrude tool pulls it into a solid
+        // (Romain 20 nov., 9 h 25: no Extrude of its own on a curve, "si on
+        // veut extrude on va chercher le Extrude tool")
+        if kind == PushKind::Extrude {
+            if let Some(id) = self.pullable() {
+                let at = p.or_else(|| self.doc.feature(id).and_then(|f| self.view().project(f.origin.as_vec3()))).unwrap_or(self.principal());
+                self.begin_curve_pull(id, at);
+                return;
+            }
+        }
         self.abort_gestures();
         let picked = if self.sel_mode == SelMode::Face && self.tool == Tool::Select { self.face_sel.first().copied() } else { None };
         self.tool = Tool::Push(kind);
@@ -349,6 +541,13 @@ impl AppState {
 
     /// A click with the Inset tool, or a press with the Extrude tool.
     pub fn push_press(&mut self, kind: PushKind, p: [f32; 2], held: bool) {
+        // Extrude on a closed curve's line: the curve pulled into a solid
+        if kind == PushKind::Extrude {
+            if let Some(id) = self.pick_path(p).map(|id| self.top_boolean(id)).filter(|id| self.doc.is_closed_curve(*id)) {
+                self.begin_curve_pull(id, p);
+                return;
+            }
+        }
         let Some(h) = self.pick_at(p) else {
             self.toast(&format!("{}: click a {}face of the part", kind.label(), if kind == PushKind::Inset { "flat " } else { "" }), true);
             return;
@@ -363,15 +562,32 @@ impl AppState {
 
     fn push_start(&mut self, face: usize, at: DVec3, p: [f32; 2], held: bool) {
         let Some((r, origin, n)) = self.face_plane(face, at, "Extrude") else { return };
+        // the other picked faces go with it
+        let mut more: Vec<FaceRef> = vec![];
+        for q in self.face_sel.clone() {
+            let Some(fi) = self.model_face_of(&q) else { continue };
+            if fi == face {
+                continue;
+            }
+            if let Some((r2, o2, _)) = self.face_plane(fi, q.at, "Extrude") {
+                more.push(FaceRef { tag: r2.tag, at: o2 });
+            }
+        }
         self.begin_live("Extrude");
         let mut id = 0;
-        self.live(|d| id = d.add_push(Push { face: FaceRef { tag: r.tag, at: origin }, inset: 0.0, depth: 0.0 }));
+        let mut others = vec![];
+        self.live(|d| {
+            id = d.add_push(Push { face: FaceRef { tag: r.tag, at: origin }, inset: 0.0, depth: 0.0 });
+            for m in &more {
+                others.push(d.add_push(Push { face: m.clone(), inset: 0.0, depth: 0.0 }));
+            }
+        });
         let (ro, rd) = self.ray(p);
         let t0 = closest_on_line(origin, n, ro, rd).unwrap_or(0.0);
-        self.push = Some(PushGesture { kind: PushKind::Extrude, id, origin, n, held, from: p, t0, moved: false, inset: 0.0, depth: 0.0 });
+        self.push = Some(PushGesture { kind: PushKind::Extrude, id, origin, n, held, from: p, t0, moved: false, inset: 0.0, depth: 0.0, others: others.clone() });
         self.tool = Tool::Push(PushKind::Extrude);
         self.face_sel.clear();
-        self.selection = vec![id];
+        self.selection = std::iter::once(id).chain(others).collect();
     }
 
     /// The pointer moves: the extrusion's depth follows, along the normal.
@@ -389,9 +605,12 @@ impl AppState {
         }
         self.push = Some(g.clone());
         let (id, depth) = (g.id, g.depth);
+        let others = g.others.clone();
         self.live(|d| {
-            if let Some(pu) = d.feature_mut(id).and_then(|f| f.push.as_mut()) {
-                pu.depth = depth;
+            for i in std::iter::once(id).chain(others.iter().copied()) {
+                if let Some(pu) = d.feature_mut(i).and_then(|f| f.push.as_mut()) {
+                    pu.depth = depth;
+                }
             }
         });
     }
@@ -418,6 +637,7 @@ impl AppState {
         }
         self.end_live();
         self.clean_selection_after_push(Some(g.id));
+        self.selection.extend(g.others.iter().copied().filter(|i| self.doc.feature(*i).is_some()));
         self.toast(&format!("Extrude {} mm · drag the arrow to change it", crate::widgets::fmt_mm(g.depth as f32)), false);
     }
 
@@ -512,7 +732,7 @@ impl AppState {
         let (ro, rd) = self.ray(p);
         let Some(t) = closest_on_line(line.0, line.1, ro, rd) else { return };
         self.begin_live(f.kind_label());
-        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line) });
+        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![], carried: Default::default(), pivot: line.0, custom: false, keep: vec![], cage: None, pts: vec![] });
     }
 
     pub(crate) fn update_push_drag(&mut self, d: &Drag, p: [f32; 2]) {
@@ -599,6 +819,10 @@ impl AppState {
     pub fn profile_corner(&self, v: DVec3) -> Option<(FeatureId, usize)> {
         for f in self.doc.features.iter().filter(|f| f.visible) {
             let (Prim::Profile { x, z, .. } | Prim::Path { x, z }, Some(pr)) = (&f.prim, &f.profile) else { continue };
+            // a spline's points are not cut
+            if pr.spline {
+                continue;
+            }
             let l = f.matrix().inverse().transform_point3(v);
             let h = f.prim.height();
             if !(l.y.abs() < 1e-3 || (l.y.abs() - h).abs() < 1e-3) {
@@ -652,7 +876,7 @@ impl AppState {
         let picks: Vec<(usize, (FeatureId, usize))> = self.vert_sel.iter().enumerate().filter_map(|(k, q)| self.profile_corner(*q).map(|c| (k, c))).collect();
         self.live(|d| {
             for (id, i) in &corners {
-                if let Some(pr) = d.feature_mut(*id).and_then(|f| f.profile.as_mut()) {
+                if let Some(pr) = d.feature_mut(*id).and_then(editable) {
                     if pr.corner.len() < pr.points.len() {
                         pr.corner.resize(pr.points.len(), 0.0);
                     }
@@ -705,12 +929,29 @@ impl AppState {
         }
     }
 
-    /// Rounds the corners at the picked vertices (their short edges) at
-    /// `size`: one fillet step, selected after.
+    /// The edges a vertex fillet rounds: a thin plate's corner, its short
+    /// edge; any other corner (a cube's, Romain 19 nov. 23 h 18, "Fillet de
+    /// vertex"), every edge leaving it, made in one fillet so they meet in a
+    /// rounded corner.
+    pub fn vertex_edges(&self, v: DVec3) -> Vec<EdgeRef> {
+        if let Some(r) = self.corner_edge(v) {
+            return vec![r];
+        }
+        let Some(m) = self.model.as_ref() else { return vec![] };
+        let at = v.as_vec3();
+        let near = |p: Option<&[f32; 3]>| p.map(|p| Vec3::from_array(*p).distance(at) < 1e-3).unwrap_or(false);
+        (0..m.edges.len())
+            .filter(|&i| !m.edges[i].seam && m.edges[i].pts.len() >= 2 && (near(m.edges[i].pts.first()) || near(m.edges[i].pts.last())))
+            .filter_map(|i| self.edge_ref(i))
+            .collect()
+    }
+
+    /// Rounds the corners at the picked vertices (their edges, see
+    /// `vertex_edges`) at `size`: one fillet step, selected after.
     pub fn round_corners(&mut self, size: f64) {
         let mut edges: Vec<EdgeRef> = vec![];
         for v in self.vert_sel.clone() {
-            if let Some(r) = self.corner_edge(v) {
+            for r in self.vertex_edges(v) {
                 if !edges.iter().any(|e| e.key() == r.key() && e.at.distance(r.at) < 1e-3) {
                     edges.push(r);
                 }
@@ -732,14 +973,14 @@ impl AppState {
         self.single().filter(|f| f.tweak.is_some())
     }
 
-    /// The component the gizmo moves in Vertex, Edge and Face modes: the
-    /// selected move step's, else the first one picked.
-    pub fn picked_comp(&self) -> Option<Comp> {
+    /// The components the gizmo moves in Vertex, Edge and Face modes: all
+    /// those picked (19 nov.: two vertices moved with W).
+    pub fn picked_comps(&self) -> Vec<Comp> {
         match self.sel_mode {
-            SelMode::Face => self.face_sel.first().cloned().map(Comp::Face),
-            SelMode::Edge => self.edge_sel.first().cloned().map(Comp::Edge),
-            SelMode::Vertex => self.vert_sel.first().copied().map(Comp::Vertex),
-            SelMode::Object => None,
+            SelMode::Face => self.face_sel.iter().cloned().map(Comp::Face).collect(),
+            SelMode::Edge => self.edge_sel.iter().cloned().map(Comp::Edge).collect(),
+            SelMode::Vertex => self.vert_sel.iter().copied().map(Comp::Vertex).collect(),
+            SelMode::Object => vec![],
         }
     }
 
@@ -751,22 +992,76 @@ impl AppState {
         if let Some(t) = self.selected_tweak().and_then(|f| f.tweak.as_ref()) {
             return Some(t.at() + t.delta);
         }
-        match self.picked_comp()? {
-            Comp::Face(f) => Some(f.at),
-            Comp::Edge(e) => Some(e.at),
-            // a vertex that is gone (a sketch corner just cut): no gizmo
-            Comp::Vertex(v) => self.part_vertices().iter().any(|q| q.as_dvec3().distance(v) < 1e-3).then_some(v),
+        // curve points: their middle
+        if self.picked_path_points().is_some() {
+            return Some(self.vert_sel.iter().copied().sum::<DVec3>() / self.vert_sel.len() as f64);
         }
+        let comps = self.picked_comps();
+        // a vertex that is gone (a sketch corner just cut): no gizmo
+        if let [Comp::Vertex(v)] = comps.as_slice() {
+            if !self.part_vertices().iter().any(|q| q.as_dvec3().distance(*v) < 1e-3) {
+                return None;
+            }
+        }
+        Tweak::new(comps).map(|t| t.at())
+    }
+
+    /// The points a component move carries, before it goes live: the
+    /// selected move step's (a copy: all its faces'; else its components
+    /// where the step put them), else the picked components' (a face's
+    /// corners, edges' middles and centre; an edge's ends and middle; a
+    /// vertex).
+    fn tweak_carried(&mut self) -> crate::snap::Carried {
+        let mut feats: Vec<FeatureId> = vec![];
+        let mut faces: Vec<usize> = vec![];
+        let mut extra: Vec<DVec3> = vec![];
+        let (comps, shift) = match self.selected_tweak() {
+            Some(f) => {
+                let t = f.tweak.clone().unwrap();
+                feats.push(f.id);
+                (if t.copy { vec![] } else { t.comps().cloned().collect() }, t.delta)
+            }
+            None => (self.picked_comps(), DVec3::ZERO),
+        };
+        for c in comps {
+            match c {
+                Comp::Face(r) => faces.extend(self.model_face_of(&FaceRef { at: r.at + shift, ..r })),
+                Comp::Edge(r) => {
+                    let Some(i) = self.model_edge_of(&EdgeRef { at: r.at + shift, ..r }) else { continue };
+                    let Some(e) = self.model.as_ref().and_then(|m| m.edges.get(i)) else { continue };
+                    let d3 = |q: &[f32; 3]| Vec3::from(*q).as_dvec3();
+                    extra.extend(e.pts.first().map(d3));
+                    extra.extend(e.pts.last().map(d3));
+                    extra.extend(polyline_middle(&e.pts));
+                }
+                Comp::Vertex(v) => extra.push(v + shift),
+            }
+        }
+        self.carried(&feats, &faces, &extra)
     }
 
     /// A drag on the gizmo in Vertex, Edge or Face mode: the selected move
     /// step changes, or a new one starts on the picked component.
     pub(crate) fn begin_tweak_drag(&mut self, h: Handle, p: [f32; 2]) {
-        if !matches!(h, Handle::Axis(_) | Handle::Plane(_)) {
+        if !matches!(h, Handle::Axis(_) | Handle::Plane(_) | Handle::Free | Handle::Scale(_) | Handle::ScaleAll | Handle::Cage(_)) {
             return;
         }
-        let Some(pivot) = self.comp_pivot() else { return };
+        // curve points: moved in their plane, not a step on the part
+        if self.selected_tweak().is_none() {
+            if let Some(pts) = self.picked_path_points() {
+                self.begin_path_points_drag(h, p, pts);
+                return;
+            }
+        }
+        let cage = if matches!(h, Handle::Cage(_)) { self.cage() } else { None };
+        let Some(pivot) = self.pivot() else { return };
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
+        let custom = self.custom_pivot_on();
+        let mut carried = if crate::state::move_mask(h).is_some() { self.tweak_carried() } else { Default::default() };
+        // a pivot put by hand (D): it alone lands on points
+        if custom {
+            carried.pts = vec![(pivot, crate::snap::SnapKind::End)];
+        }
         let id = match self.selected_tweak() {
             Some(f) => {
                 let id = f.id;
@@ -774,38 +1069,101 @@ impl AppState {
                 id
             }
             None => {
-                let Some(comp) = self.picked_comp() else { return };
-                let t = Tweak { comp, delta: DVec3::ZERO };
-                self.begin_live(t.label());
+                let Some(t) = Tweak::new(self.picked_comps()) else { return };
+                // R (the cage too): named a scale from the start
+                let scaling = matches!(h, Handle::Scale(_) | Handle::ScaleAll | Handle::Cage(_));
+                let label = if scaling {
+                    match t.comp {
+                        Comp::Face(_) => "Scale faces",
+                        Comp::Edge(_) => "Scale edges",
+                        Comp::Vertex(_) => "Scale vertices",
+                    }
+                } else {
+                    t.label()
+                };
+                self.begin_live(label);
                 let mut id = 0;
-                self.live(|d| id = d.add_tweak(t));
+                self.live(|d| {
+                    id = d.add_tweak(t);
+                    if scaling {
+                        let name = d.fresh_name(label);
+                        if let Some(f) = d.feature_mut(id) {
+                            f.name = name;
+                        }
+                    }
+                });
                 self.select(Some(id), false);
                 id
             }
         };
         let Some(f) = self.doc.feature(id).cloned() else { return };
-        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None });
+        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried, pivot, custom, keep: vec![], cage, pts: vec![] });
+        // the move step now selected: the pivot put by hand goes on with it
+        if custom {
+            self.custom_pivot = Some((self.pivot_key(), pivot));
+        }
     }
 
     pub(crate) fn update_tweak_drag(&mut self, d: &Drag, p: [f32; 2]) {
         let Some(t0) = d.start[0].tweak.clone() else { return };
         let id = d.start[0].id;
-        let pivot0 = t0.at() + t0.delta;
+        let pivot0 = d.pivot;
+        // the scale cage: scaled about the side facing the grip (Alt: its
+        // middle), as the step's own scale and centre
+        if let (Handle::Cage(s), Some(c)) = (d.handle, d.cage) {
+            let Some((k, anchor)) = self.cage_scale(&c, s, p, &[]) else { return };
+            let (s0, d0) = (t0.scale, t0.delta);
+            let a0 = t0.about.unwrap_or_else(|| if (s0 - DVec3::ONE).abs().max_element() < 1e-9 { anchor - d0 } else { c.point([0, 0, 0]) - d0 });
+            self.live(|doc| {
+                if let Some(tw) = doc.feature_mut(id).and_then(|f| f.tweak.as_mut()) {
+                    tw.about = Some(a0);
+                    tw.scale = s0 * k;
+                    tw.delta = anchor + k * (a0 - anchor + d0) - a0;
+                }
+            });
+            return;
+        }
         let Some(now) = self.handle_param(d.handle, pivot0, p) else { return };
         let raw = now - d.grab;
         let mut delta = DVec3::new(self.snap(raw.x), self.snap(raw.y), self.snap(raw.z));
         self.snap_shown = None;
-        let a = match d.handle {
-            Handle::Axis(a) | Handle::Plane(a) => a,
-            _ => return,
-        };
-        // a point of interest under the pointer: the component lines up
-        // with it, along the axis or in the plane
-        if let Some(s) = self.pick_snap(p, &[]).cloned() {
-            let mask = if matches!(d.handle, Handle::Axis(_)) { DVec3::AXES[a] } else { DVec3::ONE - DVec3::AXES[a] };
-            delta = (s.pos - pivot0) * mask;
-            let pos = pivot0 + delta;
-            self.snap_shown = Some(crate::snap::Snapped { pos, kind: s.kind, source: (pos.distance(s.pos) > 1e-3).then_some(s.pos), guides: vec![] });
+        // R in a component mode: scaled round their centre, along X, Y, Z
+        if matches!(d.handle, Handle::Scale(_) | Handle::ScaleAll) {
+            let k = match d.handle {
+                Handle::Scale(a) => {
+                    let (s0, s1) = ((d.grab - pivot0)[a], (now - pivot0)[a]);
+                    if s0.abs() < 1e-9 {
+                        return;
+                    }
+                    let mut v = DVec3::ONE;
+                    v[a] = s1 / s0;
+                    v
+                }
+                _ => DVec3::splat(2f64.powf((now.x - d.grab.x) / 120.0)),
+            };
+            let snap = self.settings.snap;
+            let k = k.map(|x| if snap { (x * 100.0).round() / 100.0 } else { x }.clamp(0.0, 100.0));
+            self.gizmo_readout = Some(match d.handle {
+                Handle::Scale(a) => format!("{} × {:.2}", ["X", "Y", "Z"][a], k[a]),
+                _ => format!("× {:.2}", k.x),
+            });
+            self.live(|doc| {
+                if let Some(tw) = doc.feature_mut(id).and_then(|f| f.tweak.as_mut()) {
+                    tw.scale = t0.scale * k;
+                }
+            });
+            return;
+        }
+        // a point of what moves passing near a point of interest lands on
+        // it; the pointer on one: the pivot lines up with it, along the
+        // axis, in the plane, or on it (the centre: all three axes)
+        let Some(mask) = crate::state::move_mask(d.handle) else { return };
+        if let Some((best, shown)) = self.align_move(p, raw, mask, &[pivot0], &d.carried, &[]) {
+            delta = best;
+            self.snap_shown = Some(shown);
+        }
+        if d.custom {
+            self.custom_pivot = Some((self.pivot_key(), pivot0 + delta));
         }
         self.live(|doc| {
             if let Some(tw) = doc.feature_mut(id).and_then(|f| f.tweak.as_mut()) {
@@ -859,7 +1217,7 @@ impl AppState {
                 };
                 let (ro, rd) = self.ray(p);
                 let t0 = closest_on_line(r.at, n, ro, rd).unwrap_or(0.0);
-                let t = Tweak { comp: Comp::Edge(r.clone()), delta: DVec3::ZERO };
+                let Some(t) = Tweak::new(vec![Comp::Edge(r.clone())]) else { return true };
                 self.begin_live(t.label());
                 let mut id = 0;
                 self.live(|d| id = d.add_tweak(t));
@@ -988,8 +1346,9 @@ impl AppState {
                     self.round_drag = Some(RoundDrag { what: RoundWhat::Corners { corners, id, bis, per, y }, press: p, r0: size, px, chamfer, size, chamfer0: chamfer, tension_from: None, tension: self.corner_tension(id, i) });
                     return true;
                 }
-                if let Some(r) = self.corner_edge(v) {
-                    self.edge_sel = vec![r];
+                let es = self.vertex_edges(v);
+                if !es.is_empty() {
+                    self.edge_sel = es;
                     self.vert_sel.clear();
                     self.hover_vertex = None;
                     self.selection.clear();
@@ -1067,7 +1426,7 @@ impl AppState {
                 let v = if g.chamfer { -size } else { size };
                 self.live(|d| {
                     for (fid, i) in corners {
-                        if let Some(pr) = d.feature_mut(*fid).and_then(|f| f.profile.as_mut()) {
+                        if let Some(pr) = d.feature_mut(*fid).and_then(editable) {
                             if pr.corner.len() < pr.points.len() {
                                 pr.corner.resize(pr.points.len(), 0.0);
                             }
@@ -1187,7 +1546,7 @@ impl AppState {
         }
         self.live(|d| {
             for (fid, i) in corners {
-                if let Some(pr) = d.feature_mut(*fid).and_then(|f| f.profile.as_mut()) {
+                if let Some(pr) = d.feature_mut(*fid).and_then(editable) {
                     if pr.tension.len() < pr.points.len() {
                         pr.tension.resize(pr.points.len(), 0.0);
                     }
@@ -1285,4 +1644,12 @@ impl AppState {
             self.toast("Ctrl + B: pick edges (2) or sketch corners (1) first", true);
         }
     }
+}
+
+/// A feature's outline to edit by hand: a curve of the Curves set becomes
+/// a plain path first (3ds Max's Convert to Editable Spline), else its
+/// settings would make it again.
+fn editable(f: &mut nurbs_kernel::Feature) -> Option<&mut nurbs_kernel::Profile> {
+    f.curve = None;
+    f.profile.as_mut()
 }

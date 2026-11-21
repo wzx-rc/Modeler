@@ -15,6 +15,9 @@ pub mod client;
 pub mod doc;
 pub mod model;
 pub mod proto;
+pub mod mesh;
+pub mod mesh_bevel;
+pub mod patch;
 pub mod remesh;
 
 #[cfg(feature = "occ")]
@@ -22,5 +25,6 @@ pub mod build;
 #[cfg(feature = "occ")]
 pub mod quads;
 
-pub use doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Knife, KnifePoint, Op, Paint, Prim, Profile, Push, Round, Tweak};
+pub use doc::{Array, ArrayKind, Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Form, FormKind, Knife, KnifePoint, Loft, Makes, MaterialLook, Mirror, Op, Paint, Prim, Profile, Push, RefMesh, Revolve, Round, Sheet, Shell, Tweak};
+pub use mesh::{MeshData, MeshKind, MeshRef};
 pub use model::{Edge, Face, FaceTag, Model, Quads};
