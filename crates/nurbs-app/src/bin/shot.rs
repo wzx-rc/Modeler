@@ -1656,6 +1656,41 @@ fn main() {
         }
     }
 
+    if want("orphans") {
+        // operations left by a shape deleted in a document from before
+        // 20 nov. (FORME_DOC: a saved scene): the outliner's row takes them
+        // away, one undo step
+        let d = match std::env::var("FORME_DOC") {
+            Ok(path) => nurbs_kernel::Doc::from_json(&std::fs::read_to_string(&path).expect("FORME_DOC")).expect("a document"),
+            Err(_) => {
+                let mut d = test_part();
+                d.add_round(2.0, false, vec![EdgeRef { faces: [FaceTag { feature: 1, sub: 2 }.pack(), FaceTag { feature: 1, sub: 4 }.pack()], at: DVec3::new(12.0, 20.0, 15.0) }]);
+                d.add_round(1.0, false, vec![EdgeRef { faces: [FaceTag { feature: 3, sub: 0 }.pack(), FaceTag { feature: 3, sub: 1 }.pack()], at: DVec3::new(17.0, 30.0, 0.0) }]);
+                d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 3, sub: 1 }.pack(), at: DVec3::new(10.0, 30.0, 0.0) }, inset: 2.0, depth: 2.0 });
+                // the boss gone, as an old Delete left it
+                d.features.retain(|f| f.id != 3);
+                d
+            }
+        };
+        h.reset(d, "Leftovers");
+        h.settle();
+        let errors = |h: &Harness| h.st.model.as_ref().map(|m| m.errors.len()).unwrap_or(0);
+        let row = h.ctx.data(|d| d.get_temp::<Pos2>(egui::Id::new("orphans-row"))).expect("the leftover row");
+        h.move_to(row);
+        h.steps(3);
+        h.shot("zero-orphans-1-row");
+        eprintln!("  {} features, {} leftover, {} errors", h.st.doc.features.len(), h.st.doc.orphans().len(), errors(&h));
+        h.click(row);
+        h.settle();
+        h.move_to(pos2(800.0, 300.0));
+        h.steps(3);
+        h.shot("zero-orphans-2-removed");
+        eprintln!("  {} features, {} leftover, {} errors, toast {:?}", h.st.doc.features.len(), h.st.doc.orphans().len(), errors(&h), h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.st.undo();
+        h.settle();
+        eprintln!("  undone: {} features, {} leftover, {} errors", h.st.doc.features.len(), h.st.doc.orphans().len(), errors(&h));
+    }
+
     if want("history") {
         // the history strip: the Block's own history (its fillet and
         // inset), back to the fillet, scrubbed, the fillet turned off in

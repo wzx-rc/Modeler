@@ -2070,6 +2070,30 @@ impl Doc {
         }
         (2..).map(|i| format!("{base} {i}")).find(|n| !self.features.iter().any(|f| &f.name == n)).unwrap()
     }
+    /// The operations left by shapes that are gone: each names faces, and
+    /// every feature it names is no longer in the document (or is one of
+    /// these). A shape deleted takes its operations with it since 20 nov.;
+    /// a document from before keeps them, failing at every build ("its
+    /// face is gone").
+    pub fn orphans(&self) -> Vec<FeatureId> {
+        let mut dead: Vec<FeatureId> = vec![];
+        loop {
+            let more: Vec<FeatureId> = self
+                .features
+                .iter()
+                .filter(|f| !dead.contains(&f.id) && !f.is_solid() && f.mirror.is_none() && f.array.is_none() && f.shell.is_none())
+                .filter(|f| {
+                    let named = named_features(f);
+                    !named.is_empty() && named.iter().all(|n| dead.contains(n) || self.feature(*n).is_none())
+                })
+                .map(|f| f.id)
+                .collect();
+            if more.is_empty() {
+                return dead;
+            }
+            dead.extend(more);
+        }
+    }
     /// Takes these features out. A 2D boolean takes its operands with it
     /// (those no other boolean left takes in); an operand taken out leaves
     /// its boolean's list, a boolean left with none goes too.
@@ -2194,5 +2218,30 @@ mod tests {
         assert_eq!(back, d);
         let (lo, hi) = d.feature(1).unwrap().bounds();
         assert!((lo - DVec3::new(-10.0, 0.0, -10.0)).length() < 1e-9 && (hi - DVec3::new(10.0, 20.0, 10.0)).length() < 1e-9);
+    }
+
+    #[test]
+    fn orphans_of_a_shape_that_is_gone() {
+        // a document from before 20 nov.: a shape deleted left its
+        // operations (Romain's scene of 21 nov.: 16 of its 19 errors)
+        let tag = |f: FeatureId, sub: i64| ((f as i64) << 16) | sub;
+        let mut d = Doc::default();
+        let a = d.add(Op::Add, PrimKind::Box.default_prim(), DVec3::ZERO, DQuat::IDENTITY);
+        let b = d.add(Op::Add, PrimKind::Box.default_prim(), DVec3::new(40.0, 0.0, 0.0), DQuat::IDENTITY);
+        let on_a = d.add_round(2.0, false, vec![EdgeRef { faces: [tag(a, 2), tag(a, 0)], at: DVec3::ZERO }]);
+        let on_b = d.add_round(2.0, false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 0)], at: DVec3::ZERO }]);
+        // on the fillet's own face, then on that step's
+        let push = d.add_push(Push { face: FaceRef { tag: tag(on_b, 0), at: DVec3::ZERO }, inset: 0.0, depth: 1.0 });
+        let knife = d.add_knife(Knife { pts: vec![KnifePoint { edge: EdgeRef { faces: [tag(push, 1), tag(b, 2)], at: DVec3::ZERO }, f: 0.5, at: DVec3::ZERO }], segs: vec![], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+        // between both shapes: it keeps a face that is there
+        let both = d.add_round(1.0, false, vec![EdgeRef { faces: [tag(a, 0), tag(b, 1)], at: DVec3::ZERO }]);
+        let vertex = d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::ZERO), delta: DVec3::X, more: vec![], scale: DVec3::ONE, copy: false, about: None });
+        assert!(d.orphans().is_empty());
+        d.features.retain(|f| f.id != b);
+        assert_eq!(d.orphans(), vec![on_b, push, knife]);
+        let dead = d.orphans();
+        d.remove(&dead);
+        assert_eq!(d.features.iter().map(|f| f.id).collect::<Vec<_>>(), vec![a, on_a, both, vertex]);
+        assert!(d.orphans().is_empty());
     }
 }

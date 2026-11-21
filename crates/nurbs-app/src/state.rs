@@ -1625,6 +1625,20 @@ impl AppState {
         self.toast(&format!("{what} deleted"), false);
     }
 
+    /// Takes away the operations whose shapes are gone (`Doc::orphans`: a
+    /// document from before 20 nov., when a shape deleted left them), one
+    /// undo step.
+    pub fn remove_orphans(&mut self) {
+        let ids = self.doc.orphans();
+        if ids.is_empty() {
+            return;
+        }
+        let n = ids.len();
+        self.edit("Remove leftover operations", |d| d.remove(&ids));
+        self.selection.retain(|s| !ids.contains(s));
+        self.toast(&format!("{n} operation{} of deleted shapes removed · Ctrl + Z brings {} back", if n > 1 { "s" } else { "" }, if n > 1 { "them" } else { "it" }), false);
+    }
+
     pub fn duplicate_selected(&mut self) {
         // picked faces, edges or vertices (Romain 19 nov. 23 h 18: "dupliquer
         // ce morceau pour le déplacer devant, toujours mergé à l'entité"):

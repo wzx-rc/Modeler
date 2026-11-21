@@ -2327,6 +2327,21 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
         if feats.is_empty() && st.doc.reference.is_none() {
             ui.label(egui::RichText::new("Empty · pick a shape on the right (B, C), or drop an .obj here").font(regular(12.0)).color(TEXT2()));
         }
+        // operations left by shapes deleted before 20 nov. (they fail at
+        // every build): one row to take them away
+        let dead = st.doc.orphans().len();
+        if dead > 0 {
+            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+            let p = ui.painter();
+            p.rect(r.shrink2(vec2(1.0, 2.0)), 6.0, if resp.hovered() { RAISED() } else { Color32::TRANSPARENT }, Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+            p.text(pos2(r.min.x + 9.0, r.center().y), Align2::LEFT_CENTER, format!("{dead} leftover operation{}", if dead > 1 { "s" } else { "" }), regular(11.0), carve_light());
+            p.text(pos2(r.max.x - 9.0, r.center().y), Align2::RIGHT_CENTER, "Remove", semibold(11.0), if resp.hovered() { TEXT() } else { TEXT2() });
+            ui.ctx().data_mut(|d| d.insert_temp(Id::new("orphans-row"), r.center()));
+            if resp.on_hover_text("Their shape was deleted: they can no longer be made, and fail at every build. Ctrl + Z brings them back.").clicked() {
+                st.remove_orphans();
+            }
+            ui.add_space(2.0);
+        }
         reference_rows(ui, st);
         for (gi, (title, keep)) in groups.iter().enumerate() {
             // the last group: operations whose shape cannot be told

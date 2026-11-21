@@ -5559,10 +5559,18 @@ mod tests {
         // FORME_BATTERY=mirror-first / mirror-last: a Mirror across X through
         // the first part (cut at the plane; the second lies off it) before
         // the operations (each then made on both sides) or after them
+        // array-first / array-last: an Array of the first part (2 in a line,
+        // 80 mm along Z: its copy is the first part's island too, by its
+        // ids), before the operations (those on the first part then brought
+        // before it, as the app does) or after them
         let mode = std::env::var("FORME_BATTERY").unwrap_or_default();
         let mirror = crate::doc::Mirror { axis: 0, offset: 0.0, flip: false };
+        let array = crate::doc::Array { sources: vec![b, 2, s, 4], kind: crate::doc::ArrayKind::Line, count: 2, step: DVec3::new(0.0, 0.0, 80.0), count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 };
         if mode == "mirror-first" {
             base.add_mirror(mirror);
+        }
+        if mode == "array-first" {
+            base.add_array(array.clone());
         }
         assert_eq!(islands_against_one(&base), Vec::<String>::new());
         let only = std::env::var("FORME_COMBO").ok();
@@ -5584,6 +5592,12 @@ mod tests {
                 (two[i].1)(&mut d);
                 if mode == "mirror-last" {
                     d.add_mirror(mirror);
+                }
+                if mode == "array-first" {
+                    d.keep_arrays();
+                }
+                if mode == "array-last" {
+                    d.add_array(array.clone());
                 }
                 let diff = islands_against_one(&d);
                 n += 1;
