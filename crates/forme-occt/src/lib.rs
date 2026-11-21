@@ -59,7 +59,7 @@ extern "C" {
     fn focc_edge_count(s: *const FShape) -> c_int;
     fn focc_edge_faces(s: *const FShape, out: *mut c_int, cap: c_int) -> c_int;
     fn focc_edge_sample(s: *const FShape, index: c_int, n: c_int, xyz: *mut c_double) -> c_int;
-    fn focc_fillet_tension(s: *const FShape, tags: *const i64, rhos: *const c_double, n: c_int, done: *mut c_int, total: *mut c_int, tight: *mut c_double) -> *mut FShape;
+    fn focc_fillet_tension(s: *const FShape, before: *const FShape, tags: *const i64, rhos: *const c_double, n: c_int, done: *mut c_int, total: *mut c_int, tight: *mut c_double) -> *mut FShape;
     fn focc_fillet(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
     fn focc_fillet_multi(s: *const FShape, idx: *const c_int, r: *const c_double, tags: *const i64, n: c_int, fresh: i64) -> *mut FShape;
     fn focc_chamfer(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
@@ -670,12 +670,18 @@ impl Shape {
     /// each fillet how many of its faces took it out of how many. Two
     /// fillets meeting in a mitre go together when their tensions agree.
     pub fn fillet_tension(&self, fillets: &[(i64, f64)]) -> Result<(Shape, Vec<Tension>), String> {
+        self.fillet_tension_since(None, fillets)
+    }
+    /// The same, `before` the shape the fillets were made on: a face of
+    /// theirs that was there already, as it is now, is left alone and not
+    /// counted (another copy's of an Array: it has its tension).
+    pub fn fillet_tension_since(&self, before: Option<&Shape>, fillets: &[(i64, f64)]) -> Result<(Shape, Vec<Tension>), String> {
         let tags: Vec<i64> = fillets.iter().map(|f| f.0).collect();
         let rhos: Vec<f64> = fillets.iter().map(|f| f.1).collect();
         let mut done = vec![0 as c_int; fillets.len()];
         let mut total = vec![0 as c_int; fillets.len()];
         let mut tight = vec![0.0 as c_double; 4 * fillets.len()];
-        let s = shape(unsafe { focc_fillet_tension(self.0, tags.as_ptr(), rhos.as_ptr(), fillets.len() as c_int, done.as_mut_ptr(), total.as_mut_ptr(), tight.as_mut_ptr()) })?;
+        let s = shape(unsafe { focc_fillet_tension(self.0, before.map_or(std::ptr::null(), |b| b.0 as *const FShape), tags.as_ptr(), rhos.as_ptr(), fillets.len() as c_int, done.as_mut_ptr(), total.as_mut_ptr(), tight.as_mut_ptr()) })?;
         Ok((
             s,
             (0..fillets.len())

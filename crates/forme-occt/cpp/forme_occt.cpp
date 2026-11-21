@@ -1614,7 +1614,13 @@ static opencascade::handle<Geom_BSplineSurface> ten_general_surf(const TenFace& 
     return g;
 }
 
-FShape* focc_fillet_tension(const FShape* s, const long long* tags, const double* rhos, int n, int* done, int* total, double* tight) {
+// `before`: the shape the fillets were made on (may be null). A face of an
+// asked fillet that was there already, as it is now, is another copy's (an
+// Array's copies carry the original's tags): it has its tension, it is left
+// alone and not counted (made conic again it lost its exact surface each
+// time, and could fail: "tension on 1 of 2 faces"). A face still round (a
+// cylinder, a torus, a sphere) is tried again as before.
+FShape* focc_fillet_tension(const FShape* s, const FShape* before, const long long* tags, const double* rhos, int n, int* done, int* total, double* tight) {
     return guard(
         [&]() -> FShape* {
             for (int k = 0; k < n; k++) done[k] = total[k] = 0;
@@ -1625,6 +1631,36 @@ FShape* focc_fillet_tension(const FShape* s, const long long* tags, const double
             }
             TopTools_IndexedMapOfShape fm;
             face_map(s->s, fm);
+            // the asked fillets' faces before: tag, area, centre
+            struct Print { long long tag; double area; gp_Pnt c; };
+            auto print_of = [](const TopoDS_Face& f, long long t) {
+                GProp_GProps g;
+                BRepGProp::SurfaceProperties(f, g);
+                return Print{t, g.Mass(), g.CentreOfMass()};
+            };
+            std::vector<Print> olds;
+            if (before) {
+                TopTools_IndexedMapOfShape bm;
+                face_map(before->s, bm);
+                for (int i = 1; i <= bm.Extent(); i++) {
+                    long long t = i - 1 < (int)before->tags.size() ? before->tags[i - 1] : -1;
+                    bool asked = false;
+                    for (int k = 0; k < n; k++) asked |= tags[k] == t;
+                    if (!asked) continue;
+                    GeomAbs_SurfaceType ty = BRepAdaptor_Surface(TopoDS::Face(bm(i)), Standard_False).GetType();
+                    if (ty == GeomAbs_Cylinder || ty == GeomAbs_Torus || ty == GeomAbs_Sphere) continue;
+                    olds.push_back(print_of(TopoDS::Face(bm(i)), t));
+                }
+            }
+            auto old_face = [&](const TopoDS_Face& f, long long t) {
+                if (olds.empty()) return false;
+                GeomAbs_SurfaceType ty = BRepAdaptor_Surface(f, Standard_False).GetType();
+                if (ty == GeomAbs_Cylinder || ty == GeomAbs_Torus || ty == GeomAbs_Sphere) return false;
+                Print p = print_of(f, t);
+                for (const Print& o : olds)
+                    if (o.tag == t && std::abs(o.area - p.area) <= 1e-6 * std::max(1.0, o.area) && o.c.Distance(p.c) <= 1e-6) return true;
+                return false;
+            };
             TopTools_IndexedDataMapOfShapeListOfShape e2f;
             TopExp::MapShapesAndAncestors(s->s, TopAbs_EDGE, TopAbs_FACE, e2f);
             TopTools_IndexedDataMapOfShapeListOfShape v2e;
@@ -1640,6 +1676,7 @@ FShape* focc_fillet_tension(const FShape* s, const long long* tags, const double
                 for (int k = 0; k < n && which < 0; k++)
                     if (tags[k] == t) which = k;
                 if (which < 0) continue;
+                if (old_face(TopoDS::Face(fm(i)), t)) continue;
                 total[which]++;
                 TenFace tf;
                 tf.f = TopoDS::Face(fm(i));

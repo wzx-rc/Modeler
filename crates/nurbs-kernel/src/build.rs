@@ -994,13 +994,15 @@ fn blend(befores: &[(&Feature, Stage)], f: &Feature, r: &Round) -> Option<(Shape
 /// `errors`. For each fillet: Some(true) when every face took it, None when
 /// none did. A tension too full or too flat for a fillet running round it
 /// stops at the nearest that works (Romain: "il bute et stop", as a fillet's
-/// size does): `limits` gets (fillet, the tension it was made at).
-fn tension(s: Rc<Shape>, ts: &[(u32, f64)], name_of: &dyn Fn(u32) -> String, errors: &mut Vec<String>, limits: &mut Vec<(u32, f64)>) -> (Rc<Shape>, Vec<Option<bool>>) {
+/// size does): `limits` gets (fillet, the tension it was made at). `before`:
+/// the solid the fillets were made on; their faces that were there already
+/// (another copy's of an Array, same tags) are left as they are.
+fn tension(s: Rc<Shape>, before: Option<&Shape>, ts: &[(u32, f64)], name_of: &dyn Fn(u32) -> String, errors: &mut Vec<String>, limits: &mut Vec<(u32, f64)>) -> (Rc<Shape>, Vec<Option<bool>>) {
     if ts.is_empty() {
         return (s, vec![]);
     }
     let tagged: Vec<(i64, f64)> = ts.iter().map(|&(id, t)| (FaceTag { feature: id, sub: 0 }.pack(), t)).collect();
-    match s.fillet_tension(&tagged) {
+    match s.fillet_tension_since(before, &tagged) {
         Ok((t, counts)) => {
             // too tight for a fillet running round it: again at the nearest
             // tension that works, kept when it then takes everywhere
@@ -1015,7 +1017,7 @@ fn tension(s: Rc<Shape>, ts: &[(u32, f64)], name_of: &dyn Fn(u32) -> String, err
                 .collect();
             if stops.iter().any(|x| x.is_some()) {
                 let again: Vec<(i64, f64)> = tagged.iter().zip(&stops).map(|(&(tag, rho), x)| (tag, x.unwrap_or(rho))).collect();
-                if let Ok((t2, c2)) = s.fillet_tension(&again) {
+                if let Ok((t2, c2)) = s.fillet_tension_since(before, &again) {
                     if stops.iter().zip(&c2).all(|(x, c)| x.is_none() || c.done == c.total) {
                         let mut took = vec![];
                         for ((&(id, _), x), c) in ts.iter().zip(&stops).zip(&c2) {
@@ -1057,7 +1059,7 @@ fn tension(s: Rc<Shape>, ts: &[(u32, f64)], name_of: &dyn Fn(u32) -> String, err
             let mut s = s;
             let mut took = vec![];
             for t in ts {
-                let (n, k) = tension(s, std::slice::from_ref(t), name_of, errors, limits);
+                let (n, k) = tension(s, before, std::slice::from_ref(t), name_of, errors, limits);
                 s = n;
                 took.extend(k);
             }
@@ -1922,7 +1924,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                         mark(&step("round", f));
                     }
                     let (mut errs, mut stops) = (vec![], vec![]);
-                    let (t, took) = tension(Rc::new(p), &all, &name_of, &mut errs, &mut stops);
+                    let (t, took) = tension(Rc::new(p), Some(acc.as_ref()), &all, &name_of, &mut errs, &mut stops);
                     let full: Vec<u32> = all.iter().zip(&took).filter(|(_, k)| **k == Some(true)).map(|(a, _)| a.0).collect();
                     let lost = ts.iter().filter(|(id, _)| conic.contains(id) && !full.contains(id)).count() + own.filter(|o| !full.contains(&o.0)).iter().count();
                     (t, full, lost, (errs, stops))
@@ -5607,32 +5609,52 @@ mod tests {
     /// before them (the part and its image apart, each step on both),
     /// `mirror-touch`: across Z on the part's back face (one part, faces
     /// across the plane), `mirror-last`: across X through the part after
-    /// them.
+    /// them. `array-last`: an Array of the whole part after them (2 in a
+    /// line, 100 mm apart: twice the pair), `array-first`: the Array first
+    /// and both tools made on its copy, brought back to the original as the
+    /// app does (`Doc::keep_arrays`: twice the pair again).
     #[test]
     #[ignore]
     fn combo_battery() {
         let (mut base, b, s) = test_part();
-        let ops = combo_ops(b, 2, s, 4, DVec3::ZERO);
         let only = std::env::var("FORME_COMBO").ok();
         let mode = std::env::var("FORME_BATTERY").unwrap_or_default();
+        let step = DVec3::new(100.0, 0.0, 0.0);
+        let plain_ops = combo_ops(b, 2, s, 4, DVec3::ZERO);
+        let ops = combo_ops(b, 2, s, 4, if mode == "array-first" { step } else { DVec3::ZERO });
         let plain = base.clone();
+        let array = |d: &mut Doc| {
+            d.add_array(crate::doc::Array { sources: vec![b, 2, s, 4], kind: crate::doc::ArrayKind::Line, count: 2, step, count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 });
+        };
         match mode.as_str() {
             "mirror-first" => { base.add_mirror(crate::doc::Mirror { axis: 0, offset: -40.0, flip: false }); }
             "mirror-touch" => { base.add_mirror(crate::doc::Mirror { axis: 2, offset: -15.0, flip: false }); }
+            "array-first" => array(&mut base),
             _ => {}
         }
+        let twice = mode == "mirror-first" || mode.starts_with("array");
+        // an operation made on a copy goes back to the original
+        let kept = |d: &mut Doc| {
+            if mode == "array-first" {
+                d.keep_arrays();
+            }
+        };
         let last = |d: &mut Doc| {
             if mode == "mirror-last" {
                 d.add_mirror(crate::doc::Mirror { axis: 0, offset: 0.0, flip: false });
+            }
+            if mode == "array-last" {
+                array(d);
             }
         };
         let mut bad = vec![];
         let mut n = 0;
         let mut unstable = 0;
-        for (an, a) in &ops {
+        for (ai, (an, a)) in ops.iter().enumerate() {
             // each alone first
             let mut d = base.clone();
             a(&mut d);
+            kept(&mut d);
             last(&mut d);
             let m = build(&d, true, false, &[], &mut Cache::default());
             if !m.errors.is_empty() {
@@ -5640,7 +5662,7 @@ mod tests {
                 bad.push(format!("{an}: {:?}", m.errors));
                 continue;
             }
-            for (bn, bo) in &ops {
+            for (bi, (bn, bo)) in ops.iter().enumerate() {
                 if an == bn {
                     continue;
                 }
@@ -5650,7 +5672,9 @@ mod tests {
                 }
                 let mut d = base.clone();
                 a(&mut d);
+                kept(&mut d);
                 bo(&mut d);
+                kept(&mut d);
                 last(&mut d);
                 let t = Instant::now();
                 let m = build(&d, true, false, &[], &mut Cache::default());
@@ -5670,10 +5694,10 @@ mod tests {
                 }
                 // the part and its image apart: twice the pair made with no
                 // Mirror (a step made on one side only would show here)
-                if mode == "mirror-first" && m.errors.is_empty() {
+                if twice && m.errors.is_empty() {
                     let mut p = plain.clone();
-                    a(&mut p);
-                    bo(&mut p);
+                    (plain_ops[ai].1)(&mut p);
+                    (plain_ops[bi].1)(&mut p);
                     let (x, y) = (digest(&m), digest(&build(&p, true, false, &[], &mut Cache::default())));
                     if y.0.is_empty() && (x.1 != 2 * y.1 || x.2 != 2 * y.2 || (x.3 - 2.0 * y.3).abs() > 1e-3 * y.3.abs().max(1.0)) {
                         eprintln!("LOPSIDED {name}: faces {} / 2 × {}, edges {} / 2 × {}, volume {:.3} / 2 × {:.3}", x.1, y.1, x.2, y.2, x.3, y.3);
@@ -5739,6 +5763,31 @@ mod tests {
         assert_eq!(m.errors, Vec::<String>::new());
         let tops = m.faces.iter().filter(|f| f.kind == SurfKind::Plane && (f.point[1] - 30.0).abs() < 1e-6 && f.normal[1] > 0.9).count();
         assert_eq!(tops, 1, "the boss's top after its side is extruded");
+    }
+
+    /// Found by the tools' battery with an Array (21 nov.). A copy carries
+    /// the original's tags, so a copy's fillet with tension found the
+    /// original's faces, conic already, among its own: it made them conic
+    /// again (their exact surface lost a little more at each copy) and said
+    /// "tension on 1 of 2 faces" where that could not be done again (after
+    /// an Extrude at the fillet's end, next to another fillet). They are
+    /// left alone now: with the Array, twice the part and no error.
+    #[test]
+    fn tension_on_the_copies_of_an_array() {
+        let (base, b, s) = test_part();
+        let ops = combo_ops(b, 2, s, 4, DVec3::ZERO);
+        let op = |name: &str| &ops.iter().find(|(n, _)| *n == name).unwrap().1;
+        for (first, second) in [("fillet top-front", "tension fillet top -X"), ("tension fillet top -X", "fillet top-front"), ("tension fillet top -X", "extrude front")] {
+            let mut plain = base.clone();
+            op(first)(&mut plain);
+            op(second)(&mut plain);
+            let mut both = plain.clone();
+            both.add_array(crate::doc::Array { sources: vec![b, 2, s, 4], kind: crate::doc::ArrayKind::Line, count: 2, step: DVec3::new(100.0, 0.0, 0.0), count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 });
+            let (x, y) = (digest(&build(&plain, true, false, &[], &mut Cache::default())), digest(&build(&both, true, false, &[], &mut Cache::default())));
+            assert!(x.0.is_empty() && y.0.is_empty(), "{first} then {second}: {:?}, with an Array {:?}", x.0, y.0);
+            assert_eq!((y.1, y.2), (2 * x.1, 2 * x.2), "{first} then {second}: faces and edges, twice with an Array");
+            assert!((y.3 - 2.0 * x.3).abs() < 1e-3 * x.3, "{first} then {second}: volume {} with an Array, {} without", y.3, x.3);
+        }
     }
 
     #[test]
