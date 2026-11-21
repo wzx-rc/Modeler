@@ -2249,9 +2249,20 @@ impl AppState {
 
     /// The tab at the top (Forme, Sculpt, Poly): its theme, its tools; the
     /// scene, the selection, the view and the gizmo stay.
+    /// The tabs shown: the iPad edition has Forme and SDF only (Romain,
+    /// 21 nov., 20 h 23: "ajouter aussi le tab SDF (donc pas Sculpt ni Poly)").
+    pub fn workspaces(&self) -> Vec<crate::workspace::Workspace> {
+        use crate::workspace::Workspace;
+        if self.manual_only {
+            vec![Workspace::Forme, Workspace::Sdf]
+        } else {
+            Workspace::ALL.to_vec()
+        }
+    }
+
     pub fn set_workspace(&mut self, w: crate::workspace::Workspace) {
         use crate::workspace::Workspace;
-        if w == self.workspace {
+        if w == self.workspace || !self.workspaces().contains(&w) {
             return;
         }
         self.commit_gestures(self.principal());
@@ -4533,6 +4544,10 @@ impl AppState {
     /// Keeps the loaded reference in step with the document's (imported,
     /// removed, undone, another document opened).
     fn reference_tick(&mut self) {
+        // the iPad edition: no scan, no retopology (Romain, 19 nov.)
+        if self.manual_only {
+            return;
+        }
         if let Some(l) = &self.ref_loading {
             match l.rx.try_recv() {
                 Ok(res) => {

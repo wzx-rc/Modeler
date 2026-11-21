@@ -540,10 +540,15 @@ fn tabs(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             ui.set_height(TABS_H - 6.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
-                let tabs: Vec<(Rect, egui::Response)> = Workspace::ALL.iter().map(|_| ui.allocate_exact_size(vec2(116.0, TABS_H - 6.0), Sense::click())).collect();
-                let rects = [tabs[0].0, tabs[1].0, tabs[2].0, tabs[3].0];
+                // the iPad leaves Sculpt and Poly out (`workspaces`)
+                let shown = st.workspaces();
+                let tabs: Vec<(Rect, egui::Response)> = shown.iter().map(|_| ui.allocate_exact_size(vec2(116.0, TABS_H - 6.0), Sense::click())).collect();
+                let mut rects = [tabs[0].0; 4];
+                for (w, (r, _)) in shown.iter().zip(&tabs) {
+                    rects[w.index() as usize] = *r;
+                }
                 let p = ui.painter().clone();
-                for (w, (r, resp)) in Workspace::ALL.into_iter().zip(&tabs) {
+                for (w, (r, resp)) in shown.iter().copied().zip(&tabs) {
                     if st.workspace != w && resp.hovered() {
                         p.rect_filled(*r, 9.0, RAISED());
                     }
@@ -552,7 +557,8 @@ fn tabs(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 p.rect_filled(crate::tab_anim::pill(ui.ctx(), &rects, st.workspace), 9.0, accent());
                 crate::tab_anim::streak(ui.ctx(), &rects);
                 let mut go = None;
-                for (i, (w, (r, resp))) in Workspace::ALL.into_iter().zip(tabs).enumerate() {
+                for (w, (r, resp)) in shown.iter().copied().zip(tabs) {
+                    let i = w.index() as usize;
                     let on = st.workspace == w;
                     let lit = crate::tab_anim::lit(ui.ctx(), w, st.workspace);
                     let off = if resp.hovered() { TEXT() } else { TEXT2() };
@@ -2790,6 +2796,10 @@ fn slot_options(ui: &mut Ui, st: &mut AppState) {
     });
     ui.add_space(6.0);
     ui.horizontal(|ui| {
+        // reading the scan: not in the iPad edition
+        if st.manual_only {
+            return;
+        }
         let (well, _) = ui.allocate_exact_size(vec2(2.0 * 84.0 + 6.0, 28.0), Sense::hover());
         ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
         for (i, (c, name)) in [(false, "BY HAND"), (true, "ON SCAN")].into_iter().enumerate() {
@@ -2875,6 +2885,10 @@ fn surface_options(ui: &mut Ui, st: &mut AppState) {
     ui.horizontal(|ui| {
         // the Surface tool: its points locked on the plane under the
         // first one, or put on the scan
+        // reading the scan: not in the iPad edition
+        if st.manual_only {
+            return;
+        }
         let (well, _) = ui.allocate_exact_size(vec2(2.0 * 84.0 + 6.0, 28.0), Sense::hover());
         ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
         for (i, (c, name)) in [(false, "ON PLANE"), (true, "ON SCAN")].into_iter().enumerate() {
@@ -3247,6 +3261,9 @@ fn operand_rows(ui: &mut Ui, st: &mut AppState, b: &Feature, depth: usize) {
 /// The outliner's REFERENCE group: the mesh to model on (dropped on the
 /// window), shown or hidden, solid or seen through (Ghost), removed.
 fn reference_rows(ui: &mut Ui, st: &mut AppState) {
+    if st.manual_only {
+        return;
+    }
     let Some(rm) = st.doc.reference.clone() else { return };
     let fid = Id::new("tree-group-ref");
     let folded = ui.data(|d| d.get_temp::<bool>(fid)).unwrap_or(false);
@@ -4222,7 +4239,7 @@ fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
         st.end_live();
     }
     // a plain Cube or Cylinder: made a linked object (NURBS, Poly, Sculpt)
-    if st.linkable_solid().map(|g| g.id) == Some(id) {
+    if st.linkable_solid().map(|g| g.id) == Some(id) && !st.manual_only {
         ui.add_space(4.0);
         if primary_btn(ui, None, "Linked object", Some(ui.available_width()))
             .on_hover_text("This shape as NURBS patches (their contour edited) that are also a Poly mesh and a clay: switch its state in its window (NURBS, POLY, SCULPT). The shape is hidden.")
@@ -4338,7 +4355,7 @@ fn curve_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
 /// Four sharp corners, closed (a Path, a Rectangle): the button that makes
 /// a linked surface on them (NURBS and Poly at once). True when made.
 fn linked_button(ui: &mut Ui, st: &mut AppState, id: FeatureId) -> bool {
-    if st.single().map(|f| f.id) != Some(id) || st.four_point_path().is_none() {
+    if st.single().map(|f| f.id) != Some(id) || st.four_point_path().is_none() || st.manual_only {
         return false;
     }
     ui.add_space(4.0);
@@ -5129,9 +5146,10 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         }
     }
     if ctrl && pressed(Key::Tab) {
-        let n = Workspace::ALL.len() as u8;
-        let i = (space.index() + if shift { n - 1 } else { 1 }) % n;
-        st.set_workspace(Workspace::from_index(i));
+        let list = st.workspaces();
+        let n = list.len();
+        let i = list.iter().position(|w| *w == space).unwrap_or(0);
+        st.set_workspace(list[(i + if shift { n - 1 } else { 1 }) % n]);
         return;
     }
     let pointer = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]).unwrap_or(st.principal());
