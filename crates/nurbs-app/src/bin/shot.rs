@@ -5833,6 +5833,54 @@ fn linked_objects(h: &mut Harness) {
     let f = h.st.doc.feature(lz).unwrap();
     let top = nurbs_app::meshes::world_points(f).iter().map(|q| q.y).fold(f32::MIN, f32::max);
     eprintln!("lobj: dome: the layer's top at {top:.2} mm (rim 24)");
+    // a cube's faces, each its middle point: the top's raised 6 mm, the
+    // +X side's pushed out 4, the edges where they were
+    let mut doc = Doc::default();
+    let b2 = doc.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+    h.reset(doc, "Linked cube");
+    h.st.selection = vec![b2];
+    h.steps(2);
+    let lb = if h.st.make_linked_solid() { h.st.selection[0] } else {
+        eprintln!("lobj: cube 2 not made");
+        return;
+    };
+    h.st.camera.yaw = 0.62;
+    h.st.camera.pitch = 0.5;
+    h.st.camera.target = Vec3::new(0.0, 10.0, 0.0);
+    h.st.camera.dist = 120.0;
+    let (top_mid, side_mid) = {
+        let f = h.st.doc.feature(lb).unwrap();
+        let c = cvs_world(f).unwrap();
+        let p = patch_of(f).unwrap();
+        let mids: Vec<usize> = p.contour().into_iter().filter(|k| p.is_centre(*k)).collect();
+        eprintln!("lobj: cube 2: {} contour points, {} middles", p.contour().len(), mids.len());
+        (
+            mids.iter().copied().find(|k| c[*k].y > 19.9).unwrap(),
+            mids.iter().copied().find(|k| c[*k].x > 19.9).unwrap(),
+        )
+    };
+    h.st.move_patch_points(lb, &[top_mid], Vec3::new(0.0, 6.0, 0.0));
+    h.st.move_patch_points(lb, &[side_mid], Vec3::new(4.0, 0.0, 0.0));
+    h.st.selection = vec![lb];
+    h.key(Key::Num1);
+    h.st.selection = vec![lb];
+    h.st.patch_sel = Some(nurbs_app::linked::PatchSel { id: lb, cvs: vec![top_mid] });
+    h.steps(4);
+    h.shot("lobj-25-cube-swell");
+    h.key(Key::Num4);
+    h.st.selection.clear();
+    h.steps(4);
+    h.shot("lobj-26-cube-swell-object");
+    h.st.set_patch_state(lb, PatchState::Poly);
+    h.st.selection.clear();
+    h.steps(4);
+    h.shot("lobj-27-cube-swell-poly");
+    h.st.set_patch_state(lb, PatchState::Nurbs);
+    let f = h.st.doc.feature(lb).unwrap();
+    let pts = nurbs_app::meshes::world_points(f);
+    let top = pts.iter().map(|q| q.y).fold(f32::MIN, f32::max);
+    let side = pts.iter().map(|q| q.x).fold(f32::MIN, f32::max);
+    eprintln!("lobj: cube swell: the layer's top at {top:.2} mm (edges 20), its +X side at {side:.2} (edges 20)");
 }
 
 /// The linked surface on a busier part (Romain, 20 nov., 20 h 58: "Test

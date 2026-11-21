@@ -477,7 +477,12 @@ fn leave_sculpt(f: &mut Feature, to: PatchState) {
 /// seam) welded at the seams and bound to them.
 pub fn linked_solid(d: &mut nurbs_kernel::Doc, src: &Feature) -> Option<FeatureId> {
     let (mut p, name) = match src.prim {
-        Prim::Box { x, y, z } => (Patch::closed(&patch::box_patches(Vec3::new(x as f32, y as f32, z as f32))), "Linked cube"),
+        Prim::Box { x, y, z } => {
+            // each face its middle point too
+            let mut p = Patch::closed(&patch::box_patches(Vec3::new(x as f32, y as f32, z as f32)));
+            p.add_mids();
+            (p, "Linked cube")
+        }
         Prim::Cylinder { radius, height } => (Patch::cylinder(radius as f32, height as f32), "Linked cylinder"),
         _ => return None,
     };
@@ -558,7 +563,9 @@ impl AppState {
             c = vec![c[0], c[3], c[2], c[1]];
         }
         let corners = [c[0], c[1], c[2], c[3]];
-        let mm = Patch::new(corners);
+        let mut mm = Patch::new(corners);
+        // its middle point: moved, the surface swells there
+        mm.add_mids();
         let cv = mm.cvs(Vec3::ONE);
         // the grid: about 12 quads along the longer side
         let lu = (corners[1] - corners[0]).length().max((corners[2] - corners[3]).length());
@@ -960,6 +967,29 @@ mod tests {
         let pts = crate::meshes::world_points(f);
         let (lo, hi) = pts.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), q| (a.min(*q), b.max(*q)));
         assert!(lo.distance(Vec3::new(-20.0, 0.0, -15.0)) < 1e-3 && hi.distance(Vec3::new(20.0, 20.0, 15.0)) < 1e-3, "{lo} {hi}");
+        // 8 corners, 24 tangent points, each face's middle
+        assert_eq!(p.contour().len(), 38);
+    }
+
+    #[test]
+    fn a_cube_face_swells_from_its_middle() {
+        let (mut d, id) = cube();
+        let f = d.feature_mut(id).unwrap();
+        let s = size(f);
+        let p = patch_of(f).unwrap().clone();
+        let x = to_world(f);
+        let mid = p.contour().into_iter().find(|k| p.is_centre(*k) && x.transform_point3(Vec3::from(p.cv[*k]) * s).y > 19.99).unwrap();
+        // raised 5 mm: the layer's middle with it, its border where it was
+        if let Some(pp) = f.mesh.as_mut().and_then(|m| m.make_mut().patch.as_mut()) {
+            pp.move_points(&[mid], Vec3::new(0.0, 5.0 / s.y, 0.0), s);
+        }
+        apply_binding(f);
+        let pts = crate::meshes::world_points(f);
+        let hi = pts.iter().fold(f32::MIN, |a, q| a.max(q.y));
+        assert!((hi - 25.0).abs() < 0.05, "{hi}");
+        let edge = pts.iter().filter(|q| q.x.abs() > 19.99 && q.y > 1.0).fold(f32::MIN, |a, q| a.max(q.y));
+        assert!((edge - 20.0).abs() < 1e-3, "{edge}");
+        assert!(bound_off(f) < 1e-3, "{}", bound_off(f));
     }
 
     #[test]

@@ -84,7 +84,27 @@ pub struct Patch {
     /// a tangent point moved there takes the one across its corner along.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub smooth: Vec<[u32; 4]>,
+    /// The middle points of the patches that are a face on their own (a
+    /// cube's faces, the surface from a path; `add_mids`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mids: Vec<Mid>,
 }
+
+/// A face's middle point, for a patch that is a face on its own (no side
+/// kept smooth, not part of an end): a point on no patch, always the
+/// patch's Coons middle plus `lift`. Its 4 inner control points are raised
+/// by `lift / MID_WEIGHT` (their weight at the middle), so the face swells
+/// by 16 s (1 − s) t (1 − t) of it (`dome`), as an end raised.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Mid {
+    pub patch: u32,
+    pub centre: u32,
+    #[serde(default, skip_serializing_if = "is_zero3")]
+    pub lift: [f32; 3],
+}
+
+/// The 4 inner control points' weight at a bicubic's middle: (3 / 8)² × 4.
+const MID_WEIGHT: f32 = 0.5625;
 
 /// An end of a closed object made of five patches (`cap_patches`): its
 /// rim's 12 control points (indices into `cv`, corners at 0, 3, 6, 9) and
@@ -345,12 +365,11 @@ impl Patch {
                 }
             }
         }
-        // the ends' middles
-        for c in &self.caps {
-            if let Some(i) = c.centre {
-                if (i as usize) < self.cv.len() && !out.contains(&(i as usize)) {
-                    out.push(i as usize);
-                }
+        // the ends' and faces' middles
+        let mids = self.caps.iter().filter_map(|c| c.centre).chain(self.mids.iter().map(|m| m.centre));
+        for i in mids {
+            if (i as usize) < self.cv.len() && !out.contains(&(i as usize)) {
+                out.push(i as usize);
             }
         }
         out
@@ -358,7 +377,35 @@ impl Patch {
 
     /// An end's middle point (moved, it raises the end: a dome).
     pub fn is_centre(&self, cv: usize) -> bool {
-        self.caps.iter().any(|c| c.centre == Some(cv as u32))
+        self.caps.iter().any(|c| c.centre == Some(cv as u32)) || self.mids.iter().any(|m| m.centre == cv as u32)
+    }
+
+    /// A middle point on each patch that is a face on its own (none of its
+    /// sides kept smooth, not part of an end): a cube's six faces, the
+    /// surface from a path. Moved, it swells the face (`Mid`).
+    pub fn add_mids(&mut self) {
+        let quads = self.patches();
+        let smooth: Vec<[u32; 4]> = self.smooth.clone();
+        let in_cap = self.derived();
+        for (k, q) in quads.iter().enumerate() {
+            if self.mids.iter().any(|m| m.patch as usize == k) {
+                continue;
+            }
+            let side_smooth = SIDES.iter().any(|side| smooth.contains(&curve_key(side.map(|i| q[i] as u32))));
+            let capped = self.caps.iter().any(|c| q.iter().all(|i| c.rim.contains(&(*i as u32)) || in_cap[*i]));
+            if side_smooth || capped {
+                continue;
+            }
+            self.cv.push([0.0; 3]);
+            self.mids.push(Mid { patch: k as u32, centre: (self.cv.len() - 1) as u32, lift: [0.0; 3] });
+        }
+        self.fill_inside();
+    }
+
+    /// A patch's border, 12 control points round it (corners at 0, 3, 6,
+    /// 9), as `coons_rim` takes it.
+    fn rim_of(&self, q: &[usize; 16]) -> [Vec3; 12] {
+        CONTOUR.map(|k| Vec3::from(self.cv[q[k]]))
     }
 
     /// A control point at a corner of a patch (drawn as a square; moved, it
@@ -477,6 +524,15 @@ impl Patch {
             let rim: [Vec3; 12] = cap.rim.map(|i| Vec3::from(self.cv[i as usize]));
             self.caps[k].lift = (Vec3::from(self.cv[c]) - coons_rim(&rim, 0.5, 0.5)).to_array();
         }
+        let quads = self.patches();
+        for k in 0..self.mids.len() {
+            let (pi, c) = (self.mids[k].patch as usize, self.mids[k].centre as usize);
+            if !moved.contains(&c) || c >= self.cv.len() || pi >= quads.len() {
+                continue;
+            }
+            let rim = self.rim_of(&quads[pi]);
+            self.mids[k].lift = (Vec3::from(self.cv[c]) - coons_rim(&rim, 0.5, 0.5)).to_array();
+        }
     }
 
     /// The 4 inner control points of each patch made from its contour: the
@@ -486,7 +542,9 @@ impl Patch {
     /// (`smooth_seams`).
     pub fn fill_inside(&mut self) {
         self.derive();
-        for q in self.patches() {
+        for (qi, q) in self.patches().into_iter().enumerate() {
+            let mid = self.mids.iter().find(|m| m.patch as usize == qi).cloned();
+            let raise = mid.as_ref().map(|m| Vec3::from(m.lift) / MID_WEIGHT).unwrap_or(Vec3::ZERO);
             let p = |i: usize, j: usize| Vec3::from(self.cv[q[j * 4 + i]]);
             let mut inner = vec![];
             for j in 1..3 {
@@ -494,11 +552,15 @@ impl Patch {
                     let (s, t) = (i as f32 / 3.0, j as f32 / 3.0);
                     let v = p(i, 0) * (1.0 - t) + p(i, 3) * t + p(0, j) * (1.0 - s) + p(3, j) * s
                         - (p(0, 0) * (1.0 - s) * (1.0 - t) + p(3, 0) * s * (1.0 - t) + p(0, 3) * (1.0 - s) * t + p(3, 3) * s * t);
-                    inner.push((q[j * 4 + i], v));
+                    inner.push((q[j * 4 + i], v + raise));
                 }
             }
             for (k, v) in inner {
                 self.cv[k] = v.to_array();
+            }
+            if let Some(m) = mid.filter(|m| (m.centre as usize) < self.cv.len()) {
+                let rim = self.rim_of(&q);
+                self.cv[m.centre as usize] = (coons_rim(&rim, 0.5, 0.5) + Vec3::from(m.lift)).to_array();
             }
         }
         self.smooth_seams();
@@ -657,6 +719,9 @@ impl Patch {
         }
         for c in self.caps.iter_mut() {
             c.lift = (Vec3::from(c.lift) * old / new).to_array();
+        }
+        for m in self.mids.iter_mut() {
+            m.lift = (Vec3::from(m.lift) * old / new).to_array();
         }
         if let Some(k) = self.keep.as_mut() {
             for c in k.verts.iter_mut() {
@@ -1917,6 +1982,64 @@ mod tests {
         let rim: Vec<usize> = all.iter().copied().filter(|k| *k != top).collect();
         p.move_points(&rim, Vec3::new(0.0, -5.0, 0.0), Vec3::ONE);
         assert!((p.cv[top][1] - 36.0).abs() < 1e-3, "{}", p.cv[top][1]);
+        // saved and read again: the same
+        let back: Patch = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn a_face_swells_from_its_middle() {
+        // a cube's six faces, each its middle point; a cylinder's patches
+        // none (its ends have theirs, its side is smooth all round)
+        let mut p = Patch::closed(&box_patches(Vec3::new(20.0, 10.0, 16.0)));
+        p.add_mids();
+        assert_eq!(p.mids.len(), 6);
+        assert_eq!(p.contour().len(), 8 + 24 + 6);
+        let mut c = Patch::cylinder(10.0, 30.0);
+        c.add_mids();
+        assert!(c.mids.is_empty());
+        let top = p.mids.iter().map(|m| m.centre as usize).find(|k| p.cv[*k][1] > 9.9).unwrap();
+        assert!(p.is_centre(top) && !p.corner(top) && p.corner_of(top).is_none());
+        assert!(Vec3::from(p.cv[top]).distance(Vec3::new(0.0, 10.0, 0.0)) < 1e-4, "{:?}", p.cv[top]);
+        let pi = p.mids.iter().find(|m| m.centre as usize == top).unwrap().patch as usize;
+        let border: Vec<[f32; 3]> = CONTOUR.iter().map(|k| p.cv[p.patches()[pi][*k]]).collect();
+        // raised 4: the face's middle exactly there, its border where it was
+        p.move_points(&[top], Vec3::new(0.0, 4.0, 0.0), Vec3::ONE);
+        let f = p.surfaces(Vec3::ONE)[pi];
+        let (m, (_, _, n)) = eval_frame(&f, 0.5, 0.5);
+        assert!(m.distance(Vec3::new(0.0, 14.0, 0.0)) < 1e-3 && n.dot(Vec3::Y) > 0.9999, "{m} {n}");
+        // halfway to a side: 16 × 1/4 × 3/4 × 1/4 of it
+        let (h, _) = eval_frame(&f, 0.25, 0.5);
+        assert!((h.y - (10.0 + 4.0 * dome(0.25, 0.5))).abs() < 1e-3, "{h}");
+        let after: Vec<[f32; 3]> = CONTOUR.iter().map(|k| p.cv[p.patches()[pi][*k]]).collect();
+        assert_eq!(border, after);
+        // the other faces untouched
+        for (k, q) in p.surfaces(Vec3::ONE).iter().enumerate() {
+            if k != pi {
+                let (o, (_, _, n)) = eval_frame(q, 0.5, 0.5);
+                assert!(o.y <= 10.0 + 1e-4 && (n.y.abs() < 1e-4 || n.y.abs() > 0.9999), "{o} {n}");
+            }
+        }
+        // the whole top up 3 with its middle: the swell kept
+        let mut all: Vec<usize> = p.contour().into_iter().filter(|k| p.cv[*k][1] > 9.9).collect();
+        all.sort();
+        p.move_points(&all, Vec3::new(0.0, 3.0, 0.0), Vec3::ONE);
+        assert!((p.cv[top][1] - 17.0).abs() < 1e-3, "{}", p.cv[top][1]);
+        // the top's border alone down 3: the middle follows it
+        let rim: Vec<usize> = all.iter().copied().filter(|k| *k != top).collect();
+        p.move_points(&rim, Vec3::new(0.0, -3.0, 0.0), Vec3::ONE);
+        assert!((p.cv[top][1] - 14.0).abs() < 1e-3, "{}", p.cv[top][1]);
+        // a box fitted again (`remap`): the swell kept in mm
+        let before = eval_frame(&p.surfaces(Vec3::ONE)[pi], 0.5, 0.5).0;
+        let mut q = p.clone();
+        q.remap(Vec3::ONE, Vec3::ZERO, Vec3::new(20.0, 14.0, 16.0));
+        q.fill_inside();
+        let again = eval_frame(&q.surfaces(Vec3::new(20.0, 14.0, 16.0))[pi], 0.5, 0.5).0;
+        assert!(again.distance(before) < 1e-3, "{before} {again}");
+        // the surface from a path: one middle point
+        let mut one = Patch::new([Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)]);
+        one.add_mids();
+        assert_eq!((one.mids.len(), one.contour().len(), one.cv.len()), (1, 13, 17));
         // saved and read again: the same
         let back: Patch = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back, p);
