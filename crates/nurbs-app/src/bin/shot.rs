@@ -1740,6 +1740,10 @@ fn main() {
         ipad_studio(&mut h);
     }
 
+    if want("studio-lamp") {
+        studio_lamp(&mut h);
+    }
+
     if want("groups") {
         // Romain (21 nov., 12 h 37): groups, "le meilleur de Maya et de 3ds
         // Max": three objects grouped (closed: a click takes them all), the
@@ -8303,6 +8307,130 @@ fn ipad_studio(h: &mut Harness) {
     h.shot("ipad-studio/studio-09-pc");
     h.st.settings.studio = false;
     h.st.manual_only = false;
+    h.steps(2);
+}
+
+/// The mock-up D3's model in the app (Romain, 22 nov., 9 h 55: "ajouter ce
+/// material vert… et aussi refaire le même modèle pour voir"): the Bean
+/// lamp, an SDF object of a ball, a bean blended on at 9 mm and a hole
+/// carved in the ball's top, in the seventh material (Mint); beside it the
+/// Lantern (a block and 5 operations) and the Stand (a tube and 2), as in
+/// the mock-up's scene list. The Studio interface on the iPad, dark, the
+/// Soft tab, the bean picked by the Pencil.
+fn studio_lamp(h: &mut Harness) {
+    use forme_core::{CombineMode, NodeSpec, PrimKind as SdfPrim, Shape};
+    use nurbs_app::touch::Phase;
+    use nurbs_kernel::mesh::{MeshKind, SdfModel};
+    let (w0, p0) = (h.size, h.ppp);
+    h.size = [1366.0, 1024.0];
+    h.ppp = 2.0;
+    let mut d = Doc::default();
+    // the lamp
+    let ball_c = Vec3::new(0.0, 28.0, 0.0);
+    let bean_u = Vec3::new(0.14, 0.0, -0.99).normalize();
+    let bean_a = Vec3::new(39.0, 13.0, -9.0);
+    let bean_half = 18.0;
+    let lamp = d.add_mesh(MeshKind::Sdf, &[], vec![], DVec3::ZERO, DQuat::IDENTITY, "Bean lamp");
+    let mut bean_node = 0;
+    {
+        let f = d.feature_mut(lamp).unwrap();
+        f.origin = DVec3::ZERO;
+        f.material = 6;
+        let mut model = SdfModel::new();
+        let sc = &mut model.scene;
+        let root = sc.root;
+        let mut ball = Shape::new(SdfPrim::Sphere);
+        ball.size = Vec3::splat(28.0);
+        sc.add(root, NodeSpec::shape("Ball", ball).at(ball_c));
+        let mut bean = Shape::new(SdfPrim::Capsule);
+        bean.size = Vec3::new(13.0, bean_half, 0.0);
+        bean_node = sc.add(root, NodeSpec::shape("Bean", bean).at(bean_a + bean_u * bean_half).rot(glam::Quat::from_rotation_arc(Vec3::Y, bean_u)).mode(CombineMode::Add).blend(9.0));
+        let mut hole = Shape::new(SdfPrim::Cylinder);
+        hole.size = Vec3::new(10.0, 11.0, 0.0);
+        sc.add(root, NodeSpec::shape("Hole", hole).at(Vec3::new(3.0, 47.0, 3.0)).mode(CombineMode::Carve).blend(0.0));
+        f.mesh.as_mut().unwrap().make_mut().sdf = Some(model);
+    }
+    // the Lantern: a block, its upright edges and its top rounded, three
+    // sides sunk in (5 operations)
+    let lo = DVec3::new(-250.0, 0.0, 60.0);
+    let lantern = d.add(Op::Add, Prim::Box { x: 30.0, y: 46.0, z: 30.0 }, lo, DQuat::IDENTITY);
+    d.feature_mut(lantern).unwrap().name = "Lantern".into();
+    let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+    let at = |x: f64, y: f64, z: f64| lo + DVec3::new(x, y, z);
+    d.add_round(
+        4.0,
+        false,
+        vec![
+            EdgeRef { faces: [tag(lantern, 0), tag(lantern, 4)], at: at(15.0, 23.0, 15.0) },
+            EdgeRef { faces: [tag(lantern, 0), tag(lantern, 5)], at: at(15.0, 23.0, -15.0) },
+            EdgeRef { faces: [tag(lantern, 1), tag(lantern, 4)], at: at(-15.0, 23.0, 15.0) },
+            EdgeRef { faces: [tag(lantern, 1), tag(lantern, 5)], at: at(-15.0, 23.0, -15.0) },
+        ],
+    );
+    d.add_round(2.0, false, vec![EdgeRef { faces: [tag(lantern, 2), tag(lantern, 4)], at: at(0.0, 46.0, 15.0) }]);
+    for (sub, p) in [(4u16, at(0.0, 22.0, 15.0)), (0, at(15.0, 22.0, 0.0)), (1, at(-15.0, 22.0, 0.0))] {
+        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: tag(lantern, sub), at: p }, inset: 5.0, depth: -3.0 });
+    }
+    // the Stand: a disc, its rim rounded and a post pulled up from its top
+    let so = DVec3::new(-220.0, 0.0, 140.0);
+    let stand = d.add(Op::Add, Prim::Cylinder { radius: 18.0, height: 6.0 }, so, DQuat::IDENTITY);
+    d.feature_mut(stand).unwrap().name = "Stand".into();
+    d.add_round(2.0, false, vec![EdgeRef { faces: [tag(stand, 0), tag(stand, 1)], at: so + DVec3::new(18.0, 6.0, 0.0) }]);
+    d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: tag(stand, 1), at: so + DVec3::new(0.0, 6.0, 0.0) }, inset: 10.0, depth: 14.0 });
+    h.reset(d, "Bean lamp");
+    h.st.touch.on = true;
+    h.st.manual_only = true;
+    h.st.settings.studio = true;
+    h.st.set_workspace(nurbs_app::workspace::Workspace::Sdf);
+    h.st.sdf_settle();
+    h.steps(3);
+    h.settle();
+    // the whole scene first
+    h.st.frame_all();
+    h.settle();
+    h.steps(6);
+    h.shot("ipad-studio/lamp-01-scene");
+    // the mock-up's view: the lamp alone, from the front right, above, the
+    // ball where the mock-up has it (its centre at 590, 470, 140 across)
+    h.st.camera.target = Vec3::new(22.0, 18.0, -14.0);
+    h.st.camera.yaw = 0.45;
+    h.st.camera.pitch = 0.47;
+    h.st.camera.dist = 400.0;
+    h.steps(2);
+    for _ in 0..4 {
+        let p = h.screen_of(ball_c);
+        let (right, up) = (h.st.camera.dir().cross(Vec3::Y).normalize(), Vec3::Y);
+        let (pr, pu) = (h.screen_of(ball_c - right), h.screen_of(ball_c + up));
+        let (jr, ju) = (pr - p, pu - p);
+        let e = pos2(590.0, 470.0) - p;
+        // e = a jr + b ju
+        let det = jr.x * ju.y - jr.y * ju.x;
+        let (a, b) = ((e.x * ju.y - e.y * ju.x) / det, (jr.x * e.y - jr.y * e.x) / det);
+        h.st.camera.target -= -right * a + up * b;
+        h.steps(1);
+    }
+    eprintln!("lamp: ball at {:?}, camera {:?}", h.screen_of(ball_c), h.st.camera.target);
+    h.steps(6);
+    h.shot("ipad-studio/lamp-02-view");
+    // the Pencil taps the bean: its outline, the gizmo, the blend, the pill
+    let bean_at = h.screen_of(bean_a + bean_u * (bean_half + 8.0) + Vec3::Y * 12.0);
+    h.touch(31, Phase::Start, bean_at, true);
+    h.touch(31, Phase::End, bean_at, true);
+    h.steps(3);
+    h.settle();
+    h.steps(6);
+    eprintln!("lamp: picked {:?} (bean {bean_node})", h.st.sdf_sel);
+    h.shot("ipad-studio/lamp-03-bean");
+    // the light theme
+    h.st.settings.light = true;
+    h.steps(6);
+    h.shot("ipad-studio/lamp-04-light");
+    h.st.settings.light = false;
+    h.st.settings.studio = false;
+    h.st.manual_only = false;
+    h.st.touch.on = false;
+    h.size = w0;
+    h.ppp = p0;
     h.steps(2);
 }
 

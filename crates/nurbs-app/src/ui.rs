@@ -1097,14 +1097,18 @@ fn current_material(st: &AppState) -> Option<u32> {
 fn materials_island(ctx: &egui::Context, st: &mut AppState) {
     let Some(rail) = ctx.memory(|m| m.area_rect(Id::new("rail"))) else { return };
     let off = panel_offset(ctx, "materials");
-    materials_island_at(ctx, st, pos2(rail.max.x, rail.max.y + 8.0) + off, Align2::RIGHT_TOP, CARDS_W - 12.0);
+    // seven balls (the seventh, Mint, 22 nov.): a little wider than the rail
+    materials_island_at(ctx, st, pos2(rail.max.x, rail.max.y + 8.0) + off, Align2::RIGHT_TOP, CARDS_W + 20.0);
 }
 
 /// The materials island at a place (the iPad: a pop-over beside the dock's
 /// ball), `w` points wide.
 fn materials_island_at(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2, pivot: Align2, w: f32) {
     let big = tablet();
-    let (bs, br_h) = if big { (34.0, 40.0) } else { (22.0, 24.0) };
+    let (bs, br_h): (f32, f32) = if big { (34.0, 40.0) } else { (22.0, 24.0) };
+    // the balls fit the width, 2 points apart at least
+    let n = materials::MATERIALS.len() as f32;
+    let bs = bs.min((w - 4.0 - 2.0 * (n - 1.0)) / n);
     egui::Area::new(Id::new("materials")).order(Order::Middle).pivot(pivot).fixed_pos(at).show(ctx, |ui| {
         island().inner_margin(Margin::same(if big { 12 } else { 6 })).show(ui, |ui| {
             ui.set_width(w);
@@ -1229,7 +1233,7 @@ fn look_slots(ui: &mut Ui, st: &mut AppState, mi: u32, w: f32) {
     }
     ui.add_space(3.0);
     // specular and transparency
-    let rows: [(&str, f32, f32, &str); 2] = [("Specular", look.specular, materials::SPECULAR, "Material specular"), ("Transparency", look.transparency, 0.0, "Material transparency")];
+    let rows: [(&str, f32, f32, &str); 2] = [("Specular", look.specular, materials::get(mi).spec, "Material specular"), ("Transparency", look.transparency, 0.0, "Material transparency")];
     for (k, (label, v, default, step)) in rows.into_iter().enumerate() {
         let (r, resp) = ui.allocate_exact_size(vec2(w, 18.0), Sense::click_and_drag());
         ctx.data_mut(|d| d.insert_temp(Id::new(("look-slot", k + 1)), r));

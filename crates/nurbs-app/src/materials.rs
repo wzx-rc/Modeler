@@ -1,7 +1,8 @@
-//! The six materials (Romain, 17 nov. 2026: six small balls, no names in the
-//! way). A feature stores the index of its material. Each ball's colour,
-//! specular and transparency can be changed (Romain, 20 nov., 15 h 42); the
-//! document keeps what was changed (`Doc.looks`).
+//! The material balls (Romain, 17 nov. 2026: six small balls, no names in
+//! the way; a seventh, the mock-up D3's soft green, 22 nov., 9 h 55). A
+//! feature stores the index of its material. Each ball's colour, specular
+//! and transparency can be changed (Romain, 20 nov., 15 h 42); the document
+//! keeps what was changed (`Doc.looks`).
 
 use nurbs_kernel::Doc;
 
@@ -11,15 +12,21 @@ pub struct Material {
     pub color: [f32; 3],
     pub metal: f32,
     pub rough: f32,
+    /// The specular it comes with (0.5: the highlights as they were; past
+    /// it glossier, with a clear coat).
+    pub spec: f32,
 }
 
-pub const MATERIALS: [Material; 6] = [
-    Material { name: "Grey clay", color: [0.50, 0.50, 0.49], metal: 0.0, rough: 0.55 },
-    Material { name: "Green", color: [0.34, 0.39, 0.24], metal: 0.0, rough: 0.45 },
-    Material { name: "Orange", color: [0.86, 0.42, 0.14], metal: 0.0, rough: 0.4 },
-    Material { name: "Iron", color: [0.16, 0.17, 0.19], metal: 0.7, rough: 0.35 },
-    Material { name: "Steel", color: [0.56, 0.57, 0.6], metal: 1.0, rough: 0.3 },
-    Material { name: "Rubber", color: [0.08, 0.08, 0.09], metal: 0.0, rough: 0.8 },
+pub const MATERIALS: [Material; 7] = [
+    Material { name: "Grey clay", color: [0.50, 0.50, 0.49], metal: 0.0, rough: 0.55, spec: SPECULAR },
+    Material { name: "Green", color: [0.34, 0.39, 0.24], metal: 0.0, rough: 0.45, spec: SPECULAR },
+    Material { name: "Orange", color: [0.86, 0.42, 0.14], metal: 0.0, rough: 0.4, spec: SPECULAR },
+    Material { name: "Iron", color: [0.16, 0.17, 0.19], metal: 0.7, rough: 0.35, spec: SPECULAR },
+    Material { name: "Steel", color: [0.56, 0.57, 0.6], metal: 1.0, rough: 0.3, spec: SPECULAR },
+    Material { name: "Rubber", color: [0.08, 0.08, 0.09], metal: 0.0, rough: 0.8, spec: SPECULAR },
+    // the mock-up D3's clay (#93C9A4, lit #CDEBD5, in shade #5B9673): a
+    // soft, glossy jade green
+    Material { name: "Mint", color: [0.30, 0.56, 0.40], metal: 0.0, rough: 0.32, spec: 0.68 },
 ];
 
 pub fn get(i: u32) -> &'static Material {
@@ -52,7 +59,7 @@ impl Look {
 impl Material {
     /// The ball as it comes.
     pub fn look(&self) -> Look {
-        Look { color: self.color, metal: self.metal, rough: self.rough, specular: SPECULAR, transparency: 0.0 }
+        Look { color: self.color, metal: self.metal, rough: self.rough, specular: self.spec, transparency: 0.0 }
     }
 }
 

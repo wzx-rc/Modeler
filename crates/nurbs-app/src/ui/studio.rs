@@ -354,19 +354,23 @@ fn wide_btn(ui: &mut Ui, text: &str, w: f32, filled: bool) -> Response {
     resp
 }
 
-/// The six material balls, the current one ringed; a tap gives it to what
-/// is selected or picked (`apply_material`).
+/// The material balls, the current one ringed, as big as the row lets them
+/// be (at most 36 points); a tap gives it to what is selected or picked
+/// (`apply_material`).
 fn swatches(ui: &mut Ui, st: &mut AppState) {
     let cur = current_material(st).unwrap_or(st.material);
+    let n = materials::MATERIALS.len() as f32;
+    let gap = 6.0;
+    let s = ((ui.available_width() - gap * (n - 1.0)) / n).clamp(24.0, 36.0);
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.spacing_mut().item_spacing.x = gap;
         for i in 0..materials::MATERIALS.len() as u32 {
-            let (r, resp) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(s, s), Sense::click());
             let p = ui.painter();
             if i == cur {
-                p.circle_stroke(r.center(), 19.5, Stroke::new(2.0, accent()));
+                p.circle_stroke(r.center(), s * 0.54, Stroke::new(2.0, accent()));
             }
-            material_ball(p, r.center(), if i == cur { 15.0 } else { 17.0 }, &st.look(i));
+            material_ball(p, r.center(), s * if i == cur { 0.42 } else { 0.47 }, &st.look(i));
             if resp.on_hover_text(materials::get(i).name).clicked() {
                 st.apply_material(i);
             }
@@ -1501,7 +1505,7 @@ fn paint_pop(ctx: &egui::Context, st: &mut AppState) {
         return;
     }
     let Some(btn) = ctx.data(|d| d.get_temp::<Rect>(Id::new("s-paint-btn"))) else { return };
-    materials_island_at(ctx, st, pos2(btn.center().x, btn.min.y - 22.0), Align2::CENTER_BOTTOM, 264.0);
+    materials_island_at(ctx, st, pos2(btn.center().x, btn.min.y - 22.0), Align2::CENTER_BOTTOM, 300.0);
     // closed by a tap in the view (a ball dragged onto the part keeps it)
     if ctx.input(|i| i.pointer.any_pressed()) && !ctx.is_pointer_over_egui() && st.mat_drag.is_none() {
         set_flag(ctx, "mats", false);
@@ -1695,6 +1699,30 @@ fn chip(ctx: &egui::Context, key: (&str, u32), at: egui::Pos2, text: &str, v: f3
 
 /// The sizes of the selected Cube, Cylinder or Sketch on its edges, and
 /// the blend of the picked SDF shape under it.
+/// Where a picked SDF shape meets the shapes added before it: the middle
+/// of the nearest pair of their outlines' points.
+fn neck_of(st: &AppState, id: FeatureId, n: forme_core::NodeId, own: &[glam::DVec3]) -> Option<glam::DVec3> {
+    let f = st.doc.feature(id)?;
+    let scene = crate::sdf::scene_of(f)?;
+    let shapes = crate::sdf::built_shapes(f);
+    let k = shapes.iter().position(|x| *x == n)?;
+    let mut best: Option<(f64, glam::DVec3)> = None;
+    for o in &shapes[..k] {
+        if scene.node(*o).map(|x| x.combine.mode != forme_core::CombineMode::Add).unwrap_or(true) {
+            continue;
+        }
+        for q in st.item_points(crate::common::Item::Shape(id, *o)) {
+            for p in own {
+                let d = p.distance_squared(q);
+                if best.map(|(b, _)| d < b).unwrap_or(true) {
+                    best = Some((d, (*p + q) * 0.5));
+                }
+            }
+        }
+    }
+    best.map(|(_, m)| m)
+}
+
 fn size_chips(ctx: &egui::Context, st: &mut AppState) {
     if st.tool != Tool::Select || st.drag.is_some() || st.creation.is_some() || st.marking.is_open() || st.align.is_some() {
         return;
@@ -1713,11 +1741,27 @@ fn size_chips(ctx: &egui::Context, st: &mut AppState) {
         }
         let cx = sp.iter().map(|q| q.x).sum::<f32>() / sp.len() as f32;
         let bottom = sp.iter().map(|q| q.y).fold(f32::MIN, f32::max);
-        let at = pos2(cx, bottom + 30.0);
+        let b = nd.combine.blend;
+        // where it meets the shapes it is added to (the mock-up D3: the
+        // chip at the neck, a dot on it), else under it
+        let neck = (b > 0.0 && nd.combine.mode == forme_core::CombineMode::Add).then(|| neck_of(st, id, n, &pts)).flatten().and_then(|q| view.project(q.as_vec3())).map(|s| pos2(s[0], s[1])).filter(|q| in_view(*q));
+        let at = match neck {
+            Some(q) => {
+                egui::Area::new(Id::new(("s-neck", id))).order(Order::Middle).interactable(false).pivot(Align2::CENTER_CENTER).fixed_pos(q).show(ctx, |ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::hover());
+                    let p = ui.painter();
+                    p.circle_filled(r.center(), 13.0, accent().gamma_multiply(0.22));
+                    p.circle_filled(r.center(), 6.5, PANEL());
+                    p.circle_stroke(r.center(), 6.5, Stroke::new(2.0, accent()));
+                    p.circle_filled(r.center(), 2.2, accent());
+                });
+                pos2(q.x, q.y + 34.0)
+            }
+            None => pos2(cx, bottom + 30.0),
+        };
         if !in_view(at) {
             return;
         }
-        let b = nd.combine.blend;
         if let Some(x) = chip(ctx, ("blend", id), at, &format!("Blend {} mm", fmt3(b as f64)), b, 0.0, 30.0, true) {
             st.sdf_edit_node("Blend", |x2| x2.combine.blend = x);
         }

@@ -697,7 +697,7 @@ fn materials_pop(ctx: &egui::Context, st: &mut AppState, dock_x: f32, flip: bool
     }
     let Some(ball) = ctx.data(|d| d.get_temp::<Rect>(Id::new("t-ball"))) else { return };
     let (at, pivot) = if flip { (pos2(dock_x + DOCK_W + 10.0, ball.max.y), Align2::LEFT_BOTTOM) } else { (pos2(dock_x - 10.0, ball.max.y), Align2::RIGHT_BOTTOM) };
-    materials_island_at(ctx, st, at, pivot, 264.0);
+    materials_island_at(ctx, st, at, pivot, 300.0);
 }
 
 // ------------------------------------------------------------ the sidebar

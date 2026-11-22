@@ -265,6 +265,11 @@ impl Drawer {
                     }
                 } else if st.poly_comp() {
                     0
+                } else if sdf && st.settings.studio && st.sdf_sel.is_some_and(|(f, _)| f == *id) {
+                    // the Studio interface (the mock-up D3): a shape picked
+                    // in an SDF object is told by its outline, the object
+                    // keeps its own colour
+                    0
                 } else if st.selection.contains(id) {
                     FACE_SELECTED
                 } else if st.hover_feature == Some(*id) {
