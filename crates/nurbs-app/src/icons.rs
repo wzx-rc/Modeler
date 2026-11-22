@@ -94,6 +94,10 @@ pub enum Icon {
     /// A group closed (a padlock shut) or open (its shackle free).
     Lock,
     Unlock,
+    /// The navigation island (`nav.rs`): a magnifier (zoom), four arrows
+    /// (pan).
+    Zoom,
+    Pan,
 }
 
 struct Pen<'a> {
@@ -516,6 +520,20 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 pen.arc(10.0, 5.2, 3.4, 3.2, PI, 2.0 * PI);
                 pen.line(&[(6.6, 5.2), (6.6, 9.2)]);
                 pen.line(&[(13.4, 5.2), (13.4, 6.4)]);
+            }
+        }
+        Icon::Zoom => {
+            pen.circle(8.6, 8.6, 5.6);
+            pen.line(&[(12.7, 12.7), (17.0, 17.0)]);
+            pen.line(&[(6.0, 8.6), (11.2, 8.6)]);
+            pen.line(&[(8.6, 6.0), (8.6, 11.2)]);
+        }
+        Icon::Pan => {
+            pen.line(&[(10.0, 2.5), (10.0, 17.5)]);
+            pen.line(&[(2.5, 10.0), (17.5, 10.0)]);
+            for (x, y, dx, dy) in [(10.0, 2.5, 0.0, 1.0), (10.0, 17.5, 0.0, -1.0), (2.5, 10.0, 1.0, 0.0), (17.5, 10.0, -1.0, 0.0)] {
+                // the arrow's two barbs, square to its line
+                pen.line(&[(x + 2.6 * dx - 2.6 * dy, y + 2.6 * dy - 2.6 * dx), (x, y), (x + 2.6 * dx + 2.6 * dy, y + 2.6 * dy + 2.6 * dx)]);
             }
         }
         Icon::Scale => {

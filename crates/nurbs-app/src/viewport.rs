@@ -269,21 +269,32 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     st.interacting = st.drag.is_some() || st.creation.is_some() || st.scan_round.is_some() || st.scan_slot.is_some() || st.slot_draw.is_some();
 
     // Maya navigation: Alt + left = orbit, Alt + middle = pan, Alt + right =
-    // zoom, whatever the tool
-    let (alt, d, l, m, r) = ctx.input(|i| {
+    // zoom, whatever the tool. With a pen (Romain 22 nov.: "full stylet"),
+    // the tip alone: Alt + Shift + left pans, Alt + Ctrl + left zooms, and
+    // the pen's barrel button held counts as Alt (`pen.rs`)
+    // (not on the frame a button goes down: a pen's tip may come down far
+    // from where it was last seen, the view would jump)
+    let (alt, d, l, m, r, nav_shift, nav_ctrl) = ctx.input(|i| {
         (
-            i.modifiers.alt,
-            i.pointer.delta(),
+            i.modifiers.alt || crate::pen::barrel(),
+            if i.pointer.any_pressed() { egui::Vec2::ZERO } else { i.pointer.delta() },
             i.pointer.button_down(PointerButton::Primary),
             i.pointer.button_down(PointerButton::Middle),
             i.pointer.button_down(PointerButton::Secondary),
+            i.modifiers.shift,
+            i.modifiers.ctrl || i.modifiers.mac_cmd,
         )
     });
     let in_base = st.creation.as_ref().map(|c| c.phase == Phase::Base).unwrap_or(false);
-    if alt && (resp.hovered() || resp.dragged() || l || m || r) && !in_base && st.drag.is_none() {
+    // (a press begun over an island is the island's)
+    if alt && (resp.hovered() || resp.dragged() || resp.is_pointer_button_down_on()) && !in_base && st.drag.is_none() {
         if (l || m || r) && d != egui::Vec2::ZERO {
             st.stop_flight();
-            if l {
+            if l && nav_shift {
+                st.camera.pan(d.x, d.y, rect.height());
+            } else if l && nav_ctrl {
+                st.camera.zoom(((d.x + d.y) * 0.004).exp());
+            } else if l {
                 st.camera.orbit(d.x, d.y);
             } else if m {
                 st.camera.pan(d.x, d.y, rect.height());
@@ -1872,7 +1883,7 @@ fn hint_of(st: &AppState) -> String {
                 if st.doc.features.is_empty() {
                     "B: a cube · C: a cylinder · L: a sketch · Then: drag in the view".into()
                 } else {
-                    "Click: a shape · Drag: a rectangle · Right button: menu · Alt + drag: orbit · F9 F10 F11: vertex, edge, face".into()
+                    "Click: a shape · Drag: a rectangle · Right button: menu · Alt + drag: orbit, with Shift pan, with Ctrl zoom · F9 F10 F11: vertex, edge, face".into()
                 }
             } else {
                 match st.gizmo {

@@ -10,6 +10,10 @@ pub enum ViewPreset {
     Front,
     Right,
     Top,
+    /// The other sides (the navigation ball's negative axes).
+    Back,
+    Left,
+    Bottom,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -100,6 +104,21 @@ impl OrbitCamera {
                 self.pitch = 1.52;
                 self.ortho = true;
             }
+            ViewPreset::Back => {
+                self.yaw = std::f32::consts::PI;
+                self.pitch = 0.0;
+                self.ortho = true;
+            }
+            ViewPreset::Left => {
+                self.yaw = -std::f32::consts::FRAC_PI_2;
+                self.pitch = 0.0;
+                self.ortho = true;
+            }
+            ViewPreset::Bottom => {
+                self.yaw = 0.0;
+                self.pitch = -1.52;
+                self.ortho = true;
+            }
         }
     }
 
@@ -107,10 +126,19 @@ impl OrbitCamera {
         if !self.ortho {
             return ViewPreset::Perspective;
         }
+        use std::f32::consts::{FRAC_PI_2, PI, TAU};
+        // the yaw in (−π, π]
+        let y = PI - (PI - self.yaw).rem_euclid(TAU);
         if self.pitch > 1.4 {
             ViewPreset::Top
-        } else if (self.yaw - std::f32::consts::FRAC_PI_2).abs() < 0.01 {
+        } else if self.pitch < -1.4 {
+            ViewPreset::Bottom
+        } else if (y - FRAC_PI_2).abs() < 0.01 {
             ViewPreset::Right
+        } else if (y + FRAC_PI_2).abs() < 0.01 {
+            ViewPreset::Left
+        } else if (y.abs() - PI).abs() < 0.01 {
+            ViewPreset::Back
         } else {
             ViewPreset::Front
         }

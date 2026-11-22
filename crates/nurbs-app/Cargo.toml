@@ -36,3 +36,7 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 image.workspace = true
+
+# the pen's barrel button with Windows Ink (`pen.rs`)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Input_Pointer", "Win32_UI_WindowsAndMessaging"] }

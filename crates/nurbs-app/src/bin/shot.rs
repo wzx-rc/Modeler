@@ -5351,6 +5351,108 @@ fn main() {
             }
         }
     }
+    if want("nav") {
+        // the navigation with a pen's tip alone (Romain 22 nov., 16 h 49:
+        // "La navigation doit pouvoir se faire full stylet"): the island at
+        // the view's top right, its ball dragged and its axes tapped, Zoom,
+        // Pan, Frame; then Alt + Shift / Alt + Ctrl with the tip, the pen's
+        // button as Alt
+        use nurbs_app::camera::ViewPreset;
+        use nurbs_app::nav;
+        h.reset(test_part(), "Test part");
+        let cam = |h: &Harness| format!("yaw {:.3} pitch {:.3} dist {:.1} target [{:.1}, {:.1}, {:.1}] {:?}", h.st.camera.yaw, h.st.camera.pitch, h.st.camera.dist, h.st.camera.target.x, h.st.camera.target.y, h.st.camera.target.z, h.st.camera.preset_of());
+        let r = nav::rects(&h.ctx).expect("the navigation island");
+        eprintln!("  island: ball {:?} zoom {:?} pan {:?} frame {:?}", r.ball, r.zoom, r.pan, r.frame);
+        eprintln!("  start: {}", cam(&h));
+        h.move_to(r.ball.center() + vec2(-14.0, 20.0));
+        h.steps(2);
+        h.shot("zero-nav-1-island");
+        // the ball dragged: the view turns
+        let c = r.ball.center();
+        h.drag(c + vec2(-14.0, 20.0), c + vec2(70.0, 34.0), 14, false);
+        eprintln!("  ball dragged: {}", cam(&h));
+        h.shot("zero-nav-2-orbit");
+        h.press(c + vec2(70.0, 34.0), false);
+        h.steps(2);
+        // an axis tapped: the view along it, again: the other side
+        let tap = |h: &mut Harness, axis: usize, sign: f32| {
+            let c = nav::rects(&h.ctx).unwrap().ball.center();
+            let dots = nav::axis_dots(&h.st, c);
+            // the dot nearest the eye of those on that axis and side
+            let d = dots.iter().rev().find(|d| d.axis == axis && d.sign == sign).copied().unwrap();
+            h.click(d.at);
+            h.settle();
+        };
+        tap(&mut h, 0, 1.0);
+        eprintln!("  +X tapped: {}", cam(&h));
+        h.move_to(r.ball.center() + vec2(0.0, 200.0));
+        h.steps(2);
+        h.shot("zero-nav-3-right");
+        tap(&mut h, 0, 1.0);
+        eprintln!("  +X again: {}", cam(&h));
+        h.shot("zero-nav-4-left");
+        tap(&mut h, 1, 1.0);
+        eprintln!("  +Y tapped: {}", cam(&h));
+        h.shot("zero-nav-5-top");
+        // back to 3D, then Zoom and Pan dragged with the tip
+        h.st.camera.preset(ViewPreset::Perspective);
+        h.st.frame_all();
+        h.settle();
+        let d0 = h.st.camera.dist;
+        let z = r.zoom.center();
+        h.drag(z, z + vec2(0.0, -90.0), 12, false);
+        eprintln!("  zoom dragged up 90: dist {:.1} → {:.1}", d0, h.st.camera.dist);
+        h.shot("zero-nav-6-zoom");
+        h.press(z + vec2(0.0, -90.0), false);
+        h.steps(2);
+        let t0 = h.st.camera.target;
+        let p = r.pan.center();
+        h.drag(p, p + vec2(-160.0, 60.0), 12, false);
+        eprintln!("  pan dragged: target {:?} → {:?}", t0, h.st.camera.target);
+        h.shot("zero-nav-7-pan");
+        h.press(p + vec2(-160.0, 60.0), false);
+        h.steps(2);
+        h.click(r.frame.center());
+        h.settle();
+        eprintln!("  frame: {}", cam(&h));
+        h.shot("zero-nav-8-frame");
+        // with the keyboard: Alt + Shift + tip pans, Alt + Ctrl + tip zooms
+        // (in the view, on empty space: nothing picked)
+        let e = pos2(560.0, 240.0);
+        let (t0, d0) = (h.st.camera.target, h.st.camera.dist);
+        h.hold(Modifiers { alt: true, shift: true, ..Default::default() });
+        h.drag(e, e + vec2(120.0, 0.0), 10, true);
+        h.hold(Modifiers { alt: true, ctrl: true, ..Default::default() });
+        let target_moved = (h.st.camera.target - t0).length();
+        h.drag(e, e + vec2(0.0, 90.0), 10, true);
+        h.hold(Modifiers::NONE);
+        eprintln!("  Alt + Shift: target moved {:.1} mm · Alt + Ctrl: dist {:.1} → {:.1} · selection {:?}", target_moved, d0, h.st.camera.dist, h.st.selection);
+        // the pen's button held (Windows Ink): the tip's drag turns the view
+        // and picks nothing, even when it starts on the part
+        h.st.frame_all();
+        h.settle();
+        let y0 = h.st.camera.yaw;
+        nurbs_app::pen::set_barrel(true);
+        let on_part = h.screen_of(Vec3::new(14.0, 6.0, 15.0));
+        eprintln!("  pen button held: {} (on the part at {:?})", nurbs_app::pen::barrel(), on_part);
+        h.drag(on_part, on_part + vec2(90.0, 0.0), 10, true);
+        nurbs_app::pen::set_barrel(false);
+        eprintln!("  pen button + drag on the part: yaw {:.3} → {:.3} · selection {:?} (nothing picked)", y0, h.st.camera.yaw, h.st.selection);
+        // a shape's window placed: not over the island
+        h.click(on_part);
+        h.settle();
+        let pop = h.ctx.memory(|m| m.area_rect(egui::Id::new("op-pop")));
+        let nav_r = h.ctx.memory(|m| m.area_rect(egui::Id::new("nav")));
+        eprintln!("  window {:?} island {:?} overlap {}", pop, nav_r, pop.zip(nav_r).map(|(a, b)| a.intersects(b)).unwrap_or(false));
+        h.shot("zero-nav-9-window");
+        // the setting hides it
+        h.st.settings.nav = false;
+        h.steps(2);
+        eprintln!("  hidden: {}", nav::rects(&h.ctx).is_none());
+        h.shot("zero-nav-10-hidden");
+        h.st.settings.nav = true;
+    }
+
     if want("isolate") {
         // Isolate (Romain 20 nov., 9 h 38, Maya): a block beside the test
         // part picked, the top bar's icon: it alone, framed; again: all
@@ -5772,7 +5874,9 @@ fn main() {
         h.st.begin_live("Cylinder");
         h.st.live(|d| cyl = d.add(Op::Add, nurbs_kernel::Prim::Cylinder { radius: 10.0, height: 30.0 }, DVec3::new(48.0, 0.0, 0.0), glam::DQuat::IDENTITY));
         h.st.end_live();
-        h.st.camera.frame(Vec3::new(-24.0, 0.0, -20.0), Vec3::new(64.0, 45.0, 20.0));
+        // framed wider on the right: the brush's window sits left of the
+        // navigation island there
+        h.st.camera.frame(Vec3::new(-24.0, 0.0, -20.0), Vec3::new(96.0, 45.0, 20.0));
         h.st.form.brush = nurbs_app::forms::Brush::Move;
         h.st.form.radius = 50.0;
         h.settle();

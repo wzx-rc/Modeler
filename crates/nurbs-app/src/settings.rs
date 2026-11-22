@@ -24,11 +24,14 @@ pub struct Settings {
     /// The Sub Outliner (the clicked element's operations): a fixed
     /// container in the left panel, else a floating column beside it.
     pub sub_fixed: bool,
+    /// The navigation island in the view (`nav.rs`: the axis ball, Zoom,
+    /// Pan, Frame; the tip of a pen alone turns, moves and zooms the view).
+    pub nav: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: true }
     }
 }
 

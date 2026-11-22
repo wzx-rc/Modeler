@@ -142,6 +142,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     st.view_rect = [left, EDGE + ISLAND_H, screen.width() - 2.0 * EDGE - CARDS_W, screen.height() - HISTORY_H];
     top_bar(ctx, st, screen);
     rail(ctx, st, screen);
+    crate::nav::show(ctx, st);
     materials_island(ctx, st);
     history_strip(ctx, st, screen);
     help_box(ctx, st);
@@ -1806,8 +1807,12 @@ fn op_place(ctx: &egui::Context, st: &AppState, k: OpPop, anchor: Rect, h: f32) 
     let full = OP_W + 26.0;
     let vr = st.view_rect;
     let (left, right, top, bottom) = (vr[0] + 8.0, vr[2] - 8.0, vr[1] + 48.0, vr[3] - 8.0);
+    // the navigation island at the view's top right (`nav.rs`): the
+    // window's places on that side go left of it
+    let nav = ctx.memory(|m| m.area_rect(Id::new("nav"))).filter(|_| st.settings.nav);
+    let beside_nav = nav.map(|n| n.min.x - 8.0).unwrap_or(right);
     if k == OpPop::Tool {
-        return pos2(right - full, top + 60.0);
+        return pos2(beside_nav - full, top + 60.0);
     }
     let view = st.view();
     let mut part = anchor;
@@ -1855,6 +1860,8 @@ fn op_place(ctx: &egui::Context, st: &AppState, k: OpPop, anchor: Rect, h: f32) 
         pos2(left, y_by),
         pos2(right - full, top),
         pos2(left, top),
+        pos2(beside_nav - full, y_by),
+        pos2(beside_nav - full, top),
     ];
     let area = |a: Rect, b: Rect| {
         let i = a.intersect(b);
@@ -2964,6 +2971,10 @@ fn defaults(ui: &mut Ui, st: &mut AppState) {
             st.save_settings();
         }
         ui.add_space(2.0);
+    }
+    if toggle_row(ui, "Navigation buttons", st.settings.nav) {
+        st.settings.nav = !st.settings.nav;
+        st.save_settings();
     }
     if toggle_row(ui, "World origin", st.settings.origin) {
         st.settings.origin = !st.settings.origin;

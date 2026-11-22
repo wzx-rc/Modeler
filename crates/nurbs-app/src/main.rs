@@ -200,6 +200,24 @@ impl ApplicationHandler<()> for App {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(window) = self.window.clone() else { return };
+        // a pen's touches (Windows Ink) given to egui as the mouse's events,
+        // its barrel button noted (`pen.rs`); a mouse event gives the
+        // pointer back to the mouse
+        if let WindowEvent::Touch(t) = &event {
+            if let Some(evs) = nurbs_app::pen::as_mouse(t) {
+                if let Some(es) = self.egui_state.as_mut() {
+                    for e in &evs {
+                        let _ = es.on_window_event(&window, e);
+                    }
+                }
+                self.redraw_until = self.now() + 0.25;
+                window.request_redraw();
+                return;
+            }
+        }
+        if matches!(event, WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }) {
+            nurbs_app::pen::mouse_seen();
+        }
         if let Some(es) = self.egui_state.as_mut() {
             let _ = es.on_window_event(&window, &event);
         }

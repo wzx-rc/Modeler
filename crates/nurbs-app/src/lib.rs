@@ -20,6 +20,8 @@ pub mod knife;
 pub mod history;
 pub mod marking;
 pub mod materials;
+pub mod nav;
+pub mod pen;
 pub mod pick;
 pub mod reference;
 pub mod remote;
