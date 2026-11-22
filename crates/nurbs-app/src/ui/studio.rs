@@ -1699,32 +1699,37 @@ fn chip(ctx: &egui::Context, key: (&str, u32), at: egui::Pos2, text: &str, v: f3
     out
 }
 
-/// The sizes of the selected Cube, Cylinder or Sketch on its edges, and
-/// the blend of the picked SDF shape under it.
-/// Where a picked SDF shape meets the shapes added before it: the middle
-/// of the nearest pair of their outlines' points.
-fn neck_of(st: &AppState, id: FeatureId, n: forme_core::NodeId, own: &[glam::DVec3]) -> Option<glam::DVec3> {
+/// Where a picked SDF shape meets the shapes added before it, as seen: of
+/// its silhouette's points, the one nearest their surfaces (their own
+/// distance fields; 22 nov.: the nearest pair of their outlines' points put
+/// a ball's chip on a far corner of the block under it).
+fn neck_of(st: &AppState, id: FeatureId, n: forme_core::NodeId, _own: &[glam::DVec3]) -> Option<glam::DVec3> {
     let f = st.doc.feature(id)?;
     let scene = crate::sdf::scene_of(f)?;
     let shapes = crate::sdf::built_shapes(f);
     let k = shapes.iter().position(|x| *x == n)?;
-    let mut best: Option<(f64, glam::DVec3)> = None;
-    for o in &shapes[..k] {
-        if scene.node(*o).map(|x| x.combine.mode != forme_core::CombineMode::Add).unwrap_or(true) {
-            continue;
-        }
-        for q in st.item_points(crate::common::Item::Shape(id, *o)) {
-            for p in own {
-                let d = p.distance_squared(q);
-                if best.map(|(b, _)| d < b).unwrap_or(true) {
-                    best = Some((d, (*p + q) * 0.5));
-                }
+    let others: Vec<forme_core::Program> = shapes[..k].iter().filter(|o| scene.node(**o).map(|x| x.combine.mode == forme_core::CombineMode::Add).unwrap_or(false)).map(|o| forme_core::compile_single(scene, *o)).collect();
+    if others.is_empty() {
+        return None;
+    }
+    let m = crate::sdf::frame_matrix(f);
+    let back = m.inverse();
+    let mut best: Option<(f32, glam::Vec3)> = None;
+    for line in crate::sdf::node_silhouette(f, scene, n, st.camera.eye()) {
+        for p in line {
+            let w = glam::Vec3::from(p);
+            let q = back.transform_point3(w);
+            let d = others.iter().map(|o| o.dist(q)).fold(f32::MAX, f32::min).abs();
+            if best.map(|(b, _)| d < b).unwrap_or(true) {
+                best = Some((d, w));
             }
         }
     }
-    best.map(|(_, m)| m)
+    best.map(|(_, w)| w.as_dvec3())
 }
 
+/// The sizes of the selected Cube, Cylinder or Sketch on its edges, and
+/// the blend of the picked SDF shape under it.
 fn size_chips(ctx: &egui::Context, st: &mut AppState) {
     if st.tool != Tool::Select || st.drag.is_some() || st.creation.is_some() || st.marking.is_open() || st.align.is_some() {
         return;

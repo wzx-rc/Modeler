@@ -8144,7 +8144,7 @@ fn ipad_studio(h: &mut Harness) {
     use egui::{Id, LayerId, Order};
     use nurbs_app::touch::Phase;
     let (w0, p0) = (h.size, h.ppp);
-    h.size = [1366.0, 1024.0];
+    h.size = std::env::var("FORME_IPAD_SIZE").ok().and_then(|s| { let v: Vec<f32> = s.split('x').filter_map(|x| x.parse().ok()).collect(); (v.len() == 2).then(|| [v[0], v[1]]) }).unwrap_or([1366.0, 1024.0]);
     h.ppp = 2.0;
     fn tap(h: &mut Harness, p: Pos2, pencil: bool) {
         h.touch(31, Phase::Start, p, pencil);
