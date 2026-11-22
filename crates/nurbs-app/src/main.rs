@@ -34,6 +34,8 @@ struct App {
     saved: ((u64, u64), f64),
     /// `FORME_SIM=1`: the scripted run for Apple's simulator (`sim.rs`)
     sim: Option<nurbs_app::sim::Sim>,
+    /// another frame wanted (asked in `about_to_wait`)
+    again: bool,
     _proxy: EventLoopProxy<()>,
 }
 
@@ -97,7 +99,7 @@ impl App {
             }
         }
         let saved = ((st.version, st.looks_rev), 0.0);
-        App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0, saved, sim: nurbs_app::sim::Sim::from_env(), _proxy: proxy }
+        App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0, saved, sim: nurbs_app::sim::Sim::from_env(), again: true, _proxy: proxy }
     }
 
     fn now(&self) -> f64 {
@@ -170,7 +172,7 @@ impl App {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             _ => {
                 gfx.surface.configure(&gfx.device, &gfx.config);
-                window.request_redraw();
+                self.again = true;
                 return;
             }
         };
@@ -187,15 +189,18 @@ impl App {
                 drawer.render(device, queue, &view, [w, h], 1.0, st, &[], &mut egui::TexturesDelta::default());
                 nurbs_app::remote::read_rgba(device, queue, &tex)
             });
-            window.request_redraw();
+            self.again = true;
         }
         // the kernel is working: keep looking for its answer
         let now = self.now();
         let busy = self.st.interacting || self.st.toast.is_some() || self.st.building() || self.st.ref_busy() || self.st.dev_busy() || self.st.link.busy() || self.st.touch.active() || self.sim.as_ref().is_some_and(|s| !s.done);
         let egui_wants = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay.as_secs_f32() < 0.05).unwrap_or(false);
-        if busy || egui_wants || now < self.redraw_until {
-            window.request_redraw();
-        }
+        // asked in `about_to_wait`, outside this redraw: on iOS a redraw
+        // asked while one is drawn is dropped (winit's view clears it after
+        // drawRect), so the app drew once and waited for the next touch (22
+        // nov., Apple's simulator: the first frame only, no interface; on the
+        // iPad the tabs and the panels a touch behind)
+        self.again |= busy || egui_wants || now < self.redraw_until;
     }
 
     fn save_session(&mut self) {
@@ -319,6 +324,11 @@ impl ApplicationHandler<()> for App {
             el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + std::time::Duration::from_millis(100)));
         } else {
             el.set_control_flow(ControlFlow::Wait);
+            if std::mem::take(&mut self.again) {
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
         }
     }
 }
