@@ -22,10 +22,13 @@ pub struct Sim {
     step: usize,
     next: f64,
     marked: Option<(usize, f64)>,
+    /// A Pencil drag under way: from, to, its start and length in seconds,
+    /// whether the tip is down.
+    drag: Option<(Pos2, Pos2, f64, f64, bool)>,
     pub done: bool,
 }
 
-const STEPS: [&str; 12] = [
+const STEPS: [&str; 17] = [
     "empty",
     "tap-soft",
     "bean-added",
@@ -36,13 +39,18 @@ const STEPS: [&str; 12] = [
     "tap-soft-again",
     "tap-capsule-in-soft",
     "block-added",
+    "pencil-orbit",
+    "pencil-zoom",
+    "pencil-pan",
+    "pencil-top",
+    "pencil-frame",
     "light",
     "end",
 ];
 
 impl Sim {
     pub fn from_env() -> Option<Sim> {
-        (std::env::var("FORME_SIM").map(|v| v == "1").unwrap_or(false)).then_some(Sim { step: 0, next: WARMUP, marked: None, done: false })
+        (std::env::var("FORME_SIM").map(|v| v == "1").unwrap_or(false)).then_some(Sim { step: 0, next: WARMUP, marked: None, drag: None, done: false })
     }
 
     /// Once per frame, before the frame's input is taken: plays the step due.
@@ -51,6 +59,20 @@ impl Sim {
         if self.done {
             return;
         }
+        // the Pencil's drag, a frame at a time
+        if let Some((a, b, t0, len, down)) = self.drag {
+            let k = ((now - t0) / len).clamp(0.0, 1.0) as f32;
+            let p = a + (b - a) * k;
+            if !down {
+                crate::touch::on_touch(ctx, st, 902, Phase::Start, a, true, now);
+                self.drag = Some((a, b, t0, len, true));
+            } else if k >= 1.0 {
+                crate::touch::on_touch(ctx, st, 902, Phase::End, b, true, now);
+                self.drag = None;
+            } else {
+                crate::touch::on_touch(ctx, st, 902, Phase::Move, p, true, now);
+            }
+        }
         // the step played half a step ago: its picture
         if let Some((k, at)) = self.marked {
             if now >= at {
@@ -58,8 +80,14 @@ impl Sim {
                 let name = STEPS[k];
                 let docs = crate::files::documents_dir();
                 let _ = std::fs::create_dir_all(&docs);
+                let c = st.camera;
                 let state = format!(
-                    "step {k} {name}: workspace {:?}, selection {:?}, sdf {:?}, tool {:?}, mode {:?}, studio {}, content {:?}, viewport and insets {:?}, {info}",
+                    "step {k} {name}: camera yaw {:.3} pitch {:.3} dist {:.1} ortho {} target {:.1?}, workspace {:?}, selection {:?}, sdf {:?}, tool {:?}, mode {:?}, studio {}, content {:?}, viewport and insets {:?}, {info}",
+                    c.yaw,
+                    c.pitch,
+                    c.dist,
+                    c.ortho,
+                    c.target,
                     st.workspace,
                     st.selection,
                     st.sdf_sel,
@@ -106,10 +134,49 @@ impl Sim {
                 st.set_workspace(crate::workspace::Workspace::Forme);
                 st.quick_add(nurbs_kernel::doc::PrimKind::Box);
             }
+            // the Studio's navigation column, the Pencil's tip alone
+            "pencil-orbit" => {
+                if let Some(r) = nav_cube(ctx) {
+                    self.drag = Some((r.center(), r.center() + egui::vec2(-90.0, 30.0), now, 1.2, false));
+                }
+            }
+            "pencil-zoom" => {
+                if let Some([z, _]) = nav_grips(ctx) {
+                    self.drag = Some((z.center(), z.center() + egui::vec2(0.0, -70.0), now, 1.0, false));
+                }
+            }
+            "pencil-pan" => {
+                if let Some([_, p]) = nav_grips(ctx) {
+                    self.drag = Some((p.center(), p.center() + egui::vec2(-110.0, -40.0), now, 1.0, false));
+                }
+            }
+            "pencil-top" => {
+                // the cube's top face as the camera sees it (`view_cube`)
+                if let Some(r) = nav_cube(ctx) {
+                    let fwd = -st.camera.dir();
+                    let right = fwd.cross(Vec3::Y).normalize();
+                    let up = right.cross(fwd).normalize();
+                    let at = r.center() + egui::vec2(Vec3::Y.dot(right), -Vec3::Y.dot(up)) * 10.5;
+                    tap(ctx, st, now, at, true);
+                }
+            }
+            "pencil-frame" => {
+                if let Some(r) = nav_cube(ctx) {
+                    tap(ctx, st, now, egui::pos2(r.center().x, r.max.y + 8.0 + 24.0), true);
+                }
+            }
             "light" => st.settings.light = true,
             _ => {}
         }
     }
+}
+
+fn nav_cube(ctx: &egui::Context) -> Option<Rect> {
+    ctx.data(|d| d.get_temp::<Rect>(Id::new("s-nav-cube")))
+}
+
+fn nav_grips(ctx: &egui::Context) -> Option<[Rect; 2]> {
+    ctx.data(|d| d.get_temp::<[Rect; 2]>(Id::new("s-nav-rects")))
 }
 
 /// A tap: the finger down and up (a Pencil: the pointer).

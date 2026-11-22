@@ -35,6 +35,10 @@ const INSP_W: f32 = 300.0;
 const DOCK_H: f32 = 92.0;
 const CUBE: f32 = 64.0;
 const FRAME_H: f32 = 48.0;
+/// The navigation grips over the view cube (Zoom, Pan: a Pencil's target)
+/// and their pill's height.
+const GRIP: f32 = 48.0;
+const NAV_H: f32 = 2.0 * GRIP + 4.0 + 8.0;
 
 fn rgb(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
@@ -806,7 +810,7 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect, flip: bool) {
         return;
     }
     let x = if flip { screen.min.x + E } else { screen.max.x - E - INSP_W };
-    let bottom = screen.max.y - E - FRAME_H - 8.0 - CUBE - 12.0;
+    let bottom = screen.max.y - E - FRAME_H - 8.0 - CUBE - 8.0 - NAV_H - 12.0;
     let max_h = (bottom - TOP - 32.0).max(160.0);
     set_op_style(ctx, true);
     egui::Area::new(Id::new("s-insp")).order(Order::Middle).fixed_pos(pos2(x, TOP)).show(ctx, |ui| {
@@ -1253,8 +1257,11 @@ fn select_btn(ctx: &egui::Context, ui: &mut Ui, st: &mut AppState) {
 /// Crisp (the Forme tab, the mock-up D1): Build / Dig, Select, Block,
 /// Tube, Sketch, Shapes, then Round, Push, Cut.
 fn crisp_tools(ctx: &egui::Context, ui: &mut Ui, st: &mut AppState) {
-    // Build / Dig: what the next shapes do, and the selected ones
-    let shown = shown_op(st);
+    // Build / Dig: what the next shapes do, only (Romain, 22 nov., 17 h 54:
+    // "ADD et SUBB … semblait pas fonctionner": a shape just made stays
+    // picked, so Dig tapped next turned that shape into a dig and the part
+    // vanished; a picked shape's own Build / Dig is in the inspector)
+    let shown = st.mode;
     let (wr, _) = ui.allocate_exact_size(vec2(76.0, 72.0), Sense::hover());
     ui.painter().rect_filled(wr, 14.0, seg_bg());
     for (i, (op, word)) in [(Op::Add, "Build"), (Op::Carve, "Dig")].into_iter().enumerate() {
@@ -1268,8 +1275,8 @@ fn crisp_tools(ctx: &egui::Context, ui: &mut Ui, st: &mut AppState) {
         }
         let c = if on { if op == Op::Carve { carve_light() } else { TEXT_STRONG() } } else { TEXT2() };
         p.text(r.center(), Align2::CENTER_CENTER, word, if on { semibold(12.0) } else { medium(12.0) }, c);
-        if resp.clicked() {
-            set_op_from_ui(st, op);
+        if resp.on_hover_text(if op == Op::Carve { "The next shapes dig into the part" } else { "The next shapes build onto the part" }).clicked() {
+            st.mode = op;
         }
     }
     ui.add_space(4.0);
@@ -1321,7 +1328,9 @@ fn soft_tools(ctx: &egui::Context, ui: &mut Ui, st: &mut AppState) {
         }
     }
     bar_sep(ui, 72.0);
-    let mode = picked.map(|p| p.1).unwrap_or(st.sdf.mode);
+    // what the next shapes do, only (a picked shape's own mode is in the
+    // inspector; see Crisp's Build / Dig)
+    let mode = st.sdf.mode;
     let (wr, _) = ui.allocate_exact_size(vec2(4.0 * 2.0 + 3.0 * 60.0 + 2.0 * 3.0, 72.0), Sense::hover());
     ui.painter().rect_filled(wr, 14.0, seg_bg());
     for (i, (m, icon, word)) in [(CombineMode::Add, Icon::BoolUnion, "Add"), (CombineMode::Carve, Icon::BoolSubtract, "Carve"), (CombineMode::Intersect, Icon::BoolIntersect, "Overlap")].into_iter().enumerate() {
@@ -1338,9 +1347,6 @@ fn soft_tools(ctx: &egui::Context, ui: &mut Ui, st: &mut AppState) {
         p.text(pos2(r.center().x, r.center().y + 15.0), Align2::CENTER_CENTER, word, if on { semibold(12.0) } else { medium(12.0) }, c);
         if resp.clicked() {
             st.sdf.mode = m;
-            if picked.is_some() {
-                st.sdf_edit_node(&format!("Make it {}", m.label()), |n| n.combine.mode = m);
-            }
         }
     }
 }
@@ -1517,15 +1523,57 @@ fn paint_pop(ctx: &egui::Context, st: &mut AppState) {
 // ------------------------------------------------------------ the view
 
 /// The view cube and Frame, at the bottom corner on the inspector's side.
+/// The navigation column at the bottom right (Romain, 22 nov.: "La
+/// navigation doit pouvoir se faire full stylet", for the iPad): Zoom and
+/// Pan grips dragged by the Pencil's tip alone (a finger too), the view
+/// cube (a drag turns the view, a tap on a face looks square at it), Frame.
 fn view_cube(ctx: &egui::Context, st: &mut AppState, screen: Rect, flip: bool) {
     let x = if flip { screen.min.x + E } else { screen.max.x - E - CUBE };
-    let y = screen.max.y - E - FRAME_H - 8.0 - CUBE;
+    let y = screen.max.y - E - FRAME_H - 8.0 - CUBE - 8.0 - NAV_H;
     egui::Area::new(Id::new("s-cube")).order(Order::Middle).fixed_pos(pos2(x, y)).show(ctx, |ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
-        let (r, resp) = ui.allocate_exact_size(vec2(CUBE, CUBE), Sense::click());
+        // the grips' pill
+        let (pill, _) = ui.allocate_exact_size(vec2(CUBE, NAV_H), Sense::hover());
+        {
+            let p = ui.painter();
+            shadowed(p, pill, 18.0, tint(PANEL(), 0.88), shadow(false));
+            p.rect_stroke(pill, 18.0, Stroke::new(1.0, PANEL_BORDER()), StrokeKind::Inside);
+        }
+        let zr = Rect::from_center_size(pos2(pill.center().x, pill.min.y + 4.0 + GRIP * 0.5), vec2(GRIP, GRIP));
+        let pr = zr.translate(vec2(0.0, GRIP + 4.0));
+        let zoom = nav_grip(ui, "s-nav-zoom", zr, Icon::Zoom).on_hover_text("Zoom: drag up to come closer, down to go back");
+        if zoom.dragged() {
+            let d = grip_moved(ui, &zoom);
+            if d != egui::Vec2::ZERO {
+                st.stop_flight();
+                st.camera.zoom(((d.x - d.y) * 0.006).exp());
+            }
+            st.interacting = true;
+        }
+        let pan = nav_grip(ui, "s-nav-pan", pr, Icon::PanView).on_hover_text("Pan: drag to move the view with the Pencil");
+        if pan.dragged() {
+            let d = grip_moved(ui, &pan);
+            if d != egui::Vec2::ZERO {
+                st.stop_flight();
+                let h = st.view_rect[3] - st.view_rect[1];
+                st.camera.pan(d.x * 1.5, d.y * 1.5, h);
+            }
+            st.interacting = true;
+        }
+        ctx.data_mut(|m| m.insert_temp(Id::new("s-nav-rects"), [zr, pr]));
+        let (r, resp) = ui.allocate_exact_size(vec2(CUBE, CUBE), Sense::click_and_drag());
+        ctx.data_mut(|m| m.insert_temp(Id::new("s-nav-cube"), r));
+        if resp.dragged() {
+            let d = grip_moved(ui, &resp);
+            if d != egui::Vec2::ZERO {
+                st.stop_flight();
+                st.camera.orbit(d.x * 1.5, d.y * 1.5);
+            }
+            st.interacting = true;
+        }
         let p = ui.painter();
-        shadowed(&p, r, 18.0, tint(PANEL(), 0.88), shadow(false));
-        p.rect_stroke(r, 18.0, Stroke::new(1.0, PANEL_BORDER()), StrokeKind::Inside);
+        shadowed(&p, r, 18.0, if resp.dragged() { RAISED() } else { tint(PANEL(), 0.88) }, shadow(false));
+        p.rect_stroke(r, 18.0, Stroke::new(1.0, if resp.dragged() { accent() } else { PANEL_BORDER() }), StrokeKind::Inside);
         // the cube as the camera sees it: its faces towards the eye, the
         // nearest drawn last
         let d = st.camera.dir();
@@ -1556,7 +1604,7 @@ fn view_cube(ctx: &egui::Context, st: &mut AppState, screen: Rect, flip: bool) {
         let lit = pick(rgb(0x55, 0x5B, 0x65), rgb(0xFA, 0xFB, 0xFC));
         // the face under the pointer (else the one the view looks at most)
         // tinted in the accent, as the mock-up's top face
-        let hover = ui.input(|i| i.pointer.hover_pos()).filter(|h| r.contains(*h));
+        let hover = ui.input(|i| i.pointer.hover_pos()).filter(|h| r.contains(*h)).filter(|_| !resp.dragged());
         let lit_face = hover.and_then(|h| seen.iter().rev().find(|(_, q, _, _)| inside(q, h)).map(|x| x.2)).or_else(|| seen.last().map(|x| x.2));
         let edge = pick(rgb(0xA3, 0xA9, 0xB2), rgb(0x8E, 0x95, 0x9F));
         for (k, q, n, _) in &seen {
@@ -1571,7 +1619,7 @@ fn view_cube(ctx: &egui::Context, st: &mut AppState, screen: Rect, flip: bool) {
             let _ = n;
             p.text(pos2(r.center().x, r.max.y - 7.0), Align2::CENTER_BOTTOM, *name, medium(9.0), TEXT2());
         }
-        if resp.on_hover_text("View from the front, the top or the side: tap a face").clicked() {
+        if resp.on_hover_text("Drag: turn the view · Tap a face: look square at it (again: back to the perspective)").clicked() {
             if let Some(at) = ui.input(|i| i.pointer.interact_pos()) {
                 // the nearest face under the tap
                 if let Some((_, _, n, _)) = seen.iter().rev().find(|(_, q, _, _)| inside(q, at)) {
@@ -1588,6 +1636,27 @@ fn view_cube(ctx: &egui::Context, st: &mut AppState, screen: Rect, flip: bool) {
             st.frame_current();
         }
     });
+}
+
+/// A navigation grip: a round button the tip drags, lit while it does.
+fn nav_grip(ui: &mut Ui, id: &str, r: Rect, icon: Icon) -> egui::Response {
+    let resp = ui.interact(r, Id::new(id), Sense::drag());
+    let p = ui.painter();
+    let on = resp.dragged() || resp.is_pointer_button_down_on();
+    let fill = if on { tint(accent(), 0.22) } else if resp.hovered() { btn_bg() } else { Color32::TRANSPARENT };
+    p.circle(r.center(), GRIP * 0.5 - 2.0, fill, Stroke::new(1.0, if on { accent() } else { Color32::TRANSPARENT }));
+    icons::paint(p, Rect::from_center_size(r.center(), vec2(20.0, 20.0)), icon, if on { accent() } else { ink() });
+    resp
+}
+
+/// A grip's drag this frame; nothing on the frame the tip comes down (the
+/// Pencil comes down far from where it was last seen).
+fn grip_moved(ui: &Ui, r: &egui::Response) -> egui::Vec2 {
+    if ui.input(|i| i.pointer.any_pressed()) {
+        egui::Vec2::ZERO
+    } else {
+        r.drag_delta()
+    }
 }
 
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {

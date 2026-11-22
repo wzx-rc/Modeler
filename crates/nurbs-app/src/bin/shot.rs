@@ -1740,6 +1740,10 @@ fn main() {
         ipad_studio(&mut h);
     }
 
+    if want("studio-ops") {
+        studio_ops(&mut h);
+    }
+
     if want("studio-lamp") {
         studio_lamp(&mut h);
     }
@@ -8140,6 +8144,155 @@ fn linked_complex(h: &mut Harness) {
 /// dock at the bottom; a shape picked by the Pencil (its sizes on the
 /// part, the action pill), two edges and their Round, the Soft (SDF) tab,
 /// the light theme, then the PC.
+/// The Studio interface on the iPad (Romain, 22 nov., 17 h 54: "ADD et
+/// SUBB mode … semblait pas fonctionner"): Build / Dig in Crisp and Add /
+/// Carve in Soft, all by Pencil taps on the dock; then the navigation
+/// column (Zoom, Pan, the cube) dragged by the Pencil.
+fn studio_ops(h: &mut Harness) {
+    use egui::{Id, LayerId, Order};
+    use nurbs_app::touch::Phase;
+    let (w0, p0) = (h.size, h.ppp);
+    h.size = [1194.0, 834.0];
+    h.ppp = 2.0;
+    fn tap(h: &mut Harness, p: Pos2) {
+        h.touch(41, Phase::Start, p, true);
+        h.touch(41, Phase::End, p, true);
+        h.steps(3);
+    }
+    fn pdrag(h: &mut Harness, a: Pos2, b: Pos2) {
+        h.touch(42, Phase::Start, a, true);
+        for i in 1..=20 {
+            h.touch(42, Phase::Move, a + (b - a) * (i as f32 / 20.0), true);
+        }
+        h.touch(42, Phase::End, b, true);
+        h.steps(3);
+    }
+    fn dock(h: &Harness, w: f32, hgt: f32) -> Vec<Rect> {
+        let layer = LayerId::new(Order::Middle, Id::new("s-dock"));
+        let mut v: Vec<Rect> = h.ctx.viewport(|v| v.prev_pass.widgets.get_layer(layer).filter(|w| w.sense.senses_click() && w.enabled).map(|w| w.rect).collect());
+        v.retain(|r| (r.width() - w).abs() < 0.6 && (r.height() - hgt).abs() < 0.6);
+        v.sort_by(|a, b| (a.min.x, a.min.y).partial_cmp(&(b.min.x, b.min.y)).unwrap());
+        v.dedup();
+        v
+    }
+    fn report(h: &Harness, what: &str) {
+        let m = h.st.model.as_ref();
+        eprintln!(
+            "studio-ops: {what}: mode {:?}, tool {:?}, selection {:?}, features {:?}, model faces {}, errors {:?}",
+            h.st.mode,
+            h.st.tool,
+            h.st.selection,
+            h.st.doc.features.iter().map(|f| (f.id, f.name.clone(), f.op)).collect::<Vec<_>>(),
+            m.map(|m| m.faces.len()).unwrap_or(0),
+            m.map(|m| m.errors.clone()).unwrap_or_default()
+        );
+    }
+    h.reset(Doc::default(), "Untitled");
+    h.st.touch.on = true;
+    h.st.manual_only = true;
+    h.st.settings.studio = true;
+    h.steps(4);
+    let bd = dock(h, 68.0, 31.0);
+    let btn = dock(h, 66.0, 72.0);
+    eprintln!("studio-ops: {} Build / Dig, {} dock buttons", bd.len(), btn.len());
+    if bd.len() < 2 || btn.len() < 2 {
+        return;
+    }
+    let block = btn[1].center();
+    // Build: Block, Block again (the 20 mm block at once)
+    tap(h, block);
+    tap(h, block);
+    h.settle();
+    report(h, "Build, Block twice");
+    h.shot("studio-ops/ops-01-block");
+    // Dig, then Block twice: drilled through the block picked
+    tap(h, bd[1].center());
+    h.settle();
+    report(h, "Dig tapped with the block picked");
+    h.shot("studio-ops/ops-02-dig-tapped");
+    tap(h, bd[0].center());
+    h.settle();
+    report(h, "Build tapped again");
+    // nothing picked, Dig, then Block twice with the block picked again
+    h.st.selection.clear();
+    h.steps(2);
+    tap(h, bd[1].center());
+    h.steps(2);
+    report(h, "Dig with nothing picked");
+    let first = h.st.doc.features.first().map(|f| f.id);
+    if let Some(id) = first {
+        h.st.selection = vec![id];
+    }
+    h.steps(2);
+    report(h, "the block picked again");
+    tap(h, block);
+    tap(h, block);
+    h.settle();
+    report(h, "Dig, Block twice");
+    h.shot("studio-ops/ops-03-dug");
+    // Soft: a Ball, Carve, a Bean
+    h.st.set_workspace(nurbs_app::workspace::Workspace::Sdf);
+    h.steps(4);
+    let modes = dock(h, 60.0, 64.0);
+    let soft = dock(h, 66.0, 72.0);
+    eprintln!("studio-ops: Soft: {} modes, {} buttons", modes.len(), soft.len());
+    let sdf_report = |h: &Harness, what: &str| {
+        let info = h.st.sdf_picked().and_then(|(f, n)| nurbs_app::sdf::scene_of(f).map(|s| (nurbs_kernel::mesh::sdf_shapes(s).iter().map(|x| (s.node(*x).map(|nd| nd.name.clone()), s.node(*x).map(|nd| nd.combine.mode))).collect::<Vec<_>>(), n)));
+        let tris: usize = h.st.doc.features.iter().filter_map(|f| f.mesh.as_ref()).map(|m| m.faces.len()).sum();
+        eprintln!("studio-ops: Soft {what}: mode {:?}, shapes {:?}, mesh faces {tris}", h.st.sdf.mode, info);
+    };
+    if modes.len() >= 2 && soft.len() >= 5 {
+        tap(h, soft[1].center()); // Ball
+        h.steps(30);
+        sdf_report(h, "Ball");
+        tap(h, modes[1].center()); // Carve
+        h.steps(30);
+        sdf_report(h, "Carve tapped with the ball picked");
+        h.shot("studio-ops/ops-04-soft-carve-tapped");
+        tap(h, modes[0].center()); // Add back
+        h.steps(10);
+        h.st.sdf_sel = h.st.sdf_sel.map(|(f, _)| (f, 0)).filter(|_| false);
+        h.steps(4);
+        tap(h, modes[1].center()); // Carve, nothing picked
+        h.steps(4);
+        tap(h, soft[4].center()); // Bean
+        h.steps(60);
+        sdf_report(h, "Carve then Bean");
+        h.shot("studio-ops/ops-05-soft-bean-carved");
+    }
+    // the navigation column, the Pencil alone
+    h.st.set_workspace(nurbs_app::workspace::Workspace::Forme);
+    h.st.selection.clear();
+    h.steps(4);
+    h.shot("studio-ops/nav-01");
+    let cam0 = h.st.camera;
+    if let (Some(cube), Some([z, p])) = (h.ctx.data(|d| d.get_temp::<Rect>(Id::new("s-nav-cube"))), h.ctx.data(|d| d.get_temp::<[Rect; 2]>(Id::new("s-nav-rects")))) {
+        pdrag(h, cube.center(), cube.center() + egui::vec2(-90.0, 30.0));
+        eprintln!("studio-ops: cube dragged: yaw {:.3} -> {:.3}, pitch {:.3} -> {:.3}", cam0.yaw, h.st.camera.yaw, cam0.pitch, h.st.camera.pitch);
+        h.shot("studio-ops/nav-02-turned");
+        let d0 = h.st.camera.dist;
+        pdrag(h, z.center(), z.center() + egui::vec2(0.0, -70.0));
+        eprintln!("studio-ops: Zoom dragged up: dist {d0:.1} -> {:.1}", h.st.camera.dist);
+        h.shot("studio-ops/nav-03-zoomed");
+        let t0 = h.st.camera.target;
+        pdrag(h, p.center(), p.center() + egui::vec2(-110.0, -40.0));
+        eprintln!("studio-ops: Pan dragged: target {t0:?} -> {:?}", h.st.camera.target);
+        h.shot("studio-ops/nav-04-panned");
+        let fwd = -h.st.camera.dir();
+        let right = fwd.cross(Vec3::Y).normalize();
+        let up = right.cross(fwd).normalize();
+        tap(h, cube.center() + egui::vec2(Vec3::Y.dot(right), -Vec3::Y.dot(up)) * 10.5);
+        h.settle();
+        eprintln!("studio-ops: top face tapped: {:?}", h.st.camera.preset_of());
+        h.shot("studio-ops/nav-05-top");
+        tap(h, egui::pos2(cube.center().x, cube.max.y + 32.0));
+        h.settle();
+        h.shot("studio-ops/nav-06-framed");
+    }
+    h.size = w0;
+    h.ppp = p0;
+}
+
 fn ipad_studio(h: &mut Harness) {
     use egui::{Id, LayerId, Order};
     use nurbs_app::touch::Phase;

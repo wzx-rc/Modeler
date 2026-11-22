@@ -276,11 +276,12 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
     st.interacting = st.drag.is_some() || st.creation.is_some() || st.scan_round.is_some() || st.scan_slot.is_some() || st.slot_draw.is_some();
 
     // Maya navigation: Alt + left = orbit, Alt + middle = pan, Alt + right =
-    // zoom, whatever the tool
+    // zoom, whatever the tool (not on the frame a button goes down: a pen's
+    // tip may come down far from where it was last seen, the view would jump)
     let (alt, d, l, m, r) = ctx.input(|i| {
         (
             i.modifiers.alt,
-            i.pointer.delta(),
+            if i.pointer.any_pressed() { egui::Vec2::ZERO } else { i.pointer.delta() },
             i.pointer.button_down(PointerButton::Primary),
             i.pointer.button_down(PointerButton::Middle),
             i.pointer.button_down(PointerButton::Secondary),

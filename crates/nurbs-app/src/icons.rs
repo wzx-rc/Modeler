@@ -125,6 +125,10 @@ pub enum Icon {
     /// A group closed (a padlock shut) or open (its shackle free).
     Lock,
     Unlock,
+    /// The view's navigation grips (Studio, the Pencil alone): a magnifier
+    /// (zoom), four arrows (pan).
+    Zoom,
+    PanView,
     // the iPad's layout
     Minus,
     Plus,
@@ -762,6 +766,20 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
             pen.closed(&[(5.6, 5.6), (11.2, 5.6), (11.2, 11.2), (5.6, 11.2)]);
             pen.circle(12.2, 12.2, 2.9);
+        }
+        Icon::Zoom => {
+            pen.circle(8.6, 8.6, 5.6);
+            pen.line(&[(12.7, 12.7), (17.0, 17.0)]);
+            pen.line(&[(6.0, 8.6), (11.2, 8.6)]);
+            pen.line(&[(8.6, 6.0), (8.6, 11.2)]);
+        }
+        Icon::PanView => {
+            pen.line(&[(10.0, 2.5), (10.0, 17.5)]);
+            pen.line(&[(2.5, 10.0), (17.5, 10.0)]);
+            for (x, y, dx, dy) in [(10.0, 2.5, 0.0, 1.0), (10.0, 17.5, 0.0, -1.0), (2.5, 10.0, 1.0, 0.0), (17.5, 10.0, -1.0, 0.0)] {
+                // the arrow's two barbs, square to its line
+                pen.line(&[(x + 2.6 * dx - 2.6 * dy, y + 2.6 * dy - 2.6 * dx), (x, y), (x + 2.6 * dx + 2.6 * dy, y + 2.6 * dy + 2.6 * dx)]);
+            }
         }
         Icon::Lock | Icon::Unlock => {
             pen.closed(&[(4.5, 9.2), (15.5, 9.2), (15.5, 17.0), (4.5, 17.0)]);
