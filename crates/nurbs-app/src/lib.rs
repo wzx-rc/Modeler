@@ -68,6 +68,7 @@ pub fn version_title() -> String {
 pub fn run(ctx: &egui::Context, st: &mut AppState) {
     // tab_anim: a new tab fades its colours in (before the theme is set)
     tab_anim::tick(ctx, st.workspace, st.settings.tab_anim);
+    theme::set_studio(st.settings.studio);
     theme::set_theme(ctx, st.settings.light, st.workspace);
     // an .obj dropped on the window: the reference mesh to model on
     let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());

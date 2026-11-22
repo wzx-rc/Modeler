@@ -2089,8 +2089,12 @@ fn status(p: &Painter, st: &AppState) {
     // just above the history strip; on the iPad at the view's bottom right,
     // above the "?" button
     let tablet = crate::widgets::tablet();
-    let (at, align) = if tablet { (pos2(st.view_rect[2] - 4.0, st.view_rect[3] - 76.0), Align2::RIGHT_BOTTOM) } else { (pos2(st.view_rect[0] + 12.0, st.view_rect[3] - 4.0), Align2::LEFT_BOTTOM) };
-    let r = chip(p, at, align, &parts.join(" · "), PANEL_BORDER(), color);
+    // the Studio interface: at the view's bottom left, and only when it has
+    // something to say (building, the kernel missing, Claude's link)
+    let studio = crate::theme::studio();
+    let (at, align) = if studio { (pos2(st.view_rect[0] + 4.0, st.view_rect[3] - 4.0), Align2::LEFT_BOTTOM) } else if tablet { (pos2(st.view_rect[2] - 4.0, st.view_rect[3] - 76.0), Align2::RIGHT_BOTTOM) } else { (pos2(st.view_rect[0] + 12.0, st.view_rect[3] - 4.0), Align2::LEFT_BOTTOM) };
+    let quiet = studio && color == TEXT() && !st.building() && st.link.served == 0;
+    let r = if quiet { Rect::from_min_size(at, egui::Vec2::ZERO) } else { chip(p, at, align, &parts.join(" · "), PANEL_BORDER(), color) };
     // what could not be made
     if let Some(m) = &st.model {
         let mut y = r.min.y - 6.0;

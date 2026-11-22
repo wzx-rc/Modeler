@@ -470,6 +470,7 @@ impl Drawer {
             view: st.view().scaled(ppp),
             points_to_px: ppp,
             light: st.settings.light,
+            studio: st.settings.studio,
             grid: st.settings.grid,
             origin: st.settings.origin,
             base: CLAY,

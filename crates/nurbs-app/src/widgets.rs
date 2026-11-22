@@ -357,7 +357,7 @@ pub struct Keypad {
 }
 
 /// One − / + step of a slider row on the iPad.
-fn step_of(v: f32, step: f64, suffix: &str) -> f32 {
+pub fn step_of(v: f32, step: f64, suffix: &str) -> f32 {
     if step >= 1.0 {
         return step as f32;
     }

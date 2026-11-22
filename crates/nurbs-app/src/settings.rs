@@ -36,11 +36,17 @@ pub struct Settings {
     /// iPad: a finger held still this long (seconds) in the view is the
     /// right button (the marking menu).
     pub hold_time: f64,
+    /// The Studio interface (Romain 22 nov.: the mock-up D3 as a theme
+    /// that changes the whole UI and UX): soft greys, a soft blue accent
+    /// (green in the SDF tab, named Soft), the scene on the left, an
+    /// inspector on the right, the tools in a dock at the bottom
+    /// (`ui::studio`). Else the classic layout (`ui::tablet` on the iPad).
+    pub studio: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, tab_anim: true, left_handed: false, pencil_only: false, hold_time: 0.45 }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, tab_anim: true, left_handed: false, pencil_only: false, hold_time: 0.45, studio: false }
     }
 }
 

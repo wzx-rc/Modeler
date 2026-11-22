@@ -16,7 +16,7 @@ struct U {
     right: vec4<f32>,
     up: vec4<f32>,
     view: vec4<f32>,     // size (px), projection centre (px)
-    params: vec4<f32>,   // near, far, line width (px), light theme
+    params: vec4<f32>,   // near, far, line width (px), theme (0 dark, 1 light, 2 Studio dark, 3 Studio light)
     sel: vec4<f32>,      // selection colour (linear), mix
     hover: vec4<f32>,    // pre-selection colour (linear), mix
     base: vec4<f32>,     // part colour (linear), w = grid
@@ -83,6 +83,9 @@ struct BgOut {
     let ro = u.eye.xyz;
     let rd = normalize(u.fwd.xyz + u.right.xyz * sx * t + u.up.xyz * sy * t);
     let px = t / half_h;
+    if (u.params.w > 1.5) {
+        return studio_bg(frag, ro, rd, px, u.params.w > 2.5);
+    }
     let light = u.params.w > 0.5;
     let v = frag.y / u.view.y;
     var col = mix(vec3<f32>(0.0102, 0.0109, 0.0124), vec3<f32>(0.0074, 0.0079, 0.0090), v);
@@ -131,6 +134,54 @@ struct BgOut {
         col = mix(gcol, col, fog);
     }
     return vec4<f32>(aces(col * 1.9), 1.0);
+}
+
+// The Studio interface's background (the mock-up D3, Romain 22 nov.): a
+// soft radial studio light behind the part, the ground not drawn, only its
+// grid lines fading out with the distance and towards the screen's edges.
+// Its colours are the mock-up's own (sRGB), so no tone mapping.
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    return pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+}
+
+fn studio_bg(frag: vec2<f32>, ro: vec3<f32>, rd: vec3<f32>, px: f32, light: bool) -> vec4<f32> {
+    let uv = frag / u.view.xy;
+    let d = clamp(length((uv - vec2<f32>(0.5, 0.42)) / 0.75), 0.0, 1.0);
+    var c0 = vec3<f32>(48.0, 52.0, 59.0) / 255.0;
+    var c1 = vec3<f32>(35.0, 38.0, 43.0) / 255.0;
+    var c2 = vec3<f32>(24.0, 25.0, 29.0) / 255.0;
+    var line = vec3<f32>(54.0, 58.0, 66.0) / 255.0;
+    var axis = vec3<f32>(74.0, 79.0, 88.0) / 255.0;
+    if (light) {
+        c0 = vec3<f32>(250.0, 251.0, 252.0) / 255.0;
+        c1 = vec3<f32>(238.0, 240.0, 243.0) / 255.0;
+        c2 = vec3<f32>(223.0, 227.0, 232.0) / 255.0;
+        line = vec3<f32>(205.0, 210.0, 217.0) / 255.0;
+        axis = vec3<f32>(179.0, 186.0, 195.0) / 255.0;
+    }
+    var col = mix(c0, c1, smoothstep(0.0, 0.6, d));
+    col = mix(col, c2, smoothstep(0.6, 1.0, d));
+    if (rd.y < -1e-4 && u.base.w > 0.5) {
+        let tg = -ro.y / rd.y;
+        let gp = ro + rd * tg;
+        let foot = tg * px * 1.2;
+        let c1g = abs(fract(gp.xz / 10.0 + 0.5) - 0.5) * 10.0;
+        let l1 = 1.0 - smoothstep(0.0, foot + 0.04, min(c1g.x, c1g.y));
+        let c2g = abs(fract(gp.xz / 50.0 + 0.5) - 0.5) * 50.0;
+        let l2 = 1.0 - smoothstep(0.0, foot + 0.06, min(c2g.x, c2g.y));
+        // fading with the distance, and towards the screen's edges (the
+        // mock-up's mask)
+        let mask = 1.0 - smoothstep(0.55, 1.05, length((uv - vec2<f32>(0.5, 0.58)) / 0.5));
+        let fade = exp(-tg * 0.0022) * mask;
+        col = mix(col, line, max(l1 * 0.75, l2) * fade);
+        if (u.misc.x > 0.5) {
+            let w = foot * 1.3 + 0.1;
+            let ax = 1.0 - smoothstep(0.0, w, abs(gp.z));
+            let az = 1.0 - smoothstep(0.0, w, abs(gp.x));
+            col = mix(col, axis, max(ax, az) * fade);
+        }
+    }
+    return vec4<f32>(to_linear(col), 1.0);
 }
 
 // ------------------------------------------------------------------ mesh
@@ -470,6 +521,8 @@ pub struct Frame<'a> {
     pub view: View,
     pub points_to_px: f32,
     pub light: bool,
+    /// The Studio interface: its soft studio background (`fs_bg`).
+    pub studio: bool,
     pub grid: bool,
     pub origin: bool,
     /// Part colour (sRGB 0..1).
@@ -784,7 +837,7 @@ impl Renderer {
             right: [right.x, right.y, right.z, 0.0],
             up: [up.x, up.y, up.z, 0.0],
             view: [view.size[0], view.size[1], view.principal[0], view.principal[1]],
-            params: [near, far, LINE_PT * f.points_to_px, f.light as u32 as f32],
+            params: [near, far, LINE_PT * f.points_to_px, f.light as u32 as f32 + if f.studio { 2.0 } else { 0.0 }],
             sel: [s[0], s[1], s[2], sa],
             hover: [h[0], h[1], h[2], ha],
             base: [b[0], b[1], b[2], f.grid as u32 as f32],

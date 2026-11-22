@@ -44,21 +44,21 @@ fn island_t() -> egui::Frame {
 }
 
 /// A pop-over (a menu, a fly-out, the gestures sheet): opaque.
-fn pop_t() -> egui::Frame {
+pub(super) fn pop_t() -> egui::Frame {
     island_t().fill(PANEL().to_opaque())
 }
 
 /// A pop-over's flag (open or not), kept by egui between frames.
-fn flag(ctx: &egui::Context, name: &str) -> bool {
+pub(super) fn flag(ctx: &egui::Context, name: &str) -> bool {
     ctx.data(|d| d.get_temp::<bool>(Id::new(("t-flag", name)))).unwrap_or(false)
 }
 
-fn set_flag(ctx: &egui::Context, name: &str, on: bool) {
+pub(super) fn set_flag(ctx: &egui::Context, name: &str, on: bool) {
     ctx.data_mut(|d| d.insert_temp(Id::new(("t-flag", name)), on));
 }
 
 /// A press outside these rects closes a pop-over.
-fn pressed_outside(ctx: &egui::Context, keep: &[Rect]) -> bool {
+pub(super) fn pressed_outside(ctx: &egui::Context, keep: &[Rect]) -> bool {
     ctx.input(|i| i.pointer.any_pressed()) && ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| !keep.iter().any(|r| r.contains(p)))
 }
 
@@ -131,7 +131,7 @@ fn seg_btn(ui: &mut Ui, size: egui::Vec2, icon: Option<Icon>, label: &str, on: b
 }
 
 /// The text on a filled button: dark on a light fill, light on a dark one.
-fn contrast_on(fill: Color32) -> Color32 {
+pub(super) fn contrast_on(fill: Color32) -> Color32 {
     let l = 0.299 * fill.r() as f32 + 0.587 * fill.g() as f32 + 0.114 * fill.b() as f32;
     if l > 150.0 { Color32::from_rgb(0x0F, 0x11, 0x14) } else { Color32::from_rgb(0xF2, 0xF3, 0xF5) }
 }
@@ -353,7 +353,7 @@ fn view_island(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 
 /// A row of a pop-over menu: an icon, a label, a tick or a value on the
 /// right; 48 points tall.
-fn menu_row(ui: &mut Ui, icon: Option<Icon>, label: &str, on: bool) -> Response {
+pub(super) fn menu_row(ui: &mut Ui, icon: Option<Icon>, label: &str, on: bool) -> Response {
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::click());
     let p = ui.painter();
     if resp.is_pointer_button_down_on() {
@@ -374,7 +374,7 @@ fn menu_row(ui: &mut Ui, icon: Option<Icon>, label: &str, on: bool) -> Response 
 }
 
 /// The view menu under "3D": the presets, X-ray, Isolate, the grid.
-fn view_menu(ctx: &egui::Context, st: &mut AppState) {
+pub(super) fn view_menu(ctx: &egui::Context, st: &mut AppState) {
     if !flag(ctx, "view") {
         return;
     }
@@ -414,7 +414,7 @@ fn view_menu(ctx: &egui::Context, st: &mut AppState) {
 
 /// The settings pop-over: the look, the snapping, the iPad's own (the
 /// hand, Pencil only, the hold time) and the Touch & Pencil sheet.
-fn settings_pop(ctx: &egui::Context, st: &mut AppState) {
+pub(super) fn settings_pop(ctx: &egui::Context, st: &mut AppState) {
     if !flag(ctx, "settings") {
         return;
     }
@@ -428,6 +428,7 @@ fn settings_pop(ctx: &egui::Context, st: &mut AppState) {
             let mut changed = false;
             for (label, v) in [
                 ("Light theme", &mut st.settings.light as *mut bool),
+                ("Studio interface", &mut st.settings.studio as *mut bool),
                 ("Snap to the part's points", &mut st.settings.points as *mut bool),
                 ("Hint line at the top", &mut st.settings.help as *mut bool),
                 ("Tab animation", &mut st.settings.tab_anim as *mut bool),
@@ -804,7 +805,7 @@ fn hint_pill(ctx: &egui::Context, st: &mut AppState) {
 
 /// The PC's hint said for the iPad: the parts the Pencil and the fingers
 /// can do (no keys), "click" said "tap", at most three.
-fn touch_hint(st: &AppState) -> Vec<String> {
+pub(super) fn touch_hint(st: &AppState) -> Vec<String> {
     let text = crate::viewport::hint(st);
     let mut out = vec![];
     for part in text.split(" · ") {
@@ -831,7 +832,7 @@ fn touch_hint(st: &AppState) -> Vec<String> {
 
 /// Where the action bar sits: above the box of what is selected or picked
 /// (its bottom centre), below the hint.
-fn bar_at(st: &AppState) -> Option<egui::Pos2> {
+pub(super) fn bar_at(st: &AppState) -> Option<egui::Pos2> {
     if st.tool != Tool::Select || st.creation.is_some() || st.drag.is_some() || st.marking.is_open() || st.align.is_some() || st.push.is_some() {
         return None;
     }
@@ -1097,7 +1098,7 @@ fn col_title(ui: &mut Ui, t: &str) {
 /// The Touch & Pencil sheet (the mock-up's): the fingers, the Pencil,
 /// Shift and Ctrl, then the settings (left-handed, Pencil only, the hold
 /// time).
-fn gesture_sheet(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+pub(super) fn gesture_sheet(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     if !flag(ctx, "sheet") {
         return;
     }

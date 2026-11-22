@@ -35,6 +35,27 @@ pub fn light() -> bool {
     LIGHT.load(Ordering::Relaxed)
 }
 
+// The Studio interface (Romain 22 nov., the mock-up D3): softer neutrals,
+// a soft blue accent (the SDF tab's green), set once per frame.
+static STUDIO: AtomicBool = AtomicBool::new(false);
+
+pub fn studio() -> bool {
+    STUDIO.load(Ordering::Relaxed)
+}
+
+pub fn set_studio(on: bool) {
+    STUDIO.store(on, Ordering::Relaxed);
+}
+
+/// A neutral of the Studio interface (dark, light), else the classic one.
+fn sn(dark: u32, light_c: u32, classic: Color32) -> Color32 {
+    if !studio() {
+        return classic;
+    }
+    let v = if light() { light_c } else { dark };
+    Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
 /// One colour per theme.
 pub fn pick(dark: Color32, light_c: Color32) -> Color32 {
     if light() { light_c } else { dark }
@@ -42,51 +63,63 @@ pub fn pick(dark: Color32, light_c: Color32) -> Color32 {
 
 #[allow(non_snake_case)]
 pub fn BG() -> Color32 {
-    if light() { Color32::from_rgb(0xEE, 0xF0, 0xF3) } else { Color32::from_rgb(0x0F, 0x11, 0x14) }
+    let classic = if light() { Color32::from_rgb(0xEE, 0xF0, 0xF3) } else { Color32::from_rgb(0x0F, 0x11, 0x14) };
+    sn(0x1E2126, 0xEEF0F3, classic)
 }
 #[allow(non_snake_case)]
 pub fn PANEL() -> Color32 {
-    if light() { Color32::from_rgb(0xFF, 0xFF, 0xFF) } else { Color32::from_rgb(0x17, 0x19, 0x1D) }
+    let classic = if light() { Color32::from_rgb(0xFF, 0xFF, 0xFF) } else { Color32::from_rgb(0x17, 0x19, 0x1D) };
+    sn(0x26292F, 0xFFFFFF, classic)
 }
 #[allow(non_snake_case)]
 pub fn PANEL_BORDER() -> Color32 {
-    if light() { Color32::from_rgb(0xD8, 0xDC, 0xE2) } else { Color32::from_rgb(0x2A, 0x2E, 0x35) }
+    let classic = if light() { Color32::from_rgb(0xD8, 0xDC, 0xE2) } else { Color32::from_rgb(0x2A, 0x2E, 0x35) };
+    sn(0x353940, 0xE1E4E9, classic)
 }
 #[allow(non_snake_case)]
 pub fn RAISED() -> Color32 {
-    if light() { Color32::from_rgb(0xED, 0xEF, 0xF2) } else { Color32::from_rgb(0x25, 0x29, 0x30) }
+    let classic = if light() { Color32::from_rgb(0xED, 0xEF, 0xF2) } else { Color32::from_rgb(0x25, 0x29, 0x30) };
+    sn(0x31353C, 0xEBEEF2, classic)
 }
 #[allow(non_snake_case)]
 pub fn WELL() -> Color32 {
-    if light() { Color32::from_rgb(0xF2, 0xF4, 0xF6) } else { Color32::from_rgb(0x0F, 0x11, 0x14) }
+    let classic = if light() { Color32::from_rgb(0xF2, 0xF4, 0xF6) } else { Color32::from_rgb(0x0F, 0x11, 0x14) };
+    sn(0x1F2227, 0xF1F3F5, classic)
 }
 #[allow(non_snake_case)]
 pub fn DIVIDER() -> Color32 {
-    if light() { Color32::from_rgb(0xE0, 0xE3, 0xE8) } else { Color32::from_rgb(0x2A, 0x2E, 0x35) }
+    let classic = if light() { Color32::from_rgb(0xE0, 0xE3, 0xE8) } else { Color32::from_rgb(0x2A, 0x2E, 0x35) };
+    sn(0x373B42, 0xE6E8EC, classic)
 }
 #[allow(non_snake_case)]
 pub fn TEXT() -> Color32 {
-    if light() { Color32::from_rgb(0x1E, 0x22, 0x27) } else { Color32::from_rgb(0xE4, 0xE7, 0xEB) }
+    let classic = if light() { Color32::from_rgb(0x1E, 0x22, 0x27) } else { Color32::from_rgb(0xE4, 0xE7, 0xEB) };
+    sn(0xE8EAED, 0x1C2027, classic)
 }
 #[allow(non_snake_case)]
 pub fn TEXT_STRONG() -> Color32 {
-    if light() { Color32::from_rgb(0x0C, 0x0E, 0x11) } else { Color32::from_rgb(0xF2, 0xF3, 0xF5) }
+    let classic = if light() { Color32::from_rgb(0x0C, 0x0E, 0x11) } else { Color32::from_rgb(0xF2, 0xF3, 0xF5) };
+    sn(0xF4F5F7, 0x111418, classic)
 }
 #[allow(non_snake_case)]
 pub fn TEXT2() -> Color32 {
-    if light() { Color32::from_rgb(0x5C, 0x63, 0x6D) } else { Color32::from_rgb(0x9A, 0xA1, 0xAB) }
+    let classic = if light() { Color32::from_rgb(0x5C, 0x63, 0x6D) } else { Color32::from_rgb(0x9A, 0xA1, 0xAB) };
+    sn(0xA3A9B2, 0x5A626D, classic)
 }
 #[allow(non_snake_case)]
 pub fn TEXT_ICON() -> Color32 {
-    if light() { Color32::from_rgb(0x3A, 0x40, 0x48) } else { Color32::from_rgb(0xC3, 0xC8, 0xCF) }
+    let classic = if light() { Color32::from_rgb(0x3A, 0x40, 0x48) } else { Color32::from_rgb(0xC3, 0xC8, 0xCF) };
+    sn(0xC9CDD3, 0x3A404A, classic)
 }
 #[allow(non_snake_case)]
 pub fn LABEL() -> Color32 {
-    if light() { Color32::from_rgb(0x47, 0x4D, 0x55) } else { Color32::from_rgb(0xB8, 0xBE, 0xC6) }
+    let classic = if light() { Color32::from_rgb(0x47, 0x4D, 0x55) } else { Color32::from_rgb(0xB8, 0xBE, 0xC6) };
+    sn(0xBCC2CA, 0x3A404A, classic)
 }
 #[allow(non_snake_case)]
 pub fn NEUTRAL_MODE() -> Color32 {
-    if light() { Color32::from_rgb(0x4E, 0x54, 0x5C) } else { Color32::from_rgb(0xC8, 0xCC, 0xD2) }
+    let classic = if light() { Color32::from_rgb(0x4E, 0x54, 0x5C) } else { Color32::from_rgb(0xC8, 0xCC, 0xD2) };
+    sn(0xC8CCD2, 0x4E545C, classic)
 }
 pub const AXIS_X: Color32 = Color32::from_rgb(0xF0, 0x60, 0x5A);
 pub const AXIS_Y: Color32 = Color32::from_rgb(0x7C, 0xCB, 0x5B);
@@ -213,11 +246,11 @@ pub fn set_theme(ctx: &egui::Context, on: bool, space: crate::workspace::Workspa
     let before = LIGHT.swap(on, Ordering::Relaxed);
     let before_space = SPACE.swap(space.index(), Ordering::Relaxed);
     let key = egui::Id::new("theme-light-styled");
-    let styled: Option<(bool, u8)> = ctx.data(|d| d.get_temp(key));
+    let styled: Option<(bool, u8, bool)> = ctx.data(|d| d.get_temp(key));
     // tab_anim: restyled every frame while the colours fade, once after
     let blending = blend().is_some();
-    if before != on || before_space != space.index() || styled != Some((on, space.index())) || blending {
-        let k = if blending { (on, 255) } else { (on, space.index()) };
+    if before != on || before_space != space.index() || styled != Some((on, space.index(), studio())) || blending {
+        let k = if blending { (on, 255, studio()) } else { (on, space.index(), studio()) };
         ctx.data_mut(|d| d.insert_temp(key, k));
         ctx.global_style_mut(|style| apply_visuals(&mut style.visuals));
     }
@@ -246,29 +279,41 @@ fn ws(c: [(u32, u32); 4]) -> Color32 {
     }
 }
 
+/// The classic accents, or the Studio's (the mock-up D3: a soft blue in
+/// the Forme tab, named Crisp there, a soft green in the SDF tab, Soft).
+fn ws2(classic: [(u32, u32); 4], studio_c: [(u32, u32); 4]) -> Color32 {
+    ws(if studio() { studio_c } else { classic })
+}
+
 pub fn accent() -> Color32 {
-    ws([(0xF2F3F5, 0x2B2F35), (0xECB48E, 0xB0643A), (0x9CD2F4, 0x2D7FB8), (0x9EE09A, 0x2E8B3E)])
+    ws2([(0xF2F3F5, 0x2B2F35), (0xECB48E, 0xB0643A), (0x9CD2F4, 0x2D7FB8), (0x9EE09A, 0x2E8B3E)], [(0x8EA0F2, 0x4F6BDF), (0xECB48E, 0xB0643A), (0x9CD2F4, 0x2D7FB8), (0x6FCF97, 0x3E9A66)])
 }
 pub fn accent_light() -> Color32 {
-    ws([(0xFFFFFF, 0x5A6069), (0xF7D3BA, 0xC9845C), (0xC6E6FA, 0x5A9FCF), (0xC8F0C4, 0x5BAF66)])
+    ws2([(0xFFFFFF, 0x5A6069), (0xF7D3BA, 0xC9845C), (0xC6E6FA, 0x5A9FCF), (0xC8F0C4, 0x5BAF66)], [(0xB3C0F7, 0x7088E6), (0xF7D3BA, 0xC9845C), (0xC6E6FA, 0x5A9FCF), (0x9BE3B8, 0x5DB585)])
 }
 pub fn accent_bg() -> Color32 {
-    ws([(0x2E3238, 0xE4E7EB), (0x3B2E27, 0xF6E6DC), (0x24313C, 0xDDEBF5), (0x253626, 0xDFF1E0)])
+    ws2([(0x2E3238, 0xE4E7EB), (0x3B2E27, 0xF6E6DC), (0x24313C, 0xDDEBF5), (0x253626, 0xDFF1E0)], [(0x313A58, 0xE9EDFB), (0x3B2E27, 0xF6E6DC), (0x24313C, 0xDDEBF5), (0x2F4439, 0xE3F4EA)])
 }
 pub fn accent_border() -> Color32 {
-    ws([(0x6A707A, 0x9AA1AB), (0x93705A, 0xD3A587), (0x5B8098, 0x8DB8D6), (0x5F9A5D, 0x8FC897)])
+    ws2([(0x6A707A, 0x9AA1AB), (0x93705A, 0xD3A587), (0x5B8098, 0x8DB8D6), (0x5F9A5D, 0x8FC897)], [(0x5E6FB0, 0x9AABEB), (0x93705A, 0xD3A587), (0x5B8098, 0x8DB8D6), (0x4F8F6B, 0x8FCCA8)])
 }
 pub fn accent_text() -> Color32 {
-    ws([(0xFFFFFF, 0x111316), (0xFFE6D5, 0x5A2D14), (0xE2F3FF, 0x123A57), (0xE4FBE2, 0x123F1A)])
+    ws2([(0xFFFFFF, 0x111316), (0xFFE6D5, 0x5A2D14), (0xE2F3FF, 0x123A57), (0xE4FBE2, 0x123F1A)], [(0xC9D3FF, 0x22357F), (0xFFE6D5, 0x5A2D14), (0xE2F3FF, 0x123A57), (0xB8EDCC, 0x1F5A3A)])
 }
 /// Text and icons drawn on a filled accent.
 pub fn on_accent() -> Color32 {
-    ws([(0x15171A, 0xFFFFFF), (0x24160E, 0xFFFFFF), (0x0E1A24, 0xFFFFFF), (0x0F1F10, 0xFFFFFF)])
+    ws2([(0x15171A, 0xFFFFFF), (0x24160E, 0xFFFFFF), (0x0E1A24, 0xFFFFFF), (0x0F1F10, 0xFFFFFF)], [(0x0E1430, 0xFFFFFF), (0x24160E, 0xFFFFFF), (0x0E1A24, 0xFFFFFF), (0x10241A, 0xFFFFFF)])
 }
 pub fn carve() -> Color32 {
+    if studio() {
+        return pick(Color32::from_rgb(0xE0, 0x92, 0x5F), Color32::from_rgb(0xC4, 0x6A, 0x3A));
+    }
     pick(Color32::from_rgb(0xF0, 0x8A, 0x3C), Color32::from_rgb(0xD9, 0x66, 0x1A))
 }
 pub fn carve_light() -> Color32 {
+    if studio() {
+        return pick(Color32::from_rgb(0xF0, 0xB4, 0x8A), Color32::from_rgb(0xD9, 0x82, 0x52));
+    }
     pick(Color32::from_rgb(0xFF, 0xB2, 0x7A), Color32::from_rgb(0xF2, 0x9A, 0x55))
 }
 

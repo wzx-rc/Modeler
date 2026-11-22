@@ -16,6 +16,9 @@ use glam::{DQuat, DVec3, EulerRot};
 
 /// The iPad's layout (the mock-up of 21 nov.).
 mod tablet;
+/// The Studio interface (the mock-up D3 of 22 nov., a setting): another
+/// layout and way of working, on the iPad and the PC.
+mod studio;
 use nurbs_kernel::doc::{CurveKind, CurveOp, PrimKind};
 use nurbs_kernel::{Feature, FeatureId, Op, Prim};
 
@@ -158,8 +161,17 @@ pub fn prim_key(k: PrimKind) -> &'static str {
 }
 
 pub fn show(ctx: &egui::Context, st: &mut AppState) {
+    // the Studio interface (studio.rs), on the iPad and the PC: its own
+    // layout, the iPad's large rows and keypad
+    set_tablet(st.touch.on || st.settings.studio);
+    if st.settings.studio {
+        studio::show(ctx, st);
+        if st.tool != Tool::Select {
+            st.last_tool = Some(st.tool);
+        }
+        return;
+    }
     // the iPad: the layout of the mock-up (tablet.rs)
-    set_tablet(st.touch.on);
     if st.touch.on {
         tablet::show(ctx, st);
         if st.tool != Tool::Select {
@@ -2515,61 +2527,7 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
         op_island().show(ui, |ui| {
             ui.set_width(OP_W);
             grip(ui, "op-pop");
-            let mut body = |ui: &mut Ui| match k {
-                OpPop::Edges => round_card(ui, st),
-                OpPop::Faces => face_card(ui, st),
-                OpPop::Verts => {
-                    let n = st.vert_sel.len();
-                    op_title(ui, &if n > 1 { format!("{n} vertices") } else { "Vertex".to_string() }, "");
-                    vertex_card(ui, st);
-                }
-                OpPop::Curves => combine_card(ui, st),
-                OpPop::PolyBevel => poly_bevel_card(ui, st),
-                OpPop::Step(id) => {
-                    let Some(f) = st.doc.feature(id).cloned() else { return };
-                    op_title(ui, &f.name, f.kind_label());
-                    // a curve of a 2D boolean: back to it
-                    if let Some(b) = st.curve_inside(f.id).map(|b| (b.id, b.name.clone())) {
-                        let r = ui.add(egui::Label::new(egui::RichText::new(format!("‹ In {}", b.1)).font(medium(12.0)).color(LABEL())).sense(Sense::click()));
-                        if r.on_hover_text("Select the 2D boolean it is in").clicked() {
-                            st.selection = vec![b.0];
-                        }
-                    }
-                    if f.loft.is_some() {
-                        loft_card(ui, st, &f);
-                    } else if f.shape_bool.is_some() {
-                        bool_card(ui, st, &f);
-                        curve_make_card(ui, st, &f);
-                    } else if f.push.is_some() {
-                        push_card(ui, st);
-                    } else if f.tweak.is_some() {
-                        tweak_card(ui, st, id);
-                    } else if f.curve.is_some() {
-                        curve_card(ui, st, &f);
-                        curve_make_card(ui, st, &f);
-                    } else if f.is_path() {
-                        path_card(ui, st, &f);
-                        curve_make_card(ui, st, &f);
-                    } else if f.shell.is_some() {
-                        shell_card(ui, st, &f);
-                    } else if f.mirror.is_some() {
-                        mirror_card(ui, st, &f);
-                    } else if f.array.is_some() {
-                        array_card(ui, st, &f);
-                    } else {
-                        round_card(ui, st);
-                    }
-                }
-                OpPop::Tool if st.tool == Tool::Slot => slot_options(ui, st),
-                OpPop::Tool if st.tool == Tool::Form => form_options(ui, st),
-                OpPop::Tool if st.tool == Tool::Create(PrimKind::Path) => path_options(ui, st),
-                OpPop::Tool => surface_options(ui, st),
-                OpPop::Shape(id) => {
-                    let Some(f) = st.doc.feature(id).cloned() else { return };
-                    op_title(ui, &f.name, f.kind_label());
-                    shape_card(ui, st, &f);
-                }
-            };
+            let mut body = |ui: &mut Ui| op_body(ui, st, k);
             if tablet() {
                 // the iPad: a tall window (an SDF object's) scrolls in the
                 // view's height, under the top islands
@@ -2583,6 +2541,66 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
         });
     });
     set_op_style(ctx, false);
+}
+
+/// The operation window's content for its subject (also the Studio
+/// interface's inspector).
+fn op_body(ui: &mut Ui, st: &mut AppState, k: OpPop) {
+    match k {
+        OpPop::Edges => round_card(ui, st),
+        OpPop::Faces => face_card(ui, st),
+        OpPop::Verts => {
+            let n = st.vert_sel.len();
+            op_title(ui, &if n > 1 { format!("{n} vertices") } else { "Vertex".to_string() }, "");
+            vertex_card(ui, st);
+        }
+        OpPop::Curves => combine_card(ui, st),
+        OpPop::PolyBevel => poly_bevel_card(ui, st),
+        OpPop::Step(id) => {
+            let Some(f) = st.doc.feature(id).cloned() else { return };
+            op_title(ui, &f.name, f.kind_label());
+            // a curve of a 2D boolean: back to it
+            if let Some(b) = st.curve_inside(f.id).map(|b| (b.id, b.name.clone())) {
+                let r = ui.add(egui::Label::new(egui::RichText::new(format!("‹ In {}", b.1)).font(medium(12.0)).color(LABEL())).sense(Sense::click()));
+                if r.on_hover_text("Select the 2D boolean it is in").clicked() {
+                    st.selection = vec![b.0];
+                }
+            }
+            if f.loft.is_some() {
+                loft_card(ui, st, &f);
+            } else if f.shape_bool.is_some() {
+                bool_card(ui, st, &f);
+                curve_make_card(ui, st, &f);
+            } else if f.push.is_some() {
+                push_card(ui, st);
+            } else if f.tweak.is_some() {
+                tweak_card(ui, st, id);
+            } else if f.curve.is_some() {
+                curve_card(ui, st, &f);
+                curve_make_card(ui, st, &f);
+            } else if f.is_path() {
+                path_card(ui, st, &f);
+                curve_make_card(ui, st, &f);
+            } else if f.shell.is_some() {
+                shell_card(ui, st, &f);
+            } else if f.mirror.is_some() {
+                mirror_card(ui, st, &f);
+            } else if f.array.is_some() {
+                array_card(ui, st, &f);
+            } else {
+                round_card(ui, st);
+            }
+        }
+        OpPop::Tool if st.tool == Tool::Slot => slot_options(ui, st),
+        OpPop::Tool if st.tool == Tool::Form => form_options(ui, st),
+        OpPop::Tool if st.tool == Tool::Create(PrimKind::Path) => path_options(ui, st),
+        OpPop::Tool => surface_options(ui, st),
+        OpPop::Shape(id) => {
+            let Some(f) = st.doc.feature(id).cloned() else { return };
+            op_title(ui, &f.name, f.kind_label());
+            shape_card(ui, st, &f);
+        }
+    }
 }
 
 /// The operation window's title: the name, and its kind when the name does
@@ -3863,6 +3881,13 @@ fn defaults(ui: &mut Ui, st: &mut AppState) {
     // Add / Carve for new shapes: the top island; their material: the
     // materials island (Romain 19 nov.)
     section(ui, "Display");
+    // the Studio interface (Romain 22 nov.: the mock-up D3 as a theme)
+    ui.label(egui::RichText::new("Interface").font(regular(12.5)).color(LABEL()));
+    if let Some(v) = segmented(ui, &[(false, "Classic", accent()), (true, "Studio", accent())], st.settings.studio, 28.0) {
+        st.settings.studio = v;
+        st.save_settings();
+    }
+    ui.add_space(2.0);
     if toggle_row(ui, "Shape list", st.settings.show_tree) {
         st.settings.show_tree = !st.settings.show_tree;
         st.save_settings();

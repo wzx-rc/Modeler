@@ -1736,6 +1736,10 @@ fn main() {
         ipad(&mut h);
     }
 
+    if want("ipad-studio") {
+        ipad_studio(&mut h);
+    }
+
     if want("groups") {
         // Romain (21 nov., 12 h 37): groups, "le meilleur de Maya et de 3ds
         // Max": three objects grouped (closed: a click takes them all), the
@@ -8121,6 +8125,185 @@ fn linked_complex(h: &mut Harness) {
     h.steps(8);
     h.shot("lsurfx-18-back-poly");
     eprintln!("lsurfx: undo {:?}", h.st.undo_labels().iter().rev().take(12).collect::<Vec<_>>());
+}
+
+/// The Studio interface (Settings › Interface, the mock-up D3 of 22 nov.):
+/// on the iPad, the scene on the left, the inspector on the right, the
+/// dock at the bottom; a shape picked by the Pencil (its sizes on the
+/// part, the action pill), two edges and their Round, the Soft (SDF) tab,
+/// the light theme, then the PC.
+fn ipad_studio(h: &mut Harness) {
+    use egui::{Id, LayerId, Order};
+    use nurbs_app::touch::Phase;
+    let (w0, p0) = (h.size, h.ppp);
+    h.size = [1366.0, 1024.0];
+    h.ppp = 2.0;
+    fn tap(h: &mut Harness, p: Pos2, pencil: bool) {
+        h.touch(31, Phase::Start, p, pencil);
+        h.touch(31, Phase::End, p, pencil);
+        h.steps(3);
+    }
+    fn widgets(h: &Harness, area: &str, order: Order) -> Vec<Rect> {
+        let layer = LayerId::new(order, Id::new(area));
+        h.ctx.viewport(|v| {
+            let w = &v.this_pass.widgets;
+            let mut out: Vec<Rect> = w.get_layer(layer).filter(|w| w.sense.senses_click() && w.enabled).map(|w| w.rect).collect();
+            if out.is_empty() {
+                out = v.prev_pass.widgets.get_layer(layer).filter(|w| w.sense.senses_click() && w.enabled).map(|w| w.rect).collect();
+            }
+            out
+        })
+    }
+    let mut d = test_part();
+    let boss = d.features.iter().find(|f| f.name == "Boss").unwrap().id;
+    let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+    d.add_round(1.5, false, vec![EdgeRef { faces: [tag(boss, 0), tag(boss, 1)], at: DVec3::new(17.0, 30.0, 0.0) }]);
+    h.reset(d, "Test part");
+    h.st.touch.on = true;
+    h.st.manual_only = true;
+    h.st.settings.studio = true;
+    h.steps(3);
+    h.st.frame_all();
+    h.settle();
+    h.shot("ipad-studio/studio-01-layout");
+    // the Pencil taps the block: the inspector, its sizes on the part, the pill
+    let block_at = h.screen_of(Vec3::new(14.0, 6.0, 15.0));
+    tap(h, block_at, true);
+    h.settle();
+    eprintln!("studio: Pencil tap on the block, selection {:?}", h.st.selection);
+    h.steps(4);
+    h.shot("ipad-studio/studio-02-shape");
+    // a + on the inspector's first size (40 × 40 steps)
+    let plus: Vec<Rect> = widgets(h, "s-insp", Order::Middle).into_iter().filter(|r| (r.width() - 40.0).abs() < 0.6 && (r.height() - 40.0).abs() < 0.6).collect();
+    eprintln!("studio: {} − / + buttons in the inspector", plus.len());
+    if plus.len() >= 2 {
+        let before = h.st.doc.feature(h.st.selection.first().copied().unwrap_or(boss)).map(|f| f.prim.clone());
+        tap(h, plus[1].center(), true);
+        h.settle();
+        eprintln!("studio: + on Width: {:?} -> {:?}", before, h.st.selection.first().and_then(|id| h.st.doc.feature(*id)).map(|f| f.prim.clone()));
+    }
+    // the dock: its buttons (66 × 72)
+    let dock: Vec<Rect> = widgets(h, "s-dock", Order::Middle).into_iter().filter(|r| (r.width() - 66.0).abs() < 0.6 && (r.height() - 72.0).abs() < 0.6).collect();
+    eprintln!("studio: {} dock buttons", dock.len());
+    // two edges picked by the Pencil (Edge mode), their Round
+    h.st.selection.clear();
+    h.st.set_sel_mode(SelMode::Edge);
+    h.steps(2);
+    for p in [Vec3::new(14.0, 20.0, 15.0), Vec3::new(20.0, 20.0, 8.0)] {
+        let at = h.screen_of(p);
+        h.hold(Modifiers::SHIFT);
+        tap(h, at, true);
+        h.hold(Modifiers::NONE);
+    }
+    eprintln!("studio: mode {:?}, {} edges picked", h.st.sel_mode, h.st.edge_sel.len());
+    h.steps(4);
+    h.shot("ipad-studio/studio-03-edges");
+    // the pill's Round: the fillet, its size in the inspector
+    let pill: Vec<Rect> = widgets(h, "s-pill", Order::Middle).into_iter().filter(|r| (r.height() - 44.0).abs() < 0.6).collect();
+    eprintln!("studio: {} buttons in the pill", pill.len());
+    if let Some(r) = pill.first().copied() {
+        tap(h, r.center(), true);
+        h.settle();
+    }
+    eprintln!("studio: after Round, {} features, selection {:?}", h.st.doc.features.len(), h.st.selection);
+    h.steps(4);
+    h.shot("ipad-studio/studio-04-round");
+    // the dock's fly-out (Shapes)
+    if let Some(r) = h.ctx.data(|d| d.get_temp::<Rect>(Id::new("s-shapes-btn"))) {
+        h.st.selection.clear();
+        h.st.edge_sel.clear();
+        h.st.set_sel_mode(SelMode::Object);
+        tap(h, r.center(), true);
+        h.steps(8);
+        h.shot("ipad-studio/studio-05-shapes");
+        tap(h, r.center(), true);
+        h.steps(2);
+    }
+    // the Soft (SDF) tab: a rounded box, a ball blended on it, a tube carved
+    h.reset(Doc::default(), "Soft part");
+    h.st.touch.on = true;
+    h.st.manual_only = true;
+    h.st.settings.studio = true;
+    h.steps(3);
+    let tabs: Vec<Rect> = widgets(h, "s-tabs", Order::Middle).into_iter().filter(|r| (r.width() - 113.0).abs() < 0.6).collect();
+    eprintln!("studio: {} tabs", tabs.len());
+    if tabs.len() == 2 {
+        tap(h, tabs[1].center(), true);
+    }
+    h.steps(3);
+    eprintln!("studio: workspace {:?}", h.st.workspace);
+    h.key(egui::Key::B);
+    h.st.sdf_edit_node("Size", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::new(24.0, 8.0, 16.0);
+            s.round = 1.5;
+        }
+        n.transform.pos = Vec3::new(0.0, 8.0, 0.0);
+    });
+    h.st.sdf.blend = 9.0;
+    h.key(egui::Key::O);
+    h.st.sdf_edit_node("Size", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::splat(9.0);
+        }
+        n.transform.pos = Vec3::new(0.0, 17.0, 0.0);
+    });
+    h.st.sdf.mode = forme_core::CombineMode::Carve;
+    h.st.sdf.blend = 1.0;
+    h.key(egui::Key::C);
+    h.st.sdf_edit_node("Size", |n| {
+        if let Some(s) = n.shape_mut() {
+            s.size = Vec3::new(4.0, 30.0, 0.0);
+        }
+        n.transform.pos = Vec3::new(0.0, 10.0, 0.0);
+        n.transform.rot = glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    });
+    h.st.sdf.mode = forme_core::CombineMode::Add;
+    h.st.sdf_settle();
+    h.st.frame_all();
+    h.settle();
+    h.steps(8);
+    // the Pencil taps the ball
+    let ball = h.screen_of(Vec3::new(4.0, 24.0, 4.0));
+    tap(h, ball, true);
+    h.settle();
+    h.steps(6);
+    eprintln!("studio: Soft, picked {:?}", h.st.sdf_sel);
+    h.shot("ipad-studio/studio-06-soft");
+    // the light theme (the mock-up D1's look), Soft then Crisp
+    h.st.settings.light = true;
+    h.steps(6);
+    h.shot("ipad-studio/studio-07-soft-light");
+    let tabs: Vec<Rect> = widgets(h, "s-tabs", Order::Middle).into_iter().filter(|r| (r.width() - 113.0).abs() < 0.6).collect();
+    if tabs.len() == 2 {
+        tap(h, tabs[0].center(), true);
+    }
+    h.reset(test_part(), "Test part");
+    h.st.touch.on = true;
+    h.st.manual_only = true;
+    h.st.settings.studio = true;
+    h.st.settings.light = true;
+    h.steps(3);
+    h.st.frame_all();
+    h.settle();
+    let block_at = h.screen_of(Vec3::new(14.0, 6.0, 15.0));
+    tap(h, block_at, true);
+    h.settle();
+    h.steps(4);
+    h.shot("ipad-studio/studio-08-crisp-light");
+    // the PC: the same layout, a mouse
+    h.st.settings.light = false;
+    h.st.touch.on = false;
+    h.size = w0;
+    h.ppp = p0;
+    h.steps(4);
+    h.st.frame_all();
+    h.settle();
+    h.steps(4);
+    h.shot("ipad-studio/studio-09-pc");
+    h.st.settings.studio = false;
+    h.st.manual_only = false;
+    h.steps(2);
 }
 
 /// The iPad (12.9", 1366 × 1024 points, 2 pixels each), the layout of the
