@@ -1254,6 +1254,33 @@ fn select_btn(ctx: &egui::Context, ui: &mut Ui, st: &mut AppState) {
     }
 }
 
+/// Crisp's Select: the four selection modes in a square (Romain, 22 nov.,
+/// 18 h 05: "Où sont les modes de sélection Components ?"), Object and
+/// Points above, Edges and Faces under them; each tap goes back to Select.
+fn mode_grid(ctx: &egui::Context, ui: &mut Ui, st: &mut AppState) {
+    let (wr, _) = ui.allocate_exact_size(vec2(84.0, 72.0), Sense::hover());
+    ui.painter().rect_filled(wr, 14.0, seg_bg());
+    let modes = [(SelMode::Object, Icon::ModeObject, "Object: whole shapes"), (SelMode::Vertex, Icon::ModeVertex, "Points"), (SelMode::Edge, Icon::ModeEdge, "Edges"), (SelMode::Face, Icon::ModeFace, "Faces")];
+    for (i, (m, icon, tip)) in modes.into_iter().enumerate() {
+        let r = Rect::from_min_size(wr.min + vec2(4.0 + (i % 2) as f32 * 39.0, 4.0 + (i / 2) as f32 * 33.0), vec2(37.0, 31.0));
+        let resp = ui.interact(r, Id::new(("s-selmode", i)), Sense::click());
+        let on = st.tool == Tool::Select && st.sel_mode == m;
+        let p = ui.painter();
+        if on {
+            p.rect_filled(r.translate(vec2(0.0, 1.0)), 10.0, Color32::from_black_alpha(if light() { 18 } else { 60 }));
+            p.rect_filled(r, 10.0, accent_bg());
+        } else if resp.is_pointer_button_down_on() {
+            p.rect_filled(r, 10.0, seg_on());
+        }
+        icons::paint(p, Rect::from_center_size(r.center(), vec2(19.0, 19.0)), icon, if on { accent_text() } else { TEXT2() });
+        if resp.on_hover_text(tip).clicked() {
+            close_flies(ctx, "");
+            st.select_tool();
+            st.set_sel_mode(m);
+        }
+    }
+}
+
 /// Crisp (the Forme tab, the mock-up D1): Build / Dig, Select, Block,
 /// Tube, Sketch, Shapes, then Round, Push, Cut.
 fn crisp_tools(ctx: &egui::Context, ui: &mut Ui, st: &mut AppState) {
@@ -1280,7 +1307,7 @@ fn crisp_tools(ctx: &egui::Context, ui: &mut Ui, st: &mut AppState) {
         }
     }
     ui.add_space(4.0);
-    select_btn(ctx, ui, st);
+    mode_grid(ctx, ui, st);
     bar_sep(ui, 72.0);
     for (k, word) in [(PrimKind::Box, "Block"), (PrimKind::Cylinder, "Tube"), (PrimKind::Profile, "Sketch")] {
         if dock_btn(ui, Some(prim_icon(k)), word, st.tool == Tool::Create(k)).0.clicked() {

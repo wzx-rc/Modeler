@@ -8198,7 +8198,8 @@ fn studio_ops(h: &mut Harness) {
     if bd.len() < 2 || btn.len() < 2 {
         return;
     }
-    let block = btn[1].center();
+    // (Crisp's dock begins with the modes' square, then Block)
+    let block = btn[0].center();
     // Build: Block, Block again (the 20 mm block at once)
     tap(h, block);
     tap(h, block);
@@ -8230,6 +8231,21 @@ fn studio_ops(h: &mut Harness) {
     h.settle();
     report(h, "Dig, Block twice");
     h.shot("studio-ops/ops-03-dug");
+    // the selection modes' square: Edges, then Faces, then Object
+    let sm = dock(h, 37.0, 31.0);
+    eprintln!("studio-ops: {} selection modes", sm.len());
+    if sm.len() == 4 {
+        tap(h, sm[2].center());
+        eprintln!("studio-ops: mode after Edges: {:?}", h.st.sel_mode);
+        h.steps(3);
+        h.shot("studio-ops/ops-03b-edges-mode");
+        tap(h, sm[3].center());
+        eprintln!("studio-ops: mode after Faces: {:?}", h.st.sel_mode);
+        tap(h, sm[1].center());
+        eprintln!("studio-ops: mode after Points: {:?}", h.st.sel_mode);
+        tap(h, sm[0].center());
+        eprintln!("studio-ops: mode after Object: {:?}", h.st.sel_mode);
+    }
     // Soft: a Ball, Carve, a Bean
     h.st.set_workspace(nurbs_app::workspace::Workspace::Sdf);
     h.steps(4);

@@ -28,7 +28,7 @@ pub struct Sim {
     pub done: bool,
 }
 
-const STEPS: [&str; 17] = [
+const STEPS: [&str; 18] = [
     "empty",
     "tap-soft",
     "bean-added",
@@ -44,6 +44,7 @@ const STEPS: [&str; 17] = [
     "pencil-pan",
     "pencil-top",
     "pencil-frame",
+    "mode-edges",
     "light",
     "end",
 ];
@@ -163,6 +164,15 @@ impl Sim {
             "pencil-frame" => {
                 if let Some(r) = nav_cube(ctx) {
                     tap(ctx, st, now, egui::pos2(r.center().x, r.max.y + 8.0 + 24.0), true);
+                }
+            }
+            // the dock's square of selection modes: Edges (bottom left)
+            "mode-edges" => {
+                let layer = LayerId::new(Order::Middle, Id::new("s-dock"));
+                let mut cells: Vec<Rect> = ctx.viewport(|v| v.prev_pass.widgets.get_layer(layer).filter(|w| w.sense.senses_click() && (w.rect.width() - 37.0).abs() < 0.6 && (w.rect.height() - 31.0).abs() < 0.6).map(|w| w.rect).collect());
+                cells.sort_by(|a, b| (a.min.x, a.min.y).partial_cmp(&(b.min.x, b.min.y)).unwrap());
+                if let Some(r) = cells.get(1) {
+                    tap(ctx, st, now, r.center(), true);
                 }
             }
             "light" => st.settings.light = true,
