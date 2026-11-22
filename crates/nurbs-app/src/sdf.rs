@@ -123,19 +123,24 @@ pub fn key_of(f: &Feature) -> Option<u64> {
     Some(h.finish())
 }
 
+/// The resolution's four levels (`Settings.sdf_res`): name, the cells
+/// across the scene's diagonal while it moves, then once it is still.
+pub const RES_LEVELS: [(&str, f32, f32); 4] = [("Draft", 60.0, 120.0), ("Medium", 80.0, 200.0), ("Fine", 100.0, 300.0), ("Ultra", 120.0, 440.0)];
+
 /// The cell for a scene this big: coarse while it moves, fine after.
-fn cell_for(lo: Vec3, hi: Vec3, fine: bool) -> f32 {
+fn cell_for(lo: Vec3, hi: Vec3, fine: bool, res: u8) -> f32 {
     let d = (hi - lo).length().max(1.0);
+    let (_, coarse, still) = RES_LEVELS[(res as usize).min(3)];
     if fine {
-        (d / 200.0).max(0.1)
+        (d / still).max(0.05)
     } else {
-        (d / 80.0).max(0.25)
+        (d / coarse).max(0.2)
     }
 }
 
 /// The scene meshed (its box's scale since the last meshing taken into
 /// its shapes first).
-pub fn mesh_model(model: &SdfModel, now: Vec3, fine: bool) -> Meshed {
+pub fn mesh_model(model: &SdfModel, now: Vec3, fine: bool, res: u8) -> Meshed {
     let mut model = model.clone();
     model.take_scale(now);
     // the shapes past the history marker left out
@@ -145,7 +150,7 @@ pub fn mesh_model(model: &SdfModel, now: Vec3, fine: bool) -> Meshed {
         return Meshed { model, pts: vec![], faces: vec![], mats: vec![] };
     }
     let prog = forme_core::compile(&built);
-    let m = forme_core::mesh::dual_contour(&prog, lo, hi, cell_for(lo, hi, fine));
+    let m = forme_core::mesh::dual_contour(&prog, lo, hi, cell_for(lo, hi, fine, res));
     let mats = m
         .indices
         .chunks(3)
@@ -749,6 +754,14 @@ impl AppState {
     /// when they changed, fine in a thread when nothing moves.
     pub fn sdf_tick(&mut self) {
         let live = self.is_live() || self.sdf_drag.is_some();
+        // the resolution changed: everything meshed again (coarse at once,
+        // then fine)
+        let res = self.settings.sdf_res.min(3);
+        if res != self.sdf_res {
+            self.sdf_res = res;
+            self.sdf_meshed.clear();
+            self.sdf_jobs.clear();
+        }
         // the fine meshings done
         let mut done = vec![];
         self.sdf_jobs.retain(|j| match j.rx.try_recv() {
@@ -777,7 +790,7 @@ impl AppState {
             let state = self.sdf_meshed.get(&id).copied();
             if state.map(|s| s.0) != Some(key) {
                 // changed (or never meshed here): coarse now
-                let m = mesh_model(f.mesh.as_ref().unwrap().sdf.as_ref().unwrap(), size(f), false);
+                let m = mesh_model(f.mesh.as_ref().unwrap().sdf.as_ref().unwrap(), size(f), false, res);
                 let f = self.doc.feature_mut(id).unwrap();
                 let mats = apply(f, m);
                 let k = key_of(f).unwrap_or(0);
@@ -793,7 +806,7 @@ impl AppState {
             let now = size(f);
             let (tx, rx) = channel();
             std::thread::spawn(move || {
-                let _ = tx.send(mesh_model(&model, now, true));
+                let _ = tx.send(mesh_model(&model, now, true, res));
             });
             self.sdf_jobs.push(SdfJob { id, key, rx });
         }

@@ -1748,6 +1748,10 @@ fn main() {
         studio_lamp(&mut h);
     }
 
+    if want("sdf-quality") {
+        sdf_quality(&mut h);
+    }
+
     if want("ipad-first") {
         ipad_first(&mut h);
     }
@@ -8674,6 +8678,103 @@ fn studio_lamp(h: &mut Harness) {
     h.steps(6);
     h.shot("ipad-studio/lamp-04-light");
     h.st.settings.light = false;
+    h.st.settings.studio = false;
+    h.st.manual_only = false;
+    h.st.touch.on = false;
+    h.size = w0;
+    h.ppp = p0;
+    h.steps(2);
+}
+
+/// The SDF mesh's quality (Romain 22 nov., 18 h 37, his iPad: "En SDF
+/// c'est pas ultra qualité la résolution", a ball with a hole carved
+/// sharp, its rim jagged): a ball Ø 60 with a tube carved sharp, one with a
+/// 2 mm blend, close up, coarse then fine.
+fn sdf_quality(h: &mut Harness) {
+    use forme_core::{CombineMode, NodeSpec, PrimKind as SdfPrim, Shape};
+    use nurbs_kernel::mesh::{MeshKind, SdfModel};
+    let (w0, p0) = (h.size, h.ppp);
+    h.size = [1194.0, 834.0];
+    h.ppp = 2.0;
+    let mut d = Doc::default();
+    for (k, blend) in [(0, 0.0f32), (1, 2.0)] {
+        let x = k as f64 * 80.0;
+        let id = d.add_mesh(MeshKind::Sdf, &[], vec![], DVec3::new(x, 0.0, 0.0), DQuat::IDENTITY, "SDF object");
+        let f = d.feature_mut(id).unwrap();
+        f.origin = DVec3::new(x, 0.0, 0.0);
+        let mut model = SdfModel::new();
+        let sc = &mut model.scene;
+        let root = sc.root;
+        let mut ball = Shape::new(SdfPrim::Sphere);
+        ball.size = Vec3::splat(30.0);
+        sc.add(root, NodeSpec::shape("Ball", ball).at(Vec3::new(0.0, 30.0, 0.0)));
+        let mut hole = Shape::new(SdfPrim::Cylinder);
+        hole.size = Vec3::new(17.0, 14.0, 0.0);
+        let u = Vec3::new(0.35, 0.3, 1.0).normalize();
+        sc.add(root, NodeSpec::shape("Hole", hole).at(Vec3::new(0.0, 30.0, 0.0) + u * 28.0).rot(glam::Quat::from_rotation_arc(Vec3::Y, u)).mode(CombineMode::Carve).blend(blend));
+        f.mesh.as_mut().unwrap().make_mut().sdf = Some(model);
+    }
+    h.reset(d, "SDF quality");
+    h.st.touch.on = true;
+    h.st.manual_only = true;
+    h.st.settings.studio = true;
+    h.st.set_workspace(nurbs_app::workspace::Workspace::Sdf);
+    // coarse: the meshing made at once, before the fine one comes
+    h.st.sdf_tick();
+    h.st.camera.target = Vec3::new(40.0, 30.0, 0.0);
+    h.st.camera.yaw = 0.35;
+    h.st.camera.pitch = 0.3;
+    h.st.camera.dist = 260.0;
+    h.steps(1);
+    h.shot("sdf-quality/q-01-coarse");
+    h.st.sdf_settle();
+    h.steps(3);
+    let tris: Vec<usize> = h.st.doc.features.iter().filter_map(|f| f.mesh.as_ref().map(|m| m.faces.len())).collect();
+    eprintln!("sdf-quality: triangles {tris:?}");
+    h.shot("sdf-quality/q-02-fine");
+    // close on the sharp rim
+    h.st.camera.target = Vec3::new(8.0, 40.0, 22.0);
+    h.st.camera.dist = 90.0;
+    h.steps(3);
+    h.shot("sdf-quality/q-03-rim");
+    h.st.camera.target = Vec3::new(88.0, 40.0, 22.0);
+    h.steps(3);
+    h.shot("sdf-quality/q-04-rim-blend");
+    // the resolution slider in the inspector (the object selected), Ultra
+    // tapped by the Pencil
+    let first = h.st.doc.features[0].id;
+    h.st.selection = vec![first];
+    h.st.camera.target = Vec3::new(40.0, 30.0, 0.0);
+    h.st.camera.dist = 260.0;
+    h.steps(4);
+    h.shot("sdf-quality/q-05-slider");
+    if let Some(r) = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("s-sdf-res"))) {
+        let at = pos2(r.max.x - 14.0, r.min.y + 12.0);
+        h.touch(31, nurbs_app::touch::Phase::Start, at, true);
+        h.touch(31, nurbs_app::touch::Phase::End, at, true);
+        h.steps(3);
+    }
+    eprintln!("sdf-quality: resolution {}", h.st.settings.sdf_res);
+    let t = std::time::Instant::now();
+    h.st.sdf_settle();
+    eprintln!("sdf-quality: Ultra meshed in {:?}", t.elapsed());
+    h.steps(3);
+    h.shot("sdf-quality/q-06-ultra");
+    h.st.selection.clear();
+    h.st.camera.target = Vec3::new(8.0, 40.0, 22.0);
+    h.st.camera.dist = 90.0;
+    h.steps(3);
+    h.shot("sdf-quality/q-07-ultra-rim");
+    h.st.settings.sdf_res = 1;
+    // the frame times over the view (the host measures them; set here)
+    h.st.settings.show_perf = true;
+    h.st.perf.add(33.0, 6.5, 9.0);
+    h.st.camera.target = Vec3::new(40.0, 30.0, 0.0);
+    h.st.camera.dist = 260.0;
+    h.st.sdf_settle();
+    h.steps(3);
+    h.shot("sdf-quality/q-08-frame-times");
+    h.st.settings.show_perf = false;
     h.st.settings.studio = false;
     h.st.manual_only = false;
     h.st.touch.on = false;

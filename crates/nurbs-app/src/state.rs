@@ -640,6 +640,25 @@ pub struct UndoStep {
     pub sel: SelState,
 }
 
+/// The frame's times, smoothed (ms): between two frames, the interface's
+/// pass, the drawing; the kernel's last answer is `AppState::round_ms`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Perf {
+    pub frame: f32,
+    pub ui: f32,
+    pub draw: f32,
+}
+
+impl Perf {
+    pub fn add(&mut self, frame: f32, ui: f32, draw: f32) {
+        let k = 0.1;
+        let mix = |a: &mut f32, b: f32| *a = if *a == 0.0 { b } else { *a + (b - *a) * k };
+        mix(&mut self.frame, frame.min(1000.0));
+        mix(&mut self.ui, ui);
+        mix(&mut self.draw, draw);
+    }
+}
+
 pub struct AppState {
     pub doc: Doc,
     pub doc_name: String,
@@ -779,6 +798,8 @@ pub struct AppState {
     sent_frames: Vec<(u64, Vec<(FeatureId, DMat4)>)>,
     /// Kernel round trip of the last model (ms).
     pub round_ms: f32,
+    /// The frame's times measured by the host (`Settings.show_perf`).
+    pub perf: Perf,
 
     pub settings: Settings,
     pub toast: Option<Toast>,
@@ -906,6 +927,8 @@ pub struct AppState {
     pub sdf_sel: Option<(FeatureId, forme_core::NodeId)>,
     pub sdf_drag: Option<crate::sdf::SdfDrag>,
     pub sdf_meshed: std::collections::HashMap<FeatureId, (u64, bool)>,
+    /// The resolution the SDF objects were meshed at (`Settings.sdf_res`).
+    pub sdf_res: u8,
     pub sdf_jobs: Vec<crate::sdf::SdfJob>,
     /// Each SDF object's triangles' materials as last meshed: the engine's,
     /// so a shape's material shows on its part of the surface and a Carve's
@@ -989,6 +1012,7 @@ impl AppState {
             submitted: 0,
             sent_frames: vec![],
             round_ms: 0.0,
+            perf: Perf::default(),
             settings: Settings::default(),
             toast: None,
             now: 0.0,
@@ -1053,6 +1077,7 @@ impl AppState {
             sdf_sel: None,
             sdf_drag: None,
             sdf_meshed: Default::default(),
+            sdf_res: 1,
             sdf_jobs: vec![],
             sdf_mats: Default::default(),
             poly_loop: vec![],

@@ -316,6 +316,51 @@ mod tests {
         assert!((b - a).cross(c - a).dot(a) > 0.0, "inward winding");
     }
 
+    /// A ball with a tube carved in it (Romain's iPad, 22 nov.: the rim
+    /// jagged): the mesh closed, on the surface, no spike off the rim.
+    fn carved_ball(blend: f32) -> (Program, mesh::Mesh) {
+        let mut s = Scene::new();
+        let r = s.root;
+        let mut ball = Shape::new(PrimKind::Sphere);
+        ball.size = Vec3::splat(30.0);
+        s.add(r, NodeSpec::shape("ball", ball));
+        let mut hole = Shape::new(PrimKind::Cylinder);
+        hole.size = Vec3::new(17.0, 14.0, 0.0);
+        let u = Vec3::new(0.35, 0.3, 1.0).normalize();
+        s.add(r, NodeSpec::shape("hole", hole).at(u * 28.0).rot(glam::Quat::from_rotation_arc(Vec3::Y, u)).mode(CombineMode::Carve).blend(blend));
+        let p = compile(&s);
+        let (lo, hi) = s.bounds();
+        let m = mesh::dual_contour(&p, lo, hi, (hi - lo).length() / 200.0);
+        (p, m)
+    }
+
+    /// Triangles whose middle is off the surface (cut across a crease) and
+    /// how far the vertices are off it.
+    fn across(p: &Program, m: &mesh::Mesh) -> (usize, f32) {
+        let cut = m
+            .indices
+            .chunks(3)
+            .filter(|t| {
+                let c = (m.positions[t[0] as usize] + m.positions[t[1] as usize] + m.positions[t[2] as usize]) / 3.0;
+                p.dist(c).abs() > 0.05
+            })
+            .count();
+        let off = m.positions.iter().map(|v| p.dist(*v).abs()).fold(0f32, f32::max);
+        (cut, off)
+    }
+
+    #[test]
+    fn carved_ball_rim_is_clean() {
+        // before 22 nov.: 118 and 5 triangles across, vertices 0.21 off
+        for (blend, most) in [(0.0, 30), (2.0, 4)] {
+            let (p, m) = carved_ball(blend);
+            let (cut, off) = across(&p, &m);
+            eprintln!("blend {blend}: {} triangles, {cut} across, off {off:.4}", m.triangle_count());
+            assert!(cut <= most, "blend {blend}: {cut} triangles across the rim");
+            assert!(off < 0.1, "blend {blend}: a vertex {off} off the surface");
+        }
+    }
+
     #[test]
     fn mesh_box_keeps_sharp_corners() {
         let p = compile(&one(Shape::new(PrimKind::Box), Vec3::new(0.3, 0.2, 0.1)));

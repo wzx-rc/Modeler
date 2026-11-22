@@ -3905,6 +3905,13 @@ fn defaults(ui: &mut Ui, st: &mut AppState) {
         }
         ui.add_space(2.0);
     }
+    ui.label(egui::RichText::new("SDF resolution").font(regular(12.5)).color(LABEL()));
+    let levels: Vec<(u8, &str, Color32)> = (0..4u8).map(|k| (k, crate::sdf::RES_LEVELS[k as usize].0, accent())).collect();
+    if let Some(v) = segmented(ui, &levels, st.settings.sdf_res.min(3), 28.0) {
+        st.settings.sdf_res = v;
+        st.save_settings();
+    }
+    ui.add_space(2.0);
     // tab_anim
     if toggle_row(ui, "Tab animation", st.settings.tab_anim) {
         st.settings.tab_anim = !st.settings.tab_anim;

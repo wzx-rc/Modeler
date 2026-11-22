@@ -118,6 +118,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     dock(ctx, st, screen);
     view_cube(ctx, st, screen, flip);
     hint_pill(ctx, st);
+    perf_pill(ctx, st);
     size_chips(ctx, st);
     actions_pill(ctx, st);
     group_bar(ctx, st);
@@ -1034,6 +1035,54 @@ fn sdf_object_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     ui.label(egui::RichText::new("Tap a shape, here or on the part, to change it").font(regular(12.5)).color(TEXT2()));
     label(ui, "Material");
     swatches(ui, st);
+    ui.add_space(14.0);
+    res_slider(ui, st, f);
+}
+
+/// The SDF objects' mesh resolution (Romain 22 nov., 18 h 50: "un slider
+/// avec 4 niveau"): a track with four stops, a tap or a drag picks the
+/// nearest; the level's name and the triangles of the object shown.
+fn res_slider(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    let now = st.settings.sdf_res.min(3) as usize;
+    let tris = f.mesh.as_ref().map(|m| m.faces.len()).unwrap_or(0);
+    let fine = st.sdf_meshed.get(&f.id).map(|s| s.1).unwrap_or(false);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Resolution").font(semibold(12.0)).color(TEXT2()));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let note = if fine { format!("{} · {}k triangles", crate::sdf::RES_LEVELS[now].0, (tris + 500) / 1000) } else { format!("{} · meshing…", crate::sdf::RES_LEVELS[now].0) };
+            ui.label(egui::RichText::new(note).font(medium(12.0)).color(ink()));
+        });
+    });
+    ui.add_space(2.0);
+    let w = ui.available_width();
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 40.0), Sense::click_and_drag());
+    ui.data_mut(|d| d.insert_temp(Id::new("s-sdf-res"), r));
+    let x0 = r.min.x + 14.0;
+    let x1 = r.max.x - 14.0;
+    let stop = |k: usize| x0 + (x1 - x0) * k as f32 / 3.0;
+    if resp.clicked() || resp.dragged() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            let k = (((p.x - x0) / (x1 - x0)) * 3.0).round().clamp(0.0, 3.0) as u8;
+            if k != st.settings.sdf_res {
+                st.settings.sdf_res = k;
+                st.save_settings();
+            }
+        }
+    }
+    let now = st.settings.sdf_res.min(3) as usize;
+    let p = ui.painter();
+    let y = r.min.y + 12.0;
+    p.line_segment([pos2(x0, y), pos2(x1, y)], Stroke::new(3.0, seg_bg()));
+    p.line_segment([pos2(x0, y), pos2(stop(now), y)], Stroke::new(3.0, accent()));
+    for k in 0..4 {
+        let c = pos2(stop(k), y);
+        if k == now {
+            p.circle(c, 9.0, Color32::WHITE, Stroke::new(1.5, accent()));
+        } else {
+            p.circle_filled(c, 4.0, if k < now { accent() } else { muted() });
+        }
+        p.text(pos2(c.x, r.max.y - 6.0), Align2::CENTER_BOTTOM, crate::sdf::RES_LEVELS[k].0, regular(11.0), if k == now { ink() } else { muted() });
+    }
 }
 
 /// A shape of an SDF object (the mock-up D3): how it joins, the blend, its
@@ -1120,6 +1169,8 @@ fn sdf_shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature, n: forme_core::No
     });
     label(ui, "Material");
     swatches(ui, st);
+    ui.add_space(14.0);
+    res_slider(ui, st, f);
     if fold_row(ui, "Position, turn and repeat", "sdf-pos") {
         if let Some(pos) = xyz_fields(ui, ["X", "Y", "Z"], nd.transform.pos.to_array(), "") {
             st.sdf_live_node("Move shape", |x| x.transform.pos = glam::Vec3::from(pos));
@@ -1740,6 +1791,25 @@ fn look_from(st: &mut AppState, n: glam::Vec3) {
 
 /// The hint at the top of the view while a tool or a component mode is
 /// on: the tool, then what the Pencil (or the mouse) does now.
+/// The frame times over the view (`Settings.show_perf`): frames a second,
+/// the interface's and the drawing's share, the kernel's last answer, the
+/// triangles on screen.
+fn perf_pill(ctx: &egui::Context, st: &mut AppState) {
+    if !st.settings.show_perf {
+        return;
+    }
+    let p = st.perf;
+    let fps = if p.frame > 0.0 { 1000.0 / p.frame } else { 0.0 };
+    let tris = st.model.as_ref().map(|m| m.triangles.len()).unwrap_or(0) + st.doc.features.iter().filter_map(|f| f.mesh.as_ref().map(|m| m.faces.len())).sum::<usize>();
+    let text = format!("{fps:.0} fps · UI {:.1} ms · draw {:.1} ms · kernel {:.0} ms · {}k triangles", p.ui, p.draw, st.round_ms, (tris + 500) / 1000);
+    let vr = st.view_rect;
+    egui::Area::new(Id::new("s-perf")).order(Order::Middle).interactable(false).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2((vr[0] + vr[2]) * 0.5, vr[3] - 128.0)).show(ctx, |ui| {
+        egui::Frame::new().fill(Color32::from_rgba_unmultiplied(24, 26, 30, 220)).corner_radius(egui::CornerRadius::same(14)).inner_margin(Margin::symmetric(12, 6)).show(ui, |ui| {
+            ui.label(egui::RichText::new(text).font(medium(12.5)).color(Color32::from_rgb(0xE4, 0xE6, 0xEA)));
+        });
+    });
+}
+
 fn hint_pill(ctx: &egui::Context, st: &mut AppState) {
     let busy = st.tool != Tool::Select || st.sel_mode != SelMode::Object || st.marking.is_open();
     if !st.settings.help || !busy || flag(ctx, "sheet") {

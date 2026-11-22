@@ -29,6 +29,8 @@ struct App {
     egui_state: Option<egui_winit::State>,
     t0: Instant,
     redraw_until: f64,
+    /// When the last frame was drawn (s), for the frame times.
+    last_frame: f64,
     /// The session saved every few seconds while it changes (a crash
     /// loses little): the version saved and when.
     saved: ((u64, u64), f64),
@@ -99,7 +101,7 @@ impl App {
             }
         }
         let saved = ((st.version, st.looks_rev), 0.0);
-        App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0, saved, sim: nurbs_app::sim::Sim::from_env(), again: true, _proxy: proxy }
+        App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0, last_frame: 0.0, saved, sim: nurbs_app::sim::Sim::from_env(), again: true, _proxy: proxy }
     }
 
     fn now(&self) -> f64 {
@@ -164,7 +166,9 @@ impl App {
             self.st.touch.apply(&mut raw);
         }
         let st = &mut self.st;
+        let t_ui = std::time::Instant::now();
         let mut out = self.ctx.run_pass(raw, |ctx| nurbs_app::run(ctx, st));
+        let ui_ms = t_ui.elapsed().as_secs_f32() * 1000.0;
         es.handle_platform_output(&window, std::mem::take(&mut out.platform_output));
         let ppp = out.pixels_per_point;
         let paint = self.ctx.tessellate(std::mem::take(&mut out.shapes), ppp);
@@ -177,9 +181,15 @@ impl App {
             }
         };
         let view = frame.texture.create_view(&Default::default());
+        let t_draw = std::time::Instant::now();
         gfx.drawer.render(&gfx.device, &gfx.queue, &view, [gfx.config.width, gfx.config.height], ppp, &self.st, &paint, &mut out.textures_delta);
         window.pre_present_notify();
         gfx.queue.present(frame);
+        let draw_ms = t_draw.elapsed().as_secs_f32() * 1000.0;
+        let t = self.t0.elapsed().as_secs_f64();
+        let between = ((t - self.last_frame) * 1000.0) as f32;
+        self.last_frame = t;
+        self.st.perf.add(between, ui_ms, draw_ms);
         // pictures asked by Claude: the view alone, offscreen
         if !self.st.link.captures.is_empty() {
             let (device, queue, format, drawer) = (&gfx.device, &gfx.queue, gfx.config.format, &mut gfx.drawer);

@@ -42,6 +42,13 @@ pub struct Settings {
     /// inspector on the right, the tools in a dock at the bottom
     /// (`ui::studio`). Else the classic layout (`ui::tablet` on the iPad).
     pub studio: bool,
+    /// The SDF objects' mesh, 0 to 3 (Romain 22 nov., 18 h 50: "Pour la
+    /// résolution met un slider avec 4 niveau"): Draft, Medium (as
+    /// before), Fine, Ultra (`sdf::RES_LEVELS`).
+    pub sdf_res: u8,
+    /// Frame times shown over the view (Romain 22 nov., 18 h 50: "en NURBS
+    /// c'est lent quand on déplace les éléments", on his iPad Pro of 2017).
+    pub show_perf: bool,
     /// What the file was written by: 0 before 22 nov. (no field), 1 since
     /// the Studio interface is the iPad's own (Romain 22 nov., 12 h 04:
     /// "implémenter ce thème sur la version iPad"). An older file is
@@ -55,7 +62,7 @@ pub const VERSION: u32 = 1;
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, tab_anim: true, left_handed: false, pencil_only: false, hold_time: 0.45, studio: cfg!(target_os = "ios"), version: VERSION }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, tab_anim: true, left_handed: false, pencil_only: false, hold_time: 0.45, studio: cfg!(target_os = "ios"), sdf_res: 1, show_perf: false, version: VERSION }
     }
 }
 

@@ -434,6 +434,7 @@ pub(super) fn settings_pop(ctx: &egui::Context, st: &mut AppState) {
                 ("Tab animation", &mut st.settings.tab_anim as *mut bool),
                 ("Left-handed", &mut st.settings.left_handed as *mut bool),
                 ("Pencil only (a finger never picks)", &mut st.settings.pencil_only as *mut bool),
+                ("Show frame times", &mut st.settings.show_perf as *mut bool),
             ] {
                 // SAFETY: each pointer is a distinct field of st.settings,
                 // alive for this loop, and nothing else borrows it meanwhile
@@ -446,6 +447,11 @@ pub(super) fn settings_pop(ctx: &egui::Context, st: &mut AppState) {
             let mut t = st.settings.hold_time as f32;
             if slider_row(ui, "Hold time", &mut t, 0.25..=1.0, 0.05, "s").0 {
                 st.settings.hold_time = t as f64;
+                changed = true;
+            }
+            let mut res = st.settings.sdf_res as f32 + 1.0;
+            if slider_row(ui, "SDF resolution", &mut res, 1.0..=4.0, 1.0, "").0 {
+                st.settings.sdf_res = (res.round() as i32 - 1).clamp(0, 3) as u8;
                 changed = true;
             }
             let mut step = st.settings.step as f32;
