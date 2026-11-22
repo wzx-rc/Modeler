@@ -1,0 +1,70 @@
+name: ipad-sim
+
+# Forme NURBS on Apple's iPad simulator: the app built for it, run with its
+# scripted steps (FORME_SIM=1), a screenshot after each step. The pictures
+# go to the release "ipad-sim-latest" (and the run's artifacts).
+on:
+  push:
+    branches: ["claude/project-thread-739pr7"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ipad-sim-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sim:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+      - uses: actions/cache/restore@v4
+        id: occt
+        with:
+          path: ~/occt-sim
+          key: occt-sim-7.8.1-${{ hashFiles('ios/build_occt_ios.sh') }}
+      - name: OpenCascade for the simulator
+        if: steps.occt.outputs.cache-hit != 'true'
+        # the device's script with the simulator's SDK (its own work folder)
+        run: |
+          sed -e 's/--sdk iphoneos/--sdk iphonesimulator/' -e 's/occt-ios-work/occt-sim-work/' ios/build_occt_ios.sh > "$RUNNER_TEMP/build_occt_sim.sh"
+          bash "$RUNNER_TEMP/build_occt_sim.sh" "$HOME/occt-sim"
+      - uses: actions/cache/save@v4
+        if: steps.occt.outputs.cache-hit != 'true'
+        with:
+          path: ~/occt-sim
+          key: occt-sim-7.8.1-${{ hashFiles('ios/build_occt_ios.sh') }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-sim-nurbs
+      - name: Build FormeNURBS.app for the simulator
+        run: bash ios/build_nurbs_sim.sh
+      - name: Run it on an iPad simulator
+        run: bash ios/sim_run.sh
+      - name: Pictures in one zip
+        if: always()
+        run: cd target && zip -qr sim-shots.zip sim-shots || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ipad-sim-shots
+          path: target/sim-shots
+      - name: Publish the pictures (release ipad-sim-latest)
+        if: always()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ipad-sim-latest
+          target_commitish: ${{ github.sha }}
+          name: Forme NURBS — simulateur iPad
+          prerelease: true
+          make_latest: false
+          body: |
+            Captures du simulateur iPad, commit ${{ github.sha }}.
+          files: target/sim-shots.zip
+          overwrite_files: true

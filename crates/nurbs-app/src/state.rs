@@ -2271,6 +2271,15 @@ impl AppState {
         self.poly_sel = None;
         self.poly_hover = None;
         self.sdf_sel = None;
+        // the Studio interface: each tab keeps its own things picked (22
+        // nov., Romain: "ça switch mal": a Soft object stayed picked in
+        // Crisp, with its card and the part's Mirror / Hollow)
+        if self.settings.studio && matches!(w, Workspace::Forme | Workspace::Sdf) {
+            let soft = w == Workspace::Sdf;
+            let keep: Vec<_> = self.selection.iter().copied().filter(|id| self.doc.feature(*id).map(|f| crate::sdf::is_sdf(f) == soft).unwrap_or(false)).collect();
+            self.selection = keep;
+            self.group_sel = None;
+        }
         // the components picked in the Forme tab are the part's
         if from == Workspace::Forme || w != Workspace::Forme {
             self.edge_sel.clear();

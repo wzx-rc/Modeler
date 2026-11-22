@@ -1744,6 +1744,10 @@ fn main() {
         studio_lamp(&mut h);
     }
 
+    if want("ipad-first") {
+        ipad_first(&mut h);
+    }
+
     if want("groups") {
         // Romain (21 nov., 12 h 37): groups, "le meilleur de Maya et de 3ds
         // Max": three objects grouped (closed: a click takes them all), the
@@ -8308,6 +8312,80 @@ fn ipad_studio(h: &mut Harness) {
     h.st.settings.studio = false;
     h.st.manual_only = false;
     h.steps(2);
+}
+
+/// The iPad as Romain opened it (22 nov., 14 h 51, his capture): a first
+/// launch, nothing in the scene, the Soft tab, Bean from the dock; at the
+/// size the window had then (1600 × 900, the PC's) and at the iPad Pro 11"'s
+/// own (1194 × 834).
+fn ipad_first(h: &mut Harness) {
+    use egui::{Id, LayerId, Order};
+    use nurbs_app::touch::Phase;
+    fn tap(h: &mut Harness, p: Pos2) {
+        h.touch(31, Phase::Start, p, true);
+        h.touch(31, Phase::End, p, true);
+        h.steps(3);
+    }
+    fn widgets(h: &Harness, area: &str) -> Vec<Rect> {
+        let layer = LayerId::new(Order::Middle, Id::new(area));
+        h.ctx.viewport(|v| {
+            let w = &v.this_pass.widgets;
+            let mut out: Vec<Rect> = w.get_layer(layer).filter(|w| w.sense.senses_click() && w.enabled).map(|w| w.rect).collect();
+            if out.is_empty() {
+                out = v.prev_pass.widgets.get_layer(layer).filter(|w| w.sense.senses_click() && w.enabled).map(|w| w.rect).collect();
+            }
+            out
+        })
+    }
+    let (w0, p0) = (h.size, h.ppp);
+    for (name, size) in [("1600x900", [1600.0, 900.0]), ("11in", [1194.0, 834.0])] {
+        h.size = size;
+        h.ppp = 2.0;
+        h.reset(Doc::default(), "Untitled");
+        h.st.camera = nurbs_app::camera::OrbitCamera { target: Vec3::new(0.0, 10.0, 0.0), yaw: 0.62, pitch: 0.42, dist: 160.0, ..Default::default() };
+        h.st.touch.on = true;
+        h.st.manual_only = true;
+        h.st.settings.studio = true;
+        h.steps(4);
+        h.shot(&format!("ipad-first/{name}-1-empty"));
+        let tabs = widgets(h, "s-tabs");
+        eprintln!("first {name}: tabs {:?}", tabs);
+        if let Some(r) = tabs.iter().max_by(|a, b| a.center().x.total_cmp(&b.center().x)) {
+            tap(h, r.center());
+        }
+        h.steps(3);
+        let dock = widgets(h, "s-dock");
+        eprintln!("first {name}: workspace {:?}, dock {:?}", h.st.workspace, dock.iter().map(|r| (r.center().x as i32, r.center().y as i32)).collect::<Vec<_>>());
+        h.shot(&format!("ipad-first/{name}-2-soft"));
+        h.key(egui::Key::P);
+        h.settle();
+        h.steps(6);
+        h.shot(&format!("ipad-first/{name}-3-bean"));
+        // under the grid (Romain 14 h 56: "on voit l'HDR")
+        for (k, pitch) in [-0.15f32, -0.5].iter().enumerate() {
+            h.st.camera.pitch = *pitch;
+            h.steps(3);
+            h.shot(&format!("ipad-first/{name}-4-under{k}"));
+        }
+        h.st.camera.pitch = 0.42;
+        h.steps(2);
+        // the change of tab as the iPad has it (its animation on)
+        if name == "11in" {
+            h.st.settings.tab_anim = true;
+            let tabs = widgets(h, "s-tabs");
+            if let Some(r) = tabs.iter().filter(|r| r.width() < 200.0).min_by(|a, b| a.center().x.total_cmp(&b.center().x)) {
+                h.touch(31, Phase::Start, r.center(), true);
+                h.touch(31, Phase::End, r.center(), true);
+            }
+            for k in 0..6 {
+                h.step();
+                h.shot(&format!("ipad-first/{name}-5-switch{k}"));
+            }
+            eprintln!("first: after the tap on Crisp, workspace {:?}", h.st.workspace);
+        }
+    }
+    h.size = w0;
+    h.ppp = p0;
 }
 
 /// The mock-up D3's model in the app (Romain, 22 nov., 9 h 55: "ajouter ce

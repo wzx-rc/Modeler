@@ -550,6 +550,7 @@ impl AppState {
             return;
         }
         // a new object, its first shape an Add
+        let empty = !self.doc.features.iter().any(|f| f.visible && (f.is_solid() || f.is_mesh()));
         let at = self.camera.target.as_dvec3();
         let at = DVec3::new(at.x, 0.0, at.z);
         let mut fid = 0;
@@ -570,6 +571,13 @@ impl AppState {
         self.selection = vec![fid];
         self.sdf_tick();
         self.set_gizmo(crate::state::GizmoMode::Move);
+        // the first thing in the scene: the view comes to it, the shape about
+        // a third of the view (22 nov., Romain's iPad: a 12 mm bean lost in
+        // a view 160 mm away)
+        if empty {
+            let c = at.as_vec3() + glam::Vec3::Y * half_height(&sh);
+            self.fly_frame(c - glam::Vec3::splat(22.0), c + glam::Vec3::splat(22.0));
+        }
     }
 
     /// Changes the picked shape (its node), one undo step.

@@ -32,6 +32,8 @@ struct App {
     /// The session saved every few seconds while it changes (a crash
     /// loses little): the version saved and when.
     saved: ((u64, u64), f64),
+    /// `FORME_SIM=1`: the scripted run for Apple's simulator (`sim.rs`)
+    sim: Option<nurbs_app::sim::Sim>,
     _proxy: EventLoopProxy<()>,
 }
 
@@ -95,7 +97,7 @@ impl App {
             }
         }
         let saved = ((st.version, st.looks_rev), 0.0);
-        App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0, saved, _proxy: proxy }
+        App { window: None, gfx: None, st, ctx, egui_state: None, t0: Instant::now(), redraw_until: 0.0, saved, sim: nurbs_app::sim::Sim::from_env(), _proxy: proxy }
     }
 
     fn now(&self) -> f64 {
@@ -148,6 +150,11 @@ impl App {
         let (Some(window), Some(gfx), Some(es)) = (self.window.clone(), self.gfx.as_mut(), self.egui_state.as_mut()) else {
             return;
         };
+        if let Some(sim) = self.sim.as_mut() {
+            let (i, o) = (window.inner_size(), window.outer_size());
+            let info = format!("window inner {}x{} outer {}x{} scale {:.2} surface {}x{}", i.width, i.height, o.width, o.height, window.scale_factor(), gfx.config.width, gfx.config.height);
+            sim.tick(&self.ctx, &mut self.st, self.t0.elapsed().as_secs_f64(), &info);
+        }
         let mut raw = es.take_egui_input(&window);
         if self.st.touch.on {
             let now = self.t0.elapsed().as_secs_f64();
@@ -184,7 +191,7 @@ impl App {
         }
         // the kernel is working: keep looking for its answer
         let now = self.now();
-        let busy = self.st.interacting || self.st.toast.is_some() || self.st.building() || self.st.ref_busy() || self.st.dev_busy() || self.st.link.busy() || self.st.touch.active();
+        let busy = self.st.interacting || self.st.toast.is_some() || self.st.building() || self.st.ref_busy() || self.st.dev_busy() || self.st.link.busy() || self.st.touch.active() || self.sim.as_ref().is_some_and(|s| !s.done);
         let egui_wants = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay.as_secs_f32() < 0.05).unwrap_or(false);
         if busy || egui_wants || now < self.redraw_until {
             window.request_redraw();
@@ -230,8 +237,14 @@ impl ApplicationHandler<()> for App {
         if self.window.is_some() {
             return;
         }
-        #[allow(unused_mut)]
-        let mut attrs = Window::default_attributes().with_title(nurbs_app::version_title()).with_inner_size(winit::dpi::LogicalSize::new(1600.0, 900.0)).with_window_icon(theme::window_icon());
+        let mut attrs = Window::default_attributes().with_title(nurbs_app::version_title()).with_window_icon(theme::window_icon());
+        // the PC's window; on the iPad winit makes the UIWindow this size
+        // (22 nov., Romain's capture: a window of 1600 × 900 points on an
+        // 11" screen of 1194 × 834, its right and bottom off the screen):
+        // there it takes the screen's own
+        if !cfg!(target_os = "ios") {
+            attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(1600.0, 900.0));
+        }
         #[cfg(target_os = "ios")]
         {
             // the Shift / Ctrl buttons sit by the bottom edge: a swipe there must not send
@@ -244,7 +257,9 @@ impl ApplicationHandler<()> for App {
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface: Some(&surface), ..Default::default() })).expect("adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("forme-nurbs"), required_limits: adapter.limits(), ..Default::default() })).expect("device");
-        let size = window.inner_size();
+        // iOS: the whole screen (`inner_size` is its safe area there; egui
+        // keeps the islands inside it, the view goes under the edges)
+        let size = if cfg!(target_os = "ios") { window.outer_size() } else { window.inner_size() };
         let mut config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).expect("surface config");
         let caps = surface.get_capabilities(&adapter);
         if let Some(f) = caps.formats.iter().copied().find(|f| f.is_srgb()) {

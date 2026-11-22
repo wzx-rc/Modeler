@@ -42,6 +42,7 @@ pub mod sculpt;
 pub mod poly;
 pub mod linked;
 pub mod tab_anim;
+pub mod sim;
 pub mod sdf;
 pub mod common;
 

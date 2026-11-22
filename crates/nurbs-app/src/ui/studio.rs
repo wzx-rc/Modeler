@@ -1207,12 +1207,14 @@ fn dock(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         glass(24).fill(tint(PANEL(), 0.9)).shadow(shadow(true)).inner_margin(Margin::symmetric(10, 9)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                crate::tab_anim::enter(ui, vec2(0.0, 8.0), |ui| match st.workspace {
+                // the tab's tools at once (22 nov.: faded in, the dock read
+                // as empty for a moment after a tap on Crisp or Soft)
+                match st.workspace {
                     Workspace::Sdf => soft_tools(ctx, ui, st),
                     Workspace::Sculpt => sculpt_tools(ctx, ui, st),
                     Workspace::Poly => poly_tools(ctx, ui, st),
                     Workspace::Forme => crisp_tools(ctx, ui, st),
-                });
+                }
                 bar_sep(ui, 72.0);
                 // Paint: the six balls above it
                 let cur = current_material(st).unwrap_or(st.material);
@@ -1742,6 +1744,11 @@ fn size_chips(ctx: &egui::Context, st: &mut AppState) {
         let cx = sp.iter().map(|q| q.x).sum::<f32>() / sp.len() as f32;
         let bottom = sp.iter().map(|q| q.y).fold(f32::MIN, f32::max);
         let b = nd.combine.blend;
+        // the object's first shape blends with nothing: no chip
+        let first = st.doc.feature(id).and_then(crate::sdf::scene_of).map(|s| crate::sdf::shapes(s).first() == Some(&n)).unwrap_or(true);
+        if first {
+            return;
+        }
         // where it meets the shapes it is added to (the mock-up D3: the
         // chip at the neck, a dot on it), else under it
         let neck = (b > 0.0 && nd.combine.mode == forme_core::CombineMode::Add).then(|| neck_of(st, id, n, &pts)).flatten().and_then(|q| view.project(q.as_vec3())).map(|s| pos2(s[0], s[1])).filter(|q| in_view(*q));
@@ -1958,12 +1965,15 @@ fn actions_pill(ctx: &egui::Context, st: &mut AppState) {
                     return;
                 }
                 let solids: Vec<FeatureId> = st.selection.iter().copied().filter(|id| st.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false)).collect();
+                // Mirror, Repeat and Hollow are steps of the Crisp part: not
+                // for a mesh (a Soft object picked whole)
+                let part = solids.iter().all(|id| st.doc.feature(*id).map(|f| !f.is_mesh()).unwrap_or(false));
                 if !solids.is_empty() {
                     gizmo(ui, st);
                     if pill_btn(ui, Icon::Duplicate, "Copy", TEXT(), false).clicked() {
                         st.duplicate_selected();
                     }
-                    if st.workspace == Workspace::Forme {
+                    if st.workspace == Workspace::Forme && part {
                         if pill_btn(ui, Icon::Mirror, "Mirror", TEXT(), false).clicked() {
                             st.add_mirror(0);
                         }

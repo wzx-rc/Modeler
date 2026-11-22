@@ -92,8 +92,12 @@ struct BgOut {
     if (light) {
         col = mix(vec3<f32>(0.47, 0.48, 0.50), vec3<f32>(0.40, 0.41, 0.43), v);
     }
-    if (rd.y < -1e-4) {
-        let tg = -ro.y / rd.y;
+    // the ground only where the ray meets it in front of the eye: from
+    // under it (the eye below 0) the rays going up meet it, those going
+    // down never do (tg < 0 made the fade grow without end: Romain's
+    // "HDR" under the grid, 22 nov.)
+    let tg = -ro.y / select(rd.y, -1e-4, abs(rd.y) < 1e-4);
+    if (abs(rd.y) > 1e-4 && tg > 0.0) {
         let gp = ro + rd * tg;
         var gcol = vec3<f32>(0.0125, 0.0133, 0.0150);
         if (light) {
@@ -161,8 +165,8 @@ fn studio_bg(frag: vec2<f32>, ro: vec3<f32>, rd: vec3<f32>, px: f32, light: bool
     }
     var col = mix(c0, c1, smoothstep(0.0, 0.6, d));
     col = mix(col, c2, smoothstep(0.6, 1.0, d));
-    if (rd.y < -1e-4 && u.base.w > 0.5) {
-        let tg = -ro.y / rd.y;
+    let tg = -ro.y / select(rd.y, -1e-4, abs(rd.y) < 1e-4);
+    if (abs(rd.y) > 1e-4 && tg > 0.0 && u.base.w > 0.5) {
         let gp = ro + rd * tg;
         let foot = tg * px * 1.2;
         let c1g = abs(fract(gp.xz / 10.0 + 0.5) - 0.5) * 10.0;
