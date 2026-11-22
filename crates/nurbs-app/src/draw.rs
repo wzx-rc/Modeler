@@ -381,7 +381,7 @@ impl Drawer {
                         // lighter and wider, as the mock-up's
                         let studio = st.settings.studio;
                         let c = if carve_mode { carve } else if studio && on { crate::theme::accent_light() } else { accent };
-                        let (alpha, w) = if on { if studio { (250, 2.4) } else { (240, 1.6) } } else if studio { (105, 1.0) } else { (70, 1.0) };
+                        let (alpha, w) = if on { if studio { (250, 2.4) } else { (240, 1.6) } } else if studio { (55, 1.0) } else { (70, 1.0) };
                         // the Studio interface: each shape by its outline
                         // as seen (the mock-up D3), not by its rings
                         let lines = if st.settings.studio { crate::sdf::node_silhouette(f, scene, n, st.camera.eye()) } else { crate::sdf::node_lines(f, scene, n) };

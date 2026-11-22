@@ -30,7 +30,7 @@ pub const MATERIALS: [Material; 7] = [
     Material { name: "Rubber", color: [0.08, 0.08, 0.09], metal: 0.0, rough: 0.8, spec: SPECULAR, trans: 0.0 },
     // the mock-up D3's clay (#93C9A4, lit #CDEBD5, in shade #5B9673): a
     // soft, glossy jade green that lets the light in
-    Material { name: "Mint", color: [0.40, 0.56, 0.45], metal: 0.0, rough: 0.32, spec: 0.68, trans: 0.8 },
+    Material { name: "Mint", color: [0.40, 0.57, 0.42], metal: 0.0, rough: 0.32, spec: 0.68, trans: 0.8 },
 ];
 
 pub fn get(i: u32) -> &'static Material {

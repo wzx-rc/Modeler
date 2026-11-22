@@ -294,26 +294,31 @@ fn light(i: MOut) -> Lit {
     let gloss = max(k - 1.0, 0.0);
     let shine = mix(110.0, 8.0, rough) * (1.0 + 2.0 * gloss);
     let spec = pow(max(dot(n, h), 0.0), shine) * mix(0.18, 0.9, metal) * (1.0 - 0.6 * rough) * k * (1.0 + gloss);
-    let rim = pow(1.0 - max(dot(n, v), 0.0), 4.0) * 0.08;
+    // a translucent material has no white rim (its edges go darker, below)
+    let rim = pow(1.0 - max(dot(n, v), 0.0), 4.0) * 0.08 * (1.0 - trans);
     let r = reflect(-v, n);
     let env = mix(vec3<f32>(0.10, 0.10, 0.11), vec3<f32>(0.85, 0.87, 0.9), clamp(0.5 + 0.5 * dot(r, u.up.xyz), 0.0, 1.0));
     let spec_col = mix(vec3<f32>(1.0), base, metal);
     let fres = pow(1.0 - max(dot(n, v), 0.0), 5.0);
-    let coat = env * (0.04 + 0.6 * fres) * gloss * (1.0 - metal) * 0.7;
+    let coat = env * (0.04 + 0.6 * fres * (1.0 - 0.85 * trans)) * gloss * (1.0 - metal) * 0.7;
     var o: Lit;
     o.diff = base * diff * (1.0 - 0.75 * metal) + base * env * metal * 0.85 * mix(0.35, 1.0, min(k, 1.0)) + vec3<f32>(rim);
     if (trans > 0.0) {
-        // under the surface (the mock-up D3's clay, Romain 22 nov.,
-        // 10 h 32): the shade lifted by the light scattered inside it,
-        // deeper in colour (its hue at full strength), and the outline lit
-        // from inside, where the light crosses only a little of it
+        // under the surface (the mock-up D3's clay, Romain 22 nov., 10 h 32
+        // and 11 h 18: "c'est l'inverse le fresnel… pas blanc sur les
+        // bords mais plus sombre"): the light that went in comes out where
+        // the surface faces the eye, so the middle glows, and the shade is
+        // lifted in a deeper tint of the colour (its hue at full
+        // strength); towards the outline the light crosses more of it and
+        // comes out deeper and darker, a fresnel turned round
         let top = max(max(base.r, base.g), max(base.b, 1e-3));
         let deep = base * (base / top);
         let nv = max(dot(n, v), 0.0);
         let shade = 1.0 - clamp(dk, 0.0, 1.0);
-        let edge = pow(1.0 - nv, 2.2);
-        let glow = mix(base, vec3<f32>(top), 0.45) * (0.55 + 0.45 * sky);
-        o.diff = o.diff + trans * (deep * shade * 0.14 + glow * edge * 0.32);
+        let inner = mix(base, vec3<f32>(top), 0.2) * pow(nv, 2.0) * (0.5 + 0.5 * sky);
+        o.diff = o.diff + trans * (deep * shade * 0.10 + inner * 0.16);
+        let edge = pow(1.0 - nv, 1.25);
+        o.diff = mix(o.diff, deep * (0.20 + 0.22 * dk), clamp(edge * trans * 0.95, 0.0, 1.0));
     }
     o.spec = spec_col * spec + coat;
     return o;
