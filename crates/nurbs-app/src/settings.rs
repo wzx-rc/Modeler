@@ -26,12 +26,14 @@ pub struct Settings {
     pub sub_fixed: bool,
     /// The navigation island in the view (`nav.rs`: the axis ball, Zoom,
     /// Pan, Frame; the tip of a pen alone turns, moves and zooms the view).
+    /// Off by default on the PC (Romain, 22 nov.: the pen navigation was
+    /// asked for the iPad), on with a touch screen.
     pub nav: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: true }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: cfg!(target_os = "ios") }
     }
 }
 

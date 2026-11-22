@@ -5360,6 +5360,9 @@ fn main() {
         use nurbs_app::camera::ViewPreset;
         use nurbs_app::nav;
         h.reset(test_part(), "Test part");
+        // off by default on the PC (Settings › Display › Navigation buttons)
+        h.st.settings.nav = true;
+        h.steps(2);
         let cam = |h: &Harness| format!("yaw {:.3} pitch {:.3} dist {:.1} target [{:.1}, {:.1}, {:.1}] {:?}", h.st.camera.yaw, h.st.camera.pitch, h.st.camera.dist, h.st.camera.target.x, h.st.camera.target.y, h.st.camera.target.z, h.st.camera.preset_of());
         let r = nav::rects(&h.ctx).expect("the navigation island");
         eprintln!("  island: ball {:?} zoom {:?} pan {:?} frame {:?}", r.ball, r.zoom, r.pan, r.frame);
