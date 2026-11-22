@@ -8347,7 +8347,8 @@ fn studio_lamp(h: &mut Harness) {
         bean_node = sc.add(root, NodeSpec::shape("Bean", bean).at(bean_a + bean_u * bean_half).rot(glam::Quat::from_rotation_arc(Vec3::Y, bean_u)).mode(CombineMode::Add).blend(9.0));
         let mut hole = Shape::new(SdfPrim::Cylinder);
         hole.size = Vec3::new(10.0, 11.0, 0.0);
-        sc.add(root, NodeSpec::shape("Hole", hole).at(Vec3::new(3.0, 47.0, 3.0)).mode(CombineMode::Carve).blend(0.0));
+        // its rim rounded (Romain 22 nov., 10 h 32: "un fillet au niveau du trou")
+        sc.add(root, NodeSpec::shape("Hole", hole).at(Vec3::new(3.0, 47.0, 3.0)).mode(CombineMode::Carve).blend(4.0));
         f.mesh.as_mut().unwrap().make_mut().sdf = Some(model);
     }
     // the Lantern: a block, its upright edges and its top rounded, three

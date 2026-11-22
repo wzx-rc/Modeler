@@ -376,10 +376,16 @@ impl Drawer {
                     let built = crate::sdf::built_shapes(f);
                     for n in crate::sdf::shapes(scene).into_iter().filter(|n| built.contains(n) && scene.node(*n).map(|x| x.visible).unwrap_or(false)) {
                         let carve_mode = scene.node(n).map(|x| x.combine.mode != forme_core::CombineMode::Add).unwrap_or(false);
-                        let c = if carve_mode { carve } else { accent };
                         let on = picked == Some(n);
-                        let (alpha, w) = if on { (240, 1.6) } else { (70, 1.0) };
-                        line_vertices(&crate::sdf::node_lines(f, scene, n), [c.r(), c.g(), c.b(), alpha], w, &mut over);
+                        // the Studio interface: the picked shape's outline
+                        // lighter and wider, as the mock-up's
+                        let studio = st.settings.studio;
+                        let c = if carve_mode { carve } else if studio && on { crate::theme::accent_light() } else { accent };
+                        let (alpha, w) = if on { if studio { (250, 2.4) } else { (240, 1.6) } } else if studio { (105, 1.0) } else { (70, 1.0) };
+                        // the Studio interface: each shape by its outline
+                        // as seen (the mock-up D3), not by its rings
+                        let lines = if st.settings.studio { crate::sdf::node_silhouette(f, scene, n, st.camera.eye()) } else { crate::sdf::node_lines(f, scene, n) };
+                        line_vertices(&lines, [c.r(), c.g(), c.b(), alpha], w, &mut over);
                     }
                 }
             }
@@ -638,5 +644,8 @@ fn quad_vertices(q: &nurbs_kernel::Quads, out: &mut Vec<MeshVertex>) {
 
 /// A face as the shader reads it, from its material's look.
 fn face_gpu(l: &materials::Look, flags: u32) -> FaceGpu {
-    FaceGpu { color: linear(l.color), flags, metal: l.metal, rough: l.rough, spec: l.specular, alpha: l.opacity() }
+    // the translucency rides in the flags' second byte (the face's layout
+    // stays 32 bytes)
+    let trans = ((l.translucency.clamp(0.0, 1.0) * 255.0).round() as u32) << 8;
+    FaceGpu { color: linear(l.color), flags: flags | trans, metal: l.metal, rough: l.rough, spec: l.specular, alpha: l.opacity() }
 }

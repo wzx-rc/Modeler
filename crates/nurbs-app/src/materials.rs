@@ -15,18 +15,22 @@ pub struct Material {
     /// The specular it comes with (0.5: the highlights as they were; past
     /// it glossier, with a clear coat).
     pub spec: f32,
+    /// How much light it lets in under its surface, 0..1 (0: none): its
+    /// shade lifted and tinted, its outline lit from inside (the mock-up
+    /// D3's clay; Romain 22 nov., 10 h 32: "un effet de translucence").
+    pub trans: f32,
 }
 
 pub const MATERIALS: [Material; 7] = [
-    Material { name: "Grey clay", color: [0.50, 0.50, 0.49], metal: 0.0, rough: 0.55, spec: SPECULAR },
-    Material { name: "Green", color: [0.34, 0.39, 0.24], metal: 0.0, rough: 0.45, spec: SPECULAR },
-    Material { name: "Orange", color: [0.86, 0.42, 0.14], metal: 0.0, rough: 0.4, spec: SPECULAR },
-    Material { name: "Iron", color: [0.16, 0.17, 0.19], metal: 0.7, rough: 0.35, spec: SPECULAR },
-    Material { name: "Steel", color: [0.56, 0.57, 0.6], metal: 1.0, rough: 0.3, spec: SPECULAR },
-    Material { name: "Rubber", color: [0.08, 0.08, 0.09], metal: 0.0, rough: 0.8, spec: SPECULAR },
+    Material { name: "Grey clay", color: [0.50, 0.50, 0.49], metal: 0.0, rough: 0.55, spec: SPECULAR, trans: 0.0 },
+    Material { name: "Green", color: [0.34, 0.39, 0.24], metal: 0.0, rough: 0.45, spec: SPECULAR, trans: 0.0 },
+    Material { name: "Orange", color: [0.86, 0.42, 0.14], metal: 0.0, rough: 0.4, spec: SPECULAR, trans: 0.0 },
+    Material { name: "Iron", color: [0.16, 0.17, 0.19], metal: 0.7, rough: 0.35, spec: SPECULAR, trans: 0.0 },
+    Material { name: "Steel", color: [0.56, 0.57, 0.6], metal: 1.0, rough: 0.3, spec: SPECULAR, trans: 0.0 },
+    Material { name: "Rubber", color: [0.08, 0.08, 0.09], metal: 0.0, rough: 0.8, spec: SPECULAR, trans: 0.0 },
     // the mock-up D3's clay (#93C9A4, lit #CDEBD5, in shade #5B9673): a
-    // soft, glossy jade green
-    Material { name: "Mint", color: [0.30, 0.56, 0.40], metal: 0.0, rough: 0.32, spec: 0.68 },
+    // soft, glossy jade green that lets the light in
+    Material { name: "Mint", color: [0.40, 0.56, 0.45], metal: 0.0, rough: 0.32, spec: 0.68, trans: 0.8 },
 ];
 
 pub fn get(i: u32) -> &'static Material {
@@ -48,6 +52,8 @@ pub struct Look {
     pub specular: f32,
     /// 0 opaque .. 1 clear.
     pub transparency: f32,
+    /// The ball's translucency (`Material::trans`).
+    pub translucency: f32,
 }
 
 impl Look {
@@ -59,7 +65,7 @@ impl Look {
 impl Material {
     /// The ball as it comes.
     pub fn look(&self) -> Look {
-        Look { color: self.color, metal: self.metal, rough: self.rough, specular: self.spec, transparency: 0.0 }
+        Look { color: self.color, metal: self.metal, rough: self.rough, specular: self.spec, transparency: 0.0, translucency: self.trans }
     }
 }
 

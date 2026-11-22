@@ -287,6 +287,104 @@ pub fn node_lines(f: &Feature, scene: &Scene, id: NodeId) -> Vec<Vec<[f32; 3]>> 
     }
 }
 
+/// A shape's outline as the eye sees it (the Studio interface, the mock-up
+/// D3: a shape drawn by its silhouette, not by its rings): a sphere's
+/// circle seen from the eye, a capsule's two side lines and the ends past
+/// them, a cylinder's rims and its two side lines; a box and a torus keep
+/// their lines. `eye` in the world.
+pub fn node_silhouette(f: &Feature, scene: &Scene, id: NodeId, eye: Vec3) -> Vec<Vec<[f32; 3]>> {
+    let Some(n) = scene.node(id) else { return vec![] };
+    let Some(sh) = n.shape() else { return vec![] };
+    let m = node_world(f, scene, id);
+    let e = m.inverse().transform_point3(eye);
+    let p = |v: Vec3| m.transform_point3(v).to_array();
+    let s = sh.size;
+    const N: usize = 72;
+    // a sphere's circle seen from `e` (centre c, radius r): on the plane
+    // square to the eye's line, where the lines from the eye touch it
+    let circle = |c: Vec3, r: f32| -> Option<(Vec3, f32, Vec3, Vec3)> {
+        let d = e - c;
+        let l = d.length();
+        if l <= r * 1.001 {
+            return None;
+        }
+        let w = d / l;
+        let centre = c + w * (r * r / l);
+        let rad = r * (1.0 - (r / l).powi(2)).sqrt();
+        let a = w.any_orthonormal_vector();
+        Some((centre, rad, a, w.cross(a)))
+    };
+    let ring_pts = |(c, r, a, b): (Vec3, f32, Vec3, Vec3)| -> Vec<Vec3> { (0..=N).map(|i| i as f32 / N as f32 * std::f32::consts::TAU).map(|t| c + (a * t.cos() + b * t.sin()) * r).collect() };
+    // the two lines along Y touching a cylinder of radius r round it, as
+    // seen from the eye (exact: the eye's line to the axis is the same
+    // across Y for every height)
+    let sides = |r: f32| -> Option<[Vec3; 2]> {
+        let h = Vec3::new(e.x, 0.0, e.z);
+        let l = h.length();
+        if l <= r * 1.001 {
+            return None;
+        }
+        let w = h / l;
+        let sd = Vec3::Y.cross(w);
+        let along = r * r / l;
+        let across = r * (1.0 - (r / l).powi(2)).sqrt();
+        Some([w * along + sd * across, w * along - sd * across])
+    };
+    match sh.kind {
+        PrimKind::Sphere => circle(Vec3::ZERO, s.x).map(|c| vec![ring_pts(c).into_iter().map(p).collect()]).unwrap_or_default(),
+        PrimKind::Cylinder => {
+            let ring = |y: f32| -> Vec<[f32; 3]> { (0..=N).map(|i| i as f32 / N as f32 * std::f32::consts::TAU).map(|a| p(Vec3::new(s.x * a.cos(), y, s.x * a.sin()))).collect() };
+            let mut out = vec![ring(s.y), ring(-s.y)];
+            if let Some(q) = sides(s.x) {
+                for k in q {
+                    out.push(vec![p(k + Vec3::Y * s.y), p(k - Vec3::Y * s.y)]);
+                }
+            }
+            out
+        }
+        PrimKind::Capsule => {
+            let (r, h) = (s.x, s.y);
+            let mut out = vec![];
+            if let Some(q) = sides(r) {
+                for k in q {
+                    out.push(vec![p(k + Vec3::Y * h), p(k - Vec3::Y * h)]);
+                }
+            }
+            // each end's circle, its part past the side lines' ends
+            for y in [h, -h] {
+                let Some(c) = circle(Vec3::Y * y, r) else { continue };
+                let pts = ring_pts(c);
+                let past = |v: &Vec3| if y > 0.0 { v.y >= y - 1e-3 } else { v.y <= y + 1e-3 };
+                // the run of points past the end, taken round the circle from
+                // a point that is not
+                let Some(start) = pts.iter().position(|v| !past(v)) else {
+                    out.push(pts.into_iter().map(p).collect());
+                    continue;
+                };
+                let mut run: Vec<[f32; 3]> = vec![];
+                for i in 0..N {
+                    let v = pts[(start + i) % N];
+                    if past(&v) {
+                        run.push(p(v));
+                    } else if run.len() > 1 {
+                        out.push(std::mem::take(&mut run));
+                    } else {
+                        run.clear();
+                    }
+                }
+                if run.len() > 1 {
+                    out.push(run);
+                }
+            }
+            if out.is_empty() {
+                return node_lines(f, scene, id);
+            }
+            out
+        }
+        _ => node_lines(f, scene, id),
+    }
+}
+
 /// A new shape of this kind, about 20 mm (sizes are half sizes).
 fn new_shape(k: PrimKind) -> Shape {
     let mut s = Shape::new(k);

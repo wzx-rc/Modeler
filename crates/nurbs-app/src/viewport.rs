@@ -1099,8 +1099,32 @@ fn arrow(p: &Painter, a: Pos2, b: Pos2, color: Color32, width: f32) {
     p.line_segment([a, b], Stroke::new(width, color));
     let d = (b - a).normalized();
     let n = vec2(-d.y, d.x);
-    let tip = b + d * 11.0;
-    p.add(Shape::convex_polygon(vec![tip, b + n * 5.5, b - n * 5.5], color, Stroke::NONE));
+    // the Studio interface (the mock-up D3): a bigger head
+    let (len, half) = if crate::theme::studio() { (15.0, 7.5) } else { (11.0, 5.5) };
+    let tip = b + d * len;
+    p.add(Shape::convex_polygon(vec![tip, b + n * half, b - n * half], color, Stroke::NONE));
+}
+
+/// The gizmo's colours: the axes' and the one under the pointer. In the
+/// Studio interface (Romain 22 nov., 10 h 32: "le gizmo en teinté de vert
+/// aussi comme sur le concept") all three are tints of the tab's accent,
+/// told apart by their lightness, and the hovered one goes white.
+fn gizmo_colors() -> ([Color32; 3], Color32) {
+    if !crate::theme::studio() {
+        return ([AXIS_X, AXIS_Y, AXIS_Z], HOT);
+    }
+    let a = accent_light();
+    let towards = if crate::theme::light() { Color32::BLACK } else { Color32::WHITE };
+    ([a, a.lerp_to_gamma(towards, 0.32), accent()], if crate::theme::light() { accent_text() } else { Color32::WHITE })
+}
+
+/// The gizmo's centre in the Studio interface: a white dot ringed dark
+/// (the mock-up's), the accent round it when hovered or dragged.
+fn studio_centre(p: &Painter, c: Pos2, on: bool) {
+    if on {
+        p.circle_filled(c, 11.0, tint(accent(), 0.30));
+    }
+    p.circle(c, 6.5, Color32::WHITE, Stroke::new(1.5, Color32::from_rgb(0x1C, 0x22, 0x1F)));
 }
 
 fn draw_gizmo(p: &Painter, st: &AppState) {
@@ -1126,17 +1150,26 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
         return;
     }
     let Some((c, tips)) = gizmo_points(st) else { return };
-    let colors = [AXIS_X, AXIS_Y, AXIS_Z];
+    let (colors, hot_col) = gizmo_colors();
+    let studio = crate::theme::studio();
+    // the Studio interface: the plane squares only while the pointer is
+    // near the gizmo (the mock-up shows its arrows alone)
+    let reach = tips.iter().flatten().map(|t| t.distance(c)).fold(0.0f32, f32::max) + 24.0;
+    let near = p.ctx().input(|i| i.pointer.hover_pos()).map(|h| h.distance(c) < reach).unwrap_or(false);
     // plane squares
     for (n, (a, b)) in [(2usize, (0usize, 1usize)), (0, (1, 2)), (1, (0, 2))] {
         if dragging.is_some() && dragging != Some(Handle::Plane(n)) {
             continue;
         }
+        if studio && !near && hot != Some(Handle::Plane(n)) && dragging != Some(Handle::Plane(n)) {
+            continue;
+        }
         if let (Some(ta), Some(tb)) = (tips[a], tips[b]) {
             let q = plane_square(c, ta, tb);
             let on = hot == Some(Handle::Plane(n));
-            let col = if on { HOT } else { colors[n] };
-            p.add(Shape::convex_polygon(q.to_vec(), tint(col, if on { 0.45 } else { 0.22 }), Stroke::new(1.0, tint(col, 0.8))));
+            let col = if on { hot_col } else { colors[n] };
+            let (fill, edge) = if studio { (if on { 0.40 } else { 0.14 }, 0.55) } else { (if on { 0.45 } else { 0.22 }, 0.8) };
+            p.add(Shape::convex_polygon(q.to_vec(), tint(col, fill), Stroke::new(1.0, tint(col, edge))));
         }
     }
     for (a, t) in tips.iter().enumerate() {
@@ -1145,19 +1178,22 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
         }
         if let Some(t) = t {
             let on = hot == Some(Handle::Axis(a));
-            arrow(p, c + (*t - c) * 0.18, *t, if on { HOT } else { colors[a] }, if on { 3.0 } else { 2.2 });
+            let w = if studio { if on { 3.4 } else { 2.6 } } else if on { 3.0 } else { 2.2 };
+            arrow(p, c + (*t - c) * if studio { 0.12 } else { 0.18 }, *t, if on { hot_col } else { colors[a] }, w);
         }
     }
     // the centre: a square (Maya's), a move on all three axes
-    {
+    if studio {
+        studio_centre(p, c, hot == Some(Handle::Free) || dragging == Some(Handle::Free));
+    } else {
         let on = hot == Some(Handle::Free) || dragging == Some(Handle::Free);
         let sq = Rect::from_center_size(c, vec2(12.0, 12.0));
         if on {
             p.rect_filled(sq, 1.5, tint(HOT, 0.35));
         }
         p.rect_stroke(sq, 1.5, Stroke::new(if on { 1.6 } else { 1.1 }, if on { HOT } else { Color32::from_gray(0xd8) }), egui::StrokeKind::Middle);
+        p.circle(c, 2.5, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
     }
-    p.circle(c, 2.5, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
     // a pivot put by hand (D): ringed
     if st.custom_pivot_on() {
         p.circle_stroke(c, 10.5, Stroke::new(1.3, HOT));
@@ -1184,7 +1220,8 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
 /// E: three rings round the world axes; R: three axes with cubes and a
 /// square in the middle (all at once). The value under way by the pivot.
 fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Option<Handle>) {
-    let colors = [AXIS_X, AXIS_Y, AXIS_Z];
+    let (colors, hot_col) = gizmo_colors();
+    let studio = crate::theme::studio();
     let Some(c) = st.pivot().and_then(|q| world(st, q)) else { return };
     if st.gizmo == GizmoMode::Rotate {
         let Some(rs) = rings(st) else { return };
@@ -1193,7 +1230,7 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
                 continue;
             }
             let on = hot == Some(Handle::Rot(a));
-            let col = if on { HOT } else { colors[a] };
+            let col = if on { hot_col } else { colors[a] };
             for w in pts.windows(2) {
                 let front = w[0].1 && w[1].1;
                 p.line_segment([w[0].0, w[1].0], Stroke::new(if front { if on { 3.0 } else { 2.2 } } else { 1.2 }, if front { col } else { tint(col, 0.35) }));
@@ -1207,14 +1244,19 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
             }
             let Some(t) = t else { continue };
             let on = hot == Some(Handle::Scale(a)) || hot == Some(Handle::ScaleAll);
-            let col = if on { HOT } else { colors[a] };
+            let col = if on { hot_col } else { colors[a] };
             p.line_segment([c + (*t - c) * 0.18, *t], Stroke::new(if on { 3.0 } else { 2.2 }, col));
             p.rect_filled(Rect::from_center_size(*t, vec2(10.0, 10.0)), 2.0, col);
         }
         let on = hot == Some(Handle::ScaleAll);
-        p.rect(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, if on { tint(HOT, 0.5) } else { tint(Color32::WHITE, 0.25) }, Stroke::new(1.5, if on { HOT } else { Color32::WHITE }), egui::StrokeKind::Middle);
+        let ring = if studio { accent_light() } else { Color32::WHITE };
+        p.rect(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, if on { tint(hot_col, 0.5) } else { tint(ring, 0.25) }, Stroke::new(1.5, if on { hot_col } else { ring }), egui::StrokeKind::Middle);
     }
-    p.circle(c, 2.25, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
+    if studio {
+        studio_centre(p, c, false);
+    } else {
+        p.circle(c, 2.25, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
+    }
     if let Some(t) = &st.gizmo_readout {
         chip(p, c + vec2(14.0, 14.0), Align2::LEFT_TOP, t, HOT, HOT);
     }

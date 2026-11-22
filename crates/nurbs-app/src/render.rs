@@ -259,6 +259,8 @@ fn light(i: MOut) -> Lit {
     var rough = 0.85;
     // the material's specular: 1 as the balls come, 0 none, 2 twice
     var k = 1.0;
+    // how much light it lets in under its surface (the flags' 2nd byte)
+    var trans = 0.0;
     if (i.face != 0xFFFFFFFFu) {
         let fc = faces[i.face];
         base = fc.color;
@@ -274,12 +276,17 @@ fn light(i: MOut) -> Lit {
         metal = fc.metal;
         rough = fc.rough;
         k = fc.spec * 2.0;
+        trans = f32((flags >> 8u) & 255u) / 255.0;
     }
     let key = normalize(-u.right.xyz * 0.45 + u.up.xyz * 0.8 - u.fwd.xyz * 0.55);
     let fill = normalize(u.right.xyz * 0.7 - u.up.xyz * 0.2 - u.fwd.xyz * 0.6);
     let h = normalize(key + v);
     let sky = 0.5 + 0.5 * dot(n, u.up.xyz);
-    let diff = max(dot(n, key), 0.0) * 0.95 + max(dot(n, fill), 0.0) * 0.18 + 0.05 + 0.07 * sky;
+    // a translucent material: the key light wraps further round it (the
+    // light that went in comes out past the terminator)
+    let wrap = 0.4 * trans;
+    let dk = max((dot(n, key) + wrap) / (1.0 + wrap), 0.0);
+    let diff = dk * 0.95 + max(dot(n, fill), 0.0) * 0.18 + 0.05 + 0.07 * sky;
     // sharper, stronger and tinted highlights on metals; a sky / ground
     // reflection gives them their look. Past its usual specular a
     // material gets glossier: a sharper highlight and a clear coat
@@ -295,6 +302,19 @@ fn light(i: MOut) -> Lit {
     let coat = env * (0.04 + 0.6 * fres) * gloss * (1.0 - metal) * 0.7;
     var o: Lit;
     o.diff = base * diff * (1.0 - 0.75 * metal) + base * env * metal * 0.85 * mix(0.35, 1.0, min(k, 1.0)) + vec3<f32>(rim);
+    if (trans > 0.0) {
+        // under the surface (the mock-up D3's clay, Romain 22 nov.,
+        // 10 h 32): the shade lifted by the light scattered inside it,
+        // deeper in colour (its hue at full strength), and the outline lit
+        // from inside, where the light crosses only a little of it
+        let top = max(max(base.r, base.g), max(base.b, 1e-3));
+        let deep = base * (base / top);
+        let nv = max(dot(n, v), 0.0);
+        let shade = 1.0 - clamp(dk, 0.0, 1.0);
+        let edge = pow(1.0 - nv, 2.2);
+        let glow = mix(base, vec3<f32>(top), 0.45) * (0.55 + 0.45 * sky);
+        o.diff = o.diff + trans * (deep * shade * 0.14 + glow * edge * 0.32);
+    }
     o.spec = spec_col * spec + coat;
     return o;
 }
