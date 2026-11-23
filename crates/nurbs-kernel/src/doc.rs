@@ -835,6 +835,14 @@ pub struct Tweak {
     /// facing the handle dragged stays): else its vertices' centre.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub about: Option<DVec3>,
+    /// A face that cannot be moved is swept into new walls instead
+    /// (`build::tweak_swept`). Set on the moves made since 23 nov.: a move
+    /// saved before, refused then, stays refused, else the steps after it
+    /// (made on the part without it) no longer find what they name
+    /// (Romain's scene: a Move face of 20 nov. swept lost a Loop cut, four
+    /// Knife cuts, an Extrude and four fillets).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sweep: bool,
 }
 
 fn one3() -> DVec3 {
@@ -866,7 +874,7 @@ impl Tweak {
     pub fn new(comps: Vec<Comp>) -> Option<Tweak> {
         let mut it = comps.into_iter();
         let comp = it.next()?;
-        Some(Tweak { comp, delta: DVec3::ZERO, more: it.collect(), scale: DVec3::ONE, copy: false, about: None })
+        Some(Tweak { comp, delta: DVec3::ZERO, more: it.collect(), scale: DVec3::ONE, copy: false, about: None, sweep: true })
     }
     /// All its components.
     pub fn comps(&self) -> impl Iterator<Item = &Comp> {
@@ -2423,7 +2431,7 @@ mod tests {
         let knife = d.add_knife(Knife { pts: vec![KnifePoint { edge: EdgeRef { faces: [tag(push, 1), tag(b, 2)], at: DVec3::ZERO }, f: 0.5, at: DVec3::ZERO }], segs: vec![], remove_faces: vec![], remove_edges: vec![] }, "Knife");
         // between both shapes: it keeps a face that is there
         let both = d.add_round(1.0, false, vec![EdgeRef { faces: [tag(a, 0), tag(b, 1)], at: DVec3::ZERO }]);
-        let vertex = d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::ZERO), delta: DVec3::X, more: vec![], scale: DVec3::ONE, copy: false, about: None });
+        let vertex = d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::ZERO), delta: DVec3::X, more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true });
         assert!(d.orphans().is_empty());
         d.features.retain(|f| f.id != b);
         assert_eq!(d.orphans(), vec![on_b, push, knife]);
