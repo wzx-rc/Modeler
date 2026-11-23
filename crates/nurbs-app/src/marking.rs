@@ -84,6 +84,8 @@ pub enum Act {
     Marker,
     /// A Mirror across X (the steps after it made on both sides).
     Mirror,
+    /// The picked open borders closed by faces.
+    FillHole,
 }
 
 pub struct Item {
@@ -106,12 +108,17 @@ pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
         // in Maya: Vertex west, Edge east, Face south, Object NE
         Ctx::Shape(_) | Ctx::Step(_) | Ctx::Edge | Ctx::Face => {
             let m = st.sel_mode;
-            vec![
+            let mut v = vec![
                 it(1, "Object", m == SelMode::Object, Act::Mode(SelMode::Object)),
                 it(2, "Edge", m == SelMode::Edge, Act::Mode(SelMode::Edge)),
                 it(4, "Face", m == SelMode::Face, Act::Mode(SelMode::Face)),
                 it(6, "Vertex", m == SelMode::Vertex, Act::Mode(SelMode::Vertex)),
-            ]
+            ];
+            // an open border picked: Fill hole at the top
+            if ctx == Ctx::Edge && !st.border_edges_picked().is_empty() {
+                v.push(it(0, "Fill hole", false, Act::FillHole));
+            }
+            v
         }
         Ctx::Empty => vec![
             it(0, "Cube", st.tool == Tool::Create(PrimKind::Box), Act::Place(PrimKind::Box)),
@@ -162,6 +169,10 @@ fn run(st: &mut AppState, act: Act, ctx: Ctx, at: [f32; 2]) {
         }
         Act::Extrude => st.arm_push(crate::state::PushKind::Extrude, Some(at)),
         Act::Inset => st.arm_push(crate::state::PushKind::Inset, Some(at)),
+        Act::FillHole => {
+            let at = st.border_edges_picked();
+            st.fill_holes(at);
+        }
         Act::Deselect => {
             st.edge_sel.clear();
             st.face_sel.clear();

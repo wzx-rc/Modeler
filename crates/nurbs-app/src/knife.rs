@@ -223,7 +223,7 @@ impl AppState {
         }
         let name = if all { "Loop cut" } else { "Face cut" };
         self.edit(name, |d| {
-            d.add_knife(Knife { pts: kps, segs, remove_faces: vec![], remove_edges: vec![] }, name);
+            d.add_knife(Knife { pts: kps, segs, remove_faces: vec![], remove_edges: vec![], fill: vec![] }, name);
         });
         self.knife_end();
         self.knife_preview = None;
@@ -284,7 +284,7 @@ impl AppState {
             None => {
                 let name = if lines { "Knife" } else { "Points" };
                 let mut id = 0;
-                self.edit(name, |d| id = d.add_knife(Knife { pts: vec![kp], segs: vec![], remove_faces: vec![], remove_edges: vec![] }, name));
+                self.edit(name, |d| id = d.add_knife(Knife { pts: vec![kp], segs: vec![], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, name));
                 self.knife = Some((id, 0));
             }
             Some((id, last)) => {

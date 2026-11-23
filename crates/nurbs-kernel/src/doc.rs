@@ -785,6 +785,12 @@ pub struct Knife {
     pub remove_faces: Vec<FaceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove_edges: Vec<EdgeRef>,
+    /// Fill Hole (Romain 23 nov., 14 h 52, Maya's): the open border nearest
+    /// each of these is closed by a face (`faces[0]`: the tag of the face
+    /// beside it, `faces[1]` −1; `at` on or by the border). A step of its
+    /// own; its faces tagged `(step, 1…)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fill: Vec<EdgeRef>,
 }
 
 /// A point of the Knife: on an edge, at a fraction of its curve counted
@@ -798,7 +804,9 @@ pub struct KnifePoint {
 
 impl Knife {
     pub fn label(&self) -> &'static str {
-        if !self.remove_faces.is_empty() {
+        if !self.fill.is_empty() {
+            "Fill hole"
+        } else if !self.remove_faces.is_empty() {
             "Delete faces"
         } else if !self.remove_edges.is_empty() {
             "Delete edges"
@@ -811,6 +819,10 @@ impl Knife {
     /// A Delete step.
     pub fn is_delete(&self) -> bool {
         !self.remove_faces.is_empty() || !self.remove_edges.is_empty()
+    }
+    /// A Fill hole step.
+    pub fn is_fill(&self) -> bool {
+        !self.fill.is_empty()
     }
 }
 
@@ -1472,7 +1484,7 @@ impl Feature {
             for r in &mut k.remove_faces {
                 r.at = m(r.at);
             }
-            for e in &mut k.remove_edges {
+            for e in k.remove_edges.iter_mut().chain(k.fill.iter_mut()) {
                 e.at = m(e.at);
             }
         }
@@ -1742,7 +1754,7 @@ pub(crate) fn named_features(f: &Feature) -> Vec<FeatureId> {
     if let Some(k) = &f.cut {
         tags.extend(k.pts.iter().flat_map(|p| p.edge.faces));
         tags.extend(k.remove_faces.iter().map(|r| r.tag));
-        tags.extend(k.remove_edges.iter().flat_map(|e| e.faces));
+        tags.extend(k.remove_edges.iter().chain(&k.fill).flat_map(|e| e.faces));
     }
     let mut ids: Vec<FeatureId> = tags.iter().filter(|t| **t >= 0).map(|t| (*t >> 16) as FeatureId).collect();
     ids.sort_unstable();
@@ -1779,8 +1791,8 @@ fn pattern_op(f: &Feature, ids: &[FeatureId], srcs: &[&Feature]) -> Option<Featu
         return t.comps().all(on).then(|| f.clone());
     }
     if let Some(k) = &f.cut {
-        let all = k.pts.iter().all(|p| p.edge.faces.iter().any(|t| tag_in(*t, ids))) && k.remove_faces.iter().all(|r| tag_in(r.tag, ids)) && k.remove_edges.iter().all(|e| e.faces.iter().any(|t| tag_in(*t, ids)));
-        let some = !k.pts.is_empty() || !k.remove_faces.is_empty() || !k.remove_edges.is_empty();
+        let all = k.pts.iter().all(|p| p.edge.faces.iter().any(|t| tag_in(*t, ids))) && k.remove_faces.iter().all(|r| tag_in(r.tag, ids)) && k.remove_edges.iter().chain(&k.fill).all(|e| e.faces.iter().any(|t| tag_in(*t, ids)));
+        let some = !k.pts.is_empty() || !k.remove_faces.is_empty() || !k.remove_edges.is_empty() || !k.fill.is_empty();
         return (all && some).then(|| f.clone());
     }
     None
@@ -2042,7 +2054,7 @@ impl Doc {
                             e.at = back(e.at).transform_point3(e.at);
                         }
                     } else {
-                        let p = g.push.as_ref().map(|p| p.face.at).or(g.tweak.as_ref().map(|t| t.at())).or(g.cut.as_ref().and_then(|k| k.pts.first().map(|p| p.at).or(k.remove_faces.first().map(|r| r.at)).or(k.remove_edges.first().map(|e| e.at))));
+                        let p = g.push.as_ref().map(|p| p.face.at).or(g.tweak.as_ref().map(|t| t.at())).or(g.cut.as_ref().and_then(|k| k.pts.first().map(|p| p.at).or(k.remove_faces.first().map(|r| r.at)).or(k.remove_edges.first().map(|e| e.at)).or(k.fill.first().map(|e| e.at))));
                         if let Some(p) = p {
                             let m = back(p);
                             g = g.carried_by(&|q| m.transform_point3(q));
@@ -2064,7 +2076,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(name);
-        let origin = cut.pts.first().map(|p| p.at).or(cut.remove_faces.first().map(|r| r.at)).or(cut.remove_edges.first().map(|e| e.at)).unwrap_or(DVec3::ZERO);
+        let origin = cut.pts.first().map(|p| p.at).or(cut.remove_faces.first().map(|r| r.at)).or(cut.remove_edges.first().map(|e| e.at)).or(cut.fill.first().map(|e| e.at)).unwrap_or(DVec3::ZERO);
         self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false });
         id
     }
@@ -2433,7 +2445,7 @@ mod tests {
         let on_b = d.add_round(2.0, false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 0)], at: DVec3::ZERO }]);
         // on the fillet's own face, then on that step's
         let push = d.add_push(Push { face: FaceRef { tag: tag(on_b, 0), at: DVec3::ZERO }, inset: 0.0, depth: 1.0 });
-        let knife = d.add_knife(Knife { pts: vec![KnifePoint { edge: EdgeRef { faces: [tag(push, 1), tag(b, 2)], at: DVec3::ZERO }, f: 0.5, at: DVec3::ZERO }], segs: vec![], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+        let knife = d.add_knife(Knife { pts: vec![KnifePoint { edge: EdgeRef { faces: [tag(push, 1), tag(b, 2)], at: DVec3::ZERO }, f: 0.5, at: DVec3::ZERO }], segs: vec![], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
         // between both shapes: it keeps a face that is there
         let both = d.add_round(1.0, false, vec![EdgeRef { faces: [tag(a, 0), tag(b, 1)], at: DVec3::ZERO }]);
         let vertex = d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::ZERO), delta: DVec3::X, more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true });

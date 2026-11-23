@@ -7,7 +7,7 @@ use crate::state::*;
 use glam::{DVec3, Vec3};
 use nurbs_kernel::doc::Push;
 use nurbs_kernel::model::{EdgeKind, SurfKind};
-use nurbs_kernel::{Comp, EdgeRef, FaceRef, Feature, FeatureId, Prim, Tweak};
+use nurbs_kernel::{Comp, EdgeRef, FaceRef, Feature, FeatureId, Knife, Prim, Tweak};
 
 /// A new inset (mm).
 const DEFAULT_INSET: f64 = 2.0;
@@ -432,6 +432,8 @@ impl AppState {
         let (lo, hi) = ([a[0].min(b[0]), a[1].min(b[1])], [a[0].max(b[0]), a[1].max(b[1])]);
         let inside = |s: [f32; 2]| s[0] >= lo[0] && s[0] <= hi[0] && s[1] >= lo[1] && s[1] <= hi[1];
         let v = self.view();
+        // backface culling off: what is behind is taken too
+        let through = self.settings.select_through;
         self.selection.clear();
         match self.sel_mode {
             SelMode::Vertex => {
@@ -452,14 +454,14 @@ impl AppState {
                             }
                         }
                     }
-                    found.extend(seen.iter().filter(|(p, own)| !self.hidden_on(*p, own)).map(|(p, _)| p.as_dvec3()));
+                    found.extend(seen.iter().filter(|(p, own)| through || !self.hidden_on(*p, own)).map(|(p, _)| p.as_dvec3()));
                 }
                 let part = self.part_vertices();
                 for q in self.vertices() {
                     if part.iter().any(|p| p.distance(q) < 1e-3) {
                         continue;
                     }
-                    if v.project(q).map(inside).unwrap_or(false) && !self.hidden(q) {
+                    if v.project(q).map(inside).unwrap_or(false) && (through || !self.hidden(q)) {
                         found.push(q.as_dvec3());
                     }
                 }
@@ -483,7 +485,7 @@ impl AppState {
                 for i in 0..m.edges.len() {
                     let Some(r) = self.edge_ref(i) else { continue };
                     let mid = r.at.as_vec3();
-                    if v.project(mid).map(inside).unwrap_or(false) && !self.hidden_on(mid, &m.edges[i].faces) {
+                    if v.project(mid).map(inside).unwrap_or(false) && (through || !self.hidden_on(mid, &m.edges[i].faces)) {
                         found.push(r);
                     }
                 }
@@ -519,9 +521,15 @@ impl AppState {
                             inside_tris.push((c, s));
                         }
                     }
-                    // up to 16 of them, spread over the face: only where
-                    // the eye sees it (the faces behind are not taken, in
-                    // X-ray either)
+                    // through: any face with a triangle inside, seen or not
+                    if through {
+                        if let Some((c, _)) = inside_tris.first() {
+                            found.push((f, c.as_dvec3()));
+                        }
+                        continue;
+                    }
+                    // else up to 16 of them, spread over the face: only
+                    // where the eye sees it
                     let n = inside_tris.len();
                     for k in 0..n.min(16) {
                         let (c, s) = inside_tris[k * n / n.min(16)];
@@ -1334,6 +1342,33 @@ impl AppState {
         Some(id)
     }
 
+    /// The picked edges that are open borders (one face: Delete faces left
+    /// them).
+    pub fn border_edges_picked(&self) -> Vec<EdgeRef> {
+        if self.sel_mode != SelMode::Edge {
+            return vec![];
+        }
+        self.edge_sel.iter().filter(|e| e.faces[1] < 0).cloned().collect()
+    }
+
+    /// Fill Hole (Maya's; Romain 23 nov., 14 h 52): the open border by each
+    /// of these closed by a face, one step; a part that closes is a solid
+    /// again.
+    pub fn fill_holes(&mut self, at: Vec<EdgeRef>) -> Option<FeatureId> {
+        if at.is_empty() {
+            self.toast("Fill hole: pick an open border's edge (Edge mode)", true);
+            return None;
+        }
+        self.abort_gestures();
+        let mut id = None;
+        self.edit("Fill hole", |d| id = Some(d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![], fill: at }, "Fill hole")));
+        let id = id?;
+        self.edge_sel.clear();
+        self.selection = vec![id];
+        self.toast("Hole filled", false);
+        Some(id)
+    }
+
     /// Shift + drag on the move gizmo with faces picked (Maya): the picked
     /// faces extruded, each along its own normal, instead of moved. False
     /// when no face is picked.
@@ -1486,7 +1521,7 @@ impl AppState {
         let chamfer = self.round_chamfer;
         match self.sel_mode {
             SelMode::Edge => {
-                if let Some(r) = self.pick_edge(p).and_then(|i| self.edge_ref(i)) {
+                if let Some(r) = self.pick_edge(p).and_then(|i| self.edge_ref(i)).filter(|r| r.faces[1] >= 0) {
                     let same = |x: &EdgeRef| x.key() == r.key() && x.at.distance(r.at) < 1e-3;
                     if !self.edge_sel.iter().any(same) {
                         self.edge_sel = vec![r.clone()];

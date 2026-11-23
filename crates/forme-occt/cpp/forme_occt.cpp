@@ -137,6 +137,7 @@
 #include <gp_GTrsf.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <ShapeFix_Solid.hxx>
+#include <ShapeFix_Shell.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Ax3.hxx>
@@ -6400,6 +6401,135 @@ FShape* focc_remove_faces(const FShape* s, const int* idx, int n) {
                 int q = fm.FindIndex(fo(j));
                 if (q > 0 && q - 1 < (int)s->tags.size()) r->tags[j - 1] = s->tags[q - 1];
             }
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
+// Fill Hole (Maya's; Romain 23 nov., 14 h 52): of the part's open borders
+// (loops of edges with one face, left by Delete faces), the one nearest each
+// point is closed by a face, flat when its loop is, else a filling through
+// it; sewn to the sheet it borders, a shell that closes is a solid again.
+// The new faces are tagged `fresh`, `fresh + 1`… in the points' order.
+FShape* focc_fill_holes(const FShape* s, const double* pts, int n, long long fresh) {
+    return guard(
+        [&]() -> FShape* {
+            ShapeAnalysis_FreeBounds fb(s->s, Standard_False, Standard_True);
+            std::vector<TopoDS_Wire> wires;
+            for (TopExp_Explorer wx(fb.GetClosedWires(), TopAbs_WIRE); wx.More(); wx.Next()) wires.push_back(TopoDS::Wire(wx.Current()));
+            if (wires.empty()) {
+                set_err("the part has no open border to fill");
+                return nullptr;
+            }
+            std::vector<int> pick;
+            for (int i = 0; i < n; i++) {
+                TopoDS_Vertex v = BRepBuilderAPI_MakeVertex(gp_Pnt(pts[3 * i], pts[3 * i + 1], pts[3 * i + 2]));
+                int best = -1;
+                double bd = 1e300;
+                for (int w = 0; w < (int)wires.size(); w++) {
+                    BRepExtrema_DistShapeShape d(v, wires[w]);
+                    if (d.IsDone() && d.Value() < bd) {
+                        bd = d.Value();
+                        best = w;
+                    }
+                }
+                if (best >= 0 && std::find(pick.begin(), pick.end(), best) == pick.end()) pick.push_back(best);
+            }
+            if (pick.empty()) {
+                set_err("no open border there");
+                return nullptr;
+            }
+            std::vector<TopoDS_Face> faces;
+            for (int w : pick) {
+                TopoDS_Face f;
+                BRepBuilderAPI_MakeFace mf(wires[w], Standard_True);
+                if (mf.IsDone()) f = mf.Face();
+                if (f.IsNull()) {
+                    // a filling from the plane the loop lies nearest (its
+                    // points' middle, Newell's normal): without it the
+                    // surface left the loop far out (a box's two faces side
+                    // by side filled 80 mm out)
+                    gp_XYZ c(0, 0, 0), nw(0, 0, 0);
+                    std::vector<gp_Pnt> ps;
+                    for (BRepTools_WireExplorer we(wires[w]); we.More(); we.Next()) {
+                        BRepAdaptor_Curve ca(we.Current());
+                        for (int k = 0; k < 8; k++) {
+                            double t = ca.FirstParameter() + (ca.LastParameter() - ca.FirstParameter()) * k / 8.0;
+                            ps.push_back(ca.Value(t));
+                        }
+                    }
+                    for (size_t k = 0; k < ps.size(); k++) {
+                        c += ps[k].XYZ();
+                        nw += ps[k].XYZ().Crossed(ps[(k + 1) % ps.size()].XYZ());
+                    }
+                    BRepFill_Filling fill(3, 15, 2, Standard_False, 1e-5, 1e-4, 1e-2, 0.1, 8, 9);
+                    if (!ps.empty() && nw.Modulus() > 1e-9) {
+                        c /= (double)ps.size();
+                        TopoDS_Face init = BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(c), gp_Dir(nw)));
+                        fill.LoadInitSurface(init);
+                    }
+                    for (TopExp_Explorer ex(wires[w], TopAbs_EDGE); ex.More(); ex.Next()) fill.Add(TopoDS::Edge(ex.Current()), GeomAbs_C0, Standard_True);
+                    fill.Build();
+                    if (fill.IsDone()) f = fill.Face();
+                }
+                if (f.IsNull()) {
+                    set_err("a hole could not be filled");
+                    return nullptr;
+                }
+                faces.push_back(f);
+            }
+            // the solids stay as they are; the sheets are sewn with the faces
+            BRep_Builder b;
+            TopoDS_Compound out;
+            b.MakeCompound(out);
+            BRepBuilderAPI_Sewing sew(0.01);
+            for (TopExp_Explorer sx(s->s, TopAbs_SOLID); sx.More(); sx.Next()) b.Add(out, sx.Current());
+            for (TopExp_Explorer hx(s->s, TopAbs_SHELL, TopAbs_SOLID); hx.More(); hx.Next()) sew.Add(hx.Current());
+            for (TopExp_Explorer fx(s->s, TopAbs_FACE, TopAbs_SHELL); fx.More(); fx.Next()) sew.Add(fx.Current());
+            for (const TopoDS_Face& f : faces) sew.Add(f);
+            sew.Perform();
+            TopoDS_Shape sewn = sew.SewedShape();
+            int closed = 0;
+            for (TopExp_Explorer hx(sewn, TopAbs_SHELL); hx.More(); hx.Next()) {
+                TopoDS_Shell sh = TopoDS::Shell(hx.Current());
+                if (!BRep_Tool::IsClosed(sh)) {
+                    b.Add(out, sh);
+                    continue;
+                }
+                ShapeFix_Shell fs(sh);
+                fs.Perform();
+                TopoDS_Shell fixed = fs.Shell();
+                BRepBuilderAPI_MakeSolid ms(fixed.IsNull() ? sh : fixed);
+                TopoDS_Solid so = ms.IsDone() ? ms.Solid() : TopoDS_Solid();
+                if (so.IsNull()) {
+                    b.Add(out, sh);
+                    continue;
+                }
+                BRepLib::OrientClosedSolid(so);
+                b.Add(out, so);
+                closed++;
+            }
+            for (TopExp_Explorer fx(sewn, TopAbs_FACE, TopAbs_SHELL); fx.More(); fx.Next()) b.Add(out, fx.Current());
+            FShape* r = wrap(out);
+            if (!r) return nullptr;
+            TopTools_IndexedMapOfShape fin, fo;
+            face_map(s->s, fin);
+            face_map(out, fo);
+            r->tags.assign(fo.Extent(), -1);
+            auto image = [&](const TopoDS_Shape& f) { return sew.IsModified(f) ? sew.Modified(f) : f; };
+            for (int i = 1; i <= fin.Extent(); i++) {
+                long long t = i - 1 < (int)s->tags.size() ? s->tags[i - 1] : -1;
+                int j = fo.FindIndex(fin(i));
+                if (j == 0) j = fo.FindIndex(image(fin(i)));
+                if (j > 0) r->tags[j - 1] = t;
+            }
+            for (int k = 0; k < (int)faces.size(); k++) {
+                int j = fo.FindIndex(image(faces[k]));
+                if (j > 0) r->tags[j - 1] = fresh + k;
+            }
+            for (long long& t : r->tags)
+                if (t < 0) t = fresh;
+            (void)closed;
             return r;
         },
         (FShape*)nullptr);

@@ -1523,6 +1523,11 @@ fn tweak_pair(acc: &Shape, f: &Feature, t: &Tweak, u: &Tweak) -> Result<Option<S
 /// nearer where each was put), cut into them with its lines. None when it
 /// has no point.
 fn knife(acc: &Shape, f: &Feature, k: &Knife) -> Result<Option<Shape>, String> {
+    if !k.fill.is_empty() {
+        let pts: Vec<[f64; 3]> = k.fill.iter().map(|e| e.at.to_array()).collect();
+        mark(&step("cut", f));
+        return acc.fill_holes(&pts, FaceTag { feature: f.id, sub: 1 }.pack()).map(Some);
+    }
     if !k.remove_faces.is_empty() {
         let mut faces = vec![];
         for r in &k.remove_faces {
@@ -1903,8 +1908,8 @@ fn twin_same(acc0: Option<&Shape>, a: &Feature, b: &Feature) -> bool {
     }
     if let (Some(k), Some(l)) = (&a.cut, &b.cut) {
         let near = |p: DVec3, set: &[DVec3]| set.iter().any(|q| q.distance(p) < 1e-6);
-        let (kp, kf, ke): (Vec<DVec3>, Vec<DVec3>, Vec<DVec3>) = (k.pts.iter().map(|q| q.at).collect(), k.remove_faces.iter().map(|q| q.at).collect(), k.remove_edges.iter().map(|q| q.at).collect());
-        return l.pts.iter().all(|p| near(p.at, &kp)) && l.remove_faces.iter().all(|r| near(r.at, &kf)) && l.remove_edges.iter().all(|e| near(e.at, &ke));
+        let (kp, kf, ke): (Vec<DVec3>, Vec<DVec3>, Vec<DVec3>) = (k.pts.iter().map(|q| q.at).collect(), k.remove_faces.iter().map(|q| q.at).collect(), k.remove_edges.iter().chain(&k.fill).map(|q| q.at).collect());
+        return l.pts.iter().all(|p| near(p.at, &kp)) && l.remove_faces.iter().all(|r| near(r.at, &kf)) && l.remove_edges.iter().chain(&l.fill).all(|e| near(e.at, &ke));
     }
     false
 }
@@ -4954,12 +4959,12 @@ mod tests {
         let m0 = build(&d, true, false, &[], &mut Cache::default());
         let front = KnifePoint { edge: EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }, f: 0.5, at: DVec3::new(0.0, 20.0, 15.0) };
         let back = KnifePoint { edge: EdgeRef { faces: [tag(b, 2), tag(b, 5)], at: DVec3::new(0.0, 20.0, -15.0) }, f: 0.5, at: DVec3::new(0.0, 20.0, -15.0) };
-        let k = d.add_knife(Knife { pts: vec![front.clone()], segs: vec![], remove_faces: vec![], remove_edges: vec![] }, "Points");
+        let k = d.add_knife(Knife { pts: vec![front.clone()], segs: vec![], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Points");
         let m1 = build(&d, true, false, &[], &mut Cache::default());
         assert!(m1.errors.is_empty(), "{:?}", m1.errors);
         assert_eq!(m1.faces.len(), m0.faces.len());
         assert_eq!(m1.edges.len(), m0.edges.len() + 1, "the edge cut in two");
-        d.feature_mut(k).unwrap().cut = Some(Knife { pts: vec![front, back], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] });
+        d.feature_mut(k).unwrap().cut = Some(Knife { pts: vec![front, back], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] });
         assert_eq!(d.feature(k).unwrap().kind_label(), "Knife");
         let m2 = build(&d, true, false, &[], &mut Cache::default());
         assert!(m2.errors.is_empty(), "{:?}", m2.errors);
@@ -4992,7 +4997,7 @@ mod tests {
             a.f = f;
             let mut c = kp(-15.0, 5);
             c.f = f;
-            d.add_knife(Knife { pts: vec![a, c], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+            d.add_knife(Knife { pts: vec![a, c], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
             let m = build(&d, true, false, &[], &mut Cache::default());
             // the top cut in two, across the hole when it crosses it
             assert!(m.errors.is_empty(), "x {x}: {:?}", m.errors);
@@ -5039,7 +5044,7 @@ mod tests {
                     kp([side, bottom], on(c, r, y0, a0 + 180.0)),
                     kp([side, top], on(c, r, y1, a0 + 180.0 + turn)),
                 ];
-                d.add_knife(Knife { pts, segs: vec![[0, 1], [2, 3]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+                d.add_knife(Knife { pts, segs: vec![[0, 1], [2, 3]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
                 let m = build(&d, true, false, &[], &mut Cache::default());
                 assert!(m.errors.is_empty(), "{a0} turn {turn}: {:?}", m.errors);
                 // the side in two, both halves keep its tag
@@ -5058,7 +5063,7 @@ mod tests {
         let kp = |faces: [i64; 2], at: DVec3, f: f64| KnifePoint { edge: EdgeRef { faces, at }, f, at };
         // (a fillet on a box's edge runs it all, x -20 to 20)
         d.add_knife(
-            Knife { pts: vec![kp([tag(b, 2), tag(r, 0)], DVec3::new(-5.0, 20.0, 11.0), 0.375), kp([tag(b, 4), tag(r, 0)], DVec3::new(5.0, 16.0, 15.0), 0.625)], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] },
+            Knife { pts: vec![kp([tag(b, 2), tag(r, 0)], DVec3::new(-5.0, 20.0, 11.0), 0.375), kp([tag(b, 4), tag(r, 0)], DVec3::new(5.0, 16.0, 15.0), 0.625)], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] },
             "Knife",
         );
         let m = build(&d, true, false, &[], &mut Cache::default());
@@ -5739,7 +5744,7 @@ mod tests {
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let kp = |faces: [i64; 2], at: DVec3| KnifePoint { edge: EdgeRef { faces, at }, f: (20.0 - at.x.abs()) / 40.0, at };
-        d.add_knife(Knife { pts: vec![kp([tag(b, 4), tag(b, 2)], DVec3::new(5.0, 20.0, 15.0)), kp([tag(b, 4), tag(b, 3)], DVec3::new(5.0, 0.0, 15.0))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+        d.add_knife(Knife { pts: vec![kp([tag(b, 4), tag(b, 2)], DVec3::new(5.0, 20.0, 15.0)), kp([tag(b, 4), tag(b, 3)], DVec3::new(5.0, 0.0, 15.0))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
         d.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(0.0, 0.0, -80.0), DQuat::IDENTITY);
         d.add(Op::Add, Prim::Cylinder { radius: 3.0, height: 4.0 }, DVec3::new(-8.0, 10.0, 15.0), DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2));
         let m = build(&d, true, false, &[], &mut Cache::default());
@@ -5774,7 +5779,7 @@ mod tests {
             let mut d = Doc::default();
             let (b, r) = block(&mut d);
             let side = tag(b, 4);
-            d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(11.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(11.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+            d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(11.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(11.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
             d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [side, side], at: DVec3::new(11.0, 16.7, 13.7) }), delta: DVec3::new(dx, 0.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true });
             cases.push((name, d));
         }
@@ -5782,7 +5787,7 @@ mod tests {
             let mut d = Doc::default();
             let (b, r) = block(&mut d);
             let side = tag(b, 4);
-            d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(11.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(11.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+            d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(11.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(11.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
             d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(30.0, 15.0, 0.0) }), delta: DVec3::new(3.0, 0.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true });
             cases.push(("+X end moved out after a cut", d));
         }
@@ -5796,7 +5801,7 @@ mod tests {
             let mut d = Doc::default();
             let (b, r) = block(&mut d);
             let side = tag(b, 4);
-            d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(11.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(11.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+            d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(11.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(11.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
             d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, face), at }), delta, more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true });
             cases.push((name, d));
         }
@@ -5804,14 +5809,14 @@ mod tests {
             let mut d = Doc::default();
             let (b, r) = block(&mut d);
             let side = tag(b, 4);
-            d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(-30.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(5.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+            d.add_knife(Knife { pts: vec![kx([side, tag(r, 0)], DVec3::new(-30.0, 33.4, 13.7)), kx([side, tag(b, 3)], DVec3::new(5.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
             let m = build(&d, true, false, &[], &mut Cache::default());
             eprintln!("diagonal cut: errors {:?}, faces {}", m.errors, m.faces.len());
             let e = m.edges.iter().filter(|e| e.faces[0] >= 0 && e.faces[1] >= 0 && m.faces[e.faces[0] as usize].tag.map(|t| t.pack()) == Some(side) && m.faces[e.faces[1] as usize].tag.map(|t| t.pack()) == Some(side)).count();
             let one_sided = m.edges.iter().filter(|e| e.faces[1] < 0).count();
             eprintln!("diagonal cut: {e} edges between its halves, {one_sided} one-sided edges");
             let mut d2 = d.clone();
-            d2.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![EdgeRef { faces: [side, side], at: DVec3::new(-12.5, 16.7, 13.7) }] }, "Delete");
+            d2.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![EdgeRef { faces: [side, side], at: DVec3::new(-12.5, 16.7, 13.7) }], fill: vec![] }, "Delete");
             cases.push(("diagonal cut from a corner deleted", d2));
             d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [side, side], at: DVec3::new(-12.5, 16.7, 13.7) }), delta: DVec3::new(2.0, 0.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true });
             let m = build(&d, true, false, &[], &mut Cache::default());
@@ -5837,8 +5842,8 @@ mod tests {
             let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
             let front = tag(b, 4);
             let kp = |faces: [i64; 2], at: DVec3| KnifePoint { edge: EdgeRef { faces, at }, f: 0.5, at };
-            d.add_knife(Knife { pts: vec![kp([front, tag(b, 2)], DVec3::new(0.0, 20.0, 15.0)), kp([front, tag(b, 3)], DVec3::new(0.0, 0.0, 15.0))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
-            d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![FaceRef { tag: tag(b, 1), at: DVec3::new(-20.0, 10.0, 0.0) }], remove_edges: vec![] }, "Delete faces");
+            d.add_knife(Knife { pts: vec![kp([front, tag(b, 2)], DVec3::new(0.0, 20.0, 15.0)), kp([front, tag(b, 3)], DVec3::new(0.0, 0.0, 15.0))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
+            d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![FaceRef { tag: tag(b, 1), at: DVec3::new(-20.0, 10.0, 0.0) }], remove_edges: vec![], fill: vec![] }, "Delete faces");
             front
         };
         let line = |front: i64| EdgeRef { faces: [front, front], at: DVec3::new(0.0, 10.0, 15.0) };
@@ -5849,7 +5854,7 @@ mod tests {
         let fronts = |m: &Model| m.faces.iter().filter(|f| f.tag.map(|t| t.pack()) == Some(front)).count();
         assert_eq!(fronts(&m0), 2, "the front in two");
         let mut d1 = d.clone();
-        d1.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![line(front)] }, "Delete edges");
+        d1.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![line(front)], fill: vec![] }, "Delete edges");
         let m1 = build(&d1, true, false, &[], &mut Cache::default());
         assert!(m1.errors.is_empty(), "delete: {:?}", m1.errors);
         assert_eq!(fronts(&m1), 1, "the front one again");
@@ -5859,6 +5864,61 @@ mod tests {
         assert!(m2.errors.is_empty(), "move: {:?}", m2.errors);
         let at = m2.edges.iter().filter(|e| e.faces[0] >= 0 && e.faces[1] >= 0).filter(|e| e.faces.iter().all(|&f| m2.faces[f as usize].tag.map(|t| t.pack()) == Some(front))).map(|e| e.pts[0][0]).collect::<Vec<_>>();
         assert!(at.iter().any(|x| (*x + 5.0).abs() < 1e-3), "the line at x -5: {at:?}");
+    }
+
+    #[test]
+    fn holes_filled() {
+        // 23 nov., 14 h 52 ("Il faut un tool fillHole"): two faces of a block
+        // deleted, then its holes filled one by one or both in one step;
+        // closed again it is a solid a Cube can be added to
+        let open = |d: &mut Doc| {
+            let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+            d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 10.0, 0.0) }, FaceRef { tag: tag(b, 1), at: DVec3::new(-20.0, 10.0, 0.0) }], remove_edges: vec![], fill: vec![] }, "Delete faces");
+            b
+        };
+        let border = |m: &Model| m.edges.iter().filter(|e| !e.seam && (e.faces[0] < 0 || e.faces[1] < 0)).count();
+        let right = |b: u32| EdgeRef { faces: [tag(b, 4), -1], at: DVec3::new(20.0, 10.0, 15.0) };
+        let left = |b: u32| EdgeRef { faces: [tag(b, 2), -1], at: DVec3::new(-20.0, 20.0, 0.0) };
+        let mut d = Doc::default();
+        let b = open(&mut d);
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        let b0 = border(&m0);
+        assert!(b0 > 0, "open");
+        // the right side only: still open on the left
+        let mut d1 = d.clone();
+        let k = d1.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![], fill: vec![right(b)] }, "Fill hole");
+        let m1 = build(&d1, true, false, &[], &mut Cache::default());
+        assert!(m1.errors.is_empty(), "{:?}", m1.errors);
+        assert_eq!(m1.faces.len(), 5);
+        assert!(border(&m1) > 0 && border(&m1) < b0, "{} of {b0}", border(&m1));
+        assert!(m1.faces.iter().any(|f| f.tag == Some(FaceTag { feature: k, sub: 1 })), "the new face is the step's");
+        // then the left: closed, a solid
+        d1.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![], fill: vec![left(b)] }, "Fill hole");
+        let m2 = build(&d1, true, false, &[], &mut Cache::default());
+        assert!(m2.errors.is_empty(), "{:?}", m2.errors);
+        assert_eq!((m2.faces.len(), border(&m2)), (6, 0));
+        assert!((mesh_volume(&m2).abs() - 24000.0).abs() < 1.0, "volume {}", mesh_volume(&m2));
+        // both in one step, then a Cube added through the top
+        let mut d3 = d.clone();
+        d3.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![], fill: vec![right(b), left(b)] }, "Fill hole");
+        d3.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(0.0, 15.0, 0.0), DQuat::IDENTITY);
+        let m3 = build(&d3, true, false, &[], &mut Cache::default());
+        assert!(m3.errors.is_empty(), "{:?}", m3.errors);
+        assert_eq!(border(&m3), 0);
+        assert!((mesh_volume(&m3).abs() - 24500.0).abs() < 1.0, "volume {}", mesh_volume(&m3));
+        // two faces side by side: one hole that is not flat, a filling
+        let mut d4 = Doc::default();
+        let b = d4.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d4.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![FaceRef { tag: tag(b, 0), at: DVec3::new(20.0, 10.0, 0.0) }, FaceRef { tag: tag(b, 2), at: DVec3::new(0.0, 20.0, 0.0) }], remove_edges: vec![], fill: vec![] }, "Delete faces");
+        d4.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![], fill: vec![right(b)] }, "Fill hole");
+        let m4 = build(&d4, true, false, &[], &mut Cache::default());
+        assert!(m4.errors.is_empty(), "{:?}", m4.errors);
+        assert_eq!((m4.faces.len(), border(&m4)), (5, 0));
+        // a surface that stays near the loop (it went 80 mm out before it
+        // started from the loop's own plane)
+        let (lo, hi) = m4.bounds().unwrap();
+        assert!(lo[0] > -20.5 && lo[1] > -0.5 && hi[0] < 22.0 && hi[1] < 22.0, "bounds {lo:?} {hi:?}");
     }
 
     #[test]
@@ -6003,7 +6063,7 @@ mod tests {
                     KnifePoint { edge: er(tag(b, 1), tag(b, 4), -20.0, 10.0, 15.0), f: 0.5, at: DVec3::new(-20.0, 10.0, 15.0) + off },
                     KnifePoint { edge: er(tag(b, 0), tag(b, 4), 20.0, 10.0, 15.0), f: 0.5, at: DVec3::new(20.0, 10.0, 15.0) + off },
                 ];
-                d.add_knife(Knife { pts, segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+                d.add_knife(Knife { pts, segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
             })),
         ]
     }
@@ -6590,6 +6650,7 @@ mod tests {
                 segs: vec![[0, 1]],
                 remove_faces: vec![],
                 remove_edges: vec![],
+                fill: vec![],
             },
             "Knife",
         );

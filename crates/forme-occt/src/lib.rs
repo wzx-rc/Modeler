@@ -73,6 +73,7 @@ extern "C" {
     fn focc_edge_point(s: *const FShape, edge: c_int, f: f64, xyz: *mut f64) -> c_int;
     fn focc_split(s: *const FShape, pts: *const f64, n: c_int, segs: *const c_int, nseg: c_int) -> *mut FShape;
     fn focc_remove_faces(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
+    fn focc_fill_holes(s: *const FShape, pts: *const c_double, n: c_int, fresh: i64) -> *mut FShape;
     fn focc_defeature(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
     fn focc_shell(s: *const FShape, idx: *const c_int, n: c_int, t: c_double, out: c_int, base: i64, arc: c_int) -> *mut FShape;
     fn focc_piece(s: *const FShape, idx: *const c_int, n: c_int, m: *const c_double, tag: i64) -> *mut FShape;
@@ -809,6 +810,13 @@ impl Shape {
     pub fn remove_faces(&self, faces: &[usize]) -> Result<Shape, String> {
         let idx: Vec<c_int> = faces.iter().map(|&i| i as c_int).collect();
         shape(unsafe { focc_remove_faces(self.0, idx.as_ptr(), idx.len() as c_int) })
+    }
+    /// Fill Hole: the open border nearest each point closed by a face (flat
+    /// when it is, else a filling), sewn on; a shell that closes is a solid
+    /// again. The new faces tagged `fresh`, `fresh + 1`…
+    pub fn fill_holes(&self, pts: &[[f64; 3]], fresh: i64) -> Result<Shape, String> {
+        let flat: Vec<f64> = pts.iter().flatten().copied().collect();
+        shape(unsafe { focc_fill_holes(self.0, flat.as_ptr(), pts.len() as c_int, fresh) })
     }
     /// Edges (1-based) taken out: the two faces each parts made one (they
     /// must lie on one surface).

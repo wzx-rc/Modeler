@@ -566,6 +566,8 @@ pub enum ToastAct {
     OneSide(FeatureId),
     /// Every step after the Mirrors made on its own side only, this one too.
     MirrorSingle(FeatureId),
+    /// The holes a Delete faces step left, filled (Fill hole).
+    FillDeleted(FeatureId),
 }
 
 /// One line of the debug journal (Romain, 20 nov. 6 h 15: "un Interactive
@@ -1443,7 +1445,7 @@ impl AppState {
         // a move, or a Delete faces / edges, that fails is taken back at
         // once with its reason (20 nov., 11 h 48: "1 edge deleted" was said
         // while the build refused it, and the steps piled up)
-        let undoable = |f: &Feature| f.tweak.as_ref().map(|t| !t.copy).unwrap_or(false) || f.cut.as_ref().map(|k| !k.remove_edges.is_empty() || !k.remove_faces.is_empty()).unwrap_or(false);
+        let undoable = |f: &Feature| f.tweak.as_ref().map(|t| !t.copy).unwrap_or(false) || f.cut.as_ref().map(|k| !k.remove_edges.is_empty() || !k.remove_faces.is_empty() || !k.fill.is_empty()).unwrap_or(false);
         let failed = steps.iter().filter_map(|id| self.doc.feature(*id)).filter(|f| undoable(f)).find_map(|f| new.iter().find(|e| e.starts_with(&format!("{}:", f.name))).cloned());
         if let Some(err) = failed {
             self.undo_doc();
@@ -1639,10 +1641,14 @@ impl AppState {
             let n = faces.len();
             let mut id = 0;
             self.edit("Delete faces", |d| {
-                id = d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: faces, remove_edges: vec![] }, "Delete faces");
+                id = d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: faces, remove_edges: vec![], fill: vec![] }, "Delete faces");
             });
             self.selection = vec![id];
             self.toast(&format!("{n} face{} deleted: the part is open there", if n > 1 { "s" } else { "" }), false);
+            if let Some(t) = self.toast.as_mut() {
+                t.acts = vec![("Fill hole".into(), ToastAct::FillDeleted(id))];
+                t.until = t.until.max(self.now + 6.0);
+            }
             return;
         }
         if self.sel_mode == SelMode::Edge && !self.edge_sel.is_empty() {
@@ -1650,7 +1656,7 @@ impl AppState {
             let n = edges.len();
             let mut id = 0;
             self.edit("Delete edges", |d| {
-                id = d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: edges }, "Delete edges");
+                id = d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: edges, fill: vec![] }, "Delete edges");
             });
             self.selection = vec![id];
             self.toast(&format!("{n} edge{} deleted", if n > 1 { "s" } else { "" }), false);
@@ -2149,8 +2155,14 @@ impl AppState {
     pub fn edge_ref(&self, i: usize) -> Option<EdgeRef> {
         let m = self.model.as_ref()?;
         let e = m.edges.get(i)?;
-        if e.seam || e.faces[0] < 0 || e.faces[1] < 0 {
+        if e.seam || (e.faces[0] < 0 && e.faces[1] < 0) {
             return None;
+        }
+        // an open border (one face, Delete faces left it): [its face, -1],
+        // what Fill hole names
+        if e.faces[0] < 0 || e.faces[1] < 0 {
+            let a = m.faces.get(e.faces[0].max(e.faces[1]) as usize)?.tag?.pack();
+            return Some(EdgeRef { faces: [a, -1], at: polyline_middle(&e.pts)? });
         }
         let a = m.faces.get(e.faces[0] as usize)?.tag?.pack();
         let b = m.faces.get(e.faces[1] as usize)?.tag?.pack();
@@ -2182,7 +2194,8 @@ impl AppState {
         let v = self.view();
         let mut cands: Vec<(f32, usize, Vec3)> = vec![];
         for (i, e) in m.edges.iter().enumerate() {
-            if e.seam || e.faces[1] < 0 {
+            // an open border too (Fill hole)
+            if e.seam || (e.faces[0] < 0 && e.faces[1] < 0) {
                 continue;
             }
             let mut best: Option<(f32, Vec3)> = None;
@@ -2290,8 +2303,13 @@ impl AppState {
                 }
             });
         } else if !self.edge_sel.is_empty() && size > 1e-6 {
+            // an open border has nothing to round
+            let edges: Vec<EdgeRef> = self.edge_sel.iter().filter(|e| e.faces[1] >= 0).cloned().collect();
+            if edges.is_empty() {
+                return;
+            }
+            self.edge_sel.clear();
             self.begin_live(label);
-            let edges = std::mem::take(&mut self.edge_sel);
             let mut id = 0;
             let only = self.round_only;
             self.live(|d| {

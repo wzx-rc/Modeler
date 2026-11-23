@@ -272,6 +272,11 @@ impl AppState {
                 self.set_one_side(id, true);
                 self.toast("Made on this side only", false);
             }
+            ToastAct::FillDeleted(id) => {
+                // each deleted face's hole, by the point it was picked at
+                let at: Vec<nurbs_kernel::EdgeRef> = self.doc.feature(id).and_then(|f| f.cut.as_ref()).map(|k| k.remove_faces.iter().map(|r| nurbs_kernel::EdgeRef { faces: [r.tag, -1], at: r.at }).collect()).unwrap_or_default();
+                self.fill_holes(at);
+            }
             ToastAct::MirrorSingle(id) => {
                 let Some(m) = self.mirror_before(id) else { return };
                 self.set_mirror_single(m, true);

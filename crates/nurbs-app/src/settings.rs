@@ -36,11 +36,15 @@ pub struct Settings {
     /// The plane of symmetry drawn in the view while the Mirror is on (not
     /// only while it is selected).
     pub mirror_plane: bool,
+    /// The rectangle in Vertex, Edge and Face modes also takes what is
+    /// behind (backface culling off; Romain 23 nov., 14 h 51), else only
+    /// what the eye sees (his 21 nov. ask).
+    pub select_through: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: cfg!(target_os = "ios"), mirror_bar: false, mirror_plane: true }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: cfg!(target_os = "ios"), mirror_bar: false, mirror_plane: true, select_through: true }
     }
 }
 

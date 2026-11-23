@@ -1619,6 +1619,8 @@ fn main() {
         // Maya: a rectangle picks the components the eye sees inside it
         // (F9 vertex, F10 edge, F11 face; Shift adds, Ctrl takes away)
         h.reset(test_part(), "Test part");
+        // only what is seen first; BACKFACES (23 nov.) at the end
+        h.st.settings.select_through = false;
         let lo = h.screen_of(Vec3::new(-24.0, -2.0, 18.0));
         let hi = h.screen_of(Vec3::new(24.0, 32.0, -18.0));
         let (a, b) = (pos2(lo.x.min(hi.x) - 30.0, lo.y.max(hi.y) + 30.0), pos2(lo.x.max(hi.x) + 30.0, lo.y.min(hi.y) - 30.0));
@@ -1654,6 +1656,7 @@ fn main() {
         let mut d = Doc::default();
         d.add(Op::Add, Prim::Box { x: 60.0, y: 40.0, z: 2.0 }, DVec3::ZERO, DQuat::IDENTITY);
         h.reset(d, "Thin wall");
+        h.st.settings.select_through = false;
         h.settle();
         let (a, b) = (pos2(420.0, 120.0), pos2(1500.0, 800.0));
         for xray in [false, true] {
@@ -1687,6 +1690,71 @@ fn main() {
             h.key(egui::Key::X);
             h.hold(Modifiers::NONE);
         }
+        // BACKFACES on (Romain 23 nov., 14 h 51: "il doit prendre toutes
+        // les faces y compris celle derrière", backface culling off): the
+        // far side too, 6 faces, 12 edges, 8 vertices
+        h.st.settings.select_through = true;
+        h.key(egui::Key::F11);
+        h.drag(a, b, 10, true);
+        h.settle();
+        let faces = h.st.face_sel.len();
+        h.shot("zero-marquee-7-thin-backfaces");
+        h.key(egui::Key::F10);
+        h.drag(a, b, 10, true);
+        h.settle();
+        let edges = h.st.edge_sel.len();
+        h.key(egui::Key::F9);
+        h.drag(a, b, 10, true);
+        h.settle();
+        eprintln!("  thin wall, backfaces: {faces} faces, {edges} edges, {} vertices picked (all: 6, 12, 8)", h.st.vert_sel.len());
+    }
+
+    if want("fill-hole") {
+        // Fill Hole (Romain 23 nov., 14 h 52: "Il faut un tool fillHole"):
+        // two faces of a block deleted (one hole round both), the toast's
+        // Fill hole; then a face deleted again, its border picked in Edge
+        // mode, its window's Fill hole
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.st.settings.select_through = false;
+        h.settle();
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(20.0, 10.0, 0.0)));
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.key(egui::Key::Delete);
+        h.settle();
+        eprintln!("  deleted: toast {:?}", h.st.toast.as_ref().map(|t| (t.text.clone(), t.acts.iter().map(|a| a.0.clone()).collect::<Vec<_>>())));
+        h.steps(3);
+        h.shot("zero-fill-1-deleted");
+        let act = h.st.toast.as_ref().and_then(|t| t.acts.first().map(|a| a.1));
+        if let Some(a) = act {
+            h.st.toast_act(a);
+        }
+        h.settle();
+        let open = |h: &Harness| h.st.model.as_ref().map(|m| m.edges.iter().filter(|e| !e.seam && (e.faces[0] < 0 || e.faces[1] < 0)).count());
+        eprintln!("  filled from the toast: faces {:?}, open edges {:?}, errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), open(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-fill-2-filled");
+        // the front deleted, its border picked, the window's button
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(-5.0, 8.0, 15.0)));
+        h.key(egui::Key::Delete);
+        h.settle();
+        h.st.toast = None;
+        h.key(egui::Key::F10);
+        h.click(h.screen_of(Vec3::new(-10.0, 0.0, 15.0)));
+        h.settle();
+        h.steps(3);
+        eprintln!("  border picked: {:?}, open edges {:?}", h.st.border_edges_picked(), open(&h));
+        h.shot("zero-fill-3-border-picked");
+        let at = h.st.border_edges_picked();
+        h.st.fill_holes(at);
+        h.settle();
+        eprintln!("  filled: faces {:?}, open edges {:?}, errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), open(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-fill-4-closed");
     }
 
     if want("direct") {
@@ -4878,6 +4946,7 @@ fn main() {
                 segs: vec![[0, 1]],
                 remove_faces: vec![],
                 remove_edges: vec![],
+                fill: vec![],
             },
             "Knife",
         );
@@ -6504,7 +6573,7 @@ fn main() {
         let t = |f: FeatureId, sub: u16| FaceTag { feature: f, sub }.pack();
         let r = d.add_round(6.6, false, vec![EdgeRef { faces: [t(b, 2), t(b, 4)], at: glam::DVec3::new(0.0, 40.0, 13.7) }, EdgeRef { faces: [t(b, 2), t(b, 5)], at: glam::DVec3::new(0.0, 40.0, -13.7) }]);
         let kx = |faces: [i64; 2], at: glam::DVec3| KnifePoint { edge: EdgeRef { faces, at }, f: (30.0 - at.x.abs()) / 60.0, at };
-        d.add_knife(Knife { pts: vec![kx([t(b, 4), t(r, 0)], glam::DVec3::new(-30.0, 33.4, 13.7)), kx([t(b, 4), t(b, 3)], glam::DVec3::new(5.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![] }, "Knife");
+        d.add_knife(Knife { pts: vec![kx([t(b, 4), t(r, 0)], glam::DVec3::new(-30.0, 33.4, 13.7)), kx([t(b, 4), t(b, 3)], glam::DVec3::new(5.0, 0.0, 13.7))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
         h.reset(d, "Flank");
         h.st.camera.frame(Vec3::new(-32.0, 0.0, -15.0), Vec3::new(32.0, 42.0, 15.0));
         h.steps(2);

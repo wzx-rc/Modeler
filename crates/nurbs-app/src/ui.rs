@@ -48,6 +48,9 @@ pub fn paint_op_glyph(p: &egui::Painter, c: egui::Pos2, op: Op, color: Color32, 
 /// A feature's icon: its primitive, or the fillet's.
 pub fn feature_icon(f: &Feature) -> Icon {
     if let Some(k) = &f.cut {
+        if k.is_fill() {
+            return Icon::ModeFace;
+        }
         if k.is_delete() {
             return Icon::Trash;
         }
@@ -79,6 +82,9 @@ pub fn feature_icon(f: &Feature) -> Icon {
 /// What a step does, in a few words: "Fillet · 2 mm", "Inset · 2 mm · −3 mm".
 pub fn step_info(f: &Feature) -> String {
     if let Some(k) = &f.cut {
+        if !k.fill.is_empty() {
+            return "filled".to_string();
+        }
         if !k.remove_faces.is_empty() {
             return format!("{} face{}", k.remove_faces.len(), if k.remove_faces.len() > 1 { "s" } else { "" });
         }
@@ -264,6 +270,26 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                         if resp.on_hover_text(tip).clicked() {
                             st.round_chamfer = c;
                         }
+                    }
+                }
+                // component modes: the rectangle takes what is behind too
+                // (backface culling off) or only what is seen
+                if st.tool == Tool::Select && matches!(st.sel_mode, SelMode::Vertex | SelMode::Edge | SelMode::Face) {
+                    island_sep(ui);
+                    let on = st.settings.select_through;
+                    let g = ui.painter().layout_no_wrap("BACKFACES".to_string(), mono(11.0), TEXT2());
+                    let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 24.0, 28.0), Sense::click());
+                    let pill = r.shrink2(vec2(0.0, 3.0));
+                    if on {
+                        ui.painter().rect(pill, 11.0, RAISED(), Stroke::new(1.0, TEXT2()), StrokeKind::Inside);
+                    } else {
+                        ui.painter().rect(pill, 11.0, if resp.hovered() { RAISED() } else { Color32::TRANSPARENT }, Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+                    }
+                    ui.painter().text(pill.center(), Align2::CENTER_CENTER, "BACKFACES", mono(11.0), if on { TEXT() } else { TEXT2() });
+                    let tip = if on { "The rectangle takes what is behind too (backface culling off): click to take only what is seen" } else { "The rectangle takes only what is seen: click to take what is behind too (backface culling off)" };
+                    if resp.on_hover_text(tip).clicked() {
+                        st.settings.select_through = !on;
+                        st.save_settings();
                     }
                 }
                 island_sep(ui);
@@ -2108,6 +2134,8 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                         mirror_card(ui, st, &f);
                     } else if f.array.is_some() {
                         array_card(ui, st, &f);
+                    } else if f.cut.is_some() {
+                        cut_card(ui, st, &f);
                     } else {
                         round_card(ui, st);
                     }
@@ -3815,7 +3843,48 @@ fn path_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
 
 /// The fillet or chamfer: of the picked edges (made at the first size), or
 /// of the selected fillet. One undo step per slider drag.
+/// A Knife, Delete or Fill hole step: what it did; a Delete faces step
+/// offers to fill the holes it left (it showed the fillet's controls).
+fn cut_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
+    let Some(k) = &f.cut else { return };
+    let text = if k.is_fill() {
+        "Its holes closed by faces; closed again, the part is a solid".to_string()
+    } else if !k.remove_faces.is_empty() {
+        format!("{}: the part is open there", step_info(f))
+    } else if !k.remove_edges.is_empty() {
+        format!("{}: their two faces made one", step_info(f))
+    } else {
+        format!("{} cut in the part", step_info(f))
+    };
+    ui.label(egui::RichText::new(text).font(regular(12.0)).color(TEXT2()));
+    if !k.remove_faces.is_empty() {
+        ui.add_space(4.0);
+        if primary_btn(ui, None, "Fill hole", Some(ui.available_width())).on_hover_text("Close the holes it left with faces (Maya's Fill Hole)").clicked() {
+            st.toast_act(crate::state::ToastAct::FillDeleted(f.id));
+        }
+    }
+}
+
 fn round_card(ui: &mut Ui, st: &mut AppState) {
+    // open borders picked (Delete faces left them): Fill hole, nothing to
+    // round there
+    let borders = st.border_edges_picked();
+    if st.selected_round().is_none() && !borders.is_empty() {
+        let n = borders.len();
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+            ui.painter().circle_filled(r.center(), 5.0, EDGE_SEL);
+            ui.label(egui::RichText::new(if n > 1 { format!("{n} open border edges") } else { "Open border edge".to_string() }).font(semibold(14.0)).color(TEXT()));
+        });
+        ui.add_space(4.0);
+        if primary_btn(ui, None, "Fill hole", Some(ui.available_width())).on_hover_text("Close the hole this border goes round with a face (Maya's Fill Hole); closed again, the part is a solid").clicked() {
+            st.fill_holes(borders);
+        }
+        if st.edge_sel.len() > n {
+            ui.label(egui::RichText::new("The other edges picked: pick them alone to round them").font(regular(12.0)).color(TEXT2()));
+        }
+        return;
+    }
     let any_down = ui.input(|i| i.pointer.any_down());
     let existing = st.selected_round().and_then(|f| f.round.clone());
     let (size, chamfer, n) = match &existing {
