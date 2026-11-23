@@ -1022,6 +1022,11 @@ pub struct Mirror {
     /// Keeps the side below the plane (towards −axis) instead of above.
     #[serde(default, skip_serializing_if = "is_false")]
     pub flip: bool,
+    /// The steps after it are made on their own side only, none doubled
+    /// (Romain 23 nov., 8 h 20: "On dirait toujours que les deux morceaux
+    /// sont en symétrie ou instanciés"); each step's own `one_side` too.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub single: bool,
 }
 
 impl Mirror {

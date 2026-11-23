@@ -572,7 +572,7 @@ fn object(h: &mut Harness) {
         d.add_array(nurbs_kernel::Array { sources: vec![vent], kind: nurbs_kernel::ArrayKind::Line, count: 5, step: DVec3::new(6.0, 0.0, 0.0), count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 })
     });
     timed(h, &mut log, "Inset camera top 2, -1", |d| d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: cam, sub: 2 }.pack(), at: DVec3::new(0.0, 16.0, 40.0) }, inset: 2.0, depth: -1.0 }));
-    timed(h, &mut log, "Mirror X", |d| d.add_mirror(nurbs_kernel::Mirror { axis: 0, offset: 0.0, flip: false }));
+    timed(h, &mut log, "Mirror X", |d| d.add_mirror(nurbs_kernel::Mirror { axis: 0, offset: 0.0, flip: false, single: false }));
     let ant = timed(h, &mut log, "Antenna (cylinder)", |d| named(d, Op::Add, Prim::Cylinder { radius: 1.5, height: 20.0 }, DVec3::new(15.0, 24.0, -12.0), up, "Antenna"));
     let e = edges_between(h, (ant, 0), (ant, 1));
     timed(h, &mut log, "Fillet antenna tip 0.75", |d| d.add_round(0.75, false, e));
@@ -2599,7 +2599,7 @@ fn main() {
         h.move_to(pos2(800.0, 120.0));
         h.steps(3);
         h.shot("zero-mirror-5-selected");
-        h.st.set_mirror(nurbs_kernel::Mirror { axis: 2, offset: 0.0, flip: true }, true);
+        h.st.set_mirror(nurbs_kernel::Mirror { axis: 2, offset: 0.0, flip: true, single: false }, true);
         h.st.end_live();
         h.settle();
         h.move_to(pos2(800.0, 120.0));
@@ -5430,7 +5430,7 @@ fn main() {
         h.st.camera.dist *= 1.6;
         h.st.camera.yaw += 0.5;
         h.settle();
-        h.st.add_mirror(0);
+        let mir = h.st.add_mirror(0).unwrap_or(0);
         h.settle();
         h.st.select(None, false);
         let mut push = 0;
@@ -5446,6 +5446,21 @@ fn main() {
         eprintln!("  this side only: x {:?}, errors {:?}", vol(&h), errors(&h));
         h.steps(3);
         h.shot("zero-nov23-5-one-side");
+        // the toast's "Always this side": the Mirror's later steps all on
+        // their own side (its window says so), a second Extrude too
+        h.st.set_one_side(push, false);
+        h.settle();
+        h.st.toast_act(nurbs_app::state::ToastAct::MirrorSingle(push));
+        h.settle();
+        eprintln!("  mirror single: {:?}, x {:?}, errors {:?}", h.st.doc.feature(mir).and_then(|f| f.mirror).map(|m| m.single), vol(&h), errors(&h));
+        let mut p2 = 0;
+        h.st.edit("Extrude", |d| p2 = d.add_push(Push { face: FaceRef { tag: tag(blk, 4), at: DVec3::new(20.0, 15.0, 10.0) }, inset: 3.0, depth: 4.0 }));
+        h.settle();
+        eprintln!("  second extrude: toast {:?}, z {:?}", h.st.toast.as_ref().map(|t| t.text.clone()), h.st.model.as_ref().and_then(|m| m.bounds()).map(|(lo, hi)| (lo[2], hi[2])));
+        let _ = p2;
+        h.st.selection = vec![mir];
+        h.steps(3);
+        h.shot("zero-nov23-5b-mirror-single");
 
         // 3. the face of an inset left as a line moved out along its
         // normal: walls made, no refusal

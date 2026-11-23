@@ -1859,8 +1859,12 @@ fn hint_of(st: &AppState) -> String {
                 "Square on the first copy: the step (round a circle: how many) · Arrow at the end: how many (round a circle: the angle) · A copy clicked is the original: an operation on it is made on all · Del: delete it".into()
             } else if st.selected_shell().is_some() {
                 "Dot: the walls' thickness · Window: Inward / Outward, the faces open, Pick faces · Del: delete it".into()
-            } else if st.selected_mirror().is_some() {
-                "Window: the plane's axis, where it passes, the side kept · The steps after it are made on both sides · Del: delete it".into()
+            } else if let Some(m) = st.selected_mirror().and_then(|f| f.mirror) {
+                if m.single {
+                    "Window: the plane's axis, where it passes, the side kept · The steps after it are made on their own side only · Del: delete it".into()
+                } else {
+                    "Window: the plane's axis, where it passes, the side kept · The steps after it are made on both sides (Steps after it: This side only) · Del: delete it".into()
+                }
             } else if st.sel_mode == SelMode::Object && st.selection.len() >= 2 && st.selection.iter().all(|id| st.doc.is_closed_curve(*id)) {
                 "Window: Union, Subtract (the first picked less the others), Intersect: one curve, kept live · Shift + click: add a curve".into()
             } else if st.single().is_some_and(|f| f.is_extruded_curve()) {

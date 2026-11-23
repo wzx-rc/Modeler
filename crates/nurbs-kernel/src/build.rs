@@ -1764,6 +1764,27 @@ fn twin_tool(t: &Shape, m: &Mirror) -> Result<Option<Shape>, String> {
 /// blend and stop alike); an inset, a move, the Knife followed by its image
 /// (the same id: its faces carry the same tags; `twin_of`). None when there
 /// is no Mirror. (The shapes after it are doubled in `run`, `twin_tool`.)
+/// The document with the steps after a Mirror set to "this side only"
+/// (`Mirror.single`), up to the next Mirror, marked so (`one_side`), as if
+/// set one by one. (Not past another Mirror: a step made on the side that
+/// Mirror drops would be lost.) None when no Mirror says so.
+fn sided_doc(doc: &Doc) -> Option<Doc> {
+    if !doc.features.iter().any(|f| f.visible && !f.suspended && f.mirror.is_some_and(|m| m.single)) {
+        return None;
+    }
+    let mut out = doc.clone();
+    let mut single = false;
+    for f in out.features.iter_mut() {
+        match f.mirror {
+            Some(m) if f.visible && !f.suspended => single = m.single,
+            Some(_) => {}
+            None if single => f.one_side = true,
+            None => {}
+        }
+    }
+    Some(out)
+}
+
 fn mirrored_doc(doc: &Doc) -> Option<Doc> {
     if !doc.features.iter().any(|f| f.mirror.is_some() && f.visible && !f.suspended) {
         return None;
@@ -3176,6 +3197,9 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let mut used_tools = vec![];
     let mut used_stages = vec![];
     // during a drag, what it changes built last
+    // a Mirror whose later steps are made on one side only
+    let sided = sided_doc(doc);
+    let doc = sided.as_ref().unwrap_or(doc);
     let ordered = if fine || quads || std::env::var_os("FORME_NO_DRAG_ORDER").is_some() { None } else { drag_order(doc, &cache.last) };
     cache.last = doc.features.iter().map(|f| (f.id, f.hash())).collect();
     let doc = ordered.as_ref().unwrap_or(doc);
@@ -3454,7 +3478,7 @@ mod tests {
         // −X end (its image) opens too
         let mut d3 = Doc::default();
         let b3 = d3.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, DVec3::new(10.0, 0.0, 0.0), DQuat::IDENTITY);
-        d3.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false });
+        d3.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false, single: false });
         let end = FaceRef { tag: tag(b3, 0), at: DVec3::new(30.0, 5.0, 0.0) };
         d3.add_shell(Shell { faces: vec![end], thickness: 1.0, outward: false }, end.at);
         let mut c3 = Cache::default();
@@ -3493,7 +3517,7 @@ mod tests {
         // to 30, its top one face (no seam)
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, DVec3::new(10.0, 0.0, 0.0), DQuat::IDENTITY);
-        let mi = d.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false });
+        let mi = d.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false, single: false });
         assert_eq!(d.feature(mi).unwrap().kind_label(), "Mirror");
         assert!(!d.feature(mi).unwrap().is_solid());
         let mut cache = Cache::default();
@@ -3518,6 +3542,20 @@ mod tests {
         assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(h)).count(), 2);
         let v1 = 60.0 * 10.0 * 20.0 - 2.0 * std::f64::consts::PI * 9.0 * 10.0;
         assert!((mesh_volume(&m) - v1).abs() < 2.0, "{} {v1}", mesh_volume(&m));
+        // the Mirror's later steps on one side only: the hole at 15 alone,
+        // a push of the front face on the mirror side alone
+        d.feature_mut(mi).unwrap().mirror.as_mut().unwrap().single = true;
+        let front = FaceRef { tag: tag(b, 4), at: DVec3::new(-20.0, 5.0, 10.0) };
+        let p = d.add_push(Push { face: front, inset: 4.0, depth: 2.0 });
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(h)).count(), 1);
+        let v_one = 60.0 * 10.0 * 20.0 - std::f64::consts::PI * 9.0 * 10.0 + 52.0 * 2.0 * 2.0;
+        assert!((mesh_volume(&m) - v_one).abs() < 2.0, "{} {v_one}", mesh_volume(&m));
+        d.remove(&[p]);
+        d.feature_mut(mi).unwrap().mirror.as_mut().unwrap().single = false;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(h)).count(), 2);
         // a box centred on the plane after it: made once (its own image)
         let c = d.add(Op::Add, Prim::Box { x: 10.0, y: 5.0, z: 10.0 }, DVec3::new(0.0, 10.0, 0.0), DQuat::IDENTITY);
         let m = build(&d, true, false, &[], &mut cache);
@@ -3667,7 +3705,7 @@ mod tests {
             let mut d = Doc::default();
             let b = if mirrored { d.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, DVec3::new(10.0, 0.0, 0.0), DQuat::IDENTITY) } else { d.add(Op::Add, Prim::Box { x: 60.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY) };
             if mirrored {
-                d.add_mirror(crate::doc::Mirror { axis: 0, offset: 0.0, flip: false });
+                d.add_mirror(crate::doc::Mirror { axis: 0, offset: 0.0, flip: false, single: false });
             }
             let mut cache = Cache::default();
             let m = build(&d, true, false, &[], &mut cache);
@@ -5119,7 +5157,7 @@ mod tests {
             let m = build(&d2, true, false, &[], &mut Cache::default());
             assert_eq!(line(&m), (1, 1, vec![36.0]), "one history {one}: {:?}", m.errors);
             // a Mirror: the line on both sides
-            d2.add_mirror(crate::doc::Mirror { axis: 0, offset: 40.0, flip: false });
+            d2.add_mirror(crate::doc::Mirror { axis: 0, offset: 40.0, flip: false, single: false });
             let m = build(&d2, true, false, &[], &mut Cache::default());
             assert_eq!(line(&m), (2, 2, vec![36.0, 36.0]), "one history {one}: {:?}", m.errors);
             // sunk 1 mm after all: a pocket, as before
@@ -5207,7 +5245,7 @@ mod tests {
         same(&e);
         // a Mirror across X: the first and third blocks lie across it, the
         // second gets its image
-        let mi = d.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false });
+        let mi = d.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false, single: false });
         let m1 = build(&d, true, false, &[], &mut Cache::default());
         assert!(m1.errors.is_empty(), "{:?}", m1.errors);
         assert!((m1.bounds().unwrap().0[0] + 70.0).abs() < 1e-3);
@@ -5221,7 +5259,7 @@ mod tests {
         let mut cache = Cache::default();
         build(&d, true, false, &[], &mut cache);
         let mut e = d.clone();
-        e.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false });
+        e.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false, single: false });
         let m3 = build(&e, true, false, &[], &mut cache);
         assert_eq!(m3.booleans, 0);
         assert_eq!(digest(&m3), digest(&m2));
@@ -5364,6 +5402,7 @@ mod tests {
         for n in from..=d0.features.len() {
             let mut d = d0.clone();
             d.features.truncate(n);
+            let d = sided_doc(&d).unwrap_or(d);
             let arrayed = arrayed_doc(&d);
             let doc = arrayed.as_ref().unwrap_or(&d);
             let mirrored = mirrored_doc(doc);
@@ -5991,7 +6030,7 @@ mod tests {
         // ids), before the operations (those on the first part then brought
         // before it, as the app does) or after them
         let mode = std::env::var("FORME_BATTERY").unwrap_or_default();
-        let mirror = crate::doc::Mirror { axis: 0, offset: 0.0, flip: false };
+        let mirror = crate::doc::Mirror { axis: 0, offset: 0.0, flip: false, single: false };
         let array = crate::doc::Array { sources: vec![b, 2, s, 4], kind: crate::doc::ArrayKind::Line, count: 2, step: DVec3::new(0.0, 0.0, 80.0), count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 };
         if mode == "mirror-first" {
             base.add_mirror(mirror);
@@ -6068,8 +6107,8 @@ mod tests {
             d.add_array(crate::doc::Array { sources: vec![b, 2, s, 4], kind: crate::doc::ArrayKind::Line, count: 2, step, count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 });
         };
         match mode.as_str() {
-            "mirror-first" => { base.add_mirror(crate::doc::Mirror { axis: 0, offset: -40.0, flip: false }); }
-            "mirror-touch" => { base.add_mirror(crate::doc::Mirror { axis: 2, offset: -15.0, flip: false }); }
+            "mirror-first" => { base.add_mirror(crate::doc::Mirror { axis: 0, offset: -40.0, flip: false, single: false }); }
+            "mirror-touch" => { base.add_mirror(crate::doc::Mirror { axis: 2, offset: -15.0, flip: false, single: false }); }
             "array-first" => array(&mut base),
             _ => {}
         }
@@ -6082,7 +6121,7 @@ mod tests {
         };
         let last = |d: &mut Doc| {
             if mode == "mirror-last" {
-                d.add_mirror(crate::doc::Mirror { axis: 0, offset: 0.0, flip: false });
+                d.add_mirror(crate::doc::Mirror { axis: 0, offset: 0.0, flip: false, single: false });
             }
             if mode == "array-last" {
                 array(d);
@@ -6183,7 +6222,7 @@ mod tests {
             op(first)(&mut plain);
             op(second)(&mut plain);
             let mut both = base.clone();
-            both.add_mirror(crate::doc::Mirror { axis: 0, offset: -40.0, flip: false });
+            both.add_mirror(crate::doc::Mirror { axis: 0, offset: -40.0, flip: false, single: false });
             op(first)(&mut both);
             op(second)(&mut both);
             let (x, y) = (digest(&build(&plain, true, false, &[], &mut Cache::default())), digest(&build(&both, true, false, &[], &mut Cache::default())));

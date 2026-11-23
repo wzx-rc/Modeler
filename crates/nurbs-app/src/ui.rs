@@ -1335,19 +1335,46 @@ fn help_box(ctx: &egui::Context, st: &mut AppState) {
 
 fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     let Some(t) = &st.toast else { return };
-    let (text, warn) = (t.text.clone(), t.warn);
+    let (text, warn, acts) = (t.text.clone(), t.warn, t.acts.clone());
     let cx = st.principal()[0];
     // above the history pop-up while it is open
     let key = Id::new("history-pop");
     let open = ctx.data(|d| d.get_temp::<(usize, Rect)>(key)).is_some();
     let pop = if open { ctx.data(|d| d.get_temp::<Rect>(key.with("rect"))) } else { None };
     let y = pop.map(|r| r.min.y - 8.0).unwrap_or(screen.max.y - 92.0).min(screen.max.y - 92.0);
-    egui::Area::new(Id::new("toast")).order(Order::Tooltip).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(cx, y)).interactable(false).show(ctx, |ui| {
+    let mut clicked = None;
+    let mut hovered = false;
+    egui::Area::new(Id::new("toast")).order(Order::Tooltip).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(cx, y)).interactable(!acts.is_empty()).show(ctx, |ui| {
         let g = ui.painter().layout_no_wrap(text, medium(13.0), TEXT());
-        let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 32.0, 36.0), Sense::hover());
+        // its buttons, small pills after the text
+        let labels: Vec<_> = acts.iter().map(|(l, _)| ui.painter().layout_no_wrap(l.clone(), semibold(12.5), on_accent())).collect();
+        let bw: f32 = labels.iter().map(|l| l.size().x + 22.0 + 8.0).sum();
+        let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 32.0 + bw, 36.0), Sense::hover());
+        hovered = resp.hovered();
         ui.painter().rect(r, 18.0, pick(Color32::from_rgb(0x2A, 0x2D, 0x33), Color32::WHITE), Stroke::new(1.0, if warn { carve() } else { accent_border() }), StrokeKind::Inside);
+        let gx = g.size().x;
         ui.painter().galley(pos2(r.min.x + 16.0, r.center().y - g.size().y * 0.5), g, TEXT());
+        let mut x = r.min.x + 16.0 + gx + 10.0;
+        for (i, l) in labels.into_iter().enumerate() {
+            let br = Rect::from_min_size(pos2(x, r.center().y - 12.0), vec2(l.size().x + 22.0, 24.0));
+            let b = ui.interact(br, Id::new(("toast-act", i)), Sense::click());
+            let fill = if b.hovered() { accent_light() } else { accent() };
+            ui.painter().rect_filled(br, 12.0, fill);
+            ui.painter().galley(pos2(br.min.x + 11.0, br.center().y - l.size().y * 0.5), l, on_accent());
+            if b.clicked() {
+                clicked = Some(acts[i].1);
+            }
+            x = br.max.x + 8.0;
+        }
     });
+    if let Some(a) = clicked {
+        st.toast_act(a);
+    } else if hovered {
+        // it stays while the pointer is on it
+        if let Some(t) = st.toast.as_mut() {
+            t.until = t.until.max(st.now + 1.5);
+        }
+    }
 }
 
 // ----------------------------------------------------- context bar
@@ -2007,6 +2034,11 @@ fn mirror_side_row(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
         return;
     }
     section(ui, "Mirror");
+    let i = st.doc.features.iter().position(|g| g.id == f.id).unwrap_or(0);
+    if st.mirror_single_before(i) {
+        ui.label(egui::RichText::new("On this side only: its Mirror makes every step after it so").font(regular(11.5)).color(LABEL()));
+        return;
+    }
     if toggle_row(ui, "This side only", f.one_side) {
         st.set_one_side(f.id, !f.one_side);
     }
@@ -2081,7 +2113,7 @@ fn mirror_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
     if let Some(a) = ui.push_id("mirror-axis", |ui| segmented(ui, &items, m.axis, 28.0)).inner {
         if a != m.axis {
             let flip = st.model.as_ref().and_then(|md| md.bounds()).map(|(lo, hi)| (lo[a as usize] + hi[a as usize]) < -1e-3).unwrap_or(false);
-            st.set_mirror(nurbs_kernel::Mirror { axis: a, offset: 0.0, flip }, true);
+            st.set_mirror(nurbs_kernel::Mirror { axis: a, offset: 0.0, flip, single: m.single }, true);
             st.end_live();
         }
     }
@@ -2094,6 +2126,13 @@ fn mirror_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
     if toggle_row(ui, &format!("Keep the −{} side", m.axis_name()), m.flip) {
         st.set_mirror(nurbs_kernel::Mirror { flip: !m.flip, ..m }, true);
         st.end_live();
+    }
+    section(ui, "Steps after it");
+    let c = TEXT();
+    if let Some(one) = ui.push_id("mirror-later", |ui| segmented(ui, &[(false, "Both sides", c), (true, "This side only", c)], m.single, 28.0)).inner {
+        if one != m.single {
+            st.set_mirror_single(f.id, one);
+        }
     }
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
         st.end_live();

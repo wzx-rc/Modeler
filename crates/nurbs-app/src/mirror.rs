@@ -5,7 +5,7 @@
 //! A click on either side names the same shape or face: both carry the
 //! same tags.
 
-use crate::state::AppState;
+use crate::state::{AppState, ToastAct};
 use glam::DVec3;
 use nurbs_kernel::{Feature, FeatureId, Mirror};
 
@@ -26,7 +26,7 @@ impl AppState {
         self.abort_gestures();
         let a = axis.min(2) as usize;
         let flip = self.model.as_ref().and_then(|m| m.bounds()).map(|(lo, hi)| (lo[a] + hi[a]) < -1e-3).unwrap_or(false);
-        let m = Mirror { axis: axis.min(2), offset: 0.0, flip };
+        let m = Mirror { axis: axis.min(2), offset: 0.0, flip, single: false };
         let mut id = None;
         self.edit("Mirror", |d| id = Some(d.add_mirror(m)));
         if let Some(id) = id {
@@ -83,10 +83,16 @@ impl AppState {
         let i = self.doc.features.iter().position(|f| f.id == id)?;
         let f = &self.doc.features[i];
         let doubled = f.is_solid() || f.round.is_some() || f.push.is_some() || f.tweak.is_some() || f.cut.is_some() || f.shell.is_some() || f.bridge.is_some();
-        if !doubled || f.mirror.is_some() || f.array.is_some() {
+        if !doubled || f.mirror.is_some() || f.array.is_some() || f.one_side || self.mirror_single_before(i) {
             return None;
         }
         self.doc.features[..i].iter().rev().find(|g| g.mirror.is_some() && g.visible && !g.suspended).and_then(|g| g.mirror)
+    }
+
+    /// Whether the Mirror just before step i makes its later steps on one
+    /// side only (`Mirror.single`, up to the next Mirror).
+    pub fn mirror_single_before(&self, i: usize) -> bool {
+        self.doc.features[..i.min(self.doc.features.len())].iter().rev().find(|g| g.visible && !g.suspended && g.mirror.is_some()).is_some_and(|g| g.mirror.is_some_and(|m| m.single))
     }
 
     /// Whether a step comes after a Mirror and could be made on both sides
@@ -118,8 +124,45 @@ impl AppState {
         }
         let fresh: Vec<FeatureId> = self.doc.features.iter().map(|f| f.id).filter(|id| *id > self.mirror_told).collect();
         self.mirror_told = newest;
-        if let Some(m) = fresh.iter().find_map(|id| self.mirrored_by(*id)) {
-            self.toast(&format!("Made on both sides of the Mirror across {}: \"This side only\" in its window", m.axis_name()), false);
+        if let Some((id, m)) = fresh.iter().find_map(|id| self.mirrored_by(*id).map(|m| (*id, m))) {
+            self.toast(&format!("Made on both sides of the Mirror across {}", m.axis_name()), false);
+            if let Some(t) = self.toast.as_mut() {
+                t.until = self.now + 8.0;
+                t.acts = vec![("This side only".into(), ToastAct::OneSide(id)), ("Always this side".into(), ToastAct::MirrorSingle(id))];
+            }
+        }
+    }
+
+    /// A Mirror's later steps (up to the next Mirror) made on their own
+    /// side only, or on both again (its window, the toast's "Always this
+    /// side" for the Mirror just before that step).
+    pub fn set_mirror_single(&mut self, mirror: FeatureId, on: bool) {
+        self.edit(if on { "Steps after the Mirror on one side" } else { "Steps after the Mirror on both sides" }, |d| {
+            if let Some(m) = d.feature_mut(mirror).and_then(|f| f.mirror.as_mut()) {
+                m.single = on;
+            }
+        });
+    }
+
+    /// The active Mirror just before a step.
+    pub fn mirror_before(&self, id: FeatureId) -> Option<FeatureId> {
+        let i = self.doc.features.iter().position(|f| f.id == id)?;
+        self.doc.features[..i].iter().rev().find(|g| g.visible && !g.suspended && g.mirror.is_some()).map(|g| g.id)
+    }
+
+    /// A toast's button.
+    pub fn toast_act(&mut self, a: ToastAct) {
+        self.toast = None;
+        match a {
+            ToastAct::OneSide(id) => {
+                self.set_one_side(id, true);
+                self.toast("Made on this side only", false);
+            }
+            ToastAct::MirrorSingle(id) => {
+                let Some(m) = self.mirror_before(id) else { return };
+                self.set_mirror_single(m, true);
+                self.toast("From now on, steps after the Mirror are made on their own side only (its window to undo)", false);
+            }
         }
     }
 }

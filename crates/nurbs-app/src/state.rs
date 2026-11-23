@@ -555,6 +555,17 @@ pub struct Toast {
     pub text: String,
     pub until: f64,
     pub warn: bool,
+    /// Buttons in the toast (a click does it and closes the toast).
+    pub acts: Vec<(String, ToastAct)>,
+}
+
+/// What a toast's button does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ToastAct {
+    /// That step made on its own side of the Mirror only.
+    OneSide(FeatureId),
+    /// Every step after the Mirrors made on its own side only, this one too.
+    MirrorSingle(FeatureId),
 }
 
 /// One line of the debug journal (Romain, 20 nov. 6 h 15: "un Interactive
@@ -4405,7 +4416,7 @@ impl AppState {
     }
 
     pub fn toast(&mut self, text: &str, warn: bool) {
-        self.toast = Some(Toast { text: text.to_string(), until: self.now + if warn { 4.0 } else { 2.5 }, warn });
+        self.toast = Some(Toast { text: text.to_string(), until: self.now + if warn { 4.0 } else { 2.5 }, warn, acts: vec![] });
         self.record("toast", text);
     }
 
