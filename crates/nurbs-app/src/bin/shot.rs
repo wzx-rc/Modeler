@@ -2550,6 +2550,60 @@ fn main() {
         h.shot("zero-freeze-4-undone");
     }
 
+    if want("paint") {
+        // An element's material on all its faces (Romain 23 nov., 21 h 03:
+        // the pocket's walls and the Shell's stayed grey): FORME_DOC a saved
+        // scene, FORME_PAINT the element; each feature whose faces lie in the
+        // element's box, with the material they show
+        let (d, id) = match std::env::var("FORME_DOC") {
+            Ok(path) => (nurbs_kernel::Doc::from_json(&std::fs::read_to_string(&path).expect("FORME_DOC")).expect("a document"), std::env::var("FORME_PAINT").ok().and_then(|v| v.parse().ok()).unwrap_or(1)),
+            Err(_) => {
+                let mut d = test_part();
+                d.features[0].material = 2;
+                (d, 1)
+            }
+        };
+        h.reset(d, "Paint");
+        h.settle();
+        h.settle();
+        h.key(egui::Key::Escape);
+        h.st.selection = vec![id];
+        h.st.frame_selection();
+        h.settle();
+        let want_m = h.st.doc.feature(id).map(|f| f.material).unwrap_or(0);
+        if let Some(m) = h.st.model.clone() {
+            // the element's own faces' box
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for (t, tri) in m.triangles.iter().enumerate() {
+                let f = m.tri_face[t] as usize;
+                if m.faces[f].tag.map(|x| h.st.paint_owner(h.st.element_of(x.feature)) == id).unwrap_or(false) {
+                    for &v in tri {
+                        let p = Vec3::from(m.positions[v as usize]);
+                        lo = lo.min(p);
+                        hi = hi.max(p);
+                    }
+                }
+            }
+            let mut rows: std::collections::BTreeMap<(u32, u32, u32), usize> = Default::default();
+            for (t, tri) in m.triangles.iter().enumerate() {
+                let f = m.tri_face[t] as usize;
+                let Some(tag) = m.faces[f].tag else { continue };
+                let c = tri.iter().map(|&v| Vec3::from(m.positions[v as usize])).sum::<Vec3>() / 3.0;
+                if c.cmpge(lo - 0.05).all() && c.cmple(hi + 0.05).all() {
+                    *rows.entry((tag.feature, h.st.paint_owner(h.st.element_of(tag.feature)), h.st.face_material(f))).or_default() += 1;
+                }
+            }
+            eprintln!("  element {id} material {want_m}, its box {lo:?} {hi:?}");
+            for ((fid, el, mat), n) in rows {
+                let name = h.st.doc.feature(fid).map(|f| f.name.clone()).unwrap_or_default();
+                eprintln!("  {}{fid} {name}: element {el}, material {mat}, {n} triangles", if mat != want_m { "!! " } else { "   " });
+            }
+        }
+        h.move_to(pos2(1500.0, 120.0));
+        h.steps(3);
+        h.shot("zero-paint-1");
+    }
+
     if want("delete-edges") {
         // Delete edges between flat faces nearly on one plane (23 nov.,
         // 19 h 25, his leg's end in three bands 0.19 mm apart; FORME_DOC: a

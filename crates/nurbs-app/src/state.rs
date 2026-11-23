@@ -2174,7 +2174,22 @@ impl AppState {
     /// The material a feature's faces show: its own, or for a fillet the
     /// one of the shape its first edge belongs to.
     pub fn material_of(&self, id: FeatureId) -> u32 {
-        // a step on the part takes the material of the face it starts from
+        // the element's (Romain 23 nov., 21 h 03: "le shader ne s'applique
+        // toujours pas à tout l'objet, et les nouvelles faces ne prennent pas
+        // sa couleur"): an operation's faces take its element's, a Carve's
+        // faces (a pocket's walls) the shape it cuts
+        let el = self.element_of(id);
+        if let Some(f) = self.doc.feature(el) {
+            if f.is_solid() && f.op == Op::Carve {
+                if let Some(h) = self.carve_host(el) {
+                    return self.doc.feature(h).map(|g| g.material).unwrap_or(0);
+                }
+            }
+            if f.is_solid() || f.is_path() {
+                return f.material;
+            }
+        }
+        // a step whose element is not told: the face it starts from
         let mut id = id;
         for _ in 0..16 {
             let Some(f) = self.doc.feature(id) else { return 0 };
@@ -2189,6 +2204,29 @@ impl AppState {
             }
         }
         0
+    }
+
+    /// Whose material a shape's faces show: a Carve's, the shape it cuts.
+    pub fn paint_owner(&self, id: FeatureId) -> FeatureId {
+        match self.doc.feature(id) {
+            Some(f) if f.is_solid() && f.op == Op::Carve => self.carve_host(id).unwrap_or(id),
+            _ => id,
+        }
+    }
+
+    /// The added shape a Carve cuts (its pocket's walls take its material):
+    /// of the visible added shapes whose box meets its own, the last made
+    /// before it, else the first after it.
+    pub fn carve_host(&self, c: FeatureId) -> Option<FeatureId> {
+        let ci = self.doc.features.iter().position(|f| f.id == c)?;
+        let (a, b) = self.doc.features[ci].bounds();
+        let meets = |f: &Feature| {
+            f.op == Op::Add && f.is_solid() && !f.is_path() && f.visible && !f.suspended && {
+                let (lo, hi) = f.bounds();
+                a.cmple(hi + 0.01).all() && b.cmpge(lo - 0.01).all()
+            }
+        };
+        self.doc.features[..ci].iter().rev().find(|f| meets(f)).or_else(|| self.doc.features[ci + 1..].iter().find(|f| meets(f))).map(|f| f.id)
     }
 
     /// The shapes a material goes to: the selected ones (an operation's:
@@ -2210,6 +2248,9 @@ impl AppState {
             }
             ids.retain(|id| self.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false));
         }
+        // a pocket's material is its shape's
+        let ids: Vec<FeatureId> = ids.into_iter().map(|id| self.paint_owner(id)).collect();
+        let mut ids = ids;
         ids.sort();
         ids.dedup();
         ids
@@ -2257,7 +2298,7 @@ impl AppState {
         if self.sel_mode == SelMode::Face && !self.face_sel.is_empty() {
             return Some(DropTarget::Face { tag: t.pack(), face: h.face });
         }
-        let id = self.element_of(t.feature);
+        let id = self.paint_owner(self.element_of(t.feature));
         self.doc.feature(id).filter(|f| f.is_solid()).map(|_| DropTarget::Shape(id))
     }
 
@@ -2266,7 +2307,7 @@ impl AppState {
         let Some(tag) = self.model.as_ref().and_then(|m| m.faces.get(face)).and_then(|f| f.tag) else { return false };
         match t {
             DropTarget::Face { tag: x, .. } => tag.pack() == *x || (self.face_sel.iter().any(|r| r.tag == *x) && self.face_sel.iter().any(|r| r.tag == tag.pack())),
-            DropTarget::Shape(id) => self.element_of(tag.feature) == *id && self.paint_of(tag.pack()).is_none(),
+            DropTarget::Shape(id) => self.paint_owner(self.element_of(tag.feature)) == *id && self.paint_of(tag.pack()).is_none(),
         }
     }
 
@@ -2328,7 +2369,7 @@ impl AppState {
     /// Gives whole shapes a material: their faces' own materials go (as
     /// in Maya, a material given to the object replaces its faces').
     fn shapes_material(&mut self, ids: &[FeatureId], m: u32) {
-        let owned: Vec<i64> = self.doc.paint.iter().map(|p| p.tag).filter(|t| FaceTag::unpack(*t).map(|x| ids.contains(&self.element_of(x.feature))).unwrap_or(false)).collect();
+        let owned: Vec<i64> = self.doc.paint.iter().map(|p| p.tag).filter(|t| FaceTag::unpack(*t).map(|x| ids.contains(&self.paint_owner(self.element_of(x.feature)))).unwrap_or(false)).collect();
         let ids = ids.to_vec();
         self.edit("Material", |d| {
             for id in &ids {

@@ -1728,7 +1728,7 @@ fn hint_of(st: &AppState) -> String {
     }
     if let Some(m) = &st.marking.menu {
         return match m.ctx {
-            crate::marking::Ctx::Shape(_) => "Release on an item: run it · Up: the materials · In the middle: nothing · Esc: close".into(),
+            crate::marking::Ctx::Shape(_) => "Release on an item: run it · Right: the materials · In the middle: nothing · Esc: close".into(),
             _ => "Release on an item: run it · Quick flick: at once · In the middle: nothing · Esc: close".into(),
         };
     }

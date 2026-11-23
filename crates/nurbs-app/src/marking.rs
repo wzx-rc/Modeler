@@ -8,8 +8,8 @@
 //!   flashes alone so the choice is seen); held, the menu is drawn after
 //!   0.2 s and the release on an item runs it. Released in the middle:
 //!   nothing.
-//! - On a shape, the top item opens the material arc (BrickIt style): the
-//!   six balls come out one by one, release on one to give it.
+//! - On the part, the right item opens the material arc (BrickIt style):
+//!   the six balls come out one by one, release on one to give it.
 //! - Not while a gesture is live, nor with the Knife (its right click ends
 //!   the cut).
 //!
@@ -103,20 +103,21 @@ fn it(dir: u8, label: &'static str, checked: bool, act: Act) -> Item {
 /// The items of each context. Change the menu here.
 pub fn items(st: &AppState, ctx: Ctx) -> Vec<Item> {
     match ctx {
-        // on the part, only the four modes (Romain, 20 nov. 5 h 52: "ne
-        // mettre que les 4 états, Object, Edge, Point, Face"), placed as
-        // in Maya: Vertex west, Edge east, Face south, Object NE
+        // on the part, the four modes and the materials, as in Maya
+        // (Romain 23 nov., 21 h 03: "Vertex : Gauche, Face : Bas, Edge :
+        // haut, Matériau : Droite"), Object NE
         Ctx::Shape(_) | Ctx::Step(_) | Ctx::Edge | Ctx::Face => {
             let m = st.sel_mode;
             let mut v = vec![
+                it(0, "Edge", m == SelMode::Edge, Act::Mode(SelMode::Edge)),
                 it(1, "Object", m == SelMode::Object, Act::Mode(SelMode::Object)),
-                it(2, "Edge", m == SelMode::Edge, Act::Mode(SelMode::Edge)),
+                it(2, "Material", false, Act::Material),
                 it(4, "Face", m == SelMode::Face, Act::Mode(SelMode::Face)),
                 it(6, "Vertex", m == SelMode::Vertex, Act::Mode(SelMode::Vertex)),
             ];
-            // an open border picked: Fill hole at the top
+            // an open border picked: Fill hole at the bottom right
             if ctx == Ctx::Edge && !st.border_edges_picked().is_empty() {
-                v.push(it(0, "Fill hole", false, Act::FillHole));
+                v.push(it(3, "Fill hole", false, Act::FillHole));
             }
             v
         }
@@ -237,11 +238,16 @@ fn dir_of(dx: f32, dy: f32) -> u8 {
     ((d + 8) % 8) as u8
 }
 
-/// Centre of ball `k` of `n` on the material arc (above the menu).
+/// Centre of ball `k` of `n` on the material arc (right of the menu).
 fn ball_at(c: Pos2, k: usize, n: usize) -> Pos2 {
     let t = if n <= 1 { 0.5 } else { k as f32 / (n - 1) as f32 };
     let a = (t - 0.5) * ARC_SPREAD;
-    pos2(c.x + a.sin() * ARC_R, c.y - a.cos() * ARC_R * 0.86)
+    pos2(c.x + a.cos() * ARC_R, c.y + a.sin() * ARC_R * 0.86)
+}
+
+/// Where the arc's balls start: the Material item.
+fn arc_from(c: Pos2) -> Pos2 {
+    pos2(c.x + RADIUS, c.y)
 }
 
 /// What is under the pointer; picks it as a click would (keeping what is
@@ -335,9 +341,9 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect) -> bool {
     if !menu.shown && now - menu.t0 >= DELAY {
         menu.shown = true;
     }
-    // the material arc: opens when the pointer reaches the top item
-    if matches!(menu.ctx, Ctx::Shape(_)) {
-        if menu.arc.is_none() && menu.hover == Some(0) && dist > RADIUS * 0.7 {
+    // the material arc: opens when the pointer reaches the right item
+    if menu.ctx != Ctx::Empty {
+        if menu.arc.is_none() && menu.hover == Some(2) && dist > RADIUS * 0.7 {
             menu.arc = Some(now);
             menu.shown = true;
         }
@@ -363,8 +369,14 @@ pub fn input(ctx: &egui::Context, st: &mut AppState, rect: Rect) -> bool {
     }
     if !down {
         let menu = st.marking.menu.take().unwrap();
-        if let (Some(k), Ctx::Shape(id)) = (menu.ball, menu.ctx) {
-            st.drop_material(crate::state::DropTarget::Shape(id), k as u32);
+        if let Some(k) = menu.ball {
+            match menu.ctx {
+                Ctx::Shape(id) | Ctx::Step(id) => {
+                    let el = st.paint_owner(st.element_of(id));
+                    st.drop_material(crate::state::DropTarget::Shape(el), k as u32);
+                }
+                _ => st.apply_material(k as u32),
+            }
         } else if let Some(d) = menu.hover {
             if let Some(item) = items(st, menu.ctx).into_iter().find(|i| i.dir == d && i.act != Act::Material) {
                 if !menu.shown {
@@ -448,8 +460,11 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
         draw_pill(&p, r, g, hot || (item.act == Act::Material && m.arc.is_some()), 1.0);
     }
     // the material arc: the balls come out one by one
-    if let (Some(t0), Ctx::Shape(id)) = (m.arc, m.ctx) {
-        let cur = st.doc.feature(id).map(|f| f.material as usize);
+    if let Some(t0) = m.arc {
+        let cur = match m.ctx {
+            Ctx::Shape(id) | Ctx::Step(id) => st.doc.feature(st.paint_owner(st.element_of(id))).map(|f| f.material as usize),
+            _ => None,
+        };
         let n = MATERIALS.len();
         for k in 0..n {
             let mat = st.look(k as u32);
@@ -457,7 +472,7 @@ pub fn draw(ctx: &egui::Context, st: &AppState) {
             if e <= 0.0 {
                 continue;
             }
-            let from = pos2(c.x, c.y - RADIUS * 0.82);
+            let from = arc_from(c);
             let q = from + (ball_at(c, k, n) - from) * e;
             let hot = m.ball == Some(k);
             let r = BALL * e * if hot { 1.3 } else { 1.0 };
