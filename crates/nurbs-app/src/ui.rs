@@ -407,8 +407,15 @@ fn mode_pill(ui: &mut Ui, st: &mut AppState) {
             SelMode::Face => "Face (3 or F11): pick faces to inset (I) or extrude (Ctrl + E) · drag a rectangle to pick several",
             SelMode::Object => "Object (4, Q or F8): pick and move whole shapes",
         };
+        let tip = format!("{tip}\nCtrl + click: convert what is picked to it");
         if resp.on_hover_text(tip).clicked() {
-            st.set_sel_mode(m);
+            // Ctrl + click (Maya's Convert Selection): what is picked
+            // becomes this mode's components (faces → their edges…)
+            if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+                st.convert_selection(m);
+            } else {
+                st.set_sel_mode(m);
+            }
         }
     }
 }
@@ -4398,6 +4405,14 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         return;
     }
     if ctrl {
+        // Ctrl + F8 to F11 (or 2 to 4): what is picked converted to that
+        // mode's components (Maya's Convert Selection)
+        for (k, m) in [(Key::F8, SelMode::Object), (Key::F9, SelMode::Vertex), (Key::F10, SelMode::Edge), (Key::F11, SelMode::Face), (Key::Num2, SelMode::Edge), (Key::Num3, SelMode::Face), (Key::Num4, SelMode::Object)] {
+            if pressed(k) {
+                st.convert_selection(m);
+                return;
+            }
+        }
         if pressed(Key::Z) {
             if shift {
                 st.redo();

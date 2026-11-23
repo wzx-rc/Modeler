@@ -1757,6 +1757,51 @@ fn main() {
         h.shot("zero-fill-4-closed");
     }
 
+    if want("convert") {
+        // Ctrl + a mode (Maya's Convert Selection; Romain 23 nov., 16 h 11)
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.settle();
+        let count = |h: &Harness| format!("{:?}: faces {}, edges {}, vertices {}, shapes {}", h.st.sel_mode, h.st.face_sel.len(), h.st.edge_sel.len(), h.st.vert_sel.len(), h.st.selection.len());
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.settle();
+        eprintln!("  picked: {}", count(&h));
+        h.shot("zero-convert-1-face");
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::F10);
+        h.hold(Modifiers::NONE);
+        h.steps(3);
+        eprintln!("  Ctrl + F10: {}", count(&h));
+        h.shot("zero-convert-2-edges");
+        h.st.convert_selection(SelMode::Vertex);
+        h.steps(3);
+        eprintln!("  to vertices: {}", count(&h));
+        h.shot("zero-convert-3-vertices");
+        h.st.convert_selection(SelMode::Face);
+        h.steps(3);
+        eprintln!("  to faces: {}", count(&h));
+        h.shot("zero-convert-4-faces");
+        h.st.convert_selection(SelMode::Object);
+        h.steps(3);
+        eprintln!("  to object: {}", count(&h));
+        h.st.convert_selection(SelMode::Edge);
+        h.steps(3);
+        eprintln!("  object to edges: {}", count(&h));
+        // one edge to its two faces
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::F10);
+        h.click(h.screen_of(Vec3::new(8.0, 20.0, 15.0)));
+        h.st.convert_selection(SelMode::Face);
+        h.steps(3);
+        eprintln!("  one edge to faces: {}", count(&h));
+        h.shot("zero-convert-5-edge-to-faces");
+        h.st.undo();
+        h.steps(2);
+        eprintln!("  undo: {}", count(&h));
+    }
+
     if want("multi") {
         // The tools on several picked components (Romain 23 nov., 15 h 19:
         // "Les tools doivent fonctionner sur multi selection… 2 faces, fait

@@ -71,6 +71,106 @@ impl AppState {
         }
     }
 
+    // ------------------------------------------- convert (Maya, Ctrl + mode)
+
+    /// What is picked converted to another mode's components and that
+    /// mode set (Maya's Convert Selection; Romain 23 nov., 16 h 11: "Si je
+    /// click CTRL + un component icon ça fait une conversion"): faces give
+    /// their edges, their vertices or their elements; edges the faces on
+    /// either side, their ends, their elements; vertices the edges and the
+    /// faces round them; shapes (Object mode) all their faces, edges or
+    /// vertices. One undo step (a selection step).
+    pub fn convert_selection(&mut self, to: SelMode) {
+        let from = self.sel_mode;
+        let Some(m) = self.model.clone() else {
+            self.set_sel_mode(to);
+            return;
+        };
+        let near = |a: Vec3, b: Vec3| a.distance(b) < 1e-3;
+        let ends = |i: usize| -> Vec<Vec3> {
+            let e = &m.edges[i];
+            [e.pts.first(), e.pts.last()].into_iter().flatten().map(|p| Vec3::from(*p)).collect()
+        };
+        let live = |i: usize| !m.edges[i].seam && m.edges[i].pts.len() >= 2;
+        // what is picked, as model faces, edges and vertices
+        let (mut faces, mut edges, mut verts): (Vec<usize>, Vec<usize>, Vec<Vec3>) = (vec![], vec![], vec![]);
+        match from {
+            SelMode::Face => faces = self.picked_faces(),
+            SelMode::Edge => edges = self.edge_sel.iter().filter_map(|e| self.model_edge_of(e)).collect(),
+            SelMode::Vertex => verts = self.vert_sel.iter().map(|v| v.as_vec3()).collect(),
+            SelMode::Object => {
+                let els: Vec<FeatureId> = self.selection.iter().map(|id| self.element_of(*id)).collect();
+                faces = (0..m.faces.len()).filter(|&f| m.faces[f].tag.map(|t| els.contains(&self.element_of(t.feature))).unwrap_or(false)).collect();
+            }
+        }
+        if from == to && from != SelMode::Object {
+            return;
+        }
+        // filled in from what was picked: faces → edges → vertices, or back
+        if !faces.is_empty() {
+            edges = (0..m.edges.len()).filter(|&i| live(i) && m.edges[i].faces.iter().any(|f| *f >= 0 && faces.contains(&(*f as usize)))).collect();
+        } else if !verts.is_empty() {
+            edges = (0..m.edges.len()).filter(|&i| live(i) && ends(i).iter().any(|q| verts.iter().any(|v| near(*v, *q)))).collect();
+        }
+        if faces.is_empty() {
+            for &i in &edges {
+                for f in m.edges[i].faces {
+                    if f >= 0 && !faces.contains(&(f as usize)) {
+                        faces.push(f as usize);
+                    }
+                }
+            }
+        }
+        if verts.is_empty() {
+            for &i in &edges {
+                for q in ends(i) {
+                    if !verts.iter().any(|v| near(*v, q)) {
+                        verts.push(q);
+                    }
+                }
+            }
+        }
+        let (nf, ne, nv) = (faces.len(), edges.len(), verts.len());
+        // a point inside each face: its first triangle's middle
+        let face_point = |f: usize| -> Option<DVec3> {
+            let t = self.picker.range(f).find(|&t| m.tri_face[t] as usize == f)?;
+            Some((m.triangles[t].iter().map(|k| Vec3::from(m.positions[*k as usize])).sum::<Vec3>() / 3.0).as_dvec3())
+        };
+        let face_refs: Vec<FaceRef> = faces.iter().filter_map(|&f| self.face_ref(f, face_point(f)?)).collect();
+        let edge_refs: Vec<EdgeRef> = edges.iter().filter_map(|&i| self.edge_ref(i)).collect();
+        let mut elements: Vec<FeatureId> = vec![];
+        for &f in &faces {
+            if let Some(t) = m.faces[f].tag {
+                let el = self.element_of(t.feature);
+                if self.doc.feature(el).is_some() && !elements.contains(&el) {
+                    elements.push(el);
+                }
+            }
+        }
+        self.set_sel_mode(to);
+        self.selection.clear();
+        let n = match to {
+            SelMode::Face => {
+                self.face_sel = face_refs;
+                format!("{nf} face{}", if nf == 1 { "" } else { "s" })
+            }
+            SelMode::Edge => {
+                self.edge_sel = edge_refs;
+                format!("{ne} edge{}", if ne == 1 { "" } else { "s" })
+            }
+            SelMode::Vertex => {
+                self.vert_sel = verts.iter().map(|v| v.as_dvec3()).collect();
+                format!("{nv} verti{}", if nv == 1 { "x" } else { "ces" })
+            }
+            SelMode::Object => {
+                let k = elements.len();
+                self.selection = elements;
+                format!("{k} shape{}", if k == 1 { "" } else { "s" })
+            }
+        };
+        self.toast(&format!("Converted to {n}"), false);
+    }
+
     // ----------------------------------------------------- linked (Maya)
 
     /// The faces linked to `face` (a double-click in Face mode, as Maya's
