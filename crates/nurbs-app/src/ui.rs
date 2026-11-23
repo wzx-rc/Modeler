@@ -292,6 +292,25 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                         st.settings.select_through = !on;
                         st.save_settings();
                     }
+                    // the move gizmo's axes: the world's or the normal's
+                    // (Maya's Axis Orientation; Romain 23 nov., 22 h 05)
+                    if st.gizmo == GizmoMode::Move {
+                        let on = st.settings.move_normal;
+                        let g = ui.painter().layout_no_wrap("NORMAL".to_string(), mono(11.0), TEXT2());
+                        let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 24.0, 28.0), Sense::click());
+                        let pill = r.shrink2(vec2(0.0, 3.0));
+                        if on {
+                            ui.painter().rect(pill, 11.0, RAISED(), Stroke::new(1.0, TEXT2()), StrokeKind::Inside);
+                        } else {
+                            ui.painter().rect(pill, 11.0, if resp.hovered() { RAISED() } else { Color32::TRANSPARENT }, Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+                        }
+                        ui.painter().text(pill.center(), Align2::CENTER_CENTER, "NORMAL", mono(11.0), if on { TEXT() } else { TEXT2() });
+                        let tip = if on { "Move along the picked components' normal (N: the green arrow; several picked, each along its own): click for the world's axes (Alt + N)" } else { "Move along the world's axes: click to move along the picked components' normal (Alt + N)" };
+                        if resp.on_hover_text(tip).clicked() {
+                            st.settings.move_normal = !on;
+                            st.save_settings();
+                        }
+                    }
                 }
                 island_sep(ui);
                 if icon_btn(ui, Icon::Magnet, st.settings.snap, &format!("Snap to {} mm", fmt_mm(st.settings.step as f32)), 28.0).clicked() {
@@ -3319,6 +3338,15 @@ fn settings_window(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 st.settings.nav = !st.settings.nav;
                 st.save_settings();
             }
+            section(ui, "History");
+            if toggle_row(ui, "Keep the history", !st.settings.history_off) {
+                st.settings.history_off = !st.settings.history_off;
+                st.save_settings();
+                st.toast(if st.settings.history_off { "History off: each operation is folded into its shape once made" } else { "History on: operations are kept as steps" }, false);
+            }
+            if st.settings.history_off {
+                ui.label(egui::RichText::new("Off: each operation, once made, is folded into its shape (Delete History), so a long scene stays quick to open and to rebuild. Ctrl + Z still takes it back.").font(regular(12.0)).color(LABEL()));
+            }
             section(ui, "View");
             if toggle_row(ui, "Ground grid", st.settings.grid) {
                 st.settings.grid = !st.settings.grid;
@@ -4572,6 +4600,14 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     // selected: the scene's Mirror across X, the steps after it on both sides
     if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::M) {
         st.mirror_selected();
+        return;
+    }
+    // Alt + N: the move gizmo along the components' normal, or the world's
+    if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl && !i.modifiers.shift) && pressed(Key::N) {
+        st.settings.move_normal = !st.settings.move_normal;
+        st.save_settings();
+        let on = st.settings.move_normal;
+        st.toast(if on { "Move along the normal (Alt + N)" } else { "Move along the world's axes (Alt + N)" }, false);
         return;
     }
     // Delete History (Maya's Alt + Shift + D): each element picked frozen

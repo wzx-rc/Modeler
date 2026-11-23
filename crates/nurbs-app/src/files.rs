@@ -71,3 +71,50 @@ pub fn list() -> Vec<(String, PathBuf)> {
 
 /// The work in progress, saved on quit and reopened at start.
 pub const SESSION: &str = "Session";
+
+/// The kernel's last model of a document, kept beside the documents
+/// (`cache/`, by a hash of its features) and shown at once when the same
+/// document is opened again, while the kernel builds it (Romain, 23 nov.,
+/// 22 h 05: "Quand j'ouvre la scene très longue à tout rebuild"). Whatever
+/// the file it comes from: the session, a document saved, an undo.
+pub fn model_key(doc: &Doc) -> u64 {
+    let s = serde_json::to_string(&doc.features).unwrap_or_default();
+    nurbs_kernel::doc::fnv(s.as_bytes())
+}
+
+fn model_path(key: u64) -> PathBuf {
+    documents_dir().join("cache").join(format!("{key:016x}.model"))
+}
+
+/// How many models are kept (the most recent).
+const MODELS_KEPT: usize = 16;
+
+pub fn save_model(key: u64, m: &nurbs_kernel::Model) -> std::io::Result<()> {
+    let p = model_path(key);
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = p.with_extension("model.tmp");
+    std::fs::write(&tmp, m.encode())?;
+    std::fs::rename(&tmp, &p)?;
+    // the oldest beyond the count taken away
+    if let Some(dir) = p.parent() {
+        let mut all: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "model"))
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .collect();
+        all.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, q) in all.into_iter().skip(MODELS_KEPT) {
+            let _ = std::fs::remove_file(q);
+        }
+    }
+    Ok(())
+}
+
+pub fn load_model(key: u64) -> Option<nurbs_kernel::Model> {
+    let b = std::fs::read(model_path(key)).ok()?;
+    nurbs_kernel::Model::decode(&b)
+}

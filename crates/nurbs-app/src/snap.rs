@@ -8,7 +8,7 @@
 //! Ctrl held: no snapping to points (the grid step still applies).
 
 use crate::state::{polyline_middle, AppState, BasePlane};
-use glam::{DVec3, Vec3};
+use glam::{DQuat, DVec3, Vec3};
 use nurbs_kernel::model::{EdgeKind, SurfKind};
 use nurbs_kernel::{FeatureId, Model};
 
@@ -302,6 +302,14 @@ impl AppState {
     /// top) lines up with it. The nearest on screen wins, a carried point
     /// that would stay far from it in depth last. The move and what to draw.
     pub fn align_move(&self, p: [f32; 2], raw: DVec3, mask: DVec3, keys: &[DVec3], carried: &Carried, skip: &[FeatureId]) -> Option<(DVec3, Snapped)> {
+        self.align_move_in(p, raw, mask, DQuat::IDENTITY, keys, carried, skip)
+    }
+
+    /// The same, the mask in the frame `rot` (the move gizmo along the
+    /// components' normal).
+    pub fn align_move_in(&self, p: [f32; 2], raw: DVec3, mask: DVec3, rot: DQuat, keys: &[DVec3], carried: &Carried, skip: &[FeatureId]) -> Option<(DVec3, Snapped)> {
+        let inv = rot.inverse();
+        let masked = |v: DVec3| rot * ((inv * v) * mask);
         if !self.snapping() {
             return None;
         }
@@ -329,7 +337,7 @@ impl AppState {
                 continue;
             }
             let s = &self.snaps[*i];
-            if let Some((k, delta)) = keys.iter().map(|k| (*k, (s.pos - *k) * mask)).min_by(|x, y| x.1.distance(raw).total_cmp(&y.1.distance(raw))) {
+            if let Some((k, delta)) = keys.iter().map(|k| (*k, masked(s.pos - *k))).min_by(|x, y| x.1.distance(raw).total_cmp(&y.1.distance(raw))) {
                 cands.push((d + s.kind.rank(), k, delta, *i));
             }
         }
@@ -341,7 +349,7 @@ impl AppState {
                     continue;
                 }
                 let s = &self.snaps[*i];
-                let delta = (s.pos - *from) * mask;
+                let delta = masked(s.pos - *from);
                 // near on screen only, far in depth: the piece would jump
                 let Some(k) = v.project((*from + delta).as_vec3()) else { continue };
                 if (k[0] - m[0]).hypot(k[1] - m[1]) > CATCH * 1.5 {

@@ -756,6 +756,12 @@ pub struct AppState {
     pub gizmo: GizmoMode,
     /// The rotation or scale under way, as shown by the gizmo.
     pub gizmo_readout: Option<String>,
+    /// The move gizmo's axes while a drag lasts (taken when it begins:
+    /// the components' own frame turns as they move).
+    pub drag_rot: DQuat,
+    /// Moves along their normals (`begin_normals_drag`): the first
+    /// component's own normal (the drag follows the gizmo's mean one).
+    pub face_drag_first: Option<DVec3>,
     /// The marking menu (right button), open or flashing.
     pub marking: crate::marking::Marking,
     /// A material ball dragged from the materials island, and what it
@@ -783,6 +789,13 @@ pub struct AppState {
     /// Each request sent lately, with its shapes' frames (the drag's
     /// preview, `drag_preview`).
     sent_frames: Vec<(u64, Vec<(FeatureId, DMat4)>)>,
+    /// Each request sent lately, with its extrusions' depths (`push_preview`).
+    sent_depths: Vec<(u64, Vec<(FeatureId, f64)>)>,
+    /// The document whose model was last kept or shown from the cache
+    /// (`keep_model`).
+    saved_model: Option<u64>,
+    /// The model `keep_model` last looked at.
+    kept_serial: u64,
     /// Kernel round trip of the last model (ms).
     pub round_ms: f32,
 
@@ -942,6 +955,8 @@ impl AppState {
             drag: None,
             gizmo: GizmoMode::Move,
             gizmo_readout: None,
+            drag_rot: DQuat::IDENTITY,
+            face_drag_first: None,
             marking: Default::default(),
             mat_drag: None,
             hot_handle: None,
@@ -957,6 +972,9 @@ impl AppState {
             vert_hidden: Default::default(),
             submitted: 0,
             sent_frames: vec![],
+            sent_depths: vec![],
+            saved_model: None,
+            kept_serial: u64::MAX,
             round_ms: 0.0,
             settings: Settings::default(),
             toast: None,
@@ -1106,6 +1124,45 @@ impl AppState {
         self.picker.start(&m);
         self.model = Some(m);
         self.model_gen += 1;
+    }
+
+    /// The kernel's model of this document kept from a session before
+    /// (`files::load_model`), shown at once while the kernel builds it
+    /// (the same serial as its answer, which then takes its place).
+    pub fn show_saved_model(&mut self) {
+        if self.doc.features.is_empty() {
+            return;
+        }
+        let key = crate::files::model_key(&self.doc);
+        let Some(mut m) = crate::files::load_model(key) else { return };
+        m.serial = self.version * 4 + 2;
+        m.fine = true;
+        self.fine_errors = Some(m.errors.clone());
+        self.picker = Picker::new(&m);
+        let m = Arc::new(m);
+        self.picker.start(&m);
+        self.model = Some(m);
+        self.model_gen += 1;
+        self.saved_model = Some(key);
+        self.record("model", "shown from the cache while the kernel builds");
+    }
+
+    /// The fine model of the document as it is, kept for the next time it
+    /// is opened (written in a thread; once per model).
+    pub fn keep_model(&mut self) {
+        let Some(m) = self.model.clone() else { return };
+        if !m.fine || m.serial / 4 != self.version || self.is_live() || self.isolate.is_some() || self.doc.features.is_empty() || self.kept_serial == m.serial {
+            return;
+        }
+        self.kept_serial = m.serial;
+        let key = crate::files::model_key(&self.doc);
+        if self.saved_model == Some(key) {
+            return;
+        }
+        self.saved_model = Some(key);
+        std::thread::spawn(move || {
+            let _ = crate::files::save_model(key, &m);
+        });
     }
 
     /// The model on screen with only the faces of features `keep` (and the
@@ -1481,6 +1538,13 @@ impl AppState {
             self.undo_doc();
             self.record("auto-undo", &err);
             self.toast(&format!("{err} · undone"), true);
+            return;
+        }
+        // history off: the operations just made folded into their shapes
+        // (those that failed keep their history, to be seen and mended)
+        if self.settings.history_off {
+            let ok: Vec<FeatureId> = steps.iter().copied().filter(|id| self.doc.feature(*id).is_some_and(|f| !new.iter().any(|e| e.starts_with(&format!("{}:", f.name))))).collect();
+            self.fold_history(&ok);
         }
     }
 
@@ -1754,7 +1818,53 @@ impl AppState {
             v.dedup();
             v
         };
-        let plan: Vec<(FeatureId, Vec<FeatureId>)> = els
+        let plan = self.bake_plan(&els);
+        if plan.is_empty() {
+            self.toast(if els.is_empty() { "Delete History: pick a shape first" } else { "Delete History: no operation to fold into it" }, false);
+            return;
+        }
+        let names: Vec<String> = plan.iter().filter_map(|(id, _)| self.doc.feature(*id).map(|f| f.name.clone())).collect();
+        self.edit("Delete History", |d| {
+            for (el, ops) in &plan {
+                if let Some(f) = d.feature_mut(*el) {
+                    f.bake = ops.clone();
+                }
+            }
+        });
+        self.toast(&format!("Delete History: {} being made one solid…", names.join(", ")), false);
+    }
+
+    /// History off (`Settings.history_off`): the shapes the operations of
+    /// an edit just made work on, each folded into one solid with all its
+    /// operations, as Delete History does, with no undo step of its own
+    /// (the edit's undo brings its history back). Not a shape with its own
+    /// symmetry, nor one with a step made on one side of a Mirror (folded,
+    /// the Mirror would make it on both).
+    fn fold_history(&mut self, steps: &[FeatureId]) {
+        let op = |f: &Feature| !f.is_solid() && f.mirror.is_none() && f.array.is_none() && f.shell.is_none();
+        let mut els: Vec<FeatureId> = steps.iter().filter(|id| self.doc.feature(**id).is_some_and(op)).map(|id| self.element_of(*id)).collect();
+        els.sort_unstable();
+        els.dedup();
+        els.retain(|el| {
+            self.doc.feature(*el).is_some_and(|f| f.is_solid() && !f.is_path() && !f.is_sheet() && f.sym.is_none() && f.bake.is_empty()) && !self.history_ops(*el).iter().any(|id| self.doc.feature(*id).is_some_and(|g| g.one_side))
+        });
+        let plan = self.bake_plan(&els);
+        if plan.is_empty() {
+            return;
+        }
+        for (el, ops) in &plan {
+            if let Some(f) = self.doc.feature_mut(*el) {
+                f.bake = ops.clone();
+            }
+        }
+        self.record("history off", &format!("folding {:?}", plan.iter().map(|p| p.0).collect::<Vec<_>>()));
+        self.touched();
+    }
+
+    /// What Delete History folds into each element: its operations, and the
+    /// holes cut in it before the last of them with their own.
+    fn bake_plan(&self, els: &[FeatureId]) -> Vec<(FeatureId, Vec<FeatureId>)> {
+        els
             .iter()
             .map(|&el| {
                 let ops = self.history_ops(el);
@@ -1772,20 +1882,7 @@ impl AppState {
                 (el, all)
             })
             .filter(|(_, ops)| !ops.is_empty())
-            .collect();
-        if plan.is_empty() {
-            self.toast(if els.is_empty() { "Delete History: pick a shape first" } else { "Delete History: no operation to fold into it" }, false);
-            return;
-        }
-        let names: Vec<String> = plan.iter().filter_map(|(id, _)| self.doc.feature(*id).map(|f| f.name.clone())).collect();
-        self.edit("Delete History", |d| {
-            for (el, ops) in &plan {
-                if let Some(f) = d.feature_mut(*el) {
-                    f.bake = ops.clone();
-                }
-            }
-        });
-        self.toast(&format!("Delete History: {} being made one solid…", names.join(", ")), false);
+            .collect()
     }
 
     /// The Carve shapes made before the last of `ops` whose box meets the
@@ -1906,9 +2003,13 @@ impl AppState {
         self.edge_sel.clear();
         self.vert_sel.clear();
         self.touched();
-        let what = done.iter().map(|(n, k)| format!("{n} ({k} operations)")).collect::<Vec<_>>().join(", ");
+        let what = done.iter().map(|(n, k)| format!("{n} ({k} operation{})", if *k == 1 { "" } else { "s" })).collect::<Vec<_>>().join(", ");
         self.record("edit", &format!("Delete History: {what}"));
-        self.toast(&format!("History deleted: {what} now one solid · Ctrl + Z brings it back"), false);
+        if self.settings.history_off {
+            self.toast(&format!("History off: {what} folded into one solid"), false);
+        } else {
+            self.toast(&format!("History deleted: {what} now one solid · Ctrl + Z brings it back"), false);
+        }
     }
 
     pub fn duplicate_selected(&mut self) {
@@ -3953,10 +4054,10 @@ impl AppState {
         let (ro, rd) = self.ray(p);
         match h {
             Handle::Axis(a) => {
-                let axis = DVec3::AXES[a];
+                let axis = self.gizmo_rot() * DVec3::AXES[a];
                 closest_on_line(pivot, axis, ro, rd).map(|t| pivot + axis * t)
             }
-            Handle::Plane(a) => BasePlane::new(pivot, DVec3::AXES[a], None).hit(ro, rd),
+            Handle::Plane(a) => BasePlane::new(pivot, self.gizmo_rot() * DVec3::AXES[a], None).hit(ro, rd),
             Handle::Free => {
                 let n = (self.view().eye.as_dvec3() - pivot).try_normalize()?;
                 BasePlane::new(pivot, n, None).hit(ro, rd)
@@ -3982,6 +4083,7 @@ impl AppState {
     }
 
     pub fn begin_drag(&mut self, h: Handle, p: [f32; 2]) {
+        self.drag_rot = self.move_frame();
         if matches!(h, Handle::PushInset | Handle::PushDepth) {
             self.begin_push_drag(h, p);
             return;
@@ -4288,6 +4390,30 @@ impl AppState {
         Some(d.start.iter().map(|f| f.id).collect())
     }
 
+    /// Extrusions whose depth changes (a drag of their arrow, Shift + drag,
+    /// several faces at once): their end faces drawn moved at once and
+    /// their walls stretched (`draw::push_moves`) until the kernel's model
+    /// of the depth now arrives (Romain, 23 nov., 22 h 05: "je fait une
+    /// extrude sur 4 face ici et ça lag"). Each with its depth in the model
+    /// on screen and how far it changed since.
+    pub fn push_preview(&self) -> Option<std::collections::HashMap<FeatureId, (f64, f64)>> {
+        let m = self.model.as_ref()?;
+        if m.serial / 4 == self.version {
+            return None;
+        }
+        let (_, then) = self.sent_depths.iter().find(|(s, _)| *s == m.serial)?;
+        let mut out = std::collections::HashMap::new();
+        for (id, d) in then {
+            let Some(now) = self.doc.feature(*id).filter(|f| f.visible && !f.suspended).and_then(|f| f.push.as_ref()).map(|p| p.depth) else { continue };
+            // (an extrusion that turns into a cut, or one the model shows
+            // with no depth: left to the kernel)
+            if (now - d).abs() > 1e-9 && d.abs() > 1e-4 && now * d > 0.0 {
+                out.insert(*id, (*d, now - d));
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
     /// Object mode is a transform (Romain, 20 nov. 5 h 52: "déplace le
     /// transform qui contient l'élément, du coup ce doit être fluide et
     /// léger"): while whole shapes are dragged, each added one's faces (its
@@ -4464,6 +4590,11 @@ impl AppState {
             self.sent_frames.push((want, frames));
             if self.sent_frames.len() > 64 {
                 self.sent_frames.remove(0);
+            }
+            let depths = self.doc.features.iter().filter_map(|f| Some((f.id, f.push.as_ref()?.depth))).collect();
+            self.sent_depths.push((want, depths));
+            if self.sent_depths.len() > 64 {
+                self.sent_depths.remove(0);
             }
         }
     }
@@ -4788,6 +4919,7 @@ impl AppState {
         self.save_name = name.to_string();
         self.mirror_told = self.doc.features.iter().map(|f| f.id).max().unwrap_or(0);
         self.touched();
+        self.show_saved_model();
         self.ref_frame = true;
         self.frame_all();
     }

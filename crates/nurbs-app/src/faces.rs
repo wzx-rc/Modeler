@@ -4,7 +4,7 @@
 //! (`doc::Push`), made live while the pointer moves.
 
 use crate::state::*;
-use glam::{DVec3, Vec3};
+use glam::{DQuat, DVec3, Vec3};
 use nurbs_kernel::doc::Push;
 use nurbs_kernel::model::{EdgeKind, SurfKind};
 use nurbs_kernel::{Comp, EdgeRef, FaceRef, Feature, FeatureId, Knife, Prim, Tweak};
@@ -1367,6 +1367,94 @@ impl AppState {
         }
     }
 
+    /// The move gizmo's axes now: the world's, or with Normal on in a
+    /// component mode the picked components' own frame (Maya's Axis
+    /// Orientation: Normal): Y (its N arrow) along their mean normal, X
+    /// along an edge of the first, Z across.
+    pub fn move_frame(&self) -> DQuat {
+        if !self.settings.move_normal || self.sel_mode == SelMode::Object || self.gizmo != crate::state::GizmoMode::Move {
+            return DQuat::IDENTITY;
+        }
+        let ns = self.comp_normals();
+        let Some(first) = ns.first() else { return DQuat::IDENTITY };
+        let n = ns.iter().map(|c| c.1).sum::<DVec3>().try_normalize().unwrap_or(first.1);
+        let t = first.2.unwrap_or(DVec3::X);
+        let x = (t - n * t.dot(n)).try_normalize().or_else(|| (DVec3::X - n * n.x).try_normalize()).or_else(|| (DVec3::Z - n * n.z).try_normalize()).unwrap_or(DVec3::X);
+        let z = x.cross(n);
+        DQuat::from_mat3(&glam::DMat3::from_cols(x, n, z)).normalize()
+    }
+
+    /// The move gizmo's axes: frozen while a drag lasts.
+    pub fn gizmo_rot(&self) -> DQuat {
+        if self.drag.is_some() {
+            self.drag_rot
+        } else {
+            self.move_frame()
+        }
+    }
+
+    /// Each picked component (or the selected move step's, where it put
+    /// them): its point, its outward normal (a face's there; an edge's two
+    /// faces' mean; a vertex's faces' mean) and a direction along it (an
+    /// edge of the face, the edge, an edge leaving the vertex).
+    pub(crate) fn comp_normals(&self) -> Vec<(DVec3, DVec3, Option<DVec3>)> {
+        let Some(m) = self.model.as_ref() else { return vec![] };
+        let (comps, shift) = match self.selected_tweak().and_then(|f| f.tweak.clone()) {
+            Some(t) if !t.copy => (t.comps().cloned().collect::<Vec<_>>(), t.delta),
+            _ => (self.picked_comps(), DVec3::ZERO),
+        };
+        let d3 = |q: &[f32; 3]| Vec3::from(*q).as_dvec3();
+        let along = |e: &nurbs_kernel::model::Edge| -> Option<DVec3> { Some(d3(e.pts.last()?) - d3(e.pts.first()?)).filter(|v| v.length() > 1e-9) };
+        let mut out = vec![];
+        for c in comps {
+            match c {
+                Comp::Face(r) => {
+                    let at = r.at + shift;
+                    let Some(i) = self.model_face_of(&FaceRef { at, ..r }) else { continue };
+                    let Some(n) = self.normal_near(i, at) else { continue };
+                    let t = m.edges.iter().filter(|e| !e.seam && e.faces.contains(&(i as i32)) && e.kind == EdgeKind::Line).find_map(|e| along(e)).or_else(|| m.edges.iter().filter(|e| !e.seam && e.faces.contains(&(i as i32))).find_map(|e| along(e)));
+                    out.push((at, n, t));
+                }
+                Comp::Edge(r) => {
+                    let at = r.at + shift;
+                    let Some(i) = self.model_edge_of(&EdgeRef { at, ..r }) else { continue };
+                    let e = &m.edges[i];
+                    let n: DVec3 = e.faces.iter().filter(|f| **f >= 0).filter_map(|f| self.normal_near(*f as usize, at)).sum();
+                    let Some(n) = n.try_normalize() else { continue };
+                    out.push((at, n, along(e)));
+                }
+                Comp::Vertex(v) => {
+                    let at = v + shift;
+                    let mut n = DVec3::ZERO;
+                    let mut t = None;
+                    let mut seen: Vec<i32> = vec![];
+                    for e in m.edges.iter().filter(|e| !e.seam) {
+                        let (Some(a), Some(b)) = (e.pts.first().map(d3), e.pts.last().map(d3)) else { continue };
+                        let away = if a.distance(at) < 1e-3 {
+                            e.pts.get(1).map(d3).map(|q| q - a)
+                        } else if b.distance(at) < 1e-3 {
+                            e.pts.get(e.pts.len().saturating_sub(2)).map(d3).map(|q| q - b)
+                        } else {
+                            continue;
+                        };
+                        if t.is_none() {
+                            t = away;
+                        }
+                        for f in e.faces.iter().filter(|f| **f >= 0) {
+                            if !seen.contains(f) {
+                                seen.push(*f);
+                                n += self.normal_near(*f as usize, at).unwrap_or(DVec3::ZERO);
+                            }
+                        }
+                    }
+                    let Some(n) = n.try_normalize() else { continue };
+                    out.push((at, n, t));
+                }
+            }
+        }
+        out
+    }
+
     /// Where the gizmo sits in Vertex, Edge and Face modes.
     pub fn comp_pivot(&self) -> Option<DVec3> {
         if self.tool != Tool::Select || self.push.is_some() {
@@ -1438,6 +1526,11 @@ impl AppState {
         }
         let cage = if matches!(h, Handle::Cage(_)) { self.cage() } else { None };
         let Some(pivot) = self.pivot() else { return };
+        // with Normal on, the N arrow on several components: each moves
+        // along its own normal by the same amount (Maya), a step each
+        if h == Handle::Axis(1) && self.drag_rot != DQuat::IDENTITY && self.selected_tweak().is_none() && self.begin_normals_drag(pivot, p) {
+            return;
+        }
         let Some(grab) = self.handle_param(h, pivot, p) else { return };
         let custom = self.custom_pivot_on();
         let mut carried = if crate::state::move_mask(h).is_some() { self.tweak_carried() } else { Default::default() };
@@ -1487,6 +1580,43 @@ impl AppState {
         }
     }
 
+    /// Several picked components moved along their own normals at once
+    /// (the gizmo's N arrow with Normal on): a move step each, one undo
+    /// step, sized as an edge pull is. False with one component (the
+    /// gizmo's own move does it).
+    fn begin_normals_drag(&mut self, pivot: DVec3, p: [f32; 2]) -> bool {
+        let comps = self.picked_comps();
+        let ns = self.comp_normals();
+        if comps.len() < 2 || ns.len() != comps.len() {
+            return false;
+        }
+        let n = self.drag_rot * DVec3::Y;
+        let (ro, rd) = self.ray(p);
+        let t0 = closest_on_line(pivot, n, ro, rd).unwrap_or(0.0);
+        let Some(t) = Tweak::new(vec![comps[0].clone()]) else { return false };
+        self.begin_live(t.label());
+        let mut id = 0;
+        let mut others = vec![];
+        self.live(|d| {
+            id = d.add_tweak(t);
+            for c in &comps[1..] {
+                if let Some(t2) = Tweak::new(vec![c.clone()]) {
+                    others.push(d.add_tweak(t2));
+                }
+            }
+        });
+        self.face_sel.clear();
+        self.edge_sel.clear();
+        self.vert_sel.clear();
+        self.selection = std::iter::once(id).chain(others.iter().copied()).collect();
+        let px = self.mm_per_point(pivot);
+        let dirs = ns[1..].iter().map(|c| c.1).collect();
+        // the first along its own normal too
+        self.face_drag = Some(FaceDrag { id, what: FaceDragWhat::Edge { at: pivot, n, t0 }, press: p, px, size: 0.0, others, dirs });
+        self.face_drag_first = Some(ns[0].1);
+        true
+    }
+
     pub(crate) fn update_tweak_drag(&mut self, d: &Drag, p: [f32; 2]) {
         let Some(t0) = d.start[0].tweak.clone() else { return };
         let id = d.start[0].id;
@@ -1508,7 +1638,16 @@ impl AppState {
         }
         let Some(now) = self.handle_param(d.handle, pivot0, p) else { return };
         let raw = now - d.grab;
-        let mut delta = DVec3::new(self.snap(raw.x), self.snap(raw.y), self.snap(raw.z));
+        // (snapped on the gizmo's own axes: the world's, or the normal's)
+        let rot = self.drag_rot;
+        let l = rot.inverse() * raw;
+        let mut delta = rot * DVec3::new(self.snap(l.x), self.snap(l.y), self.snap(l.z));
+        if matches!(d.handle, Handle::Axis(_) | Handle::Plane(_)) && rot != DQuat::IDENTITY {
+            self.gizmo_readout = Some(match d.handle {
+                Handle::Axis(1) => format!("N {} mm", crate::widgets::fmt_mm((rot.inverse() * delta).y as f32)),
+                _ => format!("{} mm", crate::widgets::fmt_mm(delta.length() as f32)),
+            });
+        }
         self.snap_shown = None;
         // R in a component mode: scaled round their centre, along X, Y, Z
         if matches!(d.handle, Handle::Scale(_) | Handle::ScaleAll) {
@@ -1541,7 +1680,7 @@ impl AppState {
         // it; the pointer on one: the pivot lines up with it, along the
         // axis, in the plane, or on it (the centre: all three axes)
         let Some(mask) = crate::state::move_mask(d.handle) else { return };
-        if let Some((best, shown)) = self.align_move(p, raw, mask, &[pivot0], &d.carried, &[]) {
+        if let Some((best, shown)) = self.align_move_in(p, raw, mask, rot, &[pivot0], &d.carried, &[]) {
             delta = best;
             self.snap_shown = Some(shown);
         }
@@ -1752,8 +1891,9 @@ impl AppState {
                 let d = self.snap(t - t0);
                 g.size = d;
                 let more: Vec<(FeatureId, DVec3)> = g.others.iter().copied().zip(g.dirs.iter().copied()).collect();
+                let n1 = self.face_drag_first.unwrap_or(n);
                 self.live(|doc| {
-                    for (i, dir) in std::iter::once((id, n)).chain(more.iter().copied()) {
+                    for (i, dir) in std::iter::once((id, n1)).chain(more.iter().copied()) {
                         if let Some(tw) = doc.feature_mut(i).and_then(|f| f.tweak.as_mut()) {
                             tw.delta = dir * d;
                         }
@@ -1765,6 +1905,7 @@ impl AppState {
     }
 
     pub fn end_face_drag(&mut self) {
+        self.face_drag_first = None;
         let Some(g) = self.face_drag.take() else { return };
         if g.what == FaceDragWhat::Inset || g.size.abs() > 1e-9 {
             self.end_live();

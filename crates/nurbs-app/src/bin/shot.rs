@@ -1961,6 +1961,221 @@ fn main() {
         h.shot("zero-multi-5-edges-pulled");
     }
 
+    if want("history-off") {
+        // History off (Romain 23 nov., 22 h 05: "mettre une option de
+        // history en OFF"): an inset then an extrusion on a block, each
+        // folded into the block once made; Ctrl + Z brings the history back
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.st.settings.history_off = true;
+        let list = |h: &Harness| h.st.doc.features.iter().map(|f| format!("{}{}", f.name, if f.frozen.is_some() { " (one solid)" } else { "" })).collect::<Vec<_>>();
+        let wait = |h: &mut Harness| {
+            for _ in 0..4 {
+                h.settle();
+                h.steps(3);
+            }
+        };
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.key(egui::Key::I);
+        wait(&mut h);
+        eprintln!("  after I: {:?}, toast {:?}", list(&h), h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.shot("zero-history-off-1-inset");
+        h.key(egui::Key::F11);
+        let top = h.screen_of(Vec3::new(0.0, 20.0, 0.0));
+        h.click(top);
+        let up = h.screen_of(Vec3::new(0.0, 28.0, 0.0));
+        h.hold(Modifiers::SHIFT);
+        h.press(top, true);
+        for i in 1..=10 {
+            h.move_to(top + (up - top) * (i as f32 / 10.0));
+        }
+        h.press(up, false);
+        h.hold(Modifiers::NONE);
+        wait(&mut h);
+        eprintln!("  after Shift + drag: {:?}, errors {:?}", list(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-history-off-2-extruded");
+        h.st.undo();
+        wait(&mut h);
+        eprintln!("  undo: {:?}", list(&h));
+        h.shot("zero-history-off-3-undo");
+    }
+
+    if want("normal") {
+        // The move along the picked components' normals (Maya's Axis
+        // Orientation Normal; Romain 23 nov., 22 h 05: "un transformTool
+        // comme dans Maya qui déplace une sélection par rapport à ces
+        // normal"): NORMAL on, a face of a block turned 30°, its gizmo along
+        // its normal, dragged; then three faces dragged along N, each along
+        // its own
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::from_rotation_y(0.5) * DQuat::from_rotation_z(0.3));
+        h.reset(d, "Block");
+        h.st.settings.move_normal = true;
+        let tweaks = |h: &Harness| h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| (f.name.clone(), [t.delta.x, t.delta.y, t.delta.z].map(|v| (v * 100.0).round() / 100.0)))).collect::<Vec<_>>();
+        let face_at = |h: &Harness, local: DVec3| -> Pos2 {
+            let f = &h.st.doc.features[0];
+            h.screen_of((f.origin + f.rot * local).as_vec3())
+        };
+        h.key(egui::Key::F11);
+        h.click(face_at(&h, DVec3::new(-8.0, 20.0, 0.0)));
+        h.key(egui::Key::W);
+        h.steps(3);
+        h.shot("zero-normal-1-gizmo");
+        let drag_n = |h: &mut Harness, mm: f32, shot: &str| {
+            let Some(pivot) = h.st.pivot() else { return };
+            let pivot = pivot.as_vec3();
+            let axis = h.st.gizmo_rot().as_quat() * Vec3::Y;
+            let v = h.st.view();
+            let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0;
+            let a = h.screen_of(pivot + axis * k * 0.8);
+            let b = h.screen_of(pivot + axis * (k * 0.8 + mm));
+            h.move_to(a);
+            h.steps(2);
+            eprintln!("  hot {:?}", h.st.hot_handle);
+            h.drag(a, b, 10, false);
+            h.steps(2);
+            h.shot(&format!("{shot}-drag"));
+            h.press(b, false);
+            h.settle();
+            h.steps(3);
+        };
+        drag_n(&mut h, 6.0, "zero-normal-2");
+        eprintln!("  one face along its normal: {:?}, errors {:?}", tweaks(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-normal-3-moved");
+        h.st.undo();
+        h.settle();
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::F11);
+        h.click(face_at(&h, DVec3::new(20.0, 10.0, 0.0)));
+        h.hold(Modifiers::SHIFT);
+        h.click(face_at(&h, DVec3::new(0.0, 20.0, 0.0)));
+        h.click(face_at(&h, DVec3::new(0.0, 10.0, 15.0)));
+        h.hold(Modifiers::NONE);
+        h.key(egui::Key::W);
+        h.steps(3);
+        eprintln!("  picked {}", h.st.face_sel.len());
+        h.shot("zero-normal-4-three");
+        drag_n(&mut h, 5.0, "zero-normal-5");
+        eprintln!("  three faces along N: {:?}, errors {:?}", tweaks(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-normal-6-moved");
+    }
+
+    if want("open-cached") {
+        // A long scene opened again (Romain 23 nov., 22 h 05: "Quand
+        // j'ouvre la scene très longue à tout rebuild"): the kernel's model
+        // of the last time shown at once (`show_saved_model`), the kernel
+        // building meanwhile. FORME_DOC = a scene (else the test part);
+        // FORME_DOCS sets where the cache goes.
+        let d = match std::env::var("FORME_DOC") {
+            Ok(p) => Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap(),
+            Err(_) => test_part(),
+        };
+        h.reset(d.clone(), "Scene");
+        h.st.keep_model();
+        std::thread::sleep(Duration::from_millis(1500));
+        // the app started again on it
+        let t0 = Instant::now();
+        h.st = AppState::new(d, "Scene", Kernel::start(kernel_exe()));
+        h.st.show_saved_model();
+        h.st.frame_all();
+        h.steps(2);
+        eprintln!("  shown after {:.0} ms: {} faces", t0.elapsed().as_secs_f64() * 1e3, h.st.model.as_ref().map_or(0, |m| m.faces.len()));
+        h.shot("zero-open-1-at-once");
+        h.settle();
+        eprintln!("  built after {:.1} s: {} faces", t0.elapsed().as_secs_f64(), h.st.model.as_ref().map_or(0, |m| m.faces.len()));
+        h.shot("zero-open-2-built");
+    }
+
+    if want("extrude-live") {
+        // An Extrude of several faces dragged by its arrow (Romain 23 nov.,
+        // 22 h 05: "je fait une extrude sur 4 face ici et ça lag"): the
+        // ends drawn moved at once and the walls stretched while the kernel
+        // works (`push_preview`), the kernel making them in one boolean
+        // (`push_batch`). FORME_DOC = a scene, FORME_PUSHES = its ids (else
+        // the extrusions at its end); else a block with four extruded faces.
+        let d = match std::env::var("FORME_DOC") {
+            Ok(p) => Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap(),
+            Err(_) => {
+                let mut d = Doc::default();
+                let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+                for (sub, at) in [(0u16, DVec3::new(20.0, 10.0, 0.0)), (1, DVec3::new(-20.0, 10.0, 0.0)), (2, DVec3::new(0.0, 20.0, 0.0)), (4, DVec3::new(0.0, 10.0, 15.0))] {
+                    let face = nurbs_kernel::FaceRef { tag: FaceTag { feature: b, sub }.pack(), at };
+                    d.add_push(nurbs_kernel::Push { face, inset: 3.0, depth: 4.0 });
+                }
+                d
+            }
+        };
+        let t0 = Instant::now();
+        h.reset(d, "Extrudes");
+        h.settle();
+        eprintln!("  built in {:.2} s", t0.elapsed().as_secs_f64());
+        let ids: Vec<u32> = std::env::var("FORME_PUSHES").ok().map(|v| v.split(',').filter_map(|w| w.parse().ok()).collect()).unwrap_or_else(|| {
+            let fs = &h.st.doc.features;
+            let k = fs.iter().rposition(|f| f.push.as_ref().is_none_or(|p| p.depth.abs() < 1e-6)).map_or(0, |k| k + 1);
+            fs[k..].iter().map(|f| f.id).collect()
+        });
+        h.key(egui::Key::F11);
+        h.st.selection = ids.clone();
+        h.key(egui::Key::F);
+        h.settle();
+        h.st.camera.dist *= 1.8;
+        h.st.camera.yaw += 0.5;
+        h.steps(3);
+        if let Some(hs) = h.st.push_handles() {
+        h.shot("zero-extrude-live-1-selected");
+        let grab = hs.base + (hs.tip - hs.base) * 0.6;
+        let (a, b) = (h.screen_of(grab.as_vec3()), h.screen_of((grab + hs.n * 6.0).as_vec3()));
+        h.move_to(a);
+        h.steps(2);
+        h.press(a, true);
+        let mut seen = h.st.model_gen;
+        let (mut answers, mut previewed, mut worst) = (0, 0, 0.0f64);
+        let n = 40;
+        for i in 1..=n {
+            h.pending.push(Event::PointerMoved(a + (b - a) * (i as f32 / n as f32)));
+            let t = h.frame_timed();
+            worst = worst.max(t.iter().sum());
+            if h.st.push_preview().is_some() {
+                previewed += 1;
+            }
+            if h.st.model_gen != seen {
+                seen = h.st.model_gen;
+                answers += 1;
+            }
+            if i == 20 {
+                eprintln!("  frame 20: preview {}", h.st.push_preview().is_some());
+                h.shot("zero-extrude-live-2-drag");
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        // held still at the end: drawn from the preview at once, then the
+        // kernel's model of the same depth
+        h.steps(1);
+        eprintln!("  held: preview {}", h.st.push_preview().is_some());
+        h.shot("zero-extrude-live-3-held-preview");
+        for _ in 0..400 {
+            if h.st.push_preview().is_none() {
+                break;
+            }
+            h.steps(1);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        h.steps(2);
+        h.shot("zero-extrude-live-4-held-built");
+        h.press(b, false);
+        eprintln!("  {n} frames: {previewed} drawn from the preview, {answers} kernel answers, worst frame {worst:.1} ms");
+        h.settle();
+        h.steps(3);
+        let depths: Vec<(String, f64)> = ids.iter().filter_map(|id| h.st.doc.feature(*id).and_then(|f| Some((f.name.clone(), (f.push.as_ref()?.depth * 100.0).round() / 100.0)))).collect();
+        eprintln!("  depths {depths:?}, errors {:?}", h.st.model.as_ref().map(|m| m.errors.len()));
+        h.shot("zero-extrude-live-5-done");
+        } else {
+            eprintln!("  no handles for {ids:?}");
+        }
+    }
+
     if want("direct") {
         // Shift + drag on a picked face: extrude; Ctrl + drag: inset;
         // Shift + drag on a picked edge: the edge pulled out

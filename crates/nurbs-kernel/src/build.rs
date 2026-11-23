@@ -56,6 +56,9 @@ struct Stage {
     /// The move just made took its mirror image with it (one move of
     /// both: a face across the plane bends once): the image step is done.
     paired: bool,
+    /// The steps after this one made with it in one boolean (`push_batch`):
+    /// done already.
+    batched: usize,
     /// Where it has been: the boxes (min, max) of its lumps after each
     /// step, and of the shapes added to it or cut from it (`build_islands`:
     /// islands whose boxes come near each other are built as one).
@@ -78,7 +81,7 @@ struct Stage {
 
 impl Stage {
     fn new() -> Stage {
-        Stage { shape: None, errors: vec![], limits: vec![], conic: vec![], tension_limits: vec![], paired: false, ext: vec![], noted: 0, mirrors: vec![], even: None, rough: false }
+        Stage { shape: None, errors: vec![], limits: vec![], conic: vec![], tension_limits: vec![], paired: false, batched: 0, ext: vec![], noted: 0, mirrors: vec![], even: None, rough: false }
     }
     /// Its faces of one surface made one (the shape kept when none is).
     /// The faces of one surface made one, as a union or a cut made
@@ -1230,11 +1233,95 @@ fn find_face(shape: &Shape, r: &FaceRef) -> Option<usize> {
 /// solid, None when it changes nothing. Its new faces are tagged with the
 /// step: 1 the inset (or the end of the extrusion), 2, 3… its sides.
 fn push(acc: &Shape, f: &Feature, p: &Push, limit: &mut Option<f64>) -> Result<Option<Shape>, String> {
+    match push_tool(acc, f, p, limit)? {
+        PushMade::Nothing => Ok(None),
+        PushMade::Imprint(inner) => acc.imprint(&inner).map(Some),
+        PushMade::Tool(t, true) => acc.fuse(&t).map(Some),
+        PushMade::Tool(t, false) => acc.cut(&t).map(Some),
+    }
+}
+
+/// What an inset or extrusion adds to the part: nothing, a line drawn on
+/// its face (an inset with no depth), or a solid fused (true) or cut.
+enum PushMade {
+    Nothing,
+    Imprint(Shape),
+    Tool(Shape, bool),
+}
+
+/// The extrusions that follow step `i` and are made with it in one boolean
+/// while a gesture is live (an Extrude of several faces, Romain 23 nov.,
+/// 22 h 05: "je fait une extrude sur 4 face ici et ça lag"): each an
+/// extrusion the same way (all fused or all cut), with their mirror images
+/// (after a Mirror), the next in the whole history too, none on a face
+/// another of them made, all changed since the last request (the ones the
+/// gesture moves: the others keep the stages the fine build made). Their
+/// count (0: none). The fine build makes them one after the other as
+/// before (its faces of one surface made one at each), so a part saved
+/// never changes with it.
+fn push_batch(feats: &[&Feature], i: usize, island: bool) -> usize {
+    if std::env::var_os("FORME_NO_BATCH").is_some() {
+        return 0;
+    }
+    let live = |f: &Feature| LIVE.with(|l| l.borrow().contains(&f.id));
+    if !live(feats[i]) {
+        return 0;
+    }
+    let way = |f: &Feature| f.push.as_ref().filter(|p| p.depth.abs() >= 1e-6).map(|p| p.depth > 0.0);
+    let Some(w) = way(feats[i]) else { return 0 };
+    if twin_of(feats, i).is_some() {
+        return 0;
+    }
+    let face = |g: &Feature| g.push.as_ref().map(|p| p.face.tag).unwrap_or(-1);
+    let mut n = 0;
+    // the last original taken (its place in the whole history)
+    let mut prev = feats[i];
+    while let Some(&g) = feats.get(i + 1 + n) {
+        let k = i + 1 + n;
+        if way(g) != Some(w) || !live(g) {
+            break;
+        }
+        if twin_of(feats, k).is_none() {
+            if g.id == feats[k - 1].id || g.one_side != prev.one_side {
+                break;
+            }
+            // (one on a face another of them made: one after the other)
+            let t = FaceTag::unpack(face(g));
+            if feats[i..k].iter().any(|h| t.is_some_and(|x| x.feature == h.id)) {
+                break;
+            }
+            if island {
+                match (place_of(feats[k - 1]), place_of(g)) {
+                    (Some(a), Some(b)) if b == a + 1 => {}
+                    _ => break,
+                }
+            }
+            prev = g;
+        }
+        n += 1;
+    }
+    // (never an original without its image)
+    if n > 0 && feats.get(i + 1 + n).is_some_and(|_| twin_of(feats, i + 1 + n).is_some()) {
+        n -= 1;
+    }
+    if std::env::var_os("FORME_BATCH_DEBUG").is_some() {
+        eprintln!("push_batch at {} ({}): {n}", feats[i].id, feats[i].name);
+    }
+    n
+}
+
+thread_local! {
+    /// A coarse build (a gesture live): the extrusions changed since the
+    /// last request, batched (`push_batch`).
+    static LIVE: std::cell::RefCell<std::collections::HashSet<FeatureId>> = std::cell::RefCell::new(Default::default());
+}
+
+fn push_tool(acc: &Shape, f: &Feature, p: &Push, limit: &mut Option<f64>) -> Result<PushMade, String> {
     let face = find_face(acc, &p.face).ok_or("its face is gone")?;
     let info = acc.face_info(face).ok_or("its face is gone")?;
     let inset = p.inset.max(0.0);
     if p.depth.abs() < 1e-6 && inset < 1e-6 {
-        return Ok(None);
+        return Ok(PushMade::Nothing);
     }
     let tag = |sub: u16| FaceTag { feature: f.id, sub }.pack();
     if info.kind != OccSurf::Plane {
@@ -1245,7 +1332,7 @@ fn push(acc: &Shape, f: &Feature, p: &Push, limit: &mut Option<f64>) -> Result<O
         }
         mark(&step("push", f));
         let tool = acc.thicken_face(face, p.depth, [tag(0), tag(1), tag(2)])?;
-        return if p.depth > 0.0 { acc.fuse(&tool) } else { acc.cut(&tool) }.map(Some);
+        return Ok(PushMade::Tool(tool, p.depth > 0.0));
     }
     mark(&step("push", f));
     let mut inner = match acc.inset_face(face, inset) {
@@ -1280,7 +1367,7 @@ fn push(acc: &Shape, f: &Feature, p: &Push, limit: &mut Option<f64>) -> Result<O
     // depth 0: the inset only drawn on the face
     if p.depth.abs() < 1e-6 {
         inner.set_tags(&vec![tag(1); inner.face_count().max(1)]);
-        return acc.imprint(&inner).map(Some);
+        return Ok(PushMade::Imprint(inner));
     }
     let n = DVec3::from_array(info.normal);
     let o = DVec3::from_array(info.point);
@@ -1305,7 +1392,7 @@ fn push(acc: &Shape, f: &Feature, p: &Push, limit: &mut Option<f64>) -> Result<O
         })
         .collect();
     prism.set_tags(&tags);
-    if p.depth > 0.0 { acc.fuse(&prism) } else { acc.cut(&prism) }.map(Some)
+    Ok(PushMade::Tool(prism, p.depth > 0.0))
 }
 
 /// The vertices (1-based) a component names on what is built so far.
@@ -2244,6 +2331,12 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") || skipped("cut") || skipped("mirror") || skipped("shell") {
             key = hash2(key, 1);
         }
+        // (extrusions made with this one in one boolean: their stage is
+        // this one's, so its key says what they are)
+        let batch = if stage.batched == 0 && !skip.iter().any(|s| s.starts_with("push:")) { push_batch(feats, i, island) } else { 0 };
+        for g in &feats[i + 1..i + 1 + batch] {
+            key = hash2(hash2(key, 0x6261746368), hash_of(doc, g));
+        }
         if let Some(m) = &f.mirror {
             sym = Some(*m);
         }
@@ -2251,6 +2344,12 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         if let Some(s) = cache.stages.get(&key) {
             stage = s.clone();
             model.cached += 1;
+            continue;
+        }
+        // made already with the extrusion before it
+        if stage.batched > 0 {
+            stage.batched -= 1;
+            keep(cache, key, &mut stage);
             continue;
         }
         // the part made symmetric
@@ -2445,6 +2544,64 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         // an inset or extrusion of a face: on the solid built so far
         if let Some(p) = &f.push {
             if let Some(acc) = stage.shape.clone() {
+                // with the extrusions after it, in one boolean
+                if batch > 0 {
+                    let mut tools: Option<(Shape, bool)> = None;
+                    let mut ok = true;
+                    let mut faces: Vec<Option<usize>> = vec![];
+                    for (j, g) in feats[i..=i + batch].iter().enumerate() {
+                        // (an image on the face its step pushed: made once;
+                        // two others on one face: one after the other)
+                        let fc = g.push.as_ref().and_then(|q| find_face(&acc, &q.face));
+                        if fc.is_some() && faces.contains(&fc) {
+                            if twin_of(feats, i + j).is_some() && faces.last() == Some(&fc) {
+                                faces.push(None);
+                                continue;
+                            }
+                            ok = false;
+                            break;
+                        }
+                        faces.push(fc);
+                        let mut l = None;
+                        match g.push.as_ref().map(|q| push_tool(&acc, g, q, &mut l)) {
+                            Some(Ok(PushMade::Tool(t, w))) if tools.as_ref().is_none_or(|x| x.1 == w) => {
+                                tools = Some(match tools.take() {
+                                    None => (t, w),
+                                    Some((c, _)) => match c.compound(&t) {
+                                        Ok(c) => (c, w),
+                                        Err(_) => {
+                                            ok = false;
+                                            break;
+                                        }
+                                    },
+                                });
+                            }
+                            _ => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    let dbg = std::env::var_os("FORME_BATCH_DEBUG").is_some();
+                    if dbg {
+                        eprintln!("batch at {} ({}): {} more, tools ok {ok}", f.id, f.name, batch);
+                    }
+                    if let (true, Some((t, w))) = (ok, tools) {
+                        mark(&step("pushes", f));
+                        let r = if w { acc.fuse_each(&t) } else { acc.cut_each(&t) };
+                        if dbg {
+                            eprintln!("  boolean: {:?}", r.as_ref().map(|s| s.face_count()).map_err(|e| e.clone()));
+                        }
+                        if let Ok(s) = r {
+                            model.booleans += 1;
+                            stage.shape = Some(Rc::new(s));
+                            stage.rough = true;
+                            stage.batched = batch;
+                            keep(cache, key, &mut stage);
+                            continue;
+                        }
+                    }
+                }
                 let mut limit = None;
                 let res = if skipped("push") { Err("skipped, it crashed the kernel".to_string()) } else { push(&acc, f, p, &mut limit) };
                 if let Some(l) = limit {
@@ -3582,6 +3739,7 @@ fn bake(doc: &Doc, f: &Feature, skip: &[String], cache: &mut Cache) -> crate::mo
 pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Cache) -> Model {
     let t0 = Instant::now();
     let mut model = Model { fine, ..Default::default() };
+    LIVE.with(|l| l.borrow_mut().clear());
     // the elements the app asks to freeze (Delete History): each built
     // alone with its operations, sent back as a solid in its own frame
     if fine {
@@ -3596,6 +3754,15 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let sided = sided_doc(doc);
     let doc = sided.as_ref().unwrap_or(doc);
     let ordered = if fine || quads || std::env::var_os("FORME_NO_DRAG_ORDER").is_some() { None } else { drag_order(doc, &cache.last) };
+    // the extrusions changed since the last request (a gesture live): made
+    // in one boolean (`push_batch`)
+    let changed: std::collections::HashSet<FeatureId> = if fine || quads {
+        Default::default()
+    } else {
+        let before: std::collections::HashMap<FeatureId, u64> = cache.last.iter().copied().collect();
+        doc.features.iter().filter(|f| f.push.is_some() && before.get(&f.id).is_some_and(|h| *h != f.hash())).map(|f| f.id).collect()
+    };
+    LIVE.with(|l| *l.borrow_mut() = changed);
     cache.last = doc.features.iter().map(|f| (f.id, f.hash())).collect();
     let doc = ordered.as_ref().unwrap_or(doc);
     // each shape's own symmetry, each Array's copies, then after a Mirror
@@ -5592,6 +5759,55 @@ mod tests {
     /// face moved along its normal past a hole failed as soon as the part
     /// held another object beside it (the union had to give one solid).
     #[test]
+    fn extrusions_batched_while_dragged() {
+        // four faces of a block extruded together, then dragged deeper: while
+        // the gesture lasts (coarse builds) the four are made in one boolean,
+        // and give the part the fine build makes one after the other
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let mut ids = vec![];
+        for (sub, at) in [(0u16, DVec3::new(20.0, 10.0, 0.0)), (1, DVec3::new(-20.0, 10.0, 0.0)), (2, DVec3::new(0.0, 20.0, 0.0)), (4, DVec3::new(0.0, 10.0, 15.0))] {
+            ids.push(d.add_push(Push { face: FaceRef { tag: tag(b, sub), at }, inset: 3.0, depth: 4.0 }));
+        }
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        for (k, depth) in [6.0, 7.5].into_iter().enumerate() {
+            for id in &ids {
+                d.feature_mut(*id).unwrap().push.as_mut().unwrap().depth = depth;
+            }
+            let live = build(&d, false, false, &[], &mut cache);
+            assert!(live.errors.is_empty(), "{:?}", live.errors);
+            assert_eq!(live.booleans, 1, "step {k}: one boolean for the four");
+            let fine = build(&d, true, false, &[], &mut Cache::default());
+            assert_eq!(live.faces.len(), fine.faces.len());
+            let tags = |m: &Model| {
+                let mut v: Vec<i64> = m.faces.iter().filter_map(|f| f.tag.map(|t| t.pack())).collect();
+                v.sort();
+                v
+            };
+            assert_eq!(tags(&live), tags(&fine));
+            let ext = |m: &Model| {
+                let mut lo = [f32::MAX; 3];
+                let mut hi = [f32::MIN; 3];
+                for p in &m.positions {
+                    for a in 0..3 {
+                        lo[a] = lo[a].min(p[a]);
+                        hi[a] = hi[a].max(p[a]);
+                    }
+                }
+                (lo, hi)
+            };
+            assert_eq!(ext(&live), ext(&fine));
+        }
+        // with FORME_NO_BATCH-like order: a second gesture on one of them
+        // only (the others unchanged): made alone
+        d.feature_mut(ids[0]).unwrap().push.as_mut().unwrap().depth = 9.0;
+        let live = build(&d, false, false, &[], &mut cache);
+        assert!(live.errors.is_empty(), "{:?}", live.errors);
+    }
+
+    #[test]
     fn inset_line_kept_and_face_moved_beside_another_object() {
         // a block, its front inset 2 mm as a line
         let mut d = Doc::default();
@@ -6108,7 +6324,22 @@ mod tests {
             _ => DVec3::X,
         } * step;
         let steps: usize = std::env::var("FORME_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+        // FORME_PUSH=id,id…: those insets / extrusions deepened 0.2 mm a
+        // step instead (an Extrude of several faces dragged)
+        let pushes: Vec<FeatureId> = std::env::var("FORME_PUSH").ok().map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
         for i in 0..steps {
+            if !pushes.is_empty() {
+                for f in d.features.iter_mut().filter(|f| pushes.contains(&f.id)) {
+                    if let Some(pu) = f.push.as_mut() {
+                        pu.depth += 0.2 * step;
+                    }
+                }
+                let t = std::time::Instant::now();
+                let m = build(&d, false, false, &[], &mut cache);
+                worst = worst.max(t.elapsed().as_secs_f64() * 1e3);
+                eprintln!("push {i}: {:.0} ms, cached {} of {}, errors {}", t.elapsed().as_secs_f64() * 1e3, m.cached, d.features.len(), m.errors.len());
+                continue;
+            }
             for f in d.features.iter_mut().filter(|f| ids.contains(&f.id)) {
                 if f.id == id {
                     f.origin += dir;

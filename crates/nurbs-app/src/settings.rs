@@ -43,11 +43,23 @@ pub struct Settings {
     /// The interface's size, 1 as it comes (Romain 23 nov., 17 h 59: "un
     /// slider pour scale l'UI"), from 0.7 to 1.6.
     pub ui_scale: f32,
+    /// The move gizmo along the picked components' normal (Maya's Axis
+    /// Orientation: Normal; Romain 23 nov., 22 h 05: "un transformTool comme
+    /// dans Maya qui déplace une sélection par rapport à ces normal"), else
+    /// along the world's axes.
+    #[serde(default)]
+    pub move_normal: bool,
+    /// History off (Maya's construction history off; Romain 23 nov.,
+    /// 22 h 05: "mettre une option de history en OFF"): each operation,
+    /// once made, folded into its shape (Delete History on it), so a long
+    /// scene stays short to build.
+    #[serde(default)]
+    pub history_off: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: cfg!(target_os = "ios"), mirror_bar: false, mirror_plane: true, select_through: true, ui_scale: 1.0 }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: cfg!(target_os = "ios"), mirror_bar: false, mirror_plane: true, select_through: true, ui_scale: 1.0, move_normal: false, history_off: false }
     }
 }
 

@@ -48,6 +48,8 @@ extern "C" {
     fn focc_transform(s: *const FShape, m: *const c_double) -> *mut FShape;
     fn focc_fuse(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_fuse_checked(a: *const FShape, b: *const FShape) -> *mut FShape;
+    fn focc_fuse_each(a: *const FShape, b: *const FShape) -> *mut FShape;
+    fn focc_cut_each(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_cut(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_common(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_region_cut(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int) -> *mut FShape;
@@ -646,6 +648,16 @@ impl Shape {
     }
     pub fn cut(&self, tool: &Shape) -> Result<Shape, String> {
         self.solid_boolean(tool, focc_cut)
+    }
+    /// A union with each solid of `tools` (a compound, `compound`) taken
+    /// as a tool of its own, in one boolean: several extrusions of one
+    /// gesture, which may overlap each other.
+    pub fn fuse_each(&self, tools: &Shape) -> Result<Shape, String> {
+        self.solid_boolean(tools, focc_fuse_each)
+    }
+    /// The same, each cut.
+    pub fn cut_each(&self, tools: &Shape) -> Result<Shape, String> {
+        self.solid_boolean(tools, focc_cut_each)
     }
     /// What the two have in common (the Curves set's Intersect: two flat
     /// regions).

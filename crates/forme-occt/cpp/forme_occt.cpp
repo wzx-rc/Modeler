@@ -1162,13 +1162,30 @@ static FShape* boolean(BRepAlgoAPI_BooleanOperation& op, const char* what, const
     return r;
 }
 
+// The tool given as a compound of several solids taken as that many tools
+// (`focc_fuse_each`, `focc_cut_each`: several extrusions of one gesture in
+// one boolean; solids that overlap each other are no valid single tool).
+static thread_local bool g_each_tool = false;
+
+static void append_tools(TopTools_ListOfShape& tools, const TopoDS_Shape& b) {
+    if (g_each_tool && b.ShapeType() == TopAbs_COMPOUND) {
+        int n = 0;
+        for (TopExp_Explorer x(b, TopAbs_SOLID); x.More(); x.Next()) {
+            tools.Append(x.Current());
+            n++;
+        }
+        if (n > 0) return;
+    }
+    tools.Append(b);
+}
+
 FShape* focc_fuse(const FShape* a, const FShape* b) {
     return guard(
         [&] {
             BRepAlgoAPI_Fuse op;
             TopTools_ListOfShape args, tools;
             args.Append(a->s);
-            tools.Append(b->s);
+            append_tools(tools, b->s);
             op.SetArguments(args);
             op.SetTools(tools);
             return boolean(op, "union", a, b);
@@ -1191,12 +1208,26 @@ FShape* focc_cut(const FShape* a, const FShape* b) {
             BRepAlgoAPI_Cut op;
             TopTools_ListOfShape args, tools;
             args.Append(a->s);
-            tools.Append(b->s);
+            append_tools(tools, b->s);
             op.SetArguments(args);
             op.SetTools(tools);
             return boolean(op, "subtraction", a, b);
         },
         (FShape*)nullptr);
+}
+
+FShape* focc_fuse_each(const FShape* a, const FShape* b) {
+    g_each_tool = true;
+    FShape* r = focc_fuse(a, b);
+    g_each_tool = false;
+    return r;
+}
+
+FShape* focc_cut_each(const FShape* a, const FShape* b) {
+    g_each_tool = true;
+    FShape* r = focc_cut(a, b);
+    g_each_tool = false;
+    return r;
 }
 
 FShape* focc_common(const FShape* a, const FShape* b) {

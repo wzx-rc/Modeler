@@ -46,6 +46,8 @@ impl App {
             Err(_) => AppState::new(Default::default(), "Untitled", kernel),
         };
         st.settings = nurbs_app::settings::Settings::load();
+        // its model from the last time, shown while the kernel builds it
+        st.show_saved_model();
         // the debug journal written as it goes (the last run's kept beside)
         let jf = files::documents_dir().join("journal.jsonl");
         let _ = std::fs::rename(&jf, files::documents_dir().join("journal-prev.jsonl"));
@@ -93,6 +95,7 @@ impl App {
             let _ = files::save(&self.st.doc, files::SESSION);
             self.saved = (stamp, now);
         }
+        self.st.keep_model();
     }
 
     /// Minimized (20 nov., 11 h 28: the app minimized answered neither the

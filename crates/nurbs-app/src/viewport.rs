@@ -44,6 +44,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         if let (Some(g), Some(h)) = (&st.face_drag, ctx.input(|i| i.pointer.latest_pos())) {
             let txt = match g.what {
                 FaceDragWhat::Inset => format!("Inset {} mm", fmt_mm(g.size as f32)),
+                FaceDragWhat::Edge { .. } if st.face_drag_first.is_some() => format!("Along their normals {} mm", fmt_mm(g.size as f32)),
                 FaceDragWhat::Edge { .. } => format!("Pull edge {} mm", fmt_mm(g.size as f32)),
             };
             chip(p, h + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, HOT, HOT);
@@ -70,7 +71,8 @@ fn gizmo_points(st: &AppState) -> Option<(Pos2, [Option<Pos2>; 3])> {
     let v = st.view();
     let dist = (pivot.as_vec3() - v.eye).length();
     let k = v.pixel_size_at(dist) as f64 * ARROW as f64;
-    let tips = [0, 1, 2].map(|a| world(st, pivot + DVec3::AXES[a] * k));
+    let rot = st.gizmo_rot();
+    let tips = [0, 1, 2].map(|a| world(st, pivot + rot * DVec3::AXES[a] * k));
     Some((c, tips))
 }
 
@@ -1658,6 +1660,9 @@ fn status(p: &Painter, st: &AppState) {
     let n = st.doc.features.len();
     let n = n - st.doc.features.iter().filter(|f| !f.is_solid()).count();
     let mut parts = vec![format!("NURBS · OpenCascade · {n} shape{}", if n == 1 { "" } else { "s" })];
+    if st.settings.history_off {
+        parts.push("history off".into());
+    }
     let mut color = TEXT();
     match st.kernel.status() {
         Status::Missing => {

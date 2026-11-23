@@ -55,7 +55,11 @@ impl Drawer {
         // (a preview that did not change since it was uploaded, the pointer
         // held still or the same grid step: nothing to upload again; on a
         // heavy part that is every vertex, each frame)
-        let pkey = preview.as_ref().map(preview_key);
+        let pushes = if quads.is_none() { st.push_preview() } else { None };
+        let pkey = match (preview.as_ref().map(preview_key), &pushes) {
+            (k, None) => k,
+            (k, Some(pp)) => Some(push_key(k.unwrap_or(0), pp)),
+        };
         if self.model_gen != st.model_gen || self.quads_shown != quads.is_some() || pkey != self.preview_key || form.is_some() || self.previewed {
             self.model_gen = st.model_gen;
             self.previewed = form.is_some();
@@ -119,15 +123,30 @@ impl Drawer {
                         }
                     }
                 }
+                // extrusions whose depth changes: their ends moved, their
+                // walls stretched
+                let push_m = match &pushes {
+                    Some(pp) if dev_none(st) => Some(push_moves(m, pp)).filter(|x| !x.is_empty()),
+                    _ => None,
+                };
+                if let Some(x) = &push_m {
+                    for v in verts.iter_mut() {
+                        if let Some(p) = x.apply(v.face as usize, v.pos) {
+                            v.pos = p;
+                        }
+                    }
+                }
                 if let (Some((_, tris)), Some(face)) = (&form, form_faces.iter().min()) {
                     verts.extend(tris.iter().map(|(p, n)| MeshVertex { pos: *p, nrm: *n, face: *face, dev: NO_DEV }));
                 }
                 // the edges a person draws: dark and thin like a CAD view
                 let moved = |e: &nurbs_kernel::Edge| e.faces.iter().find_map(|f| usize::try_from(*f).ok().and_then(|f| face_m.get(f).copied().flatten()));
                 let on_form = |e: &nurbs_kernel::Edge| e.faces.iter().any(|f| u32::try_from(*f).map(|f| form_faces.contains(&f)).unwrap_or(false));
-                let lines: Vec<Vec<[f32; 3]>> = m.edges.iter().filter(|e| !e.seam && !on_form(e)).map(|e| match moved(e) {
-                    Some(x) => e.pts.iter().map(|p| x.transform_point3(glam::Vec3::from(*p)).to_array()).collect(),
-                    None => e.pts.clone(),
+                let pushed = |e: &nurbs_kernel::Edge| push_m.as_ref().and_then(|x| e.faces.iter().find_map(|f| usize::try_from(*f).ok().filter(|f| x.moves(*f))).map(|f| (x, f)));
+                let lines: Vec<Vec<[f32; 3]>> = m.edges.iter().filter(|e| !e.seam && !on_form(e)).map(|e| match (moved(e), pushed(e)) {
+                    (Some(x), _) => e.pts.iter().map(|p| x.transform_point3(glam::Vec3::from(*p)).to_array()).collect(),
+                    (None, Some((x, f))) => e.pts.iter().map(|p| x.apply(f, *p).unwrap_or(*p)).collect(),
+                    (None, None) => e.pts.clone(),
                 }).collect();
                 line_vertices(&lines, [24, 26, 30, 210], 1.0, &mut edges);
                 self.face_m = face_m;
@@ -373,6 +392,128 @@ fn preview_key(pv: &std::collections::HashMap<nurbs_kernel::FeatureId, glam::DMa
         }
     }
     h
+}
+
+/// The extrusions' depths in a preview as one number, with the shapes'.
+fn push_key(k: u64, pp: &std::collections::HashMap<nurbs_kernel::FeatureId, (f64, f64)>) -> u64 {
+    let mut ids: Vec<&nurbs_kernel::FeatureId> = pp.keys().collect();
+    ids.sort();
+    let mut h = k ^ 0x7075736800000000;
+    for id in ids {
+        for v in [*id as u64, pp[id].0.to_bits(), pp[id].1.to_bits()] {
+            h ^= v;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+/// How the faces of extrusions move while their depth changes
+/// (`AppState::push_preview`): each point along the outward normal of the
+/// nearest point of its extrusion's end face (its own, on the end face), by
+/// `delta` on the end face, nothing on the face it was pulled from (`depth`
+/// behind it), in proportion between (the walls). A round face's end too
+/// (its points each along their own normal); after a Mirror both sides
+/// carry the step's tags, each wall finds its own end nearest.
+pub struct PushMoves {
+    /// Each model face's extrusion (an index in `ends`).
+    face: Vec<Option<usize>>,
+    ends: Vec<PushEnd>,
+}
+
+struct PushEnd {
+    pts: Vec<(glam::Vec3, glam::Vec3)>,
+    grid: std::collections::HashMap<(i32, i32, i32), Vec<u32>>,
+    cell: f32,
+    depth: f32,
+    delta: f32,
+}
+
+impl PushEnd {
+    fn key(&self, p: glam::Vec3) -> (i32, i32, i32) {
+        let q = (p / self.cell).floor();
+        (q.x as i32, q.y as i32, q.z as i32)
+    }
+
+    fn nearest(&self, p: glam::Vec3) -> Option<(glam::Vec3, glam::Vec3)> {
+        let (x, y, z) = self.key(p);
+        let mut best: Option<(f32, u32)> = None;
+        for i in -1..=1 {
+            for j in -1..=1 {
+                for k in -1..=1 {
+                    for &v in self.grid.get(&(x + i, y + j, z + k)).into_iter().flatten() {
+                        let d = self.pts[v as usize].0.distance_squared(p);
+                        if best.is_none_or(|b| d < b.0) {
+                            best = Some((d, v));
+                        }
+                    }
+                }
+            }
+        }
+        if best.is_none() {
+            best = self.pts.iter().enumerate().map(|(v, q)| (q.0.distance_squared(p), v as u32)).min_by(|a, b| a.0.total_cmp(&b.0));
+        }
+        best.map(|(_, v)| self.pts[v as usize])
+    }
+
+    fn apply(&self, p: [f32; 3]) -> [f32; 3] {
+        let q = glam::Vec3::from(p);
+        let Some((e, n)) = self.nearest(q) else { return p };
+        let s = (1.0 + (q - e).dot(n) / self.depth).clamp(0.0, 1.0);
+        (q + n * (s * self.delta)).to_array()
+    }
+}
+
+impl PushMoves {
+    pub fn is_empty(&self) -> bool {
+        self.ends.is_empty()
+    }
+
+    /// The point `p` of model face `f` where the extrusions now put it
+    /// (None: a face no extrusion moves).
+    pub fn apply(&self, f: usize, p: [f32; 3]) -> Option<[f32; 3]> {
+        let e = (*self.face.get(f)?)?;
+        Some(self.ends[e].apply(p))
+    }
+
+    pub fn moves(&self, f: usize) -> bool {
+        self.face.get(f).copied().flatten().is_some()
+    }
+}
+
+/// The moves of the faces of the extrusions changing depth: their end
+/// faces' points (tagged 1) with their normals, in cells as big as the
+/// depth so a wall's point finds its end's nearest point at once.
+pub fn push_moves(m: &nurbs_kernel::Model, pp: &std::collections::HashMap<nurbs_kernel::FeatureId, (f64, f64)>) -> PushMoves {
+    use glam::Vec3;
+    let mut index: std::collections::HashMap<nurbs_kernel::FeatureId, usize> = Default::default();
+    let mut ends: Vec<PushEnd> = vec![];
+    let mut seen: std::collections::HashSet<u32> = Default::default();
+    for (t, tri) in m.triangles.iter().enumerate() {
+        let Some(tag) = m.faces.get(m.tri_face[t] as usize).and_then(|f| f.tag) else { continue };
+        if tag.sub != 1 {
+            continue;
+        }
+        let Some(&(depth, delta)) = pp.get(&tag.feature) else { continue };
+        let e = *index.entry(tag.feature).or_insert_with(|| {
+            ends.push(PushEnd { pts: vec![], grid: Default::default(), cell: (depth.abs() as f32 * 1.5).max(1.0), depth: depth as f32, delta: delta as f32 });
+            ends.len() - 1
+        });
+        for &v in tri {
+            if seen.insert(v) {
+                let (p, n) = (Vec3::from(m.positions[v as usize]), Vec3::from(m.normals[v as usize]).normalize_or_zero());
+                ends[e].pts.push((p, n));
+            }
+        }
+    }
+    for e in ends.iter_mut() {
+        for (i, (p, _)) in e.pts.iter().enumerate() {
+            let k = e.key(*p);
+            e.grid.entry(k).or_default().push(i as u32);
+        }
+    }
+    let face = m.faces.iter().map(|f| f.tag.and_then(|t| index.get(&t.feature).copied())).collect();
+    PushMoves { face, ends }
 }
 
 /// Each face's matrix while whole shapes are dragged (`drag_preview`): its
