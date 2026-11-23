@@ -74,4 +74,53 @@ impl AppState {
         };
         Some((m, [corner(false, false), corner(true, false), corner(true, true), corner(false, true)]))
     }
+
+    /// The Mirror a step is made on both sides of: the last one on before
+    /// it, when the step is of a kind the kernel doubles (a shape, a
+    /// fillet, an inset or extrusion, a move, the Knife, a Shell's
+    /// openings, a Bridge) and not made on this side only.
+    pub fn mirrored_by(&self, id: FeatureId) -> Option<Mirror> {
+        let i = self.doc.features.iter().position(|f| f.id == id)?;
+        let f = &self.doc.features[i];
+        let doubled = f.is_solid() || f.round.is_some() || f.push.is_some() || f.tweak.is_some() || f.cut.is_some() || f.shell.is_some() || f.bridge.is_some();
+        if !doubled || f.mirror.is_some() || f.array.is_some() {
+            return None;
+        }
+        self.doc.features[..i].iter().rev().find(|g| g.mirror.is_some() && g.visible && !g.suspended).and_then(|g| g.mirror)
+    }
+
+    /// Whether a step comes after a Mirror and could be made on both sides
+    /// (its window then shows Both sides / This side only).
+    pub fn after_mirror(&self, id: FeatureId) -> bool {
+        let Some(i) = self.doc.features.iter().position(|f| f.id == id) else { return false };
+        let f = &self.doc.features[i];
+        let doubled = f.is_solid() || f.round.is_some() || f.push.is_some() || f.tweak.is_some() || f.cut.is_some() || f.shell.is_some() || f.bridge.is_some();
+        doubled && f.mirror.is_none() && self.doc.features[..i].iter().any(|g| g.mirror.is_some() && g.visible && !g.suspended)
+    }
+
+    /// Sets a step made after a Mirror on this side only, or on both
+    /// (Romain 23 nov., 7 h 07: an Extrude on the left leg made on the
+    /// right one too, "sans raison").
+    pub fn set_one_side(&mut self, id: FeatureId, on: bool) {
+        self.edit(if on { "This side only" } else { "Both sides" }, |d| {
+            if let Some(f) = d.feature_mut(id) {
+                f.one_side = on;
+            }
+        });
+    }
+
+    /// A step just made after a Mirror: said once, so the image across
+    /// the plane is no surprise.
+    pub(crate) fn tell_mirror_side(&mut self) {
+        let newest = self.doc.features.iter().map(|f| f.id).max().unwrap_or(0);
+        if newest <= self.mirror_told {
+            return;
+        }
+        let fresh: Vec<FeatureId> = self.doc.features.iter().map(|f| f.id).filter(|id| *id > self.mirror_told).collect();
+        self.mirror_told = newest;
+        if let Some(m) = fresh.iter().find_map(|id| self.mirrored_by(*id)) {
+            self.toast(&format!("Made on both sides of the Mirror across {}: \"This side only\" in its window", m.axis_name()), false);
+        }
+    }
 }
+

@@ -59,6 +59,9 @@ pub fn feature_icon(f: &Feature) -> Icon {
     if f.shell.is_some() {
         return Icon::Shell;
     }
+    if f.bridge.is_some() {
+        return Icon::Extrude;
+    }
     if f.mirror.is_some() {
         return Icon::Mirror;
     }
@@ -1979,6 +1982,7 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     } else {
                         round_card(ui, st);
                     }
+                    mirror_side_row(ui, st, &f);
                 }
                 OpPop::Tool if st.tool == Tool::Slot => slot_options(ui, st),
                 OpPop::Tool if st.tool == Tool::Form => form_options(ui, st),
@@ -1988,11 +1992,24 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     let Some(f) = st.doc.feature(id).cloned() else { return };
                     op_title(ui, &f.name, f.kind_label());
                     shape_card(ui, st, &f);
+                    mirror_side_row(ui, st, &f);
                 }
             }
         });
     });
     set_op_style(ctx, false);
+}
+
+/// A step made after a Mirror: on both sides (the kernel makes its image
+/// across the plane) or on this side only.
+fn mirror_side_row(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
+    if !st.after_mirror(f.id) {
+        return;
+    }
+    section(ui, "Mirror");
+    if toggle_row(ui, "This side only", f.one_side) {
+        st.set_one_side(f.id, !f.one_side);
+    }
 }
 
 /// The operation window's title: the name, and its kind when the name does
@@ -3763,8 +3780,14 @@ fn face_card(ui: &mut Ui, st: &mut AppState) {
     if !flat {
         ui.label(egui::RichText::new("A round face: it extrudes along its normals; no inset on it").font(regular(12.0)).color(TEXT2()));
     }
-    if n > 1 {
-        ui.label(egui::RichText::new("Several faces: the tools work on the first one for now").font(regular(12.0)).color(TEXT2()));
+    if n == 2 {
+        // (Romain 23 nov., 7 h 04: "Il faut un Bridge tool")
+        ui.add_space(4.0);
+        if primary_btn(ui, None, "Bridge the 2 faces", Some(ui.available_width())).on_hover_text("A solid joining the two faces, from one outline to the other (Maya's Bridge)").clicked() {
+            st.add_bridge();
+        }
+    } else if n > 2 {
+        ui.label(egui::RichText::new("Several faces: Extrude takes them all; Bridge takes two").font(regular(12.0)).color(TEXT2()));
     }
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -3847,6 +3870,30 @@ fn vertex_card(ui: &mut Ui, st: &mut AppState) {
             }
         }
         ui.label(egui::RichText::new("W: the arrows move them in the curve's plane").font(regular(12.0)).color(TEXT2()));
+    }
+    // a 2D boolean's corners (where its curves cross): rounded or cut on
+    // its result
+    let bc = st.picked_bool_corners();
+    if !bc.is_empty() && bc.len() == st.vert_sel.len() {
+        section(ui, if bc.len() > 1 { "Curve corners" } else { "Curve corner" });
+        let size = bc[0].2.abs();
+        let chamfer = bc[0].2 < 0.0;
+        let max = st.bool_corner_max();
+        let kinds = [(false, "Fillet", EDGE_SEL), (true, "Chamfer", EDGE_SEL)];
+        if let Some(c) = segmented(ui, &kinds, chamfer, 36.0) {
+            st.set_bool_corners(if size > 0.0 { size } else { 2.0f64.min(max) }, c, true);
+            st.end_live();
+        }
+        let any_down = ui.input(|i| i.pointer.any_down());
+        let mut v = size.min(max) as f32;
+        let (ch, start) = slider_row(ui, if chamfer { "Distance" } else { "Radius" }, &mut v, 0.0..=(max as f32).max(0.1), 0.1, "mm");
+        if ch {
+            st.set_bool_corners(v as f64, chamfer, start);
+        }
+        if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
+            st.end_live();
+        }
+        return;
     }
     // a sketch's corner: cut in its outline (exact arc or chamfer), the
     // whole height follows

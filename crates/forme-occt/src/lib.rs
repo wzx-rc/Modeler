@@ -55,6 +55,7 @@ extern "C" {
     fn focc_revolve(s: *const FShape, o: *const c_double, d: *const c_double, angle: c_double) -> *mut FShape;
     fn focc_form(poles: *const c_double, nu: c_int, nv: c_int) -> *mut FShape;
     fn focc_loft(secs: *const *const FShape, n: c_int, solid: c_int, ruled: c_int) -> *mut FShape;
+    fn focc_fillet2d(s: *const FShape, xyz: *const c_double, size: *const c_double, n: c_int, tol: c_double, done: *mut c_int) -> *mut FShape;
     fn focc_section_count(s: *const FShape) -> c_int;
     fn focc_section_edge(s: *const FShape, k: c_int) -> c_int;
     fn focc_edge_count(s: *const FShape) -> c_int;
@@ -496,6 +497,17 @@ impl Shape {
         let ck: Vec<c_int> = (0..points.len()).map(|i| match cuts.get(i).copied().flatten() { Some((CutKind::Chamfer, ..)) => 2, Some((CutKind::Conic, ..)) => 3, Some((CutKind::Curve, ..)) => 4, Some((CutKind::Span, ..)) => 5, Some(_) => 1, None => 0 }).collect();
         let abm: Vec<f64> = (0..points.len()).flat_map(|i| match cuts.get(i).copied().flatten() { Some((_, a, m, b)) => [a[0], a[1], m[0], m[1], b[0], b[1]], None => [0.0; 6] }).collect();
         shape(unsafe { focc_region_cut(xy.as_ptr(), sm.as_ptr(), ck.as_ptr(), abm.as_ptr(), points.len() as c_int) })
+    }
+
+    /// Corners of flat faces rounded (size > 0) or cut (size < 0): the
+    /// vertex nearest each point within `tol`. The shape, and which
+    /// corners were made.
+    pub fn fillet2d(&self, corners: &[([f64; 3], f64)], tol: f64) -> Result<(Shape, Vec<bool>), String> {
+        let xyz: Vec<f64> = corners.iter().flat_map(|c| c.0).collect();
+        let size: Vec<f64> = corners.iter().map(|c| c.1).collect();
+        let mut done: Vec<c_int> = vec![0; corners.len()];
+        let s = shape(unsafe { focc_fillet2d(self.0, xyz.as_ptr(), size.as_ptr(), corners.len() as c_int, tol, done.as_mut_ptr()) })?;
+        Ok((s, done.iter().map(|d| *d != 0).collect()))
     }
 
     /// The outline of `prism_cuts` as a wire in the XY plane, open (a

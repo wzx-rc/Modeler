@@ -8,6 +8,7 @@ pub mod align;
 pub mod mirror;
 pub mod array;
 pub mod shell;
+pub mod bools;
 pub mod cage;
 pub mod camera;
 pub mod draw;

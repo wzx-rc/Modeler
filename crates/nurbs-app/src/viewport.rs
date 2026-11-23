@@ -482,7 +482,10 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             // Shift + Drag"): Shift on a picked face or edge wins over the
             // move gizmo sitting on it (not over the scale cage, whose Shift
             // keeps the proportions)
-            let quick = shift && !ctrl && st.gizmo != GizmoMode::Scale && st.begin_face_drag(p2(origin), true, false);
+            let on_gizmo = matches!(handle_at(st, origin), Some(Handle::Axis(_) | Handle::Plane(_) | Handle::Free));
+            // (Shift + drag on the move gizmo with faces picked: they are
+            // extruded, Maya; Romain 23 nov., 7 h 05)
+            let quick = shift && !ctrl && st.gizmo != GizmoMode::Scale && if on_gizmo { st.shift_extrude_picked(p2(origin)) } else { st.begin_face_drag(p2(origin), true, false) };
             if quick {
                 if st.push.is_some() {
                     return;
@@ -725,18 +728,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 if st.drag.is_some() {
                     st.end_drag();
                 } else if let Some((a, b)) = st.marquee.take() {
-                    let r = Rect::from_two_pos(pos2(a[0], a[1]), pos2(b[0], b[1]));
-                    let inside: Vec<_> = st.doc.features.iter().filter(|f| f.visible && f.is_solid() && world(st, f.centre()).map(|p| r.contains(p)).unwrap_or(false)).map(|f| f.id).collect();
-                    if !(shift || ctrl) {
-                        st.selection.clear();
-                    }
-                    st.group_sel = None;
-                    // a shape of a closed group brings the whole group
-                    for id in inside.into_iter().flat_map(|id| st.pick_ids(id)).collect::<Vec<_>>() {
-                        if !st.selection.contains(&id) {
-                            st.selection.push(id);
-                        }
-                    }
+                    st.marquee_elements(a, b, shift, ctrl);
                 }
             }
             if resp.clicked_by(PointerButton::Primary) {

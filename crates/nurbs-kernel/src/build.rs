@@ -377,6 +377,13 @@ pub fn region(doc: &Doc, f: &Feature, depth: usize) -> Result<Shape, String> {
                 crate::doc::CurveOp::Intersect => acc.common(&r)?,
             };
         }
+        // its own corners (where its curves cross) rounded or cut
+        if !b.corners.is_empty() {
+            let corners: Vec<([f64; 3], f64)> = b.corners.iter().map(|c| ((f.origin + f.rot * c.at).to_array(), c.size)).collect();
+            if let Ok((s, _)) = acc.fillet2d(&corners, crate::doc::BOOL_CORNER_TOL) {
+                acc = s;
+            }
+        }
         return Ok(acc);
     }
     let (Prim::Path { x, z }, Some(pr)) = (f.prim, f.profile.as_ref()) else { return Err("not a curve".into()) };
@@ -1385,6 +1392,100 @@ fn tweak(acc: &Shape, f: &Feature, t: &Tweak) -> Result<Option<Shape>, String> {
     Err(err)
 }
 
+/// The last way to move a flat face, when the faces round it cannot
+/// follow it (the ring of an inset left as a line, a slanted face, a
+/// fillet) and making the move before the fillets did not work either:
+/// the face swept into new walls, as Maya's Move of an extruded face
+/// (Romain 23 nov., 7 h 05: "Pourquoi c'est si compliqué de faire que les
+/// components se déplacent?"). Off its normal, the walls slant.
+fn tweak_swept(acc: &Shape, f: &Feature, t: &Tweak) -> Option<Shape> {
+    let (Comp::Face(r), true, false, false) = (&t.comp, t.more.is_empty(), t.copy, (t.scale - DVec3::ONE).abs().max_element() > 1e-9) else { return None };
+    let face = find_face(acc, r)?;
+    let info = acc.face_info(face)?;
+    if info.kind != OccSurf::Plane {
+        return None;
+    }
+    let n = DVec3::from_array(info.normal).normalize_or_zero();
+    sweep_face(acc, f, r, face, n, DVec3::from_array(info.point), t.delta).ok()
+}
+
+/// Two flat faces of the part joined by a solid (Bridge, Maya's): their
+/// outlines lofted, straight from one to the other, fused with the part.
+/// When the loft cannot pair their outlines and the faces face each other
+/// on parallel planes, each swept across the gap to the other's plane and
+/// the two sweeps' common part taken. Its faces tagged `(step, 1…)`.
+fn bridge(acc: &Shape, f: &Feature, b: &crate::doc::Bridge) -> Result<Shape, String> {
+    let fa = find_face(acc, &b.faces[0]).ok_or("its first face is gone")?;
+    let fb = find_face(acc, &b.faces[1]).ok_or("its second face is gone")?;
+    if fa == fb {
+        return Err("it needs two different faces".into());
+    }
+    let (ia, ib) = (acc.face_info(fa).ok_or("its first face is gone")?, acc.face_info(fb).ok_or("its second face is gone")?);
+    if ia.kind != OccSurf::Plane || ib.kind != OccSurf::Plane {
+        return Err("only flat faces can be bridged for now".into());
+    }
+    mark(&step("bridge", f));
+    let (a, c) = (acc.inset_face(fa, 0.0)?, acc.inset_face(fb, 0.0)?);
+    let (na, nb) = (DVec3::from_array(ia.normal).normalize_or_zero(), DVec3::from_array(ib.normal).normalize_or_zero());
+    let (pa, pb) = (DVec3::from_array(ia.point), DVec3::from_array(ib.point));
+    let loft = Shape::loft(&[&a, &c], true, true);
+    let mut tool = match loft {
+        Ok(t) => t,
+        Err(e) => {
+            // two faces facing each other across a gap
+            let gap = (pb - pa).dot(na);
+            if na.dot(nb) > -0.999 || gap <= 1e-3 {
+                return Err(e);
+            }
+            let sa = a.extrude((na * gap).to_array())?;
+            let sb = c.extrude((nb * gap).to_array())?;
+            sa.common(&sb)?
+        }
+    };
+    let tags: Vec<i64> = (0..tool.face_count()).map(|i| FaceTag { feature: f.id, sub: (i + 1).min(u16::MAX as usize) as u16 }.pack()).collect();
+    tool.set_tags(&tags);
+    acc.fuse(&tool)
+}
+
+/// A flat face swept by `delta` (with a part along its outward normal `n`)
+/// into a prism, fused when it goes out, cut when it goes in: the face's
+/// end keeps the face's tag (it is the face moved), the walls are the
+/// step's `(id, 2…)`, the base `(id, 0)`.
+fn sweep_face(acc: &Shape, f: &Feature, r: &FaceRef, face: usize, n: DVec3, o: DVec3, delta: DVec3) -> Result<Shape, String> {
+    let d = delta.dot(n);
+    if d.abs() < 1e-3 {
+        return Err("the move runs along the face".into());
+    }
+    let tag = |sub: u16| FaceTag { feature: f.id, sub }.pack();
+    let inner = acc.inset_face(face, 0.0)?;
+    // carving: from a little outside the face, so no face of the tool lies on it
+    let start = if d < 0.0 { 0.1 } else { 0.0 };
+    let base = if start > 0.0 { inner.transformed(rows(DMat4::from_translation(n * start)))? } else { inner };
+    let mut prism = base.extrude((delta - n * start).to_array())?;
+    let mut side = 2u16;
+    let tags: Vec<i64> = (0..prism.face_count())
+        .map(|i| {
+            let fi = prism.face_info(i);
+            let across = fi.map(|fi| fi.kind == OccSurf::Plane && DVec3::from_array(fi.normal).dot(n).abs() > 0.999).unwrap_or(false);
+            let s = fi.map(|fi| (DVec3::from_array(fi.point) - o).dot(n)).unwrap_or(0.0);
+            if across && (s - d).abs() < 1e-4 {
+                r.tag
+            } else if across {
+                tag(0)
+            } else {
+                side = side.saturating_add(1);
+                tag(side - 1)
+            }
+        })
+        .collect();
+    prism.set_tags(&tags);
+    if d > 0.0 {
+        acc.fuse(&prism)
+    } else {
+        acc.cut(&prism)
+    }
+}
+
 /// A move and its mirror image (after a Mirror) made in one go, each
 /// vertex by its own move (a face across the plane whose two corners move
 /// bends once, not twice: a bent face cannot follow a second move).
@@ -1677,7 +1778,7 @@ fn mirrored_doc(doc: &Doc) -> Option<Doc> {
             out.features.push(f.clone());
             continue;
         }
-        let Some(m) = sym.filter(|_| on) else {
+        let Some(m) = sym.filter(|_| on && !f.one_side) else {
             out.features.push(f.clone());
             continue;
         };
@@ -1696,7 +1797,7 @@ fn mirrored_doc(doc: &Doc) -> Option<Doc> {
                 gs.faces.extend(images);
             }
             out.features.push(g);
-        } else if f.push.is_some() || f.tweak.is_some() || f.cut.is_some() {
+        } else if f.push.is_some() || f.tweak.is_some() || f.cut.is_some() || f.bridge.is_some() {
             out.features.push(f.clone());
             let refl = |p: DVec3| m.reflect(p);
             let mut g = f.carried_by(&refl);
@@ -1769,6 +1870,15 @@ fn twin_same(acc0: Option<&Shape>, a: &Feature, b: &Feature) -> bool {
         // image with it, else the image side stayed as it was, in silence.)
         let (x, y) = (verts(t), verts(u));
         return !x.is_empty() && x == y;
+    }
+    if let (Some(p), Some(q)) = (&a.bridge, &b.bridge) {
+        // two faces each other's images (a leg and its mirror): one bridge
+        let Some(acc) = acc0 else { return true };
+        let mut x: Vec<Option<usize>> = p.faces.iter().map(|r| find_face(acc, r)).collect();
+        let mut y: Vec<Option<usize>> = q.faces.iter().map(|r| find_face(acc, r)).collect();
+        x.sort();
+        y.sort();
+        return x == y;
     }
     if let (Some(k), Some(l)) = (&a.cut, &b.cut) {
         let near = |p: DVec3, set: &[DVec3]| set.iter().any(|q| q.distance(p) < 1e-6);
@@ -1909,6 +2019,11 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
             }
             keep(cache, key, &mut stage);
             continue;
+        }
+        // a step made on one side only: the part is no longer symmetric
+        // (the same Mirror again makes it so)
+        if f.one_side && sym.is_some() {
+            stage.even = None;
         }
         // the image of the step before (after a Mirror) that names what it
         // named (a face across the plane): nothing more to make
@@ -2111,13 +2226,13 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                         None => replay(doc, &feats[..i], f, None, t, &stage, skip, cache, model, used_tools, used_stages),
                     } {
                         Some(s) => stage = s,
-                        None => match tweak_unrounded(doc, &acc, f, t) {
-                            Ok(s) => {
+                        None => match tweak_unrounded(doc, &acc, f, t).ok().or_else(|| tweak_swept(&acc, f, t)) {
+                            Some(s) => {
                                 model.booleans += 1;
                                 stage.shape = Some(Rc::new(s));
                                 stage.rough = true;
                             }
-                            Err(_) => stage.errors.push(format!("{}: {e}", f.name)),
+                            None => stage.errors.push(format!("{}: {e}", f.name)),
                         },
                     },
                 }
@@ -2143,6 +2258,22 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                         stage.rough = true;
                     }
                     Ok(None) => {}
+                    Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
+                }
+            }
+            keep(cache, key, &mut stage);
+            continue;
+        }
+        // two faces bridged: on the solid built so far
+        if let Some(b) = &f.bridge {
+            if let Some(acc) = stage.shape.clone() {
+                let res = if skipped("bridge") { Err("skipped, it crashed the kernel".to_string()) } else { bridge(&acc, f, b) };
+                match res {
+                    Ok(s) => {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                        stage.rough = true;
+                    }
                     Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
                 }
             }
@@ -2199,7 +2330,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         };
         // after a Mirror: the shape and its image
         let t = match sym {
-            Some(m) if !skipped("tool") => {
+            Some(m) if !skipped("tool") && !f.one_side => {
                 let th = hash2(hash2(th, 0x6d6972726f72), hash2(m.axis as u64 + 3 * m.flip as u64, m.offset.to_bits()));
                 match cache.tools.get(&th) {
                     Some(d) => {
@@ -2938,7 +3069,7 @@ fn reach(doc: &Doc, f: &Feature, depth: u32) -> Option<(DVec3, DVec3)> {
         }
         return named(f)?.map(|b| grow(b, t.delta.length() + 0.5));
     }
-    if f.cut.is_some() {
+    if f.cut.is_some() || f.bridge.is_some() {
         return named(f)?.map(|b| grow(b, 0.5));
     }
     Some(grow(f.bounds(), 0.5))
@@ -2949,7 +3080,7 @@ fn reach(doc: &Doc, f: &Feature, depth: u32) -> Option<(DVec3, DVec3)> {
 fn mirror_safe(doc: &Doc, f: &Feature, m: &Mirror, depth: u32) -> bool {
     let tol = 1e-6;
     let kept = |r: Option<(DVec3, DVec3)>| r.is_some_and(|(lo, hi)| m.side(lo).min(m.side(hi)) >= -tol);
-    if f.mirror.is_some() || f.shell.is_some() || depth > 6 {
+    if f.mirror.is_some() || f.shell.is_some() || f.one_side || f.bridge.is_some() || depth > 6 {
         return false;
     }
     // a face's image across the plane, for a face of a plain shape centred
@@ -4065,7 +4196,7 @@ mod tests {
         let r = curve(&mut d, CurveKind::Rectangle, 30.0, 20.0, DVec3::ZERO);
         let c = curve(&mut d, CurveKind::Circle, 12.0, 12.0, DVec3::new(15.0, 0.0, 0.0));
         let b = d.add(Op::Add, Prim::Profile { x: 1.0, y: 10.0, z: 1.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.feature_mut(b).unwrap().shape_bool = Some(ShapeBool { op: CurveOp::Subtract, operands: vec![r, c] });
+        d.feature_mut(b).unwrap().shape_bool = Some(ShapeBool { op: CurveOp::Subtract, operands: vec![r, c], corners: vec![] });
         d.regen_curves();
         let f = d.feature(b).unwrap();
         assert!(f.is_extruded_curve() && !f.is_path());
@@ -4133,7 +4264,7 @@ mod tests {
         for (op, operands, edges) in [(CurveOp::Subtract, vec![r, c, h], 7), (CurveOp::Union, vec![r, c], 5), (CurveOp::Intersect, vec![r, c], 2)] {
             let mut e = d.clone();
             let b = e.add(Op::Add, Prim::Path { x: 30.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-            e.feature_mut(b).unwrap().shape_bool = Some(ShapeBool { op, operands });
+            e.feature_mut(b).unwrap().shape_bool = Some(ShapeBool { op, operands, corners: vec![] });
             let m = build(&e, true, false, &[], &mut Cache::default());
             assert!(m.errors.is_empty(), "{op:?}: {:?}", m.errors);
             let lines = &m.curves.iter().find(|c| c.0 == b).expect("its edges").1;
@@ -4148,7 +4279,7 @@ mod tests {
         let mut e = d.clone();
         e.feature_mut(c).unwrap().origin.y = 5.0;
         let b = e.add(Op::Add, Prim::Path { x: 30.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        e.feature_mut(b).unwrap().shape_bool = Some(ShapeBool { op: CurveOp::Union, operands: vec![r, c] });
+        e.feature_mut(b).unwrap().shape_bool = Some(ShapeBool { op: CurveOp::Union, operands: vec![r, c], corners: vec![] });
         let m = build(&e, true, false, &[], &mut Cache::default());
         assert!(m.errors.iter().any(|x| x.contains("plane")), "{:?}", m.errors);
     }

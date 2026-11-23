@@ -659,6 +659,9 @@ pub struct AppState {
     /// Only Selected for the fillets and chamfers made next (Romain 20
     /// nov., 10 h 54): the picked edges alone, not those tangent to them.
     pub round_only: bool,
+    /// The newest step the "made on both sides" toast was said for (a
+    /// step made after a Mirror).
+    pub mirror_told: FeatureId,
     /// The Surface tool's points: put on the reference under the pointer
     /// (true), else locked on the plane under its first point.
     pub surface_on_scan: bool,
@@ -851,6 +854,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(doc: Doc, name: &str, kernel: Kernel) -> AppState {
+        let told = doc.features.iter().map(|f| f.id).max().unwrap_or(0);
         AppState {
             doc,
             doc_name: name.to_string(),
@@ -872,6 +876,7 @@ impl AppState {
             hover_edge: None,
             round_chamfer: false,
             round_only: false,
+            mirror_told: told,
             surface_on_scan: false,
             slot_on_scan: false,
             form: Default::default(),
@@ -1272,6 +1277,7 @@ impl AppState {
         if self.doc.keep_arrays() {
             self.toast("Made on the original and every copy of its Array", false);
         }
+        self.tell_mirror_side();
         self.version += 1;
     }
 
@@ -1346,7 +1352,13 @@ impl AppState {
         if let Some(e) = self.journal.back_mut() {
             e.steps = steps.clone();
         }
-        let prev = self.model.as_ref().map(|m| m.errors.clone()).unwrap_or_default();
+        // (the errors of the steps this change made or changed are not
+        // "from before": a live drag's coarse builds had them already, so a
+        // move dragged with the gizmo that failed was never taken back;
+        // Romain 23 nov., 7 h 05, six Undo by hand)
+        let names: Vec<String> = steps.iter().filter_map(|id| self.doc.feature(*id)).map(|f| format!("{}:", f.name)).collect();
+        let mut prev = self.model.as_ref().map(|m| m.errors.clone()).unwrap_or_default();
+        prev.retain(|e| !names.iter().any(|n| e.starts_with(n.as_str())));
         self.pending_check = Some((self.version, steps, prev));
     }
 
@@ -2456,6 +2468,9 @@ impl AppState {
             } else if let Some(sh) = &f.shell {
                 // a Shell: its first opening's (none: no element)
                 sh.faces.first().map(|r| r.tag)
+            } else if let Some(b) = &f.bridge {
+                // a Bridge: its first face's
+                Some(b.faces[0].tag)
             } else if let Some(a) = &f.array {
                 // an Array: its first shape's
                 return a.sources.first().copied().filter(|s| self.doc.feature(*s).is_some());
@@ -2818,7 +2833,7 @@ impl AppState {
             id = d.add(Op::Add, first.prim, first.origin, first.rot);
             if let Some(f) = d.feature_mut(id) {
                 f.name = name;
-                f.shape_bool = Some(ShapeBool { op, operands: ids.clone() });
+                f.shape_bool = Some(ShapeBool { op, operands: ids.clone(), corners: vec![] });
             }
         });
         self.selection = vec![id];
@@ -4447,6 +4462,7 @@ impl AppState {
         self.selection.clear();
         self.doc_name = name.to_string();
         self.save_name = name.to_string();
+        self.mirror_told = self.doc.features.iter().map(|f| f.id).max().unwrap_or(0);
         self.touched();
         self.ref_frame = true;
         self.frame_all();

@@ -270,6 +270,8 @@ impl AppState {
                 }
             }
         }
+        // a 2D boolean's own corners (where its curves cross)
+        out.extend(self.bool_corners().into_iter().map(|c| c.1.as_vec3()));
         out
     }
 
@@ -344,6 +346,88 @@ impl AppState {
     /// de sélection sélectionne les faces arrières"): nothing behind the
     /// part is taken, in X-ray too (a click there takes the front one as
     /// well), and a thin wall's far side is hidden (`hidden_on`).
+    /// The rectangle in Object mode: every element it touches, whole
+    /// (Romain 23 nov., 7 h 08: "Le rectangle de sélection doit prendre
+    /// complètement un élément dès lors qu'il est touché", Maya's and 3ds
+    /// Max's crossing): the part's faces seen anywhere in it (rays through
+    /// a grid of it, every 4 points at most) give their elements, a curve
+    /// whose line crosses it its own; a closed group comes whole. Shift
+    /// adds, Ctrl takes away, else they replace the selection.
+    pub fn marquee_elements(&mut self, a: [f32; 2], b: [f32; 2], shift: bool, ctrl: bool) {
+        let (lo, hi) = ([a[0].min(b[0]), a[1].min(b[1])], [a[0].max(b[0]), a[1].max(b[1])]);
+        let mut ids: Vec<FeatureId> = vec![];
+        if self.model.is_some() {
+            let (w, h) = (hi[0] - lo[0], hi[1] - lo[1]);
+            let (nx, ny) = (((w / 4.0).ceil() as usize).clamp(1, 160), ((h / 4.0).ceil() as usize).clamp(1, 160));
+            let mut faces: Vec<usize> = vec![];
+            for j in 0..=ny {
+                for i in 0..=nx {
+                    let s = [lo[0] + w * i as f32 / nx as f32, lo[1] + h * j as f32 / ny as f32];
+                    if let Some(hit) = self.pick_at(s) {
+                        if !faces.contains(&hit.face) {
+                            faces.push(hit.face);
+                        }
+                    }
+                }
+            }
+            for f in faces {
+                if let Some(id) = self.feature_of_face(f) {
+                    ids.push(self.element_of(id));
+                }
+            }
+        }
+        // the curves whose line runs through the rectangle
+        let v = self.view();
+        let inside = |s: [f32; 2]| s[0] >= lo[0] && s[0] <= hi[0] && s[1] >= lo[1] && s[1] <= hi[1];
+        let crosses = |p: [f32; 2], q: [f32; 2]| {
+            if inside(p) || inside(q) {
+                return true;
+            }
+            // the segment against the rectangle's four sides
+            let seg = |a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]| {
+                let cr = |o: [f32; 2], u: [f32; 2], w: [f32; 2]| (u[0] - o[0]) * (w[1] - o[1]) - (u[1] - o[1]) * (w[0] - o[0]);
+                (cr(a, b, c) * cr(a, b, d) < 0.0) && (cr(c, d, a) * cr(c, d, b) < 0.0)
+            };
+            let k = [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]];
+            (0..4).any(|i| seg(p, q, k[i], k[(i + 1) % 4]))
+        };
+        for f in self.doc.features.iter().filter(|f| f.visible && f.is_path()) {
+            if self.curve_inside(f.id).is_some_and(|b| !b.visible || !self.boolean_open(b)) {
+                continue;
+            }
+            let hit = self.curve_lines(f).iter().any(|line| {
+                let s: Vec<Option<[f32; 2]>> = line.iter().map(|q| v.project(q.as_vec3())).collect();
+                s.windows(2).any(|w| matches!((w[0], w[1]), (Some(p), Some(q)) if crosses(p, q)))
+            });
+            if hit {
+                ids.push(f.id);
+            }
+        }
+        // a shape of a closed group brings the whole group
+        let mut all: Vec<FeatureId> = vec![];
+        for id in ids {
+            for x in self.pick_ids(id) {
+                if !all.contains(&x) {
+                    all.push(x);
+                }
+            }
+        }
+        if !(shift || ctrl) {
+            self.selection.clear();
+        }
+        self.group_sel = None;
+        for id in all {
+            let at = self.selection.iter().position(|x| *x == id);
+            match (ctrl, at) {
+                (true, Some(i)) => {
+                    self.selection.remove(i);
+                }
+                (false, None) => self.selection.push(id),
+                _ => {}
+            }
+        }
+    }
+
     pub fn marquee_components(&mut self, a: [f32; 2], b: [f32; 2], shift: bool, ctrl: bool) {
         let (lo, hi) = ([a[0].min(b[0]), a[1].min(b[1])], [a[0].max(b[0]), a[1].max(b[1])]);
         let inside = |s: [f32; 2]| s[0] >= lo[0] && s[0] <= hi[0] && s[1] >= lo[1] && s[1] <= hi[1];
@@ -1232,6 +1316,37 @@ impl AppState {
 // ------------------------------------------ direct drags on picked parts
 
 impl AppState {
+    /// The two picked faces joined by a solid (Bridge, Romain 23 nov.,
+    /// 7 h 04: "Il faut un Bridge tool"); the step selected.
+    pub fn add_bridge(&mut self) -> Option<FeatureId> {
+        if self.sel_mode != SelMode::Face || self.face_sel.len() != 2 {
+            self.toast("Bridge: pick two faces (Face mode, Shift + click)", true);
+            return None;
+        }
+        self.abort_gestures();
+        let faces = [self.face_sel[0], self.face_sel[1]];
+        let mut id = None;
+        self.edit("Bridge", |d| id = Some(d.add_bridge(faces)));
+        let id = id?;
+        self.face_sel.clear();
+        self.selection = vec![id];
+        self.toast("Bridge: the two faces joined", false);
+        Some(id)
+    }
+
+    /// Shift + drag on the move gizmo with faces picked (Maya): the picked
+    /// faces extruded, each along its own normal, instead of moved. False
+    /// when no face is picked.
+    pub fn shift_extrude_picked(&mut self, p: [f32; 2]) -> bool {
+        if self.sel_mode != SelMode::Face {
+            return false;
+        }
+        let Some(r) = self.face_sel.first().copied() else { return false };
+        let Some(face) = self.model_face_of(&r) else { return false };
+        self.push_start(face, r.at, p, true);
+        self.push.is_some()
+    }
+
     /// Shift or Ctrl held at the press on a picked face or edge (Maya /
     /// Plasticity): a face, Shift extrudes it, Ctrl insets it; an edge,
     /// Shift pulls it out. False when the press is on nothing picked (then
@@ -1240,13 +1355,19 @@ impl AppState {
         match self.sel_mode {
             SelMode::Face => {
                 let Some(h) = self.pick_at(p) else { return false };
-                if !self.picked_faces().contains(&h.face) {
-                    return false;
-                }
                 let at = h.point.as_dvec3();
                 if shift {
+                    // (Romain 23 nov., 7 h 05: "Et que Shift + Drag face une
+                    // extrude?") on a face not picked too: it alone
+                    if !self.picked_faces().contains(&h.face) {
+                        let Some(r) = self.face_ref(h.face, at) else { return false };
+                        self.face_sel = vec![r];
+                    }
                     self.push_start(h.face, at, p, true);
                     return self.push.is_some();
+                }
+                if !self.picked_faces().contains(&h.face) {
+                    return false;
                 }
                 if ctrl {
                     let Some((r, origin, _)) = self.face_plane(h.face, at, "Inset") else { return true };

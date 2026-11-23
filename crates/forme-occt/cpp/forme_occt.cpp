@@ -37,6 +37,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepFilletAPI_MakeFillet2d.hxx>
 #include <BRepGProp.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -754,6 +755,73 @@ FShape* focc_revolve(const FShape* s, const double* o, const double* d, double a
                 }
             }
             return wrap(r);
+        },
+        (FShape*)nullptr);
+}
+
+// The corners of flat faces (a 2D boolean's region) rounded or cut: at
+// each point given (xyz), the faces' vertex nearest it within `tol` gets a
+// fillet of size[i] (> 0) or a chamfer of -size[i] (< 0). `done[i]` says
+// whether that corner was made. Faces with no corner asked are kept.
+FShape* focc_fillet2d(const FShape* s, const double* xyz, const double* size, int n, double tol, int* done) {
+    return guard(
+        [&]() -> FShape* {
+            for (int i = 0; i < n; i++) done[i] = 0;
+            BRep_Builder bb;
+            TopoDS_Compound out;
+            bb.MakeCompound(out);
+            int faces = 0;
+            for (TopExp_Explorer fx(s->s, TopAbs_FACE); fx.More(); fx.Next()) {
+                TopoDS_Face f = TopoDS::Face(fx.Current());
+                faces++;
+                TopTools_IndexedDataMapOfShapeListOfShape ve;
+                TopExp::MapShapesAndAncestors(f, TopAbs_VERTEX, TopAbs_EDGE, ve);
+                std::vector<std::pair<int, int>> asks;  // (vertex index, point)
+                for (int i = 0; i < n; i++) {
+                    if (std::fabs(size[i]) < 1e-6) continue;
+                    gp_Pnt p(xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]);
+                    int best = 0;
+                    double bd = tol;
+                    for (int k = 1; k <= ve.Extent(); k++) {
+                        double d = BRep_Tool::Pnt(TopoDS::Vertex(ve.FindKey(k))).Distance(p);
+                        if (d < bd) {
+                            bd = d;
+                            best = k;
+                        }
+                    }
+                    if (best > 0) asks.push_back({best, i});
+                }
+                if (asks.empty()) {
+                    bb.Add(out, f);
+                    continue;
+                }
+                BRepFilletAPI_MakeFillet2d mk(f);
+                for (auto& a : asks) {
+                    TopoDS_Vertex v = TopoDS::Vertex(ve.FindKey(a.first));
+                    const TopTools_ListOfShape& es = ve.FindFromIndex(a.first);
+                    if (size[a.second] > 0) {
+                        mk.AddFillet(v, size[a.second]);
+                    } else if (es.Extent() == 2) {
+                        TopoDS_Edge e1 = TopoDS::Edge(es.First()), e2 = TopoDS::Edge(es.Last());
+                        mk.AddChamfer(e1, e2, -size[a.second], -size[a.second]);
+                    } else {
+                        continue;
+                    }
+                    if (mk.Status() == ChFi2d_IsDone) done[a.second] = 1;
+                }
+                mk.Build();
+                if (!mk.IsDone()) {
+                    for (auto& a : asks) done[a.second] = 0;
+                    bb.Add(out, f);
+                    continue;
+                }
+                bb.Add(out, mk.Shape());
+            }
+            if (faces == 1) {
+                TopExp_Explorer one(out, TopAbs_FACE);
+                return wrap(one.Current());
+            }
+            return wrap(out);
         },
         (FShape*)nullptr);
 }

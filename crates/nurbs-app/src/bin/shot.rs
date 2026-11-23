@@ -5351,6 +5351,199 @@ fn main() {
             }
         }
     }
+    if want("nov23") {
+        // Romain's list of 23 nov., 7 h 04 to 7 h 12
+        use nurbs_kernel::doc::{CurveKind, CurveOp};
+        use nurbs_kernel::{Comp, FaceRef, Push, Tweak};
+        let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        let errors = |h: &Harness| h.st.model.as_ref().map(|m| m.errors.clone()).unwrap_or_default();
+        // 1. a 2D boolean's corners rounded where its curves cross ("Il
+        // faut créer des points à fillet aux intersections")
+        h.reset(Doc::default(), "Corners");
+        h.st.camera.frame(Vec3::new(-30.0, 0.0, -30.0), Vec3::new(30.0, 5.0, 25.0));
+        h.st.camera.pitch = 1.2;
+        h.steps(2);
+        let w = |x: f32, z: f32| Vec3::new(x, 0.0, z);
+        for (k, a, b) in [(CurveKind::Rectangle, w(-25.0, -5.0), w(25.0, 22.0)), (CurveKind::Circle, w(0.0, -10.0), w(16.0, -10.0))] {
+            h.st.arm_curve(k);
+            h.steps(1);
+            let (pa, pb) = (h.screen_of(a), h.screen_of(b));
+            h.drag(pa, pb, 8, false);
+            h.steps(1);
+            h.press(pb, false);
+            h.steps(2);
+        }
+        let ids: Vec<_> = h.st.doc.features.iter().map(|f| f.id).collect();
+        h.st.selection = ids.clone();
+        h.st.make_curve_bool(CurveOp::Union);
+        h.settle();
+        let b = *h.st.selection.first().unwrap();
+        h.st.select(None, false);
+        h.key(egui::Key::F9);
+        h.steps(2);
+        let corners = h.st.bool_corners();
+        eprintln!("  boolean corners: {:?}", corners.iter().map(|c| (c.0, (c.1 * 100.0).round() / 100.0, c.2)).collect::<Vec<_>>());
+        h.shot("zero-nov23-1-corners");
+        // the two where the circle meets the rectangle's side, picked by clicks
+        let cross: Vec<DVec3> = corners.iter().filter(|c| c.1.z < -4.0).map(|c| c.1).collect();
+        for (k, q) in cross.iter().enumerate() {
+            if k > 0 {
+                h.hold(Modifiers::SHIFT);
+            }
+            h.click(h.screen_of(q.as_vec3()));
+            h.hold(Modifiers::NONE);
+        }
+        eprintln!("  picked {:?} -> {} corners of the boolean", h.st.vert_sel.iter().map(|v| (*v * 100.0).round() / 100.0).collect::<Vec<_>>(), h.st.picked_bool_corners().len());
+        h.st.set_bool_corners(4.0, false, true);
+        h.st.end_live();
+        h.settle();
+        eprintln!("  rounded: {:?}, errors {:?}", h.st.doc.feature(b).and_then(|f| f.shape_bool.clone()).map(|s| s.corners), errors(&h));
+        h.shot("zero-nov23-2-rounded");
+        // a chamfer on one, then the boolean pulled into a solid
+        h.st.vert_sel.truncate(1);
+        h.st.set_bool_corners(3.0, true, true);
+        h.st.end_live();
+        h.key(egui::Key::F8);
+        h.st.selection = vec![b];
+        h.steps(2);
+        h.st.arm_push(PushKind::Extrude, None);
+        h.steps(1);
+        let c = h.screen_of(w(0.0, 10.0));
+        h.move_to(c);
+        h.steps(1);
+        h.move_to(c + vec2(0.0, -60.0));
+        h.steps(1);
+        h.press(c + vec2(0.0, -60.0), false);
+        h.settle();
+        eprintln!("  extruded: {:?}, errors {:?}", h.st.doc.feature(b).map(|f| f.prim), errors(&h));
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.st.camera.pitch = 0.6;
+        h.settle();
+        h.shot("zero-nov23-3-extruded");
+
+        // 2. after a Mirror, an Extrude made on this side only
+        let mut d = Doc::default();
+        let blk = d.add(Op::Add, Prim::Box { x: 20.0, y: 30.0, z: 20.0 }, DVec3::new(20.0, 0.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(blk).unwrap().name = "Leg".into();
+        h.reset(d, "Mirror side");
+        h.st.camera.dist *= 1.6;
+        h.st.camera.yaw += 0.5;
+        h.settle();
+        h.st.add_mirror(0);
+        h.settle();
+        h.st.select(None, false);
+        let mut push = 0;
+        h.st.edit("Extrude", |d| push = d.add_push(Push { face: FaceRef { tag: tag(blk, 1), at: DVec3::new(10.0, 15.0, 0.0) }, inset: 4.0, depth: 6.0 }));
+        h.settle();
+        eprintln!("  toast {:?}, after mirror {}, errors {:?}", h.st.toast.as_ref().map(|t| t.text.clone()), h.st.after_mirror(push), errors(&h));
+        h.st.selection = vec![push];
+        h.steps(3);
+        h.shot("zero-nov23-4-both-sides");
+        h.st.set_one_side(push, true);
+        h.settle();
+        let vol = |h: &Harness| h.st.model.as_ref().and_then(|m| m.bounds()).map(|(lo, hi)| (lo[0], hi[0]));
+        eprintln!("  this side only: x {:?}, errors {:?}", vol(&h), errors(&h));
+        h.steps(3);
+        h.shot("zero-nov23-5-one-side");
+
+        // 3. the face of an inset left as a line moved out along its
+        // normal: walls made, no refusal
+        let mut d = Doc::default();
+        let blk = d.add(Op::Add, Prim::Box { x: 30.0, y: 30.0, z: 30.0 }, DVec3::new(0.0, 0.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(blk).unwrap().name = "Block".into();
+        d.add_round(4.0, false, vec![EdgeRef { faces: [tag(blk, 0), tag(blk, 3)], at: DVec3::new(15.0, 0.0, 0.0) }]);
+        let ins = d.add_push(Push { face: FaceRef { tag: tag(blk, 0), at: DVec3::new(15.0, 15.0, 0.0) }, inset: 3.0, depth: 0.0 });
+        h.reset(d, "Move inset face");
+        h.st.camera.yaw += 0.8;
+        h.settle();
+        eprintln!("  inset made, errors {:?}", errors(&h));
+        let mut t = Tweak::new(vec![Comp::Face(FaceRef { tag: tag(ins, 1), at: DVec3::new(15.0, 15.0, 0.0) })]).unwrap();
+        t.delta = DVec3::new(5.0, 0.0, 0.0);
+        let mut mv = 0;
+        h.st.edit("Move face", |d| mv = d.add_tweak(t.clone()));
+        h.settle();
+        eprintln!("  moved out 5: errors {:?}, x to {:?}", errors(&h), vol(&h).map(|v| v.1));
+        h.steps(3);
+        h.shot("zero-nov23-6-move-inset-face");
+        h.st.edit("Move face", |d| d.feature_mut(mv).unwrap().tweak.as_mut().unwrap().delta = DVec3::new(-4.0, 0.0, 0.0));
+        h.settle();
+        eprintln!("  moved in 4: errors {:?}, x to {:?}", errors(&h), vol(&h).map(|v| v.1));
+        h.steps(3);
+        h.shot("zero-nov23-7-move-inset-face-in");
+
+        // 4. Shift + drag on the move gizmo's arrow with a face picked: an
+        // extrusion, not a move
+        h.st.undo_doc();
+        h.st.undo_doc();
+        h.settle();
+        h.key(egui::Key::F11);
+        let top = h.screen_of(Vec3::new(0.0, 30.0, 0.0));
+        h.click(top);
+        h.key(egui::Key::W);
+        h.steps(2);
+        let n0 = h.st.doc.features.len();
+        let c = h.st.pivot().expect("a gizmo").as_vec3();
+        let s0 = h.screen_of(c);
+        let dir = (h.screen_of(c + Vec3::Y) - s0).normalized();
+        let grab = s0 + dir * 55.0;
+        h.hold(Modifiers::SHIFT);
+        h.drag(grab, grab + dir * 70.0, 10, false);
+        h.steps(1);
+        h.press(grab + dir * 70.0, false);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let made: Vec<String> = h.st.doc.features[n0.min(h.st.doc.features.len())..].iter().map(|f| format!("{} {:?}", f.name, f.push.as_ref().map(|p| p.depth))).collect();
+        eprintln!("  shift + drag on the arrow made {made:?}, errors {:?}", errors(&h));
+        h.steps(3);
+        h.shot("zero-nov23-8-shift-gizmo");
+
+        // 6. Bridge: two legs under a block, their inner faces picked and
+        // joined ("Il faut un Bridge tool"), then the same with a Mirror
+        let mut d = Doc::default();
+        let top = d.add(Op::Add, Prim::Box { x: 60.0, y: 12.0, z: 20.0 }, DVec3::new(0.0, 30.0, 0.0), DQuat::IDENTITY);
+        let l1 = d.add(Op::Add, Prim::Box { x: 8.0, y: 30.0, z: 16.0 }, DVec3::new(-14.0, 0.0, 0.0), DQuat::IDENTITY);
+        let l2 = d.add(Op::Add, Prim::Box { x: 8.0, y: 30.0, z: 16.0 }, DVec3::new(14.0, 0.0, 0.0), DQuat::IDENTITY);
+        d.add_round(5.0, false, vec![EdgeRef { faces: [tag(l1, 3), tag(l1, 1)], at: DVec3::new(-18.0, 0.0, 0.0) }]);
+        d.add_round(5.0, false, vec![EdgeRef { faces: [tag(l2, 3), tag(l2, 0)], at: DVec3::new(18.0, 0.0, 0.0) }]);
+        let _ = top;
+        h.reset(d, "Bridge");
+        h.st.camera.yaw += 0.35;
+        h.settle();
+        h.key(egui::Key::F11);
+        // the two inner faces (the far one is turned away from the eye:
+        // picked as a click on it would)
+        let inner = |h: &Harness, t: i64| h.st.model.as_ref().and_then(|m| m.faces.iter().position(|f| f.tag.map(|x| x.pack()) == Some(t)));
+        for (t, at) in [(tag(l1, 0), DVec3::new(-10.0, 15.0, 0.0)), (tag(l2, 1), DVec3::new(10.0, 15.0, 0.0))] {
+            let i = inner(&h, t).expect("an inner face");
+            let r = h.st.face_ref(i, at).expect("its ref");
+            h.st.face_sel.push(r);
+        }
+        h.steps(3);
+        eprintln!("  faces picked {:?}", h.st.face_sel.iter().map(|r| FaceTag::unpack(r.tag)).collect::<Vec<_>>());
+        h.shot("zero-nov23-10-bridge-picked");
+        let br = h.st.add_bridge();
+        h.settle();
+        eprintln!("  bridge {br:?}: faces {:?}, errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), errors(&h));
+        h.st.select(None, false);
+        h.steps(3);
+        h.shot("zero-nov23-11-bridged");
+
+        // 5. the rectangle in Object mode takes an element it only touches
+        let mut d = Doc::default();
+        let a = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::new(-20.0, 0.0, 0.0), DQuat::IDENTITY);
+        let b2 = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::new(20.0, 0.0, 0.0), DQuat::IDENTITY);
+        h.reset(d, "Rectangle");
+        h.settle();
+        h.key(egui::Key::Q);
+        let p0 = h.screen_of(Vec3::new(-14.0, 25.0, 0.0));
+        let p1 = h.screen_of(Vec3::new(-6.0, 12.0, 0.0));
+        h.drag(p0, p1, 8, true);
+        h.steps(2);
+        eprintln!("  rectangle over a corner of {a}: selection {:?} (other {b2})", h.st.selection);
+        h.shot("zero-nov23-9-marquee");
+    }
+
     if want("nav") {
         // the navigation with a pen's tip alone (Romain 22 nov., 16 h 49:
         // "La navigation doit pouvoir se faire full stylet"): the island at

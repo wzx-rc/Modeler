@@ -523,6 +523,23 @@ pub struct Curve {
 pub struct ShapeBool {
     pub op: CurveOp,
     pub operands: Vec<FeatureId>,
+    /// Its own corners rounded or cut (Romain 23 nov., 7 h 12: "Il faut
+    /// créer des points à fillet aux intersections"): where its curves
+    /// cross, in its own frame (`Feature::origin`, `rot`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corners: Vec<BoolCorner>,
+}
+
+/// How far a 2D boolean's corner may have gone from where it was rounded
+/// and still be found (mm).
+pub const BOOL_CORNER_TOL: f64 = 0.5;
+
+/// A corner of a 2D boolean's result: its point (in the boolean's frame)
+/// and its cut, a fillet's radius (> 0) or a chamfer's distance (< 0).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BoolCorner {
+    pub at: DVec3,
+    pub size: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -954,6 +971,23 @@ pub struct Feature {
     /// hollowed to a wall thickness, the faces named left open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<Shell>,
+    /// A Bridge step (Romain 23 nov., 7 h 04: "Il faut un Bridge tool", as
+    /// Maya's): two faces of the part joined by a solid lofted between
+    /// their outlines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge: Option<Bridge>,
+    /// Made on this side only after a Mirror (Romain 23 nov., 7 h 07: an
+    /// Extrude on the left leg also made on the right one, "sans raison"):
+    /// no image across the plane.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub one_side: bool,
+}
+
+/// Bridge's settings: the two faces joined (their outer outlines lofted,
+/// straight between them, the solid fused with the part).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Bridge {
+    pub faces: [FaceRef; 2],
 }
 
 /// Shell's settings: the faces taken away (the openings; none: a closed
@@ -1379,7 +1413,7 @@ impl Feature {
     /// A primitive (Add / Carve), not a step on the part (fillet,
     /// chamfer, inset, extrude).
     pub fn is_solid(&self) -> bool {
-        self.round.is_none() && self.push.is_none() && self.tweak.is_none() && self.cut.is_none() && self.mirror.is_none() && self.array.is_none() && self.shell.is_none()
+        self.round.is_none() && self.push.is_none() && self.tweak.is_none() && self.cut.is_none() && self.mirror.is_none() && self.array.is_none() && self.shell.is_none() && self.bridge.is_none()
     }
     /// An operation (a fillet, an inset, a move, the Knife, a Mirror)
     /// with its points mapped by `m` (an affine map, a mirror allowed):
@@ -1409,6 +1443,11 @@ impl Feature {
         }
         if let Some(sh) = f.shell.as_mut() {
             for r in &mut sh.faces {
+                r.at = m(r.at);
+            }
+        }
+        if let Some(b) = f.bridge.as_mut() {
+            for r in &mut b.faces {
                 r.at = m(r.at);
             }
         }
@@ -1514,6 +1553,9 @@ impl Feature {
         }
         if self.shell.is_some() {
             return "Shell";
+        }
+        if self.bridge.is_some() {
+            return "Bridge";
         }
         if let Some(k) = &self.cut {
             return k.label();
@@ -1681,6 +1723,9 @@ pub(crate) fn named_features(f: &Feature) -> Vec<FeatureId> {
     if let Some(sh) = &f.shell {
         tags.extend(sh.faces.iter().map(|r| r.tag));
     }
+    if let Some(b) = &f.bridge {
+        tags.extend(b.faces.iter().map(|r| r.tag));
+    }
     if let Some(k) = &f.cut {
         tags.extend(k.pts.iter().flat_map(|p| p.edge.faces));
         tags.extend(k.remove_faces.iter().map(|r| r.tag));
@@ -1842,7 +1887,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -1852,7 +1897,7 @@ impl Doc {
         let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0, only: false };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false });
         id
     }
     /// Adds an inset or extrusion of a face at the end.
@@ -1861,7 +1906,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(push.label());
         let origin = push.face.at;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false });
         id
     }
     /// Adds a move of a face, edge or vertex at the end.
@@ -1870,7 +1915,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(tweak.label());
         let origin = tweak.at();
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false });
         id
     }
     /// Adds a Mirror step at the end.
@@ -1879,7 +1924,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name("Mirror");
         let origin = mirror.normal() * mirror.offset;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: Some(mirror), array: None, shell: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: Some(mirror), array: None, shell: None, bridge: None, one_side: false });
         id
     }
     /// Adds a Pattern / Array step at the end.
@@ -1888,16 +1933,26 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name("Array");
         let origin = array.sources.iter().filter_map(|s| self.feature(*s)).map(|f| f.centre()).next().unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: Some(array), shell: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: Some(array), shell: None, bridge: None, one_side: false });
         id
     }
     /// Adds a Shell step at the end (`origin`: where its thickness handle
     /// starts, on the part).
+    /// Adds a Bridge between two faces at the end; its id.
+    pub fn add_bridge(&mut self, faces: [FaceRef; 2]) -> FeatureId {
+        let id = self.next_id;
+        self.next_id += 1;
+        let name = self.fresh_name("Bridge");
+        let origin = (faces[0].at + faces[1].at) * 0.5;
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: Some(Bridge { faces }), one_side: false });
+        id
+    }
+
     pub fn add_shell(&mut self, shell: Shell, origin: DVec3) -> FeatureId {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name("Shell");
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: Some(shell) });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: Some(shell), bridge: None, one_side: false });
         id
     }
     /// What the Array at `at` makes again at each copy's place, in history
@@ -1997,7 +2052,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(name);
         let origin = cut.pts.first().map(|p| p.at).or(cut.remove_faces.first().map(|r| r.at)).or(cut.remove_edges.first().map(|e| e.at)).unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false });
         id
     }
     /// The curves' outlines made again from their settings and boxes (a

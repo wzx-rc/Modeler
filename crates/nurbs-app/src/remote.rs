@@ -335,6 +335,11 @@ pub fn spec_of(f: &Feature) -> Value {
         o["keep"] = json!(if m.flip { "-" } else { "+" });
         return o;
     }
+    if let Some(b) = &f.bridge {
+        o["kind"] = json!("bridge");
+        o["faces"] = json!(b.faces.iter().map(|q| r3(q.at)).collect::<Vec<_>>());
+        return o;
+    }
     if let Some(sh) = &f.shell {
         o["kind"] = json!("shell");
         o["thickness"] = json!(r(sh.thickness));
@@ -670,6 +675,8 @@ fn primary_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
             mirror: None,
             array: None,
             shell: None,
+            bridge: None,
+            one_side: false,
         };
         let mut v = spec_of(&f);
         if let Some(o) = v.as_object_mut() {
