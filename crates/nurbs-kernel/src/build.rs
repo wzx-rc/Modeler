@@ -7786,6 +7786,19 @@ mod tests {
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert!(mine(&m, p, 1).iter().any(|f| f.kind == SurfKind::Cylinder && (f.radius - 8.0).abs() < 1e-3));
+        // a cylinder's top edge rounded 4 mm: its fillet (a torus, closed
+        // round the axis) inset 0.5 mm and raised 0.5 mm
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Cylinder { radius: 10.0, height: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let r = d.add_round(4.0, false, vec![EdgeRef { faces: [tag(c, 0), tag(c, 1)], at: DVec3::new(10.0, 20.0, 0.0) }]);
+        let m1 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m1.errors.is_empty(), "{:?}", m1.errors);
+        let fl = m1.faces.iter().find(|f| f.tag.map(|t| t.feature) == Some(r)).unwrap();
+        let p = d.add_push(Push { face: FaceRef { tag: tag(r, 0), at: DVec3::from_array(fl.point) }, inset: 0.5, depth: 0.5 });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(!mine(&m, p, 1).is_empty());
+        assert!(mesh_volume(&m) > mesh_volume(&m1) + 1.0);
         // a block's fillet face: drawn, raised 1 mm, sunk 1 mm, then too
         // wide (its 7.85 mm across): it stops at the widest that works
         let mut d = Doc::default();
