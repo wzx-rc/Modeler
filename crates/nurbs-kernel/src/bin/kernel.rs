@@ -14,6 +14,10 @@ fn main() {
     if std::env::var_os("FORME_NO_SIGNALS").is_none() {
         forme_occt::catch_signals();
     }
+    // OpenCascade's booleans on all the cores (23 nov.: his scene's 5
+    // faces extruded, a drag step 500 → 320 ms on 4 cores, the same part);
+    // FORME_BOP_PARALLEL=0: on one
+    forme_occt::set_parallel(Some(std::env::var("FORME_BOP_PARALLEL").map(|v| v != "0").unwrap_or(true)));
     let mut input = BufReader::new(std::io::stdin().lock());
     let mut output = BufWriter::new(std::io::stdout().lock());
     let mut cache = Cache::default();
