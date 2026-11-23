@@ -1422,7 +1422,7 @@ fn mirror_bar(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2) {
                 island_sep(ui);
                 // the plane: X / Y / Z
                 let axes = [(0u8, "X", ""), (1u8, "Y", ""), (2u8, "Z", "")];
-                if let Some(a) = seg_inline(ui, "mirror-bar-axis", &axes, if cur.is_some() { m.axis } else { 9 }) {
+                if let Some(a) = seg_inline_tinted(ui, "mirror-bar-axis", &axes, if cur.is_some() { m.axis } else { 9 }, &[AXIS_X, AXIS_Y, AXIS_Z]) {
                     if cur.is_none() || a != m.axis {
                         let flip = st.model.as_ref().and_then(|md| md.bounds()).map(|(lo, hi)| (lo[a as usize] + hi[a as usize]) < -1e-3).unwrap_or(false);
                         st.set_scene_mirror(nurbs_kernel::Mirror { axis: a, offset: 0.0, flip, ..m }, true);

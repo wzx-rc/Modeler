@@ -408,6 +408,12 @@ pub fn chip(ui: &mut Ui, icon: Option<Icon>, label: &str, on: bool, tip: &str) -
 
 /// Inline segmented control sized by its labels (28 pt): (value, label, key hint).
 pub fn seg_inline<T: PartialEq + Copy>(ui: &mut Ui, id: &str, items: &[(T, &str, &str)], current: T) -> Option<T> {
+    seg_inline_tinted(ui, id, items, current, &[])
+}
+
+/// `seg_inline` whose active item is lightly tinted with its own colour
+/// (`colors[i]`; none: the plain raised look), e.g. X / Y / Z in the axes'.
+pub fn seg_inline_tinted<T: PartialEq + Copy>(ui: &mut Ui, id: &str, items: &[(T, &str, &str)], current: T, colors: &[Color32]) -> Option<T> {
     let font = medium(12.5);
     let widths: Vec<f32> = items
         .iter()
@@ -424,13 +430,22 @@ pub fn seg_inline<T: PartialEq + Copy>(ui: &mut Ui, id: &str, items: &[(T, &str,
         let resp = ui.interact(r, Id::new((id, i)), Sense::click());
         let on = *v == current;
         let p = ui.painter();
+        let col = colors.get(i).copied();
         if on {
-            p.rect(r, 6.0, RAISED(), Stroke::new(1.0, pick(Color32::from_rgb(0x35, 0x3A, 0x42), Color32::from_rgb(0xCD, 0xD2, 0xD8))), StrokeKind::Inside);
+            match col {
+                Some(c) => p.rect(r, 6.0, tint(c, 0.22), Stroke::new(1.0, tint(c, 0.55)), StrokeKind::Inside),
+                None => p.rect(r, 6.0, RAISED(), Stroke::new(1.0, pick(Color32::from_rgb(0x35, 0x3A, 0x42), Color32::from_rgb(0xCD, 0xD2, 0xD8))), StrokeKind::Inside),
+            };
         } else if resp.hovered() {
             p.rect_filled(r, 6.0, tint(RAISED(), 0.6));
         }
         let tx = r.min.x + 11.0;
-        let g = p.layout_no_wrap(l.to_string(), font.clone(), if on { TEXT() } else { TEXT2() });
+        let fg = match (on, col) {
+            (true, Some(c)) => c,
+            (true, None) => TEXT(),
+            _ => TEXT2(),
+        };
+        let g = p.layout_no_wrap(l.to_string(), font.clone(), fg);
         let gw = g.size().x;
         p.galley(pos2(tx, r.center().y - g.size().y * 0.5), g, TEXT());
         if !k.is_empty() {
