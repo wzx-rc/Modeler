@@ -2628,7 +2628,7 @@ fn main() {
                 let t = |s: u16| FaceTag { feature: b, sub: s }.pack();
                 let kp = |faces: [i64; 2], at: DVec3| nurbs_kernel::doc::KnifePoint { edge: EdgeRef { faces, at }, f: 0.5, at };
                 d.add_knife(nurbs_kernel::doc::Knife { pts: vec![kp([t(4), t(2)], DVec3::new(0.0, 20.0, 15.0)), kp([t(4), t(3)], DVec3::new(0.0, 0.0, 15.0))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
-                d.add_tweak(nurbs_kernel::doc::Tweak { comp: nurbs_kernel::doc::Comp::Edge(EdgeRef { faces: [t(4), t(0)], at: DVec3::new(20.0, 10.0, 15.0) }), delta: DVec3::new(0.0, 0.0, 0.3), more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true });
+                d.add_tweak(nurbs_kernel::doc::Tweak { comp: nurbs_kernel::doc::Comp::Edge(EdgeRef { faces: [t(4), t(0)], at: DVec3::new(20.0, 10.0, 15.0) }), delta: DVec3::new(0.0, 0.0, 0.3), more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true, bend: true });
                 (d, vec![EdgeRef { faces: [t(4), t(4)], at: DVec3::new(0.0, 10.0, 15.0) }])
             }
         };
@@ -7187,6 +7187,68 @@ fn main() {
         h.st.select(None, false);
         h.steps(2);
         h.shot("zero-comp-tilt-4-lowered");
+    }
+    if want("bend") {
+        // the move made as Maya does (23 nov., 20 h 03: "revoir l'algo de
+        // déplacement de composant de zéro"): every face round what moves
+        // follows, bent when it has to. A block's top corner with a hole in
+        // the top raised 8 (refused until then: "cannot bend"), then a
+        // second corner, then a box's side face with a hole pushed out
+        // past its neighbours' corners
+        let pull = |h: &mut Harness, axis: usize, mm: f32| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + Vec3::AXES[axis]) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let by = h.screen_of(c + Vec3::AXES[axis] * mm) - s0;
+            h.drag(grab, grab + by, 10, true);
+            h.settle();
+        };
+        let say = |h: &Harness| eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-5.0, -5.0, 0.0), DQuat::IDENTITY);
+        h.reset(d, "Block with a hole");
+        h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num1);
+        let corner = h.screen_of(Vec3::new(20.0, 20.0, 15.0));
+        h.click(corner);
+        h.steps(2);
+        h.shot("zero-bend-1-picked");
+        pull(&mut h, 1, 8.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-bend-2-corner-up");
+        h.key(egui::Key::Num1);
+        let corner = h.screen_of(Vec3::new(-20.0, 20.0, -15.0));
+        h.click(corner);
+        h.steps(2);
+        pull(&mut h, 1, -6.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-bend-3-two-corners");
+        // the hole's wall at the moved top: still a cylinder, cut by the
+        // bent top
+        h.st.undo_doc();
+        h.st.undo_doc();
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num2);
+        let edge = h.screen_of(Vec3::new(20.0, 20.0, 0.0));
+        h.click(edge);
+        h.steps(2);
+        pull(&mut h, 0, 8.0);
+        say(&h);
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-bend-4-edge-out");
     }
     if want("comp-fillet") {
         // a face moved where fillets made before run along it (19 nov.):

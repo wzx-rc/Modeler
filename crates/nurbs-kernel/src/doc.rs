@@ -855,6 +855,11 @@ pub struct Tweak {
     /// Knife cuts, an Extrude and four fillets).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sweep: bool,
+    /// Made the Maya way when nothing exact can (`build::tweak_deformed`,
+    /// 23 nov., 21 h 03): its faces bent into smooth surfaces. Only for the
+    /// moves made since (absent from older saves), as `sweep`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bend: bool,
 }
 
 fn one3() -> DVec3 {
@@ -886,7 +891,7 @@ impl Tweak {
     pub fn new(comps: Vec<Comp>) -> Option<Tweak> {
         let mut it = comps.into_iter();
         let comp = it.next()?;
-        Some(Tweak { comp, delta: DVec3::ZERO, more: it.collect(), scale: DVec3::ONE, copy: false, about: None, sweep: true })
+        Some(Tweak { comp, delta: DVec3::ZERO, more: it.collect(), scale: DVec3::ONE, copy: false, about: None, sweep: true, bend: true })
     }
     /// All its components.
     pub fn comps(&self) -> impl Iterator<Item = &Comp> {
@@ -2582,7 +2587,7 @@ mod tests {
         let knife = d.add_knife(Knife { pts: vec![KnifePoint { edge: EdgeRef { faces: [tag(push, 1), tag(b, 2)], at: DVec3::ZERO }, f: 0.5, at: DVec3::ZERO }], segs: vec![], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
         // between both shapes: it keeps a face that is there
         let both = d.add_round(1.0, false, vec![EdgeRef { faces: [tag(a, 0), tag(b, 1)], at: DVec3::ZERO }]);
-        let vertex = d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::ZERO), delta: DVec3::X, more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true });
+        let vertex = d.add_tweak(Tweak { comp: Comp::Vertex(DVec3::ZERO), delta: DVec3::X, more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true, bend: true });
         assert!(d.orphans().is_empty());
         d.features.retain(|f| f.id != b);
         assert_eq!(d.orphans(), vec![on_b, push, knife]);

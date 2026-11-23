@@ -82,6 +82,7 @@ extern "C" {
     fn focc_vertex_points(s: *const FShape, xyz: *mut c_double, cap: c_int) -> c_int;
     fn focc_sub_vertices(s: *const FShape, kind: c_int, index: c_int, out: *mut c_int, cap: c_int) -> c_int;
     fn focc_move_vertices(s: *const FShape, idx: *const c_int, xyz: *const c_double, n: c_int) -> *mut FShape;
+    fn focc_deform(s: *const FShape, idx: *const c_int, xyz: *const c_double, n: c_int) -> *mut FShape;
     fn focc_move_lumps(s: *const FShape, idx: *const c_int, n: c_int, m: *const c_double) -> *mut FShape;
     fn focc_lumps_of(s: *const FShape, solids: c_int) -> *mut FShape;
     fn focc_face_count(s: *const FShape) -> c_int;
@@ -868,6 +869,15 @@ impl Shape {
         let idx: Vec<c_int> = moves.iter().map(|m| m.0).collect();
         let xyz: Vec<f64> = moves.iter().flat_map(|m| m.1).collect();
         shape(unsafe { focc_move_vertices(self.0, idx.as_ptr(), xyz.as_ptr(), idx.len() as c_int) })
+    }
+    /// Vertices moved as Maya moves them (23 nov.): every edge and face
+    /// touching them follows, carried, kept on its surface, flat, or bent
+    /// into a smooth surface through its new outline; a flat face's holes
+    /// go with it. Faces in the same order (tags kept).
+    pub fn deform(&self, moves: &[(i32, [f64; 3])]) -> Result<Shape, String> {
+        let idx: Vec<c_int> = moves.iter().map(|m| m.0).collect();
+        let xyz: Vec<f64> = moves.iter().flat_map(|m| m.1).collect();
+        shape(unsafe { focc_deform(self.0, idx.as_ptr(), xyz.as_ptr(), idx.len() as c_int) })
     }
     pub fn face_count(&self) -> usize {
         unsafe { focc_face_count(self.0) }.max(0) as usize
