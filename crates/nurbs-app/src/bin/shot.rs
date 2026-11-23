@@ -118,7 +118,8 @@ impl Harness {
 
     fn raw(&mut self) -> RawInput {
         let mut raw = RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(self.size[0], self.size[1]))),
+            // the window in points: smaller as the interface's size grows
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(self.size[0], self.size[1]) / self.ctx.zoom_factor())),
             time: Some(self.t),
             predicted_dt: 1.0 / 60.0,
             events: std::mem::take(&mut self.pending),
@@ -131,6 +132,11 @@ impl Harness {
 
     fn step(&mut self) {
         self.t += 1.0 / 60.0;
+        // the Settings' Interface size, as main.rs applies it
+        let want = self.st.settings.ui_scale.clamp(0.7, 1.6);
+        if (self.ctx.zoom_factor() - want).abs() > 1e-4 {
+            self.ctx.set_zoom_factor(want);
+        }
         let raw = self.raw();
         self.st.tick(self.t);
         let st = &mut self.st;
@@ -246,7 +252,7 @@ impl Harness {
         let (w, h) = ((self.size[0] * self.ppp) as u32, (self.size[1] * self.ppp) as u32);
         let target = self.gpu.target(w, h);
         let view = target.create_view(&Default::default());
-        self.drawer.render(&self.gpu.device, &self.gpu.queue, &view, [w, h], self.ppp, &self.st, &paint, &mut tex);
+        self.drawer.render(&self.gpu.device, &self.gpu.queue, &view, [w, h], out.pixels_per_point, &self.st, &paint, &mut tex);
         let t3 = Instant::now();
         [(t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, (t3 - t2).as_secs_f64() * 1e3]
     }
@@ -268,7 +274,7 @@ impl Harness {
         let (w, h) = ((self.size[0] * self.ppp) as u32, (self.size[1] * self.ppp) as u32);
         let target = self.gpu.target(w, h);
         let view = target.create_view(&Default::default());
-        self.drawer.render(&self.gpu.device, &self.gpu.queue, &view, [w, h], self.ppp, &self.st, &paint, &mut tex);
+        self.drawer.render(&self.gpu.device, &self.gpu.queue, &view, [w, h], out.pixels_per_point, &self.st, &paint, &mut tex);
         let px = self.gpu.read_rgba(&target);
         let path = format!("{}/{}.png", self.out, name);
         if let Some(dir) = std::path::Path::new(&path).parent() {
@@ -1800,6 +1806,76 @@ fn main() {
         h.st.undo();
         h.steps(2);
         eprintln!("  undo: {}", count(&h));
+    }
+
+    if want("settings") {
+        // Romain 23 nov., 17 h 59: the Settings window (light theme, the
+        // interface's size), the Documents window clickable after its dim
+        // closed it once, Q after an Inset (its faces picked again), a
+        // material with no face picked (the whole element)
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.settle();
+        let gear = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("settings-btn"))).map(|r| r.center());
+        eprintln!("  gear at {gear:?}");
+        if let Some(g) = gear {
+            h.click(g);
+        }
+        h.steps(3);
+        eprintln!("  settings open: {}", h.st.settings_open);
+        h.shot("zero-settings-1-window");
+        h.st.settings.light = true;
+        h.st.settings.ui_scale = 1.25;
+        h.steps(4);
+        h.shot("zero-settings-2-light-125");
+        h.st.settings.light = false;
+        h.st.settings.ui_scale = 1.0;
+        h.st.settings_open = false;
+        h.steps(4);
+        // the Documents window: closed by a click on its dim, opened again,
+        // its name field clicked
+        h.st.files_open = true;
+        h.steps(3);
+        h.click(Pos2::new(60.0, 860.0));
+        h.steps(3);
+        eprintln!("  closed by the dim: {}", !h.st.files_open);
+        h.st.files_open = true;
+        h.steps(3);
+        h.click(Pos2::new(700.0, 385.0));
+        h.steps(3);
+        let focus = h.ctx.memory(|m| m.focused());
+        eprintln!("  reopened: open {}, a field focused {:?}", h.st.files_open, focus.is_some());
+        h.shot("zero-settings-3-documents");
+        h.st.files_open = false;
+        h.steps(3);
+        // Inset on two faces, then Q: the two inset faces picked, the Face
+        // window again
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(20.0, 10.0, 0.0)));
+        h.hold(Modifiers::NONE);
+        h.key(egui::Key::I);
+        h.settle();
+        eprintln!("  inset: selected {:?}, faces {}", h.st.selection, h.st.face_sel.len());
+        h.key(egui::Key::Q);
+        h.settle();
+        h.steps(3);
+        eprintln!("  Q: {:?}, selected {:?}, faces {:?}", h.st.sel_mode, h.st.selection, h.st.face_sel.iter().map(|r| r.tag).collect::<Vec<_>>());
+        h.shot("zero-settings-4-q-after-inset");
+        // a material with no face picked: the whole element
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(0.0, 10.0, 15.0)));
+        h.steps(2);
+        eprintln!("  clicked: faces {:?}, last element {:?}", h.st.face_sel.iter().map(|r| r.tag).collect::<Vec<_>>(), h.st.last_element);
+        h.st.face_sel.clear();
+        h.steps(2);
+        h.st.apply_material(3);
+        eprintln!("  toast {:?}", h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.steps(2);
+        eprintln!("  material with no face picked: block material {:?}, painted faces {}", h.st.doc.features.first().map(|f| f.material), h.st.doc.paint.len());
     }
 
     if want("multi") {
@@ -5367,6 +5443,10 @@ fn main() {
                     let f0 = Instant::now();
                     h.pending.push(Event::PointerMoved(a + (b - a) * (i as f32 / n as f32)));
                     frames.push(h.frame_timed());
+                    // FORME_SHOTS: pictures during the drag
+                    if std::env::var_os("FORME_SHOTS").is_some() && (i == 12 || i == 40) {
+                        h.shot(&format!("zero-perf-{id}-drag-{i}"));
+                    }
                     if h.st.model_gen != seen {
                         seen = h.st.model_gen;
                         answers.push(h.st.round_ms as f64);
@@ -5389,6 +5469,10 @@ fn main() {
                 eprintln!("    dragging  tick {:.1} / {:.1} max, interface {:.1} / {:.1} max ({} frames over 8 ms), drawing {:.1} / {:.1} max", tk.1, tk.2, ui.1, ui.2, frames.iter().filter(|f| f[0] + f[1] > 8.0).count(), dr.1, dr.2);
                 eprintln!("    kernel    {} answers during the drag ({:.1} a second), each {:?} ms; fine model {:.2} s after the release", answers.len(), answers.len() as f64 / took, answers.iter().map(|a| a.round() as i64).collect::<Vec<_>>(), fine);
                 eprintln!("    errors {:?}", h.st.model.as_ref().map(|m| m.errors.len()));
+                if std::env::var_os("FORME_SHOTS").is_some() {
+                    eprintln!("    after the release: {:?} · toast {:?}", h.st.model.as_ref().map(|m| m.errors.clone()), h.st.toast.as_ref().map(|t| t.text.clone()));
+                    h.shot(&format!("zero-perf-{id}-released"));
+                }
                 h.st.undo();
                 h.settle();
             }

@@ -164,6 +164,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     align_window(ctx, st);
     op_window(ctx, st);
     files_dialog(ctx, st, screen);
+    settings_window(ctx, st, screen);
     toast(ctx, st, screen);
     shortcuts(ctx, st);
     if st.tool != Tool::Select {
@@ -371,9 +372,12 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 if (st.quads || st.remesh_on) && icon_btn(ui, Icon::Export, false, if st.remesh_on { "Export the remesh as .obj (Documents/Forme NURBS, <name>-remesh.obj)" } else { "Export the quads as .obj (Documents/Forme NURBS)" }, 28.0).clicked() {
                     st.export_obj();
                 }
-                if icon_btn(ui, Icon::Light, st.settings.light, "Light theme", 28.0).clicked() {
-                    st.settings.light = !st.settings.light;
-                    st.save_settings();
+                // the Settings window (Romain 23 nov.: the light theme and
+                // the interface's size in it)
+                let r = icon_btn(ui, Icon::Settings, st.settings_open, "Settings: theme, interface size, panels, snapping", 28.0);
+                ui.data_mut(|d| d.insert_temp(Id::new("settings-btn"), r.rect));
+                if r.clicked() {
+                    st.settings_open = !st.settings_open;
                 }
             });
         });
@@ -3160,45 +3164,125 @@ fn components_column(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2, hei
     });
 }
 
-/// Nothing selected: what new shapes will be.
+/// Nothing selected: the settings are in the Settings window now (the gear
+/// at the top right).
 fn defaults(ui: &mut Ui, st: &mut AppState) {
-    // Add / Carve for new shapes: the top island; their material: the
-    // materials island (Romain 19 nov.)
-    section(ui, "Display");
-    if toggle_row(ui, "Shape list", st.settings.show_tree) {
-        st.settings.show_tree = !st.settings.show_tree;
-        st.save_settings();
+    section(ui, "Settings");
+    if secondary_btn(ui, "Open the settings", ui.available_width()).on_hover_text("Theme, interface size, panels, snapping: the gear at the top right").clicked() {
+        st.settings_open = true;
     }
-    if st.settings.show_tree {
-        ui.label(egui::RichText::new("Sub Outliner").font(regular(12.5)).color(LABEL()));
-        let items = [(false, "Floating", accent()), (true, "Fixed", accent())];
-        if let Some(v) = segmented(ui, &items, st.settings.sub_fixed, 28.0) {
-            st.settings.sub_fixed = v;
+}
+
+/// The Settings window, under its gear at the top right: the theme, the
+/// interface's size, the panels, the view, snapping, selection.
+fn settings_window(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
+    // the interface's size dragged: applied once the button is let go
+    if let Some(v) = st.ui_scale_edit {
+        if !ctx.input(|i| i.pointer.any_down()) {
+            st.ui_scale_edit = None;
+            st.settings.ui_scale = (v / 100.0).clamp(0.7, 1.6);
             st.save_settings();
         }
-        ui.add_space(2.0);
     }
-    if toggle_row(ui, "Navigation buttons", st.settings.nav) {
-        st.settings.nav = !st.settings.nav;
-        st.save_settings();
+    if !st.settings_open {
+        return;
     }
-    if toggle_row(ui, "World origin", st.settings.origin) {
-        st.settings.origin = !st.settings.origin;
-        st.save_settings();
-    }
-    if toggle_row(ui, "Snap", st.settings.snap) {
-        st.settings.snap = !st.settings.snap;
-        st.save_settings();
-    }
-    let mut step = st.settings.step as f32;
-    let (ch, _) = slider_row(ui, "Snap step", &mut step, 0.1..=10.0, 0.1, "mm");
-    if ch {
-        st.settings.step = step.max(0.1) as f64;
-        st.save_settings();
-    }
-    if toggle_row(ui, "Snap to points (Ctrl: off)", st.settings.points) {
-        st.settings.points = !st.settings.points;
-        st.save_settings();
+    let btn = ctx.data(|d| d.get_temp::<Rect>(Id::new("settings-btn"))).unwrap_or(Rect::from_min_size(pos2(screen.max.x - 60.0, screen.min.y + EDGE), vec2(28.0, 28.0)));
+    let at = pos2(btn.max.x + 6.0, btn.max.y + 12.0);
+    let area = egui::Area::new(Id::new("settings-pop")).order(Order::Foreground).fade_in(false).pivot(Align2::RIGHT_TOP).fixed_pos(at).show(ctx, |ui| {
+        op_island().show(ui, |ui| {
+            set_op_style(ui.ctx(), true);
+            ui.set_width(OP_W);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Settings").font(semibold(15.0)).color(TEXT()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(egui::Label::new(egui::RichText::new("×").font(regular(18.0)).color(TEXT2())).sense(Sense::click())).on_hover_text("Close (Esc)").clicked() {
+                        st.settings_open = false;
+                    }
+                });
+            });
+            let max_h = (screen.max.y - at.y - 70.0).max(160.0);
+            egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+            section(ui, "Look");
+            let items = [(false, "Dark", accent()), (true, "Light", accent())];
+            if let Some(v) = segmented(ui, &items, st.settings.light, 28.0) {
+                st.settings.light = v;
+                st.save_settings();
+            }
+            let mut v = st.ui_scale_edit.unwrap_or(st.settings.ui_scale * 100.0);
+            let (ch, _) = slider_row(ui, "Interface size", &mut v, 70.0..=160.0, 5.0, "%");
+            if ch {
+                st.ui_scale_edit = Some((v / 5.0).round() * 5.0);
+            }
+            if (st.settings.ui_scale - 1.0).abs() > 1e-3 && secondary_btn(ui, "Interface size as it comes", ui.available_width()).clicked() {
+                st.settings.ui_scale = 1.0;
+                st.ui_scale_edit = None;
+                st.save_settings();
+            }
+            section(ui, "Panels");
+            if toggle_row(ui, "Shape list", st.settings.show_tree) {
+                st.settings.show_tree = !st.settings.show_tree;
+                st.save_settings();
+            }
+            if st.settings.show_tree {
+                ui.label(egui::RichText::new("Sub Outliner").font(regular(12.5)).color(LABEL()));
+                let items = [(false, "Floating", accent()), (true, "Fixed", accent())];
+                if let Some(v) = segmented(ui, &items, st.settings.sub_fixed, 28.0) {
+                    st.settings.sub_fixed = v;
+                    st.save_settings();
+                }
+                ui.add_space(2.0);
+            }
+            if toggle_row(ui, "Help box", st.settings.help) {
+                st.settings.help = !st.settings.help;
+                st.save_settings();
+            }
+            if toggle_row(ui, "Navigation buttons", st.settings.nav) {
+                st.settings.nav = !st.settings.nav;
+                st.save_settings();
+            }
+            section(ui, "View");
+            if toggle_row(ui, "Ground grid", st.settings.grid) {
+                st.settings.grid = !st.settings.grid;
+                st.save_settings();
+            }
+            if toggle_row(ui, "World origin", st.settings.origin) {
+                st.settings.origin = !st.settings.origin;
+                st.save_settings();
+            }
+            if toggle_row(ui, "Mirror plane", st.settings.mirror_plane) {
+                st.settings.mirror_plane = !st.settings.mirror_plane;
+                st.save_settings();
+            }
+            section(ui, "Snapping");
+            if toggle_row(ui, "Snap", st.settings.snap) {
+                st.settings.snap = !st.settings.snap;
+                st.save_settings();
+            }
+            let mut step = st.settings.step as f32;
+            let (ch, _) = slider_row(ui, "Snap step", &mut step, 0.1..=10.0, 0.1, "mm");
+            if ch {
+                st.settings.step = step.max(0.1) as f64;
+                st.save_settings();
+            }
+            if toggle_row(ui, "Snap to points (Ctrl: off)", st.settings.points) {
+                st.settings.points = !st.settings.points;
+                st.save_settings();
+            }
+            section(ui, "Selection");
+            if toggle_row(ui, "Rectangle through faces", st.settings.select_through) {
+                st.settings.select_through = !st.settings.select_through;
+                st.save_settings();
+            }
+            });
+            set_op_style(ui.ctx(), false);
+        });
+    });
+    // a press outside it (and off its gear) or Esc closes it
+    let r = area.response.rect;
+    let (pressed, at, esc) = ctx.input(|i| (i.pointer.any_pressed(), i.pointer.interact_pos(), i.key_pressed(egui::Key::Escape)));
+    if esc || (pressed && at.is_some_and(|p| !r.contains(p) && !btn.contains(p)) && st.ui_scale_edit.is_none()) {
+        st.settings_open = false;
     }
 }
 
@@ -4289,7 +4373,10 @@ fn files_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         st.files_open = false;
         return;
     }
-    egui::Area::new(Id::new("files")).order(Order::Foreground).pivot(Align2::CENTER_CENTER).fixed_pos(screen.center()).show(ctx, |ui| {
+    // a layer above its dim (Romain 23 nov.: "je ne peux rien cliquer ou
+    // éditer dans ce menu": on one layer with it, the dim took the clicks
+    // meant for the window once it had been clicked to close it)
+    egui::Area::new(Id::new("files")).order(Order::Tooltip).pivot(Align2::CENTER_CENTER).fixed_pos(screen.center()).show(ctx, |ui| {
         panel().inner_margin(Margin::same(16)).show(ui, |ui| {
             ui.set_width(380.0);
             ui.label(egui::RichText::new("Documents").font(semibold(16.0)).color(TEXT()));
@@ -4541,6 +4628,11 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         if under_way {
             let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| [p.x, p.y]).unwrap_or(st.principal());
             st.commit_gestures(at);
+        }
+        if st.tool == Tool::Select {
+            // an operation on components validated: what it made stays
+            // picked, its tools offered again (Romain 23 nov.)
+            st.steps_to_components();
         }
     }
     // Maya: Q select (no gizmo), W move, E rotate, R scale (rotate and

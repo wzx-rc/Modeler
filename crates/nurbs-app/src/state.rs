@@ -789,10 +789,18 @@ pub struct AppState {
     pub interacting: bool,
     pub renaming: bool,
     pub files_open: bool,
+    /// The Settings window (the gear at the top right).
+    pub settings_open: bool,
+    /// The interface's size being dragged in the Settings window: applied
+    /// when the button is let go (the layout would move under the pointer).
+    pub ui_scale_edit: Option<f32>,
     pub save_name: String,
     pub panel_visible: bool,
     /// The outliner's element whose operations show in its second column.
     pub outline_focus: Option<FeatureId>,
+    /// The element last worked on (its faces, edges or the shape picked):
+    /// a material ball clicked with nothing picked goes to it.
+    pub last_element: Option<FeatureId>,
     /// Quads view: the part as the kernel's quad mesh (fillets in orange).
     pub quads: bool,
     /// Remesh view (the « Export converter », `nurbs_kernel::remesh`, kept
@@ -951,9 +959,12 @@ impl AppState {
             interacting: false,
             renaming: false,
             files_open: false,
+            settings_open: false,
+            ui_scale_edit: None,
             save_name: name.to_string(),
             panel_visible: true,
             outline_focus: None,
+            last_element: None,
             quads: false,
             remesh_on: false,
             remesh_target: 1500,
@@ -1499,6 +1510,13 @@ impl AppState {
     /// with the document (an edit, an undo) goes with that step. Not while
     /// a gesture is under way (it ends as one step).
     fn sync_selection(&mut self) {
+        // the element last worked on
+        let tag = self.face_sel.first().map(|r| r.tag).or_else(|| self.edge_sel.first().map(|e| e.faces[0]));
+        if let Some(x) = tag.and_then(FaceTag::unpack) {
+            self.last_element = Some(self.element_of(x.feature));
+        } else if let Some(id) = self.selection.first() {
+            self.last_element = Some(self.element_of(*id));
+        }
         let now = self.sel_state();
         if self.version != self.sel_version {
             self.sel_version = self.version;
@@ -1989,11 +2007,34 @@ impl AppState {
         0
     }
 
+    /// The shapes a material goes to: the selected ones (an operation's:
+    /// its shape); in a component mode with nothing selected (Romain 23
+    /// nov.: no face picked, the whole element), the element of the picked
+    /// edges, else the one last worked on.
+    fn material_targets(&self) -> Vec<FeatureId> {
+        let mut ids: Vec<FeatureId> = self.selection.iter().map(|id| self.element_of(*id)).filter(|id| self.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false)).collect();
+        if ids.is_empty() && self.sel_mode != SelMode::Object {
+            for e in &self.edge_sel {
+                for t in e.faces {
+                    if let Some(x) = FaceTag::unpack(t) {
+                        ids.push(self.element_of(x.feature));
+                    }
+                }
+            }
+            if ids.is_empty() {
+                ids.extend(self.last_element.or(self.outline_element()).map(|id| self.element_of(id)));
+            }
+            ids.retain(|id| self.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false));
+        }
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     /// Gives the selected shapes a material (with nothing selected: the
     /// material of new shapes).
     pub fn set_material(&mut self, m: u32) {
-        let mut ids: Vec<FeatureId> = self.selection.iter().map(|id| self.element_of(*id)).filter(|id| self.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false)).collect();
-        ids.dedup();
+        let ids = self.material_targets();
         if ids.is_empty() {
             self.material = m;
             return;
@@ -2026,7 +2067,10 @@ impl AppState {
     pub fn drop_target(&self, p: [f32; 2]) -> Option<DropTarget> {
         let h = self.pick_at(p)?;
         let t = self.model.as_ref()?.faces.get(h.face)?.tag?;
-        if self.sel_mode == SelMode::Face {
+        // a face only while faces are picked (Romain 23 nov.: "si il n'y a
+        // pas une sélection de face active, le shader s'applique à tout
+        // l'élément")
+        if self.sel_mode == SelMode::Face && !self.face_sel.is_empty() {
             return Some(DropTarget::Face { tag: t.pack(), face: h.face });
         }
         let id = self.element_of(t.feature);
@@ -2037,7 +2081,7 @@ impl AppState {
     pub fn face_in_target(&self, face: usize, t: &DropTarget) -> bool {
         let Some(tag) = self.model.as_ref().and_then(|m| m.faces.get(face)).and_then(|f| f.tag) else { return false };
         match t {
-            DropTarget::Face { tag: x, .. } => tag.pack() == *x,
+            DropTarget::Face { tag: x, .. } => tag.pack() == *x || (self.face_sel.iter().any(|r| r.tag == *x) && self.face_sel.iter().any(|r| r.tag == tag.pack())),
             DropTarget::Shape(id) => self.element_of(tag.feature) == *id && self.paint_of(tag.pack()).is_none(),
         }
     }
@@ -2054,8 +2098,7 @@ impl AppState {
             self.toast(&format!("{name} on {n} face{}", if n == 1 { "" } else { "s" }), false);
             return;
         }
-        let mut ids: Vec<FeatureId> = self.selection.iter().map(|id| self.element_of(*id)).filter(|id| self.doc.feature(*id).map(|f| f.is_solid()).unwrap_or(false)).collect();
-        ids.dedup();
+        let ids = self.material_targets();
         if ids.is_empty() {
             self.material = m;
             self.toast(&format!("New shapes: {name}"), false);
@@ -2071,8 +2114,13 @@ impl AppState {
         let name = crate::materials::get(m).name;
         match t {
             DropTarget::Face { tag, .. } => {
-                self.paint_faces(&[tag], m);
-                self.toast(&format!("{name} on a face"), false);
+                // on a picked face: all the picked faces
+                let mut tags: Vec<i64> = if self.face_sel.iter().any(|r| r.tag == tag) { self.face_sel.iter().map(|r| r.tag).collect() } else { vec![tag] };
+                tags.sort();
+                tags.dedup();
+                let n = tags.len();
+                self.paint_faces(&tags, m);
+                self.toast(&format!("{name} on {}", if n == 1 { "a face".to_string() } else { format!("{n} faces") }), false);
             }
             DropTarget::Shape(id) => {
                 self.shapes_material(&[id], m);
@@ -2120,6 +2168,11 @@ impl AppState {
         // Q, W ou Entrée valide l'opération et sort du tool")
         if self.tool != Tool::Select || self.sketch.is_some() || self.creation.is_some() || self.drag.is_some() || self.push.is_some() || self.curve_pull.is_some() {
             self.commit_gestures(self.principal());
+        }
+        if matches!(g, GizmoMode::Select | GizmoMode::Move) {
+            // an operation just made on components validated: what it made
+            // stays picked (its tools offered again)
+            self.steps_to_components();
         }
         // rotate works on whole shapes; scale on components too
         if g == GizmoMode::Rotate && self.sel_mode != SelMode::Object {

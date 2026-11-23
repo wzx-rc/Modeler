@@ -40,11 +40,14 @@ pub struct Settings {
     /// behind (backface culling off; Romain 23 nov., 14 h 51), else only
     /// what the eye sees (his 21 nov. ask).
     pub select_through: bool,
+    /// The interface's size, 1 as it comes (Romain 23 nov., 17 h 59: "un
+    /// slider pour scale l'UI"), from 0.7 to 1.6.
+    pub ui_scale: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: cfg!(target_os = "ios"), mirror_bar: false, mirror_plane: true, select_through: true }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: cfg!(target_os = "ios"), mirror_bar: false, mirror_plane: true, select_through: true, ui_scale: 1.0 }
     }
 }
 

@@ -122,6 +122,13 @@ impl App {
         let (Some(window), Some(gfx), Some(es)) = (self.window.clone(), self.gfx.as_mut(), self.egui_state.as_mut()) else {
             return;
         };
+        // the interface's size: the base (a bit tighter than egui's, Romain
+        // works on a 4K screen) times the Settings' Interface size
+        let base: f32 = std::env::var("FORME_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(0.9);
+        let want = base * self.st.settings.ui_scale.clamp(0.7, 1.6);
+        if (self.ctx.zoom_factor() - want).abs() > 1e-4 {
+            self.ctx.set_zoom_factor(want);
+        }
         let raw = es.take_egui_input(&window);
         let st = &mut self.st;
         let mut out = self.ctx.run_pass(raw, |ctx| nurbs_app::run(ctx, st));

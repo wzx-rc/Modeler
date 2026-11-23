@@ -692,6 +692,63 @@ impl AppState {
         self.selected_pushes().first().and_then(|id| self.doc.feature(*id))
     }
 
+    /// Q, W or Enter on operations just made on components (Romain 23 nov.,
+    /// 17 h 59: "je fais un Inset, ça enlève les options mais comme j'ai
+    /// toujours mes 2 faces en sélection active le pop-menu revient à me
+    /// proposer des tools pour enchaîner"): they are validated, their
+    /// settings go, and what they made stays picked, so the window offers
+    /// the tools to go on with: an inset's or extrusion's new face (its
+    /// tag `(step, 1)`), a moved face, edge or vertex where it went.
+    /// False when the selection is not such operations.
+    pub fn steps_to_components(&mut self) -> bool {
+        if self.selection.is_empty() {
+            return false;
+        }
+        let feats: Vec<Feature> = self.selection.iter().filter_map(|id| self.doc.feature(*id).cloned()).collect();
+        if feats.len() != self.selection.len() {
+            return false;
+        }
+        let (mut faces, mut edges, mut verts) = (vec![], vec![], vec![]);
+        for f in &feats {
+            if let Some(p) = &f.push {
+                let tag = nurbs_kernel::model::FaceTag { feature: f.id, sub: 1 }.pack();
+                faces.push(FaceRef { tag, at: p.face.at });
+            } else if let Some(t) = f.tweak.as_ref().filter(|t| !t.copy) {
+                for c in std::iter::once(&t.comp).chain(t.more.iter()) {
+                    match c {
+                        Comp::Face(r) => faces.push(FaceRef { tag: r.tag, at: r.at + t.delta }),
+                        Comp::Edge(e) => edges.push(EdgeRef { faces: e.faces, at: e.at + t.delta }),
+                        Comp::Vertex(v) => verts.push(*v + t.delta),
+                    }
+                }
+            } else {
+                return false;
+            }
+        }
+        let mode = if !faces.is_empty() {
+            SelMode::Face
+        } else if !edges.is_empty() {
+            SelMode::Edge
+        } else if !verts.is_empty() {
+            SelMode::Vertex
+        } else {
+            return false;
+        };
+        self.abort_gestures();
+        self.tool = Tool::Select;
+        self.sel_mode = mode;
+        self.selection.clear();
+        self.face_sel.clear();
+        self.edge_sel.clear();
+        self.vert_sel.clear();
+        match mode {
+            SelMode::Face => self.face_sel = faces,
+            SelMode::Edge => self.edge_sel = edges,
+            _ => self.vert_sel = verts,
+        }
+        true
+    }
+
     /// The selected insets and extrusions, when the selection is only
     /// those (several made at once on the picked faces: their window, dot
     /// and arrow set them all; the first one carries the handles).
