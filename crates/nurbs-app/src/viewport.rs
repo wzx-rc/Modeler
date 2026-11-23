@@ -485,7 +485,8 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             let on_gizmo = matches!(handle_at(st, origin), Some(Handle::Axis(_) | Handle::Plane(_) | Handle::Free));
             // (Shift + drag on the move gizmo with faces picked: they are
             // extruded, Maya; Romain 23 nov., 7 h 05)
-            let quick = shift && !ctrl && st.gizmo != GizmoMode::Scale && if on_gizmo { st.shift_extrude_picked(p2(origin)) } else { st.begin_face_drag(p2(origin), true, false) };
+            // (a picked edge under the gizmo: Shift pulls it out, as off it)
+            let quick = shift && !ctrl && st.gizmo != GizmoMode::Scale && if on_gizmo { st.shift_extrude_picked(p2(origin)) || (st.sel_mode == SelMode::Edge && st.begin_face_drag(p2(origin), true, false)) } else { st.begin_face_drag(p2(origin), true, false) };
             if quick {
                 if st.push.is_some() {
                     return;

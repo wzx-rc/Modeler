@@ -1727,6 +1727,12 @@ fn op_pop(st: &AppState) -> Option<OpPop> {
     if st.selected_group().is_some() {
         return None;
     }
+    // several insets / extrusions made together: one window for all
+    if st.selection.len() > 1 {
+        if let Some(f) = st.selected_push() {
+            return Some(OpPop::Step(f.id));
+        }
+    }
     let f = st.single()?;
     Some(if !f.is_solid() || f.is_path() || f.loft.is_some() { OpPop::Step(f.id) } else { OpPop::Shape(f.id) })
 }
@@ -2105,7 +2111,9 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                 OpPop::Curves => combine_card(ui, st),
                 OpPop::Step(id) => {
                     let Some(f) = st.doc.feature(id).cloned() else { return };
-                    op_title(ui, &f.name, f.kind_label());
+                    let together = if f.push.is_some() { st.selected_pushes().len() } else { 1 };
+                    let title = if together > 1 { format!("{} + {} more", f.name, together - 1) } else { f.name.clone() };
+                    op_title(ui, &title, f.kind_label());
                     // a curve of a 2D boolean: back to it
                     if let Some(b) = st.curve_inside(f.id).map(|b| (b.id, b.name.clone())) {
                         let r = ui.add(egui::Label::new(egui::RichText::new(format!("‹ In {}", b.1)).font(medium(12.0)).color(LABEL())).sense(Sense::click()));
@@ -2570,8 +2578,13 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     group_properties(ui, st);
                 } else if st.single().is_some() {
                     properties(ui, st);
+                } else if st.selected_pushes().len() > 1 {
+                    let n = st.selected_pushes().len();
+                    ui.label(egui::RichText::new(format!("{n} faces worked together")).font(semibold(14.0)).color(TEXT()));
+                    pop_note(ui);
                 } else if !st.selection.is_empty() {
-                    ui.label(egui::RichText::new(format!("{} shapes selected", st.selection.len())).font(semibold(14.0)).color(TEXT()));
+                    let ops = st.selection.iter().all(|id| st.doc.feature(*id).map(|f| !f.is_solid()).unwrap_or(false));
+                    ui.label(egui::RichText::new(format!("{} {} selected", st.selection.len(), if ops { "operations" } else { "shapes" })).font(semibold(14.0)).color(TEXT()));
                     ui.label(egui::RichText::new("Move them with the arrows, or delete them (Del)").font(regular(12.0)).color(TEXT2()));
                     if st.can_group() {
                         ui.add_space(4.0);
@@ -3997,7 +4010,7 @@ fn face_card(ui: &mut Ui, st: &mut AppState) {
             st.add_bridge();
         }
     } else if n > 2 {
-        ui.label(egui::RichText::new("Several faces: Extrude takes them all; Bridge takes two").font(regular(12.0)).color(TEXT2()));
+        ui.label(egui::RichText::new("Several faces: Inset, Extrude and Shell take them all; Bridge takes two").font(regular(12.0)).color(TEXT2()));
     }
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -4025,7 +4038,11 @@ fn face_card(ui: &mut Ui, st: &mut AppState) {
 fn push_card(ui: &mut Ui, st: &mut AppState) {
     let any_down = ui.input(|i| i.pointer.any_down());
     let Some(p) = st.selected_push().and_then(|f| f.push.clone()) else { return };
-    section(ui, "Face");
+    let n = st.selected_pushes().len();
+    section(ui, if n > 1 { "Faces" } else { "Face" });
+    if n > 1 {
+        ui.label(egui::RichText::new(format!("{n} faces: each size is given to all of them")).font(regular(12.0)).color(TEXT2()));
+    }
     let span = st.round_max().max(p.inset.abs().ceil()).max(p.depth.abs().ceil()) as f32 * 2.0;
     // a curved face: no inset, only the depth along its normals
     let id = st.selected_push().map(|f| f.id);

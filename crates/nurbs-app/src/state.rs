@@ -485,6 +485,11 @@ pub struct FaceDrag {
     pub px: f64,
     /// The size now (shown by the pointer).
     pub size: f64,
+    /// The steps made with it on the other picked faces or edges (an
+    /// inset: the same size; an edge pull: each its own edge).
+    pub others: Vec<FeatureId>,
+    /// An edge pull: each other step's own way out (its edge's normal).
+    pub dirs: Vec<DVec3>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

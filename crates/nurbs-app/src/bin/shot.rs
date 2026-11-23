@@ -1757,6 +1757,89 @@ fn main() {
         h.shot("zero-fill-4-closed");
     }
 
+    if want("multi") {
+        // The tools on several picked components (Romain 23 nov., 15 h 19:
+        // "Les tools doivent fonctionner sur multi selection… 2 faces, fait
+        // Inset, ça perform que sur 1 face"): three faces inset with I, the
+        // window's sizes given to all, undone in one step; Ctrl + drag on
+        // two faces; two edges pulled out by Shift + drag
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.settle();
+        let pushes = |h: &Harness| h.st.doc.features.iter().filter_map(|f| f.push.as_ref().map(|p| (f.name.clone(), p.inset, p.depth))).collect::<Vec<_>>();
+        let errs = |h: &Harness| h.st.model.as_ref().map(|m| m.errors.clone()).unwrap_or_default();
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(20.0, 10.0, 0.0)));
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.click(h.screen_of(Vec3::new(0.0, 10.0, 15.0)));
+        h.hold(Modifiers::NONE);
+        h.settle();
+        eprintln!("  picked {} faces", h.st.face_sel.len());
+        h.shot("zero-multi-1-picked");
+        h.key(egui::Key::I);
+        h.settle();
+        h.steps(3);
+        eprintln!("  I: {:?}, selected {:?}, errors {:?}", pushes(&h), h.st.selection, errs(&h));
+        h.shot("zero-multi-2-inset");
+        h.st.set_push(4.0, 0.0, true);
+        h.st.set_push(4.0, -3.0, true);
+        h.st.end_live();
+        h.settle();
+        h.steps(3);
+        eprintln!("  window 4 mm then depth -3: {:?}, errors {:?}", pushes(&h), errs(&h));
+        h.shot("zero-multi-3-sized");
+        // one undo takes the depth, one the inset size, one all three insets
+        h.st.undo();
+        h.st.undo();
+        h.st.undo();
+        h.settle();
+        eprintln!("  three undos: {:?}", pushes(&h));
+        // Ctrl + drag on two picked faces
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::F11);
+        let top = h.screen_of(Vec3::new(0.0, 20.0, 0.0));
+        h.click(top);
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(20.0, 10.0, 0.0)));
+        h.hold(Modifiers::CTRL);
+        h.press(top, true);
+        for i in 1..=10 {
+            h.move_to(top + egui::vec2(4.0 * i as f32, 0.0));
+        }
+        h.press(top + egui::vec2(40.0, 0.0), false);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.steps(3);
+        eprintln!("  Ctrl + drag: {:?}, errors {:?}", pushes(&h), errs(&h));
+        h.shot("zero-multi-4-ctrl-drag");
+        h.st.undo();
+        h.settle();
+        // two top edges pulled out together
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::F10);
+        let e1 = h.screen_of(Vec3::new(20.0, 20.0, 0.0));
+        h.click(e1);
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(-20.0, 20.0, 0.0)));
+        h.hold(Modifiers::NONE);
+        eprintln!("  edges picked {}", h.st.edge_sel.len());
+        let up = h.screen_of(Vec3::new(20.0, 26.0, 0.0));
+        h.hold(Modifiers::SHIFT);
+        h.press(e1, true);
+        for i in 1..=10 {
+            h.move_to(e1 + (up - e1) * (i as f32 / 10.0));
+        }
+        h.press(up, false);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.steps(3);
+        let tw = h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| (f.name.clone(), t.comps().count(), (t.delta * 100.0).round() / 100.0))).collect::<Vec<_>>();
+        eprintln!("  Shift + drag on 2 edges: {:?}, errors {:?}", tw, errs(&h));
+        h.shot("zero-multi-5-edges-pulled");
+    }
+
     if want("direct") {
         // Shift + drag on a picked face: extrude; Ctrl + drag: inset;
         // Shift + drag on a picked edge: the edge pulled out
@@ -1783,6 +1866,10 @@ fn main() {
         h.key(egui::Key::F11);
         let front = h.screen_of(Vec3::new(10.0, 7.0, 15.0));
         h.click(front);
+        h.steps(40);
+        // off the gizmo sitting where the face was clicked (Ctrl on it moves
+        // it without snapping)
+        let front = h.screen_of(Vec3::new(-8.0, 5.0, 15.0));
         h.hold(Modifiers::CTRL);
         h.press(front, true);
         for i in 1..=10 {
@@ -1801,8 +1888,12 @@ fn main() {
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         h.reset(d, "Block");
         h.key(egui::Key::F10);
-        let e = h.screen_of(Vec3::new(-14.0, 20.0, 15.0));
+        // (on the gizmo's X arrow, which lies along the edge: Shift still
+        // pulls the edge; -14 is under the Edge window now)
+        let e = h.screen_of(Vec3::new(8.0, 20.0, 15.0));
         h.click(e);
+        // past the double-click time (a press there picked the edge's loop)
+        h.steps(40);
         eprintln!("  edges picked {:?}", h.st.edge_sel);
         h.hold(Modifiers::SHIFT);
         h.press(e, true);

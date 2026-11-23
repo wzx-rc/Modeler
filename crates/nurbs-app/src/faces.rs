@@ -589,7 +589,15 @@ impl AppState {
 
     /// The selected inset or extrusion, if one is.
     pub fn selected_push(&self) -> Option<&nurbs_kernel::Feature> {
-        self.single().filter(|f| f.push.is_some())
+        self.selected_pushes().first().and_then(|id| self.doc.feature(*id))
+    }
+
+    /// The selected insets and extrusions, when the selection is only
+    /// those (several made at once on the picked faces: their window, dot
+    /// and arrow set them all; the first one carries the handles).
+    pub fn selected_pushes(&self) -> Vec<FeatureId> {
+        let all = !self.selection.is_empty() && self.selection.iter().all(|id| self.doc.feature(*id).map(|f| f.push.is_some()).unwrap_or(false));
+        if all { self.selection.clone() } else { vec![] }
     }
 
     /// The Inset or Extrude tool (I / E). With a face picked in Face mode,
@@ -614,7 +622,10 @@ impl AppState {
         let Some(face) = self.model_face_of(&r) else { return };
         match kind {
             PushKind::Inset => {
-                self.make_inset(face, r.at);
+                // every picked face (Romain 23 nov., 15 h 19: "Les tools
+                // doivent fonctionner sur multi selection")
+                let faces = self.picked_face_points();
+                self.make_insets(&faces);
             }
             PushKind::Extrude => {
                 let at = p.unwrap_or_else(|| self.view().project(r.at.as_vec3()).unwrap_or(self.principal()));
@@ -669,22 +680,66 @@ impl AppState {
     /// An inset of a face, 2 mm, the line only (no depth): selected, its
     /// handle and arrow on screen to size it.
     pub fn make_inset(&mut self, face: usize, at: DVec3) -> Option<FeatureId> {
-        let (r, origin, _) = self.face_plane(face, at, "Inset")?;
-        let mut id = 0;
+        self.make_insets(&[(face, at)]).into_iter().next()
+    }
+
+    /// The picked faces as model faces with their points (Face mode).
+    pub fn picked_face_points(&self) -> Vec<(usize, DVec3)> {
+        let mut out: Vec<(usize, DVec3)> = vec![];
+        for q in &self.face_sel {
+            if let Some(fi) = self.model_face_of(q) {
+                if !out.iter().any(|x| x.0 == fi) {
+                    out.push((fi, q.at));
+                }
+            }
+        }
+        out
+    }
+
+    /// An inset of 2 mm on each face (the line only), one step per face,
+    /// all in one undo step and selected together: their window, dot and
+    /// arrow size them all at once (Maya's Inset on several faces). A
+    /// curved face is left out (said once).
+    pub fn make_insets(&mut self, faces: &[(usize, DVec3)]) -> Vec<FeatureId> {
+        let mut refs: Vec<FaceRef> = vec![];
+        let mut curved = 0;
+        for &(face, at) in faces {
+            let flat = self.model.as_ref().and_then(|m| m.faces.get(face)).map(|f| f.kind == SurfKind::Plane).unwrap_or(false);
+            if !flat && faces.len() > 1 {
+                curved += 1;
+                continue;
+            }
+            if let Some((r, origin, _)) = self.face_plane(face, at, "Inset") {
+                refs.push(FaceRef { tag: r.tag, at: origin });
+            }
+        }
+        if refs.is_empty() {
+            if curved > 0 {
+                self.toast("Inset: only flat faces (a curved face can be extruded: Ctrl + E)", true);
+            }
+            return vec![];
+        }
+        let mut ids = vec![];
         self.edit("Inset", |d| {
-            let name = d.fresh_name("Inset");
-            id = d.add_push(Push { face: FaceRef { tag: r.tag, at: origin }, inset: DEFAULT_INSET, depth: 0.0 });
-            if let Some(f) = d.feature_mut(id) {
-                f.name = name;
+            for r in &refs {
+                let name = d.fresh_name("Inset");
+                let id = d.add_push(Push { face: r.clone(), inset: DEFAULT_INSET, depth: 0.0 });
+                if let Some(f) = d.feature_mut(id) {
+                    f.name = name;
+                }
+                ids.push(id);
             }
         });
         self.tool = Tool::Select;
         self.sel_mode = SelMode::Face;
         self.face_sel.clear();
         self.edge_sel.clear();
-        self.selection = vec![id];
-        self.toast("Inset 2 mm · drag the dot to move the outline, the arrow to raise or sink it", false);
-        Some(id)
+        self.selection = ids.clone();
+        let n = ids.len();
+        let what = if n > 1 { format!("Inset 2 mm on {n} faces") } else { "Inset 2 mm".to_string() };
+        let skipped = if curved > 0 { format!(" ({curved} curved face{} left out)", if curved > 1 { "s" } else { "" }) } else { String::new() };
+        self.toast(&format!("{what}{skipped} · drag the dot to move the outline, the arrow to raise or sink it"), false);
+        ids
     }
 
     /// A click with the Inset tool, or a press with the Extrude tool.
@@ -702,7 +757,13 @@ impl AppState {
         };
         match kind {
             PushKind::Inset => {
-                self.make_inset(h.face, h.point.as_dvec3());
+                // on a picked face: all the picked faces
+                let picked = self.picked_face_points();
+                if picked.len() > 1 && picked.iter().any(|x| x.0 == h.face) {
+                    self.make_insets(&picked);
+                } else {
+                    self.make_inset(h.face, h.point.as_dvec3());
+                }
             }
             PushKind::Extrude => self.push_start(h.face, h.point.as_dvec3(), p, held),
         }
@@ -870,6 +931,8 @@ impl AppState {
     pub(crate) fn begin_push_drag(&mut self, h: Handle, p: [f32; 2]) {
         let Some(hs) = self.push_handles() else { return };
         let Some(f) = self.selected_push().cloned() else { return };
+        // the others selected with it follow (start: the first one, then them)
+        let start: Vec<nurbs_kernel::Feature> = std::iter::once(f.clone()).chain(self.selected_pushes().iter().skip(1).filter_map(|id| self.doc.feature(*id).cloned())).collect();
         let line = match h {
             Handle::PushInset => match hs.inset {
                 Some((q, w, _)) => (q, w),
@@ -880,7 +943,7 @@ impl AppState {
         let (ro, rd) = self.ray(p);
         let Some(t) = closest_on_line(line.0, line.1, ro, rd) else { return };
         self.begin_live(f.kind_label());
-        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start: vec![f], line: Some(line), ops: vec![], carried: Default::default(), pivot: line.0, custom: false, keep: vec![], cage: None, pts: vec![], groups: vec![] });
+        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start, line: Some(line), ops: vec![], carried: Default::default(), pivot: line.0, custom: false, keep: vec![], cage: None, pts: vec![], groups: vec![] });
     }
 
     pub(crate) fn update_push_drag(&mut self, d: &Drag, p: [f32; 2]) {
@@ -893,18 +956,28 @@ impl AppState {
             Handle::PushInset => (self.snap(p0.inset + amount).max(0.1), p0.depth),
             _ => (p0.inset, self.snap(p0.depth + amount)),
         };
-        let id = f.id;
+        // the dragged size given to every step selected with it
+        let ids: Vec<FeatureId> = d.start.iter().map(|g| g.id).collect();
+        let inset_drag = d.handle == Handle::PushInset;
         self.live(|doc| {
-            if let Some(pu) = doc.feature_mut(id).and_then(|g| g.push.as_mut()) {
-                pu.inset = inset;
-                pu.depth = depth;
+            for id in &ids {
+                if let Some(pu) = doc.feature_mut(*id).and_then(|g| g.push.as_mut()) {
+                    if inset_drag {
+                        pu.inset = inset;
+                    } else {
+                        pu.depth = depth;
+                    }
+                }
             }
         });
     }
 
     /// Sets the selected inset or extrusion's sizes from the panel.
     pub fn set_push(&mut self, inset: f64, depth: f64, start: bool) {
-        let Some(id) = self.selected_push().map(|f| f.id) else { return };
+        let ids = self.selected_pushes();
+        let Some(first) = ids.first().and_then(|id| self.doc.feature(*id)).and_then(|f| f.push.clone()) else { return };
+        // a slider moves one size: that one given to all of them
+        let (set_inset, set_depth) = ((inset - first.inset).abs() > 1e-12, (depth - first.depth).abs() > 1e-12);
         if start {
             if self.is_live() {
                 self.end_live();
@@ -914,20 +987,25 @@ impl AppState {
             self.begin_live("Inset");
         }
         self.live(|d| {
-            // "Inset 2" becomes "Extrude 2" when its inset goes to 0 (a name
-            // the user gave stays)
-            let rename = d.feature(id).and_then(|f| {
-                let old = f.push.as_ref()?.label();
-                let new = if inset > 0.0 { "Inset" } else { "Extrude" };
-                (old != new && f.name.starts_with(old)).then(|| d.fresh_name(new))
-            });
-            if let Some(f) = d.feature_mut(id) {
-                if let Some(name) = rename {
-                    f.name = name;
-                }
-                if let Some(pu) = f.push.as_mut() {
-                    pu.inset = inset.max(0.0);
-                    pu.depth = depth;
+            for &id in &ids {
+                let Some(cur) = d.feature(id).and_then(|f| f.push.clone()) else { continue };
+                let inset = if set_inset { inset.max(0.0) } else { cur.inset };
+                let depth = if set_depth { depth } else { cur.depth };
+                // "Inset 2" becomes "Extrude 2" when its inset goes to 0 (a
+                // name the user gave stays)
+                let rename = d.feature(id).and_then(|f| {
+                    let old = f.push.as_ref()?.label();
+                    let new = if inset > 0.0 { "Inset" } else { "Extrude" };
+                    (old != new && f.name.starts_with(old)).then(|| d.fresh_name(new))
+                });
+                if let Some(f) = d.feature_mut(id) {
+                    if let Some(name) = rename {
+                        f.name = name;
+                    }
+                    if let Some(pu) = f.push.as_mut() {
+                        pu.inset = inset;
+                        pu.depth = depth;
+                    }
                 }
             }
         });
@@ -1406,13 +1484,35 @@ impl AppState {
                 }
                 if ctrl {
                     let Some((r, origin, _)) = self.face_plane(h.face, at, "Inset") else { return true };
+                    // the other picked flat faces are inset with it
+                    let mut more: Vec<FaceRef> = vec![];
+                    for (fi, q) in self.picked_face_points() {
+                        let flat = self.model.as_ref().and_then(|m| m.faces.get(fi)).map(|f| f.kind == SurfKind::Plane).unwrap_or(false);
+                        if fi == h.face || !flat {
+                            continue;
+                        }
+                        if let Some((r2, o2, _)) = self.face_plane(fi, q, "Inset") {
+                            more.push(FaceRef { tag: r2.tag, at: o2 });
+                        }
+                    }
                     self.begin_live("Inset");
                     let mut id = 0;
-                    self.live(|d| id = d.add_push(Push { face: FaceRef { tag: r.tag, at: origin }, inset: 0.1, depth: 0.0 }));
+                    let mut others = vec![];
+                    self.live(|d| {
+                        id = d.add_push(Push { face: FaceRef { tag: r.tag, at: origin }, inset: 0.1, depth: 0.0 });
+                        for m in &more {
+                            let name = d.fresh_name("Inset");
+                            let o = d.add_push(Push { face: m.clone(), inset: 0.1, depth: 0.0 });
+                            if let Some(f) = d.feature_mut(o) {
+                                f.name = name;
+                            }
+                            others.push(o);
+                        }
+                    });
                     self.face_sel.clear();
-                    self.selection = vec![id];
+                    self.selection = std::iter::once(id).chain(others.iter().copied()).collect();
                     let px = self.mm_per_point(at);
-                    self.face_drag = Some(FaceDrag { id, what: FaceDragWhat::Inset, press: p, px, size: 0.1 });
+                    self.face_drag = Some(FaceDrag { id, what: FaceDragWhat::Inset, press: p, px, size: 0.1, others, dirs: vec![] });
                     return true;
                 }
                 false
@@ -1429,14 +1529,34 @@ impl AppState {
                 };
                 let (ro, rd) = self.ray(p);
                 let t0 = closest_on_line(r.at, n, ro, rd).unwrap_or(0.0);
+                // the other picked edges are pulled with it, each along its
+                // own faces' normal, by the same amount (a step each)
+                let mut more: Vec<(EdgeRef, DVec3)> = vec![];
+                for x in self.edge_sel.clone() {
+                    if (x.key() == r.key() && x.at.distance(r.at) < 1e-3) || x.faces[1] < 0 {
+                        continue;
+                    }
+                    if let Some(n2) = self.model_edge_of(&x).and_then(|k| self.edge_normal(k)) {
+                        more.push((x, n2));
+                    }
+                }
                 let Some(t) = Tweak::new(vec![Comp::Edge(r.clone())]) else { return true };
                 self.begin_live(t.label());
                 let mut id = 0;
-                self.live(|d| id = d.add_tweak(t));
+                let mut others = vec![];
+                self.live(|d| {
+                    id = d.add_tweak(t);
+                    for (x, _) in &more {
+                        if let Some(t2) = Tweak::new(vec![Comp::Edge(x.clone())]) {
+                            others.push(d.add_tweak(t2));
+                        }
+                    }
+                });
                 self.edge_sel.clear();
-                self.selection = vec![id];
+                self.selection = std::iter::once(id).chain(others.iter().copied()).collect();
                 let px = self.mm_per_point(r.at);
-                self.face_drag = Some(FaceDrag { id, what: FaceDragWhat::Edge { at: r.at, n, t0 }, press: p, px, size: 0.0 });
+                let dirs = more.iter().map(|m| m.1).collect();
+                self.face_drag = Some(FaceDrag { id, what: FaceDragWhat::Edge { at: r.at, n, t0 }, press: p, px, size: 0.0, others, dirs });
                 true
             }
             _ => false,
@@ -1460,9 +1580,12 @@ impl AppState {
                 let dist = (p[0] - g.press[0]).hypot(p[1] - g.press[1]) as f64;
                 let size = nice_round(dist * g.px, g.px).max(0.1);
                 g.size = size;
+                let others = g.others.clone();
                 self.live(|d| {
-                    if let Some(pu) = d.feature_mut(id).and_then(|f| f.push.as_mut()) {
-                        pu.inset = size;
+                    for i in std::iter::once(id).chain(others.iter().copied()) {
+                        if let Some(pu) = d.feature_mut(i).and_then(|f| f.push.as_mut()) {
+                            pu.inset = size;
+                        }
                     }
                 });
             }
@@ -1471,9 +1594,12 @@ impl AppState {
                 let Some(t) = closest_on_line(at, n, ro, rd) else { return };
                 let d = self.snap(t - t0);
                 g.size = d;
+                let more: Vec<(FeatureId, DVec3)> = g.others.iter().copied().zip(g.dirs.iter().copied()).collect();
                 self.live(|doc| {
-                    if let Some(tw) = doc.feature_mut(id).and_then(|f| f.tweak.as_mut()) {
-                        tw.delta = n * d;
+                    for (i, dir) in std::iter::once((id, n)).chain(more.iter().copied()) {
+                        if let Some(tw) = doc.feature_mut(i).and_then(|f| f.tweak.as_mut()) {
+                            tw.delta = dir * d;
+                        }
                     }
                 });
             }
@@ -1485,7 +1611,7 @@ impl AppState {
         let Some(g) = self.face_drag.take() else { return };
         if g.what == FaceDragWhat::Inset || g.size.abs() > 1e-9 {
             self.end_live();
-            self.selection = vec![g.id];
+            self.selection = std::iter::once(g.id).chain(g.others.iter().copied()).filter(|i| self.doc.feature(*i).is_some()).collect();
         } else {
             // not moved: nothing made
             self.cancel_live();
