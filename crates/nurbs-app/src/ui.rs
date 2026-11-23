@@ -3176,13 +3176,12 @@ fn defaults(ui: &mut Ui, st: &mut AppState) {
 /// The Settings window, under its gear at the top right: the theme, the
 /// interface's size, the panels, the view, snapping, selection.
 fn settings_window(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
-    // the interface's size dragged: applied once the button is let go
-    if let Some(v) = st.ui_scale_edit {
-        if !ctx.input(|i| i.pointer.any_down()) {
-            st.ui_scale_edit = None;
-            st.settings.ui_scale = (v / 100.0).clamp(0.7, 1.6);
-            st.save_settings();
-        }
+    // the interface's size dragged: it follows the slider live (Romain
+    // 23 nov., 18 h 40), saved once the button is let go
+    if st.ui_scale_edit.is_some() && !ctx.input(|i| i.pointer.any_down()) {
+        st.ui_scale_edit = None;
+        ctx.data_mut(|d| d.remove::<(f32, f32, f32)>(Id::new("ui-scale-drag")));
+        st.save_settings();
     }
     if !st.settings_open {
         return;
@@ -3209,10 +3208,33 @@ fn settings_window(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 st.settings.light = v;
                 st.save_settings();
             }
+            // while dragged, the value follows the pointer's travel in
+            // pixels from the press (the slider itself grows and moves with
+            // the interface, so its own reading would chase the pointer)
             let mut v = st.ui_scale_edit.unwrap_or(st.settings.ui_scale * 100.0);
+            let track = ui.available_width();
             let (ch, _) = slider_row(ui, "Interface size", &mut v, 70.0..=160.0, 5.0, "%");
-            if ch {
-                st.ui_scale_edit = Some((v / 5.0).round() * 5.0);
+            let zoom = ui.ctx().zoom_factor();
+            let px = ui.ctx().input(|i| i.pointer.latest_pos()).map(|p| p.x * zoom);
+            let key = Id::new("ui-scale-drag");
+            let drag = ui.ctx().data(|d| d.get_temp::<(f32, f32, f32)>(key));
+            let down = ui.ctx().input(|i| i.pointer.primary_down());
+            let new = match (drag, px) {
+                (Some((v0, x0, w)), Some(x)) if down => Some(v0 + (x - x0) / w.max(1.0) * 90.0),
+                (None, Some(x)) if ch && down => {
+                    ui.ctx().data_mut(|d| d.insert_temp(key, (v, x, track * zoom)));
+                    Some(v)
+                }
+                _ if ch => Some(v),
+                _ => None,
+            };
+            if let Some(v) = new {
+                let v = ((v / 5.0).round() * 5.0).clamp(70.0, 160.0);
+                st.ui_scale_edit = Some(v);
+                st.settings.ui_scale = v / 100.0;
+                if !down {
+                    st.save_settings();
+                }
             }
             if (st.settings.ui_scale - 1.0).abs() > 1e-3 && secondary_btn(ui, "Interface size as it comes", ui.available_width()).clicked() {
                 st.settings.ui_scale = 1.0;

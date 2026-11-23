@@ -711,6 +711,10 @@ pub struct AppState {
     /// A change waiting for its build: (document version, the steps it
     /// made or changed, the errors before it).
     pending_check: Option<(u64, Vec<FeatureId>, Vec<String>)>,
+    /// The errors of the last fine model (a live gesture's builds are
+    /// coarse, so these are from before it): what a change is checked
+    /// against.
+    fine_errors: Option<Vec<String>>,
     /// The Surface's outline: straight sides (false) or SplitIt's curve
     /// through the points.
     pub surface_curve: bool,
@@ -917,6 +921,7 @@ impl AppState {
             journal_file: None,
             journal_seen: (String::new(), String::new()),
             pending_check: None,
+            fine_errors: None,
             surface_curve: false,
             round_drag: None,
             face_drag: None,
@@ -1381,13 +1386,14 @@ impl AppState {
         if let Some(e) = self.journal.back_mut() {
             e.steps = steps.clone();
         }
-        // (the errors of the steps this change made or changed are not
-        // "from before": a live drag's coarse builds had them already, so a
-        // move dragged with the gizmo that failed was never taken back;
-        // Romain 23 nov., 7 h 05, six Undo by hand)
-        let names: Vec<String> = steps.iter().filter_map(|id| self.doc.feature(*id)).map(|f| format!("{}:", f.name)).collect();
-        let mut prev = self.model.as_ref().map(|m| m.errors.clone()).unwrap_or_default();
-        prev.retain(|e| !names.iter().any(|n| e.starts_with(n.as_str())));
+        // the errors from before are the last fine model's: a live drag's
+        // coarse builds had the moved step's own error already, so a move
+        // dragged with the gizmo that failed was never taken back (Romain
+        // 23 nov., 7 h 05, six Undo by hand); but a step that failed before
+        // the change and is only carried by it (an old Move face of the
+        // element moved) is not new, else every move of its element was
+        // taken back (23 nov., 18 h 35)
+        let prev = self.fine_errors.clone().or_else(|| self.model.as_ref().map(|m| m.errors.clone())).unwrap_or_default();
         self.pending_check = Some((self.version, steps, prev));
     }
 
@@ -1462,7 +1468,15 @@ impl AppState {
         // once with its reason (20 nov., 11 h 48: "1 edge deleted" was said
         // while the build refused it, and the steps piled up)
         let undoable = |f: &Feature| f.tweak.as_ref().map(|t| !t.copy).unwrap_or(false) || f.cut.as_ref().map(|k| !k.remove_edges.is_empty() || !k.remove_faces.is_empty() || !k.fill.is_empty()).unwrap_or(false);
-        let failed = steps.iter().filter_map(|id| self.doc.feature(*id)).filter(|f| undoable(f)).find_map(|f| new.iter().find(|e| e.starts_with(&format!("{}:", f.name))).cloned());
+        let failed = steps
+            .iter()
+            .filter_map(|id| self.doc.feature(*id))
+            .filter(|f| undoable(f))
+            .filter(|f| {
+                let n = format!("{}:", f.name);
+                !prev.iter().any(|e| e.starts_with(&n))
+            })
+            .find_map(|f| new.iter().find(|e| e.starts_with(&format!("{}:", f.name))).cloned());
         if let Some(err) = failed {
             self.undo_doc();
             self.record("auto-undo", &err);
@@ -2551,7 +2565,11 @@ impl AppState {
                     }
                 }
             } else if let Some(k) = &f.cut {
-                k.pts.first().map(|p| p.edge.faces[0]).or(k.remove_faces.first().map(|r| r.tag)).or(k.remove_edges.first().map(|e| e.faces[0]))
+                // (a Fill hole: its first border's face; without it the
+                // fills, and the Inset, Bridge and moves made on them, were
+                // no element's: left behind when the element moved, not in
+                // its Isolate nor its material; Romain 23 nov., 18 h 35)
+                k.pts.first().map(|p| p.edge.faces[0]).or(k.remove_faces.first().map(|r| r.tag)).or(k.remove_edges.first().map(|e| e.faces[0])).or(k.fill.first().map(|e| e.faces[0]))
             } else if let Some(sh) = &f.shell {
                 // a Shell: its first opening's (none: no element)
                 sh.faces.first().map(|r| r.tag)
@@ -4187,6 +4205,9 @@ impl AppState {
             if self.model.as_ref().map(|m| b.model.serial >= m.serial).unwrap_or(true) {
                 self.picker = Picker::new(&b.model);
                 self.round_ms = b.round_ms;
+                if b.model.fine {
+                    self.fine_errors = Some(b.model.errors.clone());
+                }
                 let m = Arc::new(b.model);
                 self.picker.start(&m);
                 self.model = Some(m);
