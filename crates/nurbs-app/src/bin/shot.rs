@@ -2503,6 +2503,53 @@ fn main() {
         eprintln!("    features {}", h.st.doc.features.len());
     }
 
+    if want("freeze") {
+        // Delete History (Alt + Shift + D) on an element (FORME_DOC: a saved
+        // scene, FORME_FREEZE: its id; else the test part's Block with a
+        // fillet and an inset): frozen into one solid, moved, undone
+        let (d, id) = match std::env::var("FORME_DOC") {
+            Ok(path) => (nurbs_kernel::Doc::from_json(&std::fs::read_to_string(&path).expect("FORME_DOC")).expect("a document"), std::env::var("FORME_FREEZE").ok().and_then(|v| v.parse().ok()).unwrap_or(1)),
+            Err(_) => {
+                let mut d = test_part();
+                d.add_round(2.0, false, vec![EdgeRef { faces: [FaceTag { feature: 1, sub: 2 }.pack(), FaceTag { feature: 1, sub: 4 }.pack()], at: DVec3::new(12.0, 20.0, 15.0) }]);
+                d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 4 }.pack(), at: DVec3::new(-12.0, 8.0, 15.0) }, inset: 2.0, depth: -1.0 });
+                (d, 1)
+            }
+        };
+        h.reset(d, "Freeze");
+        h.settle();
+        let errors = |h: &Harness| h.st.model.as_ref().map(|m| m.errors.len()).unwrap_or(0);
+        let faces = |h: &Harness| h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0);
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::Num4);
+        h.st.selection = vec![id];
+        h.st.frame_selection();
+        h.settle();
+        h.move_to(pos2(1500.0, 120.0));
+        h.steps(3);
+        h.shot("zero-freeze-1-before");
+        eprintln!("  before: {} features, {} operations of it, {} faces, {} errors", h.st.doc.features.len(), h.st.element_ops(id).len(), faces(&h), errors(&h));
+        h.hold(Modifiers { alt: true, shift: true, ..Default::default() });
+        h.key(egui::Key::D);
+        h.hold(Modifiers::default());
+        for _ in 0..4 {
+            h.settle();
+        }
+        h.steps(3);
+        h.shot("zero-freeze-2-frozen");
+        let fz = h.st.doc.feature(id).map(|f| f.frozen.is_some()).unwrap_or(false);
+        eprintln!("  frozen {fz}: {} features, {} operations of it, {} faces, {} errors, toast {:?}", h.st.doc.features.len(), h.st.element_ops(id).len(), faces(&h), errors(&h), h.st.toast.as_ref().map(|t| t.text.clone()));
+        let mut log = vec![];
+        let before = h.st.doc.clone();
+        gizmo_drag(&mut h, &mut log, "frozen element", &[id], Vec3::X, "zero-freeze-3-moved");
+        let _ = before;
+        h.st.undo_doc();
+        h.settle();
+        h.settle();
+        eprintln!("  undone: {} features, {} operations of it, {} faces, {} errors, frozen {}", h.st.doc.features.len(), h.st.element_ops(id).len(), faces(&h), errors(&h), h.st.doc.feature(id).map(|f| f.frozen.is_some()).unwrap_or(false));
+        h.shot("zero-freeze-4-undone");
+    }
+
     if want("orphans") {
         // operations left by a shape deleted in a document from before
         // 20 nov. (FORME_DOC: a saved scene): the outliner's row takes them

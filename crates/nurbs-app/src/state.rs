@@ -1741,6 +1741,176 @@ impl AppState {
         self.toast(&format!("{n} operation{} of deleted shapes removed · Ctrl + Z brings {} back", if n > 1 { "s" } else { "" }, if n > 1 { "them" } else { "it" }), false);
     }
 
+    /// Delete History (Maya's; Romain 23 nov., 18 h 39): each element
+    /// picked becomes one solid with what its operations made, and they go.
+    /// The kernel builds it alone and sends it (`Model.baked`), then
+    /// `apply_baked` changes the document; one undo step brings it all
+    /// back. An Array, a Mirror or a Shell stays (they act on more than
+    /// it).
+    pub fn delete_history(&mut self) {
+        let els: Vec<FeatureId> = {
+            let mut v: Vec<FeatureId> = self.picked_elements().into_iter().map(|id| self.element_of(id)).filter(|id| self.doc.feature(*id).is_some_and(|f| f.is_solid() && !f.is_path() && !f.is_sheet())).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let plan: Vec<(FeatureId, Vec<FeatureId>)> = els
+            .iter()
+            .map(|&el| {
+                let ops = self.history_ops(el);
+                if ops.is_empty() {
+                    return (el, ops);
+                }
+                // the holes cut in it before its last operation, with their
+                // operations: built with it, as they were (a fillet made
+                // after a hole stops at it)
+                let mut all = ops.clone();
+                for c in self.carves_in(el, &ops) {
+                    all.push(c);
+                    all.extend(self.element_ops(c));
+                }
+                (el, all)
+            })
+            .filter(|(_, ops)| !ops.is_empty())
+            .collect();
+        if plan.is_empty() {
+            self.toast(if els.is_empty() { "Delete History: pick a shape first" } else { "Delete History: no operation to fold into it" }, false);
+            return;
+        }
+        let names: Vec<String> = plan.iter().filter_map(|(id, _)| self.doc.feature(*id).map(|f| f.name.clone())).collect();
+        self.edit("Delete History", |d| {
+            for (el, ops) in &plan {
+                if let Some(f) = d.feature_mut(*el) {
+                    f.bake = ops.clone();
+                }
+            }
+        });
+        self.toast(&format!("Delete History: {} being made one solid…", names.join(", ")), false);
+    }
+
+    /// The Carve shapes made before the last of `ops` whose box meets the
+    /// element as the part shows it.
+    fn carves_in(&self, el: FeatureId, ops: &[FeatureId]) -> Vec<FeatureId> {
+        let pos = |id: FeatureId| self.doc.features.iter().position(|f| f.id == id);
+        let Some(last) = ops.iter().chain(std::iter::once(&el)).filter_map(|id| pos(*id)).max() else { return vec![] };
+        let Some((lo, hi)) = self.element_box(el) else { return vec![] };
+        self.doc.features[..last]
+            .iter()
+            .filter(|f| f.op == Op::Carve && f.is_solid() && !f.is_path() && f.visible && !f.suspended)
+            .filter(|f| {
+                let (a, b) = f.bounds();
+                a.cmple(hi + 0.5).all() && b.cmpge(lo - 0.5).all()
+            })
+            .map(|f| f.id)
+            .collect()
+    }
+
+    /// A Carve Delete History takes away with the element: it cuts no other
+    /// added shape (else it stays, and cuts the same place again).
+    fn carve_folded(&self, el: FeatureId, c: FeatureId) -> bool {
+        let Some(cf) = self.doc.feature(c) else { return false };
+        let (a, b) = cf.bounds();
+        !self.doc.features.iter().any(|f| f.id != el && f.op == Op::Add && f.is_solid() && !f.is_path() && f.visible && {
+            let (lo, hi) = f.bounds();
+            a.cmple(hi).all() && b.cmpge(lo).all()
+        })
+    }
+
+    /// The box of an element's faces in the part shown.
+    fn element_box(&self, el: FeatureId) -> Option<(DVec3, DVec3)> {
+        let m = self.model.as_ref()?;
+        let mine: Vec<bool> = m.faces.iter().map(|f| f.tag.is_some_and(|t| self.element_of(t.feature) == el)).collect();
+        let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+        for (t, &fi) in m.triangles.iter().zip(&m.tri_face) {
+            if mine.get(fi as usize).copied().unwrap_or(false) {
+                for &v in t {
+                    let p = DVec3::from_array(m.positions[v as usize].map(|x| x as f64));
+                    lo = lo.min(p);
+                    hi = hi.max(p);
+                }
+            }
+        }
+        (lo.x <= hi.x).then_some((lo, hi))
+    }
+
+    /// The operations Delete History folds into an element: its own
+    /// (`element_ops`) less an Array, a Mirror or a Shell.
+    fn history_ops(&self, el: FeatureId) -> Vec<FeatureId> {
+        self.element_ops(el).into_iter().filter(|id| self.doc.feature(*id).is_some_and(|g| g.array.is_none() && g.mirror.is_none() && g.shell.is_none())).collect()
+    }
+
+    /// The kernel's frozen solids put in the document (no undo step of its
+    /// own: the one Delete History made brings everything back).
+    fn apply_baked(&mut self, baked: &[nurbs_kernel::Baked]) {
+        let mut done: Vec<(String, usize)> = vec![];
+        let mut gone: Vec<FeatureId> = vec![];
+        for bk in baked {
+            let Some(f) = self.doc.feature(bk.id) else { continue };
+            if f.bake.is_empty() {
+                continue;
+            }
+            if !bk.error.is_empty() || bk.brep.is_empty() {
+                let name = f.name.clone();
+                if let Some(g) = self.doc.feature_mut(bk.id) {
+                    g.bake.clear();
+                }
+                self.toast(&format!("Delete History: {name} could not be made one solid ({})", bk.error), true);
+                continue;
+            }
+            // every operation of it goes, those left out or hidden too, and
+            // the holes that cut it alone (one that cuts another shape too
+            // stays: it cuts the same place again)
+            let kept: Vec<FeatureId> = f.bake.iter().copied().filter(|c| self.doc.feature(*c).is_some_and(|g| g.is_solid()) && !self.carve_folded(bk.id, *c)).collect();
+            let kept: Vec<FeatureId> = kept.iter().flat_map(|c| std::iter::once(*c).chain(self.element_ops(*c))).collect();
+            let mut ops: Vec<FeatureId> = f.bake.iter().copied().filter(|id| !kept.contains(id)).collect();
+            for id in self.history_ops(bk.id) {
+                if !ops.contains(&id) {
+                    ops.push(id);
+                }
+            }
+            let mut drop: Vec<FeatureId> = ops.clone();
+            drop.push(bk.id);
+            // the faces' own materials follow by place
+            let old: Vec<(i64, u32)> = self.doc.paint.iter().map(|p| (p.tag, p.material)).collect();
+            let mut paint: Vec<nurbs_kernel::Paint> = self.doc.paint.iter().filter(|p| !FaceTag::unpack(p.tag).is_some_and(|t| drop.contains(&t.feature))).cloned().collect();
+            for (k, t) in bk.old_tags.iter().enumerate() {
+                if let Some((_, m)) = old.iter().find(|(tag, _)| tag == t) {
+                    paint.push(nurbs_kernel::Paint { tag: FaceTag { feature: bk.id, sub: k.min(65000) as u16 }.pack(), material: *m });
+                }
+            }
+            self.doc.paint = paint;
+            self.doc.features.retain(|g| !ops.contains(&g.id));
+            if let Some(g) = self.doc.feature_mut(bk.id) {
+                g.bake.clear();
+                g.frozen = Some(nurbs_kernel::Frozen { brep: bk.brep.clone(), size: bk.size });
+                g.prim = Prim::Box { x: bk.size[0], y: bk.size[1], z: bk.size[2] };
+                g.origin = DVec3::from_array(bk.origin);
+                g.rot = DQuat::from_array(bk.rot).normalize();
+                g.profile = None;
+                g.curve = None;
+                g.shape_bool = None;
+                g.form = None;
+                g.revolve = None;
+                g.sheet = None;
+                g.fill = false;
+                done.push((g.name.clone(), ops.len()));
+            }
+            gone.extend(ops);
+        }
+        if done.is_empty() && gone.is_empty() {
+            self.touched();
+            return;
+        }
+        self.selection.retain(|id| !gone.contains(id));
+        self.face_sel.clear();
+        self.edge_sel.clear();
+        self.vert_sel.clear();
+        self.touched();
+        let what = done.iter().map(|(n, k)| format!("{n} ({k} operations)")).collect::<Vec<_>>().join(", ");
+        self.record("edit", &format!("Delete History: {what}"));
+        self.toast(&format!("History deleted: {what} now one solid · Ctrl + Z brings it back"), false);
+    }
+
     pub fn duplicate_selected(&mut self) {
         // picked faces, edges or vertices (Romain 19 nov. 23 h 18: "dupliquer
         // ce morceau pour le déplacer devant, toujours mergé à l'entité"):
@@ -4207,6 +4377,11 @@ impl AppState {
                 self.round_ms = b.round_ms;
                 if b.model.fine {
                     self.fine_errors = Some(b.model.errors.clone());
+                }
+                // frozen elements (Delete History) for this very document
+                if b.model.fine && !b.model.baked.is_empty() && b.model.serial / 4 == self.version && !self.is_live() {
+                    let baked = b.model.baked.clone();
+                    self.apply_baked(&baked);
                 }
                 let m = Arc::new(b.model);
                 self.picker.start(&m);

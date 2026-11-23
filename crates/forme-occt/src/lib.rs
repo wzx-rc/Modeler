@@ -97,6 +97,8 @@ extern "C" {
     fn focc_buf_len(b: *const FBuf) -> c_int;
     fn focc_buf_data(b: *const FBuf) -> *const u8;
     fn focc_buf_free(b: *mut FBuf);
+    fn focc_to_brep(s: *const FShape) -> *mut FBuf;
+    fn focc_from_brep(data: *const u8, len: c_int) -> *mut FShape;
     fn focc_quad_topo(s: *const FShape) -> *mut FBuf;
     fn focc_edge_on_face(s: *const FShape, face: c_int, edge: c_int, reversed: c_int, n: c_int, t: *const c_double, xyz: *mut c_double, uv: *mut c_double) -> c_int;
     fn focc_face_project(s: *const FShape, face: c_int, n: c_int, xyz: *const c_double, out: *mut c_double) -> c_int;
@@ -907,6 +909,25 @@ impl Shape {
     /// booleans and fillets pass each face's tag on to what it becomes.
     pub fn set_tags(&mut self, tags: &[i64]) {
         unsafe { focc_set_tags(self.0, tags.as_ptr(), tags.len() as c_int) }
+    }
+
+    /// The shape as BRep text (Delete History keeps it in the document).
+    pub fn to_brep(&self) -> Result<String, String> {
+        let b = unsafe { focc_to_brep(self.0) };
+        if b.is_null() {
+            return Err(last_error());
+        }
+        unsafe {
+            let bytes = std::slice::from_raw_parts(focc_buf_data(b), focc_buf_len(b).max(0) as usize).to_vec();
+            focc_buf_free(b);
+            String::from_utf8(bytes).map_err(|_| "BRep text not UTF-8".to_string())
+        }
+    }
+
+    /// A shape read back from `to_brep`'s text (its faces in the same
+    /// order, untagged).
+    pub fn from_brep(text: &str) -> Result<Shape, String> {
+        shape(unsafe { focc_from_brep(text.as_ptr(), text.len() as c_int) })
     }
 
     pub fn face_tag(&self, index: usize) -> i64 {

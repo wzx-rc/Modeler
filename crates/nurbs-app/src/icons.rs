@@ -6,6 +6,8 @@ use egui::{epaint::PathStroke, pos2, vec2, Color32, Painter, Pos2, Rect, Shape, 
 pub enum Icon {
     /// Align (3ds Max's): two bars lined up on a line.
     Align,
+    /// Delete History (Maya's): a stack of steps pressed into one block.
+    Freeze,
     Select,
     Box,
     Cylinder,
@@ -234,6 +236,15 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.closed(&sq(4.5, 13.0));
             pen.closed(&sq(10.0, 10.0));
             pen.closed(&sq(15.5, 7.0));
+        }
+        Icon::Freeze => {
+            // three thin steps above, an arrow down, one solid block
+            pen.line(&[(5.0, 3.5), (15.0, 3.5)]);
+            pen.line(&[(5.0, 6.0), (15.0, 6.0)]);
+            pen.line(&[(10.0, 7.5), (10.0, 10.5)]);
+            pen.line(&[(8.0, 9.0), (10.0, 11.0), (12.0, 9.0)]);
+            pen.closed(&[(4.0, 12.5), (16.0, 12.5), (16.0, 17.0), (4.0, 17.0)]);
+            pen.fill(&[(4.0, 12.5), (16.0, 12.5), (16.0, 17.0), (4.0, 17.0)], 0.35);
         }
         Icon::Shell => {
             // a cup in section: its walls and floor, open at the top

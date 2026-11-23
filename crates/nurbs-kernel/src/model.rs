@@ -114,6 +114,24 @@ pub struct Model {
     /// The Curves set's 2D booleans (`Feature::shape_bool`): each one's
     /// edges as polylines (world), made exactly by the kernel.
     pub curves: Vec<(u32, Vec<Vec<[f32; 3]>>)>,
+    /// Elements frozen at the app's request (`Feature::bake`, Delete
+    /// History).
+    pub baked: Vec<Baked>,
+}
+
+/// An element's solid frozen (Delete History): its BRep text in its own
+/// frame, that frame, its size, and the tag each face had (in face order:
+/// the paints follow).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Baked {
+    pub id: u32,
+    /// Empty when it failed (`error` says why).
+    pub brep: String,
+    pub origin: [f64; 3],
+    pub rot: [f64; 4],
+    pub size: [f64; 3],
+    pub old_tags: Vec<i64>,
+    pub error: String,
 }
 
 /// The part as quads (`quads.rs`): positions shared by the faces along
@@ -240,6 +258,17 @@ impl Model {
                 }
             }
         }
+        w.u32(self.baked.len() as u32);
+        for b in &self.baked {
+            w.u32(b.id);
+            w.u32(b.brep.len() as u32);
+            w.0.extend_from_slice(b.brep.as_bytes());
+            b.origin.iter().chain(&b.rot).chain(&b.size).for_each(|v| w.f64(*v));
+            w.u32(b.old_tags.len() as u32);
+            b.old_tags.iter().for_each(|t| w.i64(*t));
+            w.u32(b.error.len() as u32);
+            w.0.extend_from_slice(b.error.as_bytes());
+        }
         w.0
     }
 
@@ -336,6 +365,24 @@ impl Model {
             }
             m.curves.push((id, lines));
         }
+        let n = r.u32()? as usize;
+        for _ in 0..n {
+            let id = r.u32()?;
+            let text = |r: &mut R| -> Option<String> {
+                let n = r.u32()? as usize;
+                let s = r.b.get(r.at..r.at + n)?;
+                r.at += n;
+                Some(String::from_utf8_lossy(s).into_owned())
+            };
+            let brep = text(&mut r)?;
+            let origin = [r.f64()?, r.f64()?, r.f64()?];
+            let rot = [r.f64()?, r.f64()?, r.f64()?, r.f64()?];
+            let size = [r.f64()?, r.f64()?, r.f64()?];
+            let nt = r.u32()? as usize;
+            let old_tags = (0..nt).map(|_| r.i64()).collect::<Option<Vec<_>>>()?;
+            let error = text(&mut r)?;
+            m.baked.push(Baked { id, brep, origin, rot, size, old_tags, error });
+        }
         Some(m)
     }
 }
@@ -426,6 +473,7 @@ mod tests {
             limits: vec![(4, 2.35)],
             tension_limits: vec![(5, 0.54)],
             curves: vec![(7, vec![vec![[0.0; 3], [1.0, 2.0, 3.0]], vec![[4.0, 5.0, 6.0]]])],
+            baked: vec![Baked { id: 9, brep: "DBRep".into(), origin: [1.0, 2.0, 3.0], rot: [0.0, 0.0, 0.0, 1.0], size: [4.0, 5.0, 6.0], old_tags: vec![-1, 1 << 16], error: String::new() }],
         };
         assert_eq!(Model::decode(&m.encode()).unwrap(), m);
         let q = Model { quads: Some(Quads { positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], quads: vec![[0, 1, 2, 3]], quad_face: vec![0], skipped: vec![(2, "a face with a hole".into())] }), ..m.clone() };

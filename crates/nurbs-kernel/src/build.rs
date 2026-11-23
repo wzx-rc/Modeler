@@ -560,6 +560,21 @@ fn deep_hash(doc: &Doc, f: &Feature) -> u64 {
 
 /// The feature's solid in the world, its faces tagged.
 fn tool(f: &Feature) -> Result<Shape, String> {
+    // a frozen element (Delete History): its solid read back, its faces
+    // (id, place), scaled by the mean of its box's ratios, put in its frame
+    if let Some(fz) = &f.frozen {
+        let mut s = Shape::from_brep(&fz.brep)?;
+        let tags: Vec<i64> = (0..s.face_count()).map(|k| FaceTag { feature: f.id, sub: k.min(65000) as u16 }.pack()).collect();
+        s.set_tags(&tags);
+        let (x, y, z) = match f.prim {
+            Prim::Box { x, y, z } | Prim::Profile { x, y, z } => (x, y, z),
+            _ => (fz.size[0], fz.size[1], fz.size[2]),
+        };
+        let ratio = |a: f64, b: f64| if b > 1e-6 { (a / b).max(1e-3) } else { 1.0 };
+        let k = (ratio(x, fz.size[0]) * ratio(y, fz.size[1]) * ratio(z, fz.size[2])).cbrt();
+        let m = f.matrix() * DMat4::from_scale(DVec3::splat(k));
+        return s.transformed(rows(m));
+    }
     // a form: its BSpline through its poles (world), one face
     if let Some(fm) = &f.form {
         let poles: Vec<[f64; 3]> = f.form_poles().iter().map(|p| p.to_array()).collect();
@@ -606,7 +621,7 @@ const PAST: f64 = 0.1;
 /// it sits on (facing each other) put on it. None when nothing moves. Each
 /// face moves at most a quarter of the shape's size across it.
 fn settle(acc: &Shape, f: &Feature, t: &Shape) -> Option<Feature> {
-    if !f.is_solid() || f.is_path() || f.is_sheet() || f.shape_bool.is_some() || f.form.is_some() {
+    if !f.is_solid() || f.is_path() || f.is_sheet() || f.shape_bool.is_some() || f.form.is_some() || f.frozen.is_some() {
         return None;
     }
     let rot = f.rot;
@@ -3299,7 +3314,7 @@ fn mirror_safe(doc: &Doc, f: &Feature, m: &Mirror, depth: u32) -> bool {
 /// A plain box or cylinder centred on a Mirror's plane, one of its own axes
 /// square to it: that axis (0 X, 1 Y, 2 Z), it is its own image.
 fn sym_axis(f: &Feature, m: &Mirror) -> Option<usize> {
-    let plain = matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }) && f.is_solid() && f.profile.is_none() && f.form.is_none() && f.curve.is_none() && f.sheet.is_none() && f.revolve.is_none() && f.loft.is_none() && f.shape_bool.is_none();
+    let plain = matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }) && f.is_solid() && f.frozen.is_none() && f.profile.is_none() && f.form.is_none() && f.curve.is_none() && f.sheet.is_none() && f.revolve.is_none() && f.loft.is_none() && f.shape_bool.is_none();
     if !plain {
         return None;
     }
@@ -3336,9 +3351,58 @@ fn mirror_seams(doc: &Doc, model: &mut Model) {
     }
 }
 
+/// An element built alone with its operations (`f.bake`), in its own
+/// frame: its box's base centre at the origin, turned as `f`.
+fn bake(doc: &Doc, f: &Feature, skip: &[String], cache: &mut Cache) -> crate::model::Baked {
+    let mut out = crate::model::Baked { id: f.id, ..Default::default() };
+    let ids: Vec<FeatureId> = std::iter::once(f.id).chain(f.bake.iter().copied()).collect();
+    let mut sub = doc.clone();
+    sub.features.retain(|g| ids.contains(&g.id) && g.visible && !g.suspended);
+    for g in &mut sub.features {
+        g.bake.clear();
+    }
+    let feats: Vec<&Feature> = sub.features.iter().filter(|g| sub.makes(g) == Makes::Solid).collect();
+    let mut m = Model::default();
+    let (mut ut, mut us) = (vec![], vec![]);
+    let st = run(&sub, &feats, skip, cache, &mut m, &mut ut, &mut us);
+    let made = (|| -> Result<(), String> {
+        let shape = st.shape.ok_or("nothing is built")?;
+        let local0 = shape.transformed(rows(DMat4::from_quat(f.rot.inverse())))?;
+        let boxes = local0.lump_boxes();
+        if boxes.is_empty() {
+            return Err("nothing is built".into());
+        }
+        let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+        for (a, b) in boxes {
+            lo = lo.min(DVec3::from_array(a));
+            hi = hi.max(DVec3::from_array(b));
+        }
+        let o = DVec3::new((lo.x + hi.x) * 0.5, lo.y, (lo.z + hi.z) * 0.5);
+        let local = local0.transformed(rows(DMat4::from_translation(-o)))?;
+        out.brep = local.to_brep()?;
+        out.old_tags = (0..local.face_count()).map(|k| local.face_tag(k)).collect();
+        out.origin = (f.rot * o).to_array();
+        out.rot = f.rot.to_array();
+        out.size = (hi - lo).to_array();
+        Ok(())
+    })();
+    if let Err(e) = made {
+        out.brep.clear();
+        out.error = e;
+    }
+    out
+}
+
 pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Cache) -> Model {
     let t0 = Instant::now();
     let mut model = Model { fine, ..Default::default() };
+    // the elements the app asks to freeze (Delete History): each built
+    // alone with its operations, sent back as a solid in its own frame
+    if fine {
+        for f in doc.features.iter().filter(|f| !f.bake.is_empty()) {
+            model.baked.push(bake(doc, f, skip, cache));
+        }
+    }
     let mut used_tools = vec![];
     let mut used_stages = vec![];
     // during a drag, what it changes built last
@@ -5332,6 +5396,100 @@ mod tests {
             assert!((mesh_volume(&m) - v0 - 1000.0).abs() < 1.0, "{} / {}", mesh_volume(&m), v0 + 1000.0);
         }
         ONE_CHAIN.with(|c| c.set(false));
+    }
+
+    /// `FORME_DOC` = a saved scene, `FORME_BAKE` = an element's id,
+    /// `FORME_OPS` = its operations (commas): the element frozen, then the
+    /// scene built with it frozen, timed.
+    #[test]
+    #[ignore]
+    fn bake_probe() {
+        let doc: Doc = serde_json::from_str(&std::fs::read_to_string(std::env::var("FORME_DOC").unwrap()).unwrap()).unwrap();
+        let id: FeatureId = std::env::var("FORME_BAKE").unwrap().parse().unwrap();
+        let ops: Vec<FeatureId> = std::env::var("FORME_OPS").unwrap().split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        let mut d = doc.clone();
+        d.feature_mut(id).unwrap().bake = ops.clone();
+        let mut cache = Cache::default();
+        let t = Instant::now();
+        let m = build(&d, true, false, &[], &mut cache);
+        let bk = &m.baked[0];
+        eprintln!("baked in {} ms: {} faces, size {:?}, error {:?}, brep {} kB", t.elapsed().as_millis(), bk.old_tags.len(), bk.size, bk.error, bk.brep.len() / 1024);
+        let mut e = doc.clone();
+        e.features.retain(|g| !ops.contains(&g.id));
+        let g = e.feature_mut(id).unwrap();
+        g.frozen = Some(crate::doc::Frozen { brep: bk.brep.clone(), size: bk.size });
+        g.prim = Prim::Box { x: bk.size[0], y: bk.size[1], z: bk.size[2] };
+        g.origin = DVec3::from_array(bk.origin);
+        g.rot = glam::DQuat::from_array(bk.rot);
+        let t = Instant::now();
+        let m2 = build(&e, true, false, &[], &mut Cache::default());
+        eprintln!("frozen scene built in {} ms: {} faces (before {}), errors {} (before {}): {:?}", t.elapsed().as_millis(), m2.faces.len(), m.faces.len(), m2.errors.len(), m.errors.len(), m2.errors);
+        if let Ok(dir) = std::env::var("FORME_SAVE") {
+            std::fs::write(dir, serde_json::to_string(&e).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn element_frozen() {
+        // a block with a fillet and a face pulled out, turned 30°, frozen:
+        // the same solid with its history gone, moved like any shape, a
+        // fillet made on it after
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 10.0, z: 20.0 }, DVec3::new(5.0, 0.0, 0.0), DQuat::from_rotation_y(0.5));
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        let top = d.feature(b).unwrap().matrix().transform_point3(DVec3::new(0.0, 10.0, 10.0));
+        let f = d.add_round(2.0, false, vec![edge_near(&m, top)]);
+        let side = d.feature(b).unwrap().matrix().transform_point3(DVec3::new(10.0, 5.0, 0.0));
+        let p = d.add_push(Push { face: FaceRef { tag: tag(b, 0), at: side }, inset: 3.0, depth: 4.0 });
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        d.feature_mut(b).unwrap().bake = vec![f, p];
+        let mut cache = Cache::default();
+        let m1 = build(&d, true, false, &[], &mut cache);
+        assert_eq!(m1.baked.len(), 1);
+        let bk = &m1.baked[0];
+        assert!(bk.error.is_empty(), "{}", bk.error);
+        assert_eq!(bk.old_tags.len(), m0.faces.len());
+        // the app's side: the element frozen, its operations gone
+        let mut e = d.clone();
+        e.features.retain(|g| g.id != f && g.id != p);
+        {
+            let g = e.feature_mut(b).unwrap();
+            g.bake.clear();
+            g.frozen = Some(crate::doc::Frozen { brep: bk.brep.clone(), size: bk.size });
+            g.prim = Prim::Box { x: bk.size[0], y: bk.size[1], z: bk.size[2] };
+            g.origin = DVec3::from_array(bk.origin);
+            g.rot = glam::DQuat::from_array(bk.rot);
+        }
+        let m2 = build(&e, true, false, &[], &mut cache);
+        assert!(m2.errors.is_empty(), "{:?}", m2.errors);
+        assert_eq!(m2.faces.len(), m0.faces.len());
+        assert!((mesh_volume(&m2) - mesh_volume(&m0)).abs() < 1.0, "{} {}", mesh_volume(&m2), mesh_volume(&m0));
+        let (a, c) = (m2.bounds().unwrap(), m0.bounds().unwrap());
+        for k in 0..3 {
+            assert!((a.0[k] - c.0[k]).abs() < 0.02 && (a.1[k] - c.1[k]).abs() < 0.02, "{a:?} {c:?}");
+        }
+        assert!(m2.faces.iter().all(|x| x.tag.map(|t| t.feature) == Some(b)));
+        // moved, then a fillet on one of its edges
+        e.feature_mut(b).unwrap().origin.y += 5.0;
+        let m3 = build(&e, true, false, &[], &mut cache);
+        assert!((m3.bounds().unwrap().0[1] - 5.0).abs() < 0.02);
+        let edge = m3.edges.iter().find(|x| x.faces[1] >= 0 && x.kind == crate::model::EdgeKind::Line).unwrap();
+        let at = DVec3::from_array(edge.pts[0].map(|v| v as f64)).lerp(DVec3::from_array(edge.pts[edge.pts.len() - 1].map(|v| v as f64)), 0.5);
+        e.add_round(0.5, false, vec![edge_near(&m3, at)]);
+        let m4 = build(&e, true, false, &[], &mut cache);
+        assert!(m4.errors.is_empty(), "{:?}", m4.errors);
+        assert!(m4.faces.len() > m3.faces.len());
+        // scaled 2×: the solid twice as big every way
+        let mut g = e.clone();
+        g.features.truncate(1);
+        if let Prim::Box { x, y, z } = &mut g.features[0].prim {
+            *x *= 2.0;
+            *y *= 2.0;
+            *z *= 2.0;
+        }
+        let m5 = build(&g, true, false, &[], &mut cache);
+        assert!((mesh_volume(&m5) - 8.0 * mesh_volume(&m0)).abs() < 8.0, "{} {}", mesh_volume(&m5), mesh_volume(&m0));
     }
 
     #[test]

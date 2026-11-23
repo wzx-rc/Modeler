@@ -153,6 +153,7 @@
 #include <cstring>
 #include <exception>
 #include <string>
+#include <sstream>
 #include <vector>
 
 struct FShape {
@@ -5871,6 +5872,38 @@ int focc_face_project(const FShape* s, int face, int n, const double* xyz, doubl
 int focc_buf_len(const FBuf* b) { return (int)b->b.size(); }
 const uint8_t* focc_buf_data(const FBuf* b) { return b->b.data(); }
 void focc_buf_free(FBuf* b) { delete b; }
+
+// The shape as OpenCascade's BRep text (no triangles), for a frozen element
+// kept in the document (Delete History). The face order of the shape read
+// back is the same, so its tags follow by place.
+FBuf* focc_to_brep(const FShape* s) {
+    return guard(
+        [&]() -> FBuf* {
+            std::ostringstream out;
+            BRepTools::Write(s->s, out, Standard_False, Standard_False, TopTools_FormatVersion_CURRENT);
+            std::string t = out.str();
+            FBuf* r = new FBuf();
+            r->b.assign(t.begin(), t.end());
+            return r;
+        },
+        (FBuf*)nullptr);
+}
+
+FShape* focc_from_brep(const char* data, int len) {
+    return guard(
+        [&]() -> FShape* {
+            std::istringstream in(std::string(data, (size_t)len));
+            TopoDS_Shape sh;
+            BRep_Builder b;
+            BRepTools::Read(sh, in, b);
+            if (sh.IsNull()) {
+                set_err("the frozen shape could not be read");
+                return (FShape*)nullptr;
+            }
+            return wrap(sh);
+        },
+        (FShape*)nullptr);
+}
 
 
 

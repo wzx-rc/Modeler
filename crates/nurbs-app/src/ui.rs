@@ -1593,6 +1593,9 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                     if icon_btn(ui, Icon::Shell, false, "Shell (Alt+S): the part hollowed, 2 mm walls (Face mode: the faces picked left open)", 28.0).clicked() {
                         st.add_shell();
                     }
+                    if icon_btn(ui, Icon::Freeze, false, "Delete History (Alt+Shift+D): each shape picked made one solid with its operations, which go", 28.0).clicked() {
+                        st.delete_history();
+                    }
                 }
                 if icon_btn(ui, Icon::Frame, false, "Frame (F)", 28.0).clicked() {
                     st.frame_selection();
@@ -3502,6 +3505,9 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         if f.is_solid() && !f.is_path() && icon_btn(ui, Icon::Shell, false, "Shell (Alt+S): the part hollowed, 2 mm walls (Face mode: the faces picked left open)", 30.0).clicked() {
             st.add_shell();
         }
+        if f.is_solid() && !f.is_path() && icon_btn(ui, Icon::Freeze, false, "Delete History (Alt+Shift+D): this shape made one solid with its operations, which go", 30.0).clicked() {
+            st.delete_history();
+        }
         if icon_btn(ui, if f.visible { Icon::Eye } else { Icon::EyeOff }, false, "Hide", 30.0).clicked() {
             st.toggle_visible(id);
         }
@@ -3550,6 +3556,32 @@ fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     let id = f.id;
     // a slider drag is one undo step: it ends when no pointer button is down
     let any_down = ui.input(|i| i.pointer.any_down());
+    // a frozen element (Delete History): one solid, scaled the same way in
+    // every direction
+    if let (Some(fz), Prim::Box { x, y, z }) = (&f.frozen, f.prim) {
+        section(ui, "Frozen solid");
+        ui.label(egui::RichText::new("History deleted: one solid. Scale changes it the same way in every direction.").font(regular(12.0)).color(TEXT2()));
+        let k0 = ((x / fz.size[0].max(1e-6)) * (y / fz.size[1].max(1e-6)) * (z / fz.size[2].max(1e-6))).cbrt();
+        let mut pct = (k0 * 100.0) as f32;
+        let (ch, start) = slider_row(ui, "Scale", &mut pct, 5.0..=1000.0, 1.0, "%");
+        if ch {
+            let k = (pct.max(5.0) as f64) / 100.0;
+            let size = fz.size;
+            feature_edit(st, id, "Scale", start, |g| {
+                if let Prim::Box { x, y, z } = &mut g.prim {
+                    let c = g.origin + g.rot * DVec3::Y * (*y * 0.5);
+                    *x = size[0] * k;
+                    *y = size[1] * k;
+                    *z = size[2] * k;
+                    g.origin = c - g.rot * DVec3::Y * (*y * 0.5);
+                }
+            });
+        }
+        if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+            st.end_live();
+        }
+        return;
+    }
     section(ui, "Shape");
     match f.prim {
         Prim::Box { x, y, z } | Prim::Profile { x, y, z } => {
@@ -4486,6 +4518,11 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     // Mirror (Alt + M): across X, the steps after it made on both sides
     if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::M) {
         st.add_mirror(0);
+        return;
+    }
+    // Delete History (Maya's Alt + Shift + D): each element picked frozen
+    if ctx.input(|i| i.modifiers.alt && i.modifiers.shift && !i.modifiers.ctrl) && pressed(Key::D) {
+        st.delete_history();
         return;
     }
     // Shell (Alt + S): hollowed, the faces picked in Face mode left open
