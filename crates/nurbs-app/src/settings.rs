@@ -29,11 +29,18 @@ pub struct Settings {
     /// Off by default on the PC (Romain, 22 nov.: the pen navigation was
     /// asked for the iPad), on with a touch screen.
     pub nav: bool,
+    /// The Mirror bar under the top bar (its icon there opens it; Romain
+    /// 23 nov., 14 h 15: "il faut mettre le mirror de façon beaucoup plus
+    /// clair").
+    pub mirror_bar: bool,
+    /// The plane of symmetry drawn in the view while the Mirror is on (not
+    /// only while it is selected).
+    pub mirror_plane: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: cfg!(target_os = "ios") }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: cfg!(target_os = "ios"), mirror_bar: false, mirror_plane: true }
     }
 }
 

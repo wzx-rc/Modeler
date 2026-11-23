@@ -5558,6 +5558,49 @@ fn main() {
         eprintln!("  rectangle over a corner of {a}: selection {:?} (other {b2})", h.st.selection);
         h.shot("zero-nov23-9-marquee");
     }
+    if want("mirror-bar") {
+        // the Mirror bar (Romain 23 nov., 14 h 15): its icon in the top
+        // bar, On / X Y Z / Offset / Keep / Steps after it / Plane, and the
+        // selection's state
+        use nurbs_kernel::{FaceRef, Push};
+        let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        let mut d = Doc::default();
+        let leg = d.add(Op::Add, Prim::Box { x: 20.0, y: 30.0, z: 20.0 }, DVec3::new(20.0, 0.0, 0.0), DQuat::IDENTITY);
+        d.feature_mut(leg).unwrap().name = "Leg".into();
+        h.reset(d, "Mirror bar");
+        h.st.camera.dist *= 1.6;
+        h.st.camera.yaw += 0.5;
+        h.st.settings.mirror_bar = true;
+        h.st.settings.mirror_plane = true;
+        h.settle();
+        h.shot("zero-mirror-bar-1-none");
+        h.st.set_scene_mirror_on(true, 0);
+        h.settle();
+        h.st.selection = vec![leg];
+        h.steps(3);
+        eprintln!("  on: {} mirrors, state {:?}", h.st.scene_mirror_ids().len(), h.st.mirror_state());
+        h.shot("zero-mirror-bar-2-on-leg");
+        let mut push = 0;
+        h.st.edit("Extrude", |d| push = d.add_push(Push { face: FaceRef { tag: tag(leg, 4), at: DVec3::new(20.0, 15.0, 10.0) }, inset: 4.0, depth: 5.0 }));
+        h.settle();
+        h.st.selection = vec![push];
+        h.steps(3);
+        eprintln!("  extrude: state {:?}", h.st.mirror_state());
+        h.shot("zero-mirror-bar-3-step-both");
+        let m = h.st.scene_mirror().and_then(|f| f.mirror).unwrap();
+        h.st.set_scene_mirror(nurbs_kernel::Mirror { single: true, ..m }, true);
+        h.st.end_live();
+        h.settle();
+        h.steps(3);
+        eprintln!("  steps after it on one side: state {:?}, errors {:?}", h.st.mirror_state(), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-mirror-bar-4-this-side");
+        h.st.settings.mirror_plane = false;
+        h.st.set_scene_mirror_on(false, 0);
+        h.settle();
+        h.steps(3);
+        eprintln!("  off: on {}, x {:?}", h.st.scene_mirror_on(), h.st.model.as_ref().and_then(|m| m.bounds()).map(|(lo, hi)| (lo[0], hi[0])));
+        h.shot("zero-mirror-bar-5-off");
+    }
 
     if want("nav") {
         // the navigation with a pen's tip alone (Romain 22 nov., 16 h 49:

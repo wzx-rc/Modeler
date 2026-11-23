@@ -56,10 +56,124 @@ impl AppState {
         });
     }
 
-    /// The plane of the selected Mirror to draw: its corners round the part
-    /// (a little past it) and the Mirror.
+    /// The scene's Mirror, as the Mirror bar shows it: the last Mirror in
+    /// the history, on or off.
+    pub fn scene_mirror(&self) -> Option<&Feature> {
+        self.doc.features.iter().rev().find(|f| f.mirror.is_some())
+    }
+
+    /// The Mirrors the bar sets together: the last one and those across the
+    /// same plane (his scene of 21 nov. had three across X, one after the
+    /// other; set apart they would undo each other).
+    pub fn scene_mirror_ids(&self) -> Vec<FeatureId> {
+        let Some(m) = self.scene_mirror().and_then(|f| f.mirror) else { return vec![] };
+        self.doc.features.iter().filter(|f| f.mirror.is_some_and(|g| g.axis == m.axis && (g.offset - m.offset).abs() < 1e-9)).map(|f| f.id).collect()
+    }
+
+    /// Whether the scene's Mirror is on (one of its Mirrors at least).
+    pub fn scene_mirror_on(&self) -> bool {
+        let ids = self.scene_mirror_ids();
+        self.doc.features.iter().any(|f| ids.contains(&f.id) && f.visible && !f.suspended)
+    }
+
+    /// The Mirror bar's On: its Mirrors turned on or off (none yet: one
+    /// added across `axis`, the selection kept).
+    pub fn set_scene_mirror_on(&mut self, on: bool, axis: u8) {
+        let ids = self.scene_mirror_ids();
+        if ids.is_empty() {
+            if on {
+                let sel = self.selection.clone();
+                self.add_mirror(axis);
+                self.selection = sel;
+            }
+            return;
+        }
+        self.edit(if on { "Mirror on" } else { "Mirror off" }, |d| {
+            for id in &ids {
+                if let Some(f) = d.feature_mut(*id) {
+                    f.visible = on;
+                }
+            }
+        });
+        let m = self.scene_mirror().and_then(|f| f.mirror);
+        if let (Some(m), true) = (m, on) {
+            self.toast(&format!("Mirror across {} on", m.axis_name()), false);
+        } else {
+            self.toast("Mirror off: each side is made as it is drawn", false);
+        }
+    }
+
+    /// The Mirror bar's settings (the plane, the side kept, the steps
+    /// after it) given to the scene's Mirrors; live while a value is
+    /// dragged (`start` begins a new undo step). No Mirror yet: one added
+    /// with them.
+    pub fn set_scene_mirror(&mut self, m: Mirror, start: bool) {
+        let ids = self.scene_mirror_ids();
+        if ids.is_empty() {
+            let sel = self.selection.clone();
+            if let Some(id) = self.add_mirror(m.axis) {
+                self.edit("Mirror", |d| {
+                    if let Some(f) = d.feature_mut(id) {
+                        f.mirror = Some(Mirror { flip: f.mirror.map(|g| g.flip).unwrap_or(m.flip), ..m });
+                        f.origin = m.normal() * m.offset;
+                    }
+                });
+            }
+            self.selection = sel;
+            return;
+        }
+        if start {
+            if self.is_live() {
+                self.end_live();
+            }
+            self.begin_live("Mirror");
+        } else if !self.is_live() {
+            self.begin_live("Mirror");
+        }
+        self.live(|d| {
+            for id in &ids {
+                if let Some(f) = d.feature_mut(*id) {
+                    f.mirror = Some(m);
+                    f.origin = m.normal() * m.offset;
+                }
+            }
+        });
+    }
+
+    /// What the selection is to the Mirror, for the Mirror bar: a line to
+    /// read and, for a step that could be made on one side only, that step
+    /// and whether it is.
+    pub fn mirror_state(&self) -> Option<(String, Option<(FeatureId, bool)>)> {
+        let id = *self.selection.first()?;
+        let i = self.doc.features.iter().position(|f| f.id == id)?;
+        let f = &self.doc.features[i];
+        if f.mirror.is_some() {
+            return None;
+        }
+        let name = if self.selection.len() > 1 { format!("{} and {} more", f.name, self.selection.len() - 1) } else { f.name.clone() };
+        let on = |g: &Feature| g.visible && !g.suspended;
+        if let Some(m) = self.doc.features[i + 1..].iter().find(|g| on(g) && g.mirror.is_some()).and_then(|g| g.mirror) {
+            return Some((format!("{name} · mirrored across {}", m.axis_name()), None));
+        }
+        if let Some(m) = self.mirrored_by(id) {
+            return Some((format!("{name} · both sides of {}", m.axis_name()), Some((id, false))));
+        }
+        if self.after_mirror(id) {
+            let own = !self.mirror_single_before(i);
+            return Some((format!("{name} · one side"), own.then_some((id, true))));
+        }
+        Some((format!("{name} · not mirrored"), None))
+    }
+
+    /// The plane of the selected Mirror to draw (else of the scene's Mirror
+    /// while it is on, its bar open and its Plane set): its corners round the
+    /// part (a little past it) and the Mirror.
     pub fn mirror_plane(&self) -> Option<(Mirror, [DVec3; 4])> {
-        let m = self.selected_mirror()?.mirror?;
+        let m = match self.selected_mirror().and_then(|f| f.mirror) {
+            Some(m) => m,
+            None if self.settings.mirror_bar && self.settings.mirror_plane && self.scene_mirror_on() => self.scene_mirror()?.mirror?,
+            None => return None,
+        };
         let (lo, hi) = self.model.as_ref().and_then(|md| md.bounds()).map(|(lo, hi)| (DVec3::from_array(lo.map(|x| x as f64)), DVec3::from_array(hi.map(|x| x as f64)))).unwrap_or((DVec3::splat(-20.0), DVec3::splat(20.0)));
         let pad = (hi - lo).max_element().max(10.0) * 0.12;
         let (lo, hi) = (lo - DVec3::splat(pad), hi + DVec3::splat(pad));

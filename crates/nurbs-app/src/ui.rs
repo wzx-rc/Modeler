@@ -279,9 +279,24 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 if icon_btn(ui, Icon::Isolate, st.isolate.is_some(), tip, 28.0).clicked() {
                     st.toggle_isolate();
                 }
+                // the Mirror bar under it (lit while the scene's Mirror is on)
+                let on = st.scene_mirror_on();
+                let tip = if on { "Mirror on: its bar under the top bar (click)" } else { "Mirror: its bar under the top bar (click)" };
+                let r = icon_btn(ui, Icon::Mirror, st.settings.mirror_bar || on, tip, 28.0);
+                if on {
+                    // a dot: the scene is mirrored
+                    ui.painter().circle_filled(r.rect.right_top() + vec2(-5.0, 5.0), 3.0, AXIS_X);
+                }
+                if r.clicked() {
+                    st.settings.mirror_bar = !st.settings.mirror_bar;
+                    st.save_settings();
+                }
             });
         });
     });
+    if st.settings.mirror_bar {
+        mirror_bar(ctx, st, pos2(cx, screen.min.y + EDGE + ISLAND_H + 6.0));
+    }
 
     // right: the view
     egui::Area::new(Id::new("isl-view")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(screen.max.x - EDGE, screen.min.y + EDGE)).show(ctx, |ui| {
@@ -1375,6 +1390,93 @@ fn toast(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             t.until = t.until.max(st.now + 1.5);
         }
     }
+}
+
+// ----------------------------------------------------- mirror bar
+
+/// The Mirror bar (Romain 23 nov., 14 h 15: an icon in the top bar opens a
+/// second bar under it, On / X / Y / Z and the options, the selection's
+/// state at once, the plane shown or not): it sets the scene's Mirror
+/// (`scene_mirror_ids`: the last one and those across its plane).
+fn mirror_bar(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2) {
+    egui::Area::new(Id::new("isl-mirror")).order(Order::Foreground).fade_in(false).pivot(Align2::CENTER_TOP).fixed_pos(at).show(ctx, |ui| {
+        island().show(ui, |ui| {
+            ui.set_height(ISLAND_H - 10.0);
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let cur = st.scene_mirror().and_then(|f| f.mirror);
+                let on = st.scene_mirror_on();
+                let m = cur.unwrap_or(nurbs_kernel::Mirror { axis: 0, offset: 0.0, flip: false, single: false });
+                let (r, _) = ui.allocate_exact_size(vec2(22.0, 28.0), Sense::hover());
+                icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(15.0, 15.0)), Icon::Mirror, if on { TEXT() } else { TEXT2() });
+                // On: a small switch
+                let (sw, resp) = ui.allocate_exact_size(vec2(34.0, 18.0), Sense::click());
+                let p = ui.painter();
+                p.rect_filled(sw, 9.0, if on { accent() } else { RAISED() });
+                let knob = if on { sw.right_center() - vec2(9.0, 0.0) } else { sw.left_center() + vec2(9.0, 0.0) };
+                p.circle_filled(knob, 7.0, if on { on_accent() } else { TEXT2() });
+                let tip = if cur.is_none() { "Mirror on: the part made symmetric across X (Alt + M)" } else if on { "Mirror off: each side as it is drawn" } else { "Mirror on again" };
+                if resp.on_hover_text(tip).clicked() {
+                    st.set_scene_mirror_on(!on, m.axis);
+                }
+                island_sep(ui);
+                // the plane: X / Y / Z
+                let axes = [(0u8, "X", ""), (1u8, "Y", ""), (2u8, "Z", "")];
+                if let Some(a) = seg_inline(ui, "mirror-bar-axis", &axes, if cur.is_some() { m.axis } else { 9 }) {
+                    if cur.is_none() || a != m.axis {
+                        let flip = st.model.as_ref().and_then(|md| md.bounds()).map(|(lo, hi)| (lo[a as usize] + hi[a as usize]) < -1e-3).unwrap_or(false);
+                        st.set_scene_mirror(nurbs_kernel::Mirror { axis: a, offset: 0.0, flip, ..m }, true);
+                        st.end_live();
+                    }
+                }
+                if cur.is_some() {
+                    let span = st.model.as_ref().and_then(|md| md.bounds()).map(|(lo, hi)| lo[m.axis as usize].abs().max(hi[m.axis as usize].abs())).unwrap_or(50.0).max(10.0).ceil() as f32;
+                    let mut off = m.offset as f32;
+                    let r = value_field(ui, &mut off, -span..=span, 0.1, "mm", 64.0).on_hover_text("Where the plane passes along its axis");
+                    if r.changed() {
+                        st.set_scene_mirror(nurbs_kernel::Mirror { offset: off as f64, ..m }, r.drag_started() || !st.is_live());
+                    }
+                    if (r.drag_stopped() || (r.changed() && !r.dragged())) && st.is_live() {
+                        st.end_live();
+                    }
+                    let keep = format!("Keep −{}", m.axis_name());
+                    if chip(ui, None, &keep, m.flip, "Keep the side below the plane instead of above").clicked() {
+                        st.set_scene_mirror(nurbs_kernel::Mirror { flip: !m.flip, ..m }, true);
+                        st.end_live();
+                    }
+                    island_sep(ui);
+                    ui.label(egui::RichText::new("Steps after").font(regular(11.5)).color(TEXT2())).on_hover_text("The steps made after the Mirror: on both sides, or on their own side only");
+                    let sides = [(false, "Both sides", ""), (true, "One side", "")];
+                    let r = seg_inline(ui, "mirror-bar-single", &sides, m.single);
+                    if let Some(one) = r {
+                        if one != m.single {
+                            st.set_scene_mirror(nurbs_kernel::Mirror { single: one, ..m }, true);
+                            st.end_live();
+                        }
+                    }
+                    island_sep(ui);
+                    if chip(ui, Some(Icon::Eye), "Plane", st.settings.mirror_plane, "Show the plane of symmetry while the Mirror is on").clicked() {
+                        st.settings.mirror_plane = !st.settings.mirror_plane;
+                        st.save_settings();
+                    }
+                    let n = st.scene_mirror_ids().len();
+                    if n > 1 {
+                        chip_label(ui, &format!("×{n}"), RAISED(), LABEL());
+                    }
+                }
+                // the selection's state
+                if let Some((text, toggle)) = st.mirror_state() {
+                    island_sep(ui);
+                    ui.label(egui::RichText::new(text).font(medium(12.0)).color(TEXT()));
+                    if let Some((id, one)) = toggle {
+                        if chip(ui, None, "One side", one, "This step made on its own side only").clicked() {
+                            st.set_one_side(id, !one);
+                        }
+                    }
+                }
+            });
+        });
+    });
 }
 
 // ----------------------------------------------------- context bar
