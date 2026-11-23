@@ -6,6 +6,7 @@
 // never takes the app down. Only opencascade::handle<T> is used, never the
 // Handle_T aliases (a derived class, not a typedef, under MSVC).
 
+#include <atomic>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Curve2d.hxx>
 #include <BRepTools_WireExplorer.hxx>
@@ -93,6 +94,11 @@
 #include <Geom2d_Line.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2dAPI_Interpolate.hxx>
+#include <Geom2dConvert.hxx>
+#include <Geom2dConvert_ApproxCurve.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <GeomAPI.hxx>
+#include <ShapeFix_Wire.hxx>
 #include <TColgp_HArray1OfPnt2d.hxx>
 #include <TColgp_Array1OfPnt2d.hxx>
 #include <TColStd_Array1OfReal.hxx>
@@ -1120,12 +1126,23 @@ static void simplify_keeping(BRepAlgoAPI_BooleanOperation& op, const FShape* a, 
     }
 }
 
+// OpenCascade's own threads in the booleans (`focc_set_parallel`; -1: as
+// FORME_BOP_PARALLEL says)
+static std::atomic<int> g_parallel{-1};
+
+void focc_set_parallel(int on) { g_parallel = on; }
+
+static bool bop_parallel() {
+    int p = g_parallel.load();
+    if (p >= 0) return p > 0;
+    return getenv("FORME_BOP_PARALLEL") != nullptr;
+}
+
 static FShape* boolean(BRepAlgoAPI_BooleanOperation& op, const char* what, const FShape* a, const FShape* b) {
     dbg("boolean %s: build\n", what);
-    // FORME_BOP_PARALLEL=1: OpenCascade's own threads (21 nov.: the
-    // drone's hub dragged 26 mm, a step 156 s → 78 s on 4 cores; not on by
-    // default, its results not checked against the batteries)
-    if (getenv("FORME_BOP_PARALLEL")) op.SetRunParallel(Standard_True);
+    // OpenCascade's own threads (21 nov.: the drone's hub dragged 26 mm, a
+    // step 156 s → 78 s on 4 cores)
+    if (bop_parallel()) op.SetRunParallel(Standard_True);
     op.Build();
     dbg("boolean %s: built\n", what);
     if (!op.IsDone() || op.HasErrors()) {
@@ -3369,6 +3386,271 @@ FShape* focc_inset_face(const FShape* s, int index, double d) {
                 }
             }
             return wrap(facing(r));
+        },
+        (FShape*)nullptr);
+}
+
+// An inset on a curved face (Romain, 23 nov., 22 h 05: "Si possible que
+// le Inset fonctionne sur face courbé"): the face laid flat in its (u, v),
+// scaled so that lengths are right at its middle (everywhere on a
+// cylinder), inset there as a flat face is (`focc_inset_face`: its outline
+// moved in by d, its holes grown), and the result laid back on its surface:
+// a face (or several) on the same surface, facing the same way. A face
+// closed on itself (a cylinder's whole side, a hole's wall) only as a plain
+// band: its two rims moved in by d.
+FShape* focc_inset_curved(const FShape* s, int index, double d) {
+    return guard(
+        [&]() -> FShape* {
+            TopTools_IndexedMapOfShape fm;
+            face_map(s->s, fm);
+            if (index < 0 || index >= fm.Extent()) {
+                set_err("no such face");
+                return nullptr;
+            }
+            if (d <= 0) {
+                set_err("an inset needs a distance");
+                return nullptr;
+            }
+            TopoDS_Face f = TopoDS::Face(fm(index + 1));
+            TopoDS_Face fw = TopoDS::Face(f.Oriented(TopAbs_FORWARD));
+            opencascade::handle<Geom_Surface> S = BRep_Tool::Surface(fw);
+            if (S.IsNull()) {
+                set_err("the face has no surface");
+                return nullptr;
+            }
+            double u0, u1, v0, v1;
+            BRepTools::UVBounds(fw, u0, u1, v0, v1);
+            const double um = 0.5 * (u0 + u1), vm = 0.5 * (v0 + v1);
+            gp_Pnt P;
+            gp_Vec Su, Sv;
+            S->D1(um, vm, P, Su, Sv);
+            const double E = Su.Dot(Su), F = Su.Dot(Sv), G = Sv.Dot(Sv);
+            if (E < 1e-14 || E * G - F * F < 1e-20) {
+                set_err("the face's surface is degenerate in its middle");
+                return nullptr;
+            }
+            // (u, v) -> (x, y): lengths right at the middle (a Cholesky
+            // factor of the surface's metric there)
+            const double a = std::sqrt(E), b = F / a, c = std::sqrt((E * G - F * F) / E);
+            auto fwd = [&](const gp_Pnt2d& p) { return gp_Pnt2d(a * (p.X() - um) + b * (p.Y() - vm), c * (p.Y() - vm)); };
+            auto back = [&](const gp_Pnt2d& p) {
+                double v = vm + p.Y() / c;
+                return gp_Pnt2d(um + (p.X() - b * (v - vm)) / a, v);
+            };
+            auto facing = [&](TopoDS_Face r) {
+                if (f.Orientation() == TopAbs_REVERSED) r.Reverse();
+                return r;
+            };
+            // a band closed on itself: its rims moved in
+            bool seam = false;
+            int wires = 0;
+            for (TopExp_Explorer x(fw, TopAbs_WIRE); x.More(); x.Next()) wires++;
+            for (TopExp_Explorer x(fw, TopAbs_EDGE); x.More(); x.Next()) {
+                if (BRep_Tool::IsClosed(TopoDS::Edge(x.Current()), fw)) seam = true;
+            }
+            if (seam) {
+                // a plain band: one wire, its edges the seam and the rims
+                // at either end across it (a rim may be cut in several
+                // edges by what was fused there; a pole, a degenerate
+                // edge, is not moved)
+                bool along_u = S->IsUClosed() || S->IsUPeriodic();
+                const double lo = along_u ? v0 : u0, hi = along_u ? v1 : u1;
+                const double tol = 1e-6 * std::max(1.0, hi - lo);
+                bool plain = wires == 1, rim0 = false, rim1 = false;
+                for (TopExp_Explorer x(fw, TopAbs_EDGE); plain && x.More(); x.Next()) {
+                    TopoDS_Edge e = TopoDS::Edge(x.Current());
+                    if (BRep_Tool::IsClosed(e, fw)) continue;
+                    double p0, p1;
+                    opencascade::handle<Geom2d_Curve> pc = BRep_Tool::CurveOnSurface(e, fw, p0, p1);
+                    if (pc.IsNull()) {
+                        plain = false;
+                        break;
+                    }
+                    double at = 0;
+                    for (int k = 0; k <= 4; k++) {
+                        gp_Pnt2d q = pc->Value(p0 + (p1 - p0) * k / 4.0);
+                        double w = along_u ? q.Y() : q.X();
+                        if (k == 0) at = w;
+                        if (std::fabs(w - at) > tol) plain = false;
+                    }
+                    if (!plain) break;
+                    bool deg = BRep_Tool::Degenerated(e);
+                    if (std::fabs(at - lo) <= tol) {
+                        if (!deg) rim0 = true;
+                    } else if (std::fabs(at - hi) <= tol) {
+                        if (!deg) rim1 = true;
+                    } else {
+                        plain = false;
+                    }
+                }
+                if (!plain) {
+                    set_err("an inset on a round face closed on itself works only on a plain band for now (this one is notched or holed)");
+                    return nullptr;
+                }
+                if (!rim0 && !rim1) {
+                    set_err("the face has no border to move in");
+                    return nullptr;
+                }
+                double nu0 = u0, nu1 = u1, nv0 = v0, nv1 = v1;
+                if (along_u) {
+                    double dv = d / std::sqrt(G);
+                    if (rim0) nv0 += dv;
+                    if (rim1) nv1 -= dv;
+                } else {
+                    double du = d / std::sqrt(E);
+                    if (rim0) nu0 += du;
+                    if (rim1) nu1 -= du;
+                }
+                if (nu1 - nu0 <= 1e-9 || nv1 - nv0 <= 1e-9) {
+                    set_err("the inset is wider than the face");
+                    return nullptr;
+                }
+                BRepBuilderAPI_MakeFace mf(S, nu0, nu1, nv0, nv1, 1e-7);
+                if (!mf.IsDone()) {
+                    set_err("the inset band could not be made");
+                    return nullptr;
+                }
+                return wrap(facing(mf.Face()));
+            }
+            auto to_bspline = [](const opencascade::handle<Geom2d_Curve>& cv, double p0, double p1) -> opencascade::handle<Geom2d_BSplineCurve> {
+                opencascade::handle<Geom2d_TrimmedCurve> tc = new Geom2d_TrimmedCurve(cv, p0, p1);
+                opencascade::handle<Geom2d_BSplineCurve> bs;
+                try {
+                    bs = Geom2dConvert::CurveToBSplineCurve(tc);
+                } catch (...) {
+                    bs.Nullify();
+                }
+                if (bs.IsNull()) {
+                    Geom2dConvert_ApproxCurve ap(tc, 1e-6, GeomAbs_C2, 64, 9);
+                    if (ap.HasResult()) bs = ap.Curve();
+                }
+                return bs;
+            };
+            auto join = [](const std::vector<TopoDS_Edge>& es) -> TopoDS_Wire {
+                BRepBuilderAPI_MakeWire mw;
+                for (auto& e : es) mw.Add(e);
+                if (mw.IsDone()) return mw.Wire();
+                // ends a little apart: joined by ShapeFix
+                TopoDS_Wire w;
+                BRep_Builder bb;
+                bb.MakeWire(w);
+                for (auto& e : es) bb.Add(w, e);
+                ShapeFix_Wire fx;
+                fx.Load(w);
+                fx.SetPrecision(1e-6);
+                fx.SetMaxTolerance(1e-3);
+                fx.ClosedWireMode() = Standard_True;
+                fx.FixConnected(1e-3);
+                return fx.Wire();
+            };
+            const gp_Pln flat(gp::XOY());
+            // the face laid flat
+            auto flat_wire = [&](const TopoDS_Wire& w) -> TopoDS_Wire {
+                std::vector<TopoDS_Edge> es;
+                for (BRepTools_WireExplorer x(w, fw); x.More(); x.Next()) {
+                    TopoDS_Edge e = x.Current();
+                    double ea, eb;
+                    opencascade::handle<Geom2d_Curve> pc = BRep_Tool::CurveOnSurface(e, fw, ea, eb);
+                    if (pc.IsNull()) return TopoDS_Wire();
+                    opencascade::handle<Geom2d_BSplineCurve> bs = to_bspline(pc, ea, eb);
+                    if (bs.IsNull()) return TopoDS_Wire();
+                    for (int i = 1; i <= bs->NbPoles(); i++) bs->SetPole(i, fwd(bs->Pole(i)));
+                    opencascade::handle<Geom_Curve> c3 = GeomAPI::To3d(bs, flat);
+                    TopoDS_Edge ne = BRepBuilderAPI_MakeEdge(c3, c3->FirstParameter(), c3->LastParameter());
+                    if (e.Orientation() == TopAbs_REVERSED) ne.Reverse();
+                    es.push_back(ne);
+                }
+                return es.empty() ? TopoDS_Wire() : join(es);
+            };
+            TopoDS_Wire outer = BRepTools::OuterWire(fw);
+            TopoDS_Wire fo = flat_wire(outer);
+            if (fo.IsNull()) {
+                set_err("the face could not be laid flat");
+                return nullptr;
+            }
+            BRepBuilderAPI_MakeFace mf(flat, fo, Standard_True);
+            for (TopExp_Explorer x(fw, TopAbs_WIRE); x.More(); x.Next()) {
+                TopoDS_Wire w = TopoDS::Wire(x.Current());
+                if (w.IsSame(outer)) continue;
+                TopoDS_Wire fh = flat_wire(w);
+                if (fh.IsNull()) {
+                    set_err("a hole of the face could not be laid flat");
+                    return nullptr;
+                }
+                mf.Add(fh);
+            }
+            if (!mf.IsDone()) {
+                set_err("the face could not be laid flat");
+                return nullptr;
+            }
+            FShape tmp;
+            tmp.s = mf.Face();
+            FShape* in = focc_inset_face(&tmp, 0, d);
+            if (!in) return nullptr;
+            TopoDS_Shape got = in->s;
+            delete in;
+            // laid back on the surface
+            std::vector<TopoDS_Face> parts;
+            for (TopExp_Explorer x(got, TopAbs_FACE); x.More(); x.Next()) {
+                TopoDS_Face pf = TopoDS::Face(x.Current());
+                TopoDS_Wire po = BRepTools::OuterWire(pf);
+                auto laid = [&](const TopoDS_Wire& w) -> TopoDS_Wire {
+                    std::vector<TopoDS_Edge> es;
+                    for (BRepTools_WireExplorer y(w); y.More(); y.Next()) {
+                        TopoDS_Edge e = y.Current();
+                        double ea, eb;
+                        opencascade::handle<Geom_Curve> c3 = BRep_Tool::Curve(e, ea, eb);
+                        if (c3.IsNull()) return TopoDS_Wire();
+                        opencascade::handle<Geom2d_Curve> c2 = GeomAPI::To2d(c3, flat);
+                        opencascade::handle<Geom2d_BSplineCurve> bs = to_bspline(c2, ea, eb);
+                        if (bs.IsNull()) return TopoDS_Wire();
+                        for (int i = 1; i <= bs->NbPoles(); i++) bs->SetPole(i, back(bs->Pole(i)));
+                        TopoDS_Edge ne = BRepBuilderAPI_MakeEdge(bs, S, bs->FirstParameter(), bs->LastParameter());
+                        BRepLib::BuildCurves3d(ne);
+                        if (e.Orientation() == TopAbs_REVERSED) ne.Reverse();
+                        es.push_back(ne);
+                    }
+                    return es.empty() ? TopoDS_Wire() : join(es);
+                };
+                TopoDS_Wire lo = laid(po);
+                if (lo.IsNull()) {
+                    set_err("the inset could not be laid back on the face");
+                    return nullptr;
+                }
+                BRepBuilderAPI_MakeFace mk(S, lo, Standard_True);
+                for (TopExp_Explorer y(pf, TopAbs_WIRE); y.More(); y.Next()) {
+                    TopoDS_Wire w = TopoDS::Wire(y.Current());
+                    if (w.IsSame(po)) continue;
+                    TopoDS_Wire lh = laid(w);
+                    if (lh.IsNull()) {
+                        set_err("a hole of the inset could not be laid back on the face");
+                        return nullptr;
+                    }
+                    mk.Add(lh);
+                }
+                if (!mk.IsDone()) {
+                    set_err("the inset could not be laid back on the face");
+                    return nullptr;
+                }
+                ShapeFix_Face fix(mk.Face());
+                fix.FixOrientationMode() = 1;
+                fix.Perform();
+                TopoDS_Face r = fix.Face();
+                GProp_GProps g;
+                BRepGProp::SurfaceProperties(r, g);
+                if (g.Mass() < 1e-6) continue;
+                parts.push_back(facing(r));
+            }
+            if (parts.empty()) {
+                set_err("the inset is wider than the face");
+                return nullptr;
+            }
+            if (parts.size() == 1) return wrap(parts[0]);
+            TopoDS_Compound cp;
+            BRep_Builder cb;
+            cb.MakeCompound(cp);
+            for (auto& x : parts) cb.Add(cp, x);
+            return wrap(cp);
         },
         (FShape*)nullptr);
 }

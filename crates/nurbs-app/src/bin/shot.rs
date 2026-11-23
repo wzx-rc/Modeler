@@ -3785,6 +3785,92 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("inset-curved") {
+        // Inset on curved faces (Romain 23 nov., 22 h 05: "Si possible que
+        // le Inset fonctionne sur face courbé"): the Boss's side clicked
+        // with the Inset tool (a band 2 mm in from its rims), raised by
+        // its arrow, then sunk; a fillet's face inset and sunk; the
+        // Hole's wall inset and pushed into the block
+        // (the Boss 2 mm along +X, off the Slot: a side notched by it is
+        // refused for now)
+        let mut doc = test_part();
+        if let Some(b) = doc.features.iter_mut().find(|f| f.name == "Boss") {
+            b.origin.x = 12.0;
+        }
+        h.reset(doc, "Test part");
+        h.key(egui::Key::Num3);
+        h.st.camera.frame(Vec3::new(-20.0, 0.0, -15.0), Vec3::new(20.0, 30.0, 15.0));
+        h.steps(2);
+        h.st.arm_push(PushKind::Inset, None);
+        let side = Vec3::new(12.0, 25.0, 7.0);
+        let a = h.screen_of(side);
+        h.move_to(a);
+        h.steps(2);
+        h.click(a);
+        h.settle();
+        let ex = |h: &Harness| h.st.doc.features.iter().filter_map(|f| f.push.as_ref().map(|p| (f.name.clone(), p.inset, p.depth))).collect::<Vec<_>>();
+        eprintln!("  inset {:?} errors {:?}", ex(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-inset-curved-1-band");
+        if std::env::var_os("FORME_SAVE").is_some() {
+            let path = format!("{}/inset-curved.fnurbs", h.out);
+            eprintln!("  saved {path}: {:?}", std::fs::write(&path, h.st.doc.to_json()));
+        }
+        // its arrow dragged out 1.5 mm
+        if let Some(hs) = h.st.push_handles() {
+            let a = h.screen_of(hs.tip.as_vec3() - hs.n.as_vec3() * 0.3);
+            let b = h.screen_of((hs.tip + hs.n * 1.5).as_vec3() - hs.n.as_vec3() * 0.3);
+            h.move_to(a);
+            h.steps(2);
+            h.drag(a, b, 8, true);
+            h.settle();
+        }
+        eprintln!("  raised {:?} errors {:?}", ex(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.move_to(h.screen_of(Vec3::new(0.0, -10.0, 40.0)));
+        h.steps(2);
+        h.shot("zero-inset-curved-2-raised");
+        h.st.set_push(2.0, -1.5, true);
+        h.st.end_live();
+        h.settle();
+        eprintln!("  sunk {:?} errors {:?}", ex(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-inset-curved-3-sunk");
+        // a fillet on the block's front top edge, its face inset 1 mm and sunk 1 mm
+        let e = {
+            let m = h.st.model.as_ref().unwrap();
+            let p = Vec3::new(14.0, 20.0, 15.0);
+            let near = |i: usize| m.edges[i].pts.windows(2).map(|w| {
+                let (u, v) = (Vec3::from_array(w[0]), Vec3::from_array(w[1]));
+                let d = v - u;
+                let t = ((p - u).dot(d) / d.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                (u + d * t).distance(p)
+            }).fold(f32::MAX, f32::min);
+            (0..m.edges.len()).min_by(|a, b| near(*a).total_cmp(&near(*b))).and_then(|i| h.st.edge_ref(i))
+        };
+        let mut r = 0;
+        h.st.edit("Fillet", |d| r = d.add_round(4.0, false, e.into_iter().collect()));
+        h.settle();
+        let at = h.st.model.as_ref().unwrap().faces.iter().find(|f| f.tag.map(|t| t.feature) == Some(r)).map(|f| DVec3::from_array(f.point)).unwrap();
+        let mut p = 0;
+        h.st.edit("Inset", |d| p = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: r, sub: 0 }.pack(), at }, inset: 1.0, depth: -1.0 }));
+        h.st.selection = vec![p];
+        h.settle();
+        eprintln!("  fillet face {:?} errors {:?}", ex(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-inset-curved-4-fillet-face");
+        // the Hole's wall: a groove 1 mm into the block, 3 mm in from its rims
+        let hole = h.st.doc.features.iter().find(|f| f.name == "Hole").map(|f| f.id).unwrap();
+        let mut q = 0;
+        h.st.edit("Inset", |d| q = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: hole, sub: 0 }.pack(), at: DVec3::new(-10.0, 10.0, 5.0) }, inset: 3.0, depth: -1.0 }));
+        h.st.selection = vec![q];
+        h.settle();
+        eprintln!("  hole wall {:?} errors {:?}", ex(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
+        // seen from above, into the hole
+        h.st.camera.frame(Vec3::new(-16.0, 0.0, -6.0), Vec3::new(-4.0, 20.0, 6.0));
+        h.st.camera.pitch = 1.15;
+        h.st.camera.yaw = 0.3;
+        h.move_to(egui::pos2(500.0, 860.0));
+        h.steps(2);
+        h.settle();
+        h.shot("zero-inset-curved-5-hole-wall");
+    }
     if want("extrude-curved") {
         // Extrude on a curved face: the Boss's side pulled out along its
         // normals (a thicker boss), the Hole's wall pushed in (a bigger

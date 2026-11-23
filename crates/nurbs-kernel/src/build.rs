@@ -1316,34 +1316,17 @@ thread_local! {
     static LIVE: std::cell::RefCell<std::collections::HashSet<FeatureId>> = std::cell::RefCell::new(Default::default());
 }
 
-fn push_tool(acc: &Shape, f: &Feature, p: &Push, limit: &mut Option<f64>) -> Result<PushMade, String> {
-    let face = find_face(acc, &p.face).ok_or("its face is gone")?;
-    let info = acc.face_info(face).ok_or("its face is gone")?;
-    let inset = p.inset.max(0.0);
-    if p.depth.abs() < 1e-6 && inset < 1e-6 {
-        return Ok(PushMade::Nothing);
-    }
-    let tag = |sub: u16| FaceTag { feature: f.id, sub }.pack();
-    if info.kind != OccSurf::Plane {
-        // a curved face: the whole face pulled out along its normals (an
-        // offset), or pushed in; no inset on it
-        if inset > 0.0 {
-            return Err("an inset needs a flat face (a curved face can only be extruded)".into());
-        }
-        mark(&step("push", f));
-        let tool = acc.thicken_face(face, p.depth, [tag(0), tag(1), tag(2)])?;
-        return Ok(PushMade::Tool(tool, p.depth > 0.0));
-    }
-    mark(&step("push", f));
-    let mut inner = match acc.inset_face(face, inset) {
-        Ok(x) => x,
+/// The face's inset by `inset` (`make`), or when it is too wide the
+/// largest that works, by halves (Romain: "il bute et stop", as fillets
+/// do), put in `limit`.
+fn inset_search(inset: f64, limit: &mut Option<f64>, make: impl Fn(f64) -> Result<Shape, String>) -> Result<Shape, String> {
+    match make(inset) {
+        Ok(x) => Ok(x),
         Err(e) if inset > 0.0 => {
-            // too wide? the largest inset that works, by halves (Romain:
-            // "il bute et stop", as fillets do)
             let (mut lo, mut hi) = (0.0, inset);
             for _ in 0..14 {
                 let mid = (lo + hi) * 0.5;
-                if acc.inset_face(face, mid).is_ok() {
+                if make(mid).is_ok() {
                     lo = mid;
                 } else {
                     hi = mid;
@@ -1354,16 +1337,54 @@ fn push_tool(acc: &Shape, f: &Feature, p: &Push, limit: &mut Option<f64>) -> Res
             }
             let q = if lo >= 1.0 { 0.1 } else { 0.01 };
             let size = (lo / q).floor() * q;
-            match (size >= 0.01).then(|| acc.inset_face(face, size)) {
+            match (size >= 0.01).then(|| make(size)) {
                 Some(Ok(x)) => {
                     *limit = Some(size);
-                    x
+                    Ok(x)
                 }
-                _ => return Err(e),
+                _ => Err(e),
             }
         }
-        Err(e) => return Err(e),
-    };
+        Err(e) => Err(e),
+    }
+}
+
+fn push_tool(acc: &Shape, f: &Feature, p: &Push, limit: &mut Option<f64>) -> Result<PushMade, String> {
+    let face = find_face(acc, &p.face).ok_or("its face is gone")?;
+    let info = acc.face_info(face).ok_or("its face is gone")?;
+    let inset = p.inset.max(0.0);
+    if p.depth.abs() < 1e-6 && inset < 1e-6 {
+        return Ok(PushMade::Nothing);
+    }
+    let tag = |sub: u16| FaceTag { feature: f.id, sub }.pack();
+    mark(&step("push", f));
+    if info.kind != OccSurf::Plane {
+        // a curved face: the whole face pulled out along its normals (an
+        // offset), or pushed in; with an inset, the face's outline moved
+        // in on its surface first (`inset_curved`), then that face
+        // thickened along its normals (Romain 23 nov., 22 h 05: "Si
+        // possible que le Inset fonctionne sur face courbé")
+        if inset <= 0.0 {
+            let tool = acc.thicken_face(face, p.depth, [tag(0), tag(1), tag(2)])?;
+            return Ok(PushMade::Tool(tool, p.depth > 0.0));
+        }
+        let mut inner = inset_search(inset, limit, |d| acc.inset_curved(face, d))?;
+        if p.depth.abs() < 1e-6 {
+            inner.set_tags(&vec![tag(1); inner.face_count().max(1)]);
+            return Ok(PushMade::Imprint(inner));
+        }
+        let mut tool: Option<Shape> = None;
+        for k in 0..inner.face_count() {
+            let t = inner.thicken_face(k, p.depth, [tag(0), tag(1), tag(2)])?;
+            tool = Some(match tool {
+                None => t,
+                Some(a) => a.compound(&t)?,
+            });
+        }
+        let tool = tool.ok_or("the inset leaves nothing of the face")?;
+        return Ok(PushMade::Tool(tool, p.depth > 0.0));
+    }
+    let mut inner = inset_search(inset, limit, |d| acc.inset_face(face, d))?;
     // depth 0: the inset only drawn on the face
     if p.depth.abs() < 1e-6 {
         inner.set_tags(&vec![tag(1); inner.face_count().max(1)]);
@@ -6146,6 +6167,49 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn parallel_probe() {
+        // FORME_DOC=file.fnurbs (several: a comma between them): built with
+        // OpenCascade's booleans on one thread then on several, from no
+        // cache, timed and compared (errors, faces, edges, volume, bounds);
+        // FORME_PUSH=id,…: then those extrusions deepened a step at a time
+        // both ways (coarse builds, as a drag)
+        let Ok(list) = std::env::var("FORME_DOC") else { return };
+        let pushes: Vec<FeatureId> = std::env::var("FORME_PUSH").ok().map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
+        for p in list.split(',') {
+            let d = Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+            let mut out = vec![];
+            for par in [false, true] {
+                forme_occt::set_parallel(Some(par));
+                let mut cache = Cache::default();
+                let t = std::time::Instant::now();
+                let m = build(&d, true, false, &[], &mut cache);
+                let ms = t.elapsed().as_secs_f64() * 1e3;
+                let (lo, hi) = m.bounds().unwrap_or(([0.0; 3], [0.0; 3]));
+                let sum = format!("{} errors, {} faces, {} edges, volume {:.1}, bounds {:.2?} {:.2?}", m.errors.len(), m.faces.len(), m.edges.len(), mesh_volume(&m), lo, hi);
+                let mut steps = vec![];
+                if !pushes.is_empty() {
+                    let mut d2 = d.clone();
+                    for _ in 0..4 {
+                        for f in d2.features.iter_mut().filter(|f| pushes.contains(&f.id)) {
+                            if let Some(pu) = f.push.as_mut() {
+                                pu.depth += 0.2;
+                            }
+                        }
+                        let t = std::time::Instant::now();
+                        let _ = build(&d2, false, false, &[], &mut cache);
+                        steps.push(t.elapsed().as_secs_f64() * 1e3);
+                    }
+                }
+                eprintln!("{p} {}: {ms:.0} ms · {sum} · drag steps {:.0?} ms", if par { "parallel" } else { "one thread" }, steps);
+                out.push(sum);
+            }
+            forme_occt::set_parallel(None);
+            eprintln!("  {}", if out[0] == out[1] { "the same" } else { "DIFFERENT" });
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn islands_probe() {
         // FORME_DOC=file.fnurbs (several: a comma between them): built island
         // by island and as one history, compared; FORME_UPTO=n: its first n
@@ -7657,8 +7721,7 @@ mod tests {
     #[test]
     fn curved_faces_extruded() {
         // a cylinder's side pulled out 3 mm (a thicker cylinder), pushed in
-        // 2 mm; a fillet's face pulled out 1 mm; an inset on a curved face
-        // is refused
+        // 2 mm; a fillet's face pulled out 1 mm
         let mut d = Doc::default();
         let c = d.add(Op::Add, Prim::Cylinder { radius: 10.0, height: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let side = FaceRef { tag: tag(c, 0), at: DVec3::new(10.0, 10.0, 0.0) };
@@ -7675,9 +7738,6 @@ mod tests {
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let (lo, hi) = m.bounds().unwrap();
         assert!((hi[0] - 8.0).abs() < 0.02 && (lo[0] + 8.0).abs() < 0.02, "{lo:?} {hi:?}");
-        d.feature_mut(p).unwrap().push.as_mut().unwrap().inset = 1.0;
-        let m = build(&d, true, false, &[], &mut Cache::default());
-        assert!(m.errors.iter().any(|e| e.contains("inset needs a flat face")), "{:?}", m.errors);
         // a block's fillet face pulled out
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
@@ -7688,6 +7748,75 @@ mod tests {
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert!(m.faces.iter().any(|f| f.tag == Some(FaceTag { feature: p, sub: 1 }) && f.kind == SurfKind::Cylinder), "{:?}", m.faces.iter().map(|f| (f.tag, f.kind)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn insets_on_curved_faces() {
+        // Romain 23 nov., 22 h 05: "Si possible que le Inset fonctionne sur
+        // face courbé". A cylinder's side: a band 2 mm in from its rims,
+        // drawn, raised 1.5 mm, sunk 2 mm
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Cylinder { radius: 10.0, height: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let side = FaceRef { tag: tag(c, 0), at: DVec3::new(10.0, 10.0, 0.0) };
+        let p = d.add_push(Push { face: side, inset: 2.0, depth: 0.0 });
+        let mut cache = Cache::default();
+        fn mine(m: &Model, p: FeatureId, sub: u16) -> Vec<&crate::model::Face> {
+            m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: p, sub })).collect()
+        }
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let band = mine(&m, p, 1);
+        assert!(!band.is_empty() && band.iter().all(|f| f.kind == SurfKind::Cylinder), "{:?}", m.faces.iter().map(|f| (f.tag, f.kind)).collect::<Vec<_>>());
+        d.feature_mut(p).unwrap().push.as_mut().unwrap().depth = 1.5;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((hi[0] - 11.5).abs() < 0.03 && lo[1].abs() < 1e-3 && (hi[1] - 20.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        assert!(mine(&m, p, 1).iter().any(|f| f.kind == SurfKind::Cylinder && (f.radius - 11.5).abs() < 1e-3));
+        d.feature_mut(p).unwrap().push.as_mut().unwrap().depth = -2.0;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(mine(&m, p, 1).iter().any(|f| f.kind == SurfKind::Cylinder && (f.radius - 8.0).abs() < 1e-3), "{:?}", m.faces.iter().map(|f| (f.tag, f.kind, f.radius)).collect::<Vec<_>>());
+        assert!((m.bounds().unwrap().1[0] - 10.0).abs() < 0.03);
+        // a boss standing on a block (its foot's circle cut by the union)
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let boss = d.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0), DQuat::IDENTITY);
+        let p = d.add_push(Push { face: FaceRef { tag: tag(boss, 0), at: DVec3::new(10.0, 25.0, 7.0) }, inset: 2.0, depth: 1.0 });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(mine(&m, p, 1).iter().any(|f| f.kind == SurfKind::Cylinder && (f.radius - 8.0).abs() < 1e-3));
+        // a block's fillet face: drawn, raised 1 mm, sunk 1 mm, then too
+        // wide (its 7.85 mm across): it stops at the widest that works
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let r = d.add_round(5.0, false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
+        let m1 = build(&d, true, false, &[], &mut Cache::default());
+        let fl = m1.faces.iter().find(|f| f.tag.map(|t| t.feature) == Some(r)).unwrap();
+        let p = d.add_push(Push { face: FaceRef { tag: tag(r, 0), at: DVec3::from_array(fl.point) }, inset: 1.0, depth: 0.0 });
+        let mine = |m: &Model, sub: u16| m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: p, sub })).count();
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(mine(&m, 1), 1);
+        let area = |m: &Model| mesh_volume(m);
+        let v0 = area(&m);
+        d.feature_mut(p).unwrap().push.as_mut().unwrap().depth = 1.0;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(mine(&m, 1), 1);
+        assert!(area(&m) > v0 + 1.0, "{} {}", area(&m), v0);
+        d.feature_mut(p).unwrap().push.as_mut().unwrap().depth = -1.0;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(area(&m) < v0 - 1.0, "{} {}", area(&m), v0);
+        let pu = d.feature_mut(p).unwrap().push.as_mut().unwrap();
+        pu.depth = 0.0;
+        pu.inset = 6.0;
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let lim = m.limits.iter().find(|l| l.0 == p).map(|l| l.1);
+        assert!(lim.is_some_and(|l| l > 2.0 && l < 3.95), "{lim:?}");
     }
 
     #[test]
@@ -7753,13 +7882,15 @@ mod tests {
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let l = m.limits.iter().find(|l| l.0 == p).map(|l| l.1).expect("a limit");
         assert!(l > 0.0 && l < 20.0, "{l}");
-        // a round face (the hole's wall): moved along its normals; no inset on it
+        // a round face (the hole's wall): moved along its normals; an inset
+        // on it too since 23 nov. (its outline moved in on its surface)
         d.feature_mut(p).unwrap().push = Some(Push { face: FaceRef { tag: tag(2, 0), at: DVec3::new(5.0, 10.0, 0.0) }, inset: 0.0, depth: 1.0 });
         let m = build(&d, true, false, &[], &mut cache);
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         d.feature_mut(p).unwrap().push.as_mut().unwrap().inset = 1.0;
         let m = build(&d, true, false, &[], &mut cache);
-        assert!(m.errors.len() == 1 && m.errors[0].contains("flat"), "{:?}", m.errors);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(mine(&m, 1), 1);
     }
 
     #[test]

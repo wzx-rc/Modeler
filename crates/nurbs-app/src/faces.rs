@@ -796,10 +796,9 @@ impl AppState {
     fn face_plane(&mut self, face: usize, at: DVec3, what: &str) -> Option<(FaceRef, DVec3, DVec3)> {
         let f = self.model.as_ref().and_then(|m| m.faces.get(face)).cloned()?;
         if f.kind != SurfKind::Plane {
-            if what == "Inset" {
-                self.toast("Inset: only flat faces (a curved face can be extruded: Ctrl + E)", true);
-                return None;
-            }
+            // (an inset on it too since 23 nov.: its outline moved in on
+            // its surface by the kernel)
+            let _ = what;
             let r = self.face_ref(face, at)?;
             let n = self.normal_near(face, at)?;
             return Some((r, at, n));
@@ -856,24 +855,16 @@ impl AppState {
     /// An inset of 2 mm on each face (the line only), one step per face,
     /// all in one undo step and selected together: their window, dot and
     /// arrow size them all at once (Maya's Inset on several faces). A
-    /// curved face is left out (said once).
+    /// curved face too (since 23 nov.): its outline moved in on its
+    /// surface.
     pub fn make_insets(&mut self, faces: &[(usize, DVec3)]) -> Vec<FeatureId> {
         let mut refs: Vec<FaceRef> = vec![];
-        let mut curved = 0;
         for &(face, at) in faces {
-            let flat = self.model.as_ref().and_then(|m| m.faces.get(face)).map(|f| f.kind == SurfKind::Plane).unwrap_or(false);
-            if !flat && faces.len() > 1 {
-                curved += 1;
-                continue;
-            }
             if let Some((r, origin, _)) = self.face_plane(face, at, "Inset") {
                 refs.push(FaceRef { tag: r.tag, at: origin });
             }
         }
         if refs.is_empty() {
-            if curved > 0 {
-                self.toast("Inset: only flat faces (a curved face can be extruded: Ctrl + E)", true);
-            }
             return vec![];
         }
         let mut ids = vec![];
@@ -894,8 +885,7 @@ impl AppState {
         self.selection = ids.clone();
         let n = ids.len();
         let what = if n > 1 { format!("Inset 2 mm on {n} faces") } else { "Inset 2 mm".to_string() };
-        let skipped = if curved > 0 { format!(" ({curved} curved face{} left out)", if curved > 1 { "s" } else { "" }) } else { String::new() };
-        self.toast(&format!("{what}{skipped} · drag the dot to move the outline, the arrow to raise or sink it"), false);
+        self.toast(&format!("{what} · drag the dot to move the outline, the arrow to raise or sink it"), false);
         ids
     }
 
@@ -909,7 +899,7 @@ impl AppState {
             }
         }
         let Some(h) = self.pick_at(p) else {
-            self.toast(&format!("{}: click a {}face of the part", kind.label(), if kind == PushKind::Inset { "flat " } else { "" }), true);
+            self.toast(&format!("{}: click a face of the part", kind.label()), true);
             return;
         };
         match kind {
@@ -1063,8 +1053,10 @@ impl AppState {
                 }
             }
             if let Some((_, q, t)) = best {
-                // inwards: across the border, on the face's plane, towards the point
-                let side = n.cross(t).normalize_or_zero();
+                // inwards: across the border, on the face's plane (a
+                // curved face: square to its normal there), towards the point
+                let nq = from_i.filter(|i| m.faces[*i].kind != SurfKind::Plane).and_then(|i| self.normal_near(i, q)).unwrap_or(n);
+                let side = nq.cross(t).normalize_or_zero();
                 let w = if side.dot(at - q) >= 0.0 { side } else { -side };
                 if w.length_squared() > 0.5 {
                     inset = Some((q, w, q + w * p.inset));
@@ -1783,8 +1775,7 @@ impl AppState {
                     // the other picked flat faces are inset with it
                     let mut more: Vec<FaceRef> = vec![];
                     for (fi, q) in self.picked_face_points() {
-                        let flat = self.model.as_ref().and_then(|m| m.faces.get(fi)).map(|f| f.kind == SurfKind::Plane).unwrap_or(false);
-                        if fi == h.face || !flat {
+                        if fi == h.face {
                             continue;
                         }
                         if let Some((r2, o2, _)) = self.face_plane(fi, q, "Inset") {

@@ -1818,7 +1818,7 @@ fn hint_of(st: &AppState) -> String {
             format!("Drag: a {} {how}, on a face or the ground · Click: 20 mm · Then its settings in its window · G: another", k.label().to_lowercase())
         }
         (None, Tool::Push(k)) => match k {
-            PushKind::Inset => "Click a flat face: 2 mm, then drag its dot · Press and drag: sized at once".into(),
+            PushKind::Inset => "Click a face (flat or round): 2 mm, then drag its dot · Press and drag: sized at once".into(),
             PushKind::Extrude => "Press on a face and drag: out adds, in carves · A round face goes along its normals · On a closed curve: pulled into a solid".into(),
         },
         (None, Tool::Select) if st.curve_pull.is_some() => "Move: its height along its normal (the other way goes into the face) · Click: keep it · Esc: drop it · Top bar: Add or Carve".into(),

@@ -68,6 +68,7 @@ extern "C" {
     fn focc_fillet_multi(s: *const FShape, idx: *const c_int, r: *const c_double, tags: *const i64, n: c_int, fresh: i64) -> *mut FShape;
     fn focc_chamfer(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
     fn focc_inset_face(s: *const FShape, face: c_int, d: c_double) -> *mut FShape;
+    fn focc_inset_curved(s: *const FShape, face: c_int, d: c_double) -> *mut FShape;
     fn focc_extrude(s: *const FShape, dx: c_double, dy: c_double, dz: c_double) -> *mut FShape;
     fn focc_thicken_face(s: *const FShape, index: c_int, t: c_double, base: i64, top: i64, side: i64) -> *mut FShape;
     fn focc_move_face(s: *const FShape, index: c_int, d: c_double) -> *mut FShape;
@@ -94,6 +95,7 @@ extern "C" {
     fn focc_simplified(s: *const FShape) -> *mut FShape;
     fn focc_keep_lines(tags: *const i64, n: c_int);
     fn focc_catch_signals();
+    fn focc_set_parallel(on: c_int);
     fn focc_set_tags(s: *mut FShape, tags: *const i64, n: c_int);
     fn focc_face_tag(s: *const FShape, index: c_int) -> i64;
     fn focc_topo(s: *const FShape, defl: c_double, angle: c_double) -> *mut FBuf;
@@ -190,6 +192,12 @@ pub fn keep_lines(tags: &[i64]) {
 /// a dead process. For the kernel process; floating-point traps stay off.
 pub fn catch_signals() {
     unsafe { focc_catch_signals() }
+}
+
+/// OpenCascade's booleans on several threads (true), on one (false), or
+/// as FORME_BOP_PARALLEL says (None, the default).
+pub fn set_parallel(on: Option<bool>) {
+    unsafe { focc_set_parallel(on.map(|b| b as c_int).unwrap_or(-1)) }
 }
 
 // the C++ side keeps no global state per shape: a shape can move to another thread
@@ -763,6 +771,11 @@ impl Shape {
     /// facing the same way, with its own edges.
     pub fn inset_face(&self, face: usize, d: f64) -> Result<Shape, String> {
         shape(unsafe { focc_inset_face(self.0, face as c_int, d) })
+    }
+    /// An inset on a curved face (`focc_inset_curved`): its outline moved
+    /// in by `d` along the face, as a face (or several) on its surface.
+    pub fn inset_curved(&self, face: usize, d: f64) -> Result<Shape, String> {
+        shape(unsafe { focc_inset_curved(self.0, face as c_int, d) })
     }
     /// A face swept along `v` into a solid.
     pub fn extrude(&self, v: [f64; 3]) -> Result<Shape, String> {

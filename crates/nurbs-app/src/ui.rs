@@ -583,7 +583,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             }
             divider(ui);
             for (k, icon, tip) in [
-                (PushKind::Inset, Icon::Inset, "Inset (I): a flat face's outline moved in (2 mm), sized with its dot; its arrow raises or sinks it. Click a face, or pick a face (3) and press I"),
+                (PushKind::Inset, Icon::Inset, "Inset (I): a face's outline moved in (2 mm, on its surface when it is round), sized with its dot; its arrow raises or sinks it. Click a face, or pick a face (3) and press I"),
                 (PushKind::Extrude, Icon::Extrude, "Extrude (Ctrl + E): a face pulled out (adds) or pushed in (carves), a curved one along its normals; a closed curve pulled into a solid. Press on a face or a curve and drag, or pick it and press Ctrl + E"),
             ] {
                 let on = st.tool == Tool::Push(k);
@@ -4227,7 +4227,7 @@ fn face_card(ui: &mut Ui, st: &mut AppState) {
     });
     let flat = st.picked_faces().first().and_then(|f| st.model.as_ref().map(|m| m.faces[*f].kind == nurbs_kernel::model::SurfKind::Plane)).unwrap_or(false);
     if !flat {
-        ui.label(egui::RichText::new("A round face: it extrudes along its normals; no inset on it").font(regular(12.0)).color(TEXT2()));
+        ui.label(egui::RichText::new("A round face: its inset follows its surface, it extrudes along its normals").font(regular(12.0)).color(TEXT2()));
     }
     if n == 2 {
         // (Romain 23 nov., 7 h 04: "Il faut un Bridge tool")
@@ -4270,15 +4270,11 @@ fn push_card(ui: &mut Ui, st: &mut AppState) {
         ui.label(egui::RichText::new(format!("{n} faces: each size is given to all of them")).font(regular(12.0)).color(TEXT2()));
     }
     let span = st.round_max().max(p.inset.abs().ceil()).max(p.depth.abs().ceil()) as f32 * 2.0;
-    // a curved face: no inset, only the depth along its normals
-    let id = st.selected_push().map(|f| f.id);
-    let curved = st.model.as_ref().map(|m| m.faces.iter().any(|x| x.tag.map(|t| t.pack() == p.face.tag || (Some(t.feature) == id && t.sub == 1)).unwrap_or(false) && x.kind != nurbs_kernel::model::SurfKind::Plane)).unwrap_or(false);
-    if !curved || p.inset > 0.0 {
-        let mut inset = p.inset as f32;
-        let (ch, start) = slider_row(ui, "Inset", &mut inset, 0.0..=span, 0.1, "mm");
-        if ch {
-            st.set_push(inset.max(0.0) as f64, p.depth, start || !st.is_live());
-        }
+    // (a curved face too since 23 nov.: its outline moved in on its surface)
+    let mut inset = p.inset as f32;
+    let (ch, start) = slider_row(ui, "Inset", &mut inset, 0.0..=span, 0.1, "mm");
+    if ch {
+        st.set_push(inset.max(0.0) as f64, p.depth, start || !st.is_live());
     }
     let mut depth = p.depth as f32;
     let (ch, start) = slider_row(ui, "Depth", &mut depth, -span..=span, 0.1, "mm");
