@@ -5430,6 +5430,50 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn delete_edges_probe() {
+        // FORME_DOC, FORME_EDGES = "tag,tag,x,y,z;…": the faces of those
+        // tags printed (planes), then a Delete edges step on them built
+        let doc: Doc = serde_json::from_str(&std::fs::read_to_string(std::env::var("FORME_DOC").unwrap()).unwrap()).unwrap();
+        let edges: Vec<EdgeRef> = std::env::var("FORME_EDGES")
+            .unwrap()
+            .split(';')
+            .map(|e| {
+                let v: Vec<f64> = e.split(',').map(|x| x.trim().parse().unwrap()).collect();
+                EdgeRef { faces: [v[0] as i64, v[1] as i64], at: DVec3::new(v[2], v[3], v[4]) }
+            })
+            .collect();
+        let mut cache = Cache::default();
+        let m = build(&doc, true, false, &[], &mut cache);
+        eprintln!("{} faces, errors {:?}", m.faces.len(), m.errors);
+        let tags: Vec<i64> = edges.iter().flat_map(|e| e.faces).collect();
+        for f in &m.faces {
+            if let Some(t) = f.tag {
+                if tags.contains(&t.pack()) {
+                    eprintln!("face {} {:?} kind {:?} point {:?} normal {:?}", t.pack(), (t.feature, t.sub), f.kind, f.point, f.normal);
+                }
+            }
+        }
+        let mut d = doc.clone();
+        if let Ok(mv) = std::env::var("FORME_MOVEFACE") {
+            // "tag,x,y,z,dx,dy,dz": a Move face instead
+            let v: Vec<f64> = mv.split(',').map(|x| x.trim().parse().unwrap()).collect();
+            d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: v[0] as i64, at: DVec3::new(v[1], v[2], v[3]) }), delta: DVec3::new(v[4], v[5], v[6]), more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: false });
+        } else {
+            d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: edges, fill: vec![] }, "Delete edges");
+        }
+        let m2 = build(&d, true, false, &[], &mut cache);
+        eprintln!("after: {} faces, errors {:?}", m2.faces.len(), m2.errors);
+        for f in &m2.faces {
+            if let Some(t) = f.tag {
+                if tags.contains(&t.pack()) {
+                    eprintln!("face {} kind {:?} point {:?} normal {:?}", t.pack(), f.kind, f.point, f.normal);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn element_frozen() {
         // a block with a fillet and a face pulled out, turned 30°, frozen:
         // the same solid with its history gone, moved like any shape, a
@@ -6214,6 +6258,42 @@ mod tests {
         assert!(m2.errors.is_empty(), "move: {:?}", m2.errors);
         let at = m2.edges.iter().filter(|e| e.faces[0] >= 0 && e.faces[1] >= 0).filter(|e| e.faces.iter().all(|&f| m2.faces[f as usize].tag.map(|t| t.pack()) == Some(front))).map(|e| e.pts[0][0]).collect::<Vec<_>>();
         assert!(at.iter().any(|x| (*x + 5.0).abs() < 1e-3), "the line at x -5: {at:?}");
+    }
+
+    #[test]
+    fn edges_deleted_between_faces_nearly_on_one_plane() {
+        // 23 nov., 19 h 25 ("Je ne peux toujours pas delete ces deux edges et
+        // retrouver une face plane"): a block's front cut in two by the
+        // Knife, the edge at its right moved 0.3 mm out, so the right piece
+        // leans a little; the Knife's line deleted, the front is one flat
+        // face again, on one piece's plane (the largest's)
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let front = tag(b, 4);
+        let kp = |faces: [i64; 2], at: DVec3| KnifePoint { edge: EdgeRef { faces, at }, f: 0.5, at };
+        d.add_knife(Knife { pts: vec![kp([front, tag(b, 2)], DVec3::new(0.0, 20.0, 15.0)), kp([front, tag(b, 3)], DVec3::new(0.0, 0.0, 15.0))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
+        d.add_tweak(Tweak { comp: Comp::Edge(EdgeRef { faces: [front, tag(b, 0)], at: DVec3::new(20.0, 10.0, 15.0) }), delta: DVec3::new(0.0, 0.0, 0.3), more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true });
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        let fronts = |m: &Model| m.faces.iter().filter(|f| f.tag.map(|t| t.pack()) == Some(front)).cloned().collect::<Vec<_>>();
+        assert_eq!(fronts(&m0).len(), 2, "the front in two");
+        assert!(fronts(&m0).iter().any(|f| f.normal[0].abs() > 1e-3), "a piece leans");
+        d.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![EdgeRef { faces: [front, front], at: DVec3::new(0.0, 10.0, 15.0) }], fill: vec![] }, "Delete edges");
+        let m1 = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m1.errors.is_empty(), "delete: {:?}", m1.errors);
+        let f1 = fronts(&m1);
+        assert_eq!(f1.len(), 1, "the front one again");
+        assert_eq!(f1[0].kind, SurfKind::Plane);
+        let n = DVec3::from_array(f1[0].normal);
+        assert!(fronts(&m0).iter().any(|f| DVec3::from_array(f.normal).dot(n) > 1.0 - 1e-12), "on one piece's plane: {:?}", f1[0].normal);
+        assert!(m1.faces.iter().all(|f| f.kind == SurfKind::Plane), "every face flat");
+        // faces leaning past 5 degrees stay apart, with the reason
+        let mut e = d.clone();
+        e.features.pop();
+        e.features.last_mut().unwrap().tweak.as_mut().unwrap().delta = DVec3::new(0.0, 0.0, 4.0);
+        e.add_knife(Knife { pts: vec![], segs: vec![], remove_faces: vec![], remove_edges: vec![EdgeRef { faces: [front, front], at: DVec3::new(0.0, 10.0, 15.0) }], fill: vec![] }, "Delete edges");
+        let m2 = build(&e, true, false, &[], &mut Cache::default());
+        assert!(m2.errors.iter().any(|x| x.contains("5 degrees")), "{:?}", m2.errors);
     }
 
     #[test]

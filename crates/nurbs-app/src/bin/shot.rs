@@ -2550,6 +2550,56 @@ fn main() {
         h.shot("zero-freeze-4-undone");
     }
 
+    if want("delete-edges") {
+        // Delete edges between flat faces nearly on one plane (23 nov.,
+        // 19 h 25, his leg's end in three bands 0.19 mm apart; FORME_DOC: a
+        // saved scene, FORME_EDGES: "tag,tag,x,y,z;…"; else a block's front
+        // cut by the Knife, its right edge moved 0.3 mm out): one flat face
+        let (d, edges) = match std::env::var("FORME_DOC") {
+            Ok(path) => {
+                let d = nurbs_kernel::Doc::from_json(&std::fs::read_to_string(&path).expect("FORME_DOC")).expect("a document");
+                let edges: Vec<EdgeRef> = std::env::var("FORME_EDGES")
+                    .expect("FORME_EDGES")
+                    .split(';')
+                    .map(|e| {
+                        let v: Vec<f64> = e.split(',').map(|x| x.trim().parse().unwrap()).collect();
+                        EdgeRef { faces: [v[0] as i64, v[1] as i64], at: DVec3::new(v[2], v[3], v[4]) }
+                    })
+                    .collect();
+                (d, edges)
+            }
+            Err(_) => {
+                let mut d = nurbs_kernel::Doc::default();
+                let b = d.add(nurbs_kernel::Op::Add, nurbs_kernel::Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, glam::DQuat::IDENTITY);
+                let t = |s: u16| FaceTag { feature: b, sub: s }.pack();
+                let kp = |faces: [i64; 2], at: DVec3| nurbs_kernel::doc::KnifePoint { edge: EdgeRef { faces, at }, f: 0.5, at };
+                d.add_knife(nurbs_kernel::doc::Knife { pts: vec![kp([t(4), t(2)], DVec3::new(0.0, 20.0, 15.0)), kp([t(4), t(3)], DVec3::new(0.0, 0.0, 15.0))], segs: vec![[0, 1]], remove_faces: vec![], remove_edges: vec![], fill: vec![] }, "Knife");
+                d.add_tweak(nurbs_kernel::doc::Tweak { comp: nurbs_kernel::doc::Comp::Edge(EdgeRef { faces: [t(4), t(0)], at: DVec3::new(20.0, 10.0, 15.0) }), delta: DVec3::new(0.0, 0.0, 0.3), more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true });
+                (d, vec![EdgeRef { faces: [t(4), t(4)], at: DVec3::new(0.0, 10.0, 15.0) }])
+            }
+        };
+        h.reset(d, "Delete edges");
+        h.settle();
+        let tags: Vec<i64> = edges.iter().flat_map(|e| e.faces).collect();
+        let count = |h: &Harness| h.st.model.as_ref().map(|m| m.faces.iter().filter(|f| f.tag.map(|t| tags.contains(&t.pack())).unwrap_or(false)).count()).unwrap_or(0);
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::Num2);
+        h.st.edge_sel = edges.clone();
+        h.st.frame_current();
+        h.settle();
+        h.move_to(pos2(1500.0, 120.0));
+        h.steps(3);
+        h.shot("zero-delete-edges-1-before");
+        eprintln!("  before: {} faces of those tags", count(&h));
+        h.key(egui::Key::Delete);
+        for _ in 0..3 {
+            h.settle();
+        }
+        h.steps(3);
+        h.shot("zero-delete-edges-2-after");
+        eprintln!("  after: {} faces of those tags, errors {:?}, toast {:?}", count(&h), h.st.model.as_ref().map(|m| m.errors.iter().filter(|e| e.starts_with("Delete edges")).cloned().collect::<Vec<_>>()), h.st.toast.as_ref().map(|t| t.text.clone()));
+    }
+
     if want("orphans") {
         // operations left by a shape deleted in a document from before
         // 20 nov. (FORME_DOC: a saved scene): the outliner's row takes them

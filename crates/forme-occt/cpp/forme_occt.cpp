@@ -77,10 +77,12 @@
 #include <Geom_SurfaceOfLinearExtrusion.hxx>
 #include <Geom_SurfaceOfRevolution.hxx>
 #include <ShapeFix_Edge.hxx>
+#include <ShapeFix_Wire.hxx>
 #include <BRepAlgoAPI_Defeaturing.hxx>
 #include <GeomAPI_IntCS.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <functional>
+#include <map>
 #include <memory>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_ConicalSurface.hxx>
@@ -3428,7 +3430,7 @@ FShape* focc_thicken_face(const FShape* s, int index, double t, long long base, 
         (FShape*)nullptr);
 }
 
-static FShape* unify_across(FShape* res, const TopTools_MapOfShape& across, const TopTools_MapOfShape* ends);
+static FShape* unify_across(FShape* res, const TopTools_MapOfShape& across, const TopTools_MapOfShape* ends, bool loose = false);
 
 // Flat face `index` (0-based) of a solid moved `d` along its outward
 // normal, the faces round it (flat or curved, they must run along the
@@ -3750,7 +3752,7 @@ int focc_edge_point(const FShape* s, int edge, double f, double* xyz) {
 // only), with the tag they share; with `ends`, edges meeting at one of
 // those vertices on one line or circle made one edge too. Returns `res`
 // itself when the result is not valid; `res` is freed otherwise.
-static FShape* unify_across(FShape* res, const TopTools_MapOfShape& across, const TopTools_MapOfShape* ends) {
+static FShape* unify_across(FShape* res, const TopTools_MapOfShape& across, const TopTools_MapOfShape* ends, bool loose) {
     // every edge kept but those, and a closed face's seam (one face on
     // both its sides: it parts nothing, and a seam kept stops the faces
     // of a closed surface being joined)
@@ -3763,6 +3765,12 @@ static FShape* unify_across(FShape* res, const TopTools_MapOfShape& across, cons
             if (!ends->Contains(ex.Current())) keep.Add(ex.Current());
     ShapeUpgrade_UnifySameDomain u(res->s, ends ? Standard_True : Standard_False, Standard_True, Standard_False);
     u.KeepShapes(keep);
+    if (loose) {
+        // planes put on one plane by hand (Delete edges, flattened): their
+        // normals agree to rounding only
+        u.SetLinearTolerance(1e-5);
+        u.SetAngularTolerance(1e-7);
+    }
     u.Build();
     TopoDS_Shape out = u.Shape();
     // valid when what it was given was (a part already off, kept going)
@@ -4257,6 +4265,7 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                         opencascade::handle<Geom_Curve> mc = opencascade::handle<Geom_Curve>::DownCast(gc->Transformed(tr));
                         BRepBuilderAPI_MakeEdge me(mc, TopoDS::Vertex(na.Oriented(TopAbs_FORWARD)), TopoDS::Vertex(nb.Oriented(TopAbs_FORWARD)), t0, t1);
                         if (me.IsDone()) ne = me.Edge();
+                        dbg("carry: edge %d t %.4f..%.4f, gc(t0)-pa %.2e gc(t1)-pb %.2e gc(t0)-pb %.2e, done %d\n", i, t0, t1, gc->Value(t0).Distance(pa), gc->Value(t1).Distance(pb), gc->Value(t0).Distance(pb), (int)me.IsDone());
                     } else if (!a.IsSame(b)) {
                         // each moved end on the curve: its parameter there
                         auto param = [&](const gp_Pnt& q, double old, double& t) {
@@ -4555,7 +4564,38 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                         }
                         if (dmax > BRep_Tool::Tolerance(e)) bb.UpdateEdge(e, 1.5 * dmax);
                     }
+                    // a new edge's curve on a closed surface (a fillet's
+                    // cylinder) may come a whole turn off the kept ones':
+                    // the loop would not close in (u, v) (23 nov., his
+                    // frozen Cube's end moved next to an 8.6 mm fillet)
+                    if (!fresh.empty() && (gs->IsUPeriodic() || gs->IsVPeriodic() || gs->IsUClosed() || gs->IsVClosed()))
+                        for (TopoDS_Iterator wi(nf); wi.More(); wi.Next()) {
+                            ShapeFix_Wire sfw(TopoDS::Wire(wi.Value()), nf, Precision::Confusion());
+                            sfw.FixShifted();
+                        }
                     nf.Orientation(f.Orientation());
+                    if (getenv("FORME_OCCT_DEBUG")) {
+                        dbg("move: curved face %d kind %d orient %d valid %d, %d new edges\n", i, (int)as.GetType(), (int)f.Orientation(), (int)BRepCheck_Analyzer(nf).IsValid(), (int)fresh.size());
+                        BRepCheck_Analyzer an(nf);
+                        for (TopAbs_ShapeEnum t : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_WIRE, TopAbs_FACE})
+                            for (TopExp_Explorer x(nf, t); x.More(); x.Next()) {
+                                opencascade::handle<BRepCheck_Result> res = an.Result(x.Current());
+                                if (res.IsNull()) continue;
+                                for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More(); it.Next())
+                                    if (it.Value() != BRepCheck_NoError) dbg("   face check: type %d status %d\n", (int)t, (int)it.Value());
+                                for (res->InitContextIterator(); res->MoreShapeInContext(); res->NextShapeInContext())
+                                    for (BRepCheck_ListOfStatus::Iterator it(res->StatusOnShape()); it.More(); it.Next())
+                                        if (it.Value() != BRepCheck_NoError) dbg("   face check: type %d in context status %d\n", (int)t, (int)it.Value());
+                            }
+                        BRepCheck_Analyzer an0(f);
+                        dbg("   old face valid %d\n", (int)an0.IsValid());
+                        for (TopExp_Explorer x(nf, TopAbs_EDGE); x.More(); x.Next()) {
+                            TopoDS_Vertex a, b;
+                            TopExp::Vertices(TopoDS::Edge(x.Current()), a, b, Standard_True);
+                            gp_Pnt pa = BRep_Tool::Pnt(a), pb = BRep_Tool::Pnt(b);
+                            dbg("   edge or %d kind %d (%.3f %.3f %.3f) -> (%.3f %.3f %.3f)\n", (int)x.Current().Orientation(), (int)BRepAdaptor_Curve(TopoDS::Edge(x.Current())).GetType(), pa.X(), pa.Y(), pa.Z(), pb.X(), pb.Y(), pb.Z());
+                        }
+                    }
                     bb.Add(shell_for(f), nf);
                     tags.push_back(tag);
                     continue;
@@ -4798,6 +4838,21 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                     }
                 }
                 nf.Orientation(f.Orientation());
+                if (getenv("FORME_OCCT_DEBUG")) {
+                    auto onormal = [](const TopoDS_Face& g) {
+                        double u0, u1, v0, v1;
+                        BRepTools::UVBounds(g, u0, u1, v0, v1);
+                        BRepAdaptor_Surface a(g);
+                        gp_Pnt p;
+                        gp_Vec du, dv;
+                        a.D1(0.5 * (u0 + u1), 0.5 * (v0 + v1), p, du, dv);
+                        gp_Vec n = du.Crossed(dv);
+                        if (g.Orientation() == TopAbs_REVERSED) n.Reverse();
+                        return n.Magnitude() > 0 ? n.Normalized() : n;
+                    };
+                    gp_Vec a = onormal(TopoDS::Face(f)), b = onormal(nf);
+                    dbg("move: face %d orient %d old n (%.3f %.3f %.3f) new n (%.3f %.3f %.3f)\n", i, (int)f.Orientation(), a.X(), a.Y(), a.Z(), b.X(), b.Y(), b.Z());
+                }
                 bb.Add(shell_for(f), nf);
                 tags.push_back(tag);
             }
@@ -4856,7 +4911,22 @@ FShape* focc_move_vertices(const FShape* s, const int* vidx, const double* xyz, 
                             opencascade::handle<BRepCheck_Result> res = an.Result(x.Current());
                             if (res.IsNull()) continue;
                             for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More(); it.Next())
-                                if (it.Value() != BRepCheck_NoError) fprintf(stderr, "check: shape type %d status %d\n", (int)t, (int)it.Value());
+                                if (it.Value() != BRepCheck_NoError) {
+                                    fprintf(stderr, "check: shape type %d status %d\n", (int)t, (int)it.Value());
+                                    if (t == TopAbs_FACE) {
+                                        GProp_GProps gp;
+                                        BRepGProp::SurfaceProperties(x.Current(), gp);
+                                        gp_Pnt c = gp.CentreOfMass();
+                                        int ne = 0, nw = 0;
+                                        for (TopExp_Explorer y(x.Current(), TopAbs_EDGE); y.More(); y.Next()) ne++;
+                                        for (TopExp_Explorer y(x.Current(), TopAbs_WIRE); y.More(); y.Next()) nw++;
+                                        fprintf(stderr, "  face at %.3f %.3f %.3f, kind %d, %d wires %d edges\n", c.X(), c.Y(), c.Z(), (int)BRepAdaptor_Surface(TopoDS::Face(x.Current())).GetType(), nw, ne);
+                                        for (TopExp_Explorer y(x.Current(), TopAbs_VERTEX); y.More(); y.Next()) {
+                                            gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(y.Current()));
+                                            fprintf(stderr, "    v %.3f %.3f %.3f\n", p.X(), p.Y(), p.Z());
+                                        }
+                                    }
+                                }
                             for (res->InitContextIterator(); res->MoreShapeInContext(); res->NextShapeInContext())
                                 for (BRepCheck_ListOfStatus::Iterator it(res->StatusOnShape()); it.More(); it.Next())
                                     if (it.Value() != BRepCheck_NoError) fprintf(stderr, "check: shape type %d in context status %d\n", (int)t, (int)it.Value());
@@ -6568,6 +6638,141 @@ FShape* focc_fill_holes(const FShape* s, const double* pts, int n, long long fre
         (FShape*)nullptr);
 }
 
+// Delete edges on flat faces nearly on one plane: the faces the edges of
+// `across` join (and those joined to them through other edges of `across`)
+// must all be flat, their normals within 5 degrees of the largest one's;
+// every vertex of theirs is put on the largest one's plane (the faces round
+// them follow, as a move of vertices). `across` is changed to the moved
+// shape's edges (found by their middles). Null with `why` otherwise.
+static FShape* flatten_across(const FShape* s, TopTools_MapOfShape& across, std::string& why) {
+    TopTools_IndexedDataMapOfShapeListOfShape ef;
+    TopExp::MapShapesAndAncestors(s->s, TopAbs_EDGE, TopAbs_FACE, ef);
+    TopTools_IndexedMapOfShape fm, vm;
+    face_map(s->s, fm);
+    TopExp::MapShapes(s->s, TopAbs_VERTEX, vm);
+    Bnd_Box box;
+    BRepBndLib::Add(s->s, box);
+    double size = box.IsVoid() ? 1.0 : std::sqrt(box.SquareExtent());
+    // groups of faces (union-find on their indices)
+    std::vector<int> up(fm.Extent() + 1);
+    for (size_t i = 0; i < up.size(); i++) up[i] = (int)i;
+    std::function<int(int)> root = [&](int i) { return up[i] == i ? i : (up[i] = root(up[i])); };
+    std::vector<std::pair<TopoDS_Edge, int>> edges;
+    for (TopTools_MapIteratorOfMapOfShape it(across); it.More(); it.Next()) {
+        int k = ef.FindIndex(it.Key());
+        if (k == 0) continue;
+        std::vector<int> fs;
+        for (TopTools_ListIteratorOfListOfShape a(ef(k)); a.More(); a.Next()) {
+            int j = fm.FindIndex(a.Value());
+            if (j > 0 && std::find(fs.begin(), fs.end(), j) == fs.end()) fs.push_back(j);
+        }
+        if (fs.size() != 2) {
+            why = "the edge does not part two faces";
+            return nullptr;
+        }
+        up[root(fs[0])] = root(fs[1]);
+        edges.push_back({TopoDS::Edge(it.Key()), fs[0]});
+    }
+    std::map<int, std::vector<int>> groups;
+    for (int i = 1; i <= fm.Extent(); i++)
+        if (root(i) != i || std::any_of(edges.begin(), edges.end(), [&](const std::pair<TopoDS_Edge, int>& e) { return root(e.second) == i; })) groups[root(i)].push_back(i);
+    std::vector<int> vidx;
+    std::vector<double> xyz;
+    std::map<int, gp_Pln> plane_of;
+    for (auto& g : groups) {
+        if (g.second.size() < 2) continue;
+        int big = 0;
+        double area = -1;
+        for (int i : g.second) {
+            TopoDS_Face f = TopoDS::Face(fm(i));
+            BRepAdaptor_Surface as(f, Standard_False);
+            if (as.GetType() != GeomAbs_Plane) {
+                why = "its two faces are not on one surface, and not both flat";
+                return nullptr;
+            }
+            GProp_GProps gp;
+            BRepGProp::SurfaceProperties(f, gp);
+            if (gp.Mass() > area) {
+                area = gp.Mass();
+                big = i;
+            }
+        }
+        auto normal = [&](int i) {
+            TopoDS_Face f = TopoDS::Face(fm(i));
+            gp_Dir n = BRepAdaptor_Surface(f, Standard_False).Plane().Axis().Direction();
+            return f.Orientation() == TopAbs_REVERSED ? n.Reversed() : n;
+        };
+        gp_Dir n = normal(big);
+        gp_Pln pl(BRepAdaptor_Surface(TopoDS::Face(fm(big)), Standard_False).Plane().Location(), n);
+        for (int i : g.second)
+            if (normal(i).Angle(n) > 5.0 * M_PI / 180.0) {
+                why = "its two faces are not on one surface: flat faces must be within 5 degrees of one plane to be made one";
+                return nullptr;
+            }
+        plane_of[g.first] = pl;
+        for (int i : g.second)
+            for (TopExp_Explorer vx(fm(i), TopAbs_VERTEX); vx.More(); vx.Next()) {
+                int vi = vm.FindIndex(vx.Current());
+                if (vi == 0 || std::find(vidx.begin(), vidx.end(), vi) != vidx.end()) continue;
+                gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vx.Current()));
+                double d = gp_Vec(pl.Location(), p).Dot(gp_Vec(n));
+                if (std::abs(d) <= 1e-7) continue;
+                if (std::abs(d) > 0.05 * size + 1e-3) {
+                    why = "its faces are too far from one plane to be made one";
+                    return nullptr;
+                }
+                gp_Pnt q = p.Translated(gp_Vec(n) * -d);
+                dbg("flatten: vertex %d (%.3f %.3f %.3f) by %.4f, ref face %d area %.2f\n", vi, p.X(), p.Y(), p.Z(), -d, big, area);
+                vidx.push_back(vi);
+                xyz.push_back(q.X());
+                xyz.push_back(q.Y());
+                xyz.push_back(q.Z());
+            }
+    }
+    if (vidx.empty()) {
+        why = "its two faces are not on one surface";
+        return nullptr;
+    }
+    // each edge's middle on its group's plane, to find it again
+    std::vector<gp_Pnt> mids;
+    for (auto& e : edges) {
+        BRepAdaptor_Curve c(e.first);
+        gp_Pnt p = c.Value(0.5 * (c.FirstParameter() + c.LastParameter()));
+        const gp_Pln& pl = plane_of[root(e.second)];
+        double d = gp_Vec(pl.Location(), p).Dot(gp_Vec(pl.Axis().Direction()));
+        mids.push_back(p.Translated(gp_Vec(pl.Axis().Direction()) * -d));
+    }
+    dbg("flatten: %d groups, %d vertices moved, input valid %d\n", (int)groups.size(), (int)vidx.size(), (int)BRepCheck_Analyzer(s->s).IsValid());
+    FShape* moved = focc_move_vertices(s, vidx.data(), xyz.data(), (int)vidx.size());
+    if (!moved) {
+        why = std::string("the faces could not be put on one plane: ") + g_err;
+        return nullptr;
+    }
+    TopTools_IndexedMapOfShape em;
+    edge_map(moved->s, em);
+    TopTools_MapOfShape found;
+    for (const gp_Pnt& m : mids) {
+        int best = 0;
+        double bd = 1e-3 * size + 1e-3;
+        for (int i = 1; i <= em.Extent(); i++) {
+            BRepAdaptor_Curve c(TopoDS::Edge(em(i)));
+            double d = c.Value(0.5 * (c.FirstParameter() + c.LastParameter())).Distance(m);
+            if (d < bd) {
+                bd = d;
+                best = i;
+            }
+        }
+        if (best == 0) {
+            delete moved;
+            why = "the edge was lost putting its faces on one plane";
+            return nullptr;
+        }
+        found.Add(em(best));
+    }
+    across = found;
+    return moved;
+}
+
 // Delete edges (Edge mode + Del): the two faces each edge (1-based index)
 // parts made one again, the edges running on through its ends joined too
 // (a Knife's line taken out). Only faces lying on one surface can be one.
@@ -6597,12 +6802,29 @@ FShape* focc_remove_edges(const FShape* s, const int* idx, int n) {
             bool gone = true;
             for (TopTools_MapIteratorOfMapOfShape it(across); it.More(); it.Next())
                 if (after.Contains(it.Key())) gone = false;
-            if (!gone) {
-                delete out;
-                set_err("its two faces are not on one surface: only a cut across a face (the Knife's) can be taken out");
-                return nullptr;
+            if (gone) return out;
+            delete out;
+            // flat faces nearly on one plane (23 nov.: a leg's end left in
+            // three bands a few tenths apart by moves and copies): put on
+            // the plane of the largest first, then made one
+            std::string why;
+            FShape* flat = flatten_across(s, across, why);
+            if (flat) {
+                TopTools_MapOfShape ends2;
+                for (TopTools_MapIteratorOfMapOfShape it(across); it.More(); it.Next())
+                    for (TopExp_Explorer vx(it.Key(), TopAbs_VERTEX); vx.More(); vx.Next()) ends2.Add(vx.Current());
+                FShape* again = unify_across(flat, across, &ends2, true);
+                TopTools_IndexedMapOfShape left;
+                edge_map(again->s, left);
+                bool all = true;
+                for (TopTools_MapIteratorOfMapOfShape it(across); it.More(); it.Next())
+                    if (left.Contains(it.Key())) all = false;
+                if (all) return again;
+                delete again;
+                why = "the faces put on one plane could not be made one";
             }
-            return out;
+            set_err(why.empty() ? "its two faces are not on one surface: only a cut across a face (the Knife's) or flat faces nearly on one plane can be taken out" : why.c_str());
+            return nullptr;
         },
         (FShape*)nullptr);
 }
