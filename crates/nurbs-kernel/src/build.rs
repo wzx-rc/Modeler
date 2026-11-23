@@ -150,6 +150,120 @@ pub struct Cache {
     /// The last request's features (id, hash): what a drag changes from one
     /// step to the next (`drag_order`).
     last: Vec<(FeatureId, u64)>,
+    /// Islands by their history seen from their first shape's frame
+    /// (`rigid_key`): the frame they were built at and their stage. An
+    /// island moved or turned whole is that stage moved, its history not
+    /// made again (Romain 23 nov., 18 h 38: "manipuler une forme comme si
+    /// elle avait été del historique et bake, mais tout en gardant
+    /// l'historique").
+    rigid: HashMap<u64, (DMat4, Stage)>,
+    rigid_order: std::collections::VecDeque<u64>,
+}
+
+/// How many islands `Cache.rigid` keeps.
+const RIGID_KEEP: usize = 48;
+
+/// An island's key as seen from its first shape's frame, with that frame:
+/// the same history moved or turned whole has the same key. None when it
+/// cannot be moved whole that way (a Mirror, an Array's copies, a mirror
+/// side, curves of a 2D boolean or a loft, no shape).
+fn rigid_key(doc: &Doc, fs: &[&Feature], list: &[usize], whole: &Whole, upto: usize, skip: &[String]) -> Option<(u64, DMat4)> {
+    let placed = |f: &Feature| f.round.is_none() && f.push.is_none() && f.tweak.is_none() && f.cut.is_none() && f.shell.is_none() && f.bridge.is_none() && f.array.is_none() && f.mirror.is_none();
+    let first = fs.iter().find(|f| f.is_solid() && placed(f))?;
+    let mut ids: Vec<FeatureId> = vec![];
+    for f in fs {
+        if f.mirror.is_some() || f.array.is_some() || f.shape_bool.is_some() || f.loft.is_some() || ids.contains(&f.id) {
+            return None;
+        }
+        ids.push(f.id);
+    }
+    let frame = DMat4::from_rotation_translation(first.rot, first.origin);
+    let inv = frame.inverse();
+    let qi = first.rot.inverse();
+    let mut h = hash2(0x7269676964, upto as u64);
+    for &i in list {
+        h = hash2(h, i as u64);
+    }
+    // the rest of the history's shape (what `gap`, `strangers_join` and
+    // the joins read)
+    for (i, k) in whole.kinds.iter().enumerate() {
+        h = hash2(h, (*k as u64) | ((whole.joins[i] as u64) << 8));
+    }
+    for n in &whole.names {
+        for x in n {
+            h = hash2(h, x.map_or(u64::MAX, |x| x as u64));
+        }
+    }
+    for s in skip {
+        h = hash2(h, crate::doc::fnv(s.as_bytes()));
+    }
+    for f in fs {
+        let mut g = f.carried_by(&|p| inv.transform_point3(p));
+        // (an operation's own origin and turn are not where it acts: the
+        // app leaves them where they are)
+        if placed(f) {
+            g.origin = inv.transform_point3(f.origin);
+            g.rot = (qi * f.rot).normalize();
+            if g.rot.w < 0.0 {
+                g.rot = -g.rot;
+            }
+        }
+        let mut v = serde_json::to_value(&g).ok()?;
+        round_floats(&mut v);
+        h = hash2(h, crate::doc::fnv(v.to_string().as_bytes()));
+    }
+    let _ = doc;
+    Some((h, frame))
+}
+
+/// Every number rounded to 1e-6 (a move then its inverse gives the same).
+fn round_floats(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Number(n) => {
+            if let Some(x) = n.as_f64() {
+                if n.is_f64() {
+                    let r = (x * 1e6).round() / 1e6;
+                    let r = if r == 0.0 { 0.0 } else { r };
+                    if let Some(m) = serde_json::Number::from_f64(r) {
+                        *n = m;
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(round_floats),
+        serde_json::Value::Object(o) => o.values_mut().for_each(round_floats),
+        _ => {}
+    }
+}
+
+/// A stage moved by `m` (a move and a turn): its shape, and where it has
+/// been. None when OpenCascade cannot.
+fn moved_stage(s: &Stage, m: DMat4) -> Option<Stage> {
+    let mut t = s.clone();
+    let near_one = m.abs_diff_eq(DMat4::IDENTITY, 1e-12);
+    if near_one {
+        return Some(t);
+    }
+    if let Some(sh) = &s.shape {
+        t.shape = Some(Rc::new(sh.transformed(rows(m)).ok()?));
+    }
+    t.ext = s
+        .ext
+        .iter()
+        .map(|b| {
+            let mut lo = DVec3::splat(f64::MAX);
+            let mut hi = DVec3::splat(f64::MIN);
+            for k in 0..8 {
+                let c = DVec3::new(b[if k & 1 == 0 { 0 } else { 3 }], b[if k & 2 == 0 { 1 } else { 4 }], b[if k & 4 == 0 { 2 } else { 5 }]);
+                let q = m.transform_point3(c);
+                lo = lo.min(q);
+                hi = hi.max(q);
+            }
+            [lo.x, lo.y, lo.z, hi.x, hi.y, hi.z]
+        })
+        .collect();
+    t.noted = t.shape.as_ref().map(|s| Rc::as_ptr(s) as usize).unwrap_or(0);
+    Some(t)
 }
 
 fn rows(m: DMat4) -> [[f64; 4]; 3] {
@@ -2729,9 +2843,35 @@ fn islands_upto<'a>(doc: &'a Doc, feats: &[&'a Feature], upto: usize, global: &[
                 own[i] = true;
             }
             let fs: Vec<&Feature> = list.iter().map(|&i| feats[i]).collect();
-            ISLAND.with(|c| *c.borrow_mut() = Some(Island { whole: whole.clone(), own, upto }));
-            let st = run(doc, &fs, skip, cache, model, used_tools, used_stages);
-            ISLAND.with(|c| *c.borrow_mut() = None);
+            // an island moved or turned whole: its stage from before, moved
+            // (FORME_NO_RIGID=1: made again)
+            let rk = if std::env::var_os("FORME_NO_RIGID").is_some() { None } else { rigid_key(doc, &fs, &list, whole, upto, skip) };
+            let found = rk.and_then(|(k, fr)| cache.rigid.get(&k).and_then(|(fr0, st)| moved_stage(st, fr * fr0.inverse())));
+            let st = match found {
+                Some(st) => {
+                    model.cached += 1;
+                    if std::env::var_os("FORME_ISLANDS_DEBUG").is_some() {
+                        eprintln!("ISLAND moved whole: {:?}", fs.first().map(|f| &f.name));
+                    }
+                    st
+                }
+                None => {
+                    ISLAND.with(|c| *c.borrow_mut() = Some(Island { whole: whole.clone(), own, upto }));
+                    let st = run(doc, &fs, skip, cache, model, used_tools, used_stages);
+                    ISLAND.with(|c| *c.borrow_mut() = None);
+                    st
+                }
+            };
+            if let Some((k, fr)) = rk {
+                if cache.rigid.insert(k, (fr, st.clone())).is_none() {
+                    cache.rigid_order.push_back(k);
+                }
+                while cache.rigid_order.len() > RIGID_KEEP {
+                    if let Some(old) = cache.rigid_order.pop_front() {
+                        cache.rigid.remove(&old);
+                    }
+                }
+            }
             out.push((g, st));
         }
         if upto == feats.len() && std::env::var_os("FORME_ISLANDS_DEBUG").is_some() {
@@ -5192,6 +5332,58 @@ mod tests {
             assert!((mesh_volume(&m) - v0 - 1000.0).abs() < 1.0, "{} / {}", mesh_volume(&m), v0 + 1000.0);
         }
         ONE_CHAIN.with(|c| c.set(false));
+    }
+
+    #[test]
+    fn island_moved_whole() {
+        if std::env::var_os("FORME_ONE_CHAIN").is_some() {
+            return;
+        }
+        // a block with a hole, a fillet and a face moved, beside another
+        // block: moved and turned whole, its stage is taken moved (no
+        // boolean made again) and gives what a build from nothing gives
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 10.0, z: 20.0 }, DVec3::new(60.0, 0.0, 0.0), DQuat::IDENTITY);
+        let h = d.add(Op::Carve, Prim::Cylinder { radius: 3.0, height: 20.0 }, DVec3::new(60.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.add(Op::Add, Prim::Box { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        let f = d.add_round(2.0, false, vec![edge_near(&m, DVec3::new(60.0, 10.0, 10.0))]);
+        let t = d.add_tweak(Tweak { comp: Comp::Face(FaceRef { tag: tag(b, 0), at: DVec3::new(70.0, 4.0, 0.0) }), delta: DVec3::new(3.0, 0.0, 0.0), more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true });
+        let mut cache = Cache::default();
+        let m0 = build(&d, true, false, &[], &mut cache);
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        let mv = DMat4::from_rotation_translation(DQuat::from_rotation_y(0.4), DVec3::new(7.5, 2.0, -11.25)) ;
+        let about = DVec3::new(60.0, 0.0, 0.0);
+        let mv = DMat4::from_translation(about) * mv * DMat4::from_translation(-about);
+        let mut e = d.clone();
+        for id in [b, h] {
+            let g = e.feature(id).unwrap().moved_by(mv);
+            *e.feature_mut(id).unwrap() = g;
+        }
+        for id in [f, t] {
+            let g = e.feature(id).unwrap().carried_by(&|p| mv.transform_point3(p));
+            *e.feature_mut(id).unwrap() = g;
+        }
+        let m1 = build(&e, true, false, &[], &mut cache);
+        assert_eq!(m1.booleans, 0, "built again");
+        let m2 = build(&e, true, false, &[], &mut Cache::default());
+        assert!(m1.errors.is_empty() && m2.errors.is_empty(), "{:?} {:?}", m1.errors, m2.errors);
+        assert_eq!(m1.faces.len(), m2.faces.len());
+        assert!((mesh_volume(&m1) - mesh_volume(&m2)).abs() < 2.0, "{} {}", mesh_volume(&m1), mesh_volume(&m2));
+        let (a, c) = (m1.bounds().unwrap(), m2.bounds().unwrap());
+        for k in 0..3 {
+            assert!((a.0[k] - c.0[k]).abs() < 0.05 && (a.1[k] - c.1[k]).abs() < 0.05, "{a:?} {c:?}");
+        }
+        let tags = |m: &Model| {
+            let mut v: Vec<i64> = m.faces.iter().filter_map(|f| f.tag.map(|t| t.pack())).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(tags(&m1), tags(&m2));
+        // moved back: the first stage again
+        let m3 = build(&d, true, false, &[], &mut cache);
+        assert_eq!(m3.booleans, 0);
+        assert!((mesh_volume(&m3) - mesh_volume(&m0)).abs() < 1.0);
     }
 
     #[test]
