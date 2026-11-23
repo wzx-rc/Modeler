@@ -679,6 +679,7 @@ fn primary_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
             one_side: false,
             frozen: None,
             bake: vec![],
+            sym: None,
         };
         let mut v = spec_of(&f);
         if let Some(o) = v.as_object_mut() {

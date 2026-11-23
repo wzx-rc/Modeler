@@ -1878,7 +1878,13 @@ fn mirror_part(acc: &Shape, id: FeatureId, m: &Mirror, island: bool) -> Result<O
 /// both sides, a Carve through both), the tool alone when it is its own
 /// image (a box or a cylinder centred on the plane): None.
 fn twin_tool(t: &Shape, m: &Mirror) -> Result<Option<Shape>, String> {
-    let image = t.transformed(m.rows())?;
+    twin_rows(t, m.rows())
+}
+
+/// A tool and its image by the mirror `rw` as one, None when it is its own
+/// image.
+fn twin_rows(t: &Shape, rw: [[f64; 4]; 3]) -> Result<Option<Shape>, String> {
+    let image = t.transformed(rw)?;
     if let (Some((lo, hi)), Some((lo2, hi2))) = (shape_box(t), shape_box(&image)) {
         let tol = 1e-4 * (hi - lo).length() + 1e-5;
         if lo.distance(lo2) < tol && hi.distance(hi2) < tol {
@@ -1965,6 +1971,97 @@ fn mirrored_doc(doc: &Doc) -> Option<Doc> {
         }
     }
     Some(out)
+}
+
+/// The document with each operation on a shape that has its own symmetry
+/// (`Feature.sym`) made on both sides of its plane, as after a Mirror but
+/// for that element only: a fillet's or chamfer's edges on it with their
+/// images (one step), an inset, a move, the Knife, a bridge followed by its
+/// image (the same id, `twin_of`). An operation is the element's when what
+/// it names lies on it or on its operations (`pattern_op`, as an Array
+/// tells what it repeats). None when no shape has one. (The shape itself is
+/// made symmetric in `run`, `sym_tool`.)
+fn local_doc(doc: &Doc) -> Option<Doc> {
+    let syms: Vec<&Feature> = doc.features.iter().filter(|f| f.sym.is_some() && f.visible && !f.suspended && f.is_solid()).collect();
+    if syms.is_empty() {
+        return None;
+    }
+    let mut ids: Vec<Vec<FeatureId>> = syms.iter().map(|f| vec![f.id]).collect();
+    let mut out = doc.clone();
+    out.features.clear();
+    for (i, f) in doc.features.iter().enumerate() {
+        // a pocket in it: its operations are the element's too
+        if let Some(h) = doc.sym_host(i).filter(|_| f.visible && !f.suspended) {
+            if let Some(k) = syms.iter().position(|s| s.id == h.id) {
+                ids[k].push(f.id);
+            }
+        }
+        if !f.visible || f.suspended || f.is_solid() || f.mirror.is_some() || f.array.is_some() {
+            out.features.push(f.clone());
+            continue;
+        }
+        let Some(k) = (0..syms.len()).find(|&k| crate::doc::pattern_op(f, &ids[k], &[syms[k]]).is_some()) else {
+            out.features.push(f.clone());
+            continue;
+        };
+        ids[k].push(f.id);
+        let s = syms[k];
+        if f.one_side {
+            out.features.push(f.clone());
+            continue;
+        }
+        if let Some(r) = &f.round {
+            let mut g = f.clone();
+            let images: Vec<EdgeRef> = r.edges.iter().filter(|e| e.faces.iter().any(|t| *t >= 0 && ids[k].contains(&((*t >> 16) as FeatureId)))).map(|e| EdgeRef { at: s.sym_reflect(e.at), faces: e.faces.map(|t| s.sym_image_tag(t)) }).filter(|e| r.edges.iter().all(|x| x.at.distance(e.at) > 1e-6)).collect();
+            if let Some(gr) = g.round.as_mut() {
+                gr.edges.extend(images);
+            }
+            out.features.push(g);
+        } else if f.push.is_some() || f.tweak.is_some() || f.cut.is_some() || f.bridge.is_some() {
+            out.features.push(f.clone());
+            let mut g = f.carried_by(&|p| s.sym_reflect(p));
+            g.map_tags(&|t| s.sym_image_tag(t));
+            if g != *f {
+                g.name = format!("{}{MIRROR_SIDE}", f.name);
+                out.features.push(g);
+            }
+        } else {
+            out.features.push(f.clone());
+        }
+    }
+    Some(out)
+}
+
+/// A shape with its own symmetry (`sym`): as it is when it is its own
+/// image across its plane (a box or a cylinder: None), else cut at the
+/// plane, the side kept mirrored and joined to it (as a Mirror does, in the
+/// shape's own frame).
+fn sym_tool(t: &Shape, f: &Feature) -> Result<Option<Shape>, String> {
+    let (Some(s), Some(rw), Some((c, _))) = (f.sym, f.sym_rows(), f.sym_plane()) else { return Ok(None) };
+    let image = t.transformed(rw)?;
+    // (only a box or a cylinder keeps its own faces on both sides: their
+    // tags across the plane are known, `sym_image_tag`)
+    let plain = f.frozen.is_none() && matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. });
+    if plain {
+        if let (Some((lo, hi)), Some((lo2, hi2))) = (shape_box(t), shape_box(&image)) {
+        let tol = 1e-4 * (hi - lo).length() + 1e-5;
+        if lo.distance(lo2) < tol && hi.distance(hi2) < tol {
+            let v = t.volume();
+            if let Ok(x) = t.common(&image) {
+                if v > 0.0 && (x.volume() - v).abs() < 1e-4 * v {
+                    return Ok(None);
+                }
+            }
+        }
+        }
+    }
+    let frame = DMat4::from_rotation_translation(f.rot, c);
+    let local = t.transformed(rows(frame.inverse()))?;
+    let m = Mirror { axis: s.axis.min(2), offset: 0.0, flip: s.flip, single: false };
+    match mirror_part(&local, f.id, &m, false)? {
+        Some(x) => Ok(Some(x.transformed(rows(frame))?)),
+        None => Ok(None),
+    }
 }
 
 /// The image of the step before it (`mirrored_doc`): the same id (an
@@ -2482,6 +2579,54 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                 None => (t, fh),
             },
             _ => (t, fh),
+        };
+        // a shape with its own symmetry: made symmetric across its plane; a
+        // pocket in it, with its image
+        let host = if f.op == Op::Carve && f.sym.is_none() { doc.features.iter().position(|g| std::ptr::eq(g, f) || (g.id == f.id && g.name == f.name)).and_then(|at| doc.sym_host(at)) } else { None };
+        let (t, th) = match (f.sym, host) {
+            (None, Some(h)) if !skipped("tool") => {
+                let lh = hash2(hash2(th, 0x73796d68), h.hash());
+                match cache.tools.get(&lh) {
+                    Some(d) => {
+                        used_tools.push(lh);
+                        (d.clone(), lh)
+                    }
+                    None => match h.sym_rows().map(|rw| twin_rows(&t, rw)).unwrap_or(Ok(None)) {
+                        Ok(d) => {
+                            let d = d.map(Rc::new).unwrap_or_else(|| t.clone());
+                            cache.tools.insert(lh, d.clone());
+                            used_tools.push(lh);
+                            (d, lh)
+                        }
+                        Err(e) => {
+                            stage.errors.push(format!("{}: its image across {}'s symmetry failed ({e})", f.name, h.name));
+                            (t, th)
+                        }
+                    },
+                }
+            }
+                (Some(_), _) if !skipped("tool") => {
+                let lh = hash2(th, 0x73796d6d);
+                match cache.tools.get(&lh) {
+                    Some(d) => {
+                        used_tools.push(lh);
+                        (d.clone(), lh)
+                    }
+                    None => match sym_tool(&t, f) {
+                        Ok(d) => {
+                            let d = d.map(Rc::new).unwrap_or_else(|| t.clone());
+                            cache.tools.insert(lh, d.clone());
+                            used_tools.push(lh);
+                            (d, lh)
+                        }
+                        Err(e) => {
+                            stage.errors.push(format!("{}: its own symmetry failed ({e})", f.name));
+                            (t, th)
+                        }
+                    },
+                }
+            }
+            _ => (t, th),
         };
         // after a Mirror: the shape and its image
         let t = match sym {
@@ -3361,6 +3506,7 @@ fn bake(doc: &Doc, f: &Feature, skip: &[String], cache: &mut Cache) -> crate::mo
     for g in &mut sub.features {
         g.bake.clear();
     }
+    let sub = local_doc(&sub).unwrap_or(sub);
     let feats: Vec<&Feature> = sub.features.iter().filter(|g| sub.makes(g) == Makes::Solid).collect();
     let mut m = Model::default();
     let (mut ut, mut us) = (vec![], vec![]);
@@ -3412,7 +3558,10 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let ordered = if fine || quads || std::env::var_os("FORME_NO_DRAG_ORDER").is_some() { None } else { drag_order(doc, &cache.last) };
     cache.last = doc.features.iter().map(|f| (f.id, f.hash())).collect();
     let doc = ordered.as_ref().unwrap_or(doc);
-    // each Array's copies, then after a Mirror each step on both sides
+    // each shape's own symmetry, each Array's copies, then after a Mirror
+    // each step on both sides
+    let local = local_doc(doc);
+    let doc = local.as_ref().unwrap_or(doc);
     let arrayed = arrayed_doc(doc);
     let doc = arrayed.as_ref().unwrap_or(doc);
     let mirrored = mirrored_doc(doc);
@@ -3717,6 +3866,71 @@ mod tests {
                 eprintln!("{} faces t {t}: {} faces, volume {:.0}, errors {:?}", faces.len(), m.faces.len(), mesh_volume(&m), m.errors);
             }
         }
+    }
+
+    #[test]
+    fn local_symmetry() {
+        use crate::doc::Sym;
+        // a block turned 30° round Y, 60 mm along X from the origin, with
+        // its own symmetry across its local X: a pocket at its local +X end
+        // gets one at its −X end, a fillet on the +X end's top edge the −X
+        // one's too, a face pushed on the +X end the −X end's; a second
+        // block with none, beside it, unchanged
+        let mut d = Doc::default();
+        let q = DQuat::from_rotation_y(30f64.to_radians());
+        let o = DVec3::new(60.0, 0.0, 0.0);
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 10.0, z: 20.0 }, o, q);
+        d.feature_mut(b).unwrap().sym = Some(Sym { axis: 0, flip: false });
+        let other = d.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(-40.0, 0.0, 0.0), DQuat::IDENTITY);
+        let w = |l: DVec3| o + q * l;
+        let h = d.add(Op::Carve, Prim::Cylinder { radius: 3.0, height: 20.0 }, w(DVec3::new(12.0, -5.0, 0.0)), q);
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(h)).count(), 2);
+        let v0 = 40.0 * 10.0 * 20.0 - 2.0 * std::f64::consts::PI * 9.0 * 10.0 + 1000.0;
+        assert!((mesh_volume(&m) - v0).abs() < 2.0, "{} {v0}", mesh_volume(&m));
+        // a fillet on the +X end's top edge: both ends rounded (two faces)
+        let r = d.add_round(2.0, false, vec![EdgeRef { faces: [tag(b, 0), tag(b, 2)], at: w(DVec3::new(20.0, 10.0, 0.0)) }]);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(r)).count(), 2);
+        // the +X end pushed out by 3: the −X end too (its face 8 high under
+        // the fillet)
+        let v1 = mesh_volume(&m);
+        let p = d.add_push(Push { face: FaceRef { tag: tag(b, 0), at: w(DVec3::new(20.0, 3.0, 5.0)) }, inset: 0.0, depth: 3.0 });
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: p, sub: 1 })).count(), 2);
+        assert!((mesh_volume(&m) - (v1 + 2.0 * 3.0 * 8.0 * 20.0)).abs() < 3.0, "{} {v1}", mesh_volume(&m));
+        // the block moved and turned: its plane goes with it
+        d.remove(&[r, p]);
+        let q2 = DQuat::from_rotation_y(-50f64.to_radians());
+        let o2 = DVec3::new(70.0, 5.0, 10.0);
+        let mv = DMat4::from_rotation_translation(q2, o2) * DMat4::from_rotation_translation(q, o).inverse();
+        for id in [b, h] {
+            let g = d.feature(id).unwrap().moved_by(mv);
+            *d.feature_mut(id).unwrap() = g;
+        }
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(h)).count(), 2);
+        assert!((mesh_volume(&m) - v0).abs() < 2.0, "{} {v0}", mesh_volume(&m));
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(other)).count(), 6);
+        // a sketch not symmetric (an L, 300 mm² of its 400) made so from its
+        // +X side (the foot: 2 × 100 mm²), or from its −X side (2 × 200)
+        let mut d = Doc::default();
+        let l = d.add(Op::Add, Prim::Profile { x: 20.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(l).unwrap().profile = Some(crate::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.0], [0.0, 0.0], [0.0, 0.5], [-0.5, 0.5]], smooth: vec![false; 6], corner: vec![], tension: vec![], open: false, spline: false });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!((mesh_volume(&m) - 3000.0).abs() < 1.0, "{}", mesh_volume(&m));
+        d.feature_mut(l).unwrap().sym = Some(Sym { axis: 0, flip: false });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((mesh_volume(&m) - 2000.0).abs() < 1.0, "{}", mesh_volume(&m));
+        d.feature_mut(l).unwrap().sym = Some(Sym { axis: 0, flip: true });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!((mesh_volume(&m) - 4000.0).abs() < 1.0, "{}", mesh_volume(&m));
     }
 
     #[test]

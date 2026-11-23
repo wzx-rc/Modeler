@@ -7,7 +7,7 @@
 
 use crate::state::{AppState, ToastAct};
 use glam::DVec3;
-use nurbs_kernel::{Feature, FeatureId, Mirror};
+use nurbs_kernel::{Feature, FeatureId, Mirror, Sym};
 
 impl AppState {
     /// The selected Mirror step.
@@ -34,6 +34,76 @@ impl AppState {
             self.toast(&format!("Mirror across {}: the steps after it are made on both sides", m.axis_name()), false);
         }
         id
+    }
+
+    /// The shapes whose own symmetry the Mirror bar sets (Romain 23 nov.,
+    /// 21 h 03: "Chaque objet doit avoir sa symétrie en local"): the
+    /// elements selected or picked from (a pocket's: the shape it cuts),
+    /// solids only. Empty: the bar sets the scene's Mirror.
+    pub fn sym_targets(&self) -> Vec<FeatureId> {
+        let mut out: Vec<FeatureId> = self.picked_elements().into_iter().map(|id| self.paint_owner(id)).filter(|id| self.doc.feature(*id).is_some_and(|f| f.is_solid() && !f.is_path())).collect();
+        out.dedup();
+        out
+    }
+
+    /// The first target's own symmetry (`sym`).
+    pub fn target_sym(&self) -> Option<Sym> {
+        self.sym_targets().first().and_then(|id| self.doc.feature(*id)).and_then(|f| f.sym)
+    }
+
+    /// Sets the targets' own symmetry (None: off). Its operations are then
+    /// made on both sides of the shape's own plane, through its centre,
+    /// which moves and turns with it.
+    pub fn set_local_sym(&mut self, sym: Option<Sym>) {
+        let ids = self.sym_targets();
+        if ids.is_empty() {
+            return;
+        }
+        let label = if sym.is_some() { "Symmetry" } else { "Symmetry off" };
+        self.edit(label, |d| {
+            for id in &ids {
+                if let Some(f) = d.feature_mut(*id) {
+                    f.sym = sym;
+                }
+            }
+        });
+        let name = self.doc.feature(ids[0]).map(|f| f.name.clone()).unwrap_or_default();
+        match sym {
+            Some(s) => self.toast(&format!("{name}: its own symmetry across its {}, its operations made on both sides", s.axis_name()), false),
+            None => self.toast(&format!("{name}: no symmetry of its own"), false),
+        }
+    }
+
+    /// Alt + M, the Mirror icon: with shapes selected (or picked from), their
+    /// own symmetry across their X on or off, the Mirror bar opened; with
+    /// nothing, the scene's Mirror as before.
+    pub fn mirror_selected(&mut self) {
+        if self.sym_targets().is_empty() {
+            self.add_mirror(0);
+            return;
+        }
+        let on = self.target_sym().is_some();
+        self.set_local_sym(if on { None } else { Some(Sym { axis: 0, flip: false }) });
+        if !self.settings.mirror_bar {
+            self.settings.mirror_bar = true;
+            self.save_settings();
+        }
+    }
+
+    /// The selected shape's own symmetry plane to draw: its axis, the side
+    /// kept, the pane's corners (a little past its box), the normal.
+    pub fn local_sym_plane(&self) -> Option<(Sym, [DVec3; 4], DVec3)> {
+        let id = *self.sym_targets().first()?;
+        let f = self.doc.feature(id)?;
+        let s = f.sym?;
+        let (c, n) = f.sym_plane()?;
+        let (hx, hz) = f.prim.half_xz();
+        let half = glam::DVec3::new(hx, f.prim.height() * 0.5, hz) * 1.15 + DVec3::splat(2.0);
+        let a = s.axis.min(2) as usize;
+        let (u, v) = ((a + 1) % 3, (a + 2) % 3);
+        let ax = [DVec3::X, DVec3::Y, DVec3::Z];
+        let (du, dv) = (f.rot * ax[u] * half[u], f.rot * ax[v] * half[v]);
+        Some((s, [c - du - dv, c + du - dv, c + du + dv, c - du + dv], n))
     }
 
     /// Sets the selected Mirror (live while a slider is dragged: `start`

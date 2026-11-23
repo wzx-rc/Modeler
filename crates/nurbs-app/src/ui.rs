@@ -1441,6 +1441,12 @@ fn mirror_bar(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2) {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
+                // a shape selected: its own symmetry (Romain 23 nov., 21 h 03)
+                let targets = st.sym_targets();
+                if !targets.is_empty() {
+                    local_sym_row(ui, st, &targets);
+                    return;
+                }
                 let cur = st.scene_mirror().and_then(|f| f.mirror);
                 let on = st.scene_mirror_on();
                 let m = cur.unwrap_or(nurbs_kernel::Mirror { axis: 0, offset: 0.0, flip: false, single: false });
@@ -1516,6 +1522,53 @@ fn mirror_bar(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2) {
     });
 }
 
+/// The Mirror bar on a selected shape: its own symmetry, on its own axes,
+/// through its centre.
+fn local_sym_row(ui: &mut egui::Ui, st: &mut AppState, targets: &[nurbs_kernel::FeatureId]) {
+    let cur = st.target_sym();
+    let on = cur.is_some();
+    let s = cur.unwrap_or(nurbs_kernel::Sym { axis: 0, flip: false });
+    let (r, _) = ui.allocate_exact_size(vec2(22.0, 28.0), Sense::hover());
+    icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(15.0, 15.0)), Icon::Mirror, if on { TEXT() } else { TEXT2() });
+    let name = st.doc.feature(targets[0]).map(|f| f.name.clone()).unwrap_or_default();
+    let name = if targets.len() > 1 { format!("{name} +{}", targets.len() - 1) } else { name };
+    ui.label(egui::RichText::new(name).font(medium(12.0)).color(TEXT()));
+    ui.label(egui::RichText::new("own symmetry").font(regular(11.5)).color(TEXT2()));
+    let (sw, resp) = ui.allocate_exact_size(vec2(34.0, 18.0), Sense::click());
+    let p = ui.painter();
+    p.rect_filled(sw, 9.0, if on { accent() } else { RAISED() });
+    let knob = if on { sw.right_center() - vec2(9.0, 0.0) } else { sw.left_center() + vec2(9.0, 0.0) };
+    p.circle_filled(knob, 7.0, if on { on_accent() } else { TEXT2() });
+    let tip = if on { "Off: its operations made where they are drawn only" } else { "On: its operations made on both sides of its own plane (Alt + M)" };
+    if resp.on_hover_text(tip).clicked() {
+        st.set_local_sym(if on { None } else { Some(s) });
+    }
+    island_sep(ui);
+    // its own axes (they turn with it)
+    let axes = [(0u8, "X", ""), (1u8, "Y", ""), (2u8, "Z", "")];
+    if let Some(a) = seg_inline_tinted(ui, "sym-bar-axis", &axes, if on { s.axis } else { 9 }, &[AXIS_X, AXIS_Y, AXIS_Z]) {
+        if !on || a != s.axis {
+            st.set_local_sym(Some(nurbs_kernel::Sym { axis: a, ..s }));
+        }
+    }
+    if on {
+        let keep = format!("Keep −{}", s.axis_name());
+        if chip(ui, None, &keep, s.flip, "A shape not symmetric already is made so from its −axis side instead of its +axis side").clicked() {
+            st.set_local_sym(Some(nurbs_kernel::Sym { flip: !s.flip, ..s }));
+        }
+        island_sep(ui);
+        if chip(ui, Some(Icon::Eye), "Plane", st.settings.mirror_plane, "Show its plane of symmetry while it is selected").clicked() {
+            st.settings.mirror_plane = !st.settings.mirror_plane;
+            st.save_settings();
+        }
+    }
+    if st.scene_mirror_on() {
+        island_sep(ui);
+        let m = st.scene_mirror().and_then(|f| f.mirror).map(|m| m.axis_name()).unwrap_or("X");
+        ui.label(egui::RichText::new(format!("Scene Mirror {m} on")).font(regular(11.5)).color(TEXT2())).on_hover_text("The scene's Mirror (the whole part): deselect to set it here");
+    }
+}
+
 // ----------------------------------------------------- context bar
 
 /// The actions of the selection, floating just above it.
@@ -1584,8 +1637,8 @@ fn context_bar(ctx: &egui::Context, st: &mut AppState) {
                     if icon_btn(ui, Icon::Align, st.tool == Tool::Align, "Align (Alt+A): then click the shape to align to", 28.0).clicked() {
                         st.begin_align();
                     }
-                    if icon_btn(ui, Icon::Mirror, false, "Mirror (Alt+M): the part made symmetric across X, the steps after it on both sides", 28.0).clicked() {
-                        st.add_mirror(0);
+                    if icon_btn(ui, Icon::Mirror, st.target_sym().is_some(), "Symmetry (Alt+M): this shape symmetric across its own X, its operations on both sides (nothing selected: the scene's Mirror)", 28.0).clicked() {
+                        st.mirror_selected();
                     }
                     if icon_btn(ui, Icon::Array, false, "Array (Ctrl+Shift+D): copies in a line, in rows or round an axis, with their operations", 28.0).clicked() {
                         st.add_array();
@@ -3496,8 +3549,8 @@ fn properties(ui: &mut Ui, st: &mut AppState) {
         if icon_btn(ui, Icon::Align, st.tool == Tool::Align, "Align (Alt+A): then click the shape to align to", 30.0).clicked() {
             st.begin_align();
         }
-        if f.is_solid() && icon_btn(ui, Icon::Mirror, false, "Mirror (Alt+M): the part made symmetric across X, the steps after it on both sides", 30.0).clicked() {
-            st.add_mirror(0);
+        if f.is_solid() && icon_btn(ui, Icon::Mirror, st.target_sym().is_some(), "Symmetry (Alt+M): this shape symmetric across its own X, its operations on both sides", 30.0).clicked() {
+            st.mirror_selected();
         }
         if f.is_solid() && !f.is_path() && icon_btn(ui, Icon::Array, false, "Array (Ctrl+Shift+D): copies in a line, in rows or round an axis, with their operations", 30.0).clicked() {
             st.add_array();
@@ -4515,9 +4568,10 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.begin_align();
         return;
     }
-    // Mirror (Alt + M): across X, the steps after it made on both sides
+    // Alt + M: the selected shapes' own symmetry on or off; nothing
+    // selected: the scene's Mirror across X, the steps after it on both sides
     if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl) && pressed(Key::M) {
-        st.add_mirror(0);
+        st.mirror_selected();
         return;
     }
     // Delete History (Maya's Alt + Shift + D): each element picked frozen

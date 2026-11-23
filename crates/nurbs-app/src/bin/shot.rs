@@ -5998,6 +5998,62 @@ fn main() {
         eprintln!("  rectangle over a corner of {a}: selection {:?} (other {b2})", h.st.selection);
         h.shot("zero-nov23-9-marquee");
     }
+    if want("sym") {
+        // a shape's own symmetry (Romain 23 nov., 21 h 03: "Chaque objet
+        // doit avoir sa symétrie en local"): a block 60 mm off the origin,
+        // turned 30°, Alt + M on it: its hole and a fillet on its +X end made
+        // on both sides of its own plane, which turns with it
+        use nurbs_kernel::{EdgeRef, FaceRef, Push};
+        let tag = |f: u32, sub: u16| FaceTag { feature: f, sub }.pack();
+        let mut d = Doc::default();
+        let q = DQuat::from_rotation_y(30f64.to_radians());
+        let o = DVec3::new(60.0, 0.0, 0.0);
+        let w = |l: DVec3| o + q * l;
+        let b = d.add(Op::Add, Prim::Box { x: 50.0, y: 16.0, z: 24.0 }, o, q);
+        d.feature_mut(b).unwrap().name = "Body".into();
+        let h0 = d.add(Op::Carve, Prim::Cylinder { radius: 4.0, height: 24.0 }, w(DVec3::new(14.0, -4.0, 0.0)), q);
+        d.feature_mut(h0).unwrap().name = "Hole".into();
+        d.add_round(3.0, false, vec![EdgeRef { faces: [tag(b, 0), tag(b, 2)], at: w(DVec3::new(25.0, 16.0, 0.0)) }]);
+        d.add_push(Push { face: FaceRef { tag: tag(b, 4), at: w(DVec3::new(15.0, 8.0, 12.0)) }, inset: 3.0, depth: -2.0 });
+        h.reset(d, "Symmetry");
+        h.st.settings.mirror_bar = true;
+        h.st.settings.mirror_plane = true;
+        h.settle();
+        h.key(egui::Key::Escape);
+        h.st.selection = vec![b];
+        h.st.frame_selection();
+        h.settle();
+        h.move_to(pos2(1500.0, 120.0));
+        h.steps(3);
+        h.shot("zero-sym-1-before");
+        let faces = |h: &Harness| h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0);
+        let errors = |h: &Harness| h.st.model.as_ref().map(|m| m.errors.clone()).unwrap_or_default();
+        eprintln!("  before: {} faces {:?}", faces(&h), errors(&h));
+        h.hold(Modifiers { alt: true, ..Default::default() });
+        h.key(egui::Key::M);
+        h.hold(Modifiers::default());
+        h.settle();
+        h.settle();
+        h.steps(3);
+        eprintln!("  Alt + M: sym {:?}, {} faces {:?}, toast {:?}", h.st.doc.feature(b).and_then(|f| f.sym), faces(&h), errors(&h), h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.shot("zero-sym-2-on");
+        // across its own Z instead
+        h.st.set_local_sym(Some(nurbs_kernel::Sym { axis: 2, flip: false }));
+        h.settle();
+        h.settle();
+        h.steps(3);
+        eprintln!("  its Z: {} faces {:?}", faces(&h), errors(&h));
+        h.shot("zero-sym-3-z");
+        h.st.set_local_sym(Some(nurbs_kernel::Sym { axis: 0, flip: false }));
+        h.settle();
+        // nothing selected: the bar is the scene's Mirror again
+        h.key(egui::Key::Escape);
+        h.st.selection.clear();
+        h.settle();
+        h.steps(3);
+        h.shot("zero-sym-4-deselected");
+    }
+
     if want("mirror-bar") {
         // the Mirror bar (Romain 23 nov., 14 h 15): its icon in the top
         // bar, On / X Y Z / Offset / Keep / Steps after it / Plane, and the

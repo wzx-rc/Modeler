@@ -1493,6 +1493,24 @@ fn draw_shell(p: &Painter, st: &AppState) {
 /// The selected Mirror's plane: a faint pane round the part, its border
 /// dashed, its axis and the side kept.
 fn draw_mirror(p: &Painter, st: &AppState) {
+    // a selected shape's own plane (it turns with it)
+    if let Some((s, q, n)) = st.local_sym_plane().filter(|_| st.settings.mirror_plane) {
+        let col = [AXIS_X, AXIS_Y, AXIS_Z][s.axis.min(2) as usize];
+        let pts: Vec<Pos2> = q.iter().filter_map(|w| world(st, *w)).collect();
+        if pts.len() == 4 {
+            p.add(egui::Shape::convex_polygon(pts.clone(), tint(col, 0.07), Stroke::NONE));
+            for i in 0..4 {
+                p.add(egui::Shape::dashed_line(&[pts[i], pts[(i + 1) % 4]], Stroke::new(1.2, tint(col, 0.75)), 6.0, 4.0));
+            }
+            let c = (q[0] + q[1] + q[2] + q[3]) * 0.25;
+            let reach = (q[0] - q[2]).length() * 0.12;
+            if let (Some(a), Some(b)) = (world(st, c), world(st, c + n * reach)) {
+                arrow(p, a, b, col, 2.0);
+                chip(p, b + vec2(10.0, -4.0), Align2::LEFT_BOTTOM, &format!("Own symmetry · its {}", s.axis_name()), col, col);
+            }
+        }
+        return;
+    }
     let Some((m, q)) = st.mirror_plane() else { return };
     let col = match m.axis {
         0 => AXIS_X,
@@ -1888,7 +1906,7 @@ fn hint_of(st: &AppState) -> String {
                     _ if st.selected_group().is_some_and(|g| g.open) => "An open group: click one of its shapes to work on it alone · Its bar: close it again · Arrows: move the whole group · D + click: its pivot on a point · Ctrl + Shift + G: ungroup".into(),
                     _ if st.selected_group().is_some() => "A group: its shapes move, turn and scale together, about its pivot · Its bar: open it to pick its shapes one by one · D + click: its pivot on a point · Ctrl + Shift + G: ungroup · Ctrl + D: a copy".into(),
                     GizmoMode::Move if st.selection.len() > 1 => "Arrows and squares: move · Centre square: on all three axes · Ctrl + G: group them · D + click: pivot on a point · Alt + A: align · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
-                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · Alt + M: mirror · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
+                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · Alt + M: own symmetry · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
                     GizmoMode::Scale => "Cubes: along the shape's axes · Centre: all at once · W: move · E: rotate".into(),
                 }
