@@ -563,7 +563,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         let kp = match (knife, st.tool == Tool::Knife && ctrl) {
             (false, _) => None,
             (true, false) => hover.and_then(|h| st.knife_pick(p2(h))),
-            (true, true) => hover.and_then(|h| st.knife_loop_point(p2(h))).map(|(e, q, f)| (e, q, f, false)),
+            (true, true) => hover.and_then(|h| st.knife_loop_point(p2(h), shift)).map(|(e, q, f)| (e, q, f, false)),
         };
         st.knife_hover = kp.map(|k| k.1);
         st.knife_hover_point = kp.map(|k| k.3).unwrap_or(false);
@@ -574,7 +574,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         };
         // the notch shown by the pointer: how far along the edge
         if st.tool == Tool::Knife && st.drag.is_none() {
-            st.gizmo_readout = if ctrl { hover.and_then(|h| st.knife_loop_point(p2(h))).map(|(_, _, f)| format!("{:.0} %", f * 100.0)) } else { None };
+            st.gizmo_readout = if ctrl { hover.and_then(|h| st.knife_loop_point(p2(h), shift)).map(|(_, _, f)| format!("{:.0} %", f * 100.0)) } else { None };
         }
         let by_feature = (select && matches!(st.sel_mode, SelMode::Object | SelMode::Edge)) || st.tool == Tool::Align;
         st.hover_feature = if st.hot_handle.is_none() && by_feature { hover.and_then(|h| st.pick_path(p2(h))).or_else(|| st.hover_hit.and_then(|h| st.feature_of_face(h.face))) } else { None };
@@ -2210,7 +2210,7 @@ fn hint_of(st: &AppState) -> String {
             } else if st.face_sel.is_empty() {
                 "Click: a face · Double-click: its linked faces · Drag on empty: a rectangle · Shift + click: add · I: inset · Ctrl + E: extrude".into()
             } else {
-                "Double-click: its linked faces · Shift + drag the face: extrude · Ctrl + drag: inset · Arrows: move it · Centre square: on all three axes · D + click: pivot on a point · I: inset · Ctrl + E: extrude · Esc: deselect".into()
+                "Double-click: its linked faces · Shift + drag the face: extrude · Ctrl + drag: inset · Arrows: move it · Centre square: on all three axes · D + click: pivot on a point · I: inset · Ctrl + E: extrude · Ctrl + B: bridge two faces · Esc: deselect".into()
             }
         }
         (None, Tool::Select) if st.sel_mode == SelMode::Edge => {

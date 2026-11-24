@@ -138,7 +138,9 @@ impl AppState {
     /// pas"): its middle within `KNIFE_CATCH` points, else a tenth of the
     /// edge at a time while Snap is on (never its ends: a cut there would
     /// run along an edge).
-    pub fn knife_loop_point(&self, p: [f32; 2]) -> Option<(usize, DVec3, f64)> {
+    /// `free`: no notches (Ctrl + Shift, the loop: Romain 24 nov., 12 h 24,
+    /// "le Knife en Ctrl + Shift ne doit pas snap increment").
+    pub fn knife_loop_point(&self, p: [f32; 2], free: bool) -> Option<(usize, DVec3, f64)> {
         let (e, at, f) = self.knife_pick_edge(p)?;
         let m = self.model.as_ref()?;
         let pts: Vec<DVec3> = m.edges[e].pts.iter().map(|q| Vec3::from_array(*q).as_dvec3()).collect();
@@ -146,7 +148,7 @@ impl AppState {
         if self.view().project(mid.as_vec3()).is_some_and(|s| (s[0] - p[0]).hypot(s[1] - p[1]) <= KNIFE_CATCH) {
             return Some((e, mid, 0.5));
         }
-        if !self.settings.snap {
+        if !self.settings.snap || free {
             return Some((e, at, f));
         }
         let g = ((f * 10.0).round() / 10.0).clamp(0.1, 0.9);
@@ -158,7 +160,7 @@ impl AppState {
     /// `all`: through every four-sided face round the part (Ctrl), else
     /// across the face under the pointer only.
     pub fn knife_loop_at(&self, p: [f32; 2], all: bool) -> Option<(Vec<LoopPt>, bool)> {
-        let (e, at, f) = self.knife_loop_point(p)?;
+        let (e, at, f) = self.knife_loop_point(p, all)?;
         let m = self.model.as_ref()?;
         let size = m.bounds().map(|(lo, hi)| (Vec3::from(hi) - Vec3::from(lo)).length() as f64).unwrap_or(100.0);
         let tol = (size * 1e-4).max(1e-4) * 10.0;

@@ -348,6 +348,12 @@ impl AppState {
                 self.fill_holes(at);
             }
             ToastAct::FoldAll => self.fold_all_history(),
+            ToastAct::Freeze(o) => {
+                let ids = self.doc.object(o).map(|ob| ob.members.clone()).unwrap_or_default();
+                let keep = std::mem::replace(&mut self.selection, ids);
+                self.freeze_transform();
+                self.selection = keep;
+            }
             ToastAct::MirrorSingle(id) => {
                 let Some(m) = self.mirror_before(id) else { return };
                 self.set_mirror_single(m, true);

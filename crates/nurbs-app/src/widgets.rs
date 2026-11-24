@@ -60,6 +60,16 @@ pub fn secondary_btn(ui: &mut Ui, label: &str, width: f32) -> Response {
     resp
 }
 
+/// A small toggle button of a row (lit when on).
+pub fn seg_button(ui: &mut Ui, label: &str, on: bool, width: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
+    let p = ui.painter();
+    let fill = if on { RAISED() } else if resp.hovered() { WELL() } else { Color32::TRANSPARENT };
+    p.rect(rect.shrink(0.5), 7.0, fill, Stroke::new(1.0, if on { TEXT2() } else { DIVIDER() }), StrokeKind::Inside);
+    p.text(rect.center(), Align2::CENTER_CENTER, label, medium(12.0), if on { TEXT() } else { LABEL() });
+    resp
+}
+
 /// Segmented control. Returns the picked value.
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, items: &[(T, &str, Color32)], current: T, height: f32) -> Option<T> {
     let height = if DESK { height.min(28.0) } else { height };

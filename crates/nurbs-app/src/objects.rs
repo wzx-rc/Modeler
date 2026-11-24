@@ -43,6 +43,22 @@ pub fn put_objects(doc: &mut Doc, objs: &[(Object, Vec<Feature>)], sim: Option<S
                 });
             }
         } else if let Some(a) = aff {
+            // shapes alone that take the scale exactly (a cube, a sketch, a
+            // cylinder along it; Romain 24 nov., 12 h 24: a simple Cube
+            // scaled broke every tool after it): their sizes change, no
+            // stretch is kept, so what is made on it next is made as seen
+            if o0.stretch.is_none() && fs.iter().all(|f| f.absorbs(a)) {
+                for f0 in fs {
+                    if let Some(f) = doc.feature_mut(f0.id) {
+                        *f = f0.affine_by(a);
+                    }
+                }
+                if let Some(o) = doc.object_mut(o0.id) {
+                    o.stretch = None;
+                    o.stretched.clear();
+                }
+                continue;
+            }
             for f0 in fs {
                 if let Some(f) = doc.feature_mut(f0.id) {
                     *f = f0.clone();
@@ -277,5 +293,95 @@ impl AppState {
             Op::Intersect => Op::Add,
         };
         self.set_ops(&[id], next);
+    }
+}
+
+impl AppState {
+    /// The Objects Freeze Transform works on: those of what is picked (its
+    /// shapes, faces, edges; the Object entered too), else the selected.
+    pub fn freeze_targets(&self) -> Vec<FeatureId> {
+        let mut out: Vec<FeatureId> = vec![];
+        for el in self.picked_elements().into_iter().chain(self.selection.iter().copied()) {
+            let el = self.element_of(el);
+            if let Some(o) = self.doc.object_of(el) {
+                if !out.contains(&o) {
+                    out.push(o);
+                }
+            }
+        }
+        out
+    }
+
+    /// Freeze Transform (Maya's; Romain 24 nov., 12 h 24: "On dirait il
+    /// manque un FreezeTransform"): each Object's stretch put into its
+    /// features (`Doc::freeze_object`), so its next operations are made on
+    /// what the eye sees; its frame made the identity. An extrusion keeps
+    /// how far it goes as seen (its depth grown by the stretch across its
+    /// face, read on the model); fillets, insets and walls keep their size
+    /// (made round again). One undo step.
+    pub fn freeze_transform(&mut self) {
+        let objs = self.freeze_targets();
+        if objs.is_empty() {
+            self.toast("Freeze Transform: pick an Object first", false);
+            return;
+        }
+        // each extrusion's growth across its face, as the eye sees it
+        let mut grow: std::collections::HashMap<FeatureId, f64> = std::collections::HashMap::new();
+        for o in &objs {
+            let Some(s) = self.doc.object(*o).and_then(|ob| ob.stretch).map(nurbs_kernel::rows_to_mat) else { continue };
+            for id in self.doc.object_features(*o) {
+                let Some(p) = self.doc.feature(id).and_then(|f| f.push.clone()) else { continue };
+                let seen = s.transform_point3(p.face.at);
+                let face = self.model_face_of(&nurbs_kernel::FaceRef { tag: p.face.tag, at: seen }).or_else(|| self.model_face_of(&nurbs_kernel::FaceRef { tag: nurbs_kernel::FaceTag { feature: id, sub: 1 }.pack(), at: seen }));
+                let Some(nw) = face.and_then(|fi| self.normal_near(fi, seen)) else { continue };
+                let Some(nl) = s.transpose().transform_vector3(nw).try_normalize() else { continue };
+                let k = nw.dot(s.transform_vector3(nl));
+                if k.is_finite() && k > 1e-6 {
+                    grow.insert(id, k);
+                }
+            }
+        }
+        let mut done: Vec<String> = vec![];
+        let mut refused: Option<String> = None;
+        let mut doc = self.doc.clone();
+        for o in &objs {
+            let name = doc.object(*o).map(|ob| ob.name.clone()).unwrap_or_default();
+            match doc.freeze_object(*o, &|f: &nurbs_kernel::Feature| grow.get(&f.id).copied().unwrap_or(1.0)) {
+                Ok(()) => done.push(name),
+                Err(e) => refused = Some(format!("{name}: {e}")),
+            }
+        }
+        if done.is_empty() {
+            self.toast(&format!("Freeze Transform: {}", refused.unwrap_or_else(|| "nothing to freeze".into())), true);
+            return;
+        }
+        self.edit("Freeze Transform", |d| *d = doc);
+        match refused {
+            Some(r) => self.toast(&format!("Frozen: {} · not {r}", done.join(", ")), true),
+            None => self.toast(&format!("Frozen: {} (what is made on it now is made as seen)", done.join(", ")), false),
+        }
+    }
+
+    /// An operation just made on a stretched Object says so once, with
+    /// Freeze Transform at hand (its fillets, insets and walls are
+    /// stretched with it until then).
+    pub(crate) fn tell_stretched(&mut self) {
+        let newest = self.doc.features.iter().map(|f| f.id).max().unwrap_or(0);
+        if newest <= self.stretch_told {
+            return;
+        }
+        let fresh: Vec<FeatureId> = self.doc.features.iter().filter(|f| f.id > self.stretch_told && !f.is_solid()).map(|f| f.id).collect();
+        self.stretch_told = newest;
+        let hit = fresh.iter().find_map(|id| {
+            let o = self.doc.object_of(self.element_of(*id))?;
+            self.doc.object(o).filter(|ob| ob.stretch.is_some()).map(|ob| (ob.id, ob.name.clone()))
+        });
+        if let Some((o, name)) = hit {
+            self.toast(&format!("{name} is stretched: this is stretched with it"), false);
+            if let Some(t) = self.toast.as_mut() {
+                t.until = self.now + 8.0;
+                t.acts = vec![("Freeze Transform".into(), crate::state::ToastAct::Freeze(o))];
+            }
+        }
     }
 }

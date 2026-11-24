@@ -477,7 +477,9 @@ fn transform_values(ctx: &egui::Context, st: &mut AppState) {
     let key = Id::new("xform-pop");
     let Some((which, btn)) = ctx.data(|d| d.get_temp::<(u8, Rect)>(key)) else { return };
     let title = ["Select", "Move", "Rotate", "Scale"][which as usize];
-    let area = egui::Area::new(Id::new("xform-values")).order(Order::Foreground).fade_in(false).fixed_pos(btn.left_bottom() + vec2(-8.0, 12.0)).show(ctx, |ui| {
+    let _ = btn;
+    let at = dock_at(ctx, st, "xform-values", OP_W + 24.0);
+    let area = egui::Area::new(Id::new("xform-values")).order(Order::Foreground).fade_in(false).fixed_pos(at).show(ctx, |ui| {
         op_island().show(ui, |ui| {
             set_op_style(ui.ctx(), true);
             ui.set_width(OP_W);
@@ -520,6 +522,16 @@ fn transform_values(ctx: &egui::Context, st: &mut AppState) {
                 ui.label(egui::RichText::new(format!("{n} shapes moved together · Position: their pivot")).font(regular(11.0)).color(TEXT2()));
             } else {
                 ui.label(egui::RichText::new("Pick a shape, an Object or a group: its position shows here").font(regular(12.0)).color(TEXT2()));
+            }
+            // Freeze Transform (Maya's): a stretched Object's scale put into
+            // its features
+            let stretched: Vec<String> = st.freeze_targets().iter().filter_map(|o| st.doc.object(*o)).filter(|o| o.stretch.is_some()).map(|o| o.name.clone()).collect();
+            if !stretched.is_empty() {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(format!("{} is stretched: what is made on it is stretched too", stretched.join(", "))).font(regular(11.0)).color(TEXT2()));
+                if secondary_btn(ui, "Freeze Transform", OP_W).on_hover_text("Alt+Shift+F: the stretch put into its shapes; what is made on it next is made as seen (fillets round again)").clicked() {
+                    st.freeze_transform();
+                }
             }
             if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
                 st.end_live();
@@ -2203,65 +2215,46 @@ fn op_anchor(st: &AppState, k: OpPop) -> Option<Rect> {
 /// what, the axes, the point of each, the orientation; the part shows it
 /// live. Apply keeps it and goes on, OK keeps it, Cancel puts it back.
 fn align_window(ctx: &egui::Context, st: &mut AppState) {
-    if !st.align_open() || st.marking.is_open() {
+    if st.align.is_none() || st.marking.is_open() {
         return;
     }
     let Some(a) = st.align.clone() else { return };
     const W: f32 = 236.0;
-    let vr = st.view_rect;
-    let full = W + 20.0;
-    let h = ctx.memory(|m| m.area_rect(Id::new("align-pop"))).map(|r| r.height()).unwrap_or(300.0);
-    // beside the part (as it was when the window opened), on its right,
-    // else on its left, else by the click on the target
-    let view = st.view();
-    let mut part = Rect::from_min_max(pos2(a.at[0], a.at[1]), pos2(a.at[0], a.at[1]));
-    let mut corners: Vec<DVec3> = a.boxes.iter().flat_map(|(_, b)| [b.lo, b.hi]).collect();
-    if let Some(t) = &a.tbox {
-        corners.extend([t.lo, t.hi]);
-    }
-    if let Some((lo, hi)) = st.model.as_ref().and_then(|m| m.bounds()) {
-        corners.extend([DVec3::from(lo.map(|x| x as f64)), DVec3::from(hi.map(|x| x as f64))]);
-    }
-    for w in corners.chunks(2) {
-        for i in 0..8 {
-            let c = DVec3::new(if i & 1 == 0 { w[0].x } else { w[1].x }, if i & 2 == 0 { w[0].y } else { w[1].y }, if i & 4 == 0 { w[0].z } else { w[1].z });
-            if let Some(q) = view.project(c.as_vec3()) {
-                part = part.union(Rect::from_min_max(pos2(q[0], q[1]), pos2(q[0], q[1])));
-            }
-        }
-    }
-    let gap = 28.0;
-    let (left, right) = (vr[0] + 8.0, vr[2] - 8.0);
-    let x = if part.max.x + gap + full < right {
-        part.max.x + gap
-    } else if part.min.x - gap - full > left {
-        part.min.x - gap - full
-    } else if a.at[0] + 70.0 + full < right {
-        a.at[0] + 70.0
-    } else {
-        (a.at[0] - 70.0 - full).max(left)
-    };
-    let top = vr[1] + 48.0;
-    let mut y = (a.at[1] - 110.0).clamp(top, (vr[3] - 8.0 - h).max(top));
-    // not over the help box (bottom right): above it
-    if let Some(hb) = ctx.memory(|m| m.area_rect(Id::new("help-box"))) {
-        if Rect::from_min_size(pos2(x, y), vec2(full, h)).intersects(hb) {
-            y = (hb.min.y - 8.0 - h).max(top);
-        }
-    }
-    let at = pos2(x, y) + panel_offset(ctx, "align-pop");
+    // docked under the top bar as every option window (Romain 24 nov.,
+    // 12 h 24: "toutes les fenêtres flottantes d'option doivent être en
+    // haut, dock fixe")
+    let at = dock_at(ctx, st, "align-pop", W + 20.0);
+    let chosen = st.align_open();
     let (what, target) = st.align_names();
     let mut changed = false;
     let mut close: Option<bool> = None;
     let mut apply = false;
-    egui::Area::new(Id::new("align-pop")).order(Order::Foreground).fixed_pos(at).show(ctx, |ui| {
-        island().inner_margin(Margin::same(10)).show(ui, |ui| {
+    egui::Area::new(Id::new("align-pop")).order(Order::Foreground).fade_in(false).fixed_pos(at).show(ctx, |ui| {
+        op_island().inner_margin(Margin { left: 10, right: 10, top: 8, bottom: 8 }).show(ui, |ui| {
             ui.set_width(W);
-            grip(ui, "align-pop");
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Align").font(semibold(14.0)).color(TEXT()));
                 chip_label(ui, "Alt + A", RAISED(), LABEL());
             });
+            // the target: a shape clicked, or the world (its origin, its grid)
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let bw = (W - 12.0) / 3.0;
+                let picking = st.tool == Tool::Align;
+                if seg_button(ui, "Shape…", picking || a.target.is_some(), bw).on_hover_text("Then click the shape to align to").clicked() {
+                    st.tool = Tool::Align;
+                }
+                if seg_button(ui, "World", a.world == Some(crate::align::WorldTarget::Origin), bw).on_hover_text("Onto the world's origin (Min, Center, Pivot, Max: the origin; its orientation the world's)").clicked() {
+                    st.align_world(crate::align::WorldTarget::Origin);
+                }
+                if seg_button(ui, "Grid", a.world == Some(crate::align::WorldTarget::Grid), bw).on_hover_text("The point chosen onto the nearest grid point (the snap step)").clicked() {
+                    st.align_world(crate::align::WorldTarget::Grid);
+                }
+            });
+            if !chosen {
+                ui.label(egui::RichText::new("Click the shape to align to, or World / Grid · Esc: cancel").font(regular(11.5)).color(TEXT2()));
+                return;
+            }
             // what moves, and onto what
             let (r, _) = ui.allocate_exact_size(vec2(W, 20.0), Sense::hover());
             let p = ui.painter();
@@ -2479,6 +2472,25 @@ fn op_place(ctx: &egui::Context, st: &AppState, k: OpPop, anchor: Rect, h: f32) 
     best.map(|b| b.1).unwrap_or(pos2(right - full, top))
 }
 
+/// Where a docked option window goes (Romain 24 nov., 11 h 04 and 12 h 24:
+/// fixed at the top): under the top bar (and the Mirror bar when open),
+/// centred on the top bar, right of the floating Sub Outliner when it
+/// shows, kept in the view. `w` its width as last drawn, else this.
+fn dock_at(ctx: &egui::Context, st: &AppState, area: &str, w: f32) -> egui::Pos2 {
+    let screen = ctx.content_rect();
+    let mut top = screen.min.y + EDGE + ISLAND_H + 6.0;
+    if st.settings.mirror_bar {
+        top += ISLAND_H + 6.0;
+    }
+    let cx = ctx.memory(|m| m.area_rect(Id::new("isl-modes"))).map(|r| r.center().x).unwrap_or(screen.center().x);
+    let w = ctx.memory(|m| m.area_rect(Id::new(area))).map(|r| r.width()).unwrap_or(w);
+    let vr = st.view_rect;
+    let sub = ctx.memory(|m| m.area_rect(Id::new("components"))).filter(|r| r.max.y > top && ctx.memory(|m| m.areas().is_visible(&egui::LayerId::new(Order::Middle, Id::new("components")))));
+    let left = sub.map(|r| r.max.x + 8.0).unwrap_or(vr[0] + 8.0).max(vr[0] + 8.0);
+    let right = vr[2] - 8.0;
+    pos2((cx - w * 0.5).clamp(left, (right - w).max(left)), top)
+}
+
 /// The settings of the operation under way, in a small window next to the
 /// component it works on (Romain 18 nov., 22 h 31: "en pop-up fenêtre avec
 /// grip de déplacement… comme dans Maya quand on fait un Bevel"). It takes
@@ -2502,19 +2514,11 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
     // fixe"): a strip under the top bar (and the Mirror bar when it is
     // open), centred on the top bar, its groups in columns
     let _ = (anchor, op_subject(st, k));
-    let screen = ctx.content_rect();
-    let mut top = screen.min.y + EDGE + ISLAND_H + 6.0;
-    if st.settings.mirror_bar {
-        top += ISLAND_H + 6.0;
+    // the Align window or the Transform values take the place
+    if st.align.is_some() || ctx.data(|d| d.get_temp::<(u8, Rect)>(Id::new("xform-pop")).is_some()) {
+        return;
     }
-    let cx = ctx.memory(|m| m.area_rect(Id::new("isl-modes"))).map(|r| r.center().x).unwrap_or(screen.center().x);
-    let w = ctx.memory(|m| m.area_rect(Id::new("op-pop"))).map(|r| r.width()).unwrap_or(OP_W);
-    let vr = st.view_rect;
-    // (right of the floating Sub Outliner when it shows, `components`)
-    let sub = ctx.memory(|m| m.area_rect(Id::new("components"))).filter(|r| r.max.y > top && ctx.memory(|m| m.areas().is_visible(&egui::LayerId::new(Order::Middle, Id::new("components")))));
-    let left = sub.map(|r| r.max.x + 8.0).unwrap_or(vr[0] + 8.0).max(vr[0] + 8.0);
-    let right = vr[2] - 8.0;
-    let at = pos2((cx - w * 0.5).clamp(left, (right - w).max(left)), top);
+    let at = dock_at(ctx, st, "op-pop", OP_W);
     set_op_style(ctx, true);
     egui::Area::new(Id::new("op-pop")).order(Order::Foreground).fade_in(false).fixed_pos(at).show(ctx, |ui| {
         op_island().inner_margin(Margin { left: 12, right: 12, top: 8, bottom: 8 }).show(ui, |ui| {
@@ -3335,6 +3339,11 @@ fn object_rows(ui: &mut Ui, st: &mut AppState, ob: &nurbs_kernel::Object, indent
             st.toggle_object_visible(ob.id);
             ui.close();
         }
+        if ob.stretch.is_some() && ui.button("Freeze Transform").on_hover_text("Alt+Shift+F: its stretch put into its shapes").clicked() {
+            st.select_object(ob.id, false);
+            st.freeze_transform();
+            ui.close();
+        }
         if !others.is_empty() {
             ui.menu_button("Merge into", |ui| {
                 menu_style(ui);
@@ -3872,13 +3881,18 @@ fn sub_outliner_body(ui: &mut Ui, st: &mut AppState, el: Option<FeatureId>, max_
     }
     sa.show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
-        for (k, g) in ops.iter().enumerate() {
-            if k == marker {
+        // the newest on top (Romain 24 nov., 12 h 24); the marker line
+        // between what is made and what is left out
+        if marker >= ops.len() {
+            history_marker_line(ui);
+        }
+        for (k, g) in ops.iter().enumerate().rev() {
+            tree_row(ui, st, g, 0, false);
+            if k == marker && k > 0 {
                 history_marker_line(ui);
             }
-            tree_row(ui, st, g, 0, false);
         }
-        if marker >= ops.len() {
+        if marker == 0 && !ops.is_empty() {
             history_marker_line(ui);
         }
     });
@@ -3903,7 +3917,8 @@ fn composition_body(ui: &mut Ui, st: &mut AppState, ob: &nurbs_kernel::Object, m
         for f in &members {
             tree_row(ui, st, f, 0, false);
             let ops: Vec<Feature> = st.element_ops(f.id).iter().filter_map(|x| st.doc.feature(*x).cloned()).collect();
-            for g in &ops {
+            // the newest on top (Romain 24 nov., 12 h 24)
+            for g in ops.iter().rev() {
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
                     ui.vertical(|ui| tree_row(ui, st, g, 0, false));
@@ -4747,7 +4762,7 @@ fn face_card(ui: &mut Ui, st: &mut AppState) {
     if n == 2 {
         // (Romain 23 nov., 7 h 04: "Il faut un Bridge tool")
         ui.add_space(4.0);
-        if primary_btn(ui, None, "Bridge the 2 faces", Some(ui.available_width())).on_hover_text("A solid joining the two faces, from one outline to the other (Maya's Bridge)").clicked() {
+        if primary_btn(ui, None, "Bridge the 2 faces", Some(ui.available_width())).on_hover_text("Ctrl+B: a solid joining the two faces, from one outline to the other (Maya's Bridge)").clicked() {
             st.add_bridge();
         }
     } else if n > 2 {
@@ -5143,6 +5158,12 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.mirror_selected();
         return;
     }
+    // Freeze Transform (Alt + Shift + F): a stretched Object's scale put
+    // into its features
+    if ctx.input(|i| i.modifiers.alt && i.modifiers.shift && !i.modifiers.ctrl) && pressed(Key::F) {
+        st.freeze_transform();
+        return;
+    }
     // Delete History (Maya's Alt + Shift + D): each element picked frozen
     if ctx.input(|i| i.modifiers.alt && i.modifiers.shift && !i.modifiers.ctrl) && pressed(Key::D) {
         st.delete_history();
@@ -5216,8 +5237,14 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
                 st.group_selection();
             }
         }
+        // Ctrl + B: Bridge in Face mode (Romain 24 nov., 12 h 24), else
+        // the chamfer of what is picked
         if pressed(Key::B) {
-            st.make_bevel();
+            if st.sel_mode == SelMode::Face {
+                st.add_bridge();
+            } else {
+                st.make_bevel();
+            }
         }
         // Maya: Ctrl + E extrudes (E is the rotate gizmo)
         if pressed(Key::E) && st.push.is_none() {

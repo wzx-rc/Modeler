@@ -1675,6 +1675,32 @@ impl Feature {
         }
         f
     }
+    /// Whether an affine map takes this shape to a shape of its own kind
+    /// exactly (Freeze Transform, Romain 24 nov., 12 h 24: "il manque un
+    /// FreezeTransform"): its frame's axes stay square to each other (the
+    /// map is a scale along them, no shear), a cylinder's section and a
+    /// profile's corner cuts in mm grow the same both ways across. An
+    /// operation is never such a shape.
+    pub fn absorbs(&self, m: DMat4) -> bool {
+        if !self.is_solid() || self.frozen.is_some() || self.sheet.is_some() || self.cable.is_some() || self.revolve.is_some() || self.loft.is_some() || self.shape_bool.is_some() {
+            return false;
+        }
+        let l = glam::DMat3::from_mat4(m);
+        let r = glam::DMat3::from_quat(self.rot);
+        let a = r.transpose() * l * r;
+        let k = DVec3::new(a.x_axis.x, a.y_axis.y, a.z_axis.z);
+        let big = k.abs().max_element().max(1e-12);
+        let off = [a.x_axis.y, a.x_axis.z, a.y_axis.x, a.y_axis.z, a.z_axis.x, a.z_axis.y];
+        if k.min_element() <= 0.0 || off.iter().any(|v| v.abs() > 1e-9 * big) {
+            return false;
+        }
+        let same_across = (k.x - k.z).abs() <= 1e-9 * big;
+        let cuts = self.profile.as_ref().is_some_and(|p| p.corner.iter().any(|c| c.abs() > 1e-12)) || self.curve.as_ref().is_some_and(|c| c.corner.abs() > 1e-12 || c.corner2.abs() > 1e-12);
+        match self.prim {
+            Prim::Cylinder { .. } => same_across,
+            _ => !cuts || same_across,
+        }
+    }
     /// Taken through an affine map (an Object's stretch, or its inverse):
     /// an operation's points; a shape's base, its frame's axes as the map
     /// takes them (made square again from its up), its sizes by how much
@@ -2979,6 +3005,49 @@ impl Doc {
         let refs: Vec<&Feature> = self.features.iter().collect();
         let part = self.partition(&refs);
         refs.iter().zip(&part).filter(|(_, p)| **p == Some(Some(o))).map(|(f, _)| f.id).collect()
+    }
+
+    /// Freeze Transform (Maya's): an Object's stretch put into its
+    /// features, so what is made on it from now on is made on what the eye
+    /// sees. Its shapes take it exactly (`Feature::absorbs`: else refused
+    /// with the shape's name), its operations' points and moves go with it,
+    /// their sizes stay as they are (a fillet is round again at its size;
+    /// `depth` gives an extrusion's growth along its normal, from the app,
+    /// which knows the faces). Its frame becomes the identity (its features
+    /// are kept where it puts them already).
+    pub fn freeze_object(&mut self, o: FeatureId, depth: &dyn Fn(&Feature) -> f64) -> Result<(), String> {
+        let ob = self.object(o).ok_or("no such Object")?.clone();
+        let ids = self.object_features(o);
+        if let Some(s) = ob.stretch.map(rows_to_mat) {
+            for id in &ids {
+                let f = self.feature(*id).ok_or("a feature is gone")?;
+                if f.mirror.is_some() || f.array.is_some() || f.sym.is_some() {
+                    return Err(format!("{} cannot be frozen with it yet: Delete History keeps the look", f.name));
+                }
+                if f.is_solid() && !f.absorbs(s) {
+                    let why = match f.prim {
+                        Prim::Cylinder { .. } => "would no longer be round (stretched across its axis)",
+                        _ if f.frozen.is_some() => "is one solid already",
+                        _ => "is turned across the stretch, or has rounded corners",
+                    };
+                    return Err(format!("{} {why}: Delete History (Alt+Shift+D) keeps the look", f.name));
+                }
+            }
+            for id in &ids {
+                let f0 = self.feature(*id).unwrap().clone();
+                let k = depth(&f0);
+                let mut f = f0.affine_by(s);
+                if let Some(p) = f.push.as_mut() {
+                    p.depth *= k;
+                }
+                *self.feature_mut(*id).unwrap() = f;
+            }
+        }
+        let ob = self.object_mut(o).unwrap();
+        ob.stretch = None;
+        ob.stretched.clear();
+        ob.frame = Sim::default();
+        Ok(())
     }
 
     /// A feature made in a stretched Object since its stretch was made on

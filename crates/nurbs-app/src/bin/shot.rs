@@ -2837,6 +2837,236 @@ fn main() {
         h.shot("zero-side-scale-4-documents");
     }
 
+    if want("xfreeze") {
+        // Romain 24 nov., 12 h 24: "ça ne fonctionne plus sur un simple Cube
+        // qui a été scale. On dirait il manque un FreezeTransform". A cube
+        // alone stretched by its +X side square: its sizes change, no
+        // stretch kept; then a fillet and a 2 mm shell on it, each timed.
+        // Then a block with a fillet stretched (kept as a stretch), Freeze
+        // Transform. Then Align onto the world and the grid; the Sub
+        // Outliner newest first; a cube drawn in the Front view.
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::new(13.0, 0.0, 7.0), DQuat::IDENTITY);
+        h.reset(d, "Cube");
+        h.key(egui::Key::Num4);
+        h.click(h.screen_of(Vec3::new(13.0, 20.0, 7.0)));
+        h.key(egui::Key::R);
+        h.steps(3);
+        let grip = h.screen_of(Vec3::new(23.0, 10.0, 7.0));
+        h.move_to(grip);
+        h.steps(2);
+        eprintln!("  hover +X side: {:?}", h.st.hot_handle);
+        let to = h.screen_of(Vec3::new(43.0, 10.0, 7.0));
+        h.drag(grip, to, 12, true);
+        for _ in 0..3 {
+            h.settle();
+            h.steps(3);
+        }
+        let ob = h.st.doc.object_of(b).and_then(|o| h.st.doc.object(o)).cloned();
+        eprintln!("  cube scaled: prim {:?}, stretch kept {:?}", h.st.doc.feature(b).unwrap().prim, ob.map(|o| o.stretch.is_some()));
+        let t0 = std::time::Instant::now();
+        let mut d = h.st.doc.clone();
+        let (lo, hi) = d.feature(b).unwrap().bounds();
+        d.add_round(2.0, false, vec![EdgeRef { faces: [FaceTag { feature: b, sub: 2 }.pack(), FaceTag { feature: b, sub: 4 }.pack()], at: DVec3::new((lo.x + hi.x) * 0.5, hi.y, hi.z) }]);
+        h.st.edit("Fillet", |x| *x = d);
+        h.settle();
+        eprintln!("  fillet 2 mm: {:.0} ms, errors {:?}", t0.elapsed().as_secs_f64() * 1e3, h.st.model.as_ref().map(|m| m.errors.clone()));
+        let t0 = std::time::Instant::now();
+        let mut d = h.st.doc.clone();
+        d.add_shell(nurbs_kernel::Shell { faces: vec![], thickness: 2.0, outward: false }, DVec3::new((lo.x + hi.x) * 0.5, hi.y, 7.0));
+        h.st.edit("Shell", |x| *x = d);
+        h.settle();
+        eprintln!("  shell 2 mm: {:.0} ms, errors {:?}", t0.elapsed().as_secs_f64() * 1e3, h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.st.xray = true;
+        h.steps(3);
+        h.shot("zero-xfreeze-1-cube-scaled-shell");
+        h.st.xray = false;
+        // a block with a fillet stretched: kept as a stretch, then frozen
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add_round(3.0, false, vec![EdgeRef { faces: [FaceTag { feature: b, sub: 2 }.pack(), FaceTag { feature: b, sub: 4 }.pack()], at: DVec3::new(0.0, 20.0, 10.0) }]);
+        h.reset(d, "Block");
+        h.key(egui::Key::Num4);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.key(egui::Key::R);
+        h.steps(3);
+        let grip = h.screen_of(Vec3::new(10.0, 10.0, 0.0));
+        h.drag(grip, h.screen_of(Vec3::new(30.0, 10.0, 0.0)), 12, true);
+        for _ in 0..3 {
+            h.settle();
+            h.steps(3);
+        }
+        let ob = h.st.doc.object_of(b).and_then(|o| h.st.doc.object(o)).cloned();
+        eprintln!("  block with a fillet scaled: stretch kept {:?}", ob.as_ref().map(|o| o.stretch.is_some()));
+        h.shot("zero-xfreeze-2-stretched");
+        let t0 = std::time::Instant::now();
+        h.hold(Modifiers::ALT | Modifiers::SHIFT);
+        h.key(egui::Key::F);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let ob = h.st.doc.object_of(b).and_then(|o| h.st.doc.object(o)).cloned();
+        eprintln!("  frozen ({:.0} ms): prim {:?}, stretch {:?}, toast {:?}, errors {:?}", t0.elapsed().as_secs_f64() * 1e3, h.st.doc.feature(b).unwrap().prim, ob.map(|o| o.stretch.is_some()), h.st.toast.as_ref().map(|t| t.text.clone()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-xfreeze-3-frozen");
+        // Align onto the world, then the grid
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 10.0, z: 20.0 }, DVec3::new(13.3, 4.2, -6.7), DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.key(egui::Key::Num4);
+        h.click(h.screen_of(Vec3::new(13.3, 14.2, -6.7)));
+        h.st.begin_align();
+        h.steps(3);
+        h.shot("zero-xfreeze-4-align-open");
+        h.st.align_world(nurbs_app::align::WorldTarget::Origin);
+        h.steps(3);
+        eprintln!("  align World (centre): origin {:?}", h.st.doc.feature(b).unwrap().origin);
+        h.shot("zero-xfreeze-5-align-world");
+        h.st.align_cancel();
+        h.st.begin_align();
+        h.st.align_world(nurbs_app::align::WorldTarget::Grid);
+        h.st.align_ok();
+        h.steps(3);
+        eprintln!("  align Grid (centre): origin {:?}", h.st.doc.feature(b).unwrap().origin);
+        // the Front view: a cube drawn where there is no face
+        let d = Doc::default();
+        h.reset(d, "Empty");
+        h.st.camera.preset(nurbs_app::camera::ViewPreset::Front);
+        h.steps(3);
+        h.key(egui::Key::B);
+        let a = h.screen_of(Vec3::new(-10.0, 10.0, 0.0));
+        let c = h.screen_of(Vec3::new(10.0, 30.0, 0.0));
+        h.drag(a, c, 8, true);
+        h.steps(2);
+        h.move_to(c + egui::vec2(0.0, -40.0));
+        h.steps(2);
+        h.click(c + egui::vec2(0.0, -40.0));
+        h.settle();
+        let f = h.st.doc.features.last().cloned();
+        eprintln!("  front view cube: {:?}", f.map(|f| (f.prim, f.origin, f.rot * DVec3::Y)));
+        h.shot("zero-xfreeze-6-front-cube");
+        // a saved scene (FORME_DOC): every stretched Object frozen, timed
+        if let Ok(path) = std::env::var("FORME_DOC") {
+            let d: Doc = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            h.reset(d, "Scene");
+            for _ in 0..4 {
+                h.settle();
+                h.steps(3);
+            }
+            eprintln!("  scene: errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+            h.shot("zero-xfreeze-7-scene");
+            let objs: Vec<u32> = h.st.doc.objects.iter().filter(|o| o.stretch.is_some()).map(|o| o.id).collect();
+            for o in objs {
+                h.key(egui::Key::Num4);
+                h.st.select_object(o, false);
+                let t0 = std::time::Instant::now();
+                h.st.freeze_transform();
+                h.settle();
+                eprintln!("  freeze {o}: {:.0} ms, toast {:?}, errors {:?}", t0.elapsed().as_secs_f64() * 1e3, h.st.toast.as_ref().map(|t| t.text.clone()), h.st.model.as_ref().map(|m| m.errors.clone()));
+            }
+            h.shot("zero-xfreeze-8-scene-frozen");
+        }
+    }
+
+    if want("scaled") {
+        // Romain 24 nov., 12 h 24: "Tu as l'aprem pour faire des tests de
+        // performance, là ça ne fonctionne plus sur un simple Cube qui a
+        // été scale". A cube stretched by its side squares (real drags),
+        // then modelled: fillets, inset, extrusion, a hole, a move of a
+        // face, a shell; its drags and live changes; then the whole Object
+        // scaled again (with operations: kept as a stretch), a fillet made
+        // on it, Freeze Transform, a fillet again. scaled.txt
+        let mut log: Vec<String> = vec![];
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Scaled");
+        let side = |h: &mut Harness, from: Vec3, to: Vec3| {
+            h.key(egui::Key::Escape);
+            h.key(egui::Key::Num4);
+            let c = h.st.doc.feature(b).unwrap().centre().as_vec3();
+            h.click(h.screen_of(c));
+            h.key(egui::Key::R);
+            h.steps(3);
+            let g = h.screen_of(from);
+            h.move_to(g);
+            h.steps(2);
+            let hot = h.st.hot_handle;
+            h.drag(g, h.screen_of(to), 12, true);
+            h.settle();
+            hot
+        };
+        let hot = side(&mut h, Vec3::new(10.0, 10.0, 0.0), Vec3::new(30.0, 10.0, 0.0));
+        let hot2 = side(&mut h, Vec3::new(10.0, 20.0, 0.0), Vec3::new(10.0, 8.0, 0.0));
+        let f = h.st.doc.feature(b).unwrap().clone();
+        let ob = h.st.doc.object_of(b).and_then(|o| h.st.doc.object(o)).cloned().unwrap();
+        let line = format!("cube scaled by {hot:?} then {hot2:?}: {:?} at {:?}, stretch kept {}", f.prim, f.origin, ob.stretch.is_some());
+        eprintln!("  {line}");
+        log.push(line);
+        let (lo, hi) = f.bounds();
+        let c = (lo + hi) * 0.5;
+        let top = FaceTag { feature: b, sub: 2 }.pack();
+        let e = |a: i64, bb: i64, at: DVec3| EdgeRef { faces: [a, bb], at };
+        let s = |k: u16| FaceTag { feature: b, sub: k }.pack();
+        timed(&mut h, &mut log, "Fillet 2 on the 4 top edges", |d| {
+            d.add_round(2.0, false, vec![e(top, s(0), DVec3::new(hi.x, hi.y, c.z)), e(top, s(1), DVec3::new(lo.x, hi.y, c.z)), e(top, s(4), DVec3::new(c.x, hi.y, hi.z)), e(top, s(5), DVec3::new(c.x, hi.y, lo.z))])
+        });
+        let inset = timed(&mut h, &mut log, "Inset 4 on the top", |d| d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::doc::FaceRef { tag: top, at: DVec3::new(c.x, hi.y, c.z) }, inset: 4.0, depth: 0.0, keep: false }));
+        timed(&mut h, &mut log, "Extrude its inside 3 down", |d| d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::doc::FaceRef { tag: FaceTag { feature: inset, sub: 1 }.pack(), at: DVec3::new(c.x, hi.y, c.z) }, inset: 0.0, depth: -3.0, keep: true }));
+        let hole = timed(&mut h, &mut log, "A hole through it", |d| d.add(Op::Carve, Prim::Cylinder { radius: 2.5, height: 20.0 }, DVec3::new(lo.x + 5.0, -2.0, c.z), DQuat::IDENTITY));
+        timed(&mut h, &mut log, "Move its +X face 5 out", |d| {
+            let mut t = nurbs_kernel::Tweak::new(vec![nurbs_kernel::Comp::Face(nurbs_kernel::doc::FaceRef { tag: s(0), at: DVec3::new(hi.x, (lo.y + hi.y) * 0.5, c.z) })]).unwrap();
+            t.delta = DVec3::new(5.0, 0.0, 0.0);
+            d.add_tweak(t)
+        });
+        h.shot("zero-scaled-1-modelled");
+        gizmo_drag(&mut h, &mut log, "drag the Object along X", &[b, hole], Vec3::X, "zero-scaled-2-dragged");
+        live_change(&mut h, &mut log, "fillet 2 -> 4 live", |d, t| {
+            if let Some(r) = d.features.iter_mut().find_map(|f| f.round.as_mut()) {
+                r.size = 2.0 + 2.0 * t;
+            }
+        });
+        // which step a closed shell cannot be made after (each left out)
+        if std::env::var("FORME_SHELL_TRY").is_ok() {
+            let base = h.st.doc.clone();
+            let ids: Vec<u32> = base.features.iter().map(|f| f.id).collect();
+            for skip in std::iter::once(None).chain(ids.iter().map(|i| Some(*i))) {
+                let mut d = base.clone();
+                if let Some(sk) = skip {
+                    d.features.retain(|f| f.id != sk);
+                }
+                d.add_shell(nurbs_kernel::Shell { faces: vec![], thickness: 1.5, outward: false }, DVec3::new(c.x, hi.y, c.z));
+                h.st.edit("try", |x| *x = d);
+                h.settle();
+                eprintln!("  shell without {skip:?}: {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+                h.st.undo();
+                h.settle();
+            }
+        }
+        timed(&mut h, &mut log, "Shell 1.5 open at the bottom", |d| d.add_shell(nurbs_kernel::Shell { faces: vec![nurbs_kernel::doc::FaceRef { tag: s(3), at: DVec3::new(c.x + 8.0, lo.y, c.z - 5.0) }], thickness: 1.5, outward: false }, DVec3::new(c.x, hi.y, c.z)));
+        // the whole Object scaled again, with its operations: a stretch
+        let t0 = Instant::now();
+        let (lo2, hi2) = h.st.doc.feature(b).unwrap().bounds();
+        let _ = (lo2, hi2);
+        let hot3 = side(&mut h, Vec3::new(12.5, 4.0, 10.0), Vec3::new(12.5, 4.0, 25.0));
+        let ob = h.st.doc.object_of(b).and_then(|o| h.st.doc.object(o)).cloned().unwrap();
+        let line = format!("Object with operations scaled by {hot3:?} along Z: {:.0} ms, stretch kept {}, errors {:?}", t0.elapsed().as_secs_f64() * 1e3, ob.stretch.is_some(), h.st.model.as_ref().map(|m| m.errors.clone()));
+        eprintln!("  {line}");
+        log.push(line);
+        timed(&mut h, &mut log, "Fillet 1 on the stretched Object", |d| d.add_round(1.0, false, vec![e(FaceTag { feature: b, sub: 3 }.pack(), s(0), DVec3::new(hi.x + 5.0, lo.y, c.z))]));
+        let toast = h.st.toast.as_ref().map(|t| (t.text.clone(), t.acts.len()));
+        eprintln!("  toast {toast:?}");
+        log.push(format!("  toast {toast:?}"));
+        h.shot("zero-scaled-3-stretched");
+        timed_act(&mut h, &mut log, "Freeze Transform", |h| {
+            h.st.select_object(ob.id, false);
+            h.st.freeze_transform();
+        });
+        let toast = h.st.toast.as_ref().map(|t| t.text.clone());
+        log.push(format!("  toast {toast:?}"));
+        eprintln!("  toast {toast:?}");
+        h.shot("zero-scaled-4-frozen");
+        gizmo_drag(&mut h, &mut log, "drag the frozen Object along Z", &[b, hole], Vec3::Z, "zero-scaled-5-dragged");
+        std::fs::write(format!("{}/scaled.txt", h.out), log.join("\n")).ok();
+    }
+
     if want("intersect") {
         // Boolean Intersection and CARVE named SUB (Romain 24 nov., 5 h 45:
         // "Il y avait pas un mode Boolean Intersection? Appelle SUB à la

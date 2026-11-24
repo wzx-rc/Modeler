@@ -147,6 +147,7 @@ impl BasePlane {
             (Some(_), _) => "on the face",
             (None, Some(true)) => "on the scan's face",
             (None, Some(false)) => "tangent to the scan",
+            (None, None) if self.n.y.abs() < 0.99 => "facing the view",
             (None, None) => "on the ground",
         }
     }
@@ -606,6 +607,8 @@ pub enum ToastAct {
     /// History just turned off: the shapes that still have operations
     /// folded into one solid each (`fold_all_history`).
     FoldAll,
+    /// That stretched Object's stretch put into its features.
+    Freeze(FeatureId),
 }
 
 /// One line of the debug journal (Romain, 20 nov. 6 h 15: "un Interactive
@@ -713,6 +716,8 @@ pub struct AppState {
     /// The newest step the "made on both sides" toast was said for (a
     /// step made after a Mirror).
     pub mirror_told: FeatureId,
+    /// The newest feature `tell_stretched` looked at.
+    pub stretch_told: FeatureId,
     /// The Surface tool's points: put on the reference under the pointer
     /// (true), else locked on the plane under its first point.
     pub surface_on_scan: bool,
@@ -979,6 +984,7 @@ impl AppState {
             round_chamfer: false,
             round_only: false,
             mirror_told: told,
+            stretch_told: told,
             surface_on_scan: false,
             slot_on_scan: false,
             form: Default::default(),
@@ -1442,6 +1448,7 @@ impl AppState {
             self.toast("Made on the original and every copy of its Array", false);
         }
         self.tell_mirror_side();
+        self.tell_stretched();
         self.version += 1;
     }
 
@@ -3004,8 +3011,24 @@ impl AppState {
                 return plane.hit(ro, rd).map(|q| (plane, q));
             }
         }
-        let g = BasePlane::ground();
+        let g = self.empty_plane();
         g.hit(ro, rd).map(|q| (g, q))
+    }
+
+    /// The plane a shape is drawn on where there is no face: the ground,
+    /// unless the view looks along it (Front, Back, Left, Right; Romain
+    /// 24 nov., 12 h 24: "en vue front les cubes ne se dessinent pas par
+    /// rapport au plan de la caméra mais toujours au sol"), then the world
+    /// plane through the origin that faces the eye most.
+    pub fn empty_plane(&self) -> BasePlane {
+        let vr = self.view_rect;
+        let (_, f) = self.ray([(vr[0] + vr[2]) * 0.5, (vr[1] + vr[3]) * 0.5]);
+        if f.y.abs() >= 0.26 {
+            return BasePlane::ground();
+        }
+        let axis = if f.x.abs() > f.z.abs() { DVec3::X } else { DVec3::Z };
+        let n = if f.dot(axis) > 0.0 { -axis } else { axis };
+        BasePlane::new(DVec3::ZERO, n, None)
     }
 
     /// The face a point of interest is put on: a flat face round it (the
@@ -5178,6 +5201,7 @@ impl AppState {
         self.doc_name = name.to_string();
         self.save_name = name.to_string();
         self.mirror_told = self.doc.features.iter().map(|f| f.id).max().unwrap_or(0);
+        self.stretch_told = self.mirror_told;
         self.touched();
         self.show_saved_model();
         self.ref_frame = true;

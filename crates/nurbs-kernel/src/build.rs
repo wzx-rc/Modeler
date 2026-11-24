@@ -4252,6 +4252,39 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn plate_shell_probe() {
+        // the `scaled` scenario's plate (24 nov.): which steps a 1.5 mm
+        // shell fails after
+        use crate::doc::{Push, Shell};
+        let full = |with: &[u8]| {
+            let mut d = Doc::default();
+            let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 8.0, z: 20.0 }, DVec3::new(10.0, 0.0, 0.0), DQuat::IDENTITY);
+            if with.contains(&1) {
+                let e = |a: u16, c: u16, at: DVec3| EdgeRef { faces: [tag(b, a), tag(b, c)], at };
+                d.add_round(2.0, false, vec![e(2, 0, DVec3::new(30.0, 8.0, 0.0)), e(2, 1, DVec3::new(-10.0, 8.0, 0.0)), e(2, 4, DVec3::new(10.0, 8.0, 10.0)), e(2, 5, DVec3::new(10.0, 8.0, -10.0))]);
+            }
+            if with.contains(&2) {
+                let i = d.add_push(Push { face: FaceRef { tag: tag(b, 2), at: DVec3::new(10.0, 8.0, 0.0) }, inset: 4.0, depth: 0.0, keep: false });
+                d.add_push(Push { face: FaceRef { tag: tag(i, 1), at: DVec3::new(10.0, 8.0, 0.0) }, inset: 0.0, depth: -3.0, keep: true });
+            }
+            if with.contains(&3) {
+                d.add(Op::Carve, Prim::Cylinder { radius: 2.5, height: 20.0 }, DVec3::new(-5.0, -2.0, 0.0), DQuat::IDENTITY);
+            }
+            for (open, t) in [(false, 1.5), (false, 0.5), (true, 1.5)] {
+                let mut e = d.clone();
+                let faces = if open { vec![FaceRef { tag: tag(b, 3), at: DVec3::new(18.0, 0.0, -5.0) }] } else { vec![] };
+                e.add_shell(Shell { faces, thickness: t, outward: false }, DVec3::new(10.0, 8.0, 0.0));
+                let m = build(&e, true, false, &[], &mut Cache::default());
+                eprintln!("{with:?} open {open} t {t}: {} faces, errors {:?}", m.faces.len(), m.errors);
+            }
+        };
+        for w in [&[][..], &[1], &[2], &[3], &[1, 3], &[2, 3], &[1, 2], &[1, 2, 3]] {
+            full(w);
+        }
+    }
+
+    #[test]
     fn local_symmetry() {
         use crate::doc::Sym;
         // a block turned 30° round Y, 60 mm along X from the origin, with

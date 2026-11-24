@@ -79,6 +79,18 @@ pub struct Align {
     pub stale: bool,
     /// Where the target was clicked (the window opens by it).
     pub at: [f32; 2],
+    /// Aligned to the world (Romain 24 nov., 12 h 24: "Un objet seul doit
+    /// avoir les options d'alignement par rapport au monde"): `World` its
+    /// origin (Min, Center, Pivot and Max are all the origin; its
+    /// orientation the world's), `Grid` the nearest grid point to the
+    /// point chosen.
+    pub world: Option<WorldTarget>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldTarget {
+    Origin,
+    Grid,
 }
 
 impl AppState {
@@ -106,6 +118,7 @@ impl AppState {
             tbox: None,
             stale: false,
             at: [0.0; 2],
+            world: None,
         });
         self.tool = Tool::Align;
     }
@@ -123,11 +136,22 @@ impl AppState {
             self.toast("Align: that one moves, click another shape", false);
             return;
         }
-        let boxes: Vec<(FeatureId, AlignBox)> = ids.iter().filter_map(|id| self.align_box(*id).map(|b| (*id, b))).collect();
+        // from World or Grid to a shape: the boxes read at the start, the
+        // document as it was first
+        let world = self.align.as_ref().filter(|a| a.world.is_some()).map(|a| (a.boxes.clone(), a.base.clone()));
+        let boxes: Vec<(FeatureId, AlignBox)> = match &world {
+            Some((b, _)) => b.clone(),
+            None => ids.iter().filter_map(|id| self.align_box(*id).map(|b| (*id, b))).collect(),
+        };
         let tbox = self.align_box(t);
-        let (base, sel) = (self.doc.clone(), self.sel_state());
+        if let Some((_, d)) = world.as_ref().filter(|(_, d)| *d != self.doc) {
+            self.doc = d.clone();
+            self.touched();
+        }
+        let (base, sel) = (self.doc.clone(), self.align.as_ref().filter(|_| world.is_some()).map(|a| a.sel.clone()).unwrap_or_else(|| self.sel_state()));
         if let Some(a) = self.align.as_mut() {
             a.target = Some(t);
+            a.world = None;
             a.boxes = boxes;
             a.tbox = tbox;
             a.at = p;
@@ -174,13 +198,21 @@ impl AppState {
     /// its point meets the target's along the axes ticked.
     pub fn align_update(&mut self) {
         let Some(a) = self.align.clone() else { return };
-        let (Some(t), Some(tb)) = (a.target, a.tbox.clone()) else { return };
-        let Some(target) = a.base.feature(t).cloned() else { return };
+        let world = AlignBox { lo: DVec3::ZERO, hi: DVec3::ZERO, pivot: DVec3::ZERO, pts: vec![] };
+        let (tb, trot) = match (a.world, a.target, a.tbox.clone()) {
+            (Some(_), ..) => (world, DQuat::IDENTITY),
+            (None, Some(t), Some(tb)) => {
+                let Some(target) = a.base.feature(t) else { return };
+                (tb, target.rot)
+            }
+            _ => return,
+        };
+        let step = if self.settings.step > 0.0 { self.settings.step } else { 1.0 };
         let mut doc = a.base.clone();
         for (id, b) in &a.boxes {
             let Some(f) = a.base.feature(*id).cloned() else { continue };
             // the turn (round its pivot) and its box turned with it
-            let turn = if a.orient && f.is_solid() && !f.is_path() { target.rot * f.rot.inverse() } else { DQuat::IDENTITY };
+            let turn = if a.orient && f.is_solid() && !f.is_path() { trot * f.rot.inverse() } else { DQuat::IDENTITY };
             let piv = b.pivot;
             let from = if turn != DQuat::IDENTITY {
                 // its points turned: the box it will have
@@ -195,7 +227,7 @@ impl AppState {
             } else {
                 b.point(a.cur)
             };
-            let to = tb.point(a.tgt);
+            let to = if a.world == Some(WorldTarget::Grid) { (from / step).round() * step } else { tb.point(a.tgt) };
             let mut d = DVec3::ZERO;
             for k in 0..3 {
                 if a.axes[k] {
@@ -276,7 +308,7 @@ impl AppState {
     /// Cancel (Esc): everything as it was.
     pub fn align_cancel(&mut self) {
         if let Some(a) = self.align.take() {
-            if a.target.is_some() && self.doc != a.base {
+            if (a.target.is_some() || a.world.is_some()) && self.doc != a.base {
                 self.doc = a.base;
                 self.touched();
             }
@@ -302,9 +334,33 @@ impl AppState {
         }
     }
 
-    /// Whether the window is open (the target clicked).
+    /// Whether a target is chosen (a shape clicked, or the world).
     pub fn align_open(&self) -> bool {
-        self.align.as_ref().map(|a| a.target.is_some()).unwrap_or(false)
+        self.align.as_ref().map(|a| a.target.is_some() || a.world.is_some()).unwrap_or(false)
+    }
+
+    /// The world as the target: its origin, or the grid (its points
+    /// nearest the point chosen); the boxes read now.
+    pub fn align_world(&mut self, w: WorldTarget) {
+        let Some(a) = self.align.as_ref() else { return };
+        let ids = a.ids.clone();
+        if a.target.is_some() && self.doc != a.base {
+            self.doc = a.base.clone();
+            self.touched();
+        }
+        let boxes: Vec<(FeatureId, AlignBox)> = ids.iter().filter_map(|id| self.align_box(*id).map(|b| (*id, b))).collect();
+        if let Some(a) = self.align.as_mut() {
+            a.world = Some(w);
+            a.target = None;
+            a.tbox = None;
+            a.boxes = boxes;
+            if !a.axes.iter().any(|x| *x) {
+                a.axes = [true; 3];
+            }
+        }
+        self.tool = Tool::Select;
+        self.record("tool", "Align to the world");
+        self.align_update();
     }
 
     /// The names the window shows: what moves, and onto what.
@@ -312,6 +368,11 @@ impl AppState {
         let Some(a) = self.align.as_ref() else { return Default::default() };
         let name = |id: FeatureId| self.doc.feature(id).map(|f: &Feature| f.name.clone()).unwrap_or_default();
         let what = if a.ids.len() == 1 { name(a.ids[0]) } else { format!("{} shapes", a.ids.len()) };
-        (what, a.target.map(name).unwrap_or_default())
+        let to = match a.world {
+            Some(WorldTarget::Origin) => "World".to_string(),
+            Some(WorldTarget::Grid) => "Grid".to_string(),
+            None => a.target.map(name).unwrap_or_default(),
+        };
+        (what, to)
     }
 }
