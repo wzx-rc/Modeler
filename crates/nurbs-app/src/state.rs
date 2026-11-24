@@ -407,6 +407,9 @@ pub enum Handle {
     ArrayAngle,
     /// The selected Shell's grip: its dot across the wall, the thickness.
     ShellThick,
+    /// Y on a vertex alone: its arrow along the n-th edge leaving it
+    /// (`slide_dirs`); dragged, a move along that edge.
+    Slide(u8),
 }
 
 /// The directions a move handle may take: along its axis, in its plane, or
@@ -542,6 +545,10 @@ pub struct RoundDrag {
     /// went down, the tension then); the tension now (0: circular).
     pub tension_from: Option<([f32; 2], f64)>,
     pub tension: f64,
+    /// The way the drag first went on screen (unit): the size follows the
+    /// pointer's travel along it, signed, so going back past the press
+    /// keeps making it smaller (Romain 24 nov., 11 h 06).
+    pub dir: Option<[f32; 2]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -798,6 +805,8 @@ pub struct AppState {
     /// The move gizmo's axes while a drag lasts (taken when it begins:
     /// the components' own frame turns as they move).
     pub drag_rot: DQuat,
+    /// Y on a vertex alone: the edge its drag slides along (`move_frame`).
+    pub slide_dir: Option<DVec3>,
     /// Moves along their normals (`begin_normals_drag`): the first
     /// component's own normal (the drag follows the gizmo's mean one).
     pub face_drag_first: Option<DVec3>,
@@ -1008,6 +1017,7 @@ impl AppState {
             gizmo: GizmoMode::Move,
             gizmo_readout: None,
             drag_rot: DQuat::IDENTITY,
+            slide_dir: None,
             face_drag_first: None,
             normals_picked: vec![],
             marking: Default::default(),
@@ -4223,7 +4233,7 @@ impl AppState {
                 let n = (self.view().eye.as_dvec3() - pivot).try_normalize()?;
                 BasePlane::new(pivot, n, None).hit(ro, rd)
             }
-            Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick => None,
+            Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick | Handle::Slide(_) => None,
             Handle::Rot(a) => BasePlane::new(pivot, self.gizmo_rot() * DVec3::AXES[a], None).hit(ro, rd),
             Handle::Scale(a) => {
                 let axis = self.scale_frame()? * DVec3::AXES[a];
@@ -4244,6 +4254,16 @@ impl AppState {
     }
 
     pub fn begin_drag(&mut self, h: Handle, p: [f32; 2]) {
+        // a vertex alone with Y: along the edge pressed, as a move on X
+        self.slide_dir = None;
+        let h = match h {
+            Handle::Slide(i) => {
+                let Some(d) = self.slide_dirs().get(i as usize).copied() else { return };
+                self.slide_dir = Some(d);
+                Handle::Axis(0)
+            }
+            h => h,
+        };
         self.drag_rot = self.move_frame();
         if matches!(h, Handle::PushInset | Handle::PushDepth) {
             self.begin_push_drag(h, p);
@@ -4413,7 +4433,7 @@ impl AppState {
                     crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim { t: delta, ..Default::default() }), None);
                 });
             }
-            Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick => {}
+            Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick | Handle::Slide(_) => {}
             Handle::Rot(a) => {
                 // the world's axis (E), the box's own (Y: its frame)
                 let axis = self.gizmo_rot() * DVec3::AXES[a];
@@ -4712,6 +4732,7 @@ impl AppState {
     }
 
     pub fn end_drag(&mut self) {
+        self.slide_dir = None;
         self.snap_shown = None;
         self.gizmo_readout = None;
         if let Some(d) = self.drag.take() {

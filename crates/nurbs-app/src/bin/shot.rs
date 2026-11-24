@@ -2726,6 +2726,65 @@ fn main() {
         h.settle();
         say(&h, "stretched along its Z");
         h.shot("zero-universal-4-stretched");
+
+        // components (Romain 24 nov., 11 h 04): a face along its normal, an
+        // edge's arrows and centre, a vertex alone sliding on its edges
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Block");
+        let tweaks = |h: &Harness| h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| (f.name.clone(), t.delta.to_array().map(|v| (v * 100.0).round() / 100.0)))).collect::<Vec<_>>();
+        let arrow_of = |h: &Harness, dir: DVec3| {
+            let v = h.st.view();
+            let q = h.st.pivot().unwrap();
+            let px = v.pixel_size_at((q.as_vec3() - v.eye).length()) as f64;
+            q + dir * px * 44.0
+        };
+        // a face: its arrow along its normal
+        h.key(egui::Key::Num3);
+        h.click(h.screen_of(Vec3::new(6.0, 20.0, 4.0)));
+        h.key(egui::Key::Y);
+        h.steps(3);
+        h.shot("zero-universal-5-face");
+        let a = arrow_of(&h, DVec3::Y);
+        h.move_to(h.screen_of(a.as_vec3()));
+        h.steps(2);
+        say(&h, "face's normal arrow hovered");
+        h.drag(h.screen_of(a.as_vec3()), h.screen_of((a + DVec3::Y * 6.0).as_vec3()), 12, true);
+        h.settle();
+        eprintln!("  face moved along its normal: {:?}", tweaks(&h));
+        h.shot("zero-universal-6-face-moved");
+        // an edge: along it (its ends' squares and arrows), across (arrows
+        // from the centre), the ring and the cube
+        h.key(egui::Key::Num2);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0 + 6.0, 15.0)));
+        h.steps(3);
+        h.shot("zero-universal-7-edge");
+        let n = h.st.cage().map(|c| c.frame * DVec3::Z).unwrap_or(DVec3::Z);
+        let a = arrow_of(&h, n);
+        h.move_to(h.screen_of(a.as_vec3()));
+        h.steps(2);
+        say(&h, "edge's cross arrow hovered");
+        h.drag(h.screen_of(a.as_vec3()), h.screen_of((a + n * 4.0).as_vec3()), 12, true);
+        h.settle();
+        eprintln!("  edge moved across: {:?}", tweaks(&h));
+        // a vertex alone: an arrow along each of its edges
+        h.key(egui::Key::Num1);
+        h.click(h.screen_of(Vec3::new(20.0, 26.0, -15.0)));
+        h.steps(3);
+        eprintln!("  picked vertices {:?}", h.st.vert_sel);
+        let dirs = h.st.slide_dirs();
+        eprintln!("  vertex alone: {} edges to slide on {:?}", dirs.len(), dirs.iter().map(|d| d.to_array().map(|v| (v * 100.0).round() / 100.0)).collect::<Vec<_>>());
+        h.shot("zero-universal-8-vertex");
+        if let Some(dir) = dirs.iter().copied().max_by(|a, b| (-a.x).partial_cmp(&-b.x).unwrap()) {
+            let a = arrow_of(&h, dir);
+            h.move_to(h.screen_of(a.as_vec3()));
+            h.steps(2);
+            say(&h, "slide arrow hovered");
+            h.drag(h.screen_of(a.as_vec3()), h.screen_of((a + dir * 8.0).as_vec3()), 12, true);
+            h.settle();
+            eprintln!("  vertex slid along its edge: {:?}", tweaks(&h));
+            h.shot("zero-universal-9-vertex-slid");
+        }
     }
 
     if want("side-scale") {
@@ -3587,6 +3646,29 @@ fn main() {
         h.settle();
         eprintln!("  undone: {} features, {} operations of it, {} faces, {} errors, frozen {}", h.st.doc.features.len(), h.st.element_ops(id).len(), faces(&h), errors(&h), h.st.doc.feature(id).map(|f| f.frozen.is_some()).unwrap_or(false));
         h.shot("zero-freeze-4-undone");
+    }
+
+    if want("uni-doc") {
+        // FORME_DOC a saved scene, FORME_PAINT a shape: its whole Object
+        // picked, Y then R: the box round the part as built
+        if let Ok(path) = std::env::var("FORME_DOC") {
+            let d = nurbs_kernel::Doc::from_json(&std::fs::read_to_string(&path).expect("FORME_DOC")).expect("a document");
+            let id: u32 = std::env::var("FORME_PAINT").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+            h.reset(d, "Scene");
+            h.settle();
+            h.key(egui::Key::Escape);
+            let ids = h.st.doc.objects.iter().find(|o| o.members.contains(&id)).map(|o| o.members.clone()).unwrap_or(vec![id]);
+            h.st.selection = ids;
+            h.st.frame_selection();
+            h.settle();
+            h.key(egui::Key::Y);
+            h.steps(3);
+            eprintln!("  cage {:?}", h.st.cage().map(|c| (c.lo, c.hi)));
+            h.shot("zero-uni-doc-1-y");
+            h.key(egui::Key::R);
+            h.steps(3);
+            h.shot("zero-uni-doc-2-r");
+        }
     }
 
     if want("paint") {

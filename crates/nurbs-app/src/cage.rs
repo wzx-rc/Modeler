@@ -86,7 +86,15 @@ impl AppState {
             if fs.is_empty() {
                 return None;
             }
-            (self.scale_frame()?, fs.iter().flat_map(|f| self.seen_corners(f)).collect())
+            // round the part as built (its faces' edges), not the shapes'
+            // boxes: a face moved off its shape (Romain 24 nov., 11 h 04)
+            // left the box beside the part
+            let mesh = self.element_points(&ids);
+            (self.scale_frame()?, if mesh.is_empty() { fs.iter().flat_map(|f| self.seen_corners(f)).collect() } else { mesh })
+        } else if self.gizmo == crate::state::GizmoMode::Universal {
+            // Y: in the components' own frame (their normal), so a face's
+            // box is flat along its normal and its arrow there moves it
+            (self.comp_frame(), self.picked_points().iter().map(|p| p.as_dvec3()).collect())
         } else {
             (DQuat::IDENTITY, self.picked_points().iter().map(|p| p.as_dvec3()).collect())
         };
@@ -96,6 +104,16 @@ impl AppState {
         let back = frame.inverse();
         let (lo, hi) = pts.iter().map(|p| back * *p).fold((DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)), |(lo, hi), q| (lo.min(q), hi.max(q)));
         Some(CageBox { frame, lo, hi })
+    }
+
+    /// The points of the part's edges round the faces of these elements
+    /// (their shapes and operations), as the kernel made them.
+    pub fn element_points(&self, ids: &[FeatureId]) -> Vec<DVec3> {
+        let Some(m) = self.model.as_ref() else { return vec![] };
+        let map = crate::draw::element_map(self, m);
+        let mine: Vec<bool> = m.faces.iter().map(|f| f.tag.map(|t| ids.contains(map.get(&t.feature).unwrap_or(&t.feature))).unwrap_or(false)).collect();
+        let on = |i: i32| i >= 0 && mine.get(i as usize).copied().unwrap_or(false);
+        m.edges.iter().filter(|e| on(e.faces[0]) || on(e.faces[1])).flat_map(|e| e.pts.iter().map(|q| glam::Vec3::from(*q).as_dvec3())).collect()
     }
 
     /// Where a grip goes under the pointer (world), and whether a point of

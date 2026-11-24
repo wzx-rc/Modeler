@@ -1366,11 +1366,21 @@ impl AppState {
     pub fn move_frame(&self) -> DQuat {
         // Y: the box's own frame
         if self.gizmo == crate::state::GizmoMode::Universal {
+            // a vertex alone: along the edge its arrow was pressed on
+            if let Some(d) = self.slide_dir {
+                return frame_along(d);
+            }
             return self.cage().map(|c| c.frame).unwrap_or(DQuat::IDENTITY);
         }
         if !self.transform_on() {
             return DQuat::IDENTITY;
         }
+        self.comp_frame()
+    }
+
+    /// The picked components' own frame: Y along their mean normal, X along
+    /// an edge of the first (T, and Y in a component mode).
+    pub(crate) fn comp_frame(&self) -> DQuat {
         let ns = self.comp_normals();
         let Some(first) = ns.first() else { return DQuat::IDENTITY };
         let n = ns.iter().map(|c| c.1).sum::<DVec3>().try_normalize().unwrap_or(first.1);
@@ -1461,8 +1471,14 @@ impl AppState {
         if self.tool != Tool::Select || self.push.is_some() {
             return None;
         }
-        if let Some(t) = self.selected_tweak().and_then(|f| f.tweak.as_ref()) {
-            return Some(t.at() + t.delta);
+        if let Some(t) = self.selected_tweak().and_then(|f| f.tweak.clone()) {
+            // where its components are now: a face's middle, not the point
+            // it was clicked at (Romain 24 nov., 11 h 04)
+            if t.copy {
+                return Some(t.at() + t.delta);
+            }
+            let cs: Vec<Comp> = t.comps().cloned().collect();
+            return Some(cs.iter().map(|c| self.comp_centre(c, t.delta)).sum::<DVec3>() / cs.len().max(1) as f64);
         }
         // curve points: their middle
         if self.picked_path_points().is_some() {
@@ -1475,7 +1491,37 @@ impl AppState {
                 return None;
             }
         }
-        Tweak::new(comps).map(|t| t.at())
+        if comps.is_empty() {
+            return None;
+        }
+        // the components' middles: a face's centre wherever it was clicked
+        Some(comps.iter().map(|c| self.comp_centre(c, DVec3::ZERO)).sum::<DVec3>() / comps.len() as f64)
+    }
+
+    /// A component's middle (moved by `shift`): a face's area centre on the
+    /// model (else where it was clicked), an edge's middle, a vertex.
+    pub(crate) fn comp_centre(&self, c: &Comp, shift: DVec3) -> DVec3 {
+        match c {
+            Comp::Face(r) => {
+                let r2 = FaceRef { at: r.at + shift, ..r.clone() };
+                let at = r2.at;
+                let Some(m) = self.model.as_ref() else { return at };
+                let Some(f) = self.model_face_of(&r2) else { return at };
+                let (mut sum, mut area) = (DVec3::ZERO, 0.0);
+                for (t, tri) in m.triangles.iter().enumerate() {
+                    if m.tri_face[t] as usize != f {
+                        continue;
+                    }
+                    let [a, b, c] = tri.map(|v| glam::Vec3::from(m.positions[v as usize]).as_dvec3());
+                    let w = (b - a).cross(c - a).length() * 0.5;
+                    sum += (a + b + c) / 3.0 * w;
+                    area += w;
+                }
+                if area > 1e-12 { sum / area } else { at }
+            }
+            Comp::Edge(e) => e.at + shift,
+            Comp::Vertex(v) => *v + shift,
+        }
     }
 
     /// The points a component move carries, before it goes live: the
@@ -1971,7 +2017,7 @@ impl AppState {
                     }
                     self.selection.clear();
                     let px = self.mm_per_point(r.at);
-                    self.round_drag = Some(RoundDrag { what: RoundWhat::Edges, press: p, r0: 0.0, px, chamfer, size: 0.0, chamfer0: chamfer, tension_from: None, tension: 0.0 });
+                    self.round_drag = Some(RoundDrag { what: RoundWhat::Edges, press: p, r0: 0.0, px, chamfer, size: 0.0, chamfer0: chamfer, tension_from: None, tension: 0.0, dir: None });
                     return true;
                 }
                 let Some(h) = self.pick_at(p) else { return false };
@@ -1982,7 +2028,7 @@ impl AppState {
                 let (ro, dir) = self.ray(p);
                 let px = self.mm_per_point(ro + dir * h.t as f64);
                 self.begin_live(rd.label());
-                self.round_drag = Some(RoundDrag { what: RoundWhat::Step(id), press: p, r0: rd.size, px, chamfer: rd.chamfer, size: rd.size, chamfer0: rd.chamfer, tension_from: None, tension: rd.tension });
+                self.round_drag = Some(RoundDrag { what: RoundWhat::Step(id), press: p, r0: rd.size, px, chamfer: rd.chamfer, size: rd.size, chamfer0: rd.chamfer, tension_from: None, tension: rd.tension, dir: None });
                 true
             }
             SelMode::Vertex => {
@@ -1998,7 +2044,7 @@ impl AppState {
                     let px = self.mm_per_point(v);
                     let corners = self.picked_profile_corners();
                     self.begin_live(if chamfer { "Chamfer corner" } else { "Fillet corner" });
-                    self.round_drag = Some(RoundDrag { what: RoundWhat::Corners { corners, id, bis, per, y }, press: p, r0: size, px, chamfer, size, chamfer0: chamfer, tension_from: None, tension: self.corner_tension(id, i) });
+                    self.round_drag = Some(RoundDrag { what: RoundWhat::Corners { corners, id, bis, per, y }, press: p, r0: size, px, chamfer, size, chamfer0: chamfer, tension_from: None, tension: self.corner_tension(id, i), dir: None });
                     return true;
                 }
                 let es = self.vertex_edges(v);
@@ -2008,7 +2054,7 @@ impl AppState {
                     self.hover_vertex = None;
                     self.selection.clear();
                     let px = self.mm_per_point(v);
-                    self.round_drag = Some(RoundDrag { what: RoundWhat::Edges, press: p, r0: 0.0, px, chamfer, size: 0.0, chamfer0: chamfer, tension_from: None, tension: 0.0 });
+                    self.round_drag = Some(RoundDrag { what: RoundWhat::Edges, press: p, r0: 0.0, px, chamfer, size: 0.0, chamfer0: chamfer, tension_from: None, tension: 0.0, dir: None });
                     return true;
                 }
                 false
@@ -2035,6 +2081,7 @@ impl AppState {
                 g.tension_from = None;
                 g.press = at;
                 g.r0 = g.size;
+                g.dir = None;
             }
             _ => {}
         }
@@ -2052,9 +2099,19 @@ impl AppState {
             self.set_drag_tension(&g, t);
             return;
         }
+        // the way the drag first goes (past a few points) is the way that
+        // grows it; back past the press it keeps shrinking, never grows again
+        let (dx, dy) = (at[0] - g.press[0], at[1] - g.press[1]);
+        if g.dir.is_none() && dx.hypot(dy) > 4.0 {
+            let l = dx.hypot(dy);
+            g.dir = Some([dx / l, dy / l]);
+        }
+        let dist = match g.dir {
+            Some(d) => (dx * d[0] + dy * d[1]) as f64,
+            None => 0.0,
+        };
         self.round_drag = Some(g.clone());
-        let dist = (at[0] - g.press[0]).hypot(at[1] - g.press[1]) as f64;
-        let mut size = g.r0 + dist * g.px;
+        let mut size = (g.r0 + dist * g.px).max(0.0);
         // a corner's dot follows the pointer along its bisector (from where
         // the press was, so the size does not jump)
         if let RoundWhat::Corners { id, bis, per, y, .. } = &g.what {
@@ -2076,7 +2133,8 @@ impl AppState {
                     }
                 }
             }
-            RoundWhat::Step(_) => self.set_round(size, g.chamfer, false),
+            // a fillet made already never goes down to nothing
+            RoundWhat::Step(_) => self.set_round(size.max(0.01), g.chamfer, false),
             RoundWhat::Corners { ref corners, id, y, .. } => {
                 let v = if g.chamfer { -size } else { size };
                 self.live(|d| {
@@ -2307,4 +2365,50 @@ impl AppState {
 fn editable(f: &mut nurbs_kernel::Feature) -> Option<&mut nurbs_kernel::Profile> {
     f.curve = None;
     f.profile.as_mut()
+}
+
+/// A frame whose X runs along `d` (its Y as near the world's Y as it goes).
+pub(crate) fn frame_along(d: DVec3) -> DQuat {
+    let x = d.try_normalize().unwrap_or(DVec3::X);
+    let up = if x.y.abs() > 0.95 { DVec3::Z } else { DVec3::Y };
+    let z = x.cross(up).normalize();
+    let y = z.cross(x);
+    DQuat::from_mat3(&glam::DMat3::from_cols(x, y, z)).normalize()
+}
+
+impl AppState {
+    /// One vertex picked and nothing else (no move step selected): scaling
+    /// it does nothing, so it has no scale handle.
+    pub fn lone_vertex(&self) -> bool {
+        self.sel_mode == SelMode::Vertex && self.vert_sel.len() == 1 && self.face_sel.is_empty() && self.edge_sel.is_empty() && self.selected_tweak().is_none() && self.picked_path_points().is_none()
+    }
+
+    /// Y on a vertex picked alone (Romain 24 nov., 11 h 04: "en mode vertex
+    /// seul, fait un slide sur les edge"): the edges leaving it, each its
+    /// way out from the vertex (at its first sample).
+    pub fn slide_dirs(&self) -> Vec<DVec3> {
+        if self.gizmo != crate::state::GizmoMode::Universal || !self.lone_vertex() {
+            return vec![];
+        }
+        let Some(m) = self.model.as_ref() else { return vec![] };
+        let v = self.vert_sel[0];
+        let d3 = |q: &[f32; 3]| Vec3::from(*q).as_dvec3();
+        let mut out: Vec<DVec3> = vec![];
+        for e in m.edges.iter().filter(|e| !e.seam && e.pts.len() > 1) {
+            let (a, b) = (d3(&e.pts[0]), d3(e.pts.last().unwrap()));
+            let tol = 1e-3 * (1.0 + v.length() * 1e-3);
+            let d = if a.distance(v) < tol {
+                d3(&e.pts[1]) - a
+            } else if b.distance(v) < tol {
+                d3(&e.pts[e.pts.len() - 2]) - b
+            } else {
+                continue;
+            };
+            let Some(d) = d.try_normalize() else { continue };
+            if !out.iter().any(|o| o.dot(d) > 0.999) {
+                out.push(d);
+            }
+        }
+        out
+    }
 }

@@ -264,6 +264,9 @@ fn scale_at(st: &AppState, p: Pos2) -> Option<Handle> {
     // axis cubes are gone (Romain 24 nov., 9 h 25: "enlève le gizmo
     // classique au centre et laisse le cube blanc"): the side squares
     // scale along one axis
+    if st.lone_vertex() {
+        return None;
+    }
     let (c, _) = scale_points(st)?;
     ((p - c).length() < 10.0).then_some(Handle::ScaleAll)
 }
@@ -274,6 +277,8 @@ fn scale_at(st: &AppState, p: Pos2) -> Option<Handle> {
 struct UniBox {
     arrows: Vec<(Pos2, Pos2, usize)>,
     arcs: Vec<(Vec<Pos2>, usize)>,
+    /// A vertex alone: an arrow along each edge leaving it (`Handle::Slide`).
+    slides: Vec<(Pos2, Pos2, u8)>,
     centre: Pos2,
 }
 
@@ -289,6 +294,31 @@ fn universal(st: &AppState) -> Option<UniBox> {
         let out = c.axis(a) * s[a] as f64;
         if let (Some(b), Some(t)) = (world(st, q + out * px(q) * 10.0), world(st, q + out * px(q) * 42.0)) {
             arrows.push((b, t, a));
+        }
+    }
+    // in a component mode, an axis the box has no size along (a face's
+    // normal, across an edge) gets its arrow out of the centre: a face
+    // moves along its normal (Romain 24 nov., 11 h 04)
+    let size = c.hi - c.lo;
+    let alone = st.sel_mode == SelMode::Vertex && size.max_element() < 1e-6;
+    if st.sel_mode != SelMode::Object && !alone {
+        let q = st.pivot().unwrap_or(c.point([0, 0, 0]));
+        for a in 0..3 {
+            if size[a] < 1e-6 {
+                let out = c.axis(a);
+                if let (Some(b), Some(t)) = (world(st, q + out * px(q) * 24.0), world(st, q + out * px(q) * 60.0)) {
+                    arrows.push((b, t, a));
+                }
+            }
+        }
+    }
+    let mut slides = vec![];
+    if alone {
+        let q = st.pivot().unwrap_or(c.point([0, 0, 0]));
+        for (i, d) in st.slide_dirs().into_iter().enumerate() {
+            if let (Some(b), Some(t)) = (world(st, q + d * px(q) * 24.0), world(st, q + d * px(q) * 60.0)) {
+                slides.push((b, t, i as u8));
+            }
         }
     }
     let mut arcs = vec![];
@@ -308,7 +338,7 @@ fn universal(st: &AppState) -> Option<UniBox> {
             arcs.push((pts, a));
         }
     }
-    Some(UniBox { arrows, arcs, centre })
+    Some(UniBox { arrows, arcs, slides, centre })
 }
 
 fn universal_at(st: &AppState, p: Pos2) -> Option<Handle> {
@@ -330,6 +360,9 @@ fn universal_at(st: &AppState, p: Pos2) -> Option<Handle> {
         for w in pts.windows(2) {
             take(dist_seg(p, w[0], w[1]), Handle::Rot(*a));
         }
+    }
+    for (b, t, i) in &u.slides {
+        take(dist_seg(p, *b, *t + (*t - *b).normalized() * 6.0), Handle::Slide(*i));
     }
     // the ring round the centre: on all three axes, facing the eye
     take(((p - u.centre).length() - 20.0).abs() + 1.0, Handle::Free);
@@ -355,6 +388,18 @@ fn draw_universal(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
             arrow(p, *b, *t, if on(h) { HOT } else { colors[*a] }, if on(h) { 2.8 } else { 2.0 });
         }
     }
+    let sliding = st.slide_dir.filter(|_| dragging == Some(Handle::Axis(0)));
+    for (b, t, i) in &u.slides {
+        let h = Handle::Slide(*i);
+        // while one slides only its own stays (the vertex's edges may
+        // have moved with it: the nearest way)
+        let mine = sliding.map(|d| st.slide_dirs().get(*i as usize).map(|e| e.dot(d) > 0.99).unwrap_or(false));
+        if !(shown(h) || mine == Some(true)) {
+            continue;
+        }
+        let lit = on(h) || mine == Some(true);
+        arrow(p, *b, *t, if lit { HOT } else { Color32::from_rgb(0xF2, 0xC9, 0x4C) }, if lit { 2.8 } else { 2.0 });
+    }
     for (pts, a) in &u.arcs {
         let h = Handle::Rot(*a);
         if shown(h) && pts.len() > 1 {
@@ -375,7 +420,7 @@ fn draw_universal(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
         let col = if on(h) { HOT } else { colors[a] };
         p.rect(Rect::from_center_size(q, vec2(11.0, 11.0)), 1.5, tint(col, if on(h) { 0.55 } else { 0.25 }), Stroke::new(1.4, col), egui::StrokeKind::Middle);
     }
-    if shown(Handle::ScaleAll) {
+    if shown(Handle::ScaleAll) && !st.lone_vertex() {
         let all = on(Handle::ScaleAll);
         p.rect(Rect::from_center_size(u.centre, vec2(14.0, 14.0)), 3.0, if all { tint(HOT, 0.5) } else { tint(Color32::WHITE, 0.25) }, Stroke::new(1.5, if all { HOT } else { Color32::WHITE }), egui::StrokeKind::Middle);
     }
@@ -1199,7 +1244,9 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
             }
         }
         let on = hot == Some(Handle::ScaleAll);
-        p.rect(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, if on { tint(HOT, 0.5) } else { tint(Color32::WHITE, 0.25) }, Stroke::new(1.5, if on { HOT } else { Color32::WHITE }), egui::StrokeKind::Middle);
+        if !st.lone_vertex() {
+            p.rect(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, if on { tint(HOT, 0.5) } else { tint(Color32::WHITE, 0.25) }, Stroke::new(1.5, if on { HOT } else { Color32::WHITE }), egui::StrokeKind::Middle);
+        }
     }
     p.circle(c, 2.25, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
     if let Some(t) = &st.gizmo_readout {

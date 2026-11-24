@@ -2379,6 +2379,10 @@ fn op_subject(st: &AppState, k: OpPop) -> String {
 
 /// The operation window's width (its content; the card adds its margins).
 const OP_W: f32 = 288.0;
+/// The docked operation strip: each column's width and the strip's height
+/// (its groups flow from column to column).
+const OP_COL: f32 = 250.0;
+const OP_DOCK_H: f32 = 150.0;
 
 /// Where the operation window goes for a new subject: at the component's
 /// height, beside the part so it covers neither the part nor the gizmo. The
@@ -2387,6 +2391,7 @@ const OP_W: f32 = 288.0;
 /// above, the view's sides) the one that covers least of it, of the
 /// component and of the help box, then the nearest the component. A tool's
 /// options go at the view's top right.
+#[allow(dead_code)]
 fn op_place(ctx: &egui::Context, st: &AppState, k: OpPop, anchor: Rect, h: f32) -> egui::Pos2 {
     let full = OP_W + 26.0;
     let vr = st.view_rect;
@@ -2487,47 +2492,31 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
         return;
     }
     let key = Id::new("op-pop-subject");
-    let base_key = Id::new("op-pop-base");
     let shown = op_pop(st).and_then(|k| op_anchor(st, k).map(|a| (k, a)));
     let Some((k, anchor)) = shown else {
         // hidden: the next subject takes a place of its own, even the same one
         ctx.data_mut(|d| d.remove::<String>(key));
         return;
     };
-    let subject = op_subject(st, k);
-    let h = ctx.memory(|m| m.area_rect(Id::new("op-pop"))).map(|r| r.height()).unwrap_or(200.0);
-    let known = ctx.data(|d| d.get_temp::<String>(key));
-    let kept = ctx.data(|d| d.get_temp::<egui::Pos2>(base_key));
-    // the window's own controls changed its subject (a fillet made from the
-    // picked edges, a curve picked in a boolean's list): it stays where it is
-    let over = ctx.input(|i| i.pointer.latest_pos()).zip(ctx.memory(|m| m.area_rect(Id::new("op-pop")))).map(|(p, r)| r.expand(6.0).contains(p)).unwrap_or(false);
-    let base = match kept {
-        Some(b) if known.as_deref() == Some(subject.as_str()) => b,
-        Some(b) if known.is_some() && over => {
-            ctx.data_mut(|d| d.insert_temp(key, subject));
-            b
-        }
-        _ => {
-            let at = op_place(ctx, st, k, anchor, h);
-            ctx.data_mut(|d| {
-                d.insert_temp(key, subject);
-                d.insert_temp(base_key, at);
-                d.insert_persisted(Id::new(("panel-offset", "op-pop")), egui::Vec2::ZERO);
-            });
-            at
-        }
-    };
-    // kept inside the view as it grows or the window is resized
+    // docked (Romain 24 nov., 11 h 04: "elle à pa été mise en haut en
+    // fixe"): a strip under the top bar (and the Mirror bar when it is
+    // open), centred on the top bar, its groups in columns
+    let _ = (anchor, op_subject(st, k));
+    let screen = ctx.content_rect();
+    let mut top = screen.min.y + EDGE + ISLAND_H + 6.0;
+    if st.settings.mirror_bar {
+        top += ISLAND_H + 6.0;
+    }
+    let cx = ctx.memory(|m| m.area_rect(Id::new("isl-modes"))).map(|r| r.center().x).unwrap_or(screen.center().x);
+    let w = ctx.memory(|m| m.area_rect(Id::new("op-pop"))).map(|r| r.width()).unwrap_or(OP_W);
     let vr = st.view_rect;
-    let full = OP_W + 26.0;
-    let (left, right, top, bottom) = (vr[0] + 8.0, vr[2] - 8.0, vr[1] + 48.0, vr[3] - 8.0);
-    let at = base + panel_offset(ctx, "op-pop");
-    let at = pos2(at.x.clamp(left, (right - full).max(left)), at.y.clamp(top, (bottom - h).max(top)));
+    let (left, right) = (vr[0] + 8.0, vr[2] - 8.0);
+    let at = pos2((cx - w * 0.5).clamp(left, (right - w).max(left)), top);
     set_op_style(ctx, true);
-    egui::Area::new(Id::new("op-pop")).order(Order::Foreground).fixed_pos(at).show(ctx, |ui| {
-        op_island().show(ui, |ui| {
-            ui.set_width(OP_W);
-            grip(ui, "op-pop");
+    egui::Area::new(Id::new("op-pop")).order(Order::Foreground).fade_in(false).fixed_pos(at).show(ctx, |ui| {
+        op_island().inner_margin(Margin { left: 12, right: 12, top: 8, bottom: 8 }).show(ui, |ui| {
+            let layout = egui::Layout::top_down(egui::Align::Min).with_main_wrap(true);
+            ui.allocate_ui_with_layout(vec2(OP_COL, OP_DOCK_H), layout, |ui| {
             match k {
                 OpPop::Edges => round_card(ui, st),
                 OpPop::Faces => face_card(ui, st),
@@ -2588,6 +2577,7 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     mirror_side_row(ui, st, &f);
                 }
             }
+            });
         });
     });
     set_op_style(ctx, false);
