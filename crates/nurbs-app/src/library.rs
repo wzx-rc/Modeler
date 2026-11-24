@@ -149,6 +149,25 @@ pub struct Placing {
     pub spot: Option<Spot>,
     /// Placed since it was armed.
     pub placed: usize,
+    /// Its size (1: as saved); Shift held and the pointer moved scales it.
+    pub scale: f64,
+    /// Ctrl or Shift held (Romain 24 nov., 9 h 36: "CTRL maintenu : free
+    /// rotate, SHIFT maintenu : free scale"): the spot stays where it was,
+    /// the pointer turns it round its normal or scales it.
+    pub hold: Option<PlaceHold>,
+    /// The copies just placed, drawn until the kernel's model has them
+    /// (the click showed nothing for a moment): the document version, the
+    /// sample, its frame.
+    pub ghosts: Vec<(u64, usize, DMat4)>,
+}
+
+/// Where Ctrl / Shift began to be held while placing.
+#[derive(Clone, Copy, Debug)]
+pub struct PlaceHold {
+    pub spot: Spot,
+    pub start: [f32; 2],
+    pub angle0: f64,
+    pub scale0: f64,
 }
 
 impl AppState {
@@ -288,7 +307,7 @@ impl AppState {
         }
         self.abort_gestures();
         self.tool = Tool::Place;
-        self.place = Some(Placing { sample: i, angle: 0.0, spot: None, placed: 0 });
+        self.place = Some(Placing { sample: i, angle: 0.0, spot: None, placed: 0, scale: 1.0, hold: None, ghosts: vec![] });
     }
 
     /// Where the sample would go for the pointer at `p`.
@@ -329,10 +348,61 @@ impl AppState {
         g.hit(ro, rd).map(|q| Spot { p: q, n: DVec3::Y, x: turn(DVec3::Y), host: None, snapped: None })
     }
 
-    /// The pointer moved with the place tool.
-    pub fn place_hover(&mut self, p: Option<[f32; 2]>) {
+    /// The pointer moved with the place tool; Ctrl held turns the sample
+    /// round its normal where it is, Shift held scales it there.
+    pub fn place_hover(&mut self, p: Option<[f32; 2]>, ctrl: bool, shift: bool) {
+        let version = self.model.as_ref().map(|m| m.serial / 4).unwrap_or(0);
+        let fine = self.model.as_ref().is_some_and(|m| m.fine);
+        if let Some(pl) = self.place.as_mut() {
+            // a ghost goes once the kernel's fine model holds its copy
+            pl.ghosts.retain(|g| !(fine && version >= g.0));
+        }
+        let Some(pl) = self.place.clone() else { return };
+        if (ctrl || shift) && p.is_some() {
+            let p = p.unwrap();
+            let hold = match pl.hold {
+                Some(h) => h,
+                None => {
+                    let Some(spot) = pl.spot.or_else(|| self.place_spot(p)) else { return };
+                    PlaceHold { spot, start: p, angle0: pl.angle, scale0: pl.scale }
+                }
+            };
+            let v = self.view();
+            let Some(c) = v.project(hold.spot.p.as_vec3()) else { return };
+            let (a, b) = ([hold.start[0] - c[0], hold.start[1] - c[1]], [p[0] - c[0], p[1] - c[1]]);
+            let (mut angle, mut scale) = (pl.angle, pl.scale);
+            if ctrl {
+                // the angle the pointer went round the spot (on screen: the
+                // normal facing the eye turns as the pointer does)
+                let d = (b[1].atan2(b[0]) - a[1].atan2(a[0])) as f64;
+                let facing = if hold.spot.n.dot(v.eye.as_dvec3() - hold.spot.p) >= 0.0 { -1.0 } else { 1.0 };
+                angle = (hold.angle0 + d.to_degrees() * facing).rem_euclid(360.0);
+            }
+            if shift {
+                let (la, lb) = ((a[0] * a[0] + a[1] * a[1]).sqrt().max(6.0), (b[0] * b[0] + b[1] * b[1]).sqrt());
+                scale = (hold.scale0 * (lb / la) as f64).clamp(0.05, 20.0);
+                if self.settings.snap {
+                    scale = (scale * 20.0).round() / 20.0;
+                }
+            }
+            let mut spot = hold.spot;
+            let turn = DQuat::from_axis_angle(spot.n, (angle - hold.angle0).to_radians());
+            spot.x = turn * hold.spot.x;
+            if let Some(pl) = self.place.as_mut() {
+                pl.hold = Some(hold);
+                pl.angle = angle;
+                pl.scale = scale;
+                pl.spot = Some(spot);
+            }
+            let deg = (angle + 180.0).rem_euclid(360.0) - 180.0;
+            self.gizmo_readout = Some(format!("{deg:.0}° · ×{scale:.2}"));
+            return;
+        }
         let spot = p.and_then(|p| self.place_spot(p));
         if let Some(pl) = self.place.as_mut() {
+            if pl.hold.take().is_some() {
+                self.gizmo_readout = None;
+            }
             pl.spot = spot;
         }
     }
@@ -348,7 +418,9 @@ impl AppState {
     /// step), in the Object of the face under it; the tool stays for the
     /// next one.
     pub fn place_click(&mut self, p: [f32; 2]) -> Vec<FeatureId> {
-        let Some(spot) = self.place_spot(p) else { return vec![] };
+        // Ctrl / Shift held: where the sample is held, as it shows
+        let held = self.place.as_ref().filter(|pl| pl.hold.is_some()).and_then(|pl| pl.spot);
+        let Some(spot) = held.or_else(|| self.place_spot(p)) else { return vec![] };
         self.place_at(spot)
     }
 
@@ -357,7 +429,16 @@ impl AppState {
     pub fn place_at(&mut self, spot: Spot) -> Vec<FeatureId> {
         let Some(pl) = self.place.clone() else { return vec![] };
         let Some(s) = self.library.samples.get(pl.sample).cloned() else { return vec![] };
-        let m = spot.matrix();
+        let k = pl.scale;
+        // the same sample again exactly where the last one went: refused
+        // (one inside the other loses its fillets)
+        let m0 = spot.matrix() * DMat4::from_scale(DVec3::splat(k));
+        if pl.ghosts.last().is_some_and(|(_, i, m)| *i == pl.sample && m.abs_diff_eq(m0, 1e-6)) || self.last_place.is_some_and(|(i, m)| i == pl.sample && m.abs_diff_eq(m0, 1e-6)) {
+            self.toast(&format!("A {} is there already", s.name), false);
+            return vec![];
+        }
+        self.last_place = Some((pl.sample, m0));
+        let m = spot.matrix() * DMat4::from_scale(DVec3::splat(k));
         let host_obj = spot.host.and_then(FaceTag::unpack).map(|t| self.element_of(t.feature)).and_then(|el| self.doc.object_of(el));
         let mut new_shapes: Vec<FeatureId> = vec![];
         let host = spot.host;
@@ -369,7 +450,27 @@ impl AppState {
                 d.next_id += 1;
             }
             for f in &s.features {
-                let mut g = if f.is_solid() { f.moved_by(m) } else { f.carried_by(&|q| m.transform_point3(q)) };
+                // its size first (in its own frame), then into the spot's
+                let mut g = if f.is_solid() {
+                    let f = if (k - 1.0).abs() > 1e-9 {
+                        let mut g = crate::state::scaled(f, DVec3::ZERO, DQuat::IDENTITY, DVec3::splat(k));
+                        g.origin = f.origin * k;
+                        g
+                    } else {
+                        f.clone()
+                    };
+                    f.moved_by(spot.matrix())
+                } else {
+                    let mut g = f.carried_by(&|q| m.transform_point3(q));
+                    if let Some(r) = g.round.as_mut() {
+                        r.size *= k;
+                    }
+                    if let Some(p) = g.push.as_mut() {
+                        p.inset *= k;
+                        p.depth *= k;
+                    }
+                    g
+                };
                 // its own features first (the face it is put on may carry an
                 // id the sample used too)
                 crate::state::retag(&mut g, &map);
@@ -413,8 +514,10 @@ impl AppState {
                 }
             }
         });
+        let version = self.version;
         if let Some(pl) = self.place.as_mut() {
             pl.placed += 1;
+            pl.ghosts.push((version, pl.sample, m));
         }
         if dropped > 0 {
             self.toast(&format!("{dropped} operation(s) of “{}” named the face it sat on: left out on the ground", s.name), false);
@@ -427,10 +530,24 @@ impl AppState {
         let pl = self.place.as_ref()?;
         let spot = pl.spot?;
         let s = self.library.samples.get(pl.sample)?;
-        let m = spot.matrix().as_mat4();
+        let m = (spot.matrix() * DMat4::from_scale(DVec3::splat(pl.scale))).as_mat4();
         let t = |p: &[f32; 3]| m.transform_point3(Vec3::from_array(*p));
         let tris = s.tris.iter().map(|q| [t(&q[0]), t(&q[1]), t(&q[2])]).collect();
         let edges = s.edges.iter().map(|e| e.iter().map(t).collect()).collect();
         Some((tris, edges, spot))
+    }
+
+    /// The copies just placed that the kernel has not shown yet.
+    pub fn place_ghosts(&self) -> Vec<(Vec<[Vec3; 3]>, Vec<Vec<Vec3>>)> {
+        let Some(pl) = self.place.as_ref() else { return vec![] };
+        pl.ghosts
+            .iter()
+            .filter_map(|(_, i, m)| {
+                let s = self.library.samples.get(*i)?;
+                let m = m.as_mat4();
+                let t = |p: &[f32; 3]| m.transform_point3(Vec3::from_array(*p));
+                Some((s.tris.iter().map(|q| [t(&q[0]), t(&q[1]), t(&q[2])]).collect(), s.edges.iter().map(|e| e.iter().map(t).collect()).collect()))
+            })
+            .collect()
     }
 }

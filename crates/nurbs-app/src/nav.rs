@@ -48,7 +48,7 @@ pub struct AxisDot {
 /// The six axis dots round the ball's centre `c`, the farthest first.
 pub fn axis_dots(st: &AppState, c: Pos2) -> Vec<AxisDot> {
     let (fwd, right, up) = st.view().basis();
-    let l = BALL * 0.5 - DOT - 3.0;
+    let l = BALL * 0.5 - 8.0;
     let mut v = Vec::with_capacity(6);
     for axis in 0..3 {
         for sign in [1.0f32, -1.0] {
@@ -90,14 +90,7 @@ pub fn look_along(st: &mut AppState, axis: usize, sign: f32) {
     st.fly_to(c);
 }
 
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
-    let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
-}
 
-fn axis_color(a: usize) -> Color32 {
-    [AXIS_X, AXIS_Y, AXIS_Z][a]
-}
 
 pub fn show(ctx: &egui::Context, st: &mut AppState) {
     if !st.settings.nav {
@@ -179,55 +172,85 @@ fn ball(ui: &mut Ui, st: &mut AppState) -> Rect {
             look_along(st, d.axis, d.sign);
         }
     }
-    let p = ui.painter();
     let live = resp.hovered() || resp.dragged();
-    let bg = if live { RAISED() } else { WELL() };
-    // a sphere (Romain 24 nov., 6 h 18: "une sphère en white line et
-    // semi-opaque remplissage"): filled half see-through, its outline a
-    // white line, the world's three great circles drawn on it (their far
-    // halves fainter), so it turns with the view
-    let rad = BALL * 0.5 - 1.0;
+    sphere(ui, st, r, hot, live);
+    resp.on_hover_text("Drag: turn the view · Tap an axis: look along it (again: from the other side) · In the view: Alt + drag (or the pen's button held) turns it too, with Shift pans, with Ctrl zooms");
+    r
+}
+
+/// The view sphere: its great circles and the six sides' names (FRONT +Z,
+/// RIGHT +X, TOP +Y…) written on its surface, bent with it (Romain 24 nov.,
+/// 9 h 23, after a wireframe brick with its sides named); a tap on a name
+/// looks along that axis.
+fn sphere(ui: &Ui, st: &AppState, r: Rect, hot: Option<AxisDot>, live: bool) {
+    let p = ui.painter();
+    let c = r.center();
     let line = pick(Color32::WHITE, TEXT());
-    p.circle_filled(c, rad, bg.gamma_multiply(if live { 0.75 } else { 0.55 }));
+    // the sphere as before (24 nov., 6 h 18: "une sphère en white line et
+    // semi-opaque remplissage"; 9 h 25: "La sphère actuelle est bien, il
+    // faut juste enlever les axes de couleurs"): filled half see-through,
+    // its outline a white line, the world's three great circles on it
+    // (their far halves fainter); the colour axes gone, the sides' names
+    // written on its surface in their place (the tap targets)
+    let bg = if live { RAISED() } else { WELL() };
+    let rad = BALL * 0.5 - 1.0;
     let (fwd, right, up) = st.view().basis();
+    let at = |q: Vec3| c + vec2(q.dot(right), -q.dot(up)) * rad;
+    let near = |q: Vec3| -q.dot(fwd);
+    p.circle_filled(c, rad, bg.gamma_multiply(if live { 0.75 } else { 0.55 }));
     for axis in 0..3 {
         let (u, v) = (Vec3::AXES[(axis + 1) % 3], Vec3::AXES[(axis + 2) % 3]);
         let n = 48;
         let pt = |k: usize| {
             let t = k as f32 / n as f32 * std::f32::consts::TAU;
-            let q = u * t.cos() + v * t.sin();
-            (c + vec2(q.dot(right), -q.dot(up)) * rad, -q.dot(fwd))
+            u * t.cos() + v * t.sin()
         };
         for k in 0..n {
-            let ((a, da), (b, db)) = (pt(k), pt(k + 1));
-            let near = (da + db) * 0.5 > 0.0;
-            p.line_segment([a, b], Stroke::new(1.0, line.gamma_multiply(if near { 0.32 } else { 0.1 })));
+            let (a, b) = (pt(k), pt(k + 1));
+            let front = (near(a) + near(b)) * 0.5 > 0.0;
+            p.line_segment([at(a), at(b)], Stroke::new(1.0, line.gamma_multiply(if front { 0.32 } else { 0.1 })));
         }
     }
     p.circle_stroke(c, rad, Stroke::new(1.4, line.gamma_multiply(if live { 0.95 } else { 0.8 })));
-    // the axes again (the view may have turned above)
-    let dots = axis_dots(st, c);
-    for d in &dots {
-        // the far ones sink into the ball
-        let t = 0.5 + 0.5 * (d.depth + 1.0) * 0.5;
-        let col = mix(bg, axis_color(d.axis), t);
-        let on = hot.is_some_and(|h| h.axis == d.axis && h.sign == d.sign);
-        if d.sign > 0.0 {
-            p.line_segment([c, d.at], Stroke::new(2.0, col));
-            p.circle_filled(d.at, DOT, col);
-            p.text(d.at, Align2::CENTER_CENTER, ["X", "Y", "Z"][d.axis], semibold(10.5), Color32::from_rgb(0x16, 0x18, 0x1C));
-        } else {
-            p.circle(d.at, DOT - 1.5, mix(bg, axis_color(d.axis), t * 0.3), Stroke::new(1.3, col));
-            if on {
-                p.text(d.at, Align2::CENTER_CENTER, ["−X", "−Y", "−Z"][d.axis], semibold(9.0), TEXT());
-            }
+    // the names on the surface
+    let names = [(0, 1.0, "RIGHT"), (0, -1.0, "LEFT"), (1, 1.0, "TOP"), (1, -1.0, "BOTTOM"), (2, 1.0, "FRONT"), (2, -1.0, "BACK")];
+    let ppp = ui.ctx().pixels_per_point();
+    let tex = ui.ctx().fonts(|f| f.font_image_size());
+    for (axis, sign, name) in names {
+        let a = Vec3::AXES[axis] * sign;
+        let facing = near(a);
+        if facing < 0.05 {
+            continue;
         }
+        // its writing directions on the surface: along (left to right as
+        // read from outside) and up
+        let (t1, t2) = match axis {
+            1 => (Vec3::X, Vec3::Z * -sign),
+            _ => (Vec3::Y.cross(a), Vec3::Y),
+        };
+        let on = hot.is_some_and(|h| h.axis == axis && h.sign == sign);
+        let col = if on { accent() } else { line };
+        let alpha = ((facing - 0.05) / 0.35).clamp(0.0, 1.0) * if on { 1.0 } else { 0.85 };
+        let mut job = egui::text::LayoutJob::default();
+        job.append(name, 0.0, egui::TextFormat { font_id: medium(7.5), color: col, extra_letter_spacing: 0.8, ..Default::default() });
+        let galley = p.layout_job(job);
+        let size = galley.size();
+        let shape = egui::epaint::TextShape::new(pos2(-size.x * 0.5, -size.y * 0.5), galley, col);
+        let mut mesh = egui::epaint::Mesh::default();
+        egui::epaint::Tessellator::new(ppp, Default::default(), tex, vec![]).tessellate_text(&shape, &mut mesh);
+        // bent onto the sphere: x along t1, y down t2, by arc length
+        let k = 0.92;
+        for v in &mut mesh.vertices {
+            let (u, w) = (v.pos.x / (rad * k), -v.pos.y / (rad * k));
+            let q = (a * u.cos() * w.cos() + t1 * u.sin() * w.cos() + t2 * w.sin()).normalize();
+            v.pos = at(q);
+            v.color = v.color.gamma_multiply(alpha);
+        }
+        p.add(egui::Shape::mesh(mesh));
         if on {
-            p.circle_stroke(d.at, DOT + 1.5, Stroke::new(1.5, TEXT()));
+            p.circle_stroke(at(a), 13.0, Stroke::new(1.0, accent().gamma_multiply(0.6)));
         }
     }
-    resp.on_hover_text("Drag: turn the view · Tap an axis: look along it (again: from the other side) · In the view: Alt + drag (or the pen's button held) turns it too, with Shift pans, with Ctrl zooms");
-    r
 }
 
 /// A round grip dragged with the tip: lit while hovered, in the accent

@@ -13,6 +13,7 @@ impl AppState {
     /// The element whose history the strip shows: the selected one (for
     /// an operation, its element), else the one of the first picked face
     /// or edge. None: the scene.
+    #[allow(dead_code)]
     pub fn history_element(&self) -> Option<FeatureId> {
         if let Some(f) = self.single() {
             let id = self.element_of(f.id);

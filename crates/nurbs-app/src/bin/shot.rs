@@ -133,7 +133,7 @@ impl Harness {
     fn step(&mut self) {
         self.t += 1.0 / 60.0;
         // the Settings' Interface size, as main.rs applies it
-        let want = self.st.settings.ui_scale.clamp(0.7, 1.6);
+        let want = self.st.settings.ui_scale.clamp(0.35, 1.75);
         if (self.ctx.zoom_factor() - want).abs() > 1e-4 {
             self.ctx.set_zoom_factor(want);
         }
@@ -2140,30 +2140,16 @@ fn main() {
         h.steps(3);
         eprintln!("  settings open: {}", h.st.settings_open);
         h.shot("zero-settings-1-window");
-        // the Interface size dragged as a hand would (the pointer's place on
-        // the screen moves in pixels; the window keeps its size meanwhile)
-        if let Some(band) = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("ui-scale-band"))) {
-            let z0 = h.ctx.zoom_factor();
-            let w = band.width();
-            // the knob: 100 % of 70 to 160 along the track
-            let p0 = Pos2::new(band.left() + w * (100.0 - 70.0) / 90.0, band.bottom() - 5.0);
-            let px0 = p0.to_vec2() * z0;
-            h.press(p0, true);
-            for i in 1..=12 {
-                let px = px0 + egui::vec2(w * z0 * 0.4 * i as f32 / 12.0, 0.0);
-                // the zoom the next frame takes (the harness sets it first)
-                let z = h.st.settings.ui_scale.clamp(0.7, 1.6);
-                h.move_to((px / z).to_pos2());
-                if i == 6 {
-                    h.shot("zero-settings-2a-dragging");
-                }
-                eprintln!("  drag {i}: {:.0} %, window at {:?}", h.st.settings.ui_scale * 100.0, h.ctx.memory(|m| m.area_rect(egui::Id::new("settings-pop"))).map(|r| r.min));
+        // the Interface size: its buttons clicked (Romain 24 nov., 8 h 37)
+        for pct in [75u32, 125, 100] {
+            if let Some(r) = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(("ui-scale-btn", pct)))) {
+                h.click(r.center());
+                h.steps(4);
+                eprintln!("  clicked {pct} %: {:.0} %", h.st.settings.ui_scale * 100.0);
+                h.shot(&format!("zero-settings-2-size-{pct}"));
+            } else {
+                eprintln!("  no {pct} % button");
             }
-            let z = h.st.settings.ui_scale.clamp(0.7, 1.6);
-            h.press(((px0 + egui::vec2(w * z0 * 0.4, 0.0)) / z).to_pos2(), false);
-            h.steps(4);
-            eprintln!("  let go: {:.0} %", h.st.settings.ui_scale * 100.0);
-            h.shot("zero-settings-2b-let-go");
         }
         h.st.settings.light = true;
         h.st.settings.ui_scale = 1.25;
@@ -2638,13 +2624,12 @@ fn main() {
         // The move along the picked components' normals (Maya's Axis
         // Orientation Normal; Romain 23 nov., 22 h 05: "un transformTool
         // comme dans Maya qui déplace une sélection par rapport à ces
-        // normal"): NORMAL on, a face of a block turned 30°, its gizmo along
+        // normal"; 24 nov., 8 h 34: as Maya's Mesh > Transform, T): a face of a block turned 30°, its gizmo along
         // its normal, dragged; then three faces dragged along N, each along
         // its own
         let mut d = Doc::default();
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::from_rotation_y(0.5) * DQuat::from_rotation_z(0.3));
         h.reset(d, "Block");
-        h.st.settings.move_normal = true;
         let tweaks = |h: &Harness| h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| (f.name.clone(), [t.delta.x, t.delta.y, t.delta.z].map(|v| (v * 100.0).round() / 100.0)))).collect::<Vec<_>>();
         let face_at = |h: &Harness, local: DVec3| -> Pos2 {
             let f = &h.st.doc.features[0];
@@ -2652,7 +2637,7 @@ fn main() {
         };
         h.key(egui::Key::F11);
         h.click(face_at(&h, DVec3::new(-8.0, 20.0, 0.0)));
-        h.key(egui::Key::W);
+        h.key(egui::Key::T);
         h.steps(3);
         h.shot("zero-normal-1-gizmo");
         let drag_n = |h: &mut Harness, mm: f32, shot: &str| {
@@ -2685,7 +2670,7 @@ fn main() {
         h.click(face_at(&h, DVec3::new(0.0, 20.0, 0.0)));
         h.click(face_at(&h, DVec3::new(0.0, 10.0, 15.0)));
         h.hold(Modifiers::NONE);
-        h.key(egui::Key::W);
+        h.key(egui::Key::T);
         h.steps(3);
         eprintln!("  picked {}", h.st.face_sel.len());
         h.shot("zero-normal-4-three");

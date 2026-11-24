@@ -128,7 +128,7 @@ impl App {
         // the interface's size: the base (a bit tighter than egui's, Romain
         // works on a 4K screen) times the Settings' Interface size
         let base: f32 = std::env::var("FORME_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(0.9);
-        let want = base * self.st.settings.ui_scale.clamp(0.7, 1.6);
+        let want = base * self.st.settings.ui_scale.clamp(0.35, 1.75);
         if (self.ctx.zoom_factor() - want).abs() > 1e-4 {
             self.ctx.set_zoom_factor(want);
         }

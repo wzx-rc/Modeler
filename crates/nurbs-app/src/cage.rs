@@ -129,7 +129,9 @@ impl AppState {
     /// and the point it is about (world). The readout shows the new sizes.
     pub fn cage_scale(&mut self, c: &CageBox, s: [i8; 3], p: [f32; 2], skip: &[FeatureId]) -> Option<(DVec3, DVec3)> {
         let (target, caught) = self.cage_target(c, s, p, skip)?;
-        let centre = self.alt_held;
+        // Ctrl held (Romain 24 nov., 9 h 25: "si CTRL maintenu avec une
+        // poignée fait le scale dans les deux sens") or Alt: about the middle
+        let centre = self.alt_held || self.snap_off;
         let mid = (c.lo + c.hi) * 0.5;
         let mut al = mid;
         if !centre {

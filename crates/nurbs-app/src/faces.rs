@@ -1359,12 +1359,12 @@ impl AppState {
         }
     }
 
-    /// The move gizmo's axes now: the world's, or with Normal on in a
-    /// component mode the picked components' own frame (Maya's Axis
-    /// Orientation: Normal): Y (its N arrow) along their mean normal, X
-    /// along an edge of the first, Z across.
+    /// The move gizmo's axes now: the world's, or with T (Maya's Mesh >
+    /// Transform) in a component mode the picked components' own frame:
+    /// Y (its one green arrow) along their mean normal, X along an edge of
+    /// the first, Z across.
     pub fn move_frame(&self) -> DQuat {
-        if !self.settings.move_normal || self.sel_mode == SelMode::Object || self.gizmo != crate::state::GizmoMode::Move {
+        if !self.transform_on() {
             return DQuat::IDENTITY;
         }
         let ns = self.comp_normals();
@@ -1374,6 +1374,11 @@ impl AppState {
         let x = (t - n * t.dot(n)).try_normalize().or_else(|| (DVec3::X - n * n.x).try_normalize()).or_else(|| (DVec3::Z - n * n.z).try_normalize()).unwrap_or(DVec3::X);
         let z = x.cross(n);
         DQuat::from_mat3(&glam::DMat3::from_cols(x, n, z)).normalize()
+    }
+
+    /// T in a component mode: the gizmo is one arrow along the normals.
+    pub fn transform_on(&self) -> bool {
+        self.gizmo == crate::state::GizmoMode::Transform && self.sel_mode != SelMode::Object
     }
 
     /// The move gizmo's axes: frozen while a drag lasts.
@@ -1518,9 +1523,9 @@ impl AppState {
         }
         let cage = if matches!(h, Handle::Cage(_)) { self.cage() } else { None };
         let Some(pivot) = self.pivot() else { return };
-        // with Normal on, the N arrow on several components: each moves
-        // along its own normal by the same amount (Maya), a step each
-        if h == Handle::Axis(1) && self.drag_rot != DQuat::IDENTITY && self.selected_tweak().is_none() && self.begin_normals_drag(pivot, p) {
+        // T: the arrow on several components, each moves along its own
+        // normal by the same amount (Maya's Mesh > Transform), a step each
+        if h == Handle::Axis(1) && self.transform_on() && self.selected_tweak().is_none() && self.begin_normals_drag(pivot, p) {
             return;
         }
         let Some(grab) = self.handle_param(h, pivot, p) else { return };

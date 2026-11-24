@@ -431,6 +431,10 @@ pub enum GizmoMode {
     Move,
     Rotate,
     Scale,
+    /// T (Maya's Mesh > Transform, Romain 24 nov.): in a component mode one
+    /// green arrow along the picked components' normal, each moved along
+    /// its own; in Object mode the move gizmo.
+    Transform,
 }
 
 impl GizmoMode {
@@ -440,6 +444,7 @@ impl GizmoMode {
             GizmoMode::Move => "Move",
             GizmoMode::Rotate => "Rotate",
             GizmoMode::Scale => "Scale",
+            GizmoMode::Transform => "Transform",
         }
     }
 }
@@ -699,6 +704,9 @@ pub struct AppState {
     /// The next cable's radius and slack; the points of the one being drawn.
     pub cable: crate::cable::CableSettings,
     pub cable_draw: Option<Vec<DVec3>>,
+    /// The last Library copy placed (its sample, its frame): the same again
+    /// at the same place is refused.
+    pub last_place: Option<(usize, DMat4)>,
     /// The Library's samples and island; the place tool under way.
     pub library: crate::library::Library,
     pub place: Option<crate::library::Placing>,
@@ -946,6 +954,7 @@ impl AppState {
             form: Default::default(),
             cable: Default::default(),
             cable_draw: None,
+            last_place: None,
             library: Default::default(),
             place: None,
             sculpt: None,
@@ -1647,8 +1656,10 @@ impl AppState {
             return;
         }
         let before = std::mem::replace(&mut self.sel_seen, now);
+        // the steps undone are kept: only a change of the document drops
+        // them (Romain, 24 nov.: the history kept greyed, to go back into
+        // it as in ZBrush)
         self.undo.push(UndoStep { label: "Select".into(), doc: None, sel: before });
-        self.redo.clear();
     }
 
     /// Redoes up to the next change of the document.
@@ -2603,7 +2614,7 @@ impl AppState {
         if self.tool != Tool::Select || self.sketch.is_some() || self.creation.is_some() || self.drag.is_some() || self.push.is_some() || self.curve_pull.is_some() {
             self.commit_gestures(self.principal());
         }
-        if matches!(g, GizmoMode::Select | GizmoMode::Move) {
+        if matches!(g, GizmoMode::Select | GizmoMode::Move | GizmoMode::Transform) {
             // an operation just made on components validated: what it made
             // stays picked (its tools offered again)
             self.steps_to_components();

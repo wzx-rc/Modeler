@@ -339,4 +339,40 @@ impl AppState {
         });
         self.custom_pivot = None;
     }
+    /// The shapes selected (a whole Object, several shapes) moved so that
+    /// their pivot lands on `to`, their operations' points with them (the
+    /// Transform values of W / E / R for more than one shape).
+    pub fn move_selection_to(&mut self, to: DVec3, started: bool) {
+        let Some(from) = self.pivot() else { return };
+        let d = to - from;
+        if !d.is_finite() || d.length() < 1e-9 {
+            return;
+        }
+        if started {
+            self.end_live();
+            self.begin_live("Move");
+        } else if !self.is_live() {
+            self.begin_live("Move");
+        }
+        let sel: Vec<FeatureId> = self.selection.iter().copied().filter(|id| self.doc.feature(*id).is_some_and(|f| f.is_solid())).collect();
+        let ids = self.doc.with_operands(&sel);
+        let mut out: Vec<Feature> = vec![];
+        for old in self.doc.features.iter().filter(|f| ids.contains(&f.id) && f.is_solid()) {
+            let mut f = old.clone();
+            f.origin += d;
+            for o in self.element_ops(old.id) {
+                if let Some(op) = self.doc.feature(o) {
+                    out.push(carried(op, &|p: DVec3| p + d));
+                }
+            }
+            out.push(f);
+        }
+        self.live(|doc| {
+            for f in &out {
+                if let Some(x) = doc.feature_mut(f.id) {
+                    *x = f.clone();
+                }
+            }
+        });
+    }
 }

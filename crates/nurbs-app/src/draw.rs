@@ -183,7 +183,15 @@ impl Drawer {
                     } else {
                         match f.tag {
                             Some(t) if st.selection.contains(&t.feature) || st.selection.contains(&el(t)) => FACE_SELECTED,
-                            Some(t) if st.hover_feature == Some(t.feature) || st.hover_feature == Some(el(t)) || st.hover_also.contains(&el(t)) => FACE_HOVERED,
+                            // a Sub (or Intersect) shape's faces are its hole's
+                            // walls, deep in the part: lit as much as a
+                            // selection when hovered so it can be told and
+                            // picked (Romain, 24 nov.: "un très léger
+                            // highlight de face et pas que de edge")
+                            Some(t) if st.hover_feature == Some(t.feature) || st.hover_feature == Some(el(t)) || st.hover_also.contains(&el(t)) => {
+                                let cut = object_mode(st) && st.doc.feature(el(t)).is_some_and(|x| x.is_solid() && x.op != Op::Add);
+                                if cut { FACE_SELECTED } else { FACE_HOVERED }
+                            }
                             _ => 0,
                         }
                     };

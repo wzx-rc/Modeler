@@ -322,25 +322,6 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                         st.settings.select_through = !on;
                         st.save_settings();
                     }
-                    // the move gizmo's axes: the world's or the normal's
-                    // (Maya's Axis Orientation; Romain 23 nov., 22 h 05)
-                    if st.gizmo == GizmoMode::Move {
-                        let on = st.settings.move_normal;
-                        let g = ui.painter().layout_no_wrap("NORMAL".to_string(), mono(11.0), TEXT2());
-                        let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 24.0, 28.0), Sense::click());
-                        let pill = r.shrink2(vec2(0.0, 3.0));
-                        if on {
-                            ui.painter().rect(pill, 11.0, RAISED(), Stroke::new(1.0, TEXT2()), StrokeKind::Inside);
-                        } else {
-                            ui.painter().rect(pill, 11.0, if resp.hovered() { RAISED() } else { Color32::TRANSPARENT }, Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
-                        }
-                        ui.painter().text(pill.center(), Align2::CENTER_CENTER, "NORMAL", mono(11.0), if on { TEXT() } else { TEXT2() });
-                        let tip = if on { "Move along the picked components' normal (N: the green arrow; several picked, each along its own): click for the world's axes (Alt + N)" } else { "Move along the world's axes: click to move along the picked components' normal (Alt + N)" };
-                        if resp.on_hover_text(tip).clicked() {
-                            st.settings.move_normal = !on;
-                            st.save_settings();
-                        }
-                    }
                 }
                 island_sep(ui);
                 if icon_btn(ui, Icon::Magnet, st.settings.snap, &format!("Snap to {} mm", fmt_mm(st.settings.step as f32)), 28.0).clicked() {
@@ -450,7 +431,8 @@ fn gizmo_buttons(ui: &mut Ui, st: &mut AppState) {
         (GizmoMode::Select, Icon::Select, "Q", "Select (Q): no gizmo, clicks and rectangles only"),
         (GizmoMode::Move, Icon::Move, "W", "Move (W): arrows and squares move what is picked, dots resize a shape · right click or hold: its values"),
         (GizmoMode::Rotate, Icon::Rotate, "E", "Rotate (E): three rings turn the picked shapes round X, Y, Z (15° steps while Snap is on) · right click or hold: its values"),
-        (GizmoMode::Scale, Icon::Scale, "R", "Scale (R): a cube per axis scales along the shape's own axes, the centre scales all · right click or hold: its values"),
+        (GizmoMode::Scale, Icon::Scale, "R", "Scale (R): a square on each side scales that side (Ctrl: both ways), the white cube scales all · right click or hold: its values"),
+        (GizmoMode::Transform, Icon::Extrude, "T", "Transform (T, Maya's Mesh > Transform): the picked faces, edges or vertices moved along their normal by one green arrow, each along its own"),
     ]
     .into_iter()
     .enumerate()
@@ -459,7 +441,7 @@ fn gizmo_buttons(ui: &mut Ui, st: &mut AppState) {
         let r = icon_btn(ui, icon, st.gizmo == g || open_here, tip, 30.0);
         ui.ctx().data_mut(|d| d.insert_temp(Id::new(("gizmo-btn", i)), r.rect));
         key_hint(ui, &r, key);
-        if i == 0 {
+        if i == 0 || g == GizmoMode::Transform {
             if r.clicked() {
                 st.set_gizmo(g);
             }
@@ -514,10 +496,29 @@ fn transform_values(ctx: &egui::Context, st: &mut AppState) {
                 ui.label(egui::RichText::new(&f.name).font(semibold(13.0)).color(TEXT()));
                 section(ui, "Position");
                 position_rows(ui, st, &f);
+            } else if let Some(pv) = st.pivot().filter(|_| st.selection.iter().any(|id| st.doc.feature(*id).is_some_and(|f| f.is_solid()))) {
+                // several shapes (a whole Object): their pivot's position,
+                // typed or dragged, moves them all
+                let n = st.selection.iter().filter(|id| st.doc.feature(**id).is_some_and(|f| f.is_solid())).count();
+                let name = st.selected_object().map(|o| o.name.clone()).unwrap_or_else(|| format!("{n} shapes"));
+                ui.label(egui::RichText::new(name).font(semibold(13.0)).color(TEXT()));
+                section(ui, "Position");
+                let colors = [AXIS_X, AXIS_Y, AXIS_Z];
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for k in 0..3 {
+                        let mut v = pv[k] as f32;
+                        let r = axis_field(ui, ["X", "Y", "Z"][k], colors[k], &mut v, "");
+                        if r.changed() {
+                            let mut to = pv;
+                            to[k] = v as f64;
+                            st.move_selection_to(to, r.drag_started());
+                        }
+                    }
+                });
+                ui.label(egui::RichText::new(format!("{n} shapes moved together · Position: their pivot")).font(regular(11.0)).color(TEXT2()));
             } else {
-                let n = st.selection.len();
-                let note = if n > 1 { format!("{n} shapes: move, turn or scale them with the gizmo; pick one (or a group) for its values") } else { "Pick a shape or a group: its position and rotation show here".to_string() };
-                ui.label(egui::RichText::new(note).font(regular(12.0)).color(TEXT2()));
+                ui.label(egui::RichText::new("Pick a shape, an Object or a group: its position shows here").font(regular(12.0)).color(TEXT2()));
             }
             if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
                 st.end_live();
@@ -1304,25 +1305,18 @@ fn step_icon(label: &str) -> (Icon, Color32) {
     }
 }
 
-/// What the strip shows: the element's history (the shape, then its
-/// operations; the marker after the first `at` of them), else the scene's
-/// undo history (the start, then each step; `at` steps done).
+/// What the strip shows: always the scene's undo history (Romain, 24 nov.:
+/// "ne laisser tout le temps que le scene history, ne pas switch à la
+/// sélection"): the start, then each step, `at` of them done; the steps
+/// undone stay, greyed, to be done again as long as no new edit drops them
+/// (as in ZBrush). An element's own history is in the Sub Outliner.
 fn history_cells(st: &AppState) -> (Option<FeatureId>, Vec<Cell>, usize) {
-    if let Some(el) = st.history_element() {
-        let f = st.doc.feature(el).cloned().unwrap();
-        let info = if f.is_path() { f.kind_label().to_string() } else { format!("{} · {}", f.prim.kind().label(), f.op.label()) };
-        let mut cells = vec![Cell { icon: feature_icon(&f), color: feature_color(&f), name: f.name.clone(), info, op: None, on: f.visible }];
-        for id in st.element_ops(el) {
-            let Some(g) = st.doc.feature(id) else { continue };
-            cells.push(Cell { icon: feature_icon(g), color: feature_color(g), name: g.name.clone(), info: format!("{} · {}", g.kind_label(), step_info(g)), op: Some(id), on: g.visible });
-        }
-        return (Some(el), cells, st.marker_of(el));
-    }
     let (names, at) = st.scene_history();
     let mut cells = vec![Cell { icon: Icon::Folder, color: TEXT2(), name: "Start".into(), info: "The document as opened".into(), op: None, on: true }];
     for (i, n) in names.iter().enumerate() {
         let (icon, color) = step_icon(n);
-        cells.push(Cell { icon, color, name: n.clone(), info: format!("Step {} of {}", i + 1, names.len()), op: None, on: true });
+        let info = if i < at { format!("Step {} of {}", i + 1, names.len()) } else { format!("Step {} of {} · undone, click to do it again", i + 1, names.len()) };
+        cells.push(Cell { icon, color, name: n.clone(), info, op: None, on: true });
     }
     (None, cells, at)
 }
@@ -3247,8 +3241,13 @@ fn object_rows(ui: &mut Ui, st: &mut AppState, ob: &nurbs_kernel::Object, indent
     resp.dnd_set_drag_payload(RowDrag { shapes: ob.members.clone() });
     drag_ghost(ui, &resp, &ob.name);
     drop_on_object(ui, st, &resp, r, ob.id);
-    let selected = st.selected_object().map(|o| o.id) == Some(ob.id);
     let entered = st.open_object == Some(ob.id);
+    // its master (its first Add shape) is the Object's row itself, never
+    // listed again under it (Romain 24 nov., 9 h 29: "celui qui est master
+    // n'apparaît pas en premier enfant de lui-même"); entered, the row picks
+    // that shape alone
+    let first = st.doc.features.iter().find(|f| f.op == Op::Add && ob.members.contains(&f.id)).map(|f| f.id).unwrap_or(ob.members[0]);
+    let selected = st.selected_object().map(|o| o.id) == Some(ob.id) || (entered && st.selection == [first]);
     let lit = st.hover_feature.is_some_and(|h| ob.members.contains(&h));
     let shown = ob.members.iter().any(|m| st.doc.feature(*m).is_some_and(|f| f.visible));
     let dim = if shown { 1.0 } else { 0.4 };
@@ -3260,13 +3259,15 @@ fn object_rows(ui: &mut Ui, st: &mut AppState, ob: &nurbs_kernel::Object, indent
     } else if resp.hovered() || lit {
         p.rect_filled(r, 6.0, RAISED());
     }
+    let children: Vec<Feature> = st.doc.features.iter().filter(|f| f.id != first && ob.members.contains(&f.id)).cloned().collect();
     let ar = Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(10.0, 10.0));
-    let aresp = ui.interact(ar.expand(5.0), Id::new(("object-arrow", ob.id)), Sense::click());
-    icons::paint(ui.painter(), ar, if shut { Icon::ChevronRight } else { Icon::Chevron }, if aresp.hovered() { TEXT() } else { TEXT2() });
+    let aresp = ui.interact(ar.expand(5.0), Id::new(("object-arrow", ob.id)), if children.is_empty() { Sense::hover() } else { Sense::click() });
+    if !children.is_empty() {
+        icons::paint(ui.painter(), ar, if shut { Icon::ChevronRight } else { Icon::Chevron }, if aresp.hovered() { TEXT() } else { TEXT2() });
+    }
     let p = ui.painter();
     let x0 = r.min.x + 18.0;
     // its material's colour behind its icon
-    let first = st.doc.features.iter().find(|f| f.op == Op::Add && ob.members.contains(&f.id)).map(|f| f.id).unwrap_or(ob.members[0]);
     let mat = st.doc.feature(first).map(|f| f.material).unwrap_or(0);
     let lk = crate::materials::look(&st.doc, mat);
     let ball = Color32::from_rgb((lk.color[0].clamp(0.0, 1.0) * 255.0) as u8, (lk.color[1].clamp(0.0, 1.0) * 255.0) as u8, (lk.color[2].clamp(0.0, 1.0) * 255.0) as u8);
@@ -3296,7 +3297,7 @@ fn object_rows(ui: &mut Ui, st: &mut AppState, ob: &nurbs_kernel::Object, indent
     let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
     let eresp = ui.interact(er.expand(6.0), Id::new(("object-eye", ob.id)), Sense::click()).on_hover_text("Show / hide the Object");
     icons::paint(ui.painter(), er, if shown { Icon::Eye } else { Icon::EyeOff }, tint(TEXT2(), 0.8));
-    let resp = resp.on_hover_text("An Object: its shapes' booleans act only on each other. Click: the Object · double-click: rename · its shapes below: one by one");
+    let resp = resp.on_hover_text("An Object: its shapes' booleans act only on each other. Its row is its first shape · Click: the Object (entered: that shape alone) · double-click: rename · its other shapes below: one by one");
     let others: Vec<(FeatureId, String)> = st.doc.objects.iter().filter(|o| o.id != ob.id).map(|o| (o.id, o.name.clone())).collect();
     resp.context_menu(|ui| {
         menu_style(ui);
@@ -3331,13 +3332,18 @@ fn object_rows(ui: &mut Ui, st: &mut AppState, ob: &nurbs_kernel::Object, indent
         st.toggle_object_visible(ob.id);
     } else if resp.clicked() {
         let add = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
-        st.select_object(ob.id, add);
+        if entered && !add {
+            st.set_sel_mode(SelMode::Object);
+            st.outline_focus = Some(first);
+            st.enter_object(first);
+        } else {
+            st.select_object(ob.id, add);
+        }
     }
     if shut {
         return;
     }
-    let members: Vec<Feature> = st.doc.features.iter().filter(|f| ob.members.contains(&f.id)).cloned().collect();
-    for f in members {
+    for f in children {
         let n = ops_of(st, f.id);
         ui.horizontal(|ui| {
             ui.add_space(pad + 14.0);
@@ -3905,6 +3911,43 @@ fn components_column(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2, hei
 }
 
 
+/// The interface sizes offered in Settings, in %.
+pub const UI_SCALES: [u32; 9] = [35, 50, 75, 85, 100, 110, 125, 150, 175];
+
+/// Settings' Interface size: one small button per size, in a row, the
+/// 100 % one wider; the current one lit.
+fn ui_scale_buttons(ui: &mut Ui, st: &mut AppState) {
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+    let gap = 3.0;
+    let n = UI_SCALES.len() as f32;
+    let small = (row.width() - gap * (n - 1.0)) / (n + 0.5);
+    let now = (st.settings.ui_scale * 100.0).round() as u32;
+    let mut x = row.min.x;
+    for pct in UI_SCALES {
+        let big = pct == 100;
+        let w = if big { small * 1.5 } else { small };
+        let h = if big { 26.0 } else { 22.0 };
+        let r = Rect::from_min_size(pos2(x, row.center().y - h * 0.5), vec2(w, h));
+        x += w + gap;
+        let resp = ui.interact(r, Id::new(("ui-scale-btn", pct)), Sense::click());
+        ui.ctx().data_mut(|d| d.insert_temp(Id::new(("ui-scale-btn", pct)), r));
+        let on = now == pct;
+        let p = ui.painter();
+        if on {
+            p.rect(r, 6.0, tint(accent(), 0.16), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+        } else {
+            p.rect(r, 6.0, if resp.hovered() { RAISED() } else { WELL() }, Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+        }
+        let txt = if big { format!("{pct}%") } else { format!("{pct}") };
+        p.text(r.center(), Align2::CENTER_CENTER, txt, if big { medium(11.5) } else { mono(9.5) }, if on { TEXT_STRONG() } else { TEXT2() });
+        if resp.on_hover_text(format!("Interface at {pct} %")).clicked() && !on {
+            st.settings.ui_scale = pct as f32 / 100.0;
+            st.ui_scale_edit = None;
+            st.save_settings();
+        }
+    }
+}
+
 /// The Settings window, under its gear at the top right: the theme, the
 /// interface's size, the panels, the view, snapping, selection.
 fn settings_window(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
@@ -3957,29 +4000,10 @@ fn settings_window(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 st.settings.light = v;
                 st.save_settings();
             }
-            let mut v = st.ui_scale_edit.unwrap_or(st.settings.ui_scale * 100.0);
-            let top = ui.cursor().top();
-            let (ch, _) = slider_row(ui, "Interface size", &mut v, 70.0..=160.0, 5.0, "%");
-            // its band (the capture harness drags it)
-            let band = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
-            ui.ctx().data_mut(|d| d.insert_temp(Id::new("ui-scale-band"), band));
-            let down = ui.ctx().input(|i| i.pointer.primary_down());
-            if ch {
-                if down && st.ui_scale_edit.is_none() {
-                    ui.ctx().data_mut(|d| d.insert_temp(key, (zoom, at.x, at.y)));
-                }
-                let v = ((v / 5.0).round() * 5.0).clamp(70.0, 160.0);
-                st.ui_scale_edit = down.then_some(v);
-                st.settings.ui_scale = v / 100.0;
-                if !down {
-                    st.save_settings();
-                }
-            }
-            if (st.settings.ui_scale - 1.0).abs() > 1e-3 && secondary_btn(ui, "Interface size as it comes", ui.available_width()).clicked() {
-                st.settings.ui_scale = 1.0;
-                st.ui_scale_edit = None;
-                st.save_settings();
-            }
+            // the interface's size: a row of small buttons, 100 % bigger
+            // (Romain 24 nov., 8 h 37: the slider did not work)
+            ui.label(egui::RichText::new("Interface size").font(regular(12.5)).color(LABEL()));
+            ui_scale_buttons(ui, st);
             section(ui, "Panels");
             if toggle_row(ui, "Shape list", st.settings.show_tree) {
                 st.settings.show_tree = !st.settings.show_tree;
@@ -5079,14 +5103,6 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         st.mirror_selected();
         return;
     }
-    // Alt + N: the move gizmo along the components' normal, or the world's
-    if ctx.input(|i| i.modifiers.alt && !i.modifiers.ctrl && !i.modifiers.shift) && pressed(Key::N) {
-        st.settings.move_normal = !st.settings.move_normal;
-        st.save_settings();
-        let on = st.settings.move_normal;
-        st.toast(if on { "Move along the normal (Alt + N)" } else { "Move along the world's axes (Alt + N)" }, false);
-        return;
-    }
     // Delete History (Maya's Alt + Shift + D): each element picked frozen
     if ctx.input(|i| i.modifiers.alt && i.modifiers.shift && !i.modifiers.ctrl) && pressed(Key::D) {
         st.delete_history();
@@ -5290,7 +5306,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     }
     // Maya: Q select (no gizmo), W move, E rotate, R scale (rotate and
     // scale work on whole shapes: back to Object mode)
-    for (k, g) in [(Key::Q, GizmoMode::Select), (Key::W, GizmoMode::Move), (Key::E, GizmoMode::Rotate), (Key::R, GizmoMode::Scale)] {
+    for (k, g) in [(Key::Q, GizmoMode::Select), (Key::W, GizmoMode::Move), (Key::E, GizmoMode::Rotate), (Key::R, GizmoMode::Scale), (Key::T, GizmoMode::Transform)] {
         if pressed(k) {
             st.set_gizmo(g);
         }

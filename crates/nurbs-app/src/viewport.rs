@@ -159,6 +159,11 @@ fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
     // (the move gizmo has no size dots: Romain 20 nov., 11 h 44, "enlève
     // les 4 points de scale avec le translate"; R scales)
     let (c, tips) = gizmo_points(st)?;
+    // T in a component mode: its one arrow along the normals
+    if st.transform_on() {
+        let t = tips[1]?;
+        return (dist_seg(p, c, t + (t - c).normalized() * 12.0) < 10.0).then_some(Handle::Axis(1));
+    }
     // the centre (Maya): a move on all three axes
     if (p - c).length() < 9.0 {
         return Some(Handle::Free);
@@ -254,20 +259,12 @@ fn scale_at(st: &AppState, p: Pos2) -> Option<Handle> {
     if let Some((_, s)) = side {
         return Some(Handle::Cage(s));
     }
-    let (c, tips) = scale_points(st)?;
-    if (p - c).length() < 10.0 {
-        return Some(Handle::ScaleAll);
-    }
-    let mut best: Option<(f32, usize)> = None;
-    for (a, t) in tips.iter().enumerate() {
-        if let Some(t) = t {
-            let d = dist_seg(p, c + (*t - c) * 0.2, *t).min((p - *t).length() - 3.0);
-            if d < 8.0 && best.map(|b| d < b.0).unwrap_or(true) {
-                best = Some((d, a));
-            }
-        }
-    }
-    best.map(|(_, a)| Handle::Scale(a))
+    // the centre's white cube scales the same way in every direction; the
+    // axis cubes are gone (Romain 24 nov., 9 h 25: "enlève le gizmo
+    // classique au centre et laisse le cube blanc"): the side squares
+    // scale along one axis
+    let (c, _) = scale_points(st)?;
+    ((p - c).length() < 10.0).then_some(Handle::ScaleAll)
 }
 
 /// The scale cage's grip under the pointer (corners first, then edges,
@@ -629,8 +626,11 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         }
         Tool::Place => {
             // a Library sample put on the face under the pointer (`library.rs`)
-            st.place_hover(hover.map(p2));
-            if resp.clicked_by(PointerButton::Primary) {
+            let (ctrl, shift) = ctx.input(|i| (i.modifiers.ctrl || i.modifiers.mac_cmd, i.modifiers.shift));
+            st.place_hover(hover.map(p2), ctrl, shift);
+            // a double-click's second click is no second copy (24 nov.:
+            // two bolts at once, one inside the other, its fillet lost)
+            if resp.clicked_by(PointerButton::Primary) && !resp.double_clicked() {
                 if let Some(p) = resp.interact_pointer_pos().or(hover) {
                     st.place_click(p2(p));
                 }
@@ -957,6 +957,25 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
     }
     let Some((c, tips)) = gizmo_points(st) else { return };
     let colors = [AXIS_X, AXIS_Y, AXIS_Z];
+    // T in a component mode (Maya's Mesh > Transform): one green arrow
+    // along the normals, as the Extrude's
+    if st.transform_on() {
+        let Some(t) = tips[1] else { return };
+        let on = hot == Some(Handle::Axis(1)) || dragging == Some(Handle::Axis(1));
+        arrow(p, c, t, if on { HOT } else { AXIS_Y }, if on { 3.2 } else { 2.6 });
+        p.circle(c, 3.0, Color32::WHITE, Stroke::new(1.0, Color32::from_rgb(0x20, 0x22, 0x26)));
+        if let Some(r) = st.gizmo_readout.as_ref().filter(|_| dragging.is_some()) {
+            chip(p, c + vec2(14.0, 14.0), Align2::LEFT_TOP, r, HOT, HOT);
+        } else if let Some(d) = &st.drag {
+            if let (Some(s), Some(f)) = (d.start.first(), d.start.first().and_then(|s| st.doc.feature(s.id))) {
+                if let (Some(t), Some(t0)) = (&f.tweak, &s.tweak) {
+                    let dv = (t.delta - t0.delta).dot(st.drag_rot * DVec3::Y);
+                    chip(p, c + vec2(14.0, 14.0), Align2::LEFT_TOP, &format!("N {} mm", fmt_mm(dv as f32)), HOT, HOT);
+                }
+            }
+        }
+        return;
+    }
     // plane squares
     for (n, (a, b)) in [(2usize, (0usize, 1usize)), (0, (1, 2)), (1, (0, 2))] {
         if dragging.is_some() && dragging != Some(Handle::Plane(n)) {
@@ -1030,17 +1049,6 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
             }
         }
     } else {
-        let Some((_, tips)) = scale_points(st) else { return };
-        for (a, t) in tips.iter().enumerate() {
-            if dragging.is_some() && dragging != Some(Handle::Scale(a)) && dragging != Some(Handle::ScaleAll) {
-                continue;
-            }
-            let Some(t) = t else { continue };
-            let on = hot == Some(Handle::Scale(a)) || hot == Some(Handle::ScaleAll);
-            let col = if on { HOT } else { colors[a] };
-            p.line_segment([c + (*t - c) * 0.18, *t], Stroke::new(if on { 3.0 } else { 2.2 }, col));
-            p.rect_filled(Rect::from_center_size(*t, vec2(10.0, 10.0)), 2.0, col);
-        }
         // the side grips: squares like the move gizmo's planes; the box
         // they sit on shown while one is hovered or dragged
         let side_on = matches!(hot, Some(Handle::Cage(_))) || matches!(dragging, Some(Handle::Cage(_)));
@@ -1423,12 +1431,30 @@ fn draw_place(p: &Painter, st: &AppState) {
     if st.tool != Tool::Place {
         return;
     }
+    // the copies just placed, as they will show, until the kernel has them
+    for (tris, edges) in st.place_ghosts() {
+        draw_sample(p, st, &tris, &edges, 255);
+    }
     let Some((tris, edges, spot)) = st.place_preview() else { return };
+    draw_sample(p, st, &tris, &edges, 200);
+    if let (Some(c), Some(t)) = (world(st, spot.p), world(st, spot.p + spot.n * (24.0 * st.mm_per_point(spot.p)))) {
+        p.line_segment([c, t], Stroke::new(1.2, accent()));
+        p.circle(c, 3.5, accent(), Stroke::new(1.0, Color32::from_rgb(20, 22, 26)));
+        if let Some(t) = st.place.as_ref().filter(|pl| pl.hold.is_some()).and(st.gizmo_readout.as_ref()) {
+            chip(p, c + vec2(12.0, -24.0), Align2::LEFT_TOP, t, HOT, HOT);
+        } else if let Some(k) = spot.snapped {
+            chip(p, c + vec2(12.0, -24.0), Align2::LEFT_TOP, k.label(), HOT, HOT);
+        }
+    }
+}
+
+/// A Library sample's triangles shaded and its edges, on screen.
+fn draw_sample(p: &Painter, st: &AppState, tris: &[[glam::Vec3; 3]], edges: &[Vec<glam::Vec3>], alpha: u8) {
     let v = st.view();
     let (fwd, right, up) = v.basis();
     let light = (-fwd + up * 0.6 + right * 0.3).normalize();
     let mut ts: Vec<(f32, [Pos2; 3], f32)> = vec![];
-    for t in &tris {
+    for t in tris {
         let (Some(a), Some(b), Some(c)) = (world(st, t[0].as_dvec3()), world(st, t[1].as_dvec3()), world(st, t[2].as_dvec3())) else { continue };
         let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
         let n = if n.dot(-fwd) < 0.0 { -n } else { n };
@@ -1440,7 +1466,7 @@ fn draw_place(p: &Painter, st: &AppState) {
     let mut mesh = egui::Mesh::default();
     for (_, q, shade) in &ts {
         let k = (*shade * 235.0) as u8;
-        let col = Color32::from_rgba_unmultiplied(k, k.saturating_add(4), k.saturating_add(10), 200);
+        let col = Color32::from_rgba_unmultiplied(k, k.saturating_add(4), k.saturating_add(10), alpha);
         let i = mesh.vertices.len() as u32;
         for v in q {
             mesh.colored_vertex(*v, col);
@@ -1448,17 +1474,10 @@ fn draw_place(p: &Painter, st: &AppState) {
         mesh.add_triangle(i, i + 1, i + 2);
     }
     p.add(Shape::mesh(mesh));
-    for e in &edges {
+    for e in edges {
         let pts: Vec<Pos2> = e.iter().filter_map(|q| world(st, q.as_dvec3())).collect();
         if pts.len() >= 2 {
             p.add(Shape::line(pts, Stroke::new(1.2, tint(accent(), 0.9))));
-        }
-    }
-    if let (Some(c), Some(t)) = (world(st, spot.p), world(st, spot.p + spot.n * (24.0 * st.mm_per_point(spot.p)))) {
-        p.line_segment([c, t], Stroke::new(1.2, accent()));
-        p.circle(c, 3.5, accent(), Stroke::new(1.0, Color32::from_rgb(20, 22, 26)));
-        if let Some(k) = spot.snapped {
-            chip(p, c + vec2(12.0, -24.0), Align2::LEFT_TOP, k.label(), HOT, HOT);
         }
     }
 }
@@ -1892,7 +1911,11 @@ pub fn hint(st: &AppState) -> String {
     let h = hint_of(st);
     // a component mode with R: the gizmo's cubes scale what is picked
     if st.gizmo == GizmoMode::Scale && st.sel_mode != SelMode::Object {
-        return h.replace("Arrows: move it · Centre square: on all three axes", "Cubes: scale it along X, Y or Z · Centre: all at once");
+        return h.replace("Arrows: move it · Centre square: on all three axes", "Side squares: scale one side (Ctrl: both ways) · White cube: all at once");
+    }
+    // T: one green arrow along the normals
+    if st.transform_on() {
+        return h.replace("Arrows: move it · Centre square: on all three axes", "Green arrow: along the normal, each picked along its own · W: the move gizmo");
     }
     h
 }
@@ -2038,7 +2061,7 @@ fn hint_of(st: &AppState) -> String {
                     Handle::ShellThick => "Along the line: the walls' thickness, 0.1 mm steps while Snap is on · Release: keep it".into(),
                     Handle::Scale(_) => "Away from the centre: bigger · Release: keep it".into(),
                     Handle::ScaleAll => "To the right: bigger · To the left: smaller · Release: keep it".into(),
-                    Handle::Cage(_) => "The side facing the grip stays · Shift: proportions kept · Alt: from the middle · Ctrl: no snapping · Release: keep it".into(),
+                    Handle::Cage(_) => "The side facing the grip stays · Shift: proportions kept · Ctrl (or Alt): both ways, about the middle · Release: keep it".into(),
                     _ => "Moving: the kernel rebuilds the booleans live".into(),
                 }
             } else if st.selected_array().is_some() {
@@ -2072,10 +2095,10 @@ fn hint_of(st: &AppState) -> String {
                     GizmoMode::Select => "W: move · E: rotate · R: scale · Right button: menu · Del: delete · Esc: deselect".into(),
                     _ if st.selected_group().is_some_and(|g| g.open) => "An open group: click one of its shapes to work on it alone · Its bar: close it again · Arrows: move the whole group · D + click: its pivot on a point · Ctrl + Shift + G: ungroup".into(),
                     _ if st.selected_group().is_some() => "A group: its shapes move, turn and scale together, about its pivot · Its bar: open it to pick its shapes one by one · D + click: its pivot on a point · Ctrl + Shift + G: ungroup · Ctrl + D: a copy".into(),
-                    GizmoMode::Move if st.selection.len() > 1 => "Arrows and squares: move · Centre square: on all three axes · Ctrl + G: group them · D + click: pivot on a point · Alt + A: align · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
-                    GizmoMode::Move => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · Alt + M: own symmetry · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
+                    GizmoMode::Move | GizmoMode::Transform if st.selection.len() > 1 => "Arrows and squares: move · Centre square: on all three axes · Ctrl + G: group them · D + click: pivot on a point · Alt + A: align · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
+                    GizmoMode::Move | GizmoMode::Transform => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · Alt + M: own symmetry · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
-                    GizmoMode::Scale => "Cubes: along the shape's axes · Centre: all at once · W: move · E: rotate".into(),
+                    GizmoMode::Scale => "Side squares: one side (Ctrl: both ways) · White cube: all at once · W: move · E: rotate".into(),
                 }
             }
         }
