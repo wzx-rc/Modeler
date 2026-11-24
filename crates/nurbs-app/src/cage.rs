@@ -90,7 +90,7 @@ impl AppState {
             // boxes: a face moved off its shape (Romain 24 nov., 11 h 04)
             // left the box beside the part
             let mesh = self.element_points(&ids);
-            (self.scale_frame()?, if mesh.is_empty() { fs.iter().flat_map(|f| self.seen_corners(f)).collect() } else { mesh })
+            (self.scale_frame()?, if mesh.is_empty() { fs.iter().flat_map(|f| self.seen_corners(f)).collect() } else { mesh.to_vec() })
         } else if self.gizmo == crate::state::GizmoMode::Universal {
             // Y: in the components' own frame (their normal), so a face's
             // box is flat along its normal and its arrow there moves it
@@ -108,8 +108,20 @@ impl AppState {
 
     /// The points of the part's edges round the faces of these elements
     /// (their shapes and operations), as the kernel made them.
-    pub fn element_points(&self, ids: &[FeatureId]) -> Vec<DVec3> {
-        let Some(m) = self.model.as_ref() else { return vec![] };
+    pub fn element_points(&self, ids: &[FeatureId]) -> std::sync::Arc<Vec<DVec3>> {
+        let Some(m) = self.model.as_ref() else { return Default::default() };
+        let key = std::sync::Arc::as_ptr(m) as usize;
+        if let Some((k, i, p)) = self.points_cache.borrow().as_ref() {
+            if *k == key && i.as_slice() == ids {
+                return p.clone();
+            }
+        }
+        let out = std::sync::Arc::new(self.element_points_now(m, ids));
+        *self.points_cache.borrow_mut() = Some((key, ids.to_vec(), out.clone()));
+        out
+    }
+
+    fn element_points_now(&self, m: &nurbs_kernel::Model, ids: &[FeatureId]) -> Vec<DVec3> {
         let map = crate::draw::element_map(self, m);
         let mine: Vec<bool> = m.faces.iter().map(|f| f.tag.map(|t| ids.contains(map.get(&t.feature).unwrap_or(&t.feature))).unwrap_or(false)).collect();
         let on = |i: i32| i >= 0 && mine.get(i as usize).copied().unwrap_or(false);

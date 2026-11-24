@@ -2510,7 +2510,10 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
     let cx = ctx.memory(|m| m.area_rect(Id::new("isl-modes"))).map(|r| r.center().x).unwrap_or(screen.center().x);
     let w = ctx.memory(|m| m.area_rect(Id::new("op-pop"))).map(|r| r.width()).unwrap_or(OP_W);
     let vr = st.view_rect;
-    let (left, right) = (vr[0] + 8.0, vr[2] - 8.0);
+    // (right of the floating Sub Outliner when it shows, `components`)
+    let sub = ctx.memory(|m| m.area_rect(Id::new("components"))).filter(|r| r.max.y > top && ctx.memory(|m| m.areas().is_visible(&egui::LayerId::new(Order::Middle, Id::new("components")))));
+    let left = sub.map(|r| r.max.x + 8.0).unwrap_or(vr[0] + 8.0).max(vr[0] + 8.0);
+    let right = vr[2] - 8.0;
     let at = pos2((cx - w * 0.5).clamp(left, (right - w).max(left)), top);
     set_op_style(ctx, true);
     egui::Area::new(Id::new("op-pop")).order(Order::Foreground).fade_in(false).fixed_pos(at).show(ctx, |ui| {

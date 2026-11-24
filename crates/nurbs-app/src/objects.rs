@@ -81,6 +81,33 @@ impl AppState {
 
     /// What the eye sees of a feature's Object besides its features: its
     /// stretch (`None` when it has none).
+    /// An operation of a stretched Object keeps its points and sizes as
+    /// they are before the stretch (`Doc::settle_stretches`): what the eye
+    /// sees taken back there. Only once it was brought there (in
+    /// `stretched`; a step just made is brought by `touched`).
+    pub fn unstretch(&self, id: FeatureId) -> Option<DMat4> {
+        let el = self.element_of(id);
+        let o = self.doc.object(self.doc.object_of(el)?)?;
+        if !o.stretched.contains(&id) {
+            return None;
+        }
+        o.stretch.map(|s| nurbs_kernel::rows_to_mat(s).inverse())
+    }
+    pub fn local_vec(&self, id: FeatureId, v: DVec3) -> DVec3 {
+        self.unstretch(id).map_or(v, |m| m.transform_vector3(v))
+    }
+    pub fn local_pt(&self, id: FeatureId, p: DVec3) -> DVec3 {
+        self.unstretch(id).map_or(p, |m| m.transform_point3(p))
+    }
+    /// A length seen along `dir` as it is kept.
+    pub fn local_len(&self, id: FeatureId, dir: DVec3, len: f64) -> f64 {
+        self.unstretch(id).and_then(|m| dir.try_normalize().map(|d| m.transform_vector3(d).length())).map_or(len, |k| len * k)
+    }
+    /// A kept point of an operation where the eye sees it.
+    pub fn seen_pt(&self, id: FeatureId, p: DVec3) -> DVec3 {
+        self.unstretch(id).map_or(p, |m| m.inverse().transform_point3(p))
+    }
+
     pub fn stretch_of(&self, id: FeatureId) -> Option<DMat4> {
         let el = self.element_of(id);
         let o = self.doc.object(self.doc.object_of(el)?)?;

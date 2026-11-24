@@ -807,6 +807,11 @@ pub struct AppState {
     pub drag_rot: DQuat,
     /// Y on a vertex alone: the edge its drag slides along (`move_frame`).
     pub slide_dir: Option<DVec3>,
+    /// While a drag lasts in Object mode: the selection's box middle less
+    /// its shapes' own (in the scale frame), taken at its start.
+    pub pivot_gap: Option<DVec3>,
+    /// `element_points` kept for one model and one list of elements.
+    pub points_cache: std::cell::RefCell<Option<(usize, Vec<FeatureId>, Arc<Vec<DVec3>>)>>,
     /// Moves along their normals (`begin_normals_drag`): the first
     /// component's own normal (the drag follows the gizmo's mean one).
     pub face_drag_first: Option<DVec3>,
@@ -1018,6 +1023,8 @@ impl AppState {
             gizmo_readout: None,
             drag_rot: DQuat::IDENTITY,
             slide_dir: None,
+            pivot_gap: None,
+            points_cache: Default::default(),
             face_drag_first: None,
             normals_picked: vec![],
             marking: Default::default(),
@@ -4213,11 +4220,28 @@ impl AppState {
         if let Some(g) = self.selected_group() {
             return Some(g.origin);
         }
+        // the middle of the selection's box (Romain 24 nov., 11 h 33: "Le
+        // point pivot doit toujours être au centre de la selection"): the
+        // box round the part as built (`cage`), while a drag lasts the
+        // shapes' own box (instant) moved by the gap seen at its start
+        let shapes = self.shapes_centre()?;
+        if self.drag.is_some() {
+            let f = self.scale_frame().unwrap_or(DQuat::IDENTITY);
+            return Some(shapes + f * self.pivot_gap.unwrap_or(DVec3::ZERO));
+        }
+        Some(self.cage().map(|c| c.point([0, 0, 0])).unwrap_or(shapes))
+    }
+
+    /// The middle of the selected shapes' own box (their corners as seen).
+    fn shapes_centre(&self) -> Option<DVec3> {
         let fs: Vec<&Feature> = self.doc.features.iter().filter(|f| self.selection.contains(&f.id) && f.is_solid()).collect();
         if fs.is_empty() {
             return None;
         }
-        Some(fs.iter().map(|f| self.seen_centre(f)).sum::<DVec3>() / fs.len() as f64)
+        let frame = self.scale_frame().unwrap_or(DQuat::IDENTITY);
+        let back = frame.inverse();
+        let (lo, hi) = fs.iter().flat_map(|f| self.seen_corners(f)).map(|p| back * p).fold((DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)), |(lo, hi), q| (lo.min(q), hi.max(q)));
+        Some(frame * ((lo + hi) * 0.5))
     }
 
     /// Where the pointer ray meets what a handle moves along.
@@ -4265,6 +4289,12 @@ impl AppState {
             h => h,
         };
         self.drag_rot = self.move_frame();
+        self.pivot_gap = None;
+        if self.sel_mode == SelMode::Object && self.selected_group().is_none() {
+            if let (Some(seen), Some(own)) = (self.cage().map(|c| c.point([0, 0, 0])), self.shapes_centre()) {
+                self.pivot_gap = Some(self.scale_frame().unwrap_or(DQuat::IDENTITY).inverse() * (seen - own));
+            }
+        }
         if matches!(h, Handle::PushInset | Handle::PushDepth) {
             self.begin_push_drag(h, p);
             return;

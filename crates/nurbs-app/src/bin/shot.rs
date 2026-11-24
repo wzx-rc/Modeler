@@ -3671,6 +3671,37 @@ fn main() {
         }
     }
 
+    if want("sel-doc") {
+        // FORME_DOC a saved scene, FORME_SEL a step selected (FORME_MODE 1
+        // to 4): its handles printed and shot
+        if let Ok(path) = std::env::var("FORME_DOC") {
+            let d = nurbs_kernel::Doc::from_json(&std::fs::read_to_string(&path).expect("FORME_DOC")).expect("a document");
+            let id: u32 = std::env::var("FORME_SEL").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+            h.reset(d, "Scene");
+            h.settle();
+            let key = match std::env::var("FORME_MODE").as_deref() {
+                Ok("1") => egui::Key::Num1,
+                Ok("2") => egui::Key::Num2,
+                Ok("3") => egui::Key::Num3,
+                _ => egui::Key::Num4,
+            };
+            h.key(key);
+            h.st.selection = vec![id];
+            h.st.frame_selection();
+            h.settle();
+            h.steps(3);
+            let ph = h.st.push_handles();
+            eprintln!("  push handles {:?}", ph.map(|p| (p.base, p.tip, p.n)));
+            if let Some(m) = h.st.model.as_ref() {
+                for (i, f) in m.faces.iter().enumerate().filter(|(_, f)| f.tag.map(|t| t.feature == id).unwrap_or(false)) {
+                    eprintln!("  face {i} {:?} point {:?} n {:?}", f.tag, f.point, f.normal);
+                }
+            }
+            eprintln!("  pivot {:?}", h.st.pivot());
+            h.shot("zero-sel-doc");
+        }
+    }
+
     if want("paint") {
         // An element's material on all its faces (Romain 23 nov., 21 h 03:
         // the pocket's walls and the Shell's stayed grey): FORME_DOC a saved

@@ -960,7 +960,8 @@ impl AppState {
             g.depth = self.snap(t - g.t0);
         }
         self.push = Some(g.clone());
-        let (id, depth) = (g.id, g.depth);
+        // (a stretched Object keeps it as before its stretch)
+        let (id, depth) = (g.id, self.local_len(g.id, g.n, g.depth));
         let others = g.others.clone();
         self.live(|d| {
             for i in std::iter::once(id).chain(others.iter().copied()) {
@@ -1026,7 +1027,8 @@ impl AppState {
         let own_i = m.faces.iter().position(|x| x.tag.map(|t| t.feature == f.id && t.sub == 1).unwrap_or(false));
         let from_i = m.faces.iter().position(|x| x.tag.map(|t| t.pack() == p.face.tag).unwrap_or(false));
         let own = own_i.map(|i| &m.faces[i]);
-        let at = p.face.at;
+        // (a stretched Object: where the eye sees it)
+        let at = self.seen_pt(f.id, p.face.at);
         // a curved face's: the normal at the step's point (its own face is
         // the face moved along its normals: nearest the point there too)
         let n = self.normal_near(own_i.or(from_i)?, at)?;
@@ -1064,7 +1066,7 @@ impl AppState {
             }
         }
         // the arrow: from the middle of the step's own face, else from its point moved
-        let base = own.filter(|x| x.kind == SurfKind::Plane).map(|x| DVec3::from_array(x.point)).unwrap_or(at + n * p.depth);
+        let base = own.filter(|x| x.kind == SurfKind::Plane).map(|x| DVec3::from_array(x.point)).unwrap_or(self.seen_pt(f.id, p.face.at + n * p.depth));
         let v = self.view();
         let mut len = v.pixel_size_at((base.as_vec3() - v.eye).length()) as f64 * 84.0;
         // seen end on, the arrow shrinks: long enough to show 64 points at least
@@ -1100,7 +1102,7 @@ impl AppState {
         let Some(p0) = f.push.clone() else { return };
         let (ro, rd) = self.ray(p);
         let Some(t) = closest_on_line(o, dir, ro, rd) else { return };
-        let amount = t - (d.grab - o).dot(dir);
+        let amount = self.local_len(f.id, dir, t - (d.grab - o).dot(dir));
         let (inset, depth) = match d.handle {
             Handle::PushInset => (self.snap(p0.inset + amount).max(0.1), p0.depth),
             _ => (p0.inset, self.snap(p0.depth + amount)),
@@ -1673,13 +1675,29 @@ impl AppState {
         // middle), as the step's own scale and centre
         if let (Handle::Cage(s), Some(c)) = (d.handle, d.cage) {
             let Some((k, anchor)) = self.cage_scale(&c, s, p, &[]) else { return };
-            let (s0, d0) = (t0.scale, t0.delta);
-            let a0 = t0.about.unwrap_or_else(|| if (s0 - DVec3::ONE).abs().max_element() < 1e-9 { anchor - d0 } else { c.point([0, 0, 0]) - d0 });
+            // the ratios along the box's axes given to the world's (the
+            // step scales along those): Y's box in its components' frame
+            let k = if c.frame == DQuat::IDENTITY {
+                k
+            } else {
+                let mut kw = DVec3::ONE;
+                for a in 0..3 {
+                    let w = (c.frame * DVec3::AXES[a]).abs();
+                    let i = if w.x >= w.y && w.x >= w.z { 0 } else if w.y >= w.z { 1 } else { 2 };
+                    kw[i] = k[a];
+                }
+                kw
+            };
+            // worked out where the eye sees it, kept as before a stretch
+            let (s0, d0) = (t0.scale, self.seen_pt(id, t0.delta) - self.seen_pt(id, DVec3::ZERO));
+            let a0 = t0.about.map(|a| self.seen_pt(id, a)).unwrap_or_else(|| if (s0 - DVec3::ONE).abs().max_element() < 1e-9 { anchor - d0 } else { c.point([0, 0, 0]) - d0 });
+            let delta = self.local_vec(id, anchor + k * (a0 - anchor + d0) - a0);
+            let about = self.local_pt(id, a0);
             self.live(|doc| {
                 if let Some(tw) = doc.feature_mut(id).and_then(|f| f.tweak.as_mut()) {
-                    tw.about = Some(a0);
+                    tw.about = Some(about);
                     tw.scale = s0 * k;
-                    tw.delta = anchor + k * (a0 - anchor + d0) - a0;
+                    tw.delta = delta;
                 }
             });
             return;
@@ -1735,6 +1753,7 @@ impl AppState {
         if d.custom {
             self.custom_pivot = Some((self.pivot_key(), pivot0 + delta));
         }
+        let delta = self.local_vec(id, delta);
         self.live(|doc| {
             if let Some(tw) = doc.feature_mut(id).and_then(|f| f.tweak.as_mut()) {
                 tw.delta = t0.delta + delta;
@@ -1937,8 +1956,8 @@ impl AppState {
                 let Some(t) = closest_on_line(at, n, ro, rd) else { return };
                 let d = self.snap(t - t0);
                 g.size = d;
-                let more: Vec<(FeatureId, DVec3)> = g.others.iter().copied().zip(g.dirs.iter().copied()).collect();
-                let n1 = self.face_drag_first.unwrap_or(n);
+                let more: Vec<(FeatureId, DVec3)> = g.others.iter().copied().zip(g.dirs.iter().copied()).map(|(i, v)| (i, self.local_vec(i, v))).collect();
+                let n1 = self.local_vec(id, self.face_drag_first.unwrap_or(n));
                 self.live(|doc| {
                     for (i, dir) in std::iter::once((id, n1)).chain(more.iter().copied()) {
                         if let Some(tw) = doc.feature_mut(i).and_then(|f| f.tweak.as_mut()) {
