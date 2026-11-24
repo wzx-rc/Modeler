@@ -175,7 +175,7 @@ fn rigid_key(doc: &Doc, fs: &[&Feature], list: &[usize], whole: &Whole, upto: us
     let first = fs.iter().find(|f| f.is_solid() && placed(f))?;
     let mut ids: Vec<FeatureId> = vec![];
     for f in fs {
-        if f.mirror.is_some() || f.array.is_some() || f.shape_bool.is_some() || f.loft.is_some() || ids.contains(&f.id) {
+        if f.mirror.is_some() || f.array.is_some() || f.shape_bool.is_some() || f.loft.is_some() || f.stretch.is_some() || ids.contains(&f.id) {
             return None;
         }
         ids.push(f.id);
@@ -2715,6 +2715,22 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
             keep(cache, key, &mut stage);
             continue;
         }
+        // a scale step: what is built so far taken through its map (its
+        // flat faces kept flat, its tags kept), what comes after built on it
+        if let Some(st) = &f.stretch {
+            if let Some(acc) = stage.shape.clone() {
+                let res = if skipped("stretch") { Err("skipped, it crashed the kernel".to_string()) } else { acc.transformed(rows(st.matrix())) };
+                match res {
+                    Ok(s) => {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                    }
+                    Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
+                }
+            }
+            keep(cache, key, &mut stage);
+            continue;
+        }
         // the part hollowed: on the solid built so far
         if let Some(sh) = &f.shell {
             if let Some(acc) = stage.shape.clone() {
@@ -3303,7 +3319,7 @@ fn islands_upto<'a>(doc: &'a Doc, feats: &[&'a Feature], upto: usize, global: &[
 /// Object (Romain, 24 nov., 6 h 01). The shapes in no Object are built
 /// together as before.
 fn build_objects<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Stage {
-    let placed = |k: &Option<FeatureId>| k.and_then(|id| doc.object(id)).is_some_and(|o| !o.frame.is_identity() || o.stretch.is_some());
+    let placed = |k: &Option<FeatureId>| k.and_then(|id| doc.object(id)).is_some_and(|o| !o.frame.is_identity());
     if doc.objects.is_empty() {
         return build_islands(doc, feats, skip, cache, model, used_tools, used_stages);
     }
@@ -3350,8 +3366,8 @@ fn build_objects<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache
             }
             None => (build_islands(doc, sub, skip, cache, model, used_tools, used_stages), None),
         };
-        let stretch = k.and_then(|id| doc.object(id)).map(|o| o.stretch_matrix()).unwrap_or(DMat4::IDENTITY);
-        let m = stretch * sim.map(|t| t.matrix()).unwrap_or(DMat4::IDENTITY);
+        let _ = k;
+        let m = sim.map(|t| t.matrix()).unwrap_or(DMat4::IDENTITY);
         if !m.abs_diff_eq(DMat4::IDENTITY, 1e-12) {
             if let Some(sh) = s.shape.take() {
                 match sh.placed(rows(m)) {
@@ -3475,6 +3491,8 @@ fn build_islands<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache
         }
         // a Shell with no opening hollows every solid
         all |= f.shell.as_ref().is_some_and(|s| s.faces.is_empty());
+        // a scale step takes its whole Object (built apart: all its islands)
+        all |= f.stretch.is_some();
         let mut found = false;
         for &p in names[i].iter().flatten() {
             if global[p] {
@@ -3682,7 +3700,7 @@ fn drag_order(doc: &Doc, last: &[(FeatureId, u64)]) -> Option<Doc> {
             continue;
         }
         let ids: Vec<FeatureId> = members.iter().map(|&i| doc.features[i].id).collect();
-        let join = if g.shell.is_some() {
+        let join = if g.shell.is_some() || g.stretch.is_some() {
             true
         } else if let Some(m) = &g.mirror {
             members.iter().any(|&i| !mirror_safe(doc, &doc.features[i], m, 0))
@@ -3719,7 +3737,7 @@ fn drag_order(doc: &Doc, last: &[(FeatureId, u64)]) -> Option<Doc> {
 /// Where a feature can change the part, in world space (`drag_order`):
 /// None, anywhere (a Mirror, a Shell, what cannot be told).
 fn reach(doc: &Doc, f: &Feature, depth: u32) -> Option<(DVec3, DVec3)> {
-    if depth > 6 || f.mirror.is_some() || f.shell.is_some() || (f.is_solid() && f.op == Op::Intersect) {
+    if depth > 6 || f.mirror.is_some() || f.shell.is_some() || f.stretch.is_some() || (f.is_solid() && f.op == Op::Intersect) {
         return None;
     }
     let grow = |(lo, hi): (DVec3, DVec3), d: f64| (lo - DVec3::splat(d), hi + DVec3::splat(d));
@@ -3774,7 +3792,7 @@ fn reach(doc: &Doc, f: &Feature, depth: u32) -> Option<(DVec3, DVec3)> {
 fn mirror_safe(doc: &Doc, f: &Feature, m: &Mirror, depth: u32) -> bool {
     let tol = 1e-6;
     let kept = |r: Option<(DVec3, DVec3)>| r.is_some_and(|(lo, hi)| m.side(lo).min(m.side(hi)) >= -tol);
-    if f.mirror.is_some() || f.shell.is_some() || (f.is_solid() && f.op == Op::Intersect) || f.one_side || f.bridge.is_some() || depth > 6 {
+    if f.mirror.is_some() || f.shell.is_some() || f.stretch.is_some() || (f.is_solid() && f.op == Op::Intersect) || f.one_side || f.bridge.is_some() || depth > 6 {
         return false;
     }
     // a face's image across the plane, for a face of a plain shape centred
@@ -8095,7 +8113,8 @@ mod tests {
             let a = glam::DMat3::from_cols(DVec3::X, DVec3::Y, DVec3::Z) + glam::DMat3::from_cols(x * x.x, x * x.y, x * x.z);
             [a.x_axis.x, a.x_axis.y, a.x_axis.z, 0.0, a.y_axis.x, a.y_axis.y, a.y_axis.z, 0.0, a.z_axis.x, a.z_axis.y, a.z_axis.z, 0.0, 0.0, 0.0, 0.0, 1.0]
         });
-        d.object_mut(o).unwrap().stretch = Some(crate::doc::mat_to_rows(s));
+        // (a scale step after its features)
+        d.add_stretch(o, s, DVec3::ZERO).unwrap();
         let m2 = build(&d, true, false, &[], &mut cache);
         assert!(m2.errors.is_empty(), "{:?}", m2.errors);
         let v2 = mesh_volume(&m2);
@@ -8103,6 +8122,62 @@ mod tests {
         let want = (v1 - small) * 2.0 + small;
         assert!((v2 - want).abs() < want * 1.5e-2, "{v2} {want}");
         assert_eq!(mine(&m2), n0);
+    }
+
+    #[test]
+    fn scale_step_keeps_what_comes_after() {
+        // Romain 24 nov., 13 h 09: "Si je rajoute un cylindre APRES il
+        // prend le scale value coef". A block with a fillet scaled 1.5 along
+        // X and 0.5 along Y (a scale step); a hole made after it stays
+        // round, an inset on its top (flat again) works; an older
+        // document's Object stretch becomes the same step
+        let tag = |f: FeatureId, sub: u16| FaceTag { feature: f, sub }.pack();
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add_round(3.0, false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
+        d.settle_objects(None);
+        let o = d.object_of(b).unwrap();
+        let s = DMat4::from_scale(DVec3::new(1.5, 0.5, 1.0));
+        let mut old = d.clone();
+        d.add_stretch(o, s, DVec3::ZERO).unwrap();
+        let mut cache = Cache::default();
+        let m0 = build(&d, true, false, &[], &mut cache);
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        // its flat faces are planes again
+        let planes = m0.faces.iter().filter(|f| f.tag.is_some_and(|t| t.feature == b) && f.kind == SurfKind::Plane).count();
+        assert_eq!(planes, 6, "{:?}", m0.faces.iter().map(|f| (f.tag, f.kind)).collect::<Vec<_>>());
+        // a hole after it, through the stretched block (now 10 high)
+        let h = d.add(Op::Carve, Prim::Cylinder { radius: 4.0, height: 20.0 }, DVec3::new(-10.0, -5.0, 0.0), DQuat::IDENTITY);
+        let ins = d.add_push(Push { face: FaceRef { tag: tag(b, 2), at: DVec3::new(15.0, 10.0, -5.0) }, inset: 2.0, depth: -1.0, keep: false });
+        assert!(d.settle_objects(None) || d.object_of(h) == Some(o));
+        assert_eq!(d.object_of(h), Some(o));
+        let m1 = build(&d, true, false, &[], &mut cache);
+        assert!(m1.errors.is_empty(), "{:?}", m1.errors);
+        let wall: Vec<&crate::model::Face> = m1.faces.iter().filter(|f| f.tag.is_some_and(|t| t.feature == h)).collect();
+        assert!(!wall.is_empty() && wall.iter().any(|f| f.kind == SurfKind::Cylinder && (f.radius - 4.0).abs() < 1e-6), "{:?}", wall.iter().map(|f| (f.kind, f.radius)).collect::<Vec<_>>());
+        assert!(m1.faces.iter().any(|f| f.tag.is_some_and(|t| t.feature == ins)), "the inset is not made");
+        // the scale step seen from a feature before it
+        assert!(d.seen_map(b).is_some_and(|m| m.abs_diff_eq(s, 1e-12)));
+        assert!(d.seen_map(h).is_none());
+        // an older Object stretch: the same step, after the fillet
+        old.object_mut(o).unwrap().stretch = Some(crate::doc::mat_to_rows(s));
+        old.object_mut(o).unwrap().stretched = vec![b];
+        assert!(old.settle_objects(None));
+        assert!(old.objects[0].stretch.is_none());
+        let st = old.features.last().unwrap();
+        assert!(st.stretch.as_ref().is_some_and(|x| x.matrix().abs_diff_eq(s, 1e-12)), "{:?}", old.features.iter().map(|f| f.name.clone()).collect::<Vec<_>>());
+        let m2 = build(&old, true, false, &[], &mut cache);
+        assert!(m2.errors.is_empty(), "{:?}", m2.errors);
+        assert!((mesh_volume(&m2) - mesh_volume(&m0)).abs() < 1e-3 * mesh_volume(&m0));
+        // Freeze Transform: the block takes it into its sizes (the hole
+        // after the step is left as it is)
+        let mut fr = d.clone();
+        let err = fr.freeze_object(o, &|_, _| 1.0);
+        assert!(err.is_ok(), "{err:?}");
+        assert!(!fr.features.iter().any(|f| f.stretch.is_some()));
+        if let Prim::Box { x, y, .. } = fr.feature(b).unwrap().prim {
+            assert!((x - 60.0).abs() < 1e-9 && (y - 10.0).abs() < 1e-9, "{x} {y}");
+        }
     }
 
     #[test]

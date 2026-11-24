@@ -55,11 +55,19 @@ pub struct Settings {
     /// scene stays short to build.
     #[serde(default)]
     pub history_off: bool,
+    /// The Scale tool's Legacy option (Romain 24 nov., 13 h 09: "ça scale en
+    /// essayant de maintenir les formes, comme avant mais en fonctionnel (du
+    /// coup un fillet ne va pas se modifier)"): a whole Object scaled puts
+    /// the scale into each of its features (a box its sizes, a cylinder its
+    /// radius and height; fillets, insets and walls keep their size), never
+    /// a scale step as a mesh's.
+    #[serde(default)]
+    pub scale_legacy: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: cfg!(target_os = "ios"), mirror_bar: false, mirror_plane: true, select_through: true, ui_scale: 1.0, move_normal: false, history_off: cfg!(target_os = "ios") }
+        Settings { light: false, grid: true, origin: true, snap: true, step: 1.0, points: true, show_tree: true, help: true, sub_fixed: false, nav: cfg!(target_os = "ios"), mirror_bar: false, mirror_plane: true, select_through: true, ui_scale: 1.0, move_normal: false, history_off: cfg!(target_os = "ios"), scale_legacy: false }
     }
 }
 

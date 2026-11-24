@@ -2546,7 +2546,7 @@ fn main() {
                 m.map_or(0, |m| m.faces.len()),
                 m.map(|m| m.errors.clone()).unwrap_or_default(),
                 o.map(|o| (o.frame.t.to_array().map(|v| (v * 100.0).round() / 100.0), (o.frame.s * 1000.0).round() / 1000.0)),
-                o.is_some_and(|o| o.stretch.is_some())
+                o.is_some_and(|o| h.st.doc.is_stretched(o.id))
             );
         };
         h.key(egui::Key::Num4);
@@ -2863,7 +2863,7 @@ fn main() {
             h.steps(3);
         }
         let ob = h.st.doc.object_of(b).and_then(|o| h.st.doc.object(o)).cloned();
-        eprintln!("  cube scaled: prim {:?}, stretch kept {:?}", h.st.doc.feature(b).unwrap().prim, ob.map(|o| o.stretch.is_some()));
+        eprintln!("  cube scaled: prim {:?}, stretch kept {:?}", h.st.doc.feature(b).unwrap().prim, ob.map(|o| h.st.doc.is_stretched(o.id)));
         let t0 = std::time::Instant::now();
         let mut d = h.st.doc.clone();
         let (lo, hi) = d.feature(b).unwrap().bounds();
@@ -2897,7 +2897,7 @@ fn main() {
             h.steps(3);
         }
         let ob = h.st.doc.object_of(b).and_then(|o| h.st.doc.object(o)).cloned();
-        eprintln!("  block with a fillet scaled: stretch kept {:?}", ob.as_ref().map(|o| o.stretch.is_some()));
+        eprintln!("  block with a fillet scaled: stretch kept {:?}", ob.as_ref().map(|o| h.st.doc.is_stretched(o.id)));
         h.shot("zero-xfreeze-2-stretched");
         let t0 = std::time::Instant::now();
         h.hold(Modifiers::ALT | Modifiers::SHIFT);
@@ -2905,7 +2905,7 @@ fn main() {
         h.hold(Modifiers::NONE);
         h.settle();
         let ob = h.st.doc.object_of(b).and_then(|o| h.st.doc.object(o)).cloned();
-        eprintln!("  frozen ({:.0} ms): prim {:?}, stretch {:?}, toast {:?}, errors {:?}", t0.elapsed().as_secs_f64() * 1e3, h.st.doc.feature(b).unwrap().prim, ob.map(|o| o.stretch.is_some()), h.st.toast.as_ref().map(|t| t.text.clone()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        eprintln!("  frozen ({:.0} ms): prim {:?}, stretch {:?}, toast {:?}, errors {:?}", t0.elapsed().as_secs_f64() * 1e3, h.st.doc.feature(b).unwrap().prim, ob.map(|o| h.st.doc.is_stretched(o.id)), h.st.toast.as_ref().map(|t| t.text.clone()), h.st.model.as_ref().map(|m| m.errors.clone()));
         h.shot("zero-xfreeze-3-frozen");
         // Align onto the world, then the grid
         let mut d = Doc::default();
@@ -2953,7 +2953,7 @@ fn main() {
             }
             eprintln!("  scene: errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
             h.shot("zero-xfreeze-7-scene");
-            let objs: Vec<u32> = h.st.doc.objects.iter().filter(|o| o.stretch.is_some()).map(|o| o.id).collect();
+            let objs: Vec<u32> = h.st.doc.objects.iter().filter(|o| h.st.doc.is_stretched(o.id)).map(|o| o.id).collect();
             for o in objs {
                 h.key(egui::Key::Num4);
                 h.st.select_object(o, false);
@@ -2997,7 +2997,7 @@ fn main() {
         let hot2 = side(&mut h, Vec3::new(10.0, 20.0, 0.0), Vec3::new(10.0, 8.0, 0.0));
         let f = h.st.doc.feature(b).unwrap().clone();
         let ob = h.st.doc.object_of(b).and_then(|o| h.st.doc.object(o)).cloned().unwrap();
-        let line = format!("cube scaled by {hot:?} then {hot2:?}: {:?} at {:?}, stretch kept {}", f.prim, f.origin, ob.stretch.is_some());
+        let line = format!("cube scaled by {hot:?} then {hot2:?}: {:?} at {:?}, stretch kept {}", f.prim, f.origin, h.st.doc.is_stretched(ob.id));
         eprintln!("  {line}");
         log.push(line);
         let (lo, hi) = f.bounds();
@@ -3047,7 +3047,7 @@ fn main() {
         let _ = (lo2, hi2);
         let hot3 = side(&mut h, Vec3::new(12.5, 4.0, 10.0), Vec3::new(12.5, 4.0, 25.0));
         let ob = h.st.doc.object_of(b).and_then(|o| h.st.doc.object(o)).cloned().unwrap();
-        let line = format!("Object with operations scaled by {hot3:?} along Z: {:.0} ms, stretch kept {}, errors {:?}", t0.elapsed().as_secs_f64() * 1e3, ob.stretch.is_some(), h.st.model.as_ref().map(|m| m.errors.clone()));
+        let line = format!("Object with operations scaled by {hot3:?} along Z: {:.0} ms, stretch kept {}, errors {:?}", t0.elapsed().as_secs_f64() * 1e3, h.st.doc.is_stretched(ob.id), h.st.model.as_ref().map(|m| m.errors.clone()));
         eprintln!("  {line}");
         log.push(line);
         timed(&mut h, &mut log, "Fillet 1 on the stretched Object", |d| d.add_round(1.0, false, vec![e(FaceTag { feature: b, sub: 3 }.pack(), s(0), DVec3::new(hi.x + 5.0, lo.y, c.z))]));
@@ -3065,6 +3065,194 @@ fn main() {
         h.shot("zero-scaled-4-frozen");
         gizmo_drag(&mut h, &mut log, "drag the frozen Object along Z", &[b, hole], Vec3::Z, "zero-scaled-5-dragged");
         std::fs::write(format!("{}/scaled.txt", h.out), log.join("\n")).ok();
+    }
+
+    if want("rescale") {
+        // Romain 24 nov., 13 h 09: the Scale made again as a step of its
+        // Object. A block with a fillet scaled by its +X side square (a
+        // "Scale" step, its faces still flat), Ctrl + Z and Ctrl + Y (the
+        // part follows), a Sub cylinder drawn on its scaled top (round),
+        // a box drawn on it; Legacy (the shapes take the scale, the fillet
+        // keeps its size); a Sub hovered and selected (its volume filled
+        // lightly). FORME_DOC: his scene, migrated, a cylinder drawn on it.
+        let tg = |f: u32, s: u16| FaceTag { feature: f, sub: s }.pack();
+        let bounds = |h: &Harness| -> String {
+            let Some(m) = h.st.model.as_ref() else { return "no model".into() };
+            let lo = m.positions.iter().fold([f32::MAX; 3], |a, p| [a[0].min(p[0]), a[1].min(p[1]), a[2].min(p[2])]);
+            let hi = m.positions.iter().fold([f32::MIN; 3], |a, p| [a[0].max(p[0]), a[1].max(p[1]), a[2].max(p[2])]);
+            let r = |v: f32| (v * 10.0).round() / 10.0;
+            format!("{:?} to {:?}, {} faces ({} flat), errors {:?}", lo.map(r), hi.map(r), m.faces.len(), m.faces.iter().filter(|f| f.kind == nurbs_kernel::model::SurfKind::Plane).count(), m.errors)
+        };
+        let steps = |h: &Harness| -> Vec<String> { h.st.doc.features.iter().map(|f| format!("{}{}", f.name, if f.stretch.is_some() { " (scale)" } else { "" })).collect() };
+        let round_of = |h: &Harness, id: u32| -> Vec<(nurbs_kernel::model::SurfKind, f64)> {
+            h.st.model.as_ref().map(|m| m.faces.iter().filter(|f| f.tag.is_some_and(|t| t.feature == id) && f.kind != nurbs_kernel::model::SurfKind::Plane).map(|f| (f.kind, (f.radius * 1000.0).round() / 1000.0)).collect()).unwrap_or_default()
+        };
+        let scale_side = |h: &mut Harness, pick: Vec3, from: Vec3, to: Vec3| {
+            h.key(egui::Key::Escape);
+            h.st.tool = Tool::Select;
+            h.key(egui::Key::Num4);
+            h.click(h.screen_of(pick));
+            h.key(egui::Key::R);
+            h.steps(3);
+            let g = h.screen_of(from);
+            h.move_to(g);
+            h.steps(2);
+            let hot = h.st.hot_handle;
+            h.drag(g, h.screen_of(to), 12, true);
+            for _ in 0..3 {
+                h.settle();
+                h.steps(3);
+            }
+            hot
+        };
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add_round(3.0, false, vec![EdgeRef { faces: [tg(b, 2), tg(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
+        h.reset(d, "Block");
+        eprintln!("  before: {}", bounds(&h));
+        let hot = scale_side(&mut h, Vec3::new(0.0, 20.0, 0.0), Vec3::new(20.0, 10.0, 0.0), Vec3::new(40.0, 10.0, 0.0));
+        eprintln!("  scaled by {hot:?}: steps {:?}, {}", steps(&h), bounds(&h));
+        h.shot("zero-rescale-1-scaled");
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::Z);
+        h.hold(Modifiers::NONE);
+        for _ in 0..3 {
+            h.settle();
+            h.steps(3);
+        }
+        eprintln!("  Ctrl + Z: steps {:?}, {}", steps(&h), bounds(&h));
+        h.shot("zero-rescale-2-undone");
+        h.hold(Modifiers::CTRL);
+        h.key(egui::Key::Y);
+        h.hold(Modifiers::NONE);
+        for _ in 0..3 {
+            h.settle();
+            h.steps(3);
+        }
+        eprintln!("  Ctrl + Y: steps {:?}, {}", steps(&h), bounds(&h));
+        // a Sub cylinder drawn on the scaled top: round
+        h.key(egui::Key::Escape);
+        h.st.selection.clear();
+        h.st.mode = Op::Carve;
+        h.st.tool = Tool::Create(PrimKind::Cylinder);
+        let c = h.screen_of(Vec3::new(-15.0, 20.0, -4.0));
+        let r = h.screen_of(Vec3::new(-9.0, 20.0, -4.0));
+        h.move_to(c);
+        h.steps(2);
+        h.drag(c, r, 8, true);
+        h.steps(2);
+        let down = h.screen_of(Vec3::new(-15.0, 8.0, -4.0));
+        h.move_to(down);
+        h.settle();
+        h.shot("zero-rescale-3-cylinder-drawn");
+        h.click(down);
+        for _ in 0..3 {
+            h.settle();
+            h.steps(3);
+        }
+        let cyl = h.st.doc.features.last().unwrap().clone();
+        eprintln!("  cylinder drawn: {:?} at {:?}, steps {:?}, its faces {:?}, {}", cyl.prim, cyl.origin, steps(&h), round_of(&h, cyl.id), bounds(&h));
+        // a box drawn on the scaled top, Add
+        h.st.mode = Op::Add;
+        h.st.tool = Tool::Create(PrimKind::Box);
+        let a = h.screen_of(Vec3::new(5.0, 20.0, -8.0));
+        let e = h.screen_of(Vec3::new(20.0, 20.0, 2.0));
+        h.move_to(a);
+        h.steps(2);
+        h.drag(a, e, 10, true);
+        h.steps(2);
+        let up = h.screen_of(Vec3::new(12.0, 28.0, -3.0));
+        h.move_to(up);
+        h.settle();
+        h.click(up);
+        for _ in 0..3 {
+            h.settle();
+            h.steps(3);
+        }
+        let bx = h.st.doc.features.last().unwrap().clone();
+        eprintln!("  box drawn: {:?} at {:?}, steps {:?}, {}", bx.prim, bx.origin, steps(&h), bounds(&h));
+        h.st.tool = Tool::Select;
+        h.st.selection.clear();
+        h.steps(3);
+        h.shot("zero-rescale-4-drawn-on-it");
+        // the Sub hovered then selected: its volume filled lightly
+        h.key(egui::Key::Num4);
+        // the hole's far wall, seen through its mouth
+        let eye = h.st.view().eye.as_dvec3();
+        let c0 = cyl.origin;
+        let away = DVec3::new(c0.x - eye.x, 0.0, c0.z - eye.z).normalize() * 5.0;
+        let wall = c0 + away + DVec3::new(0.0, -3.0, 0.0);
+        h.move_to(h.screen_of(wall.as_vec3() + Vec3::new(0.0, 0.0, 0.0)));
+        h.steps(2);
+        h.move_to(h.screen_of(wall.as_vec3()));
+        h.steps(3);
+        eprintln!("  hover at {wall:?}: {:?} also {:?} (the Sub {})", h.st.hover_feature, h.st.hover_also, cyl.id);
+        h.shot("zero-rescale-5-sub-hovered");
+        h.st.selection = vec![cyl.id];
+        h.steps(3);
+        h.shot("zero-rescale-6-sub-selected");
+        // Legacy: the shapes take the scale, the fillet keeps its size
+        h.st.settings.scale_legacy = true;
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add_round(3.0, false, vec![EdgeRef { faces: [tg(b, 2), tg(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-8.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: tg(b, 2), at: DVec3::new(10.0, 20.0, -5.0) }, inset: 2.0, depth: -1.0, keep: false });
+        h.reset(d, "Legacy");
+        h.st.settings.scale_legacy = true;
+        let hot = scale_side(&mut h, Vec3::new(0.0, 20.0, 0.0), Vec3::new(20.0, 10.0, 0.0), Vec3::new(40.0, 10.0, 0.0));
+        for f in &h.st.doc.features {
+            eprintln!("  legacy {hot:?}: {} {:?} at {:?} round {:?} push {:?}", f.name, f.prim, f.origin, f.round.as_ref().map(|r| r.size), f.push.as_ref().map(|p| (p.inset, p.depth)));
+        }
+        eprintln!("  legacy: {}", bounds(&h));
+        h.shot("zero-rescale-7-legacy");
+        h.st.settings.scale_legacy = false;
+        // his scene (FORME_DOC), migrated: a Sub cylinder drawn on its Cube
+        if let Ok(path) = std::env::var("FORME_DOC") {
+            let d: Doc = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            h.reset(d, "Scene");
+            for _ in 0..3 {
+                h.settle();
+                h.steps(3);
+            }
+            eprintln!("  scene: steps {:?}, {}", steps(&h), bounds(&h));
+            h.shot("zero-rescale-8-scene");
+            // the Cube's largest flat face seen from the eye
+            let eye = h.st.view().eye.as_dvec3();
+            let face = h.st.model.as_ref().and_then(|m| {
+                m.faces
+                    .iter()
+                    .filter(|f| f.kind == nurbs_kernel::model::SurfKind::Plane && f.tag.is_some_and(|t| t.feature == 1))
+                    .map(|f| (DVec3::from(f.point), DVec3::from(f.normal)))
+                    .filter(|(p, n)| n.dot(eye - *p) > 0.0)
+                    .max_by(|x, y| x.1.dot((eye - x.0).normalize()).total_cmp(&y.1.dot((eye - y.0).normalize())))
+            });
+            if let Some((p, n)) = face {
+                let t = n.any_orthonormal_vector();
+                h.st.mode = Op::Carve;
+                h.st.tool = Tool::Create(PrimKind::Cylinder);
+                let c = h.screen_of(p.as_vec3());
+                let r = h.screen_of((p + t * 12.0).as_vec3());
+                h.move_to(c);
+                h.steps(2);
+                h.drag(c, r, 8, true);
+                h.steps(2);
+                let down = h.screen_of((p - n * 20.0).as_vec3());
+                h.move_to(down);
+                h.settle();
+                h.click(down);
+                for _ in 0..3 {
+                    h.settle();
+                    h.steps(3);
+                }
+                let cyl = h.st.doc.features.last().unwrap().clone();
+                eprintln!("  scene: cylinder drawn on {p:?} {n:?}: {:?} at {:?}, its faces {:?}, steps {:?}, {}", cyl.prim, cyl.origin, round_of(&h, cyl.id), steps(&h), bounds(&h));
+                h.st.tool = Tool::Select;
+                h.st.selection = vec![cyl.id];
+                h.steps(3);
+                h.shot("zero-rescale-9-scene-cylinder");
+            }
+        }
     }
 
     if want("intersect") {

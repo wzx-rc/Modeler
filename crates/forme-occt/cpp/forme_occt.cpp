@@ -13,6 +13,7 @@
 #include <TopoDS_Iterator.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <Geom2d_Curve.hxx>
+#include <Geom_Plane.hxx>
 #include <BRepLProp_SLProps.hxx>
 #include <BRepTools.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
@@ -976,6 +977,49 @@ static bool conformal(const double* m) {
 // A map that does not keep angles (an Object stretched along one axis,
 // Romain 24 nov.): every surface made a BSpline by GTransform, the faces'
 // tags carried.
+// After a GTransform every face is a BSpline: a face that was flat is given
+// its plane again (an affine map takes a plane to a plane, exactly), its
+// edges' curves on it made from their 3D curves, so the tools that need a
+// flat face (an inset, an extrusion, a face moved) still take it after a
+// stretch (Romain 24 nov., 13 h 09). Faces with a location of their own are
+// left as they are. Returns how many were made flat.
+static int planes_back(const TopoDS_Shape& src, BRepBuilderAPI_GTransform& op, const double* m) {
+    auto lin = [&](const gp_XYZ& v) { return gp_XYZ(m[0] * v.X() + m[1] * v.Y() + m[2] * v.Z(), m[4] * v.X() + m[5] * v.Y() + m[6] * v.Z(), m[8] * v.X() + m[9] * v.Y() + m[10] * v.Z()); };
+    BRep_Builder B;
+    TopTools_IndexedMapOfShape fm;
+    face_map(src, fm);
+    int n = 0;
+    for (int i = 1; i <= fm.Extent(); ++i) {
+        const TopoDS_Face& f = TopoDS::Face(fm(i));
+        BRepAdaptor_Surface a(f, Standard_False);
+        if (a.GetType() != GeomAbs_Plane) continue;
+        TopoDS_Shape g0 = op.ModifiedShape(f);
+        if (g0.IsNull() || g0.ShapeType() != TopAbs_FACE || !g0.Location().IsIdentity()) continue;
+        TopoDS_Face g = TopoDS::Face(g0);
+        TopLoc_Location l0;
+        Handle(Geom_Surface) old = BRep_Tool::Surface(g, l0);
+        if (old.IsNull() || !l0.IsIdentity()) continue;
+        gp_Ax3 ax = a.Plane().Position();
+        gp_XYZ o = lin(ax.Location().XYZ()) + gp_XYZ(m[3], m[7], m[11]);
+        gp_XYZ x = lin(ax.XDirection().XYZ()), y = lin(ax.YDirection().XYZ());
+        // the side its (u, v) faced: the images of its axes crossed
+        gp_XYZ nn = x ^ y;
+        if (!ax.Direct()) nn.Reverse();
+        if (nn.Modulus() < 1e-12 || x.Modulus() < 1e-12) continue;
+        gp_Ax3 nax{gp_Pnt(o), gp_Dir(nn), gp_Dir(x)};
+        if (!ax.Direct()) nax.YReverse();
+        const double tol = BRep_Tool::Tolerance(g);
+        B.UpdateFace(g, new Geom_Plane(nax), TopLoc_Location(), tol);
+        for (TopExp_Explorer ex(g, TopAbs_EDGE); ex.More(); ex.Next()) {
+            const TopoDS_Edge& e = TopoDS::Edge(ex.Current());
+            B.UpdateEdge(e, Handle(Geom2d_Curve)(), old, TopLoc_Location(), BRep_Tool::Tolerance(e));
+            BRepLib::BuildPCurveForEdgeOnPlane(e, g);
+        }
+        ++n;
+    }
+    return n;
+}
+
 static FShape* gtransformed(const FShape* s, const double* m) {
     gp_GTrsf g;
     g.SetVectorialPart(gp_Mat(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]));
@@ -984,6 +1028,29 @@ static FShape* gtransformed(const FShape* s, const double* m) {
     if (!op.IsDone()) {
         set_err("the shape could not be stretched");
         return (FShape*)nullptr;
+    }
+    // its flat faces flat again; when that leaves a wrong shape, the
+    // GTransform as it comes (made again: the faces were changed in place)
+    bool flat = false;
+    if (!getenv("FORME_NO_PLANES_BACK") && planes_back(s->s, op, m) > 0) {
+        flat = valid(op.Shape());
+        if (!flat && getenv("FORME_OCCT_DEBUG")) {
+            fprintf(stderr, "planes_back: invalid, plain GTransform\n");
+            dump_check(op.Shape());
+        }
+    }
+    if (!flat) {
+        BRepBuilderAPI_GTransform again(s->s, g, Standard_True);
+        if (again.IsDone()) {
+            FShape* r = wrap(again.Shape());
+            if (r && !s->tags.empty()) {
+                carry_tags(again, s, r, -1);
+                bool none = true;
+                for (long long t : r->tags) none = none && t < 0;
+                if (none && r->tags.size() == s->tags.size()) r->tags = s->tags;
+            }
+            return r;
+        }
     }
     FShape* r = wrap(op.Shape());
     if (r && !s->tags.empty()) {

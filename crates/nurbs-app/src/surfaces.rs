@@ -99,7 +99,7 @@ impl AppState {
         ids.dedup();
         let start: Vec<Feature> = self.doc.features.iter().filter(|f| ids.contains(&f.id)).cloned().collect();
         self.begin_live("Move points");
-        self.drag = Some(Drag { handle: h, grab, start, line: None, ops: vec![], carried: Default::default(), pivot, custom: false, keep: vec![], cage: None, pts, groups: vec![], objects: vec![] });
+        self.drag = Some(Drag { handle: h, grab, start, line: None, ops: vec![], carried: Default::default(), pivot, custom: false, keep: vec![], cage: None, pts, groups: vec![], objects: vec![], grow: vec![], legacy: false });
     }
 
     pub(crate) fn update_path_points_drag(&mut self, d: &Drag, p: [f32; 2]) {

@@ -195,7 +195,7 @@ impl AppState {
             }
         };
         self.begin_live("Array");
-        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried: Default::default(), pivot: o, custom: false, keep: vec![], cage: None, pts: vec![], groups: vec![], objects: vec![] });
+        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried: Default::default(), pivot: o, custom: false, keep: vec![], cage: None, pts: vec![], groups: vec![], objects: vec![], grow: vec![], legacy: false });
     }
 
     pub(crate) fn update_array_drag(&mut self, d: &Drag, p: [f32; 2]) {

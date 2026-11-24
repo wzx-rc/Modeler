@@ -26,6 +26,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
         handle_input(ctx, st, &resp, rect);
         let p = ui.painter();
+        draw_cutters(p, st);
         draw_gizmo(p, st);
         draw_vertices(p, st);
         draw_push(p, st);
@@ -1595,6 +1596,53 @@ fn draw_cable(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
         let txt = format!("Cable · Ø {} mm · {n} point{}", fmt_mm((st.cable.radius * 2.0) as f32), if n == 1 { "" } else { "s" });
         chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, CABLE, CABLE);
     }
+}
+
+/// A Sub's or an Intersect's volume, very lightly filled while it is
+/// hovered or selected (Romain 24 nov.: "un très léger highlight de face
+/// et pas que de edge"): its hole's walls may be thin or out of sight,
+/// its cage alone is a few lines. Seen through the part, back to front.
+fn draw_cutters(p: &Painter, st: &AppState) {
+    if !matches!(st.sel_mode, SelMode::Object) || st.dragged_shapes().is_some() {
+        return;
+    }
+    let v = st.view();
+    let (fwd, right, up) = v.basis();
+    let light = (-fwd + up * 0.6 + right * 0.3).normalize();
+    let mut ts: Vec<(f32, [Pos2; 3], Color32)> = vec![];
+    for f in st.doc.features.iter().filter(|f| f.visible && f.is_solid() && !f.is_path() && f.op != nurbs_kernel::Op::Add) {
+        let creating = st.creation.as_ref().is_some_and(|c| c.id == f.id);
+        let selected = st.selection.contains(&f.id);
+        let hovered = st.tool == Tool::Select && (st.hover_feature == Some(f.id) || st.hover_also.contains(&f.id));
+        if !(creating || selected || hovered) {
+            continue;
+        }
+        let base = if f.op == nurbs_kernel::Op::Intersect { intersect() } else { carve() };
+        let alpha = if selected || creating { 46.0 } else { 30.0 };
+        for t in st.shape_fill(f) {
+            let (Some(a), Some(b), Some(c)) = (world(st, t[0]), world(st, t[1]), world(st, t[2])) else { continue };
+            let n = (t[1] - t[0]).cross(t[2] - t[0]).as_vec3().normalize_or_zero();
+            let n = if n.dot(-fwd) < 0.0 { -n } else { n };
+            let shade = 0.7 + 0.3 * n.dot(light).max(0.0);
+            let k = |x: u8| (x as f32 * shade) as u8;
+            let col = Color32::from_rgba_unmultiplied(k(base.r()), k(base.g()), k(base.b()), alpha as u8);
+            let d = ((t[0] + t[1] + t[2]) / 3.0).as_vec3().distance(v.eye);
+            ts.push((d, [a, b, c], col));
+        }
+    }
+    if ts.is_empty() {
+        return;
+    }
+    ts.sort_by(|x, y| y.0.total_cmp(&x.0));
+    let mut mesh = egui::Mesh::default();
+    for (_, q, col) in &ts {
+        let i = mesh.vertices.len() as u32;
+        for v in q {
+            mesh.colored_vertex(*v, *col);
+        }
+        mesh.add_triangle(i, i + 1, i + 2);
+    }
+    p.add(Shape::mesh(mesh));
 }
 
 /// A Library sample where a click would put it: its faces shaded, its

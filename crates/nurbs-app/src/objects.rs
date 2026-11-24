@@ -23,11 +23,35 @@ use nurbs_kernel::{Doc, Feature, FeatureId, Object, Op, Sim};
 /// Whole Objects dragged as one (each as it was, with every feature of
 /// its): a move, turn or scale the same along every axis carries them all
 /// and the Object's frame (`Feature::similar_by`: the kernel finds the same
-/// history built and only puts it in its new place); any other scale (a
-/// side of the box dragged) is its stretch, applied by the kernel to the
-/// result, the features left as they were.
-pub fn put_objects(doc: &mut Doc, objs: &[(Object, Vec<Feature>)], sim: Option<Sim>, aff: Option<DMat4>) {
+/// history built and only puts it in its new place). Any other scale (a
+/// side of the box dragged): shapes alone that take it exactly change their
+/// sizes; else a scale step (`Feature.stretch`, "Scale") at the end of the
+/// Object's history takes what is built before it, as a mesh's scale, and
+/// what is made after it is made as it is (Romain 24 nov., 13 h 09: "Si je
+/// rajoute un cylindre APRES il prend le scale value coef"). Scaled again
+/// just after one, that step is the one scaled. `legacy` (the Scale tool's
+/// Legacy option, his same message: "ça scale en essayant de maintenir les
+/// formes… un fillet ne va pas se modifier"): every scale, the same along
+/// every axis too, put into each feature (`Feature::affine_by`): shapes
+/// stay shapes of their kind, operations keep their sizes, an extrusion
+/// grows along its face (`grow`, read on the model when the drag began).
+pub fn put_objects(doc: &mut Doc, objs: &[(Object, Vec<Feature>)], sim: Option<Sim>, aff: Option<DMat4>, legacy: Option<&[(FeatureId, DVec3)]>) {
     for (o0, fs) in objs {
+        if let (Some(grow), Some(a)) = (legacy, aff.or(sim.map(|t| t.matrix()))) {
+            // every feature as it was taken through the map, kept a shape
+            for f0 in fs {
+                if let Some(f) = doc.feature_mut(f0.id) {
+                    let mut g = f0.affine_by(a);
+                    if let (Some(p), Some((_, n))) = (g.push.as_mut(), grow.iter().find(|(id, _)| *id == f0.id)) {
+                        p.depth *= grow_along(a, *n);
+                    }
+                    *f = g;
+                }
+            }
+            // (a step this drag made before Legacy went on: taken away)
+            drop_new_steps(doc, o0.id, fs);
+            continue;
+        }
         if let Some(t) = sim {
             for f0 in fs {
                 if let Some(f) = doc.feature_mut(f0.id) {
@@ -36,27 +60,19 @@ pub fn put_objects(doc: &mut Doc, objs: &[(Object, Vec<Feature>)], sim: Option<S
             }
             if let Some(o) = doc.object_mut(o0.id) {
                 o.frame = t.after(&o0.frame);
-                // seen as it was, moved: T S T⁻¹ on what T carried
-                o.stretch = o0.stretch.map(|s| {
-                    let m = t.matrix();
-                    nurbs_kernel::mat_to_rows(m * nurbs_kernel::rows_to_mat(s) * m.inverse())
-                });
             }
+            drop_new_steps(doc, o0.id, fs);
         } else if let Some(a) = aff {
             // shapes alone that take the scale exactly (a cube, a sketch, a
             // cylinder along it; Romain 24 nov., 12 h 24: a simple Cube
-            // scaled broke every tool after it): their sizes change, no
-            // stretch is kept, so what is made on it next is made as seen
-            if o0.stretch.is_none() && fs.iter().all(|f| f.absorbs(a)) {
+            // scaled broke every tool after it): their sizes change
+            if fs.iter().all(|f| f.is_solid() && f.absorbs(a)) {
                 for f0 in fs {
                     if let Some(f) = doc.feature_mut(f0.id) {
                         *f = f0.affine_by(a);
                     }
                 }
-                if let Some(o) = doc.object_mut(o0.id) {
-                    o.stretch = None;
-                    o.stretched.clear();
-                }
+                drop_new_steps(doc, o0.id, fs);
                 continue;
             }
             for f0 in fs {
@@ -64,17 +80,48 @@ pub fn put_objects(doc: &mut Doc, objs: &[(Object, Vec<Feature>)], sim: Option<S
                     *f = f0.clone();
                 }
             }
-            if let Some(o) = doc.object_mut(o0.id) {
-                let s = a * o0.stretch_matrix();
-                if s.abs_diff_eq(DMat4::IDENTITY, 1e-9) {
-                    o.stretch = None;
-                    o.stretched.clear();
-                } else {
-                    o.stretch = Some(nurbs_kernel::mat_to_rows(s));
-                    o.stretched = if o0.stretch.is_some() { o0.stretched.clone() } else { fs.iter().map(|f| f.id).collect() };
+            // the step this goes on with: the Object's last feature when the
+            // drag began, else one this drag made, else a new one
+            let last0 = fs.iter().filter(|f| doc.features.iter().any(|g| g.id == f.id)).max_by_key(|f| doc.features.iter().position(|g| g.id == f.id)).filter(|f| f.stretch.is_some());
+            match last0 {
+                Some(f0) => {
+                    let m = a * f0.stretch.as_ref().unwrap().matrix();
+                    if let Some(st) = doc.feature_mut(f0.id).and_then(|f| f.stretch.as_mut()) {
+                        st.rows = nurbs_kernel::mat_to_rows(m);
+                    }
                 }
+                None => match new_step(doc, o0.id, fs) {
+                    Some(id) => {
+                        if let Some(st) = doc.feature_mut(id).and_then(|f| f.stretch.as_mut()) {
+                            st.rows = nurbs_kernel::mat_to_rows(a);
+                        }
+                    }
+                    None => {
+                        let at = a.transform_point3(DVec3::ZERO);
+                        doc.add_stretch(o0.id, a, at);
+                    }
+                },
             }
         }
+    }
+}
+
+/// How much an extrusion along `n` grows under `a`: the pushed vector's
+/// part along the face's new normal.
+pub fn grow_along(a: DMat4, n: DVec3) -> f64 {
+    let n2 = a.inverse().transpose().transform_vector3(n).try_normalize();
+    let k = n2.map_or(1.0, |n2| a.transform_vector3(n).dot(n2));
+    if k.is_finite() && k > 1e-6 { k } else { 1.0 }
+}
+
+/// A scale step of this Object that was not there when the drag began.
+fn new_step(doc: &Doc, o: FeatureId, fs: &[Feature]) -> Option<FeatureId> {
+    doc.features.iter().find(|f| f.stretch.as_ref().is_some_and(|s| s.shapes.iter().any(|m| fs.iter().any(|g| g.id == *m))) && !fs.iter().any(|g| g.id == f.id)).map(|f| f.id).filter(|_| doc.object(o).is_some())
+}
+
+fn drop_new_steps(doc: &mut Doc, o: FeatureId, fs: &[Feature]) {
+    while let Some(id) = new_step(doc, o, fs) {
+        doc.features.retain(|f| f.id != id);
     }
 }
 
@@ -95,19 +142,12 @@ impl AppState {
             .collect()
     }
 
-    /// What the eye sees of a feature's Object besides its features: its
-    /// stretch (`None` when it has none).
-    /// An operation of a stretched Object keeps its points and sizes as
-    /// they are before the stretch (`Doc::settle_stretches`): what the eye
-    /// sees taken back there. Only once it was brought there (in
-    /// `stretched`; a step just made is brought by `touched`).
+    /// Where the eye sees a feature of a scaled Object: the scale steps
+    /// made after it in its Object (`Doc::seen_map`), inverted: what the
+    /// eye sees taken back to where the feature keeps its points and sizes
+    /// (an operation made before a step). None when no step comes after it.
     pub fn unstretch(&self, id: FeatureId) -> Option<DMat4> {
-        let el = self.element_of(id);
-        let o = self.doc.object(self.doc.object_of(el)?)?;
-        if !o.stretched.contains(&id) {
-            return None;
-        }
-        o.stretch.map(|s| nurbs_kernel::rows_to_mat(s).inverse())
+        self.doc.seen_map(id).map(|m| m.inverse())
     }
     pub fn local_vec(&self, id: FeatureId, v: DVec3) -> DVec3 {
         self.unstretch(id).map_or(v, |m| m.transform_vector3(v))
@@ -121,17 +161,16 @@ impl AppState {
     }
     /// A kept point of an operation where the eye sees it.
     pub fn seen_pt(&self, id: FeatureId, p: DVec3) -> DVec3 {
-        self.unstretch(id).map_or(p, |m| m.inverse().transform_point3(p))
+        self.doc.seen_map(id).map_or(p, |m| m.transform_point3(p))
     }
 
+    /// The scale steps made after a feature (a shape: where the eye sees it).
     pub fn stretch_of(&self, id: FeatureId) -> Option<DMat4> {
-        let el = self.element_of(id);
-        let o = self.doc.object(self.doc.object_of(el)?)?;
-        o.stretch.map(nurbs_kernel::rows_to_mat)
+        self.doc.seen_map(id)
     }
 
-    /// A shape's centre and corners where the eye sees them (through its
-    /// Object's stretch).
+    /// A shape's centre and corners where the eye sees them (through the
+    /// scale steps after it).
     pub fn seen_centre(&self, f: &Feature) -> DVec3 {
         let c = f.centre();
         self.stretch_of(f.id).map_or(c, |s| s.transform_point3(c))
@@ -312,32 +351,47 @@ impl AppState {
         out
     }
 
+    /// An Object's own transform as the eye sees it: its frame, then its
+    /// last scale step when that is its last feature (the step a Scale
+    /// drag changes: the drag preview moves the model on screen by it).
+    pub fn object_seen(&self, o: &Object) -> DMat4 {
+        let last = self.doc.last_stretch(o.id).and_then(|id| self.doc.feature(id)).and_then(|f| f.stretch.as_ref()).filter(|_| self.doc.features.iter().any(|f| f.stretch.is_some()));
+        last.map_or(DMat4::IDENTITY, |st| st.matrix()) * o.frame.matrix()
+    }
+
+    /// An extrusion's face normal as the step keeps it (before the scale
+    /// steps after it), read on the model where the eye sees it.
+    pub fn push_kept_normal(&self, id: FeatureId) -> Option<DVec3> {
+        let p = self.doc.feature(id)?.push.clone()?;
+        let m = self.doc.seen_map(id);
+        let seen = m.map_or(p.face.at, |m| m.transform_point3(p.face.at));
+        let face = self.model_face_of(&nurbs_kernel::FaceRef { tag: p.face.tag, at: seen }).or_else(|| self.model_face_of(&nurbs_kernel::FaceRef { tag: nurbs_kernel::FaceTag { feature: id, sub: 1 }.pack(), at: seen }));
+        let nw = face.and_then(|fi| self.normal_near(fi, seen))?;
+        match m {
+            Some(m) => m.transpose().transform_vector3(nw).try_normalize(),
+            None => Some(nw),
+        }
+    }
+
     /// Freeze Transform (Maya's; Romain 24 nov., 12 h 24: "On dirait il
-    /// manque un FreezeTransform"): each Object's stretch put into its
-    /// features (`Doc::freeze_object`), so its next operations are made on
-    /// what the eye sees; its frame made the identity. An extrusion keeps
-    /// how far it goes as seen (its depth grown by the stretch across its
-    /// face, read on the model); fillets, insets and walls keep their size
-    /// (made round again). One undo step.
+    /// manque un FreezeTransform"): each Object's scale steps put into its
+    /// features (`Doc::freeze_object`), so it is made of shapes of their own
+    /// kind again; its frame made the identity. An extrusion keeps how far
+    /// it goes as seen (its depth grown by the scale across its face, read
+    /// on the model); fillets, insets and walls keep their size (made round
+    /// again). One undo step.
     pub fn freeze_transform(&mut self) {
-        let objs = self.freeze_targets();
+        let objs: Vec<FeatureId> = self.freeze_targets().into_iter().filter(|o| self.doc.is_stretched(*o)).collect();
         if objs.is_empty() {
-            self.toast("Freeze Transform: pick an Object first", false);
+            self.toast("Freeze Transform: pick an Object with a Scale step first", false);
             return;
         }
-        // each extrusion's growth across its face, as the eye sees it
-        let mut grow: std::collections::HashMap<FeatureId, f64> = std::collections::HashMap::new();
+        // each extrusion's face normal as it is kept
+        let mut normals: std::collections::HashMap<FeatureId, DVec3> = std::collections::HashMap::new();
         for o in &objs {
-            let Some(s) = self.doc.object(*o).and_then(|ob| ob.stretch).map(nurbs_kernel::rows_to_mat) else { continue };
             for id in self.doc.object_features(*o) {
-                let Some(p) = self.doc.feature(id).and_then(|f| f.push.clone()) else { continue };
-                let seen = s.transform_point3(p.face.at);
-                let face = self.model_face_of(&nurbs_kernel::FaceRef { tag: p.face.tag, at: seen }).or_else(|| self.model_face_of(&nurbs_kernel::FaceRef { tag: nurbs_kernel::FaceTag { feature: id, sub: 1 }.pack(), at: seen }));
-                let Some(nw) = face.and_then(|fi| self.normal_near(fi, seen)) else { continue };
-                let Some(nl) = s.transpose().transform_vector3(nw).try_normalize() else { continue };
-                let k = nw.dot(s.transform_vector3(nl));
-                if k.is_finite() && k > 1e-6 {
-                    grow.insert(id, k);
+                if let Some(n) = self.push_kept_normal(id) {
+                    normals.insert(id, n);
                 }
             }
         }
@@ -346,7 +400,7 @@ impl AppState {
         let mut doc = self.doc.clone();
         for o in &objs {
             let name = doc.object(*o).map(|ob| ob.name.clone()).unwrap_or_default();
-            match doc.freeze_object(*o, &|f: &nurbs_kernel::Feature| grow.get(&f.id).copied().unwrap_or(1.0)) {
+            match doc.freeze_object(*o, &|f: &nurbs_kernel::Feature, s: DMat4| normals.get(&f.id).map_or(1.0, |n| grow_along(s, *n))) {
                 Ok(()) => done.push(name),
                 Err(e) => refused = Some(format!("{name}: {e}")),
             }
@@ -358,30 +412,7 @@ impl AppState {
         self.edit("Freeze Transform", |d| *d = doc);
         match refused {
             Some(r) => self.toast(&format!("Frozen: {} · not {r}", done.join(", ")), true),
-            None => self.toast(&format!("Frozen: {} (what is made on it now is made as seen)", done.join(", ")), false),
-        }
-    }
-
-    /// An operation just made on a stretched Object says so once, with
-    /// Freeze Transform at hand (its fillets, insets and walls are
-    /// stretched with it until then).
-    pub(crate) fn tell_stretched(&mut self) {
-        let newest = self.doc.features.iter().map(|f| f.id).max().unwrap_or(0);
-        if newest <= self.stretch_told {
-            return;
-        }
-        let fresh: Vec<FeatureId> = self.doc.features.iter().filter(|f| f.id > self.stretch_told && !f.is_solid()).map(|f| f.id).collect();
-        self.stretch_told = newest;
-        let hit = fresh.iter().find_map(|id| {
-            let o = self.doc.object_of(self.element_of(*id))?;
-            self.doc.object(o).filter(|ob| ob.stretch.is_some()).map(|ob| (ob.id, ob.name.clone()))
-        });
-        if let Some((o, name)) = hit {
-            self.toast(&format!("{name} is stretched: this is stretched with it"), false);
-            if let Some(t) = self.toast.as_mut() {
-                t.until = self.now + 8.0;
-                t.acts = vec![("Freeze Transform".into(), crate::state::ToastAct::Freeze(o))];
-            }
+            None => self.toast(&format!("Frozen: {} (its Scale steps put into its shapes)", done.join(", ")), false),
         }
     }
 }

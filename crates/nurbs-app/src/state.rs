@@ -135,15 +135,19 @@ pub struct BasePlane {
     /// On the reference: Some(true) its flat face, Some(false) its tangent
     /// plane (no flat face there).
     pub scan: Option<bool>,
+    /// Tangent to a curved face of the part (a cylinder's side, a fillet,
+    /// a surface) where the pointer is.
+    pub tangent: bool,
 }
 
 impl BasePlane {
     pub fn ground() -> BasePlane {
-        BasePlane { origin: DVec3::ZERO, u: DVec3::X, n: DVec3::Y, v: DVec3::Z, face: None, scan: None }
+        BasePlane { origin: DVec3::ZERO, u: DVec3::X, n: DVec3::Y, v: DVec3::Z, face: None, scan: None, tangent: false }
     }
     /// Where it lies, for the pointer's chip.
     pub fn label(&self) -> &'static str {
         match (self.face, self.scan) {
+            (Some(_), _) if self.tangent => "tangent to the face",
             (Some(_), _) => "on the face",
             (None, Some(true)) => "on the scan's face",
             (None, Some(false)) => "tangent to the scan",
@@ -162,7 +166,7 @@ impl BasePlane {
         let pick = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Z };
         let u = (pick - n * pick.dot(n)).normalize();
         // (u, n, v) right-handed like (X, Y, Z)
-        BasePlane { origin, u, n, v: u.cross(n), face, scan: None }
+        BasePlane { origin, u, n, v: u.cross(n), face, scan: None, tangent: false }
     }
     pub fn to_plane(&self, p: DVec3) -> [f64; 2] {
         let d = p - self.origin;
@@ -496,6 +500,10 @@ pub struct Drag {
     /// of its features as they were; the drag sets its transform and
     /// carries them all (`apply_objects`).
     pub objects: Vec<(nurbs_kernel::Object, Vec<Feature>)>,
+    /// The Scale tool's Legacy option on for this drag (`Settings.scale_legacy`)
+    /// and each extrusion's face normal then (as kept: `push_kept_normal`).
+    pub legacy: bool,
+    pub grow: Vec<(FeatureId, DVec3)>,
 }
 
 /// A fillet or chamfer sized by a drag on screen (Rectify's Radius
@@ -716,8 +724,6 @@ pub struct AppState {
     /// The newest step the "made on both sides" toast was said for (a
     /// step made after a Mirror).
     pub mirror_told: FeatureId,
-    /// The newest feature `tell_stretched` looked at.
-    pub stretch_told: FeatureId,
     /// The Surface tool's points: put on the reference under the pointer
     /// (true), else locked on the plane under its first point.
     pub surface_on_scan: bool,
@@ -984,7 +990,6 @@ impl AppState {
             round_chamfer: false,
             round_only: false,
             mirror_told: told,
-            stretch_told: told,
             surface_on_scan: false,
             slot_on_scan: false,
             form: Default::default(),
@@ -1440,15 +1445,12 @@ impl AppState {
         // a shape gone leaves its group; every shape in one Object
         self.doc.clean_groups();
         self.doc.settle_objects(self.last_object);
-        // an operation made on a stretched Object: back in its own space
-        self.doc.settle_stretches();
         self.keep_markers();
         // an operation made on an Array's copy: on every copy
         if self.doc.keep_arrays() {
             self.toast("Made on the original and every copy of its Array", false);
         }
         self.tell_mirror_side();
-        self.tell_stretched();
         self.version += 1;
     }
 
@@ -1759,7 +1761,10 @@ impl AppState {
         let doc = u.doc.map(|d| {
             // only the groups differ (the kernel does not use them): the
             // part is not built again
-            let quiet = d.features == self.doc.features && d.paint == self.doc.paint && d.looks == self.doc.looks && d.reference == self.doc.reference;
+            // (an Object's members and transform are built: Romain 24 nov.,
+            // 13 h 09, a Scale undone stayed on screen)
+            let same_objects = d.objects.len() == self.doc.objects.len() && d.objects.iter().zip(&self.doc.objects).all(|(a, b)| a.id == b.id && a.members == b.members && a.frame == b.frame && a.stretch == b.stretch);
+            let quiet = d.features == self.doc.features && same_objects && d.paint == self.doc.paint && d.looks == self.doc.looks && d.reference == self.doc.reference;
             let now = std::mem::replace(&mut self.doc, d);
             if quiet {
                 self.looks_rev += 1;
@@ -3010,6 +3015,12 @@ impl AppState {
                 // the plane through the face, origin at the face's middle point
                 return plane.hit(ro, rd).map(|q| (plane, q));
             }
+            // a curved face (a cylinder's side, a fillet, a surface): the
+            // plane tangent to it there, square to a world axis within 5°
+            let n = crate::scan::snap_axis(h.smooth.as_dvec3());
+            let mut plane = BasePlane::new(h.point.as_dvec3(), n, Some(h.face));
+            plane.tangent = true;
+            return plane.hit(ro, rd).map(|q| (plane, q));
         }
         let g = self.empty_plane();
         g.hit(ro, rd).map(|q| (g, q))
@@ -3086,6 +3097,10 @@ impl AppState {
             } else if let Some(a) = &f.array {
                 // an Array: its first shape's
                 return a.sources.first().copied().filter(|s| self.doc.feature(*s).is_some());
+            } else if let Some(st) = &f.stretch {
+                // a Scale step: its Object's first shape (still there)
+                let o = st.shapes.iter().find_map(|m| self.doc.object_of(*m))?;
+                return self.doc.object(o).and_then(|ob| ob.members.first().copied());
             } else {
                 return None;
             };
@@ -4112,6 +4127,83 @@ impl AppState {
         }
     }
 
+    /// A solid's volume as triangles (world, through its Object's
+    /// stretch), to fill a Sub's or an Intersect's cage lightly: a box's
+    /// six sides, a cylinder's side and ends, a sketch's sides and its
+    /// outline's inside (ear clipping), an extruded 2D boolean's sides.
+    pub fn shape_fill(&self, f: &Feature) -> Vec<[DVec3; 3]> {
+        let mut out: Vec<[DVec3; 3]> = vec![];
+        let quad = |out: &mut Vec<[DVec3; 3]>, a: DVec3, b: DVec3, c: DVec3, d: DVec3| {
+            out.push([a, b, c]);
+            out.push([a, c, d]);
+        };
+        let sides = |out: &mut Vec<[DVec3; 3]>, base: &[DVec3], v: DVec3| {
+            for w in base.windows(2) {
+                quad(out, w[0], w[1], w[1] + v, w[0] + v);
+            }
+        };
+        let m = f.matrix();
+        let h = f.prim.height();
+        if f.shape_bool.is_some() && f.is_extruded_curve() {
+            let v = f.axis() * h;
+            for l in self.curve_lines(f) {
+                sides(&mut out, &l, v);
+            }
+        } else {
+            match f.prim {
+                Prim::Box { .. } => {
+                    let c = f.corners();
+                    for k in 0..3 {
+                        let (i, j) = ((k + 1) % 3, (k + 2) % 3);
+                        for v in 0..2 {
+                            let at = |a: usize, b: usize| c[(v << k) | (a << i) | (b << j)];
+                            quad(&mut out, at(0, 0), at(1, 0), at(1, 1), at(0, 1));
+                        }
+                    }
+                }
+                Prim::Cylinder { radius, .. } => {
+                    let n = 48;
+                    let ring: Vec<DVec3> = (0..=n)
+                        .map(|i| {
+                            let a = std::f64::consts::TAU * i as f64 / n as f64;
+                            m.transform_point3(DVec3::new(radius * a.cos(), 0.0, radius * a.sin()))
+                        })
+                        .collect();
+                    let v = f.axis() * h;
+                    sides(&mut out, &ring, v);
+                    let c = m.transform_point3(DVec3::ZERO);
+                    for w in ring.windows(2) {
+                        out.push([c, w[0], w[1]]);
+                        out.push([c + v, w[0] + v, w[1] + v]);
+                    }
+                }
+                Prim::Profile { x, z, .. } => {
+                    if let Some(pr) = &f.profile {
+                        let mut line = pr.polyline(x, z);
+                        if line.len() > 2 && line.first() == line.last() {
+                            line.pop();
+                        }
+                        let at = |q: [f64; 2], y: f64| m.transform_point3(DVec3::new(q[0], y, q[1]));
+                        let mut ring: Vec<DVec3> = line.iter().map(|q| at(*q, 0.0)).collect();
+                        if let Some(first) = ring.first().copied() {
+                            ring.push(first);
+                        }
+                        sides(&mut out, &ring, f.axis() * h);
+                        for [a, b, c] in ear_clip(&line) {
+                            out.push([at(line[a], 0.0), at(line[b], 0.0), at(line[c], 0.0)]);
+                            out.push([at(line[a], h), at(line[b], h), at(line[c], h)]);
+                        }
+                    }
+                }
+                Prim::Path { .. } => {}
+            }
+        }
+        match self.stretch_of(f.id) {
+            Some(s) => out.into_iter().map(|t| t.map(|p| s.transform_point3(p))).collect(),
+            None => out,
+        }
+    }
+
     /// The 2D boolean (in use) that takes this curve in.
     pub fn curve_inside(&self, id: FeatureId) -> Option<&Feature> {
         self.doc.boolean_of(id).and_then(|b| self.doc.feature(b)).filter(|b| !b.suspended)
@@ -4372,7 +4464,11 @@ impl AppState {
         let cage = if matches!(h, Handle::Cage(_)) { self.cage() } else { None };
         // a group moved, turned or scaled: its transform with its shapes
         let groups = if matches!(h, Handle::Size(_)) { vec![] } else { self.whole_groups(&start.iter().map(|s| s.id).collect::<Vec<_>>()) };
-        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom, keep, cage, pts: vec![], groups, objects });
+        // the Scale's Legacy option: features scaled as shapes, extrusions
+        // grown along their faces
+        let legacy = self.settings.scale_legacy && matches!(h, Handle::Scale(_) | Handle::ScaleAll | Handle::Cage(_));
+        let grow: Vec<(FeatureId, DVec3)> = if legacy { objects.iter().flat_map(|o| o.1.iter()).filter(|f| f.push.is_some()).filter_map(|f| Some((f.id, self.push_kept_normal(f.id)?))).collect() } else { vec![] };
+        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom, keep, cage, pts: vec![], groups, objects, legacy, grow });
     }
 
     /// The point a handle sits on.
@@ -4483,7 +4579,7 @@ impl AppState {
                             g.origin = g0.origin + delta;
                         }
                     }
-                    crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim { t: delta, ..Default::default() }), None);
+                    crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim { t: delta, ..Default::default() }), None, None);
                 });
             }
             Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick | Handle::Slide(_) => {}
@@ -4521,7 +4617,7 @@ impl AppState {
                             g.origin = pivot0 + dq * (g0.origin - pivot0);
                         }
                     }
-                    crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim::about(pivot0, dq, 1.0)), None);
+                    crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim::about(pivot0, dq, 1.0)), None, None);
                 });
             }
             Handle::Cage(s) => {
@@ -4537,9 +4633,9 @@ impl AppState {
                     // a whole Object: as a mesh would be, the same along
                     // every axis (Shift, or all three) or stretched
                     if (k.x - k.y).abs() < 1e-9 && (k.y - k.z).abs() < 1e-9 {
-                        crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim::about(anchor, DQuat::IDENTITY, k.x)), None);
+                        crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim::about(anchor, DQuat::IDENTITY, k.x)), None, d.legacy.then_some(d.grow.as_slice()));
                     } else {
-                        crate::objects::put_objects(doc, &d.objects, None, Some(crate::objects::scale_about(anchor, c.frame, k)));
+                        crate::objects::put_objects(doc, &d.objects, None, Some(crate::objects::scale_about(anchor, c.frame, k)), d.legacy.then_some(d.grow.as_slice()));
                     }
                 });
             }
@@ -4581,9 +4677,9 @@ impl AppState {
                         }
                     }
                     if (k.x - k.y).abs() < 1e-9 && (k.y - k.z).abs() < 1e-9 {
-                        crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim::about(pivot0, DQuat::IDENTITY, k.x)), None);
+                        crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim::about(pivot0, DQuat::IDENTITY, k.x)), None, d.legacy.then_some(d.grow.as_slice()));
                     } else {
-                        crate::objects::put_objects(doc, &d.objects, None, Some(crate::objects::scale_about(pivot0, frame, k)));
+                        crate::objects::put_objects(doc, &d.objects, None, Some(crate::objects::scale_about(pivot0, frame, k)), d.legacy.then_some(d.grow.as_slice()));
                     }
                 });
             }
@@ -4709,7 +4805,7 @@ impl AppState {
         let mut whole: Vec<(FeatureId, DMat4)> = vec![];
         for (id, t) in then {
             if let Some(o) = self.doc.object(*id) {
-                let x = o.stretch_matrix() * o.frame.matrix() * t.inverse();
+                let x = self.object_seen(o) * t.inverse();
                 if !x.abs_diff_eq(DMat4::IDENTITY, 1e-9) && x.is_finite() {
                     // (its Array's copies and Shell's walls too: all of it moves as one)
                     whole.extend(o.members.iter().map(|m| (*m, x)));
@@ -4868,8 +4964,9 @@ impl AppState {
             self.kernel.submit(want, iso.as_ref().unwrap_or(&self.doc), fine, quads);
             self.submitted = want;
             let mut frames: Vec<(FeatureId, DMat4)> = self.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()).map(|f| (f.id, shape_frame(f))).collect();
-            // each Object's own transform as seen (its stretch after its frame)
-            frames.extend(self.doc.objects.iter().map(|o| (o.id, o.stretch_matrix() * o.frame.matrix())));
+            // each Object's own transform as seen (its last scale step after
+            // its frame)
+            frames.extend(self.doc.objects.iter().map(|o| (o.id, self.object_seen(o))));
             self.sent_frames.push((want, frames));
             if self.sent_frames.len() > 64 {
                 self.sent_frames.remove(0);
@@ -5201,7 +5298,6 @@ impl AppState {
         self.doc_name = name.to_string();
         self.save_name = name.to_string();
         self.mirror_told = self.doc.features.iter().map(|f| f.id).max().unwrap_or(0);
-        self.stretch_told = self.mirror_told;
         self.touched();
         self.show_saved_model();
         self.ref_frame = true;
@@ -5427,3 +5523,61 @@ pub fn shape_frame(f: &Feature) -> DMat4 {
 
 /// How many lines the debug journal keeps.
 pub const JOURNAL: usize = 40;
+
+/// A simple polygon's inside as triangles (ear clipping, either
+/// winding; points repeated or in line are passed over). Indices into
+/// `pts`.
+pub fn ear_clip(pts: &[[f64; 2]]) -> Vec<[usize; 3]> {
+    let n = pts.len();
+    if n < 3 {
+        return vec![];
+    }
+    let area: f64 = (0..n).map(|i| {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        a[0] * b[1] - b[0] * a[1]
+    }).sum();
+    let s = if area < 0.0 { -1.0 } else { 1.0 };
+    let cross = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) * s;
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut out = vec![];
+    let mut guard = 0;
+    while idx.len() > 3 && guard < n * n {
+        guard += 1;
+        let k = idx.len();
+        let mut cut = None;
+        for i in 0..k {
+            let (a, b, c) = (idx[(i + k - 1) % k], idx[i], idx[(i + 1) % k]);
+            let (pa, pb, pc) = (pts[a], pts[b], pts[c]);
+            let turn = cross(pa, pb, pc);
+            if turn <= 1e-12 {
+                // a point in line with its neighbours (or reflex): not an ear
+                if turn.abs() <= 1e-12 {
+                    cut = Some((i, None));
+                    break;
+                }
+                continue;
+            }
+            let inside = idx.iter().any(|&j| {
+                j != a && j != b && j != c && {
+                    let q = pts[j];
+                    cross(pa, pb, q) >= 0.0 && cross(pb, pc, q) >= 0.0 && cross(pc, pa, q) >= 0.0
+                }
+            });
+            if !inside {
+                cut = Some((i, Some([a, b, c])));
+                break;
+            }
+        }
+        match cut {
+            Some((i, t)) => {
+                out.extend(t);
+                idx.remove(i);
+            }
+            None => break,
+        }
+    }
+    if idx.len() == 3 {
+        out.push([idx[0], idx[1], idx[2]]);
+    }
+    out
+}

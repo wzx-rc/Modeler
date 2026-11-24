@@ -132,7 +132,7 @@ impl AppState {
         let (a, b) = (s.plane.at(s.a), s.plane.at(s.b));
         let e = (b - a) / l;
         // the plane turned along the slot: its rectangle square to it
-        let plane = BasePlane { origin: (a + b) * 0.5, u: e, n: s.plane.n, v: e.cross(s.plane.n), face: s.plane.face, scan: s.plane.scan };
+        let plane = BasePlane { origin: (a + b) * 0.5, u: e, n: s.plane.n, v: e.cross(s.plane.n), face: s.plane.face, scan: s.plane.scan, tangent: s.plane.tangent };
         let (x, z) = (l * 0.5, s.w * 0.5);
         let r = s.w * 0.5;
         self.sketch = Some(Sketch {

@@ -19,6 +19,34 @@ pub struct Hit {
     pub face: usize,
     /// The triangle's normal, towards the ray's origin.
     pub normal: Vec3,
+    /// The mesh's normals at the hit, blended (a curved face's own way
+    /// there, not its facet's), towards the ray's origin.
+    pub smooth: Vec3,
+}
+
+/// The mesh's vertex normals of a triangle blended at a point on it,
+/// turned towards `towards`' side (the facet's normal when they are
+/// missing).
+fn smooth_normal(m: &Model, tri: [u32; 3], p: Vec3, facet: Vec3) -> Vec3 {
+    let at = |i: u32| Vec3::from(m.positions[i as usize]);
+    let (a, b, c) = (at(tri[0]), at(tri[1]), at(tri[2]));
+    let n = (b - a).cross(c - a);
+    let area = n.length_squared();
+    if area <= 0.0 || m.normals.len() != m.positions.len() {
+        return facet;
+    }
+    let wa = (b - p).cross(c - p).dot(n) / area;
+    let wb = (c - p).cross(a - p).dot(n) / area;
+    let wc = 1.0 - wa - wb;
+    let nn = |i: u32| Vec3::from(m.normals[i as usize]);
+    let s = (nn(tri[0]) * wa + nn(tri[1]) * wb + nn(tri[2]) * wc).normalize_or_zero();
+    if s == Vec3::ZERO {
+        facet
+    } else if s.dot(facet) < 0.0 {
+        -s
+    } else {
+        s
+    }
 }
 
 /// Per face: its triangles (contiguous, the kernel writes them face by
@@ -123,7 +151,8 @@ impl Picker {
         if n.dot(rd) > 0.0 {
             n = -n;
         }
-        Some(Hit { t: d, point: ro + rd * d, face: m.tri_face[t as usize] as usize, normal: n })
+        let point = ro + rd * d;
+        Some(Hit { t: d, point, face: m.tri_face[t as usize] as usize, normal: n, smooth: smooth_normal(m, tri, point, n) })
     }
 
     /// Nearest hit along the ray, face by face (no tree yet).
@@ -156,7 +185,8 @@ impl Picker {
                         if n.dot(rd) > 0.0 {
                             n = -n;
                         }
-                        best = Some(Hit { t: d, point: ro + rd * d, face: f, normal: n });
+                        let point = ro + rd * d;
+                        best = Some(Hit { t: d, point, face: f, normal: n, smooth: smooth_normal(m, tri, point, n) });
                     }
                 }
             }

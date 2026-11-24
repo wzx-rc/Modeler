@@ -76,6 +76,9 @@ pub fn feature_icon(f: &Feature) -> Icon {
     if f.shell.is_some() {
         return Icon::Shell;
     }
+    if f.stretch.is_some() {
+        return Icon::Scale;
+    }
     if f.bridge.is_some() {
         return Icon::Extrude;
     }
@@ -323,6 +326,27 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                         st.save_settings();
                     }
                 }
+                // the Scale tool (R, and Y's squares): as a mesh (a Scale step)
+                // or Legacy (Romain 24 nov., 13 h 09: the shapes kept, fillets
+                // left at their size)
+                if matches!(st.gizmo, GizmoMode::Scale | GizmoMode::Universal) && st.sel_mode == SelMode::Object {
+                    island_sep(ui);
+                    let on = st.settings.scale_legacy;
+                    let g = ui.painter().layout_no_wrap("LEGACY".to_string(), mono(11.0), TEXT2());
+                    let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 24.0, 28.0), Sense::click());
+                    let pill = r.shrink2(vec2(0.0, 3.0));
+                    if on {
+                        ui.painter().rect(pill, 11.0, RAISED(), Stroke::new(1.0, TEXT2()), StrokeKind::Inside);
+                    } else {
+                        ui.painter().rect(pill, 11.0, if resp.hovered() { RAISED() } else { Color32::TRANSPARENT }, Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
+                    }
+                    ui.painter().text(pill.center(), Align2::CENTER_CENTER, "LEGACY", mono(11.0), if on { TEXT() } else { TEXT2() });
+                    let tip = if on { "Legacy: a whole Object scaled keeps its shapes (a box's sizes, a cylinder round; fillets keep their size). Click: scale it as a mesh" } else { "As a mesh: a whole Object scaled unevenly gets a Scale step (all of it before, fillets too). Click for Legacy: the shapes kept, fillets left at their size" };
+                    if resp.on_hover_text(tip).clicked() {
+                        st.settings.scale_legacy = !on;
+                        st.save_settings();
+                    }
+                }
                 island_sep(ui);
                 if icon_btn(ui, Icon::Magnet, st.settings.snap, &format!("Snap to {} mm", fmt_mm(st.settings.step as f32)), 28.0).clicked() {
                     st.settings.snap = !st.settings.snap;
@@ -525,11 +549,11 @@ fn transform_values(ctx: &egui::Context, st: &mut AppState) {
             }
             // Freeze Transform (Maya's): a stretched Object's scale put into
             // its features
-            let stretched: Vec<String> = st.freeze_targets().iter().filter_map(|o| st.doc.object(*o)).filter(|o| o.stretch.is_some()).map(|o| o.name.clone()).collect();
+            let stretched: Vec<String> = st.freeze_targets().iter().filter(|o| st.doc.is_stretched(**o)).filter_map(|o| st.doc.object(*o)).map(|o| o.name.clone()).collect();
             if !stretched.is_empty() {
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new(format!("{} is stretched: what is made on it is stretched too", stretched.join(", "))).font(regular(11.0)).color(TEXT2()));
-                if secondary_btn(ui, "Freeze Transform", OP_W).on_hover_text("Alt+Shift+F: the stretch put into its shapes; what is made on it next is made as seen (fillets round again)").clicked() {
+                ui.label(egui::RichText::new(format!("{} has a Scale step: what was made before it is scaled as a mesh", stretched.join(", "))).font(regular(11.0)).color(TEXT2()));
+                if secondary_btn(ui, "Freeze Transform", OP_W).on_hover_text("Alt+Shift+F: its Scale steps put into its shapes (fillets round again at their size)").clicked() {
                     st.freeze_transform();
                 }
             }
@@ -2560,6 +2584,8 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                     } else if f.is_path() {
                         path_card(ui, st, &f);
                         curve_make_card(ui, st, &f);
+                    } else if f.stretch.is_some() {
+                        stretch_card(ui, st, &f);
                     } else if f.shell.is_some() {
                         shell_card(ui, st, &f);
                     } else if f.mirror.is_some() {
@@ -2663,6 +2689,32 @@ fn shell_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
     }
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
         st.end_live();
+    }
+}
+
+/// A Scale step (a whole Object scaled as a mesh, not the same along every
+/// axis): its factors, Freeze Transform, its removal.
+fn stretch_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
+    let Some(x) = f.stretch.clone() else { return };
+    section(ui, "Scale");
+    let k = x.factors();
+    ui.label(egui::RichText::new(format!("X × {:.3}   Y × {:.3}   Z × {:.3}", k.x, k.y, k.z)).font(mono(12.0)).color(TEXT()));
+    ui.label(egui::RichText::new("What its Object is made of before it, scaled as a mesh (its fillets too). What is made after it is made as it is.").font(regular(11.0)).color(TEXT2()));
+    ui.add_space(2.0);
+    let w = ui.available_width();
+    if secondary_btn(ui, "Freeze Transform", w).on_hover_text("Alt+Shift+F: the scale put into its shapes (fillets round again at their size)").clicked() {
+        if let Some(o) = x.shapes.iter().find_map(|m| st.doc.object_of(*m)) {
+            st.select_object(o, false);
+            st.freeze_transform();
+        }
+    }
+    if secondary_btn(ui, "Remove the scale", w).clicked() {
+        let id = f.id;
+        st.edit("Remove scale", |d| d.features.retain(|g| g.id != id));
+        st.selection.retain(|s| *s != id);
+    }
+    if let Some(e) = st.feature_error(f) {
+        ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
     }
 }
 
@@ -3339,7 +3391,7 @@ fn object_rows(ui: &mut Ui, st: &mut AppState, ob: &nurbs_kernel::Object, indent
             st.toggle_object_visible(ob.id);
             ui.close();
         }
-        if ob.stretch.is_some() && ui.button("Freeze Transform").on_hover_text("Alt+Shift+F: its stretch put into its shapes").clicked() {
+        if st.doc.is_stretched(ob.id) && ui.button("Freeze Transform").on_hover_text("Alt+Shift+F: its Scale steps put into its shapes").clicked() {
             st.select_object(ob.id, false);
             st.freeze_transform();
             ui.close();
