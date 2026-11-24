@@ -2865,6 +2865,7 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
             ui.add_space(2.0);
         }
         reference_rows(ui, st);
+        rename_key(ui, st);
         group_rows(ui, st, &ops_of, focus);
         objects_section(ui, st, &ops_of, focus);
         for (gi, (title, keep)) in groups.iter().enumerate() {
@@ -2986,6 +2987,10 @@ fn group_rows(ui: &mut Ui, st: &mut AppState, ops_of: &dyn Fn(&AppState, Feature
             ui.spacing_mut().button_padding = vec2(8.0, 3.0);
             ui.spacing_mut().interact_size.y = 24.0;
             ui.style_mut().override_font_id = Some(regular(12.5));
+            if ui.button("Rename").clicked() {
+                start_rename(ui, (1, g.id), &g.name);
+                ui.close();
+            }
             if ui.button(if g.open { "Close" } else { "Open" }).clicked() {
                 st.set_group_open(g.id, !g.open);
                 ui.close();
@@ -3079,9 +3084,13 @@ fn object_rows(ui: &mut Ui, st: &mut AppState, ob: &nurbs_kernel::Object, indent
     let oid = Id::new(("tree-object-fold", ob.id));
     let shut = ui.data(|d| d.get_temp::<bool>(oid)).unwrap_or(false);
     let pad = 14.0 * indent as f32;
-    let (full, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+    let (full, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click_and_drag());
     let r = Rect::from_min_max(pos2(full.min.x + pad, full.min.y), full.max);
     ui.ctx().data_mut(|d| d.insert_temp(Id::new(("object-row", ob.id)), r.center()));
+    // dragged onto another Object: merged into it; a row dropped here: into this one
+    resp.dnd_set_drag_payload(RowDrag { shapes: ob.members.clone() });
+    drag_ghost(ui, &resp, &ob.name);
+    drop_on_object(ui, st, &resp, r, ob.id);
     let selected = st.selected_object().map(|o| o.id) == Some(ob.id);
     let entered = st.open_object == Some(ob.id);
     let lit = st.hover_feature.is_some_and(|h| ob.members.contains(&h));
@@ -3318,15 +3327,35 @@ fn reference_rows(ui: &mut Ui, st: &mut AppState) {
 /// operations are in the second column.
 fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bool) {
     let w = ui.available_width();
-    let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
+    let member = f.is_solid() && st.doc.is_member(f);
+    // a shape of an Object (Romain 24 nov., 7 h 39: "différencier le main
+    // object et les sub"): a smaller name, a lighter selection
+    let sub = member && st.doc.object_of(f.id).is_some();
+    let (r, resp) = ui.allocate_exact_size(vec2(w, if sub { 24.0 } else { 28.0 }), if member { Sense::click_and_drag() } else { Sense::click() });
     ui.ctx().data_mut(|d| d.insert_temp(Id::new(("row", f.id)), r.center()));
+    if member {
+        // a shape of an Object dragged onto another Object (or one of its
+        // shapes): moved there, with the shapes selected with it
+        let mut shapes: Vec<FeatureId> = if st.is_selected(f.id) && st.selected_object().is_none() { st.selection.iter().copied().filter(|id| st.doc.feature(*id).is_some_and(|x| x.is_solid() && st.doc.is_member(x))).collect() } else { vec![] };
+        if !shapes.contains(&f.id) {
+            shapes = vec![f.id];
+        }
+        let label = if shapes.len() > 1 { format!("{} shapes", shapes.len()) } else { f.name.clone() };
+        resp.dnd_set_drag_payload(RowDrag { shapes });
+        drag_ghost(ui, &resp, &label);
+        if let Some(o) = st.doc.object_of(f.id) {
+            drop_on_object(ui, st, &resp, r, o);
+        }
+    }
     // a group selected: its row is the one selected (Maya), its shapes'
     // rows only lit
     let in_group = st.selected_group().is_some_and(|g| g.members.contains(&f.id));
     let selected = st.is_selected(f.id) && !in_group;
     let hovered_3d = st.hover_feature == Some(f.id);
     let p = ui.painter();
-    if selected {
+    if selected && sub {
+        p.rect(r, 5.0, tint(accent_bg(), 0.55), Stroke::new(1.0, tint(accent_border(), 0.5)), StrokeKind::Inside);
+    } else if selected {
         p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
     } else if in_group {
         p.rect_filled(r, 6.0, RAISED());
@@ -3359,11 +3388,11 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
     } else {
         step_info(f)
     };
-    let info_g = p.layout_no_wrap(info, regular(12.0), tint(TEXT2(), dim));
+    let info_g = p.layout_no_wrap(info, regular(if sub { 11.0 } else { 12.0 }), tint(TEXT2(), dim));
     let info_x = r.max.x - 40.0 - info_g.size().x;
     p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
     let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
-    let mut job = egui::text::LayoutJob::single_section(f.name.clone(), egui::TextFormat::simple(if selected { semibold(13.0) } else { regular(13.0) }, name_color));
+    let mut job = egui::text::LayoutJob::single_section(f.name.clone(), egui::TextFormat::simple(match (selected, sub) { (true, true) => semibold(11.5), (true, false) => semibold(13.0), (false, true) => regular(11.5), _ => regular(13.0) }, name_color));
     job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
     let name_r = Rect::from_min_max(pos2(x0 + 20.0, r.min.y + 3.0), pos2(info_x - 4.0, r.max.y - 3.0));
     match rename_in_row(ui, (0, f.id), name_r, &f.name) {
@@ -3435,6 +3464,69 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
     }
 }
 
+/// Rows dragged in the outliner (Romain 24 nov., 7 h 32: "déplacer des
+/// sous-éléments d'un objet à un autre"): shapes, or a whole Object.
+struct RowDrag {
+    shapes: Vec<FeatureId>,
+}
+
+/// The dragged rows' name by the pointer.
+fn drag_ghost(ui: &Ui, resp: &egui::Response, label: &str) {
+    let moved = ui.input(|i| i.pointer.press_origin().zip(i.pointer.interact_pos()).is_some_and(|(a, b)| (a - b).length() >= 4.0));
+    if !resp.dragged() || !moved {
+        return;
+    }
+    let Some(at) = ui.input(|i| i.pointer.interact_pos()) else { return };
+    let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("row-drag-ghost")));
+    let g = p.layout_no_wrap(label.to_string(), semibold(12.0), TEXT_STRONG());
+    let r = Rect::from_min_size(at + vec2(14.0, 6.0), g.size() + vec2(16.0, 8.0));
+    p.rect(r, 6.0, RAISED(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+    p.galley(r.min + vec2(8.0, 4.0), g, TEXT_STRONG());
+}
+
+/// A row an Object's shapes can be dropped on: lit while they hover it,
+/// moved into the Object `to` when let go there.
+fn drop_on_object(ui: &Ui, st: &mut AppState, resp: &egui::Response, r: Rect, to: FeatureId) {
+    if let Some(d) = resp.dnd_hover_payload::<RowDrag>() {
+        if d.shapes.iter().any(|s| st.doc.object_of(*s) != Some(to)) {
+            ui.painter().rect(r, 6.0, Color32::TRANSPARENT, Stroke::new(1.5, accent()), StrokeKind::Inside);
+        }
+    }
+    if let Some(d) = resp.dnd_release_payload::<RowDrag>() {
+        let moved: Vec<FeatureId> = d.shapes.iter().copied().filter(|s| st.doc.object_of(*s) != Some(to)).collect();
+        if !moved.is_empty() {
+            st.shapes_to_object(&moved, Some(to));
+        }
+    }
+}
+
+/// F2 (Windows' rename): the selected group, Object or shape renamed in
+/// its row, its folders opened so the row shows.
+fn rename_key(ui: &Ui, st: &AppState) {
+    if !ui.input(|i| i.key_pressed(egui::Key::F2)) || ui.ctx().egui_wants_keyboard_input() {
+        return;
+    }
+    if let Some(g) = st.selected_group() {
+        start_rename(ui, (1, g.id), &g.name);
+        return;
+    }
+    if let Some(o) = st.selected_object() {
+        if let Some(g) = o.members.iter().find_map(|m| st.doc.group_of(*m).map(|g| g.id)) {
+            ui.ctx().data_mut(|d| d.insert_temp(Id::new(("tree-group-fold", g)), false));
+        }
+        start_rename(ui, (2, o.id), &o.name);
+        return;
+    }
+    let Some(f) = st.selection.first().and_then(|id| st.doc.feature(*id)) else { return };
+    if let Some(o) = st.doc.object_of(f.id) {
+        ui.ctx().data_mut(|d| d.insert_temp(Id::new(("tree-object-fold", o)), false));
+    }
+    if let Some(g) = st.doc.group_of(f.id).map(|g| g.id) {
+        ui.ctx().data_mut(|d| d.insert_temp(Id::new(("tree-group-fold", g)), false));
+    }
+    start_rename(ui, (0, f.id), &f.name);
+}
+
 /// A row of the shape list renamed in place (Romain 24 nov.: the panel
 /// under the list is gone, its name field with it): a double-click starts
 /// it, Enter or a click away keeps the name, Esc drops it. `what`: 0 a
@@ -3490,6 +3582,10 @@ fn row_menu(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     ui.spacing_mut().interact_size.y = 24.0;
     ui.style_mut().override_font_id = Some(regular(12.5));
     let is_op = !f.is_solid() && !f.is_path();
+    if ui.button("Rename").on_hover_text("Also F2, or a double-click on its name").clicked() {
+        start_rename(ui, (0, f.id), &f.name);
+        ui.close();
+    }
     if is_op {
         if ui.button(if f.visible { "Turn off" } else { "Turn on" }).clicked() {
             st.toggle_op(f.id);

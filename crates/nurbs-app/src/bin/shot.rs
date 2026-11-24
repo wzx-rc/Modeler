@@ -2184,6 +2184,40 @@ fn main() {
         h.st.select_object(h.st.doc.object_of(c).unwrap(), false);
         h.steps(3);
         h.shot("zero-objects-5-new-cube");
+        // the new cube's row dragged onto the block's Object row (Romain
+        // 7 h 32: "déplacer des sous-éléments d'un objet à un autre")
+        let pos = |h: &Harness, id: egui::Id| h.ctx.data(|d| d.get_temp::<Pos2>(id));
+        let ob = h.st.doc.object_of(b).unwrap();
+        h.st.select(None, false);
+        h.steps(3);
+        if let (Some(from), Some(to)) = (pos(&h, egui::Id::new(("row", n))), pos(&h, egui::Id::new(("object-row", ob)))) {
+            h.move_to(from);
+            h.steps(1);
+            h.press(from, true);
+            for k in 1..=12 {
+                h.move_to(from + (to - from) * (k as f32 / 12.0));
+                h.steps(1);
+            }
+            h.shot("zero-objects-6-dragging");
+            h.press(to, false);
+            wait(&mut h);
+            eprintln!("  row dropped: cube in {:?} (block's {:?}): {:?}", h.st.doc.object_of(n), ob, objs(&h));
+        } else {
+            eprintln!("  rows not drawn");
+        }
+        h.shot("zero-objects-7-dropped");
+        // F2 renames the Object selected
+        h.st.select_object(ob, false);
+        h.steps(2);
+        h.key(egui::Key::F2);
+        h.steps(2);
+        h.type_text("Body");
+        h.steps(1);
+        h.key(egui::Key::Enter);
+        h.move_to(Pos2::new(900.0, 600.0));
+        h.steps(3);
+        eprintln!("  F2: {:?}", objs(&h));
+        h.shot("zero-objects-8-renamed");
     }
 
     if want("side-scale") {
