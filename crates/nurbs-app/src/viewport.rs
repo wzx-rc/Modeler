@@ -401,7 +401,7 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         let kp = match (knife, st.tool == Tool::Knife && ctrl) {
             (false, _) => None,
             (true, false) => hover.and_then(|h| st.knife_pick(p2(h))),
-            (true, true) => hover.and_then(|h| st.knife_pick_edge(p2(h))).map(|(e, q, f)| (e, q, f, false)),
+            (true, true) => hover.and_then(|h| st.knife_loop_point(p2(h))).map(|(e, q, f)| (e, q, f, false)),
         };
         st.knife_hover = kp.map(|k| k.1);
         st.knife_hover_point = kp.map(|k| k.3).unwrap_or(false);
@@ -410,6 +410,10 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         } else {
             None
         };
+        // the notch shown by the pointer: how far along the edge
+        if st.tool == Tool::Knife && st.drag.is_none() {
+            st.gizmo_readout = if ctrl { hover.and_then(|h| st.knife_loop_point(p2(h))).map(|(_, _, f)| format!("{:.0} %", f * 100.0)) } else { None };
+        }
         let by_feature = (select && matches!(st.sel_mode, SelMode::Object | SelMode::Edge)) || st.tool == Tool::Align;
         st.hover_feature = if st.hot_handle.is_none() && by_feature { hover.and_then(|h| st.pick_path(p2(h))).or_else(|| st.hover_hit.and_then(|h| st.feature_of_face(h.face))) } else { None };
         // Object mode (Maya): the whole element, its operations' faces too

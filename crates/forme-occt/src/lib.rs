@@ -46,6 +46,7 @@ extern "C" {
     fn focc_round(s: *const FShape, idx: *const c_int, n: c_int, r: c_double, fresh: i64) -> *mut FShape;
     fn focc_bevel(s: *const FShape, idx: *const c_int, n: c_int, d: c_double, fresh: i64) -> *mut FShape;
     fn focc_transform(s: *const FShape, m: *const c_double) -> *mut FShape;
+    fn focc_place(s: *const FShape, m: *const c_double) -> *mut FShape;
     fn focc_fuse(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_fuse_checked(a: *const FShape, b: *const FShape) -> *mut FShape;
     fn focc_fuse_each(a: *const FShape, b: *const FShape) -> *mut FShape;
@@ -605,6 +606,14 @@ impl Shape {
 
     /// Copy moved by an affine map: 3 rows of 4 (rotation × uniform scale,
     /// a mirror allowed, then translation).
+    /// An Object put in place: a move and a turn only locate it (its
+    /// triangulation kept), a scale copies it, a stretch (a map that does
+    /// not keep angles) makes it of BSplines.
+    pub fn placed(&self, rows: [[f64; 4]; 3]) -> Result<Shape, String> {
+        let m: Vec<f64> = rows.iter().flatten().copied().collect();
+        shape(unsafe { focc_place(self.0, m.as_ptr()) })
+    }
+
     pub fn transformed(&self, rows: [[f64; 4]; 3]) -> Result<Shape, String> {
         let m: Vec<f64> = rows.iter().flatten().copied().collect();
         shape(unsafe { focc_transform(self.0, m.as_ptr()) })

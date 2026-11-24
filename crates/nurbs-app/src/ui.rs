@@ -870,6 +870,8 @@ fn library_island(ctx: &egui::Context, st: &mut AppState) {
             ui.add_space(6.0);
             let placing = st.place.as_ref().map(|p| p.sample);
             let mut arm: Option<usize> = None;
+            let mut drag_arm: Option<usize> = None;
+            let mut drop_at: Option<egui::Pos2> = None;
             let mut delete: Option<usize> = None;
             egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                 let n = st.library.samples.len();
@@ -882,7 +884,7 @@ fn library_island(ctx: &egui::Context, st: &mut AppState) {
                                 break;
                             }
                             let s = &st.library.samples[i];
-                            let (r, resp) = ui.allocate_exact_size(vec2(TILE, TILE + 18.0), Sense::click());
+                            let (r, resp) = ui.allocate_exact_size(vec2(TILE, TILE + 18.0), Sense::click_and_drag());
                             let pic = Rect::from_min_size(r.min, vec2(TILE, TILE));
                             let on = placing == Some(i);
                             let bg = if on { tint(accent_bg(), 1.0) } else if resp.hovered() { RAISED() } else { tint(RAISED(), 0.55) };
@@ -894,10 +896,19 @@ fn library_island(ctx: &egui::Context, st: &mut AppState) {
                             let name = ui.painter().layout(s.name.clone(), regular(11.0), if on { TEXT() } else { TEXT2() }, TILE);
                             ui.painter().galley(pos2(r.center().x - name.size().x * 0.5, pic.max.y + 3.0), name, TEXT2());
                             let (ns, no) = s.counts();
-                            let tip = format!("{}: {ns} shape{}, {no} operation{}{} · Click: place it on the faces", s.name, if ns == 1 { "" } else { "s" }, if no == 1 { "" } else { "s" }, if s.builtin() { " · comes with the app" } else { " · right click: delete" });
+                            let tip = format!("{}: {ns} shape{}, {no} operation{}{} · Click: place it on the faces · or drag it onto a face", s.name, if ns == 1 { "" } else { "s" }, if no == 1 { "" } else { "s" }, if s.builtin() { " · comes with the app" } else { " · right click: delete" });
                             let resp = resp.on_hover_text(tip);
                             if resp.clicked() {
                                 arm = Some(i);
+                            }
+                            // dragged out of its tile onto a face (Romain 24
+                            // nov., 10 h 21): it follows the pointer as the
+                            // place tool's does, let go it is placed there
+                            if resp.drag_started() && placing != Some(i) {
+                                drag_arm = Some(i);
+                            }
+                            if resp.drag_stopped() {
+                                drop_at = ui.ctx().input(|inp| inp.pointer.latest_pos());
                             }
                             if resp.secondary_clicked() && !s.builtin() {
                                 delete = Some(i);
@@ -913,6 +924,19 @@ fn library_island(ctx: &egui::Context, st: &mut AppState) {
                 } else {
                     st.arm_place(i);
                 }
+            }
+            if let Some(i) = drag_arm {
+                st.arm_place(i);
+            }
+            if let Some(p) = drop_at {
+                let vr = st.view_rect;
+                let island = ui.ctx().memory(|m| m.area_rect(Id::new("library")));
+                let in_view = p.x > vr[0] && p.x < vr[2] && p.y > vr[1] && p.y < vr[3] && !island.is_some_and(|r| r.contains(p));
+                if in_view && st.tool == Tool::Place {
+                    st.place_hover(Some([p.x, p.y]), false, false);
+                    st.place_click([p.x, p.y]);
+                }
+                st.select_tool();
             }
             if let Some(i) = delete {
                 st.delete_sample(i);
@@ -2421,7 +2445,15 @@ fn op_place(ctx: &egui::Context, st: &AppState, k: OpPop, anchor: Rect, h: f32) 
         pos2(left, top),
         pos2(beside_nav - full, y_by),
         pos2(beside_nav - full, top),
+        // next to the component itself (the part filling the view: Romain
+        // 24 nov., 10 h 21, the window stuck under the toolbars)
+        pos2(anchor.max.x + gap, y_by),
+        pos2(anchor.min.x - gap - full, y_by),
     ];
+    // the part fills most of the view: being near the component counts
+    // more than keeping off the part (which every place covers)
+    let vr_area = (vr[2] - vr[0]) * (vr[3] - vr[1]);
+    let part_w = if part.is_positive() && part.area() > vr_area * 0.55 { 0.15 } else { 1.0 };
     let area = |a: Rect, b: Rect| {
         let i = a.intersect(b);
         if i.is_positive() { i.area() } else { 0.0 }
@@ -2431,7 +2463,7 @@ fn op_place(ctx: &egui::Context, st: &AppState, k: OpPop, anchor: Rect, h: f32) 
     for c in cands {
         let at = pos2(c.x.clamp(left, (right - full).max(left)), c.y.clamp(top, (bottom - h).max(top)));
         let r = Rect::from_min_size(at, vec2(full, h));
-        let mut score = area(r, part) + 6.0 * area(r, near) + help.map(|hb| 3.0 * area(r, hb.expand(8.0))).unwrap_or(0.0);
+        let mut score = part_w * area(r, part) + 6.0 * area(r, near) + help.map(|hb| 3.0 * area(r, hb.expand(8.0))).unwrap_or(0.0);
         score += islands.iter().map(|i| 4.0 * area(r, i.expand(6.0))).sum::<f32>();
         score += 0.5 * r.distance_to_pos(anchor.center()) * 40.0;
         if best.map(|b| score < b.0).unwrap_or(true) {
@@ -4769,6 +4801,20 @@ fn push_card(ui: &mut Ui, st: &mut AppState) {
     let (ch, start) = slider_row(ui, "Depth", &mut depth, -span..=span, 0.1, "mm");
     if ch {
         st.set_push(p.inset, depth as f64, start || !st.is_live());
+    }
+    // the base line kept (Maya's polygon Extrude), out only
+    if p.depth > 1e-6 && p.inset <= 0.0 {
+        if chip(ui, None, "Keep base line", p.keep, "The face's outline stays as a line on the faces round it, as Maya's Extrude leaves it").clicked() {
+            let ids: Vec<nurbs_kernel::FeatureId> = st.selected_pushes();
+            let keep = !p.keep;
+            st.edit("Keep base line", |d| {
+                for id in &ids {
+                    if let Some(q) = d.feature_mut(*id).and_then(|f| f.push.as_mut()) {
+                        q.keep = keep;
+                    }
+                }
+            });
+        }
     }
     if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() && st.push.is_none() {
         st.end_live();

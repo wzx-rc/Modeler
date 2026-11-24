@@ -892,7 +892,7 @@ fn object(h: &mut Harness) {
     timed(h, &mut log, "Array line x5 (vent)", |d| {
         d.add_array(nurbs_kernel::Array { sources: vec![vent], kind: nurbs_kernel::ArrayKind::Line, count: 5, step: DVec3::new(6.0, 0.0, 0.0), count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 })
     });
-    timed(h, &mut log, "Inset camera top 2, -1", |d| d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: cam, sub: 2 }.pack(), at: DVec3::new(0.0, 16.0, 40.0) }, inset: 2.0, depth: -1.0 }));
+    timed(h, &mut log, "Inset camera top 2, -1", |d| d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: cam, sub: 2 }.pack(), at: DVec3::new(0.0, 16.0, 40.0) }, inset: 2.0, depth: -1.0, keep: false }));
     timed(h, &mut log, "Mirror X", |d| d.add_mirror(nurbs_kernel::Mirror { axis: 0, offset: 0.0, flip: false, single: false }));
     let ant = timed(h, &mut log, "Antenna (cylinder)", |d| named(d, Op::Add, Prim::Cylinder { radius: 1.5, height: 20.0 }, DVec3::new(15.0, 24.0, -12.0), up, "Antenna"));
     let e = edges_between(h, (ant, 0), (ant, 1));
@@ -2521,6 +2521,153 @@ fn main() {
         h.shot("zero-objects-8-renamed");
     }
 
+    if want("object-xf") {
+        // Romain 24 nov., 10 h 03: "une seule entité comme si je scale un
+        // mesh". A block with a hole, a fillet and an inset (one Object), a
+        // post beside it (another): the Object moved, turned, scaled, then
+        // stretched by a side square; an inset made on it stretched; each
+        // step's kernel time. Then 10 h 21's list: T on three faces twice,
+        // the Knife's notches, an extrusion keeping its base line
+        let tg = |f: u32, s: u16| FaceTag { feature: f, sub: s }.pack();
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-8.0, -5.0, 0.0), DQuat::IDENTITY);
+        d.add_round(3.0, false, vec![EdgeRef { faces: [tg(b, 2), tg(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
+        d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: tg(b, 2), at: DVec3::new(10.0, 20.0, -5.0) }, inset: 2.0, depth: -1.0, keep: false });
+        d.add(Op::Add, Prim::Cylinder { radius: 6.0, height: 15.0 }, DVec3::new(60.0, 0.0, 0.0), DQuat::IDENTITY);
+        h.reset(d, "Block");
+        let mut log: Vec<String> = vec![];
+        let state = |h: &Harness, what: &str| {
+            let m = h.st.model.as_ref();
+            let o = h.st.doc.objects.iter().find(|o| o.members.contains(&b));
+            eprintln!(
+                "  {what}: kernel {:.0} ms, {} faces, errors {:?}, frame {:?}, stretched {}",
+                m.map_or(0.0, |m| m.ms),
+                m.map_or(0, |m| m.faces.len()),
+                m.map(|m| m.errors.clone()).unwrap_or_default(),
+                o.map(|o| (o.frame.t.to_array().map(|v| (v * 100.0).round() / 100.0), (o.frame.s * 1000.0).round() / 1000.0)),
+                o.is_some_and(|o| o.stretch.is_some())
+            );
+        };
+        h.key(egui::Key::Num4);
+        h.click(h.screen_of(Vec3::new(5.0, 20.0, -8.0)));
+        eprintln!("  picked: {:?} (Object {:?})", h.st.selection, h.st.selected_object().map(|o| o.name.clone()));
+        h.shot("zero-object-xf-1-picked");
+        let ids = h.st.selection.clone();
+        gizmo_drag(&mut h, &mut log, "Object moved (and undone)", &ids, Vec3::X, "");
+        h.st.selection = ids.clone();
+        // moved along X by the arrow
+        h.key(egui::Key::W);
+        h.steps(2);
+        let gz = |h: &Harness| {
+            let pivot = h.st.pivot().unwrap().as_vec3();
+            let v = h.st.view();
+            (pivot, v.pixel_size_at((pivot - v.eye).length()) * 78.0)
+        };
+        let (pv, k) = gz(&h);
+        h.drag(h.screen_of(pv + Vec3::X * k * 0.8), h.screen_of(pv + Vec3::X * (k * 0.8 + 25.0)), 12, true);
+        h.settle();
+        state(&h, "moved");
+        h.shot("zero-object-xf-2-moved");
+        // turned 30° round Y
+        h.key(egui::Key::E);
+        h.steps(2);
+        let (pv, k) = gz(&h);
+        let a = h.screen_of(pv + Vec3::X * k);
+        let c = h.screen_of(pv + Vec3::new(0.866, 0.0, -0.5) * k);
+        h.move_to(a);
+        h.steps(2);
+        h.hold(Modifiers::SHIFT);
+        h.drag(a, c, 10, true);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        state(&h, "turned");
+        h.shot("zero-object-xf-3-turned");
+        // scaled ×1.5 by the white cube (to the right)
+        h.key(egui::Key::R);
+        h.steps(2);
+        let (pv, _) = gz(&h);
+        let s0 = h.screen_of(pv);
+        h.drag(s0, s0 + vec2(70.2, 0.0), 12, true);
+        h.settle();
+        state(&h, "scaled");
+        h.shot("zero-object-xf-4-scaled");
+        // stretched by its +X side's square
+        if let Some(cg) = h.st.cage() {
+            let g = cg.point([1, 0, 0]);
+            let to = g + cg.axis(0) * 15.0;
+            h.move_to(h.screen_of(g.as_vec3()));
+            h.steps(2);
+            eprintln!("  side grip hovered: {:?}", h.st.hot_handle);
+            h.drag(h.screen_of(g.as_vec3()), h.screen_of(to.as_vec3()), 12, true);
+            h.settle();
+            h.settle();
+        }
+        state(&h, "stretched");
+        h.shot("zero-object-xf-5-stretched");
+        // an inset on its top as it is seen, stretched
+        let top = {
+            let m = h.st.model.as_ref().unwrap();
+            let i = m.faces.iter().position(|f| f.tag.is_some_and(|t| t.feature == b && t.sub == 2)).unwrap_or(0);
+            let tri = m.tri_face.iter().position(|&f| f as usize == i).unwrap_or(0);
+            let t = m.triangles[tri];
+            (0..3).map(|j| Vec3::from(m.positions[t[j] as usize])).sum::<Vec3>() / 3.0
+        };
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(top));
+        h.key(egui::Key::I);
+        h.settle();
+        state(&h, "inset on the stretched top");
+        h.shot("zero-object-xf-6-inset");
+        let n = h.st.doc.features.len();
+        eprintln!("  features: {n}, undo steps: {}", h.st.undo.len());
+        for l in &log {
+            eprintln!("  {l}");
+        }
+        // T on three faces of a block, twice: each along its own normal
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.key(egui::Key::F11);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.hold(Modifiers::SHIFT);
+        h.click(h.screen_of(Vec3::new(20.0, 10.0, 0.0)));
+        h.click(h.screen_of(Vec3::new(0.0, 10.0, 15.0)));
+        h.hold(Modifiers::NONE);
+        h.key(egui::Key::T);
+        h.steps(2);
+        for round in 0..2 {
+            let (pv, k) = gz(&h);
+            let n = h.st.gizmo_rot() * DVec3::Y;
+            let a = h.screen_of(pv + n.as_vec3() * k * 0.8);
+            h.drag(a, h.screen_of(pv + n.as_vec3() * (k * 0.8 + 4.0)), 10, true);
+            h.settle();
+            let tw: Vec<String> = h.st.doc.features.iter().filter_map(|f| f.tweak.as_ref().map(|t| format!("{} {:?}", f.name, t.delta.to_array().map(|v| (v * 100.0).round() / 100.0)))).collect();
+            eprintln!("  T drag {}: faces still picked {}, steps {tw:?}, bounds {:?}", round + 1, h.st.face_sel.len(), h.st.model.as_ref().and_then(|m| m.bounds()));
+        }
+        h.shot("zero-object-xf-7-normals");
+        // an extrusion keeping its base line
+        let mut d = Doc::default();
+        let bb = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let ins = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: tg(bb, 4), at: DVec3::new(0.0, 10.0, 15.0) }, inset: 5.0, depth: 0.0, keep: false });
+        d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: ins, sub: 1 }.pack(), at: DVec3::new(0.0, 10.0, 15.0) }, inset: 0.0, depth: 8.0, keep: true });
+        d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: tg(bb, 2), at: DVec3::new(0.0, 20.0, 0.0) }, inset: 0.0, depth: 6.0, keep: true });
+        h.reset(d, "Block");
+        eprintln!("  extrusions kept: {} faces, errors {:?}", h.st.model.as_ref().map_or(0, |m| m.faces.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-object-xf-8-keep-line");
+        // the Knife's notches: Ctrl over an edge of a box
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.key(egui::Key::K);
+        h.hold(Modifiers::CTRL);
+        h.move_to(h.screen_of(Vec3::new(7.3, 20.0, 15.0)));
+        h.steps(3);
+        eprintln!("  knife notch: {:?}", h.st.gizmo_readout);
+        h.shot("zero-object-xf-9-knife-notch");
+        h.hold(Modifiers::NONE);
+    }
+
     if want("side-scale") {
         // Romain 24 nov., 7 h 16: the scale gizmo's side squares (one
         // direction only, the side across staying), Shift's 15° steps on
@@ -2603,7 +2750,7 @@ fn main() {
         // History off turned on with an inset made before
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
-        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::doc::FaceRef { tag: FaceTag { feature: b, sub: 2 }.pack(), at: DVec3::new(0.0, 20.0, 0.0) }, inset: 3.0, depth: -4.0 });
+        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::doc::FaceRef { tag: FaceTag { feature: b, sub: 2 }.pack(), at: DVec3::new(0.0, 20.0, 0.0) }, inset: 3.0, depth: -4.0, keep: false });
         h.reset(d, "Block");
         for _ in 0..3 {
             h.settle();
@@ -2719,7 +2866,7 @@ fn main() {
                 let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
                 for (sub, at) in [(0u16, DVec3::new(20.0, 10.0, 0.0)), (1, DVec3::new(-20.0, 10.0, 0.0)), (2, DVec3::new(0.0, 20.0, 0.0)), (4, DVec3::new(0.0, 10.0, 15.0))] {
                     let face = nurbs_kernel::FaceRef { tag: FaceTag { feature: b, sub }.pack(), at };
-                    d.add_push(nurbs_kernel::Push { face, inset: 3.0, depth: 4.0 });
+                    d.add_push(nurbs_kernel::Push { face, inset: 3.0, depth: 4.0, keep: false });
                 }
                 d
             }
@@ -3056,8 +3203,8 @@ fn main() {
         // from the slot), the top round the boss (the boss crosses its
         // border), a pocket; then one too wide that stops
         let mut d = test_part();
-        let p1 = d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 2 }.pack(), at: DVec3::new(-15.0, 20.0, 10.0) }, inset: 2.0, depth: -2.0 });
-        let p2 = d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 2 }.pack(), at: DVec3::new(15.0, 20.0, 10.0) }, inset: 2.0, depth: 1.5 });
+        let p1 = d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 2 }.pack(), at: DVec3::new(-15.0, 20.0, 10.0) }, inset: 2.0, depth: -2.0, keep: false });
+        let p2 = d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 2 }.pack(), at: DVec3::new(15.0, 20.0, 10.0) }, inset: 2.0, depth: 1.5, keep: false });
         h.reset(d, "Insets");
         h.settle();
         eprintln!("  errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
@@ -3098,8 +3245,8 @@ fn main() {
         // second column
         let mut d = test_part();
         d.add_round(2.0, false, vec![EdgeRef { faces: [FaceTag { feature: 1, sub: 2 }.pack(), FaceTag { feature: 1, sub: 4 }.pack()], at: DVec3::new(12.0, 20.0, 15.0) }]);
-        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 4 }.pack(), at: DVec3::new(-12.0, 8.0, 15.0) }, inset: 2.0, depth: -1.0 });
-        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 3, sub: 1 }.pack(), at: DVec3::new(10.0, 30.0, 0.0) }, inset: 2.0, depth: 2.0 });
+        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 4 }.pack(), at: DVec3::new(-12.0, 8.0, 15.0) }, inset: 2.0, depth: -1.0, keep: false });
+        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 3, sub: 1 }.pack(), at: DVec3::new(10.0, 30.0, 0.0) }, inset: 2.0, depth: 2.0, keep: false });
         h.reset(d, "Test part");
         h.st.select(Some(1), false);
         h.settle();
@@ -3344,7 +3491,7 @@ fn main() {
             Err(_) => {
                 let mut d = test_part();
                 d.add_round(2.0, false, vec![EdgeRef { faces: [FaceTag { feature: 1, sub: 2 }.pack(), FaceTag { feature: 1, sub: 4 }.pack()], at: DVec3::new(12.0, 20.0, 15.0) }]);
-                d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 4 }.pack(), at: DVec3::new(-12.0, 8.0, 15.0) }, inset: 2.0, depth: -1.0 });
+                d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 4 }.pack(), at: DVec3::new(-12.0, 8.0, 15.0) }, inset: 2.0, depth: -1.0, keep: false });
                 (d, 1)
             }
         };
@@ -3496,7 +3643,7 @@ fn main() {
                 let mut d = test_part();
                 d.add_round(2.0, false, vec![EdgeRef { faces: [FaceTag { feature: 1, sub: 2 }.pack(), FaceTag { feature: 1, sub: 4 }.pack()], at: DVec3::new(12.0, 20.0, 15.0) }]);
                 d.add_round(1.0, false, vec![EdgeRef { faces: [FaceTag { feature: 3, sub: 0 }.pack(), FaceTag { feature: 3, sub: 1 }.pack()], at: DVec3::new(17.0, 30.0, 0.0) }]);
-                d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 3, sub: 1 }.pack(), at: DVec3::new(10.0, 30.0, 0.0) }, inset: 2.0, depth: 2.0 });
+                d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 3, sub: 1 }.pack(), at: DVec3::new(10.0, 30.0, 0.0) }, inset: 2.0, depth: 2.0, keep: false });
                 // the boss gone, as an old Delete left it
                 d.features.retain(|f| f.id != 3);
                 d
@@ -3527,8 +3674,8 @@ fn main() {
         // the pop-up; the fixed Sub Outliner; the scene's undo history
         let mut d = test_part();
         d.add_round(2.0, false, vec![EdgeRef { faces: [FaceTag { feature: 1, sub: 2 }.pack(), FaceTag { feature: 1, sub: 4 }.pack()], at: DVec3::new(12.0, 20.0, 15.0) }]);
-        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 4 }.pack(), at: DVec3::new(-12.0, 8.0, 15.0) }, inset: 2.0, depth: -1.0 });
-        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 3, sub: 1 }.pack(), at: DVec3::new(10.0, 30.0, 0.0) }, inset: 2.0, depth: 2.0 });
+        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 4 }.pack(), at: DVec3::new(-12.0, 8.0, 15.0) }, inset: 2.0, depth: -1.0, keep: false });
+        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 3, sub: 1 }.pack(), at: DVec3::new(10.0, 30.0, 0.0) }, inset: 2.0, depth: 2.0, keep: false });
         h.reset(d, "Test part");
         let cell = |h: &Harness, i: usize| h.ctx.data(|d| d.get_temp::<Pos2>(egui::Id::new(("hist-cell", i)))).expect("cell drawn");
         let row = |h: &Harness, id: u64| h.ctx.data(|d| d.get_temp::<Pos2>(egui::Id::new(("row", id)))).expect("row drawn");
@@ -3581,7 +3728,7 @@ fn main() {
         h.st.set_marker(1, 1);
         h.settle();
         h.st.edit("Inset", |d| {
-            d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 0 }.pack(), at: DVec3::new(20.0, 10.0, 0.0) }, inset: 3.0, depth: -1.0 });
+            d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: 1, sub: 0 }.pack(), at: DVec3::new(20.0, 10.0, 0.0) }, inset: 3.0, depth: -1.0, keep: false });
         });
         h.settle();
         eprintln!("  order {:?}", h.st.doc.features.iter().map(|f| format!("{}{}", f.name, if f.suspended { " (out)" } else { "" })).collect::<Vec<_>>());
@@ -4467,7 +4614,7 @@ fn main() {
         h.settle();
         let at = h.st.model.as_ref().unwrap().faces.iter().find(|f| f.tag.map(|t| t.feature) == Some(r)).map(|f| DVec3::from_array(f.point)).unwrap();
         let mut p = 0;
-        h.st.edit("Inset", |d| p = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: r, sub: 0 }.pack(), at }, inset: 1.0, depth: -1.0 }));
+        h.st.edit("Inset", |d| p = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: r, sub: 0 }.pack(), at }, inset: 1.0, depth: -1.0, keep: false }));
         h.st.selection = vec![p];
         h.settle();
         eprintln!("  fillet face {:?} errors {:?}", ex(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
@@ -4475,7 +4622,7 @@ fn main() {
         // the Hole's wall: a groove 1 mm into the block, 3 mm in from its rims
         let hole = h.st.doc.features.iter().find(|f| f.name == "Hole").map(|f| f.id).unwrap();
         let mut q = 0;
-        h.st.edit("Inset", |d| q = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: hole, sub: 0 }.pack(), at: DVec3::new(-10.0, 10.0, 5.0) }, inset: 3.0, depth: -1.0 }));
+        h.st.edit("Inset", |d| q = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: hole, sub: 0 }.pack(), at: DVec3::new(-10.0, 10.0, 5.0) }, inset: 3.0, depth: -1.0, keep: false }));
         h.st.selection = vec![q];
         h.settle();
         eprintln!("  hole wall {:?} errors {:?}", ex(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
@@ -4516,7 +4663,7 @@ fn main() {
         // the Hole's wall pushed in 2 mm (into the block): a bigger hole
         let hole = h.st.doc.features.iter().find(|f| f.name == "Hole").map(|f| f.id).unwrap();
         let mut q = 0;
-        h.st.edit("Extrude", |d| q = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: hole, sub: 0 }.pack(), at: DVec3::new(-10.0, 10.0, 5.0) }, inset: 0.0, depth: -2.0 }));
+        h.st.edit("Extrude", |d| q = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: hole, sub: 0 }.pack(), at: DVec3::new(-10.0, 10.0, 5.0) }, inset: 0.0, depth: -2.0, keep: false }));
         h.st.selection = vec![q];
         h.settle();
         eprintln!("  hole wall pushed {:?} errors {:?}", ex(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
@@ -4538,7 +4685,7 @@ fn main() {
         h.settle();
         let at = h.st.model.as_ref().unwrap().faces.iter().find(|f| f.tag.map(|t| t.feature) == Some(r)).map(|f| DVec3::from_array(f.point)).unwrap();
         let mut p = 0;
-        h.st.edit("Extrude", |d| p = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: r, sub: 0 }.pack(), at }, inset: 0.0, depth: 1.5 }));
+        h.st.edit("Extrude", |d| p = d.add_push(nurbs_kernel::Push { face: nurbs_kernel::FaceRef { tag: FaceTag { feature: r, sub: 0 }.pack(), at }, inset: 0.0, depth: 1.5, keep: false }));
         h.st.selection = vec![p];
         h.settle();
         eprintln!("  fillet face pulled {:?} errors {:?}", ex(&h), h.st.model.as_ref().map(|m| m.errors.clone()));
@@ -6804,7 +6951,7 @@ fn main() {
         h.settle();
         h.st.select(None, false);
         let mut push = 0;
-        h.st.edit("Extrude", |d| push = d.add_push(Push { face: FaceRef { tag: tag(blk, 1), at: DVec3::new(10.0, 15.0, 0.0) }, inset: 4.0, depth: 6.0 }));
+        h.st.edit("Extrude", |d| push = d.add_push(Push { face: FaceRef { tag: tag(blk, 1), at: DVec3::new(10.0, 15.0, 0.0) }, inset: 4.0, depth: 6.0, keep: false }));
         h.settle();
         eprintln!("  toast {:?}, after mirror {}, errors {:?}", h.st.toast.as_ref().map(|t| t.text.clone()), h.st.after_mirror(push), errors(&h));
         h.st.selection = vec![push];
@@ -6824,7 +6971,7 @@ fn main() {
         h.settle();
         eprintln!("  mirror single: {:?}, x {:?}, errors {:?}", h.st.doc.feature(mir).and_then(|f| f.mirror).map(|m| m.single), vol(&h), errors(&h));
         let mut p2 = 0;
-        h.st.edit("Extrude", |d| p2 = d.add_push(Push { face: FaceRef { tag: tag(blk, 4), at: DVec3::new(20.0, 15.0, 10.0) }, inset: 3.0, depth: 4.0 }));
+        h.st.edit("Extrude", |d| p2 = d.add_push(Push { face: FaceRef { tag: tag(blk, 4), at: DVec3::new(20.0, 15.0, 10.0) }, inset: 3.0, depth: 4.0, keep: false }));
         h.settle();
         eprintln!("  second extrude: toast {:?}, z {:?}", h.st.toast.as_ref().map(|t| t.text.clone()), h.st.model.as_ref().and_then(|m| m.bounds()).map(|(lo, hi)| (lo[2], hi[2])));
         let _ = p2;
@@ -6838,7 +6985,7 @@ fn main() {
         let blk = d.add(Op::Add, Prim::Box { x: 30.0, y: 30.0, z: 30.0 }, DVec3::new(0.0, 0.0, 0.0), DQuat::IDENTITY);
         d.feature_mut(blk).unwrap().name = "Block".into();
         d.add_round(4.0, false, vec![EdgeRef { faces: [tag(blk, 0), tag(blk, 3)], at: DVec3::new(15.0, 0.0, 0.0) }]);
-        let ins = d.add_push(Push { face: FaceRef { tag: tag(blk, 0), at: DVec3::new(15.0, 15.0, 0.0) }, inset: 3.0, depth: 0.0 });
+        let ins = d.add_push(Push { face: FaceRef { tag: tag(blk, 0), at: DVec3::new(15.0, 15.0, 0.0) }, inset: 3.0, depth: 0.0, keep: false });
         h.reset(d, "Move inset face");
         h.st.camera.yaw += 0.8;
         h.settle();
@@ -6944,7 +7091,7 @@ fn main() {
         let h0 = d.add(Op::Carve, Prim::Cylinder { radius: 4.0, height: 24.0 }, w(DVec3::new(14.0, -4.0, 0.0)), q);
         d.feature_mut(h0).unwrap().name = "Hole".into();
         d.add_round(3.0, false, vec![EdgeRef { faces: [tag(b, 0), tag(b, 2)], at: w(DVec3::new(25.0, 16.0, 0.0)) }]);
-        d.add_push(Push { face: FaceRef { tag: tag(b, 4), at: w(DVec3::new(15.0, 8.0, 12.0)) }, inset: 3.0, depth: -2.0 });
+        d.add_push(Push { face: FaceRef { tag: tag(b, 4), at: w(DVec3::new(15.0, 8.0, 12.0)) }, inset: 3.0, depth: -2.0, keep: false });
         h.reset(d, "Symmetry");
         h.st.settings.mirror_bar = true;
         h.st.settings.mirror_plane = true;
@@ -7007,7 +7154,7 @@ fn main() {
         eprintln!("  on: {} mirrors, state {:?}", h.st.scene_mirror_ids().len(), h.st.mirror_state());
         h.shot("zero-mirror-bar-2-on-leg");
         let mut push = 0;
-        h.st.edit("Extrude", |d| push = d.add_push(Push { face: FaceRef { tag: tag(leg, 4), at: DVec3::new(20.0, 15.0, 10.0) }, inset: 4.0, depth: 5.0 }));
+        h.st.edit("Extrude", |d| push = d.add_push(Push { face: FaceRef { tag: tag(leg, 4), at: DVec3::new(20.0, 15.0, 10.0) }, inset: 4.0, depth: 5.0, keep: false }));
         h.settle();
         h.st.selection = vec![push];
         h.steps(3);

@@ -250,7 +250,7 @@ impl AppState {
         let (ro, rd) = self.ray(p);
         let Some(t) = closest_on_line(g.from, g.dir, ro, rd) else { return };
         self.begin_live("Shell");
-        self.drag = Some(Drag { handle: Handle::ShellThick, grab: g.from + g.dir * t, start: vec![f], line: Some((g.from, g.dir)), ops: vec![], carried: Default::default(), pivot: g.from, custom: false, keep: vec![], cage: None, pts: vec![], groups: vec![] });
+        self.drag = Some(Drag { handle: Handle::ShellThick, grab: g.from + g.dir * t, start: vec![f], line: Some((g.from, g.dir)), ops: vec![], carried: Default::default(), pivot: g.from, custom: false, keep: vec![], cage: None, pts: vec![], groups: vec![], objects: vec![] });
     }
 
     pub(crate) fn update_shell_drag(&mut self, d: &Drag, p: [f32; 2]) {

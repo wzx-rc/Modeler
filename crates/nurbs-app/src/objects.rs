@@ -17,9 +17,90 @@
 //! Outliner shows the selected Object's composition.
 
 use crate::state::{AppState, SelMode};
-use nurbs_kernel::{FeatureId, Object, Op};
+use glam::{DMat4, DVec3};
+use nurbs_kernel::{Doc, Feature, FeatureId, Object, Op, Sim};
+
+/// Whole Objects dragged as one (each as it was, with every feature of
+/// its): a move, turn or scale the same along every axis carries them all
+/// and the Object's frame (`Feature::similar_by`: the kernel finds the same
+/// history built and only puts it in its new place); any other scale (a
+/// side of the box dragged) is its stretch, applied by the kernel to the
+/// result, the features left as they were.
+pub fn put_objects(doc: &mut Doc, objs: &[(Object, Vec<Feature>)], sim: Option<Sim>, aff: Option<DMat4>) {
+    for (o0, fs) in objs {
+        if let Some(t) = sim {
+            for f0 in fs {
+                if let Some(f) = doc.feature_mut(f0.id) {
+                    *f = f0.similar_by(&t);
+                }
+            }
+            if let Some(o) = doc.object_mut(o0.id) {
+                o.frame = t.after(&o0.frame);
+                // seen as it was, moved: T S T⁻¹ on what T carried
+                o.stretch = o0.stretch.map(|s| {
+                    let m = t.matrix();
+                    nurbs_kernel::mat_to_rows(m * nurbs_kernel::rows_to_mat(s) * m.inverse())
+                });
+            }
+        } else if let Some(a) = aff {
+            for f0 in fs {
+                if let Some(f) = doc.feature_mut(f0.id) {
+                    *f = f0.clone();
+                }
+            }
+            if let Some(o) = doc.object_mut(o0.id) {
+                let s = a * o0.stretch_matrix();
+                if s.abs_diff_eq(DMat4::IDENTITY, 1e-9) {
+                    o.stretch = None;
+                    o.stretched.clear();
+                } else {
+                    o.stretch = Some(nurbs_kernel::mat_to_rows(s));
+                    o.stretched = if o0.stretch.is_some() { o0.stretched.clone() } else { fs.iter().map(|f| f.id).collect() };
+                }
+            }
+        }
+    }
+}
+
+/// A scale along a frame's axes about a point, as a matrix.
+pub fn scale_about(p: DVec3, frame: glam::DQuat, k: DVec3) -> DMat4 {
+    DMat4::from_translation(p) * DMat4::from_quat(frame) * DMat4::from_scale(k) * DMat4::from_quat(frame.inverse()) * DMat4::from_translation(-p)
+}
 
 impl AppState {
+    /// The whole Objects among these shapes (every shape of theirs, not the
+    /// Object entered), each as it is with every feature of its.
+    pub fn whole_objects_of(&self, ids: &[FeatureId]) -> Vec<(Object, Vec<Feature>)> {
+        self.doc
+            .objects
+            .iter()
+            .filter(|o| self.open_object != Some(o.id) && !o.members.is_empty() && o.members.iter().all(|m| ids.contains(m)))
+            .map(|o| (o.clone(), self.doc.object_features(o.id).into_iter().filter_map(|id| self.doc.feature(id).cloned()).collect()))
+            .collect()
+    }
+
+    /// What the eye sees of a feature's Object besides its features: its
+    /// stretch (`None` when it has none).
+    pub fn stretch_of(&self, id: FeatureId) -> Option<DMat4> {
+        let el = self.element_of(id);
+        let o = self.doc.object(self.doc.object_of(el)?)?;
+        o.stretch.map(nurbs_kernel::rows_to_mat)
+    }
+
+    /// A shape's centre and corners where the eye sees them (through its
+    /// Object's stretch).
+    pub fn seen_centre(&self, f: &Feature) -> DVec3 {
+        let c = f.centre();
+        self.stretch_of(f.id).map_or(c, |s| s.transform_point3(c))
+    }
+    pub fn seen_corners(&self, f: &Feature) -> [DVec3; 8] {
+        let c = f.corners();
+        match self.stretch_of(f.id) {
+            Some(s) => c.map(|p| s.transform_point3(p)),
+            None => c,
+        }
+    }
+
     /// These shapes, each with the other shapes of its Object (not the
     /// Object entered).
     pub fn object_ids(&self, ids: &[FeatureId]) -> Vec<FeatureId> {

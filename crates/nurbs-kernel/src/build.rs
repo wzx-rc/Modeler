@@ -6,7 +6,7 @@
 //! result after each feature (by the content of everything up to it). While
 //! one feature moves, only the booleans from it onwards are made again.
 
-use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Knife, Makes, Mirror, Op, Prim, Push, Round, Shell, Tweak};
+use crate::doc::{Comp, Doc, EdgeRef, FaceRef, Feature, FeatureId, Knife, Makes, Mirror, Op, Prim, Push, Round, Shell, Sim, Tweak};
 use crate::model::{Edge, EdgeKind, Face, FaceTag, Model, SurfKind};
 use crate::proto::step;
 use forme_occt::{CutKind, Shape, SurfKind as OccSurf};
@@ -3303,6 +3303,7 @@ fn islands_upto<'a>(doc: &'a Doc, feats: &[&'a Feature], upto: usize, global: &[
 /// Object (Romain, 24 nov., 6 h 01). The shapes in no Object are built
 /// together as before.
 fn build_objects<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Stage {
+    let placed = |k: &Option<FeatureId>| k.and_then(|id| doc.object(id)).is_some_and(|o| !o.frame.is_identity() || o.stretch.is_some());
     if doc.objects.is_empty() {
         return build_islands(doc, feats, skip, cache, model, used_tools, used_stages);
     }
@@ -3313,17 +3314,59 @@ fn build_objects<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache
             keys.push(*p);
         }
     }
-    if keys.len() <= 1 {
+    if keys.len() <= 1 && !keys.iter().any(|k| k.is_some()) && !keys.iter().any(placed) {
         return build_islands(doc, feats, skip, cache, model, used_tools, used_stages);
     }
     let shared_names: Vec<String> = feats.iter().filter(|f| f.mirror.is_some()).map(|f| format!("{}: ", f.name)).collect();
+    // each Object with a transform of its own: its features brought back by
+    // its inverse (rounded, so the same history is the same key in the
+    // cache whatever the transform), built there, then put in place. A
+    // Mirror's plane is kept as it is there: it is where the Object was
+    // mirrored, so its two halves go with it as a mesh's would (Maya's
+    // polyMirror under a moved transform); an Array's step and centre come
+    // back as they were made. All are made before any is built (the hashes
+    // are kept by address for the whole build).
+    let subs: Vec<(Option<FeatureId>, Vec<&Feature>)> = keys.iter().map(|k| (*k, feats.iter().zip(&part).filter(|(_, p)| p.map_or(true, |p| p == *k)).map(|(f, _)| *f).collect())).collect();
+    let locals: Vec<Option<(Doc, Sim)>> = subs
+        .iter()
+        .map(|(k, sub)| {
+            let ob = k.and_then(|id| doc.object(id))?;
+            // where it was made too (its frame the identity): rounded the
+            // same way, so its first move finds what was built before it
+            let inv = ob.frame.inverse();
+            let features: Vec<Feature> = sub.iter().map(|f| rounded(&f.similar_by(&inv))).collect();
+            Some((Doc { features, objects: vec![], ..Doc::default() }, ob.frame))
+        })
+        .collect();
     let mut out = Stage::new();
-    for k in keys {
-        let sub: Vec<&Feature> = feats.iter().zip(&part).filter(|(_, p)| p.map_or(true, |p| p == k)).map(|(f, _)| *f).collect();
+    for ((k, sub), local) in subs.iter().zip(&locals) {
         if !sub.iter().any(|f| f.is_solid()) {
             continue;
         }
-        let s = build_islands(doc, &sub, skip, cache, model, used_tools, used_stages);
+        let (mut s, sim) = match local {
+            Some((ld, sim)) => {
+                let refs: Vec<&Feature> = ld.features.iter().collect();
+                (build_islands(ld, &refs, skip, cache, model, used_tools, used_stages), Some(*sim))
+            }
+            None => (build_islands(doc, sub, skip, cache, model, used_tools, used_stages), None),
+        };
+        let stretch = k.and_then(|id| doc.object(id)).map(|o| o.stretch_matrix()).unwrap_or(DMat4::IDENTITY);
+        let m = stretch * sim.map(|t| t.matrix()).unwrap_or(DMat4::IDENTITY);
+        if !m.abs_diff_eq(DMat4::IDENTITY, 1e-12) {
+            if let Some(sh) = s.shape.take() {
+                match sh.placed(rows(m)) {
+                    Ok(t) => s.shape = Some(Rc::new(t)),
+                    Err(e) => {
+                        s.errors.push(format!("an Object could not be put in place ({e})"));
+                        s.shape = Some(sh);
+                    }
+                }
+            }
+            s.ext = s.ext.iter().map(|b| box_through(m, b)).collect();
+            if let Some(t) = sim {
+                s.limits.iter_mut().for_each(|l| l.1 *= t.s);
+            }
+        }
         out.shape = match (out.shape.take(), s.shape) {
             (Some(a), Some(b)) => match a.compound(&b) {
                 Ok(c) => Some(Rc::new(c)),
@@ -3343,6 +3386,49 @@ fn build_objects<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache
         out.tension_limits.extend(s.tension_limits);
         boxes_add(&mut out.ext, &s.ext.iter().map(|b| ([b[0], b[1], b[2]], [b[3], b[4], b[5]])).collect::<Vec<_>>());
     }
+    out
+}
+
+/// A box (lo, hi) taken through an affine map: the box round its corners.
+fn box_through(m: DMat4, b: &[f64; 6]) -> [f64; 6] {
+    let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+    for i in 0..8 {
+        let c = DVec3::new(b[if i & 1 == 0 { 0 } else { 3 }], b[if i & 2 == 0 { 1 } else { 4 }], b[if i & 4 == 0 { 2 } else { 5 }]);
+        let w = m.transform_point3(c);
+        lo = lo.min(w);
+        hi = hi.max(w);
+    }
+    [lo.x, lo.y, lo.z, hi.x, hi.y, hi.z]
+}
+
+/// A feature with its numbers rounded to 1e-6 (its frame's turn made a
+/// unit again): brought back from where an Object's transform put it, the
+/// same history gives the same feature, so the same key in the cache.
+fn rounded(f: &Feature) -> Feature {
+    let mut g = f.clone();
+    let frozen = g.frozen.take();
+    fn walk(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Number(n) => {
+                if let Some(x) = n.as_f64() {
+                    if !n.is_i64() && !n.is_u64() {
+                        let r = (x * 1e6).round() / 1e6;
+                        if let Some(m) = serde_json::Number::from_f64(if r == 0.0 { 0.0 } else { r }) {
+                            *n = m;
+                        }
+                    }
+                }
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(walk),
+            serde_json::Value::Object(o) => o.values_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    let Ok(mut v) = serde_json::to_value(&g) else { return f.clone() };
+    walk(&mut v);
+    let Ok(mut out) = serde_json::from_value::<Feature>(v) else { return f.clone() };
+    out.rot = out.rot.normalize();
+    out.frozen = frozen;
     out
 }
 
@@ -3862,7 +3948,12 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     // an inset left as a line: its inside lies on the surface of the face
     // round it, and the next union or cut made anywhere (or a Mirror) made
     // them one again; its face keeps its outline
-    let lines: Vec<i64> = feats.iter().filter(|f| f.push.as_ref().is_some_and(|p| p.inset > 0.0 && p.depth.abs() < 1e-6)).map(|f| FaceTag { feature: f.id, sub: 1 }.pack()).collect();
+    let mut lines: Vec<i64> = feats.iter().filter(|f| f.push.as_ref().is_some_and(|p| p.inset > 0.0 && p.depth.abs() < 1e-6)).map(|f| FaceTag { feature: f.id, sub: 1 }.pack()).collect();
+    // an extrusion out that keeps its base line (Maya's): its sides stay
+    // apart from the faces they go on from
+    for f in feats.iter().filter(|f| f.push.as_ref().is_some_and(|p| p.keep && p.depth > 1e-6)) {
+        lines.extend((2..2 + 512u16).map(|sub| FaceTag { feature: f.id, sub }.pack()));
+    }
     forme_occt::keep_lines(&lines);
     HASHES.with(|m| m.borrow_mut().clear());
     let mut stage = build_objects(doc, &feats, skip, cache, &mut model, &mut used_tools, &mut used_stages);
@@ -4190,7 +4281,7 @@ mod tests {
         // the +X end pushed out by 3: the −X end too (its face 8 high under
         // the fillet)
         let v1 = mesh_volume(&m);
-        let p = d.add_push(Push { face: FaceRef { tag: tag(b, 0), at: w(DVec3::new(20.0, 3.0, 5.0)) }, inset: 0.0, depth: 3.0 });
+        let p = d.add_push(Push { face: FaceRef { tag: tag(b, 0), at: w(DVec3::new(20.0, 3.0, 5.0)) }, inset: 0.0, depth: 3.0, keep: false });
         let m = build(&d, true, false, &[], &mut cache);
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert_eq!(m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: p, sub: 1 })).count(), 2);
@@ -4261,7 +4352,7 @@ mod tests {
         // a push of the front face on the mirror side alone
         d.feature_mut(mi).unwrap().mirror.as_mut().unwrap().single = true;
         let front = FaceRef { tag: tag(b, 4), at: DVec3::new(-20.0, 5.0, 10.0) };
-        let p = d.add_push(Push { face: front, inset: 4.0, depth: 2.0 });
+        let p = d.add_push(Push { face: front, inset: 4.0, depth: 2.0, keep: false });
         let m = build(&d, true, false, &[], &mut cache);
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(h)).count(), 1);
@@ -4279,7 +4370,7 @@ mod tests {
         d.remove(&[c]);
         // the front face (across the plane) pushed out by 3: once, not twice
         let front = FaceRef { tag: tag(b, 4), at: DVec3::new(-20.0, 5.0, 10.0) };
-        let p = d.add_push(Push { face: front, inset: 0.0, depth: 3.0 });
+        let p = d.add_push(Push { face: front, inset: 0.0, depth: 3.0, keep: false });
         let m = build(&d, true, false, &[], &mut cache);
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let (lo, hi) = m.bounds().unwrap();
@@ -4439,7 +4530,7 @@ mod tests {
             let m = build(&d, true, false, &[], &mut cache);
             eprintln!("mirrored {mirrored}: {} faces {:?}", m.faces.len(), m.errors);
             let front = FaceRef { tag: tag(b, 4), at: DVec3::new(-20.0, 5.0, 10.0) };
-            d.add_push(Push { face: front, inset: 0.0, depth: 3.0 });
+            d.add_push(Push { face: front, inset: 0.0, depth: 3.0, keep: false });
             let t0 = Instant::now();
             let m = build(&d, true, false, &[], &mut cache);
             eprintln!("  push: {} faces {:?} {:.0} ms", m.faces.len(), m.errors, t0.elapsed().as_secs_f64() * 1e3);
@@ -5852,7 +5943,7 @@ mod tests {
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let mut ids = vec![];
         for (sub, at) in [(0u16, DVec3::new(20.0, 10.0, 0.0)), (1, DVec3::new(-20.0, 10.0, 0.0)), (2, DVec3::new(0.0, 20.0, 0.0)), (4, DVec3::new(0.0, 10.0, 15.0))] {
-            ids.push(d.add_push(Push { face: FaceRef { tag: tag(b, sub), at }, inset: 3.0, depth: 4.0 }));
+            ids.push(d.add_push(Push { face: FaceRef { tag: tag(b, sub), at }, inset: 3.0, depth: 4.0, keep: false }));
         }
         let mut cache = Cache::default();
         let m = build(&d, true, false, &[], &mut cache);
@@ -5897,7 +5988,7 @@ mod tests {
         // a block, its front inset 2 mm as a line
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::new(100.0, 0.0, 0.0), DQuat::IDENTITY);
-        let i = d.add_push(Push { face: FaceRef { tag: tag(b, 4), at: DVec3::new(100.0, 10.0, 15.0) }, inset: 2.0, depth: 0.0 });
+        let i = d.add_push(Push { face: FaceRef { tag: tag(b, 4), at: DVec3::new(100.0, 10.0, 15.0) }, inset: 2.0, depth: 0.0, keep: false });
         // its inside: 36 × 16, the ring round it still the block's front
         let line = |m: &Model| {
             let inner: Vec<usize> = (0..m.faces.len()).filter(|k| m.faces[*k].tag == Some(FaceTag { feature: i, sub: 1 })).collect();
@@ -6039,7 +6130,7 @@ mod tests {
         let top = d.feature(b).unwrap().matrix().transform_point3(DVec3::new(0.0, 10.0, 10.0));
         let f = d.add_round(2.0, false, vec![edge_near(&m, top)]);
         let side = d.feature(b).unwrap().matrix().transform_point3(DVec3::new(10.0, 5.0, 0.0));
-        let p = d.add_push(Push { face: FaceRef { tag: tag(b, 0), at: side }, inset: 3.0, depth: 4.0 });
+        let p = d.add_push(Push { face: FaceRef { tag: tag(b, 0), at: side }, inset: 3.0, depth: 4.0, keep: false });
         let m0 = build(&d, true, false, &[], &mut Cache::default());
         assert!(m0.errors.is_empty(), "{:?}", m0.errors);
         d.feature_mut(b).unwrap().bake = vec![f, p];
@@ -6191,7 +6282,7 @@ mod tests {
         // the first block's +X face pulled out into the second: they are one
         // lump, as in one history (found by their boxes once built)
         let mut e = d.clone();
-        e.add_push(Push { face: FaceRef { tag: tag(a, 0), at: DVec3::new(10.0, 4.0, 0.0) }, inset: 0.0, depth: 45.0 });
+        e.add_push(Push { face: FaceRef { tag: tag(a, 0), at: DVec3::new(10.0, 4.0, 0.0) }, inset: 0.0, depth: 45.0, keep: false });
         let mut cache = Cache::default();
         let m = build(&e, true, false, &[], &mut cache);
         assert!(m.errors.is_empty(), "{:?}", m.errors);
@@ -6724,7 +6815,7 @@ mod tests {
         assert_eq!(m.faces.len(), 7, "the block and a sheet");
         // a leg pushed down from the bottom, its faces copied forward
         let mut leg = d.clone();
-        leg.add_push(Push { face: FaceRef { tag: tag(b, 3), at: DVec3::new(0.0, 0.0, 0.0) }, inset: 0.0, depth: 10.0 });
+        leg.add_push(Push { face: FaceRef { tag: tag(b, 3), at: DVec3::new(0.0, 0.0, 0.0) }, inset: 0.0, depth: 10.0, keep: false });
         let mid = build(&leg, true, false, &[], &mut Cache::default());
         assert!(mid.errors.is_empty(), "{:?}", mid.errors);
         let pid = leg.features.last().unwrap().id;
@@ -7086,7 +7177,7 @@ mod tests {
                 d.feature_mut(r).unwrap().round.as_mut().unwrap().tension = tension;
             })
         };
-        let push = |face: FaceRef, inset: f64, depth: f64| -> Op_ { Box::new(move |d: &mut Doc| { d.add_push(Push { face: face.clone(), inset, depth }); }) };
+        let push = |face: FaceRef, inset: f64, depth: f64| -> Op_ { Box::new(move |d: &mut Doc| { d.add_push(Push { face: face.clone(), inset, depth, keep: false }); }) };
         let tweak = |comp: Comp, delta: DVec3| -> Op_ { Box::new(move |d: &mut Doc| { d.add_tweak(Tweak { comp: comp.clone(), delta , more: vec![], scale: DVec3::ONE, copy: false, about: None, sweep: true, bend: true }); }) };
         vec![
             ("fillet top-front", round(2.0, false, 0.0, er(tag(b, 2), tag(b, 4), -12.0, 20.0, 15.0))),
@@ -7768,7 +7859,7 @@ mod tests {
             for (inset, depth) in [(2.0, 0.0), (2.0, 3.0), (2.0, -2.0), (0.5, -1.0), (6.0, 0.0), (0.0, 2.0)] {
                 let mut d = doc.clone();
                 let base = build(&d, true, false, &[], &mut Cache::default());
-                let p = d.add_push(Push { face: face.clone(), inset, depth });
+                let p = d.add_push(Push { face: face.clone(), inset, depth, keep: false });
                 let m = build(&d, true, false, &[], &mut Cache::default());
                 let mine = m.faces.iter().filter(|f| f.tag.map(|t| t.feature) == Some(p)).count();
                 let ok = m.errors.is_empty() && mine > 0;
@@ -7789,7 +7880,7 @@ mod tests {
         let mut d = Doc::default();
         let c = d.add(Op::Add, Prim::Cylinder { radius: 10.0, height: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let side = FaceRef { tag: tag(c, 0), at: DVec3::new(10.0, 10.0, 0.0) };
-        let p = d.add_push(Push { face: side, inset: 0.0, depth: 3.0 });
+        let p = d.add_push(Push { face: side, inset: 0.0, depth: 3.0, keep: false });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         let (lo, hi) = m.bounds().unwrap();
@@ -7808,7 +7899,7 @@ mod tests {
         let r = d.add_round(5.0, false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
         let m1 = build(&d, true, false, &[], &mut Cache::default());
         let fl = m1.faces.iter().find(|f| f.tag.map(|t| t.feature) == Some(r)).unwrap();
-        let p = d.add_push(Push { face: FaceRef { tag: tag(r, 0), at: DVec3::from_array(fl.point) }, inset: 0.0, depth: 1.0 });
+        let p = d.add_push(Push { face: FaceRef { tag: tag(r, 0), at: DVec3::from_array(fl.point) }, inset: 0.0, depth: 1.0, keep: false });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert!(m.faces.iter().any(|f| f.tag == Some(FaceTag { feature: p, sub: 1 }) && f.kind == SurfKind::Cylinder), "{:?}", m.faces.iter().map(|f| (f.tag, f.kind)).collect::<Vec<_>>());
@@ -7923,6 +8014,65 @@ mod tests {
     }
 
     #[test]
+    fn object_transformed_as_one() {
+        // Romain 24 nov., 10 h 03: "une seule entité comme si je scale un
+        // mesh". A block with a hole, a fillet on its top front edge and an
+        // inset on its top: its Object moved, turned and scaled 1.5 as a
+        // whole gives the same part, 1.5³ its volume, with no stage built
+        // again; stretched 2× along X, twice its volume
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(-8.0, -5.0, 0.0), DQuat::IDENTITY);
+        let e = EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) };
+        d.add_round(3.0, false, vec![e]);
+        d.add_push(Push { face: FaceRef { tag: tag(b, 2), at: DVec3::new(10.0, 20.0, -5.0) }, inset: 2.0, depth: -1.0, keep: false });
+        d.add(Op::Add, Prim::Box { x: 5.0, y: 5.0, z: 5.0 }, DVec3::new(100.0, 0.0, 0.0), DQuat::IDENTITY);
+        assert!(d.settle_objects(None));
+        let o = d.object_of(b).unwrap();
+        let mut cache = Cache::default();
+        let m0 = build(&d, true, false, &[], &mut cache);
+        assert!(m0.errors.is_empty(), "{:?}", m0.errors);
+        let mine = |m: &Model| m.faces.iter().filter(|f| f.tag.is_some_and(|t| t.feature != 5)).count();
+        let v0 = mesh_volume(&m0);
+        let n0 = mine(&m0);
+        // as the app does it: every feature of the Object carried, its frame told
+        let t = Sim::about(DVec3::new(0.0, 10.0, 0.0), DQuat::from_rotation_y(0.7) * DQuat::from_rotation_x(0.3), 1.5);
+        let t = Sim { t: t.t + DVec3::new(12.0, 5.0, -3.0), ..t };
+        let members: Vec<FeatureId> = d.features.iter().filter(|f| f.id != 5).map(|f| f.id).collect();
+        for id in &members {
+            let f = d.feature(*id).unwrap().similar_by(&t);
+            *d.feature_mut(*id).unwrap() = f;
+        }
+        d.object_mut(o).unwrap().frame = t.after(&d.object(o).unwrap().frame);
+        let before = cache.stages.len();
+        let t0 = Instant::now();
+        let m1 = build(&d, true, false, &[], &mut cache);
+        let ms = t0.elapsed().as_millis();
+        assert!(m1.errors.is_empty(), "{:?}", m1.errors);
+        assert_eq!(mine(&m1), n0);
+        let v1 = mesh_volume(&m1);
+        let small = 125.0;
+        let want = (v0 - small) * 1.5f64.powi(3) + small;
+        assert!((v1 - want).abs() < want * 2e-3, "{v1} {want}");
+        assert_eq!(cache.stages.len(), before, "a stage was built again");
+        eprintln!("moved, turned, scaled: {ms} ms");
+        // stretched 2× along its own X (the world's, about its first point)
+        let x = t.q * DVec3::X;
+        let s = DMat4::from_cols_array(&{
+            let a = glam::DMat3::from_cols(DVec3::X, DVec3::Y, DVec3::Z) + glam::DMat3::from_cols(x * x.x, x * x.y, x * x.z);
+            [a.x_axis.x, a.x_axis.y, a.x_axis.z, 0.0, a.y_axis.x, a.y_axis.y, a.y_axis.z, 0.0, a.z_axis.x, a.z_axis.y, a.z_axis.z, 0.0, 0.0, 0.0, 0.0, 1.0]
+        });
+        d.object_mut(o).unwrap().stretch = Some(crate::doc::mat_to_rows(s));
+        let m2 = build(&d, true, false, &[], &mut cache);
+        assert!(m2.errors.is_empty(), "{:?}", m2.errors);
+        let v2 = mesh_volume(&m2);
+        eprintln!("stretched: {} faces (of {n0}), {} triangles (before {})", mine(&m2), m2.tri_face.len(), m1.tri_face.len());
+        let want = (v1 - small) * 2.0 + small;
+        assert!((v2 - want).abs() < want * 1.5e-2, "{v2} {want}");
+        assert_eq!(mine(&m2), n0);
+    }
+
+    #[test]
     fn insets_on_curved_faces() {
         // Romain 23 nov., 22 h 05: "Si possible que le Inset fonctionne sur
         // face courbé". A cylinder's side: a band 2 mm in from its rims,
@@ -7930,7 +8080,7 @@ mod tests {
         let mut d = Doc::default();
         let c = d.add(Op::Add, Prim::Cylinder { radius: 10.0, height: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let side = FaceRef { tag: tag(c, 0), at: DVec3::new(10.0, 10.0, 0.0) };
-        let p = d.add_push(Push { face: side, inset: 2.0, depth: 0.0 });
+        let p = d.add_push(Push { face: side, inset: 2.0, depth: 0.0, keep: false });
         let mut cache = Cache::default();
         fn mine(m: &Model, p: FeatureId, sub: u16) -> Vec<&crate::model::Face> {
             m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: p, sub })).collect()
@@ -7954,7 +8104,7 @@ mod tests {
         let mut d = Doc::default();
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         let boss = d.add(Op::Add, Prim::Cylinder { radius: 7.0, height: 10.0 }, DVec3::new(10.0, 20.0, 0.0), DQuat::IDENTITY);
-        let p = d.add_push(Push { face: FaceRef { tag: tag(boss, 0), at: DVec3::new(10.0, 25.0, 7.0) }, inset: 2.0, depth: 1.0 });
+        let p = d.add_push(Push { face: FaceRef { tag: tag(boss, 0), at: DVec3::new(10.0, 25.0, 7.0) }, inset: 2.0, depth: 1.0, keep: false });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert!(mine(&m, p, 1).iter().any(|f| f.kind == SurfKind::Cylinder && (f.radius - 8.0).abs() < 1e-3));
@@ -7966,7 +8116,7 @@ mod tests {
         let m1 = build(&d, true, false, &[], &mut Cache::default());
         assert!(m1.errors.is_empty(), "{:?}", m1.errors);
         let fl = m1.faces.iter().find(|f| f.tag.map(|t| t.feature) == Some(r)).unwrap();
-        let p = d.add_push(Push { face: FaceRef { tag: tag(r, 0), at: DVec3::from_array(fl.point) }, inset: 0.5, depth: 0.5 });
+        let p = d.add_push(Push { face: FaceRef { tag: tag(r, 0), at: DVec3::from_array(fl.point) }, inset: 0.5, depth: 0.5, keep: false });
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert!(!mine(&m, p, 1).is_empty());
@@ -7978,7 +8128,7 @@ mod tests {
         let r = d.add_round(5.0, false, vec![EdgeRef { faces: [tag(b, 2), tag(b, 4)], at: DVec3::new(0.0, 20.0, 15.0) }]);
         let m1 = build(&d, true, false, &[], &mut Cache::default());
         let fl = m1.faces.iter().find(|f| f.tag.map(|t| t.feature) == Some(r)).unwrap();
-        let p = d.add_push(Push { face: FaceRef { tag: tag(r, 0), at: DVec3::from_array(fl.point) }, inset: 1.0, depth: 0.0 });
+        let p = d.add_push(Push { face: FaceRef { tag: tag(r, 0), at: DVec3::from_array(fl.point) }, inset: 1.0, depth: 0.0, keep: false });
         let mine = |m: &Model, sub: u16| m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: p, sub })).count();
         let mut cache = Cache::default();
         let m = build(&d, true, false, &[], &mut cache);
@@ -8011,7 +8161,7 @@ mod tests {
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, DVec3::new(0.0, -5.0, 0.0), DQuat::IDENTITY);
         let top = FaceRef { tag: tag(b, 2), at: DVec3::new(12.0, 20.0, 8.0) };
-        let p = d.add_push(Push { face: top, inset: 3.0, depth: 0.0 });
+        let p = d.add_push(Push { face: top, inset: 3.0, depth: 0.0, keep: false });
         assert_eq!(d.feature(p).unwrap().kind_label(), "Inset");
         let mut cache = Cache::default();
         let mine = |m: &Model, sub: u16| m.faces.iter().filter(|f| f.tag == Some(FaceTag { feature: p, sub })).count();
@@ -8069,7 +8219,7 @@ mod tests {
         assert!(l > 0.0 && l < 20.0, "{l}");
         // a round face (the hole's wall): moved along its normals; an inset
         // on it too since 23 nov. (its outline moved in on its surface)
-        d.feature_mut(p).unwrap().push = Some(Push { face: FaceRef { tag: tag(2, 0), at: DVec3::new(5.0, 10.0, 0.0) }, inset: 0.0, depth: 1.0 });
+        d.feature_mut(p).unwrap().push = Some(Push { face: FaceRef { tag: tag(2, 0), at: DVec3::new(5.0, 10.0, 0.0) }, inset: 0.0, depth: 1.0, keep: false });
         let m = build(&d, true, false, &[], &mut cache);
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         d.feature_mut(p).unwrap().push.as_mut().unwrap().inset = 1.0;

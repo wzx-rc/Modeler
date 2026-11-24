@@ -963,9 +963,73 @@ FShape* focc_loft(const FShape* const* secs, int n, int solid, int ruled) {
         (FShape*)nullptr);
 }
 
+// Whether the 3 x 4 matrix (rows) keeps angles: the same length on every
+// axis, square to each other (a mirror allowed).
+static bool conformal(const double* m) {
+    gp_Vec c0(m[0], m[4], m[8]), c1(m[1], m[5], m[9]), c2(m[2], m[6], m[10]);
+    double s = c0.SquareMagnitude();
+    if (s < 1e-24) return false;
+    auto same = [&](double a, double b) { return std::abs(a - b) <= 1e-9 * s; };
+    return same(c1.SquareMagnitude(), s) && same(c2.SquareMagnitude(), s) && same(c0.Dot(c1), 0) && same(c0.Dot(c2), 0) && same(c1.Dot(c2), 0);
+}
+
+// A map that does not keep angles (an Object stretched along one axis,
+// Romain 24 nov.): every surface made a BSpline by GTransform, the faces'
+// tags carried.
+static FShape* gtransformed(const FShape* s, const double* m) {
+    gp_GTrsf g;
+    g.SetVectorialPart(gp_Mat(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]));
+    g.SetTranslationPart(gp_XYZ(m[3], m[7], m[11]));
+    BRepBuilderAPI_GTransform op(s->s, g, Standard_True);
+    if (!op.IsDone()) {
+        set_err("the shape could not be stretched");
+        return (FShape*)nullptr;
+    }
+    FShape* r = wrap(op.Shape());
+    if (r && !s->tags.empty()) {
+        carry_tags(op, s, r, -1);
+        bool none = true;
+        for (long long t : r->tags) none = none && t < 0;
+        if (none && r->tags.size() == s->tags.size()) r->tags = s->tags;
+    }
+    return r;
+}
+
+// An Object put in place (Romain 24 nov.): a move and a turn only give it a
+// location (its triangulation kept, no copy), a scale a copy, a stretch a
+// GTransform.
+FShape* focc_place(const FShape* s, const double* m) {
+    return guard(
+        [&]() -> FShape* {
+            if (!conformal(m)) return gtransformed(s, m);
+            gp_Trsf t;
+            t.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+            const bool rigid = std::abs(t.ScaleFactor() - 1.0) < 1e-12 && !t.IsNegative();
+            BRepBuilderAPI_Transform op(s->s, t, rigid ? Standard_False : Standard_True);
+            if (!op.IsDone()) {
+                set_err("transform failed");
+                return (FShape*)nullptr;
+            }
+            FShape* r = wrap(op.Shape());
+            if (r && !s->tags.empty()) {
+                if (rigid) {
+                    r->tags = s->tags;
+                } else {
+                    carry_tags(op, s, r, -1);
+                    bool none = true;
+                    for (long long t2 : r->tags) none = none && t2 < 0;
+                    if (none && r->tags.size() == s->tags.size()) r->tags = s->tags;
+                }
+            }
+            return r;
+        },
+        (FShape*)nullptr);
+}
+
 FShape* focc_transform(const FShape* s, const double* m) {
     return guard(
         [&] {
+            if (!conformal(m)) return gtransformed(s, m);
             gp_Trsf t;
             t.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
             BRepBuilderAPI_Transform op(s->s, t, Standard_True);

@@ -564,10 +564,16 @@ pub fn preview_faces(st: &AppState, m: &nurbs_kernel::Model, pv: &std::collectio
         })
         .collect();
     const EPS: f64 = 1e-3;
+    // a whole Object carried as one: its mirrored half goes with it, the
+    // same way (the kernel keeps the plane where it was mirrored)
+    let whole: Vec<nurbs_kernel::FeatureId> = st.drag.as_ref().map(|d| d.objects.iter().flat_map(|o| o.0.members.iter().copied()).collect()).unwrap_or_default();
     let mut across: std::collections::HashSet<nurbs_kernel::FeatureId> = Default::default();
     let mut flips = vec![0u8; m.faces.len()];
     for f in 0..m.faces.len() {
         let (Some(e), true) = (el[f], lo[f][0] <= hi[f][0]) else { continue };
+        if whole.contains(&e) {
+            continue;
+        }
         let Some(h) = home.get(&e) else { continue };
         for (k, (a, off)) in planes.iter().enumerate().take(8) {
             let (l, u) = (lo[f][*a] as f64 - off, hi[f][*a] as f64 - off);

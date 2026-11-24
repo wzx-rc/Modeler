@@ -479,6 +479,11 @@ pub struct Drag {
     /// The groups whose shapes are all moved, as they were: their own
     /// transform goes with them (`groups.rs`).
     pub groups: Vec<nurbs_kernel::Group>,
+    /// Whole Objects moved, turned or scaled as one (Romain 24 nov.: "une
+    /// seule entité comme si je scale un mesh"): each as it was, with all
+    /// of its features as they were; the drag sets its transform and
+    /// carries them all (`apply_objects`).
+    pub objects: Vec<(nurbs_kernel::Object, Vec<Feature>)>,
 }
 
 /// A fillet or chamfer sized by a drag on screen (Rectify's Radius
@@ -788,6 +793,9 @@ pub struct AppState {
     /// Moves along their normals (`begin_normals_drag`): the first
     /// component's own normal (the drag follows the gizmo's mean one).
     pub face_drag_first: Option<DVec3>,
+    /// The components a T drag moves each along its own normal, with it:
+    /// picked again where it took them when it ends (Maya keeps them).
+    pub normals_picked: Vec<(nurbs_kernel::Comp, DVec3)>,
     /// The marking menu (right button), open or flashing.
     pub marking: crate::marking::Marking,
     /// A material ball dragged from the materials island, and what it
@@ -993,6 +1001,7 @@ impl AppState {
             gizmo_readout: None,
             drag_rot: DQuat::IDENTITY,
             face_drag_first: None,
+            normals_picked: vec![],
             marking: Default::default(),
             mat_drag: None,
             hot_handle: None,
@@ -1400,6 +1409,8 @@ impl AppState {
         // a shape gone leaves its group; every shape in one Object
         self.doc.clean_groups();
         self.doc.settle_objects(self.last_object);
+        // an operation made on a stretched Object: back in its own space
+        self.doc.settle_stretches();
         self.keep_markers();
         // an operation made on an Array's copy: on every copy
         if self.doc.keep_arrays() {
@@ -2213,7 +2224,7 @@ impl AppState {
                 d.next_id += 1;
                 let base = d.object(o).map(|ob| ob.name.clone()).unwrap_or_else(|| "Object".into());
                 let name = d.fresh_object_name(&base);
-                d.objects.push(nurbs_kernel::Object { id, name, members });
+                d.objects.push(nurbs_kernel::Object::new(id, name, members));
             }
         });
         self.selection = new;
@@ -2263,9 +2274,12 @@ impl AppState {
     pub fn later_overlaps(&self, id: FeatureId) -> Vec<FeatureId> {
         let Some(i) = self.doc.index_of(id) else { return vec![] };
         let (lo, hi) = self.doc.features[i].bounds();
+        // a boolean acts only within its Object
+        let own = self.doc.object_of(id);
         self.doc.features[i + 1..]
             .iter()
             .filter(|g| g.is_solid() && !g.is_path() && !g.is_sheet() && g.op == Op::Add && g.visible && !g.suspended)
+            .filter(|g| own.is_none() || self.doc.object_of(g.id) == own)
             .filter(|g| {
                 let (a, b) = g.bounds();
                 (lo - b).max_element() < -1e-3 && (a - hi).max_element() < -1e-3
@@ -4035,13 +4049,19 @@ impl AppState {
     /// A solid's cage (world); a 2D boolean pulled into a solid: its
     /// region's lines at its base and its top.
     pub fn shape_outline(&self, f: &Feature) -> Vec<Vec<DVec3>> {
-        if f.shape_bool.is_some() && f.is_extruded_curve() {
+        let lines = if f.shape_bool.is_some() && f.is_extruded_curve() {
             let base = self.curve_lines(f);
             let v = f.axis() * f.prim.height();
             let top: Vec<Vec<DVec3>> = base.iter().map(|l| l.iter().map(|p| *p + v).collect()).collect();
-            return base.into_iter().chain(top).collect();
+            base.into_iter().chain(top).collect()
+        } else {
+            f.outline()
+        };
+        // where the eye sees it: through its Object's stretch
+        match self.stretch_of(f.id) {
+            Some(s) => lines.into_iter().map(|l| l.into_iter().map(|p| s.transform_point3(p)).collect()).collect(),
+            None => lines,
         }
-        f.outline()
     }
 
     /// The 2D boolean (in use) that takes this curve in.
@@ -4179,7 +4199,7 @@ impl AppState {
         if fs.is_empty() {
             return None;
         }
-        Some(fs.iter().map(|f| f.centre()).sum::<DVec3>() / fs.len() as f64)
+        Some(fs.iter().map(|f| self.seen_centre(f)).sum::<DVec3>() / fs.len() as f64)
     }
 
     /// Where the pointer ray meets what a handle moves along.
@@ -4258,15 +4278,20 @@ impl AppState {
             Handle::Scale(_) | Handle::ScaleAll | Handle::Cage(_) => "Scale",
             _ => "Move",
         });
+        // whole Objects: carried as one, each with every feature of its
+        // (the Object entered: its shapes one by one, as before)
+        let objects = if matches!(h, Handle::Size(_)) { vec![] } else { self.whole_objects_of(&start.iter().map(|s| s.id).collect::<Vec<_>>()) };
+        let in_objects: Vec<FeatureId> = objects.iter().flat_map(|o| o.1.iter().map(|f| f.id)).collect();
         let ops: Vec<(Feature, FeatureId)> = start
             .iter()
             .flat_map(|s| self.element_ops(s.id).into_iter().filter_map(|o| self.doc.feature(o).cloned()).map(move |o| (o, s.id)).collect::<Vec<_>>())
+            .filter(|(o, _)| !in_objects.contains(&o.id))
             .collect();
         let keep: Vec<(FeatureId, FeatureId)> = start.iter().filter(|s| s.op == Op::Carve).flat_map(|s| self.later_overlaps(s.id).into_iter().map(move |h| (s.id, h))).collect();
         let cage = if matches!(h, Handle::Cage(_)) { self.cage() } else { None };
         // a group moved, turned or scaled: its transform with its shapes
         let groups = if matches!(h, Handle::Size(_)) { vec![] } else { self.whole_groups(&start.iter().map(|s| s.id).collect::<Vec<_>>()) };
-        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom, keep, cage, pts: vec![], groups });
+        self.drag = Some(Drag { handle: h, grab, start, line: None, ops, carried, pivot, custom, keep, cage, pts: vec![], groups, objects });
     }
 
     /// The point a handle sits on.
@@ -4373,6 +4398,7 @@ impl AppState {
                             g.origin = g0.origin + delta;
                         }
                     }
+                    crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim { t: delta, ..Default::default() }), None);
                 });
             }
             Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick => {}
@@ -4409,6 +4435,7 @@ impl AppState {
                             g.origin = pivot0 + dq * (g0.origin - pivot0);
                         }
                     }
+                    crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim::about(pivot0, dq, 1.0)), None);
                 });
             }
             Handle::Cage(s) => {
@@ -4420,6 +4447,13 @@ impl AppState {
                         if let Some(f) = doc.feature_mut(s.id) {
                             *f = scaled(s, anchor, c.frame, k);
                         }
+                    }
+                    // a whole Object: as a mesh would be, the same along
+                    // every axis (Shift, or all three) or stretched
+                    if (k.x - k.y).abs() < 1e-9 && (k.y - k.z).abs() < 1e-9 {
+                        crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim::about(anchor, DQuat::IDENTITY, k.x)), None);
+                    } else {
+                        crate::objects::put_objects(doc, &d.objects, None, Some(crate::objects::scale_about(anchor, c.frame, k)));
                     }
                 });
             }
@@ -4459,6 +4493,11 @@ impl AppState {
                             g.origin = pivot0 + frame * ((frame.inverse() * (g0.origin - pivot0)) * k);
                             g.scale = g0.scale * k;
                         }
+                    }
+                    if (k.x - k.y).abs() < 1e-9 && (k.y - k.z).abs() < 1e-9 {
+                        crate::objects::put_objects(doc, &d.objects, Some(nurbs_kernel::Sim::about(pivot0, DQuat::IDENTITY, k.x)), None);
+                    } else {
+                        crate::objects::put_objects(doc, &d.objects, None, Some(crate::objects::scale_about(pivot0, frame, k)));
                     }
                 });
             }
@@ -4580,13 +4619,24 @@ impl AppState {
         // the shapes' frames when the model on screen was asked for
         let (_, then) = self.sent_frames.iter().find(|(s, _)| *s == m.serial)?;
         let mut all = std::collections::HashMap::new();
+        // a whole Object carried: every shape of it as its own transform goes
+        let mut whole: Vec<(FeatureId, DMat4)> = vec![];
         for (id, t) in then {
+            if let Some(o) = self.doc.object(*id) {
+                let x = o.stretch_matrix() * o.frame.matrix() * t.inverse();
+                if !x.abs_diff_eq(DMat4::IDENTITY, 1e-9) && x.is_finite() {
+                    // (its Array's copies and Shell's walls too: all of it moves as one)
+                    whole.extend(o.members.iter().map(|m| (*m, x)));
+                }
+                continue;
+            }
             let Some(now) = self.doc.feature(*id).filter(|f| Some(f.id) != self.form_shown && !off.contains(&f.id)) else { continue };
             let x = shape_frame(now) * t.inverse();
             if !x.abs_diff_eq(DMat4::IDENTITY, 1e-9) && x.is_finite() {
                 all.insert(*id, x);
             }
         }
+        all.extend(whole);
         // a shape carved out is the part's hole: the kernel's model shows
         // it, its cage where the pointer takes it. Unless all it cuts goes
         // with it as one (a group, a block picked with its holes: one
@@ -4654,7 +4704,10 @@ impl AppState {
         if let Some(d) = self.drag.take() {
             // a Carve brought onto a shape made after it goes last, so it
             // cuts it (one undo step with the move)
-            let carves: Vec<FeatureId> = d.start.iter().filter(|s| s.op == Op::Carve).map(|s| s.id).collect();
+            // (not one carried with its whole Object: nothing in it moved
+            // against it)
+            let whole: Vec<FeatureId> = d.objects.iter().flat_map(|o| o.0.members.iter().copied()).collect();
+            let carves: Vec<FeatureId> = d.start.iter().filter(|s| s.op == Op::Carve && !whole.contains(&s.id)).map(|s| s.id).collect();
             let (last, cut) = self.carve_plan(&carves, &d.keep);
             if !last.is_empty() {
                 self.live(|doc| put_last(doc, &last));
@@ -4727,7 +4780,9 @@ impl AppState {
             let iso = self.build_doc();
             self.kernel.submit(want, iso.as_ref().unwrap_or(&self.doc), fine, quads);
             self.submitted = want;
-            let frames = self.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()).map(|f| (f.id, shape_frame(f))).collect();
+            let mut frames: Vec<(FeatureId, DMat4)> = self.doc.features.iter().filter(|f| f.is_solid() && !f.is_path()).map(|f| (f.id, shape_frame(f))).collect();
+            // each Object's own transform as seen (its stretch after its frame)
+            frames.extend(self.doc.objects.iter().map(|o| (o.id, o.stretch_matrix() * o.frame.matrix())));
             self.sent_frames.push((want, frames));
             if self.sent_frames.len() > 64 {
                 self.sent_frames.remove(0);

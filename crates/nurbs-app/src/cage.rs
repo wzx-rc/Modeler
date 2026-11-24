@@ -86,7 +86,7 @@ impl AppState {
             if fs.is_empty() {
                 return None;
             }
-            (self.scale_frame()?, fs.iter().flat_map(|f| f.corners()).collect())
+            (self.scale_frame()?, fs.iter().flat_map(|f| self.seen_corners(f)).collect())
         } else {
             (DQuat::IDENTITY, self.picked_points().iter().map(|p| p.as_dvec3()).collect())
         };

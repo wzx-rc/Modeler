@@ -871,7 +871,7 @@ impl AppState {
         self.edit("Inset", |d| {
             for r in &refs {
                 let name = d.fresh_name("Inset");
-                let id = d.add_push(Push { face: r.clone(), inset: DEFAULT_INSET, depth: 0.0 });
+                let id = d.add_push(Push { face: r.clone(), inset: DEFAULT_INSET, depth: 0.0, keep: false });
                 if let Some(f) = d.feature_mut(id) {
                     f.name = name;
                 }
@@ -933,9 +933,9 @@ impl AppState {
         let mut id = 0;
         let mut others = vec![];
         self.live(|d| {
-            id = d.add_push(Push { face: FaceRef { tag: r.tag, at: origin }, inset: 0.0, depth: 0.0 });
+            id = d.add_push(Push { face: FaceRef { tag: r.tag, at: origin }, inset: 0.0, depth: 0.0, keep: true });
             for m in &more {
-                others.push(d.add_push(Push { face: m.clone(), inset: 0.0, depth: 0.0 }));
+                others.push(d.add_push(Push { face: m.clone(), inset: 0.0, depth: 0.0, keep: true }));
             }
         });
         let (ro, rd) = self.ray(p);
@@ -1092,7 +1092,7 @@ impl AppState {
         let (ro, rd) = self.ray(p);
         let Some(t) = closest_on_line(line.0, line.1, ro, rd) else { return };
         self.begin_live(f.kind_label());
-        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start, line: Some(line), ops: vec![], carried: Default::default(), pivot: line.0, custom: false, keep: vec![], cage: None, pts: vec![], groups: vec![] });
+        self.drag = Some(Drag { handle: h, grab: line.0 + line.1 * t, start, line: Some(line), ops: vec![], carried: Default::default(), pivot: line.0, custom: false, keep: vec![], cage: None, pts: vec![], groups: vec![], objects: vec![] });
     }
 
     pub(crate) fn update_push_drag(&mut self, d: &Drag, p: [f32; 2]) {
@@ -1570,7 +1570,7 @@ impl AppState {
             }
         };
         let Some(f) = self.doc.feature(id).cloned() else { return };
-        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried, pivot, custom, keep: vec![], cage, pts: vec![], groups: vec![] });
+        self.drag = Some(Drag { handle: h, grab, start: vec![f], line: None, ops: vec![], carried, pivot, custom, keep: vec![], cage, pts: vec![], groups: vec![], objects: vec![] });
         // the move step now selected: the pivot put by hand goes on with it
         if custom {
             self.custom_pivot = Some((self.pivot_key(), pivot));
@@ -1611,6 +1611,7 @@ impl AppState {
         // the first along its own normal too
         self.face_drag = Some(FaceDrag { id, what: FaceDragWhat::Edge { at: pivot, n, t0 }, press: p, px, size: 0.0, others, dirs });
         self.face_drag_first = Some(ns[0].1);
+        self.normals_picked = comps.iter().cloned().zip(ns.iter().map(|c| c.1)).collect();
         true
     }
 
@@ -1791,10 +1792,10 @@ impl AppState {
                     let mut id = 0;
                     let mut others = vec![];
                     self.live(|d| {
-                        id = d.add_push(Push { face: FaceRef { tag: r.tag, at: origin }, inset: 0.1, depth: 0.0 });
+                        id = d.add_push(Push { face: FaceRef { tag: r.tag, at: origin }, inset: 0.1, depth: 0.0, keep: false });
                         for m in &more {
                             let name = d.fresh_name("Inset");
-                            let o = d.add_push(Push { face: m.clone(), inset: 0.1, depth: 0.0 });
+                            let o = d.add_push(Push { face: m.clone(), inset: 0.1, depth: 0.0, keep: false });
                             if let Some(f) = d.feature_mut(o) {
                                 f.name = name;
                             }
@@ -1902,7 +1903,25 @@ impl AppState {
 
     pub fn end_face_drag(&mut self) {
         self.face_drag_first = None;
+        let picked = std::mem::take(&mut self.normals_picked);
         let Some(g) = self.face_drag.take() else { return };
+        if !picked.is_empty() && g.size.abs() > 1e-9 {
+            // T on several components (Romain 24 nov., 10 h 21: each along
+            // its own normal, again and again): they stay picked where the
+            // drag took them, so the next drag moves each along its own
+            // normal again (a move step each, as Maya's history has)
+            self.end_live();
+            self.selection.clear();
+            let d = g.size;
+            for (c, n) in picked {
+                match c {
+                    Comp::Face(r) => self.face_sel.push(FaceRef { at: r.at + n * d, ..r }),
+                    Comp::Edge(r) => self.edge_sel.push(EdgeRef { at: r.at + n * d, ..r }),
+                    Comp::Vertex(v) => self.vert_sel.push(v + n * d),
+                }
+            }
+            return;
+        }
         if g.what == FaceDragWhat::Inset || g.size.abs() > 1e-9 {
             self.end_live();
             self.selection = std::iter::once(g.id).chain(g.others.iter().copied()).filter(|i| self.doc.feature(*i).is_some()).collect();

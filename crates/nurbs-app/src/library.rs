@@ -379,8 +379,11 @@ impl AppState {
                 angle = (hold.angle0 + d.to_degrees() * facing).rem_euclid(360.0);
             }
             if shift {
-                let (la, lb) = ((a[0] * a[0] + a[1] * a[1]).sqrt().max(6.0), (b[0] * b[0] + b[1] * b[1]).sqrt());
-                scale = (hold.scale0 * (lb / la) as f64).clamp(0.05, 20.0);
+                // twice as big per 250 points away from the spot, half as
+                // big per 250 towards it (Romain 24 nov., 10 h 21: the ratio
+                // of distances went ×10 at once near the spot)
+                let (la, lb) = ((a[0] * a[0] + a[1] * a[1]).sqrt(), (b[0] * b[0] + b[1] * b[1]).sqrt());
+                scale = (hold.scale0 * 2f64.powf(((lb - la) / 250.0) as f64)).clamp(0.05, 20.0);
                 if self.settings.snap {
                     scale = (scale * 20.0).round() / 20.0;
                 }
@@ -509,7 +512,7 @@ impl AppState {
                         let id = d.next_id;
                         d.next_id += 1;
                         let name = d.fresh_object_name(&s.name);
-                        d.objects.push(nurbs_kernel::Object { id, name, members: new_shapes.clone() });
+                        d.objects.push(nurbs_kernel::Object::new(id, name, new_shapes.clone()));
                     }
                 }
             }
