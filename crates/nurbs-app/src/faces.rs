@@ -1364,6 +1364,10 @@ impl AppState {
     /// Y (its one green arrow) along their mean normal, X along an edge of
     /// the first, Z across.
     pub fn move_frame(&self) -> DQuat {
+        // Y: the box's own frame
+        if self.gizmo == crate::state::GizmoMode::Universal {
+            return self.cage().map(|c| c.frame).unwrap_or(DQuat::IDENTITY);
+        }
         if !self.transform_on() {
             return DQuat::IDENTITY;
         }

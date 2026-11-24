@@ -2668,6 +2668,66 @@ fn main() {
         h.hold(Modifiers::NONE);
     }
 
+    if want("universal") {
+        // Y, the universal box (Romain 24 nov., 10 h 21: "un qui regroupe en
+        // même temps le Translate, rotate et scale"): a block turned 30° with
+        // a hole; its box's arrow, an arc, a side square, the ring
+        let mut d = Doc::default();
+        let q = DQuat::from_rotation_y(0.5236);
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, q);
+        d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, q * DVec3::new(-8.0, -5.0, 0.0), q);
+        h.reset(d, "Block");
+        h.key(egui::Key::Num4);
+        h.click(h.screen_of(Vec3::new(8.0, 20.0, 4.0)));
+        h.key(egui::Key::Y);
+        h.steps(3);
+        let say = |h: &Harness, what: &str| {
+            let o = h.st.doc.objects.first();
+            eprintln!("  {what}: frame {:?}, hot {:?}, errors {:?}", o.map(|o| (o.frame.t.to_array().map(|v| (v * 10.0).round() / 10.0), o.frame.q.to_axis_angle().1.to_degrees().round(), (o.frame.s * 100.0).round() / 100.0)), h.st.hot_handle, h.st.model.as_ref().map(|m| m.errors.clone()));
+        };
+        h.shot("zero-universal-1-box");
+        let cb = h.st.cage().unwrap();
+        let v = h.st.view();
+        let px = |w: DVec3| v.pixel_size_at((w.as_vec3() - v.eye).length()) as f64;
+        // the +X side's arrow, along the box's own X
+        let g = cb.point([1, 0, 0]);
+        let a0 = g + cb.axis(0) * px(g) * 30.0;
+        h.move_to(h.screen_of(a0.as_vec3()));
+        h.steps(2);
+        say(&h, "arrow hovered");
+        h.shot("zero-universal-2-arrow-hover");
+        h.drag(h.screen_of(a0.as_vec3()), h.screen_of((a0 + cb.axis(0) * 15.0).as_vec3()), 12, true);
+        h.settle();
+        say(&h, "moved 15 along its X");
+        // an arc round the vertical (an edge along Y)
+        let cb = h.st.cage().unwrap();
+        let m = cb.point([1, 0, 1]);
+        let r = px(m) * 18.0;
+        let a1 = m + (cb.axis(0) + cb.axis(2)).normalize() * r;
+        h.move_to(h.screen_of(a1.as_vec3()));
+        h.steps(2);
+        say(&h, "arc hovered");
+        let piv = h.st.pivot().unwrap();
+        let to = piv + DQuat::from_rotation_y(-0.6) * (a1 - piv);
+        h.hold(Modifiers::SHIFT);
+        h.drag(h.screen_of(a1.as_vec3()), h.screen_of(to.as_vec3()), 12, true);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        say(&h, "turned by its arc");
+        h.shot("zero-universal-3-turned");
+        // its +Z side's square: stretched
+        let cb = h.st.cage().unwrap();
+        let g = cb.point([0, 0, 1]);
+        h.move_to(h.screen_of(g.as_vec3()));
+        h.steps(2);
+        say(&h, "side square hovered");
+        h.drag(h.screen_of(g.as_vec3()), h.screen_of((g + cb.axis(2) * 10.0).as_vec3()), 12, true);
+        h.settle();
+        h.settle();
+        say(&h, "stretched along its Z");
+        h.shot("zero-universal-4-stretched");
+    }
+
     if want("side-scale") {
         // Romain 24 nov., 7 h 16: the scale gizmo's side squares (one
         // direction only, the side across staying), Shift's 15° steps on

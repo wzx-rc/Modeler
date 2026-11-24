@@ -49,6 +49,8 @@ pub enum Icon {
     Move,
     /// Scale gizmo (R).
     Scale,
+    /// The universal box: a square with an arrow, an arc and a corner.
+    Universal,
     /// Sketch (Forme NURBS): an outline of corners and a curve, its points.
     Sketch,
     /// Path: an open curve with a rounded corner, its two ends.
@@ -561,6 +563,14 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 // the arrow's two barbs, square to its line
                 pen.line(&[(x + 2.6 * dx - 2.6 * dy, y + 2.6 * dy - 2.6 * dx), (x, y), (x + 2.6 * dx + 2.6 * dy, y + 2.6 * dy + 2.6 * dx)]);
             }
+        }
+        Icon::Universal => {
+            // a box with an arrow out of its side, an arc on its corner
+            pen.closed(&[(3.0, 7.0), (13.0, 7.0), (13.0, 17.0), (3.0, 17.0)]);
+            pen.line(&[(13.0, 12.0), (18.0, 12.0)]);
+            pen.line(&[(16.0, 10.0), (18.0, 12.0), (16.0, 14.0)]);
+            pen.arc(13.0, 7.0, 4.5, 4.5, -std::f32::consts::FRAC_PI_2, 0.0);
+            pen.closed(&[(7.0, 11.0), (9.0, 11.0), (9.0, 13.0), (7.0, 13.0)]);
         }
         Icon::Scale => {
             // a small square growing into a big one

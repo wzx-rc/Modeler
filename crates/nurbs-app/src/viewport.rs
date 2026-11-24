@@ -154,6 +154,7 @@ fn handle_at(st: &AppState, p: Pos2) -> Option<Handle> {
         GizmoMode::Select => return None,
         GizmoMode::Rotate if st.sel_mode == SelMode::Object => return ring_at(st, p),
         GizmoMode::Scale => return scale_at(st, p),
+        GizmoMode::Universal => return universal_at(st, p),
         _ => {}
     }
     // (the move gizmo has no size dots: Romain 20 nov., 11 h 44, "enlève
@@ -265,6 +266,122 @@ fn scale_at(st: &AppState, p: Pos2) -> Option<Handle> {
     // scale along one axis
     let (c, _) = scale_points(st)?;
     ((p - c).length() < 10.0).then_some(Handle::ScaleAll)
+}
+
+/// The universal box (Y): its arrows (one out of each side: the side's
+/// grip, its tip, its axis), its arcs (a quarter circle round each edge's
+/// middle: its points, its axis; Object mode only), the centre.
+struct UniBox {
+    arrows: Vec<(Pos2, Pos2, usize)>,
+    arcs: Vec<(Vec<Pos2>, usize)>,
+    centre: Pos2,
+}
+
+fn universal(st: &AppState) -> Option<UniBox> {
+    let c = st.cage()?;
+    let centre = st.pivot().and_then(|q| world(st, q))?;
+    let v = st.view();
+    let px = |q: DVec3| v.pixel_size_at((q.as_vec3() - v.eye).length()) as f64;
+    let mut arrows = vec![];
+    for s in c.grips().into_iter().filter(|s| s.iter().filter(|x| **x != 0).count() == 1) {
+        let a = s.iter().position(|x| *x != 0).unwrap_or(0);
+        let q = c.point(s);
+        let out = c.axis(a) * s[a] as f64;
+        if let (Some(b), Some(t)) = (world(st, q + out * px(q) * 10.0), world(st, q + out * px(q) * 42.0)) {
+            arrows.push((b, t, a));
+        }
+    }
+    let mut arcs = vec![];
+    if st.sel_mode == SelMode::Object {
+        for s in c.grips().into_iter().filter(|s| s.iter().filter(|x| **x != 0).count() == 2) {
+            let a = s.iter().position(|x| *x == 0).unwrap_or(0);
+            let (b, d) = ((a + 1) % 3, (a + 2) % 3);
+            let m = c.point(s);
+            let (u, w) = (c.axis(b) * s[b] as f64, c.axis(d) * s[d] as f64);
+            let r = px(m) * 18.0;
+            let pts: Vec<Pos2> = (0..=12)
+                .filter_map(|i| {
+                    let t = i as f64 / 12.0 * std::f64::consts::FRAC_PI_2;
+                    world(st, m + (u * t.cos() + w * t.sin()) * r)
+                })
+                .collect();
+            arcs.push((pts, a));
+        }
+    }
+    Some(UniBox { arrows, arcs, centre })
+}
+
+fn universal_at(st: &AppState, p: Pos2) -> Option<Handle> {
+    // the side squares and the white cube first (as R's)
+    if let Some(h) = scale_at(st, p) {
+        return Some(h);
+    }
+    let u = universal(st)?;
+    let mut best: Option<(f32, Handle)> = None;
+    let mut take = |d: f32, h: Handle| {
+        if d < 8.0 && best.map_or(true, |b| d < b.0) {
+            best = Some((d, h));
+        }
+    };
+    for (b, t, a) in &u.arrows {
+        take(dist_seg(p, *b, *t + (*t - *b).normalized() * 6.0), Handle::Axis(*a));
+    }
+    for (pts, a) in &u.arcs {
+        for w in pts.windows(2) {
+            take(dist_seg(p, w[0], w[1]), Handle::Rot(*a));
+        }
+    }
+    // the ring round the centre: on all three axes, facing the eye
+    take(((p - u.centre).length() - 20.0).abs() + 1.0, Handle::Free);
+    best.map(|b| b.1)
+}
+
+fn draw_universal(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Option<Handle>) {
+    let colors = [AXIS_X, AXIS_Y, AXIS_Z];
+    let Some(u) = universal(st) else { return };
+    let on = |h: Handle| hot == Some(h) || dragging == Some(h);
+    let shown = |h: Handle| dragging.is_none() || dragging == Some(h);
+    // the box, faint
+    if let Some(cb) = st.cage() {
+        for (a0, b0) in cb.edges() {
+            if let (Some(a1), Some(b1)) = (world(st, a0), world(st, b0)) {
+                p.line_segment([a1, b1], Stroke::new(1.0, tint(Color32::WHITE, if dragging.is_some() { 0.18 } else { 0.3 })));
+            }
+        }
+    }
+    for (b, t, a) in &u.arrows {
+        let h = Handle::Axis(*a);
+        if shown(h) {
+            arrow(p, *b, *t, if on(h) { HOT } else { colors[*a] }, if on(h) { 2.8 } else { 2.0 });
+        }
+    }
+    for (pts, a) in &u.arcs {
+        let h = Handle::Rot(*a);
+        if shown(h) && pts.len() > 1 {
+            p.add(Shape::line(pts.clone(), Stroke::new(if on(h) { 3.0 } else { 2.0 }, if on(h) { HOT } else { colors[*a] })));
+        }
+    }
+    let ring = on(Handle::Free);
+    if shown(Handle::Free) {
+        p.circle_stroke(u.centre, 20.0, Stroke::new(if ring { 2.4 } else { 1.4 }, if ring { HOT } else { tint(Color32::WHITE, 0.6) }));
+    }
+    // the side squares and the white cube, as R's
+    for (sg, q) in side_grips(st) {
+        let h = Handle::Cage(sg);
+        if !shown(h) {
+            continue;
+        }
+        let a = sg.iter().position(|v| *v != 0).unwrap_or(0);
+        let col = if on(h) { HOT } else { colors[a] };
+        p.rect(Rect::from_center_size(q, vec2(11.0, 11.0)), 1.5, tint(col, if on(h) { 0.55 } else { 0.25 }), Stroke::new(1.4, col), egui::StrokeKind::Middle);
+    }
+    if shown(Handle::ScaleAll) {
+        let all = on(Handle::ScaleAll);
+        p.rect(Rect::from_center_size(u.centre, vec2(14.0, 14.0)), 3.0, if all { tint(HOT, 0.5) } else { tint(Color32::WHITE, 0.25) }, Stroke::new(1.5, if all { HOT } else { Color32::WHITE }), egui::StrokeKind::Middle);
+    }
+    if let Some(t) = &st.gizmo_readout {
+        chip(p, u.centre + vec2(24.0, 14.0), Align2::LEFT_TOP, t, HOT, HOT);
+    }
 }
 
 /// The scale cage's grip under the pointer (corners first, then edges,
@@ -957,6 +1074,10 @@ fn draw_gizmo(p: &Painter, st: &AppState) {
     }
     if (st.sel_mode == SelMode::Object && st.gizmo == GizmoMode::Rotate) || st.gizmo == GizmoMode::Scale {
         draw_rot_scale(p, st, hot, dragging);
+        return;
+    }
+    if st.gizmo == GizmoMode::Universal {
+        draw_universal(p, st, hot, dragging);
         return;
     }
     let Some((c, tips)) = gizmo_points(st) else { return };
@@ -2103,6 +2224,7 @@ fn hint_of(st: &AppState) -> String {
                     GizmoMode::Move | GizmoMode::Transform => "Arrows and squares: move · Centre square: on all three axes · D + click: pivot on a point · Alt + A: align · Alt + M: own symmetry · Ctrl + Shift + D: array · E: rotate · R: scale · Del: delete".into(),
                     GizmoMode::Rotate => "Drag a ring: turn round X, Y or Z · W: move · R: scale · Del: delete".into(),
                     GizmoMode::Scale => "Side squares: one side (Ctrl: both ways) · White cube: all at once · W: move · E: rotate".into(),
+                    GizmoMode::Universal => "Arrows: move along a side · Arcs: turn round an edge's axis (Shift: 15°) · Side squares: scale one side · White cube: all · Ring: move facing the eye".into(),
                 }
             }
         }

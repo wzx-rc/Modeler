@@ -435,6 +435,13 @@ pub enum GizmoMode {
     /// green arrow along the picked components' normal, each moved along
     /// its own; in Object mode the move gizmo.
     Transform,
+    /// Y (Romain 24 nov., 10 h 21: "un qui regroupe en même temps le
+    /// Translate, rotate et scale", in the Scale's box spirit): the box round
+    /// what is picked, in its own frame: an arrow out of each side moves
+    /// along it, an arc on each edge's middle turns round the axis along
+    /// that edge, the side squares scale one side, the white cube all,
+    /// the ring round it moves in the plane facing the eye.
+    Universal,
 }
 
 impl GizmoMode {
@@ -445,6 +452,7 @@ impl GizmoMode {
             GizmoMode::Rotate => "Rotate",
             GizmoMode::Scale => "Scale",
             GizmoMode::Transform => "Transform",
+            GizmoMode::Universal => "Universal",
         }
     }
 }
@@ -2628,7 +2636,7 @@ impl AppState {
         if self.tool != Tool::Select || self.sketch.is_some() || self.creation.is_some() || self.drag.is_some() || self.push.is_some() || self.curve_pull.is_some() {
             self.commit_gestures(self.principal());
         }
-        if matches!(g, GizmoMode::Select | GizmoMode::Move | GizmoMode::Transform) {
+        if matches!(g, GizmoMode::Select | GizmoMode::Move | GizmoMode::Transform | GizmoMode::Universal) {
             // an operation just made on components validated: what it made
             // stays picked (its tools offered again)
             self.steps_to_components();
@@ -4216,7 +4224,7 @@ impl AppState {
                 BasePlane::new(pivot, n, None).hit(ro, rd)
             }
             Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick => None,
-            Handle::Rot(a) => BasePlane::new(pivot, DVec3::AXES[a], None).hit(ro, rd),
+            Handle::Rot(a) => BasePlane::new(pivot, self.gizmo_rot() * DVec3::AXES[a], None).hit(ro, rd),
             Handle::Scale(a) => {
                 let axis = self.scale_frame()? * DVec3::AXES[a];
                 closest_on_line(pivot, axis, ro, rd).map(|t| pivot + axis * t)
@@ -4369,7 +4377,10 @@ impl AppState {
         match d.handle {
             Handle::Axis(_) | Handle::Plane(_) | Handle::Free => {
                 let raw = delta;
-                delta = DVec3::new(self.snap(delta.x), self.snap(delta.y), self.snap(delta.z));
+                // snapped along the gizmo's own axes (the box's with Y)
+                let rot = self.gizmo_rot();
+                let l = rot.inverse() * delta;
+                delta = rot * DVec3::new(self.snap(l.x), self.snap(l.y), self.snap(l.z));
                 // a point of the shape passing near a point of interest
                 // lands on it; the pointer on one: the shape's centre, base
                 // or top lines up with it (whichever is the closest to where
@@ -4379,7 +4390,8 @@ impl AppState {
                     _ => vec![pivot0],
                 };
                 let Some(mask) = move_mask(d.handle) else { return };
-                if let Some((best, shown)) = self.align_move(p, raw, mask, &keys, &d.carried, &skip) {
+                let square = rot.abs_diff_eq(DQuat::IDENTITY, 1e-9);
+                if let Some((best, shown)) = self.align_move(p, raw, mask, &keys, &d.carried, &skip).filter(|_| square) {
                     delta = best;
                     self.snap_shown = Some(shown);
                 }
@@ -4403,7 +4415,8 @@ impl AppState {
             }
             Handle::PushInset | Handle::PushDepth | Handle::ArrayStep(_) | Handle::ArrayCount(_) | Handle::ArrayAngle | Handle::ShellThick => {}
             Handle::Rot(a) => {
-                let axis = DVec3::AXES[a];
+                // the world's axis (E), the box's own (Y: its frame)
+                let axis = self.gizmo_rot() * DVec3::AXES[a];
                 let flat = |v: DVec3| v - axis * v.dot(axis);
                 let (v0, v1) = (flat(d.grab - pivot0), flat(now - pivot0));
                 if v0.length() < 1e-9 || v1.length() < 1e-9 {

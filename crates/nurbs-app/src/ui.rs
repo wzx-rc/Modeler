@@ -433,6 +433,7 @@ fn gizmo_buttons(ui: &mut Ui, st: &mut AppState) {
         (GizmoMode::Rotate, Icon::Rotate, "E", "Rotate (E): three rings turn the picked shapes round X, Y, Z (15° steps while Snap is on) · right click or hold: its values"),
         (GizmoMode::Scale, Icon::Scale, "R", "Scale (R): a square on each side scales that side (Ctrl: both ways), the white cube scales all · right click or hold: its values"),
         (GizmoMode::Transform, Icon::Extrude, "T", "Transform (T, Maya's Mesh > Transform): the picked faces, edges or vertices moved along their normal by one green arrow, each along its own"),
+        (GizmoMode::Universal, Icon::Universal, "Y", "Universal (Y): the box round what is picked moves, turns and scales it: an arrow out of each side, an arc on each edge, the side squares, the white cube"),
     ]
     .into_iter()
     .enumerate()
@@ -441,7 +442,7 @@ fn gizmo_buttons(ui: &mut Ui, st: &mut AppState) {
         let r = icon_btn(ui, icon, st.gizmo == g || open_here, tip, 30.0);
         ui.ctx().data_mut(|d| d.insert_temp(Id::new(("gizmo-btn", i)), r.rect));
         key_hint(ui, &r, key);
-        if i == 0 || g == GizmoMode::Transform {
+        if i == 0 || g == GizmoMode::Transform || g == GizmoMode::Universal {
             if r.clicked() {
                 st.set_gizmo(g);
             }
@@ -5352,7 +5353,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     }
     // Maya: Q select (no gizmo), W move, E rotate, R scale (rotate and
     // scale work on whole shapes: back to Object mode)
-    for (k, g) in [(Key::Q, GizmoMode::Select), (Key::W, GizmoMode::Move), (Key::E, GizmoMode::Rotate), (Key::R, GizmoMode::Scale), (Key::T, GizmoMode::Transform)] {
+    for (k, g) in [(Key::Q, GizmoMode::Select), (Key::W, GizmoMode::Move), (Key::E, GizmoMode::Rotate), (Key::R, GizmoMode::Scale), (Key::T, GizmoMode::Transform), (Key::Y, GizmoMode::Universal)] {
         if pressed(k) {
             st.set_gizmo(g);
         }
