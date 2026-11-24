@@ -1051,6 +1051,39 @@ pub struct Feature {
     /// point it was scaled about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stretch: Option<Stretch>,
+    /// Project curve (Romain 24 nov., 19 h 03, Maya's Project Curve on
+    /// Mesh): a curve projected along its own normal onto its Object, to
+    /// draw on its faces or cut it. `op`, `prim`, `rot` unused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<Project>,
+}
+
+/// What a Project curve step does: `cut` false, the faces the curve meets
+/// first (seen from its side, its normal's) are split along it, both pieces
+/// keeping their tag (as the Knife's), so one of them can be extruded or
+/// moved; true, the part is cut through along it: a closed curve takes its
+/// inside away (`flip`: keeps only its inside), an open one, its ends
+/// carried on along their tangents, the smaller side (`flip`: the other).
+/// `shapes`: the shapes of its Object when it was made (it acts there).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Project {
+    pub curve: FeatureId,
+    #[serde(default)]
+    pub cut: bool,
+    #[serde(default)]
+    pub flip: bool,
+    #[serde(default)]
+    pub shapes: Vec<FeatureId>,
+}
+
+impl Project {
+    pub fn label(&self) -> &'static str {
+        if self.cut {
+            "Project cut"
+        } else {
+            "Project"
+        }
+    }
 }
 
 /// A scale step's map (world, an affine map's rows) and the shapes of its
@@ -1595,7 +1628,7 @@ impl Feature {
     /// A primitive (Add / Carve), not a step on the part (fillet,
     /// chamfer, inset, extrude).
     pub fn is_solid(&self) -> bool {
-        self.round.is_none() && self.push.is_none() && self.tweak.is_none() && self.cut.is_none() && self.mirror.is_none() && self.array.is_none() && self.shell.is_none() && self.bridge.is_none() && self.stretch.is_none()
+        self.round.is_none() && self.push.is_none() && self.tweak.is_none() && self.cut.is_none() && self.mirror.is_none() && self.array.is_none() && self.shell.is_none() && self.bridge.is_none() && self.stretch.is_none() && self.project.is_none()
     }
     /// An operation (a fillet, an inset, a move, the Knife, a Mirror)
     /// with its points mapped by `m` (an affine map, a mirror allowed):
@@ -1959,6 +1992,9 @@ impl Feature {
         if self.stretch.is_some() {
             return "Scale";
         }
+        if let Some(p) = &self.project {
+            return p.label();
+        }
         if self.bridge.is_some() {
             return "Bridge";
         }
@@ -2143,6 +2179,9 @@ pub(crate) fn named_features(f: &Feature) -> Vec<FeatureId> {
     if let Some(st) = &f.stretch {
         ids.extend(st.shapes.iter().copied());
     }
+    if let Some(p) = &f.project {
+        ids.extend(p.shapes.iter().copied());
+    }
     ids.sort_unstable();
     ids.dedup();
     ids
@@ -2153,7 +2192,7 @@ pub(crate) fn named_features(f: &Feature) -> Vec<FeatureId> {
 /// with only its edges touching them; an inset, a move or a Knife when all
 /// it names lies on them (a vertex inside one of the shapes' boxes).
 pub(crate) fn pattern_op(f: &Feature, ids: &[FeatureId], srcs: &[&Feature]) -> Option<Feature> {
-    if f.mirror.is_some() || f.array.is_some() || f.shell.is_some() || f.stretch.is_some() {
+    if f.mirror.is_some() || f.array.is_some() || f.shell.is_some() || f.stretch.is_some() || f.project.is_some() {
         return None;
     }
     if let Some(r) = &f.round {
@@ -2392,7 +2431,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: None });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -2402,7 +2441,7 @@ impl Doc {
         let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0, only: false };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: None });
         id
     }
     /// Adds an inset or extrusion of a face at the end.
@@ -2411,7 +2450,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(push.label());
         let origin = push.face.at;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: None });
         id
     }
     /// Adds a move of a face, edge or vertex at the end.
@@ -2420,7 +2459,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(tweak.label());
         let origin = tweak.at();
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: None });
         id
     }
     /// Adds a Mirror step at the end.
@@ -2429,7 +2468,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name("Mirror");
         let origin = mirror.normal() * mirror.offset;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: Some(mirror), array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: Some(mirror), array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: None });
         id
     }
     /// Adds a Pattern / Array step at the end.
@@ -2438,7 +2477,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name("Array");
         let origin = array.sources.iter().filter_map(|s| self.feature(*s)).map(|f| f.centre()).next().unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: Some(array), shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: Some(array), shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: None });
         id
     }
     /// Adds a Shell step at the end (`origin`: where its thickness handle
@@ -2449,7 +2488,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name("Bridge");
         let origin = (faces[0].at + faces[1].at) * 0.5;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: Some(Bridge { faces }), one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: Some(Bridge { faces }), one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: None });
         id
     }
 
@@ -2457,7 +2496,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name("Shell");
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: Some(shell), bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: Some(shell), bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: None });
         id
     }
     /// A scale step on Object `o` (its shapes now), `m` in the world,
@@ -2467,7 +2506,19 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name("Scale");
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin: at, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: Some(Stretch { rows: mat_to_rows(m), shapes }) });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin: at, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: Some(Stretch { rows: mat_to_rows(m), shapes }), project: None });
+        Some(id)
+    }
+    /// A Project curve step (plan point 54): `curve` projected along its
+    /// normal onto the shapes `shapes` (its Object's), drawn on its faces
+    /// or cut through (`cut`).
+    pub fn add_project(&mut self, curve: FeatureId, cut: bool, shapes: Vec<FeatureId>) -> Option<FeatureId> {
+        let c = self.feature(curve).filter(|c| c.is_path())?;
+        let at = c.origin;
+        let id = self.next_id;
+        self.next_id += 1;
+        let name = self.fresh_name(if cut { "Project cut" } else { "Project" });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin: at, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: Some(Project { curve, cut, flip: false, shapes }) });
         Some(id)
     }
     /// The shape with its own symmetry (`sym`) that the Carve at `at` cuts
@@ -2535,7 +2586,7 @@ impl Doc {
                 }
                 let before: Vec<FeatureId> = self.features[..a].iter().map(|f| f.id).collect();
                 for (o, f) in self.features.iter().enumerate().skip(a + 1) {
-                    if !f.visible || f.suspended || f.is_solid() || f.mirror.is_some() || f.array.is_some() || f.shell.is_some() || f.stretch.is_some() {
+                    if !f.visible || f.suspended || f.is_solid() || f.mirror.is_some() || f.array.is_some() || f.shell.is_some() || f.stretch.is_some() || f.project.is_some() {
                         continue;
                     }
                     let named = named_features(f);
@@ -2585,7 +2636,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(name);
         let origin = cut.pts.first().map(|p| p.at).or(cut.remove_faces.first().map(|r| r.at)).or(cut.remove_edges.first().map(|e| e.at)).or(cut.fill.first().map(|e| e.at)).unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: None });
         id
     }
     /// The curves' outlines made again from their settings and boxes (a
@@ -2744,7 +2795,8 @@ impl Doc {
                     a.sources.retain(|o| !out.contains(o));
                 }
             }
-            let empty: Vec<FeatureId> = self.features.iter().filter(|f| f.shape_bool.as_ref().map(|b| b.operands.is_empty()).unwrap_or(false) || f.loft.as_ref().map(|l| l.sections.len() < 2).unwrap_or(false) || f.array.as_ref().map(|a| a.sources.is_empty()).unwrap_or(false)).map(|f| f.id).collect();
+            // (a projection goes with its curve)
+            let empty: Vec<FeatureId> = self.features.iter().filter(|f| f.shape_bool.as_ref().map(|b| b.operands.is_empty()).unwrap_or(false) || f.loft.as_ref().map(|l| l.sections.len() < 2).unwrap_or(false) || f.array.as_ref().map(|a| a.sources.is_empty()).unwrap_or(false) || f.project.as_ref().is_some_and(|p| out.contains(&p.curve))).map(|f| f.id).collect();
             if empty.is_empty() {
                 break;
             }

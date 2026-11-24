@@ -684,6 +684,7 @@ fn primary_candidates(st: &mut AppState, p: &Value) -> Result<Value, String> {
             sym: None,
             cable: None,
             stretch: None,
+            project: None,
         };
         let mut v = spec_of(&f);
         if let Some(o) = v.as_object_mut() {

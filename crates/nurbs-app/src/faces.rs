@@ -375,6 +375,20 @@ impl AppState {
         out
     }
 
+    /// The curves' own points (Vertex mode draws them bigger).
+    pub fn curve_points(&self) -> Vec<Vec3> {
+        let mut out = vec![];
+        for f in self.doc.features.iter().filter(|f| f.visible && f.is_path() && f.shape_bool.is_none()) {
+            let Some(pr) = &f.profile else { continue };
+            for i in 0..pr.points.len() {
+                if let Some(q) = crate::surfaces::path_point_pos(f, i) {
+                    out.push(q.as_vec3());
+                }
+            }
+        }
+        out
+    }
+
     /// The part's B-rep vertices: the ends of its edges (seams left out).
     pub fn part_vertices(&self) -> Vec<Vec3> {
         let Some(m) = &self.model else { return vec![] };

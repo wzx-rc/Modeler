@@ -77,6 +77,8 @@ extern "C" {
     fn focc_imprint(s: *const FShape, tool: *const FShape) -> *mut FShape;
     fn focc_edge_point(s: *const FShape, edge: c_int, f: f64, xyz: *mut f64) -> c_int;
     fn focc_split(s: *const FShape, pts: *const f64, n: c_int, segs: *const c_int, nseg: c_int) -> *mut FShape;
+    fn focc_project_imprint(s: *const FShape, curve: *const FShape, dir: *const f64, ext: f64) -> *mut FShape;
+    fn focc_project_tool(curve: *const FShape, dir: *const f64, lo: *const f64, hi: *const f64, side: c_int) -> *mut FShape;
     fn focc_remove_faces(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
     fn focc_fill_holes(s: *const FShape, pts: *const c_double, n: c_int, fresh: i64) -> *mut FShape;
     fn focc_defeature(s: *const FShape, idx: *const c_int, n: c_int) -> *mut FShape;
@@ -825,6 +827,20 @@ impl Shape {
         let flat: Vec<f64> = pts.iter().flatten().copied().collect();
         let s: Vec<c_int> = segs.iter().flatten().map(|&i| i as c_int).collect();
         shape(unsafe { focc_split(self.0, flat.as_ptr(), pts.len() as c_int, s.as_ptr(), segs.len() as c_int) })
+    }
+    /// Project curve, drawn on the part: `curve` (a wire, or a region's
+    /// face) swept along `dir`, the faces it meets first seen from that
+    /// side split along it (both pieces keep their tag); an open curve's
+    /// ends carried on `ext` mm along their tangents.
+    pub fn project_imprint(&self, curve: &Shape, dir: [f64; 3], ext: f64) -> Result<Shape, String> {
+        shape(unsafe { focc_project_imprint(self.0, curve.0, dir.as_ptr(), ext) })
+    }
+    /// Project curve, cut: the solid `curve` sweeps along `dir` through a
+    /// part whose box is lo..hi (a region's face swept; an open wire
+    /// carried on past the part along its ends' tangents and closed far
+    /// away on the `side` (±1) of its chord, along ±dir × chord). Untagged.
+    pub fn project_tool(curve: &Shape, dir: [f64; 3], lo: [f64; 3], hi: [f64; 3], side: i32) -> Result<Shape, String> {
+        shape(unsafe { focc_project_tool(curve.0, dir.as_ptr(), lo.as_ptr(), hi.as_ptr(), side as c_int) })
     }
     /// Faces (0-based) taken away, the faces round them grown to close the
     /// part again (a fillet's faces: its edges sharp again).

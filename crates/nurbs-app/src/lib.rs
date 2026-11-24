@@ -27,6 +27,7 @@ pub mod materials;
 pub mod nav;
 pub mod pen;
 pub mod pick;
+pub mod project;
 pub mod reference;
 pub mod remote;
 pub mod render;

@@ -216,6 +216,17 @@ impl Harness {
         }
     }
 
+    /// A key as winit gives it to egui on another layout: its physical
+    /// place (`phys`), the logical key egui made of it (the physical one
+    /// when the character has no egui key: AZERTY's & é "), the text typed.
+    fn key_phys(&mut self, key: egui::Key, phys: egui::Key, text: &str) {
+        self.pending.push(Event::Key { key, physical_key: Some(phys), pressed: true, repeat: false, modifiers: self.mods });
+        self.pending.push(Event::Text(text.to_string()));
+        self.step();
+        self.pending.push(Event::Key { key, physical_key: Some(phys), pressed: false, repeat: false, modifiers: self.mods });
+        self.step();
+    }
+
     fn click(&mut self, p: Pos2) {
         self.press(p, true);
         self.press(p, false);
@@ -3251,6 +3262,176 @@ fn main() {
                 h.st.selection = vec![cyl.id];
                 h.steps(3);
                 h.shot("zero-rescale-9-scene-cylinder");
+            }
+        }
+    }
+
+    if want("project") {
+        // Romain 24 nov., 19 h 03: the keys 1 2 3 on his AZERTY keyboard
+        // (& é " ') give Vertex, Edge, Face (4 Object); a curve's line in
+        // the fillets' yellow and its points three times bigger; Project
+        // curve (Maya's Project Curve on Mesh): an open curve drawn on the
+        // block's top, drawn on its faces, the piece it parts off extruded;
+        // a closed one cutting through, then keeping its inside; the open
+        // one cutting a side away. FORME_DOC: his scene, Path 4 projected.
+        let mode = |h: &Harness| format!("{:?}", h.st.sel_mode);
+        let info = |h: &Harness| -> String {
+            let Some(m) = h.st.model.as_ref() else { return "no model".into() };
+            format!("{} faces, {} edges, errors {:?}", m.faces.len(), m.edges.len(), m.errors)
+        };
+        h.reset(test_part(), "Project");
+        h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(25.0, 30.0, 20.0));
+        h.st.camera.target = Vec3::new(-5.0, 14.0, 4.0);
+        h.st.camera.dist *= 0.62;
+        h.steps(2);
+        for (key, phys, text) in [
+            (egui::Key::Num1, egui::Key::Num1, "&"),
+            (egui::Key::Num2, egui::Key::Num2, "é"),
+            (egui::Key::Num3, egui::Key::Num3, "\""),
+            (egui::Key::Quote, egui::Key::Num4, "'"),
+            (egui::Key::Num1, egui::Key::Num1, "1"),
+        ] {
+            h.key_phys(key, phys, text);
+            eprintln!("  key {text:?} (physical {phys:?}): {}", mode(&h));
+        }
+        h.key_phys(egui::Key::Quote, egui::Key::Num4, "'");
+        // an open curve on the top: from the −X edge to the slot's edge,
+        // in front of the hole
+        let t = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 20.0, z));
+        h.key(egui::Key::P);
+        for (x, z) in [(-20.0, 7.0), (-14.0, 11.0), (-8.0, 9.0)] {
+            let q = t(&h, x, z);
+            h.move_to(q);
+            h.steps(1);
+            h.click(q);
+        }
+        let q = t(&h, -4.0, 11.0);
+        h.move_to(q);
+        h.steps(2);
+        h.shot("zero-project-1-drawing");
+        h.click(q);
+        h.key(egui::Key::Enter);
+        h.settle();
+        let open = h.st.doc.features.last().unwrap().clone();
+        eprintln!("  open curve {} {:?} points {:?}", open.name, open.prim, open.profile.as_ref().map(|p| p.points.len()));
+        // Vertex mode: its points
+        h.key_phys(egui::Key::Num1, egui::Key::Num1, "&");
+        h.st.selection.clear();
+        h.move_to(t(&h, -14.0, 11.0));
+        h.steps(3);
+        eprintln!("  {}: curve points {}", mode(&h), h.st.curve_points().len());
+        h.shot("zero-project-2-points");
+        // Object mode, the curve selected: its window's Project section
+        h.key_phys(egui::Key::Quote, egui::Key::Num4, "'");
+        h.click(t(&h, -14.0, 11.0));
+        h.steps(3);
+        eprintln!("  selected {:?}", h.st.selection);
+        h.shot("zero-project-3-curve-window");
+        let pid = h.st.add_project(open.id, false);
+        h.settle();
+        h.steps(2);
+        eprintln!("  projected (draw) {pid:?}: {} ; toast {:?}", info(&h), h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.shot("zero-project-4-drawn-on-faces");
+        // Face mode: the piece in front of the curve picked, extruded by
+        // Shift + drag
+        h.key_phys(egui::Key::Num3, egui::Key::Num3, "\"");
+        h.st.selection.clear();
+        let piece = t(&h, -12.0, 13.5);
+        h.click(piece);
+        h.steps(2);
+        eprintln!("  {}: picked {:?}", mode(&h), h.st.face_sel);
+        h.shot("zero-project-5-piece-picked");
+        h.hold(Modifiers::SHIFT);
+        h.drag(piece, piece - egui::vec2(0.0, 60.0), 12, true);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        h.steps(2);
+        let push = h.st.doc.features.last().unwrap().clone();
+        eprintln!("  extruded: {} {:?}: {}", push.name, push.push.as_ref().map(|p| (p.inset, p.depth)), info(&h));
+        h.key_phys(egui::Key::Quote, egui::Key::Num4, "'");
+        h.st.selection.clear();
+        h.move_to(pos2(560.0, 820.0));
+        h.steps(2);
+        eprintln!("  state: xray {} hover {:?} also {:?} sel {:?} tool {:?} push {} drag {}", h.st.xray, h.st.hover_feature, h.st.hover_also, h.st.selection, h.st.tool, h.st.push.is_some(), h.st.drag.is_some());
+        h.shot("zero-project-6-piece-extruded");
+        // a closed curve on the top in front of the boss, cutting through
+        h.key(egui::Key::P);
+        let first = t(&h, 6.0, 9.0);
+        for (x, z) in [(6.0, 9.0), (17.0, 9.0), (17.0, 13.5), (6.0, 13.5)] {
+            let q = t(&h, x, z);
+            h.move_to(q);
+            h.steps(1);
+            h.click(q);
+        }
+        h.move_to(first);
+        h.steps(1);
+        h.click(first);
+        h.settle();
+        let closed = h.st.doc.features.last().unwrap().clone();
+        eprintln!("  closed curve {} open {:?}", closed.name, closed.profile.as_ref().map(|p| p.open));
+        let cid = h.st.add_project(closed.id, true);
+        h.settle();
+        h.steps(2);
+        eprintln!("  cut through {cid:?}: {}", info(&h));
+        h.shot("zero-project-7-closed-cut");
+        if let Some(cid) = cid {
+            let p = h.st.doc.feature(cid).and_then(|f| f.project.clone()).unwrap();
+            h.st.set_project(cid, nurbs_kernel::Project { flip: true, ..p });
+            h.settle();
+            h.steps(2);
+            eprintln!("  inside kept: {}", info(&h));
+            h.shot("zero-project-8-inside-kept");
+            h.hold(Modifiers::CTRL);
+            h.key(egui::Key::Z);
+            h.hold(Modifiers::NONE);
+            h.settle();
+        }
+        // the open curve's projection made a cut: a side taken away
+        if let Some(pid) = pid {
+            let p = h.st.doc.feature(pid).and_then(|f| f.project.clone()).unwrap();
+            h.st.set_project(pid, nurbs_kernel::Project { cut: true, ..p.clone() });
+            h.st.selection = vec![pid];
+            h.settle();
+            h.steps(2);
+            eprintln!("  open curve cuts: {} names {:?}", info(&h), h.st.doc.feature(pid).map(|f| f.name.clone()));
+            h.shot("zero-project-9-open-cut");
+            h.st.set_project(pid, nurbs_kernel::Project { cut: true, flip: true, ..p });
+            h.settle();
+            h.steps(2);
+            eprintln!("  the other side: {}", info(&h));
+            h.shot("zero-project-10-open-cut-flipped");
+        }
+        // his scene: Path 4 drawn on the Cube, then cutting it
+        if let Ok(path) = std::env::var("FORME_DOC") {
+            let d: Doc = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            h.reset(d, "Scene");
+            for _ in 0..3 {
+                h.settle();
+                h.steps(3);
+            }
+            let name = std::env::var("FORME_CURVE").unwrap_or_else(|_| "Path 4".into());
+            let curve = h.st.doc.features.iter().find(|f| f.name == name).map(|f| f.id);
+            eprintln!("  scene: {} ; {name} = {curve:?}", info(&h));
+            if let Some(c) = curve {
+                h.st.selection = vec![c];
+                h.steps(3);
+                h.shot("zero-project-11-scene-curve");
+                let pid = h.st.add_project(c, false);
+                h.settle();
+                h.steps(2);
+                eprintln!("  scene drawn {pid:?}: {}", info(&h));
+                h.st.selection.clear();
+                h.steps(2);
+                h.shot("zero-project-12-scene-drawn");
+                if let Some(pid) = pid {
+                    h.st.selection = vec![pid];
+                    let p = h.st.doc.feature(pid).and_then(|f| f.project.clone()).unwrap();
+                    h.st.set_project(pid, nurbs_kernel::Project { cut: true, ..p });
+                    h.settle();
+                    h.steps(2);
+                    eprintln!("  scene cut: {}", info(&h));
+                    h.shot("zero-project-13-scene-cut");
+                }
             }
         }
     }

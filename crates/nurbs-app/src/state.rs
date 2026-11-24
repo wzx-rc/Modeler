@@ -3101,6 +3101,9 @@ impl AppState {
                 // a Scale step: its Object's first shape (still there)
                 let o = st.shapes.iter().find_map(|m| self.doc.object_of(*m))?;
                 return self.doc.object(o).and_then(|ob| ob.members.first().copied());
+            } else if let Some(p) = &f.project {
+                // a projected curve: likewise
+                return self.project_owner(p);
             } else {
                 return None;
             };

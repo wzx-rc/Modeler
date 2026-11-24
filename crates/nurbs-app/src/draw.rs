@@ -240,7 +240,7 @@ impl Drawer {
             }
             // the curve under the pointer (pre-selection, Maya): lighter
             // and wider
-            let pre = egui::Color32::from_rgb(0xd8, 0xf6, 0xfa);
+            let pre = theme::PATH_PRE;
             let (c, a, w) = match (selected, hovered, inside) {
                 (true, _, _) => (theme::accent(), 240, 2.2),
                 (_, true, Some(_)) => (pre, 200, 2.0),

@@ -175,7 +175,7 @@ fn rigid_key(doc: &Doc, fs: &[&Feature], list: &[usize], whole: &Whole, upto: us
     let first = fs.iter().find(|f| f.is_solid() && placed(f))?;
     let mut ids: Vec<FeatureId> = vec![];
     for f in fs {
-        if f.mirror.is_some() || f.array.is_some() || f.shape_bool.is_some() || f.loft.is_some() || f.stretch.is_some() || ids.contains(&f.id) {
+        if f.mirror.is_some() || f.array.is_some() || f.shape_bool.is_some() || f.loft.is_some() || f.stretch.is_some() || f.project.is_some() || ids.contains(&f.id) {
             return None;
         }
         ids.push(f.id);
@@ -555,6 +555,10 @@ fn bool_tool(doc: &Doc, f: &Feature) -> Result<Shape, String> {
 
 /// A feature's hash with its 2D boolean's curves' (they are built with it).
 fn deep_hash(doc: &Doc, f: &Feature) -> u64 {
+    // a projected curve: with its curve's (moved, it projects again)
+    if let Some(p) = &f.project {
+        return hash2(f.hash(), doc.feature(p.curve).map(|c| deep_hash(doc, c)).unwrap_or(0));
+    }
     if f.shape_bool.is_none() && f.loft.is_none() {
         return f.hash();
     }
@@ -1685,6 +1689,68 @@ fn tweak_swept(acc: &Shape, f: &Feature, t: &Tweak) -> Option<Shape> {
 /// When the loft cannot pair their outlines and the faces face each other
 /// on parallel planes, each swept across the gap to the other's plane and
 /// the two sweeps' common part taken. Its faces tagged `(step, 1…)`.
+/// Project curve (plan point 54, Maya's Project Curve on Mesh): the curve
+/// along its own normal (its frame's Y) onto the part built so far. Drawn
+/// on it (`cut` false): the faces it meets first, seen from its side, split
+/// along it, both pieces keeping their tag. Cut through: a closed curve's
+/// inside taken away (`flip`: all but its inside), an open curve's smaller
+/// side (`flip`: the other), its ends carried on along their tangents; the
+/// walls tagged `(step, 1)`.
+fn project(doc: &Doc, acc: &Shape, f: &Feature, p: &crate::doc::Project) -> Result<Shape, String> {
+    let c = doc.feature(p.curve).filter(|c| c.is_path()).ok_or("its curve is not there")?;
+    let n = c.axis().normalize();
+    let curve = section(doc, c)?;
+    mark(&step("project", f));
+    if !p.cut {
+        // an open curve drawn to a face's border reaches it
+        let (lo, hi) = c.bounds();
+        let ext = (0.004 * (hi - lo).length()).clamp(0.3, 2.0);
+        return acc.project_imprint(&curve, n.to_array(), ext);
+    }
+    let boxes = acc.lump_boxes();
+    let lo = boxes.iter().fold([f64::MAX; 3], |a, b| [a[0].min(b.0[0]), a[1].min(b.0[1]), a[2].min(b.0[2])]);
+    let hi = boxes.iter().fold([f64::MIN; 3], |a, b| [a[0].max(b.1[0]), a[1].max(b.1[1]), a[2].max(b.1[2])]);
+    if boxes.is_empty() {
+        return Err("nothing to cut".into());
+    }
+    let tagged = |mut t: Shape| {
+        let tags = vec![FaceTag { feature: f.id, sub: 1 }.pack(); t.face_count()];
+        t.set_tags(&tags);
+        t
+    };
+    let made = |tool: Shape, keep_inside: bool| -> Result<Shape, String> {
+        let tool = tagged(tool);
+        if keep_inside { acc.common(&tool) } else { acc.cut(&tool) }
+    };
+    if doc.is_closed_curve(c.id) {
+        let tool = Shape::project_tool(&curve, n.to_array(), lo, hi, 1)?;
+        return made(tool, p.flip);
+    }
+    // an open curve: the smaller side taken away (flip: the larger)
+    let mut sides: Vec<(f64, Shape)> = vec![];
+    let mut why = String::new();
+    for side in [1, -1] {
+        match Shape::project_tool(&curve, n.to_array(), lo, hi, side).and_then(|t| made(t, false)) {
+            Ok(s) => sides.push((s.volume(), s)),
+            Err(e) => why = e,
+        }
+    }
+    if sides.is_empty() {
+        return Err(why);
+    }
+    let before = acc.volume();
+    if sides.iter().all(|(v, _)| (before - v).abs() < 1e-6 * before.abs().max(1.0)) {
+        return Err("the curve, carried on, does not cross the part".into());
+    }
+    sides.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let k = if p.flip { sides.len() - 1 } else { 0 };
+    let (v, s) = sides.swap_remove(k);
+    if (before - v).abs() < 1e-6 * before.abs().max(1.0) || v < 1e-9 {
+        return Err("the curve, carried on, does not cross the part".into());
+    }
+    Ok(s)
+}
+
 fn bridge(acc: &Shape, f: &Feature, b: &crate::doc::Bridge) -> Result<Shape, String> {
     let fa = find_face(acc, &b.faces[0]).ok_or("its first face is gone")?;
     let fb = find_face(acc, &b.faces[1]).ok_or("its second face is gone")?;
@@ -2354,7 +2420,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
             key = hash2(key, 0x69736c616e64);
         }
         let skipped = |what: &str| skip.iter().any(|s| *s == step(what, f));
-        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") || skipped("cut") || skipped("mirror") || skipped("shell") {
+        if skipped("tool") || skipped("boolean") || skipped("round") || skipped("push") || skipped("tweak") || skipped("cut") || skipped("mirror") || skipped("shell") || skipped("project") {
             key = hash2(key, 1);
         }
         // (extrusions made with this one in one boolean: their stage is
@@ -2724,6 +2790,25 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                     Ok(s) => {
                         model.booleans += 1;
                         stage.shape = Some(Rc::new(s));
+                    }
+                    Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
+                }
+            }
+            keep(cache, key, &mut stage);
+            continue;
+        }
+        // a curve projected onto the part: drawn on its faces, or cutting
+        // it through
+        if let Some(pj) = &f.project {
+            if let Some(acc) = stage.shape.clone() {
+                let res = if skipped("project") { Err("skipped, it crashed the kernel".to_string()) } else { project(doc, &acc, f, pj) };
+                match res {
+                    Ok(s) => {
+                        model.booleans += 1;
+                        stage.shape = Some(Rc::new(s));
+                        if pj.cut {
+                            stage.rough = true;
+                        }
                     }
                     Err(e) => stage.errors.push(format!("{}: {e}", f.name)),
                 }
@@ -3350,7 +3435,15 @@ fn build_objects<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache
             // where it was made too (its frame the identity): rounded the
             // same way, so its first move finds what was built before it
             let inv = ob.frame.inverse();
-            let features: Vec<Feature> = sub.iter().map(|f| rounded(&f.similar_by(&inv))).collect();
+            let mut features: Vec<Feature> = sub.iter().map(|f| rounded(&f.similar_by(&inv))).collect();
+            // the curves its projections read (in no Object), brought back too
+            for f in sub.iter() {
+                if let Some(c) = f.project.as_ref().and_then(|p| doc.feature(p.curve)) {
+                    if !features.iter().any(|g| g.id == c.id) {
+                        features.push(rounded(&c.similar_by(&inv)));
+                    }
+                }
+            }
             Some((Doc { features, objects: vec![], ..Doc::default() }, ob.frame))
         })
         .collect();
@@ -3361,7 +3454,8 @@ fn build_objects<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache
         }
         let (mut s, sim) = match local {
             Some((ld, sim)) => {
-                let refs: Vec<&Feature> = ld.features.iter().collect();
+                // (the curves its projections read are not built)
+                let refs: Vec<&Feature> = ld.features[..sub.len().min(ld.features.len())].iter().collect();
                 (build_islands(ld, &refs, skip, cache, model, used_tools, used_stages), Some(*sim))
             }
             None => (build_islands(doc, sub, skip, cache, model, used_tools, used_stages), None),
@@ -3493,6 +3587,8 @@ fn build_islands<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache
         all |= f.shell.as_ref().is_some_and(|s| s.faces.is_empty());
         // a scale step takes its whole Object (built apart: all its islands)
         all |= f.stretch.is_some();
+        // a projected curve: across all its Object's islands
+        all |= f.project.is_some();
         let mut found = false;
         for &p in names[i].iter().flatten() {
             if global[p] {
@@ -3700,7 +3796,7 @@ fn drag_order(doc: &Doc, last: &[(FeatureId, u64)]) -> Option<Doc> {
             continue;
         }
         let ids: Vec<FeatureId> = members.iter().map(|&i| doc.features[i].id).collect();
-        let join = if g.shell.is_some() || g.stretch.is_some() {
+        let join = if g.shell.is_some() || g.stretch.is_some() || g.project.is_some() {
             true
         } else if let Some(m) = &g.mirror {
             members.iter().any(|&i| !mirror_safe(doc, &doc.features[i], m, 0))
@@ -3737,7 +3833,7 @@ fn drag_order(doc: &Doc, last: &[(FeatureId, u64)]) -> Option<Doc> {
 /// Where a feature can change the part, in world space (`drag_order`):
 /// None, anywhere (a Mirror, a Shell, what cannot be told).
 fn reach(doc: &Doc, f: &Feature, depth: u32) -> Option<(DVec3, DVec3)> {
-    if depth > 6 || f.mirror.is_some() || f.shell.is_some() || f.stretch.is_some() || (f.is_solid() && f.op == Op::Intersect) {
+    if depth > 6 || f.mirror.is_some() || f.shell.is_some() || f.stretch.is_some() || f.project.is_some() || (f.is_solid() && f.op == Op::Intersect) {
         return None;
     }
     let grow = |(lo, hi): (DVec3, DVec3), d: f64| (lo - DVec3::splat(d), hi + DVec3::splat(d));
@@ -3792,7 +3888,7 @@ fn reach(doc: &Doc, f: &Feature, depth: u32) -> Option<(DVec3, DVec3)> {
 fn mirror_safe(doc: &Doc, f: &Feature, m: &Mirror, depth: u32) -> bool {
     let tol = 1e-6;
     let kept = |r: Option<(DVec3, DVec3)>| r.is_some_and(|(lo, hi)| m.side(lo).min(m.side(hi)) >= -tol);
-    if f.mirror.is_some() || f.shell.is_some() || f.stretch.is_some() || (f.is_solid() && f.op == Op::Intersect) || f.one_side || f.bridge.is_some() || depth > 6 {
+    if f.mirror.is_some() || f.shell.is_some() || f.stretch.is_some() || f.project.is_some() || (f.is_solid() && f.op == Op::Intersect) || f.one_side || f.bridge.is_some() || depth > 6 {
         return false;
     }
     // a face's image across the plane, for a face of a plain shape centred
@@ -4893,6 +4989,87 @@ mod tests {
         e.feature_mut(id).unwrap().profile.as_mut().unwrap().open = true;
         let m = build(&e, true, false, &[], &mut Cache::default());
         assert_eq!(m.errors.len(), 1, "{:?}", m.errors);
+    }
+
+    #[test]
+    fn curves_projected() {
+        use crate::doc::{FaceRef, Prim, Push};
+        // a 40 × 20 × 30 block, its top at y = 20; a curve 5 above it
+        // across its top, from its −X side to its +Z side
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let full = 40.0 * 20.0 * 30.0;
+        let l = path_of(&mut d, &[[-20.0, -5.0], [5.0, -2.0], [8.0, 15.0]], true, false, DVec3::new(0.0, 25.0, 0.0));
+        d.feature_mut(l).unwrap().profile.as_mut().unwrap().smooth = vec![false; 3];
+        let p = d.add_project(l, false, vec![b]).unwrap();
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let top = tag(b, 2);
+        assert_eq!(m.faces.len(), 7, "the top split in two: {:?}", m.faces.iter().map(|f| f.tag).collect::<Vec<_>>());
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.pack()) == Some(top)).count(), 2, "both pieces keep the top's tag");
+        assert!((mesh_volume(&m) - full).abs() < 1.0);
+        // its smaller side (the −X +Z corner) extruded up by 4 from a point in it
+        let mut e = d.clone();
+        e.add_push(Push { face: FaceRef { tag: top, at: DVec3::new(-15.0, 20.0, 10.0) }, inset: 0.0, depth: 4.0, keep: false });
+        let m = build(&e, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let v = mesh_volume(&m) - full;
+        assert!(v > 4.0 * 300.0 && v < 4.0 * 700.0, "only that piece raised: {v}");
+        // cut through: that side taken away; flipped: the other
+        d.feature_mut(p).unwrap().project.as_mut().unwrap().cut = true;
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let small = full - mesh_volume(&m);
+        assert!(small > 20.0 * 300.0 && small < 20.0 * 700.0, "the smaller side gone: {small}");
+        d.feature_mut(p).unwrap().project.as_mut().unwrap().flip = true;
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((mesh_volume(&m) - small).abs() < 20.0, "the other side: {} {small}", mesh_volume(&m));
+        // a closed curve (a 10 × 8 rectangle) inside the top: drawn, its
+        // inside a face of its own; cut: a hole through; flipped: a post
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let r = path_of(&mut d, &[[-5.0, -4.0], [5.0, -4.0], [5.0, 4.0], [-5.0, 4.0]], false, false, DVec3::new(2.0, 20.0, 0.0));
+        d.feature_mut(r).unwrap().profile.as_mut().unwrap().smooth = vec![false; 4];
+        let p = d.add_project(r, false, vec![b]).unwrap();
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.pack()) == Some(tag(b, 2))).count(), 2, "the rectangle's inside");
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.pack()) == Some(tag(b, 3))).count(), 1, "the bottom, behind, untouched");
+        d.feature_mut(p).unwrap().project.as_mut().unwrap().cut = true;
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((full - mesh_volume(&m) - 80.0 * 20.0).abs() < 2.0, "a hole through: {}", full - mesh_volume(&m));
+        assert!(m.faces.iter().any(|f| f.tag.map(|t| t.pack()) == Some(tag(p, 1))), "its walls tagged");
+        d.feature_mut(p).unwrap().project.as_mut().unwrap().flip = true;
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!((mesh_volume(&m) - 80.0 * 20.0).abs() < 2.0, "only its inside: {}", mesh_volume(&m));
+        // the curve moved: projected again; deleted: the step goes with it
+        d.feature_mut(r).unwrap().origin.x += 5.0;
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        let (lo, _) = m.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])]));
+        assert!((lo[0] - 2.0).abs() < 0.01, "{lo:?}");
+        d.remove(&[r]);
+        assert!(d.feature(p).is_none());
+    }
+
+    /// A saved scene's curve projected onto its Object (`FORME_DOC`,
+    /// `FORME_CURVE` = the curve's id, `FORME_CUT=1`, `FORME_FLIP=1`): the
+    /// errors, faces and volume before and after.
+    #[test]
+    #[ignore]
+    fn project_probe() {
+        let Ok(path) = std::env::var("FORME_DOC") else { return };
+        let mut d = Doc::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let c: u32 = std::env::var("FORME_CURVE").ok().and_then(|v| v.parse().ok()).unwrap();
+        let m0 = build(&d, true, false, &[], &mut Cache::default());
+        let shapes: Vec<u32> = d.objects.first().map(|o| o.members.clone()).unwrap_or_default();
+        let p = d.add_project(c, std::env::var_os("FORME_CUT").is_some(), shapes).unwrap();
+        d.feature_mut(p).unwrap().project.as_mut().unwrap().flip = std::env::var_os("FORME_FLIP").is_some();
+        let t = Instant::now();
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        println!("before: {} faces, {:.0} mm3, {:?}", m0.faces.len(), mesh_volume(&m0), m0.errors);
+        println!("after: {} faces, {:.0} mm3, {:?} ({:.0} ms)", m.faces.len(), mesh_volume(&m), m.errors, t.elapsed().as_secs_f64() * 1e3);
     }
 
     #[test]

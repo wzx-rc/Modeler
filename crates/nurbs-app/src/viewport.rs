@@ -1302,16 +1302,19 @@ fn draw_sketch(p: &Painter, st: &AppState) {
         let stroke = if back && !closing { Stroke::new(1.2, tint(col, 0.35)) } else { Stroke::new(2.0, col) };
         p.add(Shape::line(line, stroke));
     }
-    // the points: corners square, curve points round
+    // the points: corners square, curve points round; a path's three
+    // times bigger (Romain 24 nov., 19 h 03: "pour qu'on les voit mieux")
+    let big = if path { PATH_POINT } else { 1.0 };
     for (i, q) in k.pts.iter().enumerate() {
         let Some(s) = screen(*q) else { continue };
         let first = i == 0 && k.pts.len() >= 3;
-        let r = if first && closing { 3.5 } else { 2.5 };
+        let r = if first && closing { 3.5 } else { 2.5 } * big;
         let fill = if first && closing { HOT } else { chip_bg() };
+        let w = if path { 2.0 } else { 1.5 };
         if k.smooth[i] {
-            p.circle(s, r, fill, Stroke::new(1.5, col));
+            p.circle(s, r, fill, Stroke::new(w, col));
         } else {
-            p.rect(Rect::from_center_size(s, vec2(r * 2.0, r * 2.0)), 1.0, fill, Stroke::new(1.5, col), egui::StrokeKind::Middle);
+            p.rect(Rect::from_center_size(s, vec2(r * 2.0, r * 2.0)), 1.5, fill, Stroke::new(w, col), egui::StrokeKind::Middle);
         }
     }
     if let Some(s) = next.and_then(|n| n.1) {
@@ -1320,7 +1323,7 @@ fn draw_sketch(p: &Painter, st: &AppState) {
     // Ctrl: the point that a drag would round, or the one being rounded
     let ring = k.grab.or_else(|| if ctrl { hover.and_then(|h| st.sketch_point_at(p2(h))) } else { None });
     if let Some(s) = ring.and_then(|i| screen(k.pts[i])) {
-        p.circle_stroke(s, 9.0, Stroke::new(1.5, HOT));
+        p.circle_stroke(s, 6.5 + 2.5 * big, Stroke::new(1.5, HOT));
     }
     if let (Some(i), Some(h)) = (k.grab, hover) {
         let r = k.corner.get(i).copied().unwrap_or(0.0);
@@ -1370,15 +1373,15 @@ fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch, pa
     for (i, s) in sp.iter().enumerate().take(placed) {
         let Some(s) = s else { continue };
         let first = i == 0 && placed >= 3;
-        let r = if first && closing { 3.5 } else { 2.5 };
+        let r = if first && closing { 3.5 } else { 2.5 } * PATH_POINT;
         let fill = if first && closing { HOT } else { chip_bg() };
         // Curve mode: a point the curve goes round is a disc, a sharp one
         // (a V) a square
         let sharp = k.sharp.get(i).copied().unwrap_or(false);
         if st.surface_curve && !sharp {
-            p.circle(*s, r + 0.5, fill, Stroke::new(1.5, col));
+            p.circle(*s, r + 0.5, fill, Stroke::new(2.0, col));
         } else {
-            p.rect(Rect::from_center_size(*s, vec2(r * 2.0, r * 2.0)), 1.0, fill, Stroke::new(1.5, col), egui::StrokeKind::Middle);
+            p.rect(Rect::from_center_size(*s, vec2(r * 2.0, r * 2.0)), 1.5, fill, Stroke::new(2.0, col), egui::StrokeKind::Middle);
         }
     }
     if let Some(h) = hover {
@@ -1552,16 +1555,33 @@ pub fn draw_snap(p: &Painter, st: &AppState, s: &crate::snap::Snapped) {
     p.galley(r.min + vec2(5.0, 2.0), galley, dark);
 }
 
+/// How much bigger a curve's points are drawn than the part's vertices
+/// (Romain 24 nov., 19 h 03: three times).
+const PATH_POINT: f32 = 3.0;
+
 /// Vertex mode: the part's vertices the eye sees, the picked ones and the
-/// one under the pointer bigger.
+/// one under the pointer bigger; a curve's points three times bigger, in
+/// its yellow.
 fn draw_vertices(p: &Painter, st: &AppState) {
     if st.tool != Tool::Select || st.sel_mode != SelMode::Vertex {
         return;
     }
+    let curve_pts = st.curve_points();
     for (q, s) in st.visible_vertices() {
         let s = pos2(s[0], s[1]);
         let picked = st.vert_sel.iter().any(|v| v.as_vec3().distance(q) < 1e-3);
         let hot = st.hover_vertex.map(|v| v.as_vec3().distance(q) < 1e-3).unwrap_or(false);
+        if curve_pts.iter().any(|c| c.distance(q) < 1e-3) {
+            let r = 1.75 * PATH_POINT;
+            if picked {
+                p.circle(s, r + 1.5, accent(), Stroke::new(1.5, chip_bg()));
+            } else if hot {
+                p.circle(s, r + 1.5, chip_bg(), Stroke::new(2.0, HOT));
+            } else {
+                p.circle(s, r, chip_bg(), Stroke::new(2.0, PATH));
+            }
+            continue;
+        }
         if picked {
             p.circle(s, 2.75, accent(), Stroke::new(1.0, chip_bg()));
         } else if hot {
@@ -1612,8 +1632,11 @@ fn draw_cutters(p: &Painter, st: &AppState) {
     let mut ts: Vec<(f32, [Pos2; 3], Color32)> = vec![];
     for f in st.doc.features.iter().filter(|f| f.visible && f.is_solid() && !f.is_path() && f.op != nurbs_kernel::Op::Add) {
         let creating = st.creation.as_ref().is_some_and(|c| c.id == f.id);
-        let selected = st.selection.contains(&f.id);
-        let hovered = st.tool == Tool::Select && (st.hover_feature == Some(f.id) || st.hover_also.contains(&f.id));
+        // the Sub itself under the pointer or picked, not every Sub of an
+        // Object hovered or selected whole (they filled the part over)
+        let whole = st.doc.object_of(f.id).and_then(|o| st.doc.object(o)).is_some_and(|ob| ob.members.len() > 1 && ob.members.iter().all(|m| st.selection.contains(m)));
+        let selected = st.selection.contains(&f.id) && !whole;
+        let hovered = st.tool == Tool::Select && st.hover_feature == Some(f.id);
         if !(creating || selected || hovered) {
             continue;
         }
@@ -2308,7 +2331,7 @@ fn hint_of(st: &AppState) -> String {
                 if st.doc.features.is_empty() {
                     "B: a cube · C: a cylinder · L: a sketch · Then: drag in the view".into()
                 } else {
-                    "Click: a shape · Drag: a rectangle · Right button: menu · Alt + drag: orbit, with Shift pan, with Ctrl zoom · F9 F10 F11: vertex, edge, face".into()
+                    "Click: a shape · Drag: a rectangle · Right button: menu · Alt + drag: orbit, with Shift pan, with Ctrl zoom · 1 2 3: vertex, edge, face".into()
                 }
             } else {
                 match st.gizmo {

@@ -79,6 +79,9 @@ pub fn feature_icon(f: &Feature) -> Icon {
     if f.stretch.is_some() {
         return Icon::Scale;
     }
+    if f.project.is_some() {
+        return Icon::Path;
+    }
     if f.bridge.is_some() {
         return Icon::Extrude;
     }
@@ -2586,6 +2589,8 @@ fn op_window(ctx: &egui::Context, st: &mut AppState) {
                         curve_make_card(ui, st, &f);
                     } else if f.stretch.is_some() {
                         stretch_card(ui, st, &f);
+                    } else if f.project.is_some() {
+                        project_card(ui, st, &f);
                     } else if f.shell.is_some() {
                         shell_card(ui, st, &f);
                     } else if f.mirror.is_some() {
@@ -2712,6 +2717,42 @@ fn stretch_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
         let id = f.id;
         st.edit("Remove scale", |d| d.features.retain(|g| g.id != id));
         st.selection.retain(|s| *s != id);
+    }
+    if let Some(e) = st.feature_error(f) {
+        ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
+    }
+}
+
+/// A Project curve step: drawn on the faces or cutting through, which
+/// side a cut keeps, its curve.
+fn project_card(ui: &mut Ui, st: &mut AppState, f: &nurbs_kernel::Feature) {
+    let Some(p) = f.project.clone() else { return };
+    section(ui, "Project curve");
+    let c = TEXT();
+    if let Some(cut) = ui.push_id("project-mode", |ui| segmented(ui, &[(false, "Draw on faces", c), (true, "Cut through", c)], p.cut, 30.0)).inner {
+        if cut != p.cut {
+            st.set_project(f.id, nurbs_kernel::Project { cut, ..p.clone() });
+        }
+    }
+    if p.cut {
+        let closed = st.doc.is_closed_curve(p.curve);
+        let what = if closed { "Keep only its inside" } else { "Take the other side away" };
+        if toggle_row(ui, what, p.flip) {
+            st.set_project(f.id, nurbs_kernel::Project { flip: !p.flip, ..p.clone() });
+        }
+    }
+    let txt = if p.cut {
+        "Along the curve's normal, through the whole part."
+    } else {
+        "On the faces it meets first, seen from its side: Face mode picks a piece to extrude or move."
+    };
+    ui.label(egui::RichText::new(txt).font(regular(11.0)).color(TEXT2()));
+    if let Some(cv) = st.doc.feature(p.curve).map(|g| (g.id, g.name.clone())) {
+        let r = ui.add(egui::Label::new(egui::RichText::new(format!("Curve: {} ›", cv.1)).font(medium(12.0)).color(PATH)).sense(Sense::click()));
+        if r.on_hover_text("Select the curve (moved or edited, it projects again)").clicked() {
+            st.set_sel_mode(SelMode::Object);
+            st.selection = vec![cv.0];
+        }
     }
     if let Some(e) = st.feature_error(f) {
         ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
@@ -4536,6 +4577,31 @@ fn curve_make_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     } else if f.fill {
         ui.label(egui::RichText::new("A flat face inside the curve, no thickness").font(regular(12.0)).color(TEXT2()));
     }
+    // Maya's Project Curve on Mesh: along the curve's normal (its own up),
+    // onto the part (a line drawn on its faces) or through it (a cut).
+    if f.revolve.is_none() && !f.fill {
+        section(ui, "Project on the part");
+        // one column of the docked strip (its layout wraps: the available
+        // width is the strip's)
+        let w = ((ui.available_width().min(OP_COL) - 6.0) / 2.0).max(60.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if secondary_btn(ui, "Draw on faces", w).on_hover_text("Along its normal onto the faces it meets first: a piece to extrude or move in Face mode").clicked() {
+                st.add_project(id, false);
+            }
+            if secondary_btn(ui, "Cut through", w).on_hover_text("Along its normal through the whole part: a closed curve cuts a hole, an open one takes a side away").clicked() {
+                st.add_project(id, true);
+            }
+        });
+        let made: Vec<(nurbs_kernel::FeatureId, String)> = st.projections_of(id).into_iter().filter_map(|p| st.doc.feature(p).map(|g| (g.id, g.name.clone()))).collect();
+        for (pid, name) in made {
+            let r = ui.add(egui::Label::new(egui::RichText::new(format!("{name} ›")).font(medium(12.0)).color(TEXT2())).sense(Sense::click()));
+            if r.on_hover_text("Select this projection").clicked() {
+                st.set_sel_mode(SelMode::Object);
+                st.selection = vec![pid];
+            }
+        }
+    }
     if let Some(e) = st.feature_error(f) {
         ui.label(egui::RichText::new(e).font(regular(12.0)).color(carve()));
     }
@@ -5242,7 +5308,11 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         }
     }
     // Ctrl + I: Isolate (Romain 20 nov., 10 h 57; Ctrl + 1, Maya's, too)
-    if ctrl && (pressed(Key::I) || pressed(Key::Num1)) {
+    // the number row by the key's place: AZERTY's & é " ' are 1 2 3 4
+    // (Romain 24 nov., 19 h 03: "quand j'appuie sur 1, il ne passe pas en
+    // mode vertex"; the & key gave Object since 20 nov.)
+    let digit = |k: Key| ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { key, physical_key, pressed: true, .. } if *physical_key == Some(k) || (physical_key.is_none() && *key == k))));
+    if ctrl && (pressed(Key::I) || digit(Key::Num1)) {
         st.toggle_isolate();
         return;
     }
@@ -5250,7 +5320,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         // Ctrl + F8 to F11 (or 2 to 4): what is picked converted to that
         // mode's components (Maya's Convert Selection)
         for (k, m) in [(Key::F8, SelMode::Object), (Key::F9, SelMode::Vertex), (Key::F10, SelMode::Edge), (Key::F11, SelMode::Face), (Key::Num2, SelMode::Edge), (Key::Num3, SelMode::Face), (Key::Num4, SelMode::Object)] {
-            if pressed(k) {
+            if if matches!(k, Key::Num2 | Key::Num3 | Key::Num4) { digit(k) } else { pressed(k) } {
                 st.convert_selection(m);
                 return;
             }
@@ -5346,18 +5416,20 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.selection.clear();
         }
     }
-    // AZERTY (Romain, 20 nov. 6 h 45: "La touche & passe en Object Mode"):
-    // the number row's & é " ' without Shift: & Object, é Edge, " Face,
-    // ' Vertex (its 1 key would give Vertex through the key's place)
-    let typed = |t: &str| ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(x) if x == t)));
-    let azerty = !ctrl && typed("&");
-    if azerty {
-        st.set_sel_mode(SelMode::Object);
-    } else if !ctrl && typed("'") && !shift {
-        st.set_sel_mode(SelMode::Vertex);
+    // the modes on the number row by the key's place, whatever the layout
+    // (AZERTY: & Vertex, é Edge, " Face, ' Object), and Maya's F8 to F11
+    for k in [Key::Num1, Key::Num2, Key::Num3, Key::Num4] {
+        if !ctrl && digit(k) {
+            st.set_sel_mode(match k {
+                Key::Num1 => SelMode::Vertex,
+                Key::Num2 => SelMode::Edge,
+                Key::Num3 => SelMode::Face,
+                _ => SelMode::Object,
+            });
+        }
     }
-    for (k, m) in [(Key::Num1, SelMode::Vertex), (Key::Num2, SelMode::Edge), (Key::Num3, SelMode::Face), (Key::Num4, SelMode::Object), (Key::F8, SelMode::Object), (Key::F9, SelMode::Vertex), (Key::F10, SelMode::Edge), (Key::F11, SelMode::Face)] {
-        if pressed(k) && !(azerty && k == Key::Num1) {
+    for (k, m) in [(Key::F8, SelMode::Object), (Key::F9, SelMode::Vertex), (Key::F10, SelMode::Edge), (Key::F11, SelMode::Face)] {
+        if pressed(k) {
             st.set_sel_mode(m);
         }
     }

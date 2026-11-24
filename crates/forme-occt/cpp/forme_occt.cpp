@@ -27,6 +27,10 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
+#include <BRepAlgoAPI_Section.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <gp_Lin.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepLib.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -4371,6 +4375,49 @@ static FShape* knit_seams(BRepBuilderAPI_MakeShape& op, const FShape* s, FShape*
 // they lie on, and straight lines between pairs of them (segs, 2 ints
 // each, lying on faces) cut into those faces. Faces and edges keep their
 // tags (both halves of a face cut in two keep its tag).
+// What a splitter made of the part `s` cut by `tools` (edges, points):
+// the part alone (a tool left on its own dropped), its faces' tags carried.
+static FShape* split_result(BRepAlgoAPI_Splitter& op, const FShape* s, const TopTools_ListOfShape& tools) {
+    TopoDS_Shape r = op.Shape();
+    if (r.ShapeType() != TopAbs_COMPOUND) {
+        FShape* res = wrap(r);
+        if (!res) return res;
+        carry_tags(op, s, res, -1);
+        return knit_seams(op, s, res);
+    }
+    BRep_Builder bb;
+    TopoDS_Compound c;
+    bb.MakeCompound(c);
+    int count = 0;
+    TopoDS_Shape one;
+    for (TopoDS_Iterator it(r); it.More(); it.Next()) {
+        // a tool left on its own (a line off every face, a point
+        // off every edge) is dropped
+        TopAbs_ShapeEnum t = it.Value().ShapeType();
+        if (t == TopAbs_VERTEX) continue;
+        if (t == TopAbs_EDGE) {
+            bool tool = false;
+            for (TopTools_ListIteratorOfListOfShape tl(tools); tl.More(); tl.Next())
+                for (TopTools_ListIteratorOfListOfShape im(op.Modified(tl.Value())); im.More(); im.Next())
+                    if (im.Value().IsSame(it.Value())) tool = true;
+            for (TopTools_ListIteratorOfListOfShape tl(tools); tl.More(); tl.Next())
+                if (tl.Value().IsSame(it.Value())) tool = true;
+            if (tool) continue;
+        }
+        bb.Add(c, it.Value());
+        count++;
+        one = it.Value();
+    }
+    if (count == 0) {
+        set_err("the cut left nothing");
+        return nullptr;
+    }
+    FShape* res = wrap(count == 1 ? one : TopoDS_Shape(c));
+    if (!res) return nullptr;
+    carry_tags(op, s, res, -1);
+    return knit_seams(op, s, res);
+}
+
 FShape* focc_split(const FShape* s, const double* pts, int n, const int* segs, int nseg) {
     return guard(
         [&]() -> FShape* {
@@ -4459,45 +4506,229 @@ FShape* focc_split(const FShape* s, const double* pts, int n, const int* segs, i
                 set_err("the cut failed");
                 return nullptr;
             }
-            // the part alone: what the splitter made of the argument
-            TopoDS_Shape r = op.Shape();
-            if (r.ShapeType() != TopAbs_COMPOUND) {
-                FShape* res = wrap(r);
-                if (!res) return res;
-                carry_tags(op, s, res, -1);
-                return knit_seams(op, s, res);
-            }
-            BRep_Builder bb;
-            TopoDS_Compound c;
-            bb.MakeCompound(c);
-            int count = 0;
-            TopoDS_Shape one;
-            for (TopoDS_Iterator it(r); it.More(); it.Next()) {
-                // a tool left on its own (a line off every face, a point
-                // off every edge) is dropped
-                TopAbs_ShapeEnum t = it.Value().ShapeType();
-                if (t == TopAbs_VERTEX) continue;
-                if (t == TopAbs_EDGE) {
-                    bool tool = false;
-                    for (TopTools_ListIteratorOfListOfShape tl(tools); tl.More(); tl.Next())
-                        for (TopTools_ListIteratorOfListOfShape im(op.Modified(tl.Value())); im.More(); im.Next())
-                            if (im.Value().IsSame(it.Value())) tool = true;
-                    for (TopTools_ListIteratorOfListOfShape tl(tools); tl.More(); tl.Next())
-                        if (tl.Value().IsSame(it.Value())) tool = true;
-                    if (tool) continue;
-                }
-                bb.Add(c, it.Value());
-                count++;
-                one = it.Value();
-            }
-            if (count == 0) {
-                set_err("the cut left nothing");
+            return split_result(op, s, tools);
+        },
+        (FShape*)nullptr);
+}
+
+// The end of an edge at vertex `v`: its point and the way out of the edge
+// there (along its tangent, away from its middle).
+static bool end_out(const TopoDS_Edge& e, const TopoDS_Vertex& v, gp_Pnt& p, gp_Vec& out) {
+    BRepAdaptor_Curve ac(e);
+    double t = BRep_Tool::Parameter(v, e);
+    double tm = (ac.FirstParameter() + ac.LastParameter()) / 2;
+    gp_Vec d;
+    ac.D1(t, p, d);
+    if (d.Magnitude() < 1e-12) return false;
+    d.Normalize();
+    out = (tm > t) ? -d : d;
+    return true;
+}
+
+// Project curve, the line drawn on the part (Romain 24 nov., 19 h 03,
+// Maya's Project Curve on Mesh): the curve's edges (a wire's, or a region's
+// outline) swept along `dir` across the whole part, their section with it
+// kept only on the faces they meet first seen from the `dir` side (facing
+// that way, nothing of the part in front of them), and those faces split
+// there. An open curve's ends are carried on `ext` along their tangents,
+// so one drawn to a face's border cuts it across. Both pieces of a face
+// keep its tag (as the Knife's).
+FShape* focc_project_imprint(const FShape* s, const FShape* curve, const double* dir, double ext) {
+    return guard(
+        [&]() -> FShape* {
+            gp_Dir n(dir[0], dir[1], dir[2]);
+            Bnd_Box bb;
+            BRepBndLib::Add(s->s, bb);
+            BRepBndLib::Add(curve->s, bb);
+            if (bb.IsVoid()) {
+                set_err("nothing to project on");
                 return nullptr;
             }
-            FShape* res = wrap(count == 1 ? one : TopoDS_Shape(c));
-            if (!res) return nullptr;
-            carry_tags(op, s, res, -1);
-            return knit_seams(op, s, res);
+            double L = std::sqrt(bb.SquareExtent()) * 1.2 + 1.0;
+            std::vector<TopoDS_Edge> edges;
+            for (TopExp_Explorer ex(curve->s, TopAbs_EDGE); ex.More(); ex.Next()) edges.push_back(TopoDS::Edge(ex.Current()));
+            if (edges.empty()) {
+                set_err("the curve has no line");
+                return nullptr;
+            }
+            if (ext > 0) {
+                TopTools_IndexedDataMapOfShapeListOfShape ve;
+                TopExp::MapShapesAndAncestors(curve->s, TopAbs_VERTEX, TopAbs_EDGE, ve);
+                for (int i = 1; i <= ve.Extent(); i++) {
+                    if (ve(i).Extent() != 1) continue;
+                    gp_Pnt p;
+                    gp_Vec out;
+                    if (!end_out(TopoDS::Edge(ve(i).First()), TopoDS::Vertex(ve.FindKey(i)), p, out)) continue;
+                    out = out - gp_Vec(n) * out.Dot(gp_Vec(n));
+                    if (out.Magnitude() < 1e-9) continue;
+                    out.Normalize();
+                    BRepBuilderAPI_MakeEdge me(p, p.Translated(out * ext));
+                    if (me.IsDone()) edges.push_back(me.Edge());
+                }
+            }
+            // the fence: each edge swept from far before the part to far past it
+            BRep_Builder b;
+            TopoDS_Compound fence;
+            b.MakeCompound(fence);
+            gp_Trsf back;
+            back.SetTranslation(gp_Vec(n) * -L);
+            for (const TopoDS_Edge& e : edges) {
+                TopoDS_Shape m = BRepBuilderAPI_Transform(e, back, Standard_True).Shape();
+                BRepPrimAPI_MakePrism pr(m, gp_Vec(n) * (2 * L));
+                if (pr.IsDone()) b.Add(fence, pr.Shape());
+            }
+            BRepAlgoAPI_Section sec(s->s, fence, Standard_False);
+            sec.ComputePCurveOn1(Standard_True);
+            sec.Approximation(Standard_True);
+            sec.Build();
+            if (!sec.IsDone() || sec.HasErrors()) {
+                set_err("the projection failed");
+                return nullptr;
+            }
+            IntCurvesFace_ShapeIntersector ix;
+            ix.Load(s->s, 1e-6);
+            TopTools_ListOfShape tools;
+            int behind = 0;
+            for (TopExp_Explorer ex(sec.Shape(), TopAbs_EDGE); ex.More(); ex.Next()) {
+                TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                TopoDS_Shape fa;
+                if (!sec.HasAncestorFaceOn1(e, fa)) continue;
+                TopoDS_Face F = TopoDS::Face(fa);
+                BRepAdaptor_Curve ce(e);
+                gp_Pnt m = ce.Value((ce.FirstParameter() + ce.LastParameter()) / 2);
+                // the face's outward normal there: facing the curve's side
+                opencascade::handle<Geom_Surface> S = BRep_Tool::Surface(F);
+                if (S.IsNull()) continue;
+                GeomAPI_ProjectPointOnSurf pp(m, S);
+                if (pp.NbPoints() == 0) continue;
+                double u, v;
+                pp.LowerDistanceParameters(u, v);
+                GeomLProp_SLProps pr(S, u, v, 1, 1e-9);
+                if (!pr.IsNormalDefined()) continue;
+                gp_Dir fn = pr.Normal();
+                if (F.Orientation() == TopAbs_REVERSED) fn.Reverse();
+                if (fn.Dot(n) < 0.05) continue;
+                // nothing of the part in front of it
+                ix.Perform(gp_Lin(m, n), 1e-3, 4 * L);
+                if (ix.IsDone() && ix.NbPnt() > 0) {
+                    behind++;
+                    continue;
+                }
+                tools.Append(e);
+            }
+            if (tools.IsEmpty()) {
+                set_err(behind > 0 ? "the faces it meets are hidden from its side" : "the curve meets no face of the part seen from its side");
+                return nullptr;
+            }
+            BRepAlgoAPI_Splitter op;
+            TopTools_ListOfShape args;
+            args.Append(s->s);
+            op.SetArguments(args);
+            op.SetTools(tools);
+            op.SetFuzzyValue(1e-5);
+            op.Build();
+            if (!op.IsDone() || op.HasErrors()) {
+                set_err("its faces could not be split along it");
+                return nullptr;
+            }
+            return split_result(op, s, tools);
+        },
+        (FShape*)nullptr);
+}
+
+// Project curve, cut: the solid the curve sweeps along `dir` through the
+// part (its box lo..hi): a region's face swept; an open wire's ends
+// carried on along their tangents far past the part, then closed far away
+// on one side of its chord (`side` ±1: along ±dir × chord), and swept.
+FShape* focc_project_tool(const FShape* curve, const double* dir, const double* lo, const double* hi, int side) {
+    return guard(
+        [&]() -> FShape* {
+            gp_Dir n(dir[0], dir[1], dir[2]);
+            Bnd_Box bb;
+            BRepBndLib::Add(curve->s, bb);
+            bb.Add(gp_Pnt(lo[0], lo[1], lo[2]));
+            bb.Add(gp_Pnt(hi[0], hi[1], hi[2]));
+            double L = std::sqrt(bb.SquareExtent()) * 1.2 + 1.0;
+            TopoDS_Shape base;
+            bool region = false;
+            for (TopExp_Explorer ex(curve->s, TopAbs_FACE); ex.More(); ex.Next()) region = true;
+            if (region) {
+                base = curve->s;
+            } else {
+                TopoDS_Wire w;
+                if (curve->s.ShapeType() == TopAbs_WIRE) {
+                    w = TopoDS::Wire(curve->s);
+                } else {
+                    BRepBuilderAPI_MakeWire mw;
+                    for (TopExp_Explorer ex(curve->s, TopAbs_EDGE); ex.More(); ex.Next()) mw.Add(TopoDS::Edge(ex.Current()));
+                    if (!mw.IsDone()) {
+                        set_err("the curve is not one line");
+                        return nullptr;
+                    }
+                    w = mw.Wire();
+                }
+                TopoDS_Vertex v1, v2;
+                TopExp::Vertices(w, v1, v2);
+                if (v1.IsNull() || v2.IsNull() || v1.IsSame(v2)) {
+                    set_err("the curve has no ends");
+                    return nullptr;
+                }
+                TopTools_IndexedDataMapOfShapeListOfShape ve;
+                TopExp::MapShapesAndAncestors(w, TopAbs_VERTEX, TopAbs_EDGE, ve);
+                gp_Pnt p1, p2;
+                gp_Vec o1, o2;
+                if (!ve.Contains(v1) || !ve.Contains(v2) || !end_out(TopoDS::Edge(ve.FindFromKey(v1).First()), v1, p1, o1) || !end_out(TopoDS::Edge(ve.FindFromKey(v2).First()), v2, p2, o2)) {
+                    set_err("the curve's ends could not be read");
+                    return nullptr;
+                }
+                auto flat = [&](gp_Vec o) {
+                    o = o - gp_Vec(n) * o.Dot(gp_Vec(n));
+                    if (o.Magnitude() > 1e-9) o.Normalize();
+                    return o;
+                };
+                o1 = flat(o1);
+                o2 = flat(o2);
+                gp_Pnt a = p1.Translated(o1 * L), bq = p2.Translated(o2 * L);
+                gp_Vec chord(a, bq);
+                if (chord.Magnitude() < 1e-6) {
+                    set_err("the curve's ends meet");
+                    return nullptr;
+                }
+                chord.Normalize();
+                gp_Vec sd = gp_Vec(n).Crossed(chord) * (side >= 0 ? 1.0 : -1.0);
+                gp_Pnt c = bq.Translated(sd * (3 * L)), d = a.Translated(sd * (3 * L));
+                TopoDS_Vertex va = BRepBuilderAPI_MakeVertex(a), vb = BRepBuilderAPI_MakeVertex(bq), vc = BRepBuilderAPI_MakeVertex(c), vd = BRepBuilderAPI_MakeVertex(d);
+                BRepBuilderAPI_MakeWire mw;
+                mw.Add(BRepBuilderAPI_MakeEdge(va, v1).Edge());
+                mw.Add(w);
+                mw.Add(BRepBuilderAPI_MakeEdge(v2, vb).Edge());
+                mw.Add(BRepBuilderAPI_MakeEdge(vb, vc).Edge());
+                mw.Add(BRepBuilderAPI_MakeEdge(vc, vd).Edge());
+                mw.Add(BRepBuilderAPI_MakeEdge(vd, va).Edge());
+                if (!mw.IsDone() || !mw.Wire().Closed()) {
+                    set_err("the curve could not be closed past the part");
+                    return nullptr;
+                }
+                BRepBuilderAPI_MakeFace mf(mw.Wire(), Standard_True);
+                if (!mf.IsDone()) {
+                    set_err("the curve is not flat");
+                    return nullptr;
+                }
+                base = mf.Face();
+                if (!BRepCheck_Analyzer(base).IsValid()) {
+                    set_err("the curve, carried on past the part, crosses itself");
+                    return nullptr;
+                }
+            }
+            gp_Trsf back;
+            back.SetTranslation(gp_Vec(n) * -L);
+            TopoDS_Shape m = BRepBuilderAPI_Transform(base, back, Standard_True).Shape();
+            BRepPrimAPI_MakePrism pr(m, gp_Vec(n) * (2 * L));
+            if (!pr.IsDone()) {
+                set_err("the curve could not be swept");
+                return nullptr;
+            }
+            return wrap(pr.Shape());
         },
         (FShape*)nullptr);
 }
