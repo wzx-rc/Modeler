@@ -2775,7 +2775,7 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         fs.iter().any(|f| f.is_path()),
         fs.iter().any(|f| !f.is_solid() && !f.is_path()),
     ];
-    let extra = groups.iter().filter(|g| **g).count() as f32 * 25.0 + if st.doc.reference.is_some() { 53.0 } else { 0.0 } + if st.doc.groups.is_empty() { 0.0 } else { 25.0 + st.doc.groups.len() as f32 * 29.0 };
+    let extra = groups.iter().filter(|g| **g).count() as f32 * 25.0 + if st.doc.reference.is_some() { 53.0 } else { 0.0 } + if st.doc.groups.is_empty() { 0.0 } else { 25.0 + st.doc.groups.len() as f32 * 29.0 } + if st.doc.objects.is_empty() { 0.0 } else { 25.0 + st.doc.objects.len() as f32 * 29.0 };
     // the panel is the shape list alone (Romain 24 nov., 6 h 18: "Lister
     // doit être seul"): the selection's tools are in its bar over the part,
     // its transform under W / E / R in the top bar, its settings in its
@@ -2811,26 +2811,13 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
 }
 
 fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
+    let n_obj = st.doc.objects.len();
     let n = st.doc.features.iter().filter(|f| f.is_solid()).count();
     ui.horizontal(|ui| {
         ui.set_height(26.0);
-        let scan_w = if cfg!(target_os = "ios") { 0.0 } else { 92.0 };
-        let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 2.0 * 28.0 - scan_w, 26.0), Sense::hover());
+        let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 2.0 * 28.0, 26.0), Sense::hover());
         ui.painter().text(lr.left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, "SCENE", semibold(10.5), TEXT2());
-        // a scan to model on (Romain 24 nov., 6 h 18: "un bouton pour
-        // importer un scan (bouton de couleur)"): the system's Open dialog
-        if scan_w > 0.0 {
-            let (br, resp) = ui.allocate_exact_size(vec2(scan_w - 6.0, 22.0), Sense::click());
-            let c = Color32::from_rgb(0x4D, 0x8D, 0xFF);
-            ui.painter().rect_filled(br, 11.0, if resp.hovered() { c } else { c.gamma_multiply(0.85) });
-            ui.painter().text(br.center(), Align2::CENTER_CENTER, "Import scan", semibold(11.0), Color32::WHITE);
-            let tip = if st.doc.reference.is_some() { "Import a scan (.obj): it takes the place of the one there, as the reference to model on" } else { "Import a scan (.obj) as the reference to model on (or drop it on the window)" };
-            if resp.on_hover_text(tip).clicked() && !crate::files::pick_scan() {
-                st.toast(if crate::files::CAN_PICK { "The Open dialog is already open" } else { "Drop an .obj on the window to import it" }, false);
-            }
-            ui.add_space(6.0);
-        }
-        ui.painter().text(lr.left_center() + vec2(52.0, 0.0), Align2::LEFT_CENTER, format!("{n} shape{}", if n == 1 { "" } else { "s" }), regular(11.5), pick(Color32::from_rgb(0x64, 0x6B, 0x75), Color32::from_rgb(0x8A, 0x90, 0x99)));
+        ui.painter().text(lr.left_center() + vec2(52.0, 0.0), Align2::LEFT_CENTER, if n_obj > 0 { format!("{n_obj} object{}", if n_obj == 1 { "" } else { "s" }) } else { format!("{n} shape{}", if n == 1 { "" } else { "s" }) }, regular(11.5), pick(Color32::from_rgb(0x64, 0x6B, 0x75), Color32::from_rgb(0x8A, 0x90, 0x99)));
         ui.spacing_mut().item_spacing.x = 2.0;
         let one = st.single().map(|f| f.id);
         if icon_btn(ui, Icon::Up, false, "Earlier in the history", 26.0).clicked() {
@@ -2879,13 +2866,14 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
         }
         reference_rows(ui, st);
         group_rows(ui, st, &ops_of, focus);
+        objects_section(ui, st, &ops_of, focus);
         for (gi, (title, keep)) in groups.iter().enumerate() {
             // the last group: operations whose shape cannot be told
             // a 2D boolean's curves under it, not on their own
             let members: Vec<&Feature> = if *title == "OPERATIONS" {
                 feats.iter().filter(|f| !f.is_solid() && !f.is_path() && st.owner_of(f.id).is_none()).collect()
             } else {
-                feats.iter().filter(|f| keep(f) && (*title != "CURVES" || st.doc.boolean_of(f.id).is_none()) && st.doc.group_of(f.id).is_none()).collect()
+                feats.iter().filter(|f| keep(f) && (*title != "CURVES" || st.doc.boolean_of(f.id).is_none()) && st.doc.group_of(f.id).is_none() && st.doc.object_of(f.id).is_none()).collect()
             };
             if members.is_empty() {
                 continue;
@@ -3031,7 +3019,18 @@ fn group_rows(ui: &mut Ui, st: &mut AppState, ops_of: &dyn Fn(&AppState, Feature
         if shut {
             continue;
         }
+        // its Objects (a group is a folder of Objects), then its shapes in none
+        let mut shown_obj: Vec<FeatureId> = vec![];
         for m in &g.members {
+            if let Some(o) = st.doc.object_of(*m) {
+                if !shown_obj.contains(&o) {
+                    shown_obj.push(o);
+                    if let Some(ob) = st.doc.object(o).cloned() {
+                        object_rows(ui, st, &ob, 1, ops_of, focus);
+                    }
+                }
+                continue;
+            }
             let Some(f) = st.doc.feature(*m).cloned() else { continue };
             let n = ops_of(st, f.id);
             ui.horizontal(|ui| {
@@ -3044,6 +3043,149 @@ fn group_rows(ui: &mut Ui, st: &mut AppState, ops_of: &dyn Fn(&AppState, Feature
         }
     }
     ui.add_space(3.0);
+}
+
+/// The outliner's OBJECTS (Romain 24 nov., 6 h 01: "un UberMesh qui
+/// contient tous les éléments de composition en sub"): those in no group,
+/// each with its shapes under it.
+fn objects_section(ui: &mut Ui, st: &mut AppState, ops_of: &dyn Fn(&AppState, FeatureId) -> usize, focus: Option<FeatureId>) {
+    let objs: Vec<nurbs_kernel::Object> = st.doc.objects.iter().filter(|o| !o.members.iter().any(|m| st.doc.group_of(*m).is_some())).cloned().collect();
+    if objs.is_empty() {
+        return;
+    }
+    let fid = Id::new("tree-group-objects");
+    let folded = ui.data(|d| d.get_temp::<bool>(fid)).unwrap_or(false);
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+    let p = ui.painter();
+    icons::paint(p, Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(10.0, 10.0)), if folded { Icon::ChevronRight } else { Icon::Chevron }, TEXT2());
+    p.text(pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, "OBJECTS", semibold(10.0), if resp.hovered() { TEXT() } else { TEXT2() });
+    p.text(pos2(r.max.x - 6.0, r.center().y), Align2::RIGHT_CENTER, objs.len().to_string(), regular(11.0), TEXT2());
+    if resp.clicked() {
+        ui.data_mut(|d| d.insert_temp(fid, !folded));
+    }
+    if folded {
+        return;
+    }
+    for ob in &objs {
+        object_rows(ui, st, ob, 0, ops_of, focus);
+    }
+    ui.add_space(3.0);
+}
+
+/// An Object's row (its arrow, its name, how many shapes, its eye), then
+/// its shapes under it in their order, each with its Add / Sub /
+/// Intersect glyph (a click on it changes it).
+fn object_rows(ui: &mut Ui, st: &mut AppState, ob: &nurbs_kernel::Object, indent: usize, ops_of: &dyn Fn(&AppState, FeatureId) -> usize, focus: Option<FeatureId>) {
+    let oid = Id::new(("tree-object-fold", ob.id));
+    let shut = ui.data(|d| d.get_temp::<bool>(oid)).unwrap_or(false);
+    let pad = 14.0 * indent as f32;
+    let (full, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+    let r = Rect::from_min_max(pos2(full.min.x + pad, full.min.y), full.max);
+    ui.ctx().data_mut(|d| d.insert_temp(Id::new(("object-row", ob.id)), r.center()));
+    let selected = st.selected_object().map(|o| o.id) == Some(ob.id);
+    let entered = st.open_object == Some(ob.id);
+    let lit = st.hover_feature.is_some_and(|h| ob.members.contains(&h));
+    let shown = ob.members.iter().any(|m| st.doc.feature(*m).is_some_and(|f| f.visible));
+    let dim = if shown { 1.0 } else { 0.4 };
+    let p = ui.painter();
+    if selected {
+        p.rect(r, 6.0, accent_bg(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+    } else if entered {
+        p.rect(r, 6.0, RAISED(), Stroke::new(1.0, accent_border()), StrokeKind::Inside);
+    } else if resp.hovered() || lit {
+        p.rect_filled(r, 6.0, RAISED());
+    }
+    let ar = Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(10.0, 10.0));
+    let aresp = ui.interact(ar.expand(5.0), Id::new(("object-arrow", ob.id)), Sense::click());
+    icons::paint(ui.painter(), ar, if shut { Icon::ChevronRight } else { Icon::Chevron }, if aresp.hovered() { TEXT() } else { TEXT2() });
+    let p = ui.painter();
+    let x0 = r.min.x + 18.0;
+    // its material's colour behind its icon
+    let first = st.doc.features.iter().find(|f| f.op == Op::Add && ob.members.contains(&f.id)).map(|f| f.id).unwrap_or(ob.members[0]);
+    let mat = st.doc.feature(first).map(|f| f.material).unwrap_or(0);
+    let lk = crate::materials::look(&st.doc, mat);
+    let ball = Color32::from_rgb((lk.color[0].clamp(0.0, 1.0) * 255.0) as u8, (lk.color[1].clamp(0.0, 1.0) * 255.0) as u8, (lk.color[2].clamp(0.0, 1.0) * 255.0) as u8);
+    let br = Rect::from_min_size(pos2(x0, r.center().y - 8.0), vec2(16.0, 16.0));
+    p.rect_filled(br, 4.0, tint(ball, 0.35 * dim));
+    icons::paint(p, br.shrink(2.0), Icon::Cube, tint(TEXT(), dim));
+    let name_color = if selected { TEXT_STRONG() } else { tint(TEXT(), dim) };
+    let n = ob.members.len();
+    let info_g = p.layout_no_wrap(if entered { "entered".to_string() } else { format!("{n} shape{}", if n > 1 { "s" } else { "" }) }, regular(12.0), if entered { accent() } else { tint(TEXT2(), dim) });
+    let info_x = r.max.x - 40.0 - info_g.size().x;
+    p.galley(pos2(info_x, r.center().y - info_g.size().y * 0.5), info_g, Color32::WHITE);
+    let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
+    let mut job = egui::text::LayoutJob::single_section(ob.name.clone(), egui::TextFormat::simple(semibold(13.0), name_color));
+    job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let name_r = Rect::from_min_max(pos2(x0 + 20.0, r.min.y + 3.0), pos2(info_x - 4.0, r.max.y - 3.0));
+    match rename_in_row(ui, (2, ob.id), name_r, &ob.name) {
+        Some(Some(name)) => st.rename_object(ob.id, &name),
+        Some(None) => {}
+        None => {
+            let name_g = ui.painter().layout_job(job);
+            ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
+        }
+    }
+    if resp.double_clicked() {
+        start_rename(ui, (2, ob.id), &ob.name);
+    }
+    let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
+    let eresp = ui.interact(er.expand(6.0), Id::new(("object-eye", ob.id)), Sense::click()).on_hover_text("Show / hide the Object");
+    icons::paint(ui.painter(), er, if shown { Icon::Eye } else { Icon::EyeOff }, tint(TEXT2(), 0.8));
+    let resp = resp.on_hover_text("An Object: its shapes' booleans act only on each other. Click: the Object · double-click: rename · its shapes below: one by one");
+    let others: Vec<(FeatureId, String)> = st.doc.objects.iter().filter(|o| o.id != ob.id).map(|o| (o.id, o.name.clone())).collect();
+    resp.context_menu(|ui| {
+        menu_style(ui);
+        if ui.button("Rename").clicked() {
+            start_rename(ui, (2, ob.id), &ob.name);
+            ui.close();
+        }
+        if ui.button(if shown { "Hide" } else { "Show" }).clicked() {
+            st.toggle_object_visible(ob.id);
+            ui.close();
+        }
+        if !others.is_empty() {
+            ui.menu_button("Merge into", |ui| {
+                menu_style(ui);
+                for (o, name) in &others {
+                    if ui.button(name).clicked() {
+                        st.shapes_to_object(&ob.members, Some(*o));
+                        ui.close();
+                    }
+                }
+            });
+        }
+        if ui.button("Delete").clicked() {
+            st.select_object(ob.id, false);
+            st.delete_selected();
+            ui.close();
+        }
+    });
+    if aresp.clicked() {
+        ui.data_mut(|d| d.insert_temp(oid, !shut));
+    } else if eresp.clicked() {
+        st.toggle_object_visible(ob.id);
+    } else if resp.clicked() {
+        let add = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
+        st.select_object(ob.id, add);
+    }
+    if shut {
+        return;
+    }
+    let members: Vec<Feature> = st.doc.features.iter().filter(|f| ob.members.contains(&f.id)).cloned().collect();
+    for f in members {
+        let n = ops_of(st, f.id);
+        ui.horizontal(|ui| {
+            ui.add_space(pad + 14.0);
+            ui.vertical(|ui| tree_row(ui, st, &f, n, focus == Some(f.id)));
+        });
+    }
+}
+
+fn menu_style(ui: &mut Ui) {
+    ui.set_min_width(160.0);
+    ui.spacing_mut().button_padding = vec2(8.0, 3.0);
+    ui.spacing_mut().interact_size.y = 24.0;
+    ui.style_mut().override_font_id = Some(regular(12.5));
 }
 
 /// A 2D boolean's curves in the outliner, under it, indented.
@@ -3201,6 +3343,11 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
     p.rect_filled(br, 4.0, tint(c, 0.16 * dim));
     if f.is_solid() {
         paint_op_glyph(p, br.center(), f.op, tint(c, dim), 9.0);
+        // Add, Sub, Intersect in turn
+        if !f.is_path() && ui.interact(br.expand(3.0), Id::new(("row-op", f.id)), Sense::click()).on_hover_text("Add · Sub · Intersect: a click changes it").clicked() {
+            st.cycle_op(f.id);
+            return;
+        }
     } else {
         icons::paint(p, br.shrink(2.0), feature_icon(f), tint(c, dim));
     }
@@ -3276,7 +3423,10 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
             st.edge_sel.clear();
         }
         let add = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
-        if f.is_solid() {
+        if f.is_solid() && !add && st.doc.object_of(f.id).is_some() {
+            // a shape of an Object: into it, that shape alone
+            st.enter_object(f.id);
+        } else if f.is_solid() {
             // (a closed group's shape: the whole group)
             st.click_shape(Some(f.id), add);
         } else {
@@ -3361,6 +3511,35 @@ fn row_menu(ui: &mut Ui, st: &mut AppState, f: &Feature) {
         st.toggle_visible(f.id);
         ui.close();
     }
+    if f.is_solid() && st.doc.is_member(f) {
+        ui.separator();
+        for (op, name) in [(Op::Add, "Add"), (Op::Carve, "Sub"), (Op::Intersect, "Intersect")] {
+            if ui.add_enabled(f.op != op, egui::Button::new(name)).clicked() {
+                st.set_ops(&[f.id], op);
+                ui.close();
+            }
+        }
+        ui.separator();
+        let mine = st.doc.object_of(f.id);
+        let alone = mine.and_then(|o| st.doc.object(o)).is_some_and(|o| o.members.len() == 1);
+        if !alone && ui.button("New Object from it").clicked() {
+            st.shapes_to_object(&[f.id], None);
+            ui.close();
+        }
+        let others: Vec<(FeatureId, String)> = st.doc.objects.iter().filter(|o| Some(o.id) != mine).map(|o| (o.id, o.name.clone())).collect();
+        if !others.is_empty() {
+            ui.menu_button("Move to Object", |ui| {
+                menu_style(ui);
+                for (o, name) in &others {
+                    if ui.button(name).clicked() {
+                        st.shapes_to_object(&[f.id], Some(*o));
+                        ui.close();
+                    }
+                }
+            });
+        }
+        ui.separator();
+    }
     if ui.button("Delete").clicked() {
         st.select(Some(f.id), false);
         st.delete_selected();
@@ -3371,6 +3550,10 @@ fn row_menu(ui: &mut Ui, st: &mut AppState, f: &Feature) {
 /// The Sub Outliner's content: the element's name, then its operations in
 /// history order, the marker (a white line) before those left out.
 fn sub_outliner_body(ui: &mut Ui, st: &mut AppState, el: Option<FeatureId>, max_h: f32, fixed: bool) {
+    if let Some(o) = st.outline_object().and_then(|o| st.doc.object(o).cloned()) {
+        composition_body(ui, st, &o, max_h, fixed);
+        return;
+    }
     ui.horizontal(|ui| {
         ui.set_height(24.0);
         ui.label(egui::RichText::new("SUB OUTLINER").font(semibold(10.5)).color(TEXT2()));
@@ -3417,6 +3600,37 @@ fn sub_outliner_body(ui: &mut Ui, st: &mut AppState, el: Option<FeatureId>, max_
     });
 }
 
+/// The Sub Outliner of an Object (Romain 24 nov., 6 h 01: "plutôt faire
+/// qu'il gère des relations"): its shapes in the order they combine, each
+/// Add / Sub / Intersect (its glyph changes it), with the operations made
+/// on it indented under it.
+fn composition_body(ui: &mut Ui, st: &mut AppState, ob: &nurbs_kernel::Object, max_h: f32, fixed: bool) {
+    ui.horizontal(|ui| {
+        ui.set_height(24.0);
+        ui.label(egui::RichText::new("OBJECT").font(semibold(10.5)).color(TEXT2()));
+        ui.label(egui::RichText::new(&ob.name).font(semibold(12.5)).color(TEXT()));
+    });
+    let members: Vec<Feature> = st.doc.features.iter().filter(|f| ob.members.contains(&f.id)).cloned().collect();
+    let rows: usize = members.iter().map(|f| 1 + st.element_ops(f.id).len()).sum();
+    let mut sa = egui::ScrollArea::vertical().id_salt(if fixed { "sub-fixed-scroll" } else { "components-scroll" }).max_height(max_h).auto_shrink([false, !fixed]);
+    sa = if fixed { sa.min_scrolled_height(max_h) } else { sa.min_scrolled_height((rows as f32 * 29.0 + 30.0).min(max_h)) };
+    sa.show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        for f in &members {
+            tree_row(ui, st, f, 0, false);
+            let ops: Vec<Feature> = st.element_ops(f.id).iter().filter_map(|x| st.doc.feature(*x).cloned()).collect();
+            for g in &ops {
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    ui.vertical(|ui| tree_row(ui, st, g, 0, false));
+                });
+            }
+        }
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Its booleans act only on each other. Right click a shape: Add / Sub / Intersect, New Object from it, Move to Object").font(regular(11.0)).color(TEXT2()));
+    });
+}
+
 /// The history marker in a list: a short white line.
 fn history_marker_line(ui: &mut Ui) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 7.0), Sense::hover());
@@ -3426,7 +3640,7 @@ fn history_marker_line(ui: &mut Ui) {
 /// The floating Sub Outliner (Settings: Floating): an island right of the
 /// panel, as tall as the list, while an element is clicked.
 fn components_column(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2, height: f32) {
-    let Some(id) = st.outline_element() else { return };
+    let Some(id) = st.outline_element().or_else(|| st.outline_object().and_then(|o| st.doc.object(o)).map(|o| o.members[0])) else { return };
     if st.doc.feature(id).is_none() {
         return;
     }
@@ -4512,6 +4726,22 @@ fn files_dialog(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 st.files_open = false;
             }
             ui.add_space(6.0);
+            // a scan to model on (Romain 24 nov., 7 h 16: "Import scan à
+            // mettre dans le menu Document")
+            if crate::files::CAN_PICK {
+                let tip = if st.doc.reference.is_some() { "Import a scan (.obj): it takes the place of the one there, as the reference to model on" } else { "Import a scan (.obj) as the reference to model on (or drop it on the window)" };
+                let (br, resp) = ui.allocate_exact_size(vec2(348.0, 44.0), Sense::click());
+                let c = Color32::from_rgb(0x4D, 0x8D, 0xFF);
+                ui.painter().rect_filled(br, 12.0, if resp.hovered() { c } else { c.gamma_multiply(0.85) });
+                ui.painter().text(br.center(), Align2::CENTER_CENTER, "Import scan…", semibold(15.0), Color32::WHITE);
+                if resp.on_hover_text(tip).clicked() {
+                    if !crate::files::pick_scan() {
+                        st.toast("The Open dialog is already open", false);
+                    }
+                    st.files_open = false;
+                }
+                ui.add_space(6.0);
+            }
             section(ui, "Open");
             let list = files::list();
             if list.is_empty() {
@@ -4696,6 +4926,8 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             st.edge_sel.clear();
             st.face_sel.clear();
             st.vert_sel.clear();
+        } else if st.leave_object() {
+            // out of the Object entered: the whole Object picked
         } else {
             st.selection.clear();
         }

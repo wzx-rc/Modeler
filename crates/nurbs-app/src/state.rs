@@ -744,6 +744,10 @@ pub struct AppState {
     /// group's shapes all picked one by one are not the group. A closed
     /// group needs none: its shapes selected are the group.
     pub group_sel: Option<FeatureId>,
+    /// The Object entered by a double-click (its shapes picked one by one),
+    /// and the one last worked on (a new shape touching it goes in it).
+    pub open_object: Option<FeatureId>,
+    pub last_object: Option<FeatureId>,
     pub hover_hit: Option<Hit>,
     pub tool: Tool,
     /// Add or Carve for new shapes.
@@ -900,6 +904,9 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(doc: Doc, name: &str, kernel: Kernel) -> AppState {
+        // every shape in an Object (an older document split as it builds)
+        let mut doc = doc;
+        doc.settle_objects(None);
         let told = doc.features.iter().map(|f| f.id).max().unwrap_or(0);
         AppState {
             doc,
@@ -949,6 +956,8 @@ impl AppState {
             hover_feature: None,
             hover_also: vec![],
             group_sel: None,
+            open_object: None,
+            last_object: None,
             hover_hit: None,
             tool: Tool::Select,
             mode: Op::Add,
@@ -1364,8 +1373,9 @@ impl AppState {
     pub(crate) fn touched(&mut self) {
         // the curves follow their settings and boxes
         self.doc.regen_curves();
-        // a shape gone leaves its group
+        // a shape gone leaves its group; every shape in one Object
         self.doc.clean_groups();
+        self.doc.settle_objects(self.last_object);
         self.keep_markers();
         // an operation made on an Array's copy: on every copy
         if self.doc.keep_arrays() {
@@ -1597,6 +1607,17 @@ impl AppState {
             self.last_element = Some(self.element_of(x.feature));
         } else if let Some(id) = self.selection.first() {
             self.last_element = Some(self.element_of(*id));
+        }
+        // the Object worked on; an Object entered is left once nothing of
+        // it is picked
+        if let Some(o) = self.last_element.and_then(|e| self.doc.object_of(e)) {
+            self.last_object = Some(o);
+        }
+        if let Some(o) = self.open_object {
+            let inside = |id: &FeatureId| self.doc.object_of(self.element_of(*id)) == Some(o);
+            if self.doc.object(o).is_none() || (self.sel_mode == SelMode::Object && !self.selection.iter().any(inside) && self.drag.is_none()) {
+                self.open_object = None;
+            }
         }
         let now = self.sel_state();
         if self.version != self.sel_version {
@@ -2145,6 +2166,29 @@ impl AppState {
                     new_groups.push(id);
                 }
             }
+            // a whole Object copied is a new Object; a shape of one copied
+            // alone stays in it
+            let srcs: Vec<FeatureId> = plan.iter().map(|p| p.0).collect();
+            let mut whole: Vec<(FeatureId, Vec<FeatureId>)> = vec![];
+            for el in &srcs {
+                let (Some(c), Some(o)) = (map.get(el).copied(), d.object_of(*el)) else { continue };
+                let all = d.object(o).is_some_and(|ob| ob.members.iter().all(|m| srcs.contains(m)));
+                if all {
+                    match whole.iter_mut().find(|w| w.0 == o) {
+                        Some(w) => w.1.push(c),
+                        None => whole.push((o, vec![c])),
+                    }
+                } else if let Some(ob) = d.object_mut(o) {
+                    ob.members.push(c);
+                }
+            }
+            for (o, members) in whole {
+                let id = d.next_id;
+                d.next_id += 1;
+                let base = d.object(o).map(|ob| ob.name.clone()).unwrap_or_else(|| "Object".into());
+                let name = d.fresh_object_name(&base);
+                d.objects.push(nurbs_kernel::Object { id, name, members });
+            }
         });
         self.selection = new;
         self.group_sel = match new_groups.as_slice() {
@@ -2354,7 +2398,12 @@ impl AppState {
     /// Whose material a shape's faces show: a Carve's, the shape it cuts.
     pub fn paint_owner(&self, id: FeatureId) -> FeatureId {
         match self.doc.feature(id) {
-            Some(f) if f.is_solid() && f.op == Op::Carve => self.carve_host(id).unwrap_or(id),
+            // a Sub or an Intersect: its Object's first added shape (the
+            // Object's material), else the shape it cuts
+            Some(f) if f.is_solid() && f.op != Op::Add => {
+                let first = self.doc.object_of(id).and_then(|o| self.doc.object(o)).and_then(|ob| self.doc.features.iter().find(|g| g.op == Op::Add && ob.members.contains(&g.id)).map(|g| g.id));
+                first.or_else(|| self.carve_host(id)).unwrap_or(id)
+            }
             _ => id,
         }
     }
@@ -4295,8 +4344,11 @@ impl AppState {
                     return;
                 }
                 let mut ang = v0.cross(v1).dot(axis).atan2(v0.dot(v1));
-                if self.settings.snap {
-                    let step = 15f64.to_radians();
+                // Shift held: 15° steps (Romain 24 nov., 7 h 16); else whole
+                // degrees while Snap is on, free with Ctrl
+                let step = if self.shift_held { Some(15.0) } else if self.settings.snap && !self.snap_off { Some(1.0) } else { None };
+                if let Some(step) = step {
+                    let step = f64::to_radians(step);
                     ang = (ang / step).round() * step;
                 }
                 self.gizmo_readout = Some(format!("{} {:.0}°", ["X", "Y", "Z"][a], ang.to_degrees()));

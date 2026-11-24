@@ -3293,6 +3293,54 @@ fn islands_upto<'a>(doc: &'a Doc, feats: &[&'a Feature], upto: usize, global: &[
 
 /// The features built island by island (see above): the stage of the whole
 /// part, as `run` gives it for one history.
+/// Each Object built on its own (its shapes, their operations, the
+/// Mirrors), the results side by side: a boolean acts only within its
+/// Object (Romain, 24 nov., 6 h 01). The shapes in no Object are built
+/// together as before.
+fn build_objects<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Stage {
+    if doc.objects.is_empty() {
+        return build_islands(doc, feats, skip, cache, model, used_tools, used_stages);
+    }
+    let part = doc.partition(feats);
+    let mut keys: Vec<Option<FeatureId>> = vec![];
+    for p in part.iter().flatten() {
+        if !keys.contains(p) {
+            keys.push(*p);
+        }
+    }
+    if keys.len() <= 1 {
+        return build_islands(doc, feats, skip, cache, model, used_tools, used_stages);
+    }
+    let shared_names: Vec<String> = feats.iter().filter(|f| f.mirror.is_some()).map(|f| format!("{}: ", f.name)).collect();
+    let mut out = Stage::new();
+    for k in keys {
+        let sub: Vec<&Feature> = feats.iter().zip(&part).filter(|(_, p)| p.map_or(true, |p| p == k)).map(|(f, _)| *f).collect();
+        if !sub.iter().any(|f| f.is_solid()) {
+            continue;
+        }
+        let s = build_islands(doc, &sub, skip, cache, model, used_tools, used_stages);
+        out.shape = match (out.shape.take(), s.shape) {
+            (Some(a), Some(b)) => match a.compound(&b) {
+                Ok(c) => Some(Rc::new(c)),
+                Err(e) => {
+                    out.errors.push(format!("an Object is left out ({e})"));
+                    Some(a)
+                }
+            },
+            (a, b) => a.or(b),
+        };
+        for e in s.errors {
+            if !(shared_names.iter().any(|h| e.starts_with(h)) && out.errors.contains(&e)) {
+                out.errors.push(e);
+            }
+        }
+        out.limits.extend(s.limits);
+        out.tension_limits.extend(s.tension_limits);
+        boxes_add(&mut out.ext, &s.ext.iter().map(|b| ([b[0], b[1], b[2]], [b[3], b[4], b[5]])).collect::<Vec<_>>());
+    }
+    out
+}
+
 fn build_islands<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Stage {
     let n = feats.len();
     // FORME_ONE_CHAIN=1: one history, as before (to compare)
@@ -3812,7 +3860,7 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let lines: Vec<i64> = feats.iter().filter(|f| f.push.as_ref().is_some_and(|p| p.inset > 0.0 && p.depth.abs() < 1e-6)).map(|f| FaceTag { feature: f.id, sub: 1 }.pack()).collect();
     forme_occt::keep_lines(&lines);
     HASHES.with(|m| m.borrow_mut().clear());
-    let mut stage = build_islands(doc, &feats, skip, cache, &mut model, &mut used_tools, &mut used_stages);
+    let mut stage = build_objects(doc, &feats, skip, cache, &mut model, &mut used_tools, &mut used_stages);
     HASHES.with(|m| m.borrow_mut().clear());
     // the surfaces, beside the part (no boolean)
     // a curve filled, turned open, a loft of open curves (cached as tools)
@@ -7788,6 +7836,48 @@ mod tests {
         d.feature_mut(c).unwrap().origin = DVec3::new(-30.0, 10.0, 200.0);
         let m = build(&d, true, false, &[], &mut cache);
         assert!(m.errors.iter().any(|e| e.contains("share nothing")), "{:?}", m.errors);
+    }
+
+    #[test]
+    fn objects_keep_their_booleans() {
+        // Romain 24 nov., 6 h 01: "je voudrai que le Cube soustrait le gros
+        // pavé vert mais pas le cylindre". A block, a cylinder standing on
+        // it, a cube cutting through both: an older document (no Object)
+        // is one Object, cut everywhere; the cylinder put in an Object of
+        // its own keeps all of it
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let c = d.add(Op::Add, Prim::Cylinder { radius: 6.0, height: 20.0 }, DVec3::new(15.0, 20.0, 0.0), DQuat::IDENTITY);
+        let far = d.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(100.0, 0.0, 0.0), DQuat::IDENTITY);
+        let k = d.add(Op::Carve, Prim::Box { x: 20.0, y: 40.0, z: 10.0 }, DVec3::new(15.0, 5.0, 0.0), DQuat::IDENTITY);
+        let mut cache = Cache::default();
+        let before = build(&d, true, false, &[], &mut cache);
+        let v0 = mesh_volume(&before);
+        assert!(d.settle_objects(None));
+        assert_eq!(d.objects.len(), 2, "{:?}", d.objects);
+        let main = d.object_of(b).unwrap();
+        assert_eq!(d.object_of(c), Some(main));
+        assert_eq!(d.object_of(k), Some(main));
+        assert_ne!(d.object_of(far), Some(main));
+        assert!(!d.settle_objects(None));
+        // the same part split into Objects
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!((mesh_volume(&m) - v0).abs() < v0 * 1e-3, "{} {v0}", mesh_volume(&m));
+        // the cylinder alone: not cut any more
+        let cy = d.move_to_object(&[c], None).unwrap();
+        assert_ne!(cy, main);
+        assert_eq!(d.objects.len(), 3);
+        let m = build(&d, true, false, &[], &mut cache);
+        let v1 = mesh_volume(&m);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!(v1 > v0 + 500.0, "{v1} {v0}");
+        let (_, hi) = m.bounds().unwrap();
+        assert!((hi[1] - 40.0).abs() < 1e-3, "{hi:?}");
+        // and back with the block: cut again
+        d.move_to_object(&[c], Some(main));
+        assert_eq!(d.objects.len(), 2);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!((mesh_volume(&m) - v0).abs() < v0 * 1e-3);
     }
 
     #[test]

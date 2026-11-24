@@ -1960,6 +1960,25 @@ pub struct Doc {
     /// de Maya et de 3ds Max"). The kernel does not use them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<Group>,
+    /// The Objects (Romain, 24 nov., 6 h 01: "un UBER Object afin de
+    /// hiérarchiser"): each a result of its own, its shapes combined in
+    /// their order (Add, Sub, Intersect) with their operations; a boolean
+    /// acts only within its Object. A shape in none is built with the
+    /// others in none, as before (older documents until `settle_objects`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<Object>,
+}
+
+/// An Object: the shapes whose booleans act on each other (Blender's
+/// object with its Boolean modifiers, 3ds Max's ProBoolean, ZBrush's Live
+/// Boolean folder). Its operations are those made on its shapes' faces.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Object {
+    /// From the document's `next_id`: no feature has it.
+    pub id: FeatureId,
+    pub name: String,
+    /// Its shapes (solids in the chain); built in the document's order.
+    pub members: Vec<FeatureId>,
 }
 
 /// A group: shapes put in a transform of their own (Maya), closed or open
@@ -2021,7 +2040,7 @@ pub struct Paint {
 
 impl Default for Doc {
     fn default() -> Self {
-        Doc { version: VERSION, features: vec![], next_id: 1, paint: vec![], reference: None, looks: vec![], groups: vec![] }
+        Doc { version: VERSION, features: vec![], next_id: 1, paint: vec![], reference: None, looks: vec![], groups: vec![], objects: vec![] }
     }
 }
 
@@ -2452,6 +2471,235 @@ impl Doc {
         self.groups.retain(|g| g.id != id);
         ms
     }
+    // ------------------------------------------------------------ objects
+
+    /// A shape an Object holds: a solid of the chain (a primitive, a sketch,
+    /// a curve extruded or turned, a loft, a form, a frozen solid).
+    pub fn is_member(&self, f: &Feature) -> bool {
+        f.is_solid() && self.makes(f) == Makes::Solid
+    }
+    pub fn object(&self, id: FeatureId) -> Option<&Object> {
+        self.objects.iter().find(|o| o.id == id)
+    }
+    pub fn object_mut(&mut self, id: FeatureId) -> Option<&mut Object> {
+        self.objects.iter_mut().find(|o| o.id == id)
+    }
+    /// The Object a shape is in.
+    pub fn object_of(&self, shape: FeatureId) -> Option<FeatureId> {
+        self.objects.iter().find(|o| o.members.contains(&shape)).map(|o| o.id)
+    }
+    /// "Cube", "Cube 2"…: the first no Object has.
+    pub fn fresh_object_name(&self, base: &str) -> String {
+        (1..).map(|i| if i == 1 { base.to_string() } else { format!("{base} {i}") }).find(|n| !self.objects.iter().any(|o| &o.name == n)).unwrap()
+    }
+    /// For each of `feats` (in the order they are built), the Object it is
+    /// built in: a shape its own, an operation that of the first feature it
+    /// names (an Array the first shape it repeats, a move of vertices the
+    /// shape whose box holds one of them), else of the shape added last
+    /// before it. `None` for a Mirror (every Object's); `Some(None)` for a
+    /// feature in no Object. A copy (the same id) goes with the first.
+    pub fn partition(&self, feats: &[&Feature]) -> Vec<Option<Option<FeatureId>>> {
+        let mut of: std::collections::HashMap<FeatureId, Option<FeatureId>> = std::collections::HashMap::new();
+        let mut last: Option<FeatureId> = None;
+        let mut seen: Vec<((DVec3, DVec3), Option<FeatureId>)> = vec![];
+        feats
+            .iter()
+            .map(|f| {
+                if f.mirror.is_some() {
+                    return None;
+                }
+                if let Some(&o) = of.get(&f.id) {
+                    return Some(o);
+                }
+                let o = if f.is_solid() {
+                    self.object_of(f.id)
+                } else if let Some(a) = &f.array {
+                    a.sources.iter().find_map(|s| of.get(s).copied()).unwrap_or(last)
+                } else {
+                    let named = named_features(f);
+                    let by_name = named.iter().find_map(|id| of.get(id).copied());
+                    let by_vertex = || {
+                        let pts: Vec<DVec3> = f.tweak.iter().flat_map(|t| t.comps()).filter_map(|c| if let Comp::Vertex(p) = c { Some(*p) } else { None }).collect();
+                        pts.iter().find_map(|p| seen.iter().rev().find(|(b, _)| p.cmpge(b.0 - 1.0).all() && p.cmple(b.1 + 1.0).all()).map(|(_, o)| *o))
+                    };
+                    by_name.or_else(by_vertex).unwrap_or(last)
+                };
+                of.insert(f.id, o);
+                if f.is_solid() {
+                    seen.push((f.bounds(), o));
+                    if f.op == Op::Add {
+                        last = o;
+                    }
+                }
+                Some(o)
+            })
+            .collect()
+    }
+    /// The shapes each operation acts on, through the operations it names.
+    fn shapes_named(&self) -> std::collections::HashMap<FeatureId, Vec<FeatureId>> {
+        let mut map: std::collections::HashMap<FeatureId, Vec<FeatureId>> = std::collections::HashMap::new();
+        for f in &self.features {
+            if f.is_solid() {
+                map.insert(f.id, vec![f.id]);
+                continue;
+            }
+            let mut v: Vec<FeatureId> = vec![];
+            let named = if let Some(a) = &f.array { a.sources.clone() } else { named_features(f) };
+            for id in named {
+                for s in map.get(&id).cloned().unwrap_or_default() {
+                    if !v.contains(&s) {
+                        v.push(s);
+                    }
+                }
+            }
+            map.insert(f.id, v);
+        }
+        map
+    }
+    /// Every shape in exactly one Object: shapes gone or no longer shapes
+    /// leave theirs, an Object left empty goes; a shape in none joins the
+    /// Object of the shapes its box comes within 1 mm of, or that an
+    /// operation joins it to (`prefer` first, else the first such Object),
+    /// else a new Object with those in none it touches. An older document
+    /// is so split as its parts are built apart (the same part). Returns
+    /// whether anything changed.
+    pub fn settle_objects(&mut self, prefer: Option<FeatureId>) -> bool {
+        let before = self.objects.clone();
+        let members: Vec<FeatureId> = self.features.iter().filter(|f| self.is_member(f)).map(|f| f.id).collect();
+        let mut taken: Vec<FeatureId> = vec![];
+        for o in self.objects.iter_mut() {
+            o.members.retain(|m| members.contains(m) && !taken.contains(m));
+            taken.extend(o.members.iter().copied());
+        }
+        self.objects.retain(|o| !o.members.is_empty());
+        let free: Vec<FeatureId> = members.iter().copied().filter(|m| !taken.contains(m)).collect();
+        if !free.is_empty() {
+            let n = free.len();
+            let all_boxes: std::collections::HashMap<FeatureId, (DVec3, DVec3)> = self.features.iter().filter(|f| members.contains(&f.id)).map(|f| (f.id, f.bounds())).collect();
+            let bx = |id: FeatureId| all_boxes.get(&id).copied().unwrap_or((DVec3::ZERO, DVec3::ZERO));
+            let near = |a: (DVec3, DVec3), b: (DVec3, DVec3)| (a.0 - 1.0).cmple(b.1).all() && (b.0 - 1.0).cmple(a.1).all();
+            let named = self.shapes_named();
+            let mut parent: Vec<usize> = (0..n).collect();
+            fn find(p: &mut Vec<usize>, i: usize) -> usize {
+                let mut i = i;
+                while p[i] != i {
+                    p[i] = p[p[i]];
+                    i = p[i];
+                }
+                i
+            }
+            let boxes: Vec<(DVec3, DVec3)> = free.iter().map(|id| bx(*id)).collect();
+            for i in 0..n {
+                for j in i + 1..n {
+                    if near(boxes[i], boxes[j]) {
+                        let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                        parent[a] = b;
+                    }
+                }
+            }
+            // an operation on shapes in none and in Objects
+            let mut links: Vec<(usize, FeatureId)> = vec![];
+            for f in self.features.iter().filter(|f| !f.is_solid() && f.mirror.is_none()) {
+                let shapes = named.get(&f.id).cloned().unwrap_or_default();
+                let fi: Vec<usize> = shapes.iter().filter_map(|s| free.iter().position(|x| x == s)).collect();
+                for w in fi.windows(2) {
+                    let (a, b) = (find(&mut parent, w[0]), find(&mut parent, w[1]));
+                    parent[a] = b;
+                }
+                if let Some(&i) = fi.first() {
+                    for s in &shapes {
+                        if let Some(o) = self.object_of(*s) {
+                            links.push((i, o));
+                        }
+                    }
+                }
+            }
+            let root: Vec<usize> = (0..n).map(|i| find(&mut parent, i)).collect();
+            let mut groups: Vec<Vec<usize>> = vec![];
+            let mut roots: Vec<usize> = vec![];
+            for i in 0..n {
+                let r = root[i];
+                match roots.iter().position(|x| *x == r) {
+                    Some(k) => groups[k].push(i),
+                    None => {
+                        roots.push(r);
+                        groups.push(vec![i]);
+                    }
+                }
+            }
+            for g in groups {
+                let mut touched: Vec<FeatureId> = vec![];
+                for o in &self.objects {
+                    let hit = o.members.iter().any(|m| g.iter().any(|&i| near(bx(*m), boxes[i]))) || links.iter().any(|(i, lo)| *lo == o.id && root[*i] == root[g[0]]);
+                    if hit {
+                        touched.push(o.id);
+                    }
+                }
+                let ids: Vec<FeatureId> = g.iter().map(|&i| free[i]).collect();
+                // a Sub or an Intersect touching nothing yet waits (it
+                // would cut nothing in an Object of its own)
+                if touched.is_empty() && !ids.iter().any(|id| self.feature(*id).is_some_and(|f| f.op == Op::Add)) {
+                    continue;
+                }
+                let target = prefer.filter(|p| touched.contains(p)).or_else(|| touched.first().copied());
+                match target.and_then(|t| self.object_mut(t)) {
+                    Some(o) => o.members.extend(ids),
+                    None => {
+                        // named after its first shape added (else its first)
+                        let first = ids.iter().filter_map(|id| self.feature(*id)).find(|f| f.op == Op::Add).or_else(|| self.feature(ids[0])).map(|f| f.name.clone()).unwrap_or_else(|| "Object".into());
+                        let id = self.next_id;
+                        self.next_id += 1;
+                        let name = self.fresh_object_name(&first);
+                        self.objects.push(Object { id, name, members: ids });
+                    }
+                }
+            }
+        }
+        self.objects != before
+    }
+    /// These shapes put in Object `to` (None: a new one, named after the
+    /// first of them), out of their own. Returns the Object.
+    pub fn move_to_object(&mut self, shapes: &[FeatureId], to: Option<FeatureId>) -> Option<FeatureId> {
+        // (the others in an Object first, or they would follow it)
+        self.settle_objects(None);
+        let ms: Vec<FeatureId> = shapes.iter().copied().filter(|id| self.feature(*id).is_some_and(|f| self.is_member(f))).collect();
+        if ms.is_empty() {
+            return None;
+        }
+        for o in self.objects.iter_mut() {
+            o.members.retain(|m| !ms.contains(m));
+        }
+        let id = match to.filter(|t| self.object(*t).is_some()) {
+            Some(t) => {
+                self.object_mut(t).unwrap().members.extend(ms.iter().copied());
+                t
+            }
+            None => {
+                let id = self.next_id;
+                self.next_id += 1;
+                let base = self.feature(ms[0]).map(|f| f.name.clone()).unwrap_or_else(|| "Object".into());
+                let name = self.fresh_object_name(&base);
+                self.objects.push(Object { id, name, members: ms });
+                id
+            }
+        };
+        self.objects.retain(|o| !o.members.is_empty());
+        Some(id)
+    }
+    /// The shapes of the Objects these shapes are in (a shape in none: itself).
+    pub fn whole_objects(&self, ids: &[FeatureId]) -> Vec<FeatureId> {
+        let mut out: Vec<FeatureId> = vec![];
+        for id in ids {
+            match self.object_of(*id).and_then(|o| self.object(o)) {
+                Some(o) => out.extend(o.members.iter().copied()),
+                None => out.push(*id),
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|x| seen.insert(*x));
+        out
+    }
+
     /// Copies of the shapes (after the last feature), with fresh ids; returns
     /// the new ids. Fillets and chamfers are not copied (their edges belong
     /// to the original).

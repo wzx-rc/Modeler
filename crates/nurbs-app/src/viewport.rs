@@ -231,7 +231,27 @@ fn scale_points(st: &AppState) -> Option<(Pos2, [Option<Pos2>; 3])> {
     Some((c, [0, 1, 2].map(|a| world(st, pivot + frame * DVec3::AXES[a] * k))))
 }
 
+/// The scale gizmo's side grips (Romain 24 nov., 7 h 16: "que je puisse
+/// seulement scale dans une direction… plutôt qu'un point, un carré comme
+/// les équerres du Transform"): a square in the middle of each side of the
+/// box round what is selected, in the shape's own frame; a drag scales
+/// along that axis only, the side across staying (`cage.rs`).
+fn side_grips(st: &AppState) -> Vec<([i8; 3], Pos2)> {
+    let Some(c) = st.cage() else { return vec![] };
+    c.grips().into_iter().filter(|s| s.iter().filter(|v| **v != 0).count() == 1).filter_map(|s| world(st, c.point(s)).map(|q| (s, q))).collect()
+}
+
 fn scale_at(st: &AppState, p: Pos2) -> Option<Handle> {
+    let mut side: Option<(f32, [i8; 3])> = None;
+    for (s, q) in side_grips(st) {
+        let d = (q - p).length();
+        if d < 9.0 && side.map_or(true, |b| d < b.0) {
+            side = Some((d, s));
+        }
+    }
+    if let Some((_, s)) = side {
+        return Some(Handle::Cage(s));
+    }
     let (c, tips) = scale_points(st)?;
     if (p - c).length() < 10.0 {
         return Some(Handle::ScaleAll);
@@ -742,6 +762,13 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
                 // (a closed group's shape: the whole group)
                 st.click_shape(id, shift || ctrl);
             }
+            // a double-click: into its Object, that shape alone
+            if resp.double_clicked_by(PointerButton::Primary) && !(shift || ctrl) {
+                let at = resp.interact_pointer_pos().or(hover);
+                if let Some(id) = at.and_then(|p| st.pick_at(p2(p))).and_then(|h| st.feature_of_face(h.face)) {
+                    st.enter_object(id);
+                }
+            }
         }
         Tool::Create(PrimKind::Profile | PrimKind::Path | PrimKind::Surface) if st.creation.is_none() => {
             // the outline: a click or a drag puts a corner;
@@ -980,6 +1007,30 @@ fn draw_rot_scale(p: &Painter, st: &AppState, hot: Option<Handle>, dragging: Opt
             let col = if on { HOT } else { colors[a] };
             p.line_segment([c + (*t - c) * 0.18, *t], Stroke::new(if on { 3.0 } else { 2.2 }, col));
             p.rect_filled(Rect::from_center_size(*t, vec2(10.0, 10.0)), 2.0, col);
+        }
+        // the side grips: squares like the move gizmo's planes; the box
+        // they sit on shown while one is hovered or dragged
+        let side_on = matches!(hot, Some(Handle::Cage(_))) || matches!(dragging, Some(Handle::Cage(_)));
+        if side_on {
+            if let Some(cb) = st.cage() {
+                for (a0, b0) in cb.edges() {
+                    if let (Some(a1), Some(b1)) = (world(st, a0), world(st, b0)) {
+                        p.line_segment([a1, b1], Stroke::new(1.0, tint(Color32::WHITE, 0.35)));
+                    }
+                }
+            }
+        }
+        if dragging.is_none() || side_on {
+            for (sg, q) in side_grips(st) {
+                if dragging.is_some() && dragging != Some(Handle::Cage(sg)) {
+                    continue;
+                }
+                let a = sg.iter().position(|v| *v != 0).unwrap_or(0);
+                let on = hot == Some(Handle::Cage(sg)) || dragging == Some(Handle::Cage(sg));
+                let col = if on { HOT } else { colors[a] };
+                let r = Rect::from_center_size(q, vec2(11.0, 11.0));
+                p.rect(r, 1.5, tint(col, if on { 0.55 } else { 0.25 }), Stroke::new(1.4, col), egui::StrokeKind::Middle);
+            }
         }
         let on = hot == Some(Handle::ScaleAll);
         p.rect(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, if on { tint(HOT, 0.5) } else { tint(Color32::WHITE, 0.25) }, Stroke::new(1.5, if on { HOT } else { Color32::WHITE }), egui::StrokeKind::Middle);
@@ -1868,7 +1919,7 @@ fn hint_of(st: &AppState) -> String {
         (None, Tool::Select) => {
             if let Some(d) = &st.drag {
                 match d.handle {
-                    Handle::Rot(_) => "Round the ring: turn · 15° steps while Snap is on · Release: keep it".into(),
+                    Handle::Rot(_) => "Round the ring: turn · Shift: 15° steps · Ctrl: free · Release: keep it".into(),
                     Handle::ArrayStep(_) => "Along the line: the step, the copies follow · Release: keep it".into(),
                     Handle::ArrayCount(_) if st.selected_array().and_then(|f| f.array.as_ref()).map(|a| a.kind == nurbs_kernel::ArrayKind::Circle).unwrap_or(false) => "Round the axis: nearer the original, more copies · Release: keep it".into(),
                     Handle::ArrayCount(_) => "Out: more copies, the same step · In: fewer · Release: keep it".into(),

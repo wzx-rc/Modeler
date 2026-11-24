@@ -2125,6 +2125,117 @@ fn main() {
         h.shot("zero-history-off-4-scaled-turned");
     }
 
+    if want("objects") {
+        // Objects (Romain 24 nov., 6 h 01: "nommer un UBER Object afin de
+        // hiérarchiser… je voudrais que le Cube soustraie le gros pavé vert
+        // mais pas le cylindre"): his scene's three shapes (a green block, a
+        // cylinder lying on it, a cube cutting both) opened: one Object;
+        // the cylinder made an Object of its own: not cut any more; a
+        // click takes an Object, a double-click enters it
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 60.0, y: 30.0, z: 40.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.feature_mut(b).unwrap().material = 1;
+        let c = d.add(Op::Add, Prim::Cylinder { radius: 9.0, height: 60.0 }, DVec3::new(-30.0, 30.0, 0.0), DQuat::from_rotation_z(-std::f64::consts::FRAC_PI_2));
+        d.feature_mut(c).unwrap().material = 4;
+        let k = d.add(Op::Carve, Prim::Box { x: 14.0, y: 30.0, z: 14.0 }, DVec3::new(18.0, 22.0, 0.0), DQuat::IDENTITY);
+        h.reset(d, "Block");
+        let wait = |h: &mut Harness| {
+            for _ in 0..4 {
+                h.settle();
+                h.steps(3);
+            }
+        };
+        wait(&mut h);
+        let objs = |h: &Harness| h.st.doc.objects.iter().map(|o| format!("{} {:?}", o.name, o.members)).collect::<Vec<_>>();
+        eprintln!("  opened: {:?}", objs(&h));
+        h.key(egui::Key::Num4);
+        h.click(h.screen_of(Vec3::new(-20.0, 30.0, 15.0)));
+        h.steps(3);
+        eprintln!("  click on the block: selection {:?}, object {:?}", h.st.selection, h.st.selected_object().map(|o| o.name.clone()));
+        h.shot("zero-objects-1-one-object");
+        // the cylinder out, as its row's "New Object from it"
+        h.st.shapes_to_object(&[c], None);
+        wait(&mut h);
+        eprintln!("  cylinder alone: {:?}, faces of the cylinder {}", objs(&h), h.st.model.as_ref().map(|m| m.faces.iter().filter(|f| f.tag.is_some_and(|t| t.feature == c)).count()).unwrap_or(0));
+        h.click(h.screen_of(Vec3::new(-20.0, 30.0, 15.0)));
+        h.steps(3);
+        h.shot("zero-objects-2-cylinder-alone");
+        // a double-click on the block: into its Object, the block alone
+        let at = h.screen_of(Vec3::new(-20.0, 30.0, 15.0));
+        h.click(at);
+        h.click(at);
+        h.steps(3);
+        eprintln!("  double-click: open {:?}, selection {:?}", h.st.open_object, h.st.selection);
+        h.shot("zero-objects-3-entered");
+        h.key(egui::Key::Escape);
+        h.steps(3);
+        eprintln!("  Esc: open {:?}, selection {:?}", h.st.open_object, h.st.selection);
+        // the cube made Intersect from its glyph, then Sub again
+        h.st.cycle_op(k);
+        h.st.cycle_op(k);
+        wait(&mut h);
+        h.shot("zero-objects-4-intersect");
+        h.st.cycle_op(k);
+        // a new cube on the cylinder: in the cylinder's Object
+        let mut n = 0;
+        h.st.edit("Cube", |d| n = d.add(Op::Add, Prim::Box { x: 8.0, y: 8.0, z: 8.0 }, DVec3::new(-34.0, 39.0, 0.0), DQuat::IDENTITY));
+        wait(&mut h);
+        eprintln!("  new cube: in {:?} (cylinder's {:?})", h.st.doc.object_of(n), h.st.doc.object_of(c));
+        h.st.select_object(h.st.doc.object_of(c).unwrap(), false);
+        h.steps(3);
+        h.shot("zero-objects-5-new-cube");
+    }
+
+    if want("side-scale") {
+        // Romain 24 nov., 7 h 16: the scale gizmo's side squares (one
+        // direction only, the side across staying), Shift's 15° steps on
+        // the rotate rings, Import scan in the Documents window
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.key(egui::Key::Num4);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.key(egui::Key::R);
+        h.steps(3);
+        let grip = h.screen_of(Vec3::new(20.0, 10.0, 0.0));
+        h.move_to(grip);
+        h.steps(2);
+        eprintln!("  hover +X side: {:?}", h.st.hot_handle);
+        h.shot("zero-side-scale-1-grips");
+        let to = h.screen_of(Vec3::new(32.0, 10.0, 0.0));
+        h.drag(grip, to, 12, true);
+        for _ in 0..3 {
+            h.settle();
+            h.steps(3);
+        }
+        let f = h.st.doc.feature(b).unwrap();
+        let (lo, hi) = f.bounds();
+        eprintln!("  after +X side drag: prim {:?}, x {:.2}..{:.2}", f.prim, lo.x, hi.x);
+        h.shot("zero-side-scale-2-dragged");
+        // rotate with Shift: 15° steps
+        h.key(egui::Key::E);
+        h.steps(3);
+        let pivot = h.st.pivot().unwrap().as_vec3();
+        let v = h.st.view();
+        let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0;
+        let a = h.screen_of(pivot + Vec3::new(1.0, 0.0, 0.0) * k);
+        let bq = h.screen_of(pivot + Vec3::new(0.8, 0.0, -0.6) * k);
+        h.move_to(a);
+        h.steps(2);
+        eprintln!("  ring: {:?}", h.st.hot_handle);
+        h.hold(Modifiers::SHIFT);
+        h.drag(a, bq, 10, true);
+        h.hold(Modifiers::NONE);
+        h.settle();
+        let r = h.st.doc.feature(b).unwrap().rot;
+        let (ax, ang) = r.to_axis_angle();
+        eprintln!("  rotated with Shift: {:.3}° about {:?}", ang.to_degrees(), ax);
+        h.shot("zero-side-scale-3-rotated");
+        h.st.files_open = true;
+        h.steps(3);
+        h.shot("zero-side-scale-4-documents");
+    }
+
     if want("intersect") {
         // Boolean Intersection and CARVE named SUB (Romain 24 nov., 5 h 45:
         // "Il y avait pas un mode Boolean Intersection? Appelle SUB à la

@@ -16,6 +16,7 @@ pub mod faces;
 pub mod files;
 pub mod forms;
 pub mod groups;
+pub mod objects;
 pub mod icons;
 pub mod knife;
 pub mod history;

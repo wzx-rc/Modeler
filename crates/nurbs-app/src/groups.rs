@@ -45,10 +45,12 @@ impl AppState {
     /// What a click on a shape takes in Object mode: its closed group's
     /// shapes, else the shape alone.
     pub fn pick_ids(&self, id: FeatureId) -> Vec<FeatureId> {
-        match self.doc.group_of(id) {
+        let ids = match self.doc.group_of(id) {
             Some(g) if !g.open => g.members.clone(),
             _ => vec![id],
-        }
+        };
+        // each shape's Object whole, unless it is the one entered
+        self.object_ids(&ids)
     }
 
     /// A click on a shape in Object mode (the view, the outliner): a closed
@@ -121,7 +123,8 @@ impl AppState {
                 ids.push(el);
             }
         }
-        ids
+        // a group holds whole Objects
+        self.doc.whole_objects(&ids)
     }
 
     /// Whether Group has something to do: shapes selected that are not
