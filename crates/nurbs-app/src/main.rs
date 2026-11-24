@@ -1,3 +1,8 @@
+// No console window behind the app on Windows (Romain 24 nov., 10 h:
+// "possible de pas avoir cette fenêtre"); a debug build keeps it for its
+// prints. The kernel process is started with CREATE_NO_WINDOW already.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 // Forme NURBS: the desktop app (the iPad will come with the kernel linked
 // in the app, no child process there).
 
