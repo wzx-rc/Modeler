@@ -182,7 +182,29 @@ fn ball(ui: &mut Ui, st: &mut AppState) -> Rect {
     let p = ui.painter();
     let live = resp.hovered() || resp.dragged();
     let bg = if live { RAISED() } else { WELL() };
-    p.circle(c, BALL * 0.5, bg, Stroke::new(1.0, DIVIDER()));
+    // a sphere (Romain 24 nov., 6 h 18: "une sphère en white line et
+    // semi-opaque remplissage"): filled half see-through, its outline a
+    // white line, the world's three great circles drawn on it (their far
+    // halves fainter), so it turns with the view
+    let rad = BALL * 0.5 - 1.0;
+    let line = pick(Color32::WHITE, TEXT());
+    p.circle_filled(c, rad, bg.gamma_multiply(if live { 0.75 } else { 0.55 }));
+    let (fwd, right, up) = st.view().basis();
+    for axis in 0..3 {
+        let (u, v) = (Vec3::AXES[(axis + 1) % 3], Vec3::AXES[(axis + 2) % 3]);
+        let n = 48;
+        let pt = |k: usize| {
+            let t = k as f32 / n as f32 * std::f32::consts::TAU;
+            let q = u * t.cos() + v * t.sin();
+            (c + vec2(q.dot(right), -q.dot(up)) * rad, -q.dot(fwd))
+        };
+        for k in 0..n {
+            let ((a, da), (b, db)) = (pt(k), pt(k + 1));
+            let near = (da + db) * 0.5 > 0.0;
+            p.line_segment([a, b], Stroke::new(1.0, line.gamma_multiply(if near { 0.32 } else { 0.1 })));
+        }
+    }
+    p.circle_stroke(c, rad, Stroke::new(1.4, line.gamma_multiply(if live { 0.95 } else { 0.8 })));
     // the axes again (the view may have turned above)
     let dots = axis_dots(st, c);
     for d in &dots {

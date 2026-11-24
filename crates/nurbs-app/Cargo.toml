@@ -39,4 +39,8 @@ image.workspace = true
 
 # the pen's barrel button with Windows Ink (`pen.rs`)
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Input_Pointer", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Input_Pointer", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls_Dialogs"] }
+
+[build-dependencies]
+# the .exe's icon on Windows (rc.exe from the Windows SDK; a warning if missing)
+winresource = "0.1"

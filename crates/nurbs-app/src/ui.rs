@@ -165,6 +165,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     op_window(ctx, st);
     files_dialog(ctx, st, screen);
     settings_window(ctx, st, screen);
+    transform_values(ctx, st);
     toast(ctx, st, screen);
     shortcuts(ctx, st);
     if st.tool != Tool::Select {
@@ -176,7 +177,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
 
 fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     // left: the document
-    egui::Area::new(Id::new("isl-doc")).order(Order::Middle).fixed_pos(screen.min + vec2(EDGE, EDGE)).show(ctx, |ui| {
+    let doc = egui::Area::new(Id::new("isl-doc")).order(Order::Middle).fixed_pos(screen.min + vec2(EDGE, EDGE)).show(ctx, |ui| {
         island().show(ui, |ui| {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
@@ -208,14 +209,23 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         });
     });
 
+    ctx.data_mut(|d| d.insert_temp(Id::new("isl-doc-right"), doc.response.rect.max.x));
     // centre: the tool, ADD | CARVE, the helpers
-    let cx = st.principal()[0];
-    egui::Area::new(Id::new("isl-modes")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(pos2(cx, screen.min.y + EDGE)).show(ctx, |ui| {
+    // in the middle of the view, kept clear of the islands left and right
+    // of it (Q W E R made it wider: it went over the view's presets)
+    let mut cx = st.principal()[0];
+    let (w, left, right) = ctx.data(|d| (d.get_temp::<f32>(Id::new("isl-modes-w")), d.get_temp::<f32>(Id::new("isl-doc-right")), d.get_temp::<f32>(Id::new("isl-view-left"))));
+    if let (Some(w), Some(l), Some(r)) = (w, left, right) {
+        let (lo, hi) = (l + 8.0 + w * 0.5, r - 8.0 - w * 0.5);
+        cx = if lo <= hi { cx.clamp(lo, hi) } else { (lo + hi) * 0.5 };
+    }
+    let modes = egui::Area::new(Id::new("isl-modes")).order(Order::Middle).pivot(Align2::CENTER_TOP).fixed_pos(pos2(cx, screen.min.y + EDGE)).show(ctx, |ui| {
         island().show(ui, |ui| {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 mode_pill(ui, st);
+                gizmo_buttons(ui, st);
                 island_sep(ui);
                 let tool = match st.tool {
                     Tool::Create(k) => k.label().to_uppercase(),
@@ -340,12 +350,13 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             });
         });
     });
+    ctx.data_mut(|d| d.insert_temp(Id::new("isl-modes-w"), modes.response.rect.width()));
     if st.settings.mirror_bar {
         mirror_bar(ctx, st, pos2(cx, screen.min.y + EDGE + ISLAND_H + 6.0));
     }
 
     // right: the view
-    egui::Area::new(Id::new("isl-view")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(screen.max.x - EDGE, screen.min.y + EDGE)).show(ctx, |ui| {
+    let view = egui::Area::new(Id::new("isl-view")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(screen.max.x - EDGE, screen.min.y + EDGE)).show(ctx, |ui| {
         island().show(ui, |ui| {
             ui.set_height(ISLAND_H - 10.0);
             ui.horizontal_centered(|ui| {
@@ -401,6 +412,154 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             });
         });
     });
+    ctx.data_mut(|d| d.insert_temp(Id::new("isl-view-left"), view.response.rect.min.x));
+}
+
+/// Maya's Q W E R in the top bar, right of the component modes (Romain
+/// 24 nov., 6 h 18: "les 4 outils de sélection… dans la TOPBAR, à droite de
+/// Components"). A right click or a press held on Move, Rotate or Scale
+/// opens the Transform Values under it.
+fn gizmo_buttons(ui: &mut Ui, st: &mut AppState) {
+    ui.spacing_mut().item_spacing.x = 2.0;
+    let pop = ui.ctx().data(|d| d.get_temp::<(u8, Rect)>(Id::new("xform-pop")));
+    for (i, (g, icon, key, tip)) in [
+        (GizmoMode::Select, Icon::Select, "Q", "Select (Q): no gizmo, clicks and rectangles only"),
+        (GizmoMode::Move, Icon::Move, "W", "Move (W): arrows and squares move what is picked, dots resize a shape · right click or hold: its values"),
+        (GizmoMode::Rotate, Icon::Rotate, "E", "Rotate (E): three rings turn the picked shapes round X, Y, Z (15° steps while Snap is on) · right click or hold: its values"),
+        (GizmoMode::Scale, Icon::Scale, "R", "Scale (R): a cube per axis scales along the shape's own axes, the centre scales all · right click or hold: its values"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let open_here = pop.is_some_and(|(k, _)| k as usize == i);
+        let r = icon_btn(ui, icon, st.gizmo == g || open_here, tip, 30.0);
+        ui.ctx().data_mut(|d| d.insert_temp(Id::new(("gizmo-btn", i)), r.rect));
+        key_hint(ui, &r, key);
+        if i == 0 {
+            if r.clicked() {
+                st.set_gizmo(g);
+            }
+            continue;
+        }
+        // held: the values after 0.45 s (a pen or a finger has no right button)
+        let held = r.is_pointer_button_down_on() && ui.input(|inp| inp.pointer.press_start_time().is_some_and(|t| inp.time - t > 0.45));
+        if r.is_pointer_button_down_on() && !open_here {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        if r.secondary_clicked() {
+            if open_here {
+                ui.ctx().data_mut(|d| d.remove::<(u8, Rect)>(Id::new("xform-pop")));
+            } else {
+                ui.ctx().data_mut(|d| d.insert_temp(Id::new("xform-pop"), (i as u8, r.rect)));
+            }
+        } else if held && !open_here {
+            st.set_gizmo(g);
+            ui.ctx().data_mut(|d| d.insert_temp(Id::new("xform-pop"), (i as u8, r.rect)));
+        } else if r.clicked() {
+            st.set_gizmo(g);
+        }
+    }
+    ui.spacing_mut().item_spacing.x = 6.0;
+}
+
+/// The Transform Values under Move / Rotate / Scale in the top bar (their
+/// right click or a press held): the selected shape's position and
+/// rotation, a group's position, rotation and scale (Maya's channels).
+/// A press outside it or Esc closes it.
+fn transform_values(ctx: &egui::Context, st: &mut AppState) {
+    let key = Id::new("xform-pop");
+    let Some((which, btn)) = ctx.data(|d| d.get_temp::<(u8, Rect)>(key)) else { return };
+    let title = ["Select", "Move", "Rotate", "Scale"][which as usize];
+    let area = egui::Area::new(Id::new("xform-values")).order(Order::Foreground).fade_in(false).fixed_pos(btn.left_bottom() + vec2(-8.0, 12.0)).show(ctx, |ui| {
+        op_island().show(ui, |ui| {
+            set_op_style(ui.ctx(), true);
+            ui.set_width(OP_W);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Transform").font(semibold(15.0)).color(TEXT()));
+                ui.label(egui::RichText::new(title).font(regular(12.0)).color(TEXT2()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(egui::Label::new(egui::RichText::new("×").font(regular(18.0)).color(TEXT2())).sense(Sense::click())).on_hover_text("Close (Esc)").clicked() {
+                        ui.ctx().data_mut(|d| d.remove::<(u8, Rect)>(key));
+                    }
+                });
+            });
+            let any_down = ui.input(|i| i.pointer.any_down());
+            if let Some(g) = st.selected_group().cloned() {
+                group_transform(ui, st, &g);
+            } else if let Some(f) = st.single().cloned().filter(|f| f.is_solid()) {
+                ui.label(egui::RichText::new(&f.name).font(semibold(13.0)).color(TEXT()));
+                section(ui, "Position");
+                position_rows(ui, st, &f);
+            } else {
+                let n = st.selection.len();
+                let note = if n > 1 { format!("{n} shapes: move, turn or scale them with the gizmo; pick one (or a group) for its values") } else { "Pick a shape or a group: its position and rotation show here".to_string() };
+                ui.label(egui::RichText::new(note).font(regular(12.0)).color(TEXT2()));
+            }
+            if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+                st.end_live();
+            }
+            set_op_style(ui.ctx(), false);
+        });
+    });
+    let r = area.response.rect;
+    let (pressed, at, esc) = ctx.input(|i| (i.pointer.any_pressed(), i.pointer.interact_pos(), i.key_pressed(egui::Key::Escape)));
+    if esc || (pressed && at.is_some_and(|p| !r.contains(p) && !btn.contains(p))) {
+        ctx.data_mut(|d| d.remove::<(u8, Rect)>(key));
+    }
+}
+
+/// A group's transform (its own, Maya): position (its pivot), rotation,
+/// scale; changing them moves, turns or scales its shapes.
+fn group_transform(ui: &mut Ui, st: &mut AppState, g: &nurbs_kernel::Group) {
+    let id = g.id;
+    ui.label(egui::RichText::new(&g.name).font(semibold(13.0)).color(TEXT()));
+    let colors = [AXIS_X, AXIS_Y, AXIS_Z];
+    let (ex, ey, ez) = g.rot.to_euler(EulerRot::XYZ);
+    let mut e = [ex.to_degrees() as f32, ey.to_degrees() as f32, ez.to_degrees() as f32];
+    section(ui, "Position");
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for k in 0..3 {
+            let mut v = g.origin[k] as f32;
+            let r = axis_field(ui, ["X", "Y", "Z"][k], colors[k], &mut v, "");
+            if r.changed() {
+                let mut o = g.origin;
+                o[k] = v as f64;
+                st.set_group_transform(id, o, g.rot, g.scale, "Move group", r.drag_started());
+            }
+        }
+    });
+    section(ui, "Rotation");
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for k in 0..3 {
+            let r = axis_field(ui, ["X", "Y", "Z"][k], colors[k], &mut e[k], "°");
+            if r.changed() {
+                let q = DQuat::from_euler(EulerRot::XYZ, (e[0] as f64).to_radians(), (e[1] as f64).to_radians(), (e[2] as f64).to_radians());
+                st.set_group_transform(id, g.origin, q, g.scale, "Rotate group", r.drag_started());
+            }
+        }
+    });
+    section(ui, "Scale");
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for k in 0..3 {
+            let mut v = g.scale[k] as f32;
+            let (lr, _) = ui.allocate_exact_size(vec2(18.0, 22.0), Sense::hover());
+            ui.painter().text(lr.center(), Align2::CENTER_CENTER, ["X", "Y", "Z"][k], semibold(12.0), colors[k]);
+            let r = value_field(ui, &mut v, 0.01..=1000.0, 0.01, "", 66.0);
+            if r.changed() {
+                let mut sc = g.scale;
+                sc[k] = (v as f64).max(0.01);
+                st.set_group_transform(id, g.origin, g.rot, sc, "Scale group", r.drag_started());
+            }
+        }
+    });
+    ui.label(egui::RichText::new("Position: the group's pivot · D + click in the view puts it on a point").font(regular(11.0)).color(TEXT2()));
+    let w = ui.available_width();
+    if secondary_btn(ui, "Centre pivot", w).on_hover_text("The pivot back at the middle of its shapes (they do not move)").clicked() {
+        st.put_group_pivot(id, None);
+    }
 }
 
 /// The component modes (like Plasticity): Vertex, Edge, Face, Object, the
@@ -504,23 +663,6 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             if card(ui, Some(icon), "SELECTION", &sub, select, color, "Select (Esc): what a click picks is set by the modes at the top (1 or F9 vertex, 2 or F10 edge, 3 or F11 face, 4 or F8 object)").clicked() {
                 st.select_tool();
             }
-            // Maya's Q W E R: the gizmo on what is picked
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let w = ((CARDS_W - 12.0 - 3.0 * 4.0) / 4.0).floor();
-                for (g, icon, key, tip) in [
-                    (GizmoMode::Select, Icon::Select, "Q", "Select (Q): no gizmo, clicks and rectangles only"),
-                    (GizmoMode::Move, Icon::Move, "W", "Move (W): arrows and squares move what is picked, dots resize a shape"),
-                    (GizmoMode::Rotate, Icon::Rotate, "E", "Rotate (E): three rings turn the picked shapes round X, Y, Z (15° steps while Snap is on)"),
-                    (GizmoMode::Scale, Icon::Scale, "R", "Scale (R): a cube per axis scales along the shape's own axes, the centre scales all (drag right: bigger, left: smaller)"),
-                ] {
-                    let r = icon_btn(ui, icon, st.gizmo == g, tip, w);
-                    key_hint(ui, &r, key);
-                    if r.clicked() {
-                        st.set_gizmo(g);
-                    }
-                }
-            });
             divider(ui);
             let mode = st.mode;
             let m = if mode == Op::Add { "ADD" } else { "CARVE" };
@@ -2600,10 +2742,6 @@ fn surface_options(ui: &mut Ui, st: &mut AppState) {
     });
 }
 
-/// In the left panel: the settings are in the window in the view.
-fn pop_note(ui: &mut Ui) {
-    ui.label(egui::RichText::new("Its settings are in the window next to it in the view (its grip moves it)").font(regular(12.0)).color(TEXT2()));
-}
 
 // ------------------------------------------------------------ inspector
 
@@ -2621,68 +2759,30 @@ fn inspector(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
         fs.iter().any(|f| !f.is_solid() && !f.is_path()),
     ];
     let extra = groups.iter().filter(|g| **g).count() as f32 * 25.0 + if st.doc.reference.is_some() { 53.0 } else { 0.0 } + if st.doc.groups.is_empty() { 0.0 } else { 25.0 + st.doc.groups.len() as f32 * 29.0 };
-    let tree_h = if st.settings.show_tree { (rows * 28.0 + 34.0 + extra).clamp(96.0, (total * 0.36).max(120.0)) } else { 0.0 };
+    // the panel is the shape list alone (Romain 24 nov., 6 h 18: "Lister
+    // doit être seul"): the selection's tools are in its bar over the part,
+    // its transform under W / E / R in the top bar, its settings in its
+    // window
+    if !st.settings.show_tree {
+        return;
+    }
+    let fixed = if st.settings.sub_fixed { SUB_FIXED_H + 50.0 } else { 0.0 };
+    let tree_h = (rows * 28.0 + 34.0 + extra).clamp(96.0, (total - 40.0 - fixed).max(120.0));
     let off = panel_offset(ctx, "props");
     egui::Area::new(Id::new("props")).order(Order::Middle).fixed_pos(pos2(screen.min.x + EDGE, top) + off).show(ctx, |ui| {
         island().inner_margin(Margin::same(12)).show(ui, |ui| {
             ui.set_width(inner_w);
             grip(ui, "props");
-            if st.settings.show_tree {
-                tree(ui, st, tree_h);
+            tree(ui, st, tree_h);
+            if st.settings.sub_fixed {
+                // the fixed Sub Outliner: always there, the clicked
+                // element's operations load into it
                 ui.add_space(4.0);
                 divider(ui);
                 ui.add_space(6.0);
-                if st.settings.sub_fixed {
-                    // the fixed Sub Outliner: always there, the clicked
-                    // element's operations load into it
-                    let el = st.outline_element();
-                    sub_outliner_body(ui, st, el, SUB_FIXED_H, true);
-                    ui.add_space(4.0);
-                    divider(ui);
-                    ui.add_space(6.0);
-                }
+                let el = st.outline_element();
+                sub_outliner_body(ui, st, el, SUB_FIXED_H, true);
             }
-            let props_max = (total - tree_h - 40.0 - if st.settings.show_tree && st.settings.sub_fixed { SUB_FIXED_H + 50.0 } else { 0.0 }).max(160.0);
-            // an Area's Ui starts at last frame's size: without a minimum the scroll area never grows
-            egui::ScrollArea::vertical().id_salt("props-scroll").max_height(props_max).min_scrolled_height(props_max).auto_shrink([false, true]).show(ui, |ui| {
-                ui.set_width(inner_w);
-                if st.selection.is_empty() && !st.edge_sel.is_empty() {
-                    let n = st.edge_sel.len();
-                    ui.label(egui::RichText::new(if n > 1 { format!("{n} edges picked") } else { "Edge picked".to_string() }).font(semibold(14.0)).color(TEXT()));
-                    pop_note(ui);
-                } else if st.selection.is_empty() && !st.face_sel.is_empty() {
-                    let n = st.face_sel.len();
-                    ui.label(egui::RichText::new(if n > 1 { format!("{n} faces picked") } else { "Face picked".to_string() }).font(semibold(14.0)).color(TEXT()));
-                    pop_note(ui);
-                } else if st.selection.is_empty() && !st.vert_sel.is_empty() {
-                    let n = st.vert_sel.len();
-                    ui.label(egui::RichText::new(if n > 1 { format!("{n} vertices picked") } else { "Vertex picked".to_string() }).font(semibold(14.0)).color(TEXT()));
-                    let v = st.vert_sel[0];
-                    ui.label(egui::RichText::new(format!("X {}  Y {}  Z {} mm", fmt_mm(v.x as f32), fmt_mm(v.y as f32), fmt_mm(v.z as f32))).font(regular(12.0)).color(TEXT2()));
-                    pop_note(ui);
-                } else if st.selected_group().is_some() {
-                    group_properties(ui, st);
-                } else if st.single().is_some() {
-                    properties(ui, st);
-                } else if st.selected_pushes().len() > 1 {
-                    let n = st.selected_pushes().len();
-                    ui.label(egui::RichText::new(format!("{n} faces worked together")).font(semibold(14.0)).color(TEXT()));
-                    pop_note(ui);
-                } else if !st.selection.is_empty() {
-                    let ops = st.selection.iter().all(|id| st.doc.feature(*id).map(|f| !f.is_solid()).unwrap_or(false));
-                    ui.label(egui::RichText::new(format!("{} {} selected", st.selection.len(), if ops { "operations" } else { "shapes" })).font(semibold(14.0)).color(TEXT()));
-                    ui.label(egui::RichText::new("Move them with the arrows, or delete them (Del)").font(regular(12.0)).color(TEXT2()));
-                    if st.can_group() {
-                        ui.add_space(4.0);
-                        let w = ui.available_width();
-                        if secondary_btn(ui, "Group  ·  Ctrl + G", w).on_hover_text("These shapes in one group with its own transform, closed: a click takes them all").clicked() {
-                            st.group_selection();
-                        }
-                    }
-                } else {
-                    defaults(ui, st);
-                }
-            });
         });
     });
     if st.settings.show_tree && !st.settings.sub_fixed && !st.doc.features.is_empty() {
@@ -2697,8 +2797,22 @@ fn tree(ui: &mut Ui, st: &mut AppState, height: f32) {
     let n = st.doc.features.iter().filter(|f| f.is_solid()).count();
     ui.horizontal(|ui| {
         ui.set_height(26.0);
-        let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 2.0 * 28.0, 26.0), Sense::hover());
+        let scan_w = if cfg!(target_os = "ios") { 0.0 } else { 92.0 };
+        let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width() - 2.0 * 28.0 - scan_w, 26.0), Sense::hover());
         ui.painter().text(lr.left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, "SCENE", semibold(10.5), TEXT2());
+        // a scan to model on (Romain 24 nov., 6 h 18: "un bouton pour
+        // importer un scan (bouton de couleur)"): the system's Open dialog
+        if scan_w > 0.0 {
+            let (br, resp) = ui.allocate_exact_size(vec2(scan_w - 6.0, 22.0), Sense::click());
+            let c = Color32::from_rgb(0x4D, 0x8D, 0xFF);
+            ui.painter().rect_filled(br, 11.0, if resp.hovered() { c } else { c.gamma_multiply(0.85) });
+            ui.painter().text(br.center(), Align2::CENTER_CENTER, "Import scan", semibold(11.0), Color32::WHITE);
+            let tip = if st.doc.reference.is_some() { "Import a scan (.obj): it takes the place of the one there, as the reference to model on" } else { "Import a scan (.obj) as the reference to model on (or drop it on the window)" };
+            if resp.on_hover_text(tip).clicked() && !crate::files::pick_scan() {
+                st.toast(if crate::files::CAN_PICK { "The Open dialog is already open" } else { "Drop an .obj on the window to import it" }, false);
+            }
+            ui.add_space(6.0);
+        }
         ui.painter().text(lr.left_center() + vec2(52.0, 0.0), Align2::LEFT_CENTER, format!("{n} shape{}", if n == 1 { "" } else { "s" }), regular(11.5), pick(Color32::from_rgb(0x64, 0x6B, 0x75), Color32::from_rgb(0x8A, 0x90, 0x99)));
         ui.spacing_mut().item_spacing.x = 2.0;
         let one = st.single().map(|f| f.id);
@@ -2839,8 +2953,18 @@ fn group_rows(ui: &mut Ui, st: &mut AppState, ops_of: &dyn Fn(&AppState, Feature
         let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
         let mut job = egui::text::LayoutJob::single_section(g.name.clone(), egui::TextFormat::simple(if selected { semibold(13.0) } else { regular(13.0) }, name_color));
         job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-        let name_g = ui.painter().layout_job(job);
-        ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
+        let name_r = Rect::from_min_max(pos2(x0 + 20.0, r.min.y + 3.0), pos2(info_x - 4.0, r.max.y - 3.0));
+        match rename_in_row(ui, (1, g.id), name_r, &g.name) {
+            Some(Some(name)) => st.rename_group(g.id, &name),
+            Some(None) => {}
+            None => {
+                let name_g = ui.painter().layout_job(job);
+                ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
+            }
+        }
+        if resp.double_clicked() {
+            start_rename(ui, (1, g.id), &g.name);
+        }
         // closed or open, then the eye
         let lr = Rect::from_center_size(pos2(r.max.x - 42.0, r.center().y), vec2(15.0, 15.0));
         let lresp = ui.interact(lr.expand(5.0), Id::new(("group-lock", g.id)), Sense::click());
@@ -3077,8 +3201,22 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
     let max_w = (info_x - 8.0 - (x0 + 24.0)).max(20.0);
     let mut job = egui::text::LayoutJob::single_section(f.name.clone(), egui::TextFormat::simple(if selected { semibold(13.0) } else { regular(13.0) }, name_color));
     job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    let name_g = ui.painter().layout_job(job);
-    ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
+    let name_r = Rect::from_min_max(pos2(x0 + 20.0, r.min.y + 3.0), pos2(info_x - 4.0, r.max.y - 3.0));
+    match rename_in_row(ui, (0, f.id), name_r, &f.name) {
+        Some(Some(name)) => st.edit("Rename", |d| {
+            if let Some(x) = d.feature_mut(f.id) {
+                x.name = name.clone();
+            }
+        }),
+        Some(None) => {}
+        None => {
+            let name_g = ui.painter().layout_job(job);
+            ui.painter().galley(pos2(x0 + 24.0, r.center().y - name_g.size().y * 0.5), name_g, name_color);
+        }
+    }
+    if resp.double_clicked() {
+        start_rename(ui, (0, f.id), &f.name);
+    }
     let er = Rect::from_center_size(pos2(r.max.x - 18.0, r.center().y), vec2(16.0, 16.0));
     let eresp = ui.interact(er.expand(6.0), Id::new(("eye", f.id)), Sense::click());
     if is_op {
@@ -3128,6 +3266,50 @@ fn tree_row(ui: &mut Ui, st: &mut AppState, f: &Feature, ops: usize, focused: bo
             st.select(Some(f.id), add);
         }
     }
+}
+
+/// A row of the shape list renamed in place (Romain 24 nov.: the panel
+/// under the list is gone, its name field with it): a double-click starts
+/// it, Enter or a click away keeps the name, Esc drops it. `what`: 0 a
+/// feature, 1 a group.
+fn start_rename(ui: &Ui, what: (u8, FeatureId), name: &str) {
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(Id::new("tree-rename"), what);
+        d.insert_temp(Id::new("tree-rename-buf"), name.to_string());
+        d.insert_temp(Id::new("tree-rename-new"), true);
+    });
+}
+
+/// The rename field over a row's name while it is renamed: None when not,
+/// Some(None) while typing, Some(Some(name)) when kept.
+fn rename_in_row(ui: &mut Ui, what: (u8, FeatureId), r: Rect, old: &str) -> Option<Option<String>> {
+    let key = Id::new("tree-rename");
+    if ui.ctx().data(|d| d.get_temp::<(u8, FeatureId)>(key)) != Some(what) {
+        return None;
+    }
+    let bkey = Id::new("tree-rename-buf");
+    let mut buf = ui.ctx().data(|d| d.get_temp::<String>(bkey)).unwrap_or_else(|| old.to_string());
+    let resp = ui.put(r, egui::TextEdit::singleline(&mut buf).font(regular(13.0)).margin(vec2(4.0, 2.0)));
+    let first = ui.ctx().data_mut(|d| d.remove_temp::<bool>(Id::new("tree-rename-new"))).unwrap_or(false);
+    if first {
+        resp.request_focus();
+        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
+            let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(buf.chars().count()));
+            state.cursor.set_char_range(Some(all));
+            state.store(ui.ctx(), resp.id);
+        }
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(bkey, buf.clone()));
+    if !first && !resp.has_focus() {
+        ui.ctx().data_mut(|d| {
+            d.remove::<(u8, FeatureId)>(key);
+            d.remove::<String>(bkey);
+        });
+        let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        let name = buf.trim().to_string();
+        return Some((!esc && !name.is_empty() && name != old).then_some(name));
+    }
+    Some(None)
 }
 
 /// The outliner's second column, beside the panel: the operations made on
@@ -3239,14 +3421,6 @@ fn components_column(ctx: &egui::Context, st: &mut AppState, at: egui::Pos2, hei
     });
 }
 
-/// Nothing selected: the settings are in the Settings window now (the gear
-/// at the top right).
-fn defaults(ui: &mut Ui, st: &mut AppState) {
-    section(ui, "Settings");
-    if secondary_btn(ui, "Open the settings", ui.available_width()).on_hover_text("Theme, interface size, panels, snapping: the gear at the top right").clicked() {
-        st.settings_open = true;
-    }
-}
 
 /// The Settings window, under its gear at the top right: the theme, the
 /// interface's size, the panels, the view, snapping, selection.
@@ -3263,6 +3437,23 @@ fn settings_window(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
     }
     let btn = ctx.data(|d| d.get_temp::<Rect>(Id::new("settings-btn"))).unwrap_or(Rect::from_min_size(pos2(screen.max.x - 60.0, screen.min.y + EDGE), vec2(28.0, 28.0)));
     let at = pos2(btn.max.x + 6.0, btn.max.y + 12.0);
+    // while the interface's size is dragged, the window itself keeps the
+    // size and place it had at the press (Romain 24 nov., 6 h 25: "pendant
+    // que l'utilisateur slide lui n'est pas affecté par le changement"): its
+    // layer scaled back by the zoom then / the zoom now, round its corner as
+    // it was on screen; the input goes through the same transform, so the
+    // slider reads the pointer as if nothing changed
+    let key = Id::new("ui-scale-drag");
+    let layer = egui::LayerId::new(Order::Foreground, Id::new("settings-pop"));
+    let zoom = ctx.zoom_factor();
+    match ctx.data(|d| d.get_temp::<(f32, f32, f32)>(key)) {
+        Some((z0, x0, y0)) if st.ui_scale_edit.is_some() => {
+            let s = z0 / zoom;
+            let then = vec2(x0, y0) * z0 / zoom;
+            ctx.set_transform_layer(layer, egui::emath::TSTransform::new(then - at.to_vec2() * s, s));
+        }
+        _ => ctx.set_transform_layer(layer, egui::emath::TSTransform::IDENTITY),
+    }
     let area = egui::Area::new(Id::new("settings-pop")).order(Order::Foreground).fade_in(false).pivot(Align2::RIGHT_TOP).fixed_pos(at).show(ctx, |ui| {
         op_island().show(ui, |ui| {
             set_op_style(ui.ctx(), true);
@@ -3283,29 +3474,19 @@ fn settings_window(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 st.settings.light = v;
                 st.save_settings();
             }
-            // while dragged, the value follows the pointer's travel in
-            // pixels from the press (the slider itself grows and moves with
-            // the interface, so its own reading would chase the pointer)
             let mut v = st.ui_scale_edit.unwrap_or(st.settings.ui_scale * 100.0);
-            let track = ui.available_width();
+            let top = ui.cursor().top();
             let (ch, _) = slider_row(ui, "Interface size", &mut v, 70.0..=160.0, 5.0, "%");
-            let zoom = ui.ctx().zoom_factor();
-            let px = ui.ctx().input(|i| i.pointer.latest_pos()).map(|p| p.x * zoom);
-            let key = Id::new("ui-scale-drag");
-            let drag = ui.ctx().data(|d| d.get_temp::<(f32, f32, f32)>(key));
+            // its band (the capture harness drags it)
+            let band = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
+            ui.ctx().data_mut(|d| d.insert_temp(Id::new("ui-scale-band"), band));
             let down = ui.ctx().input(|i| i.pointer.primary_down());
-            let new = match (drag, px) {
-                (Some((v0, x0, w)), Some(x)) if down => Some(v0 + (x - x0) / w.max(1.0) * 90.0),
-                (None, Some(x)) if ch && down => {
-                    ui.ctx().data_mut(|d| d.insert_temp(key, (v, x, track * zoom)));
-                    Some(v)
+            if ch {
+                if down && st.ui_scale_edit.is_none() {
+                    ui.ctx().data_mut(|d| d.insert_temp(key, (zoom, at.x, at.y)));
                 }
-                _ if ch => Some(v),
-                _ => None,
-            };
-            if let Some(v) = new {
                 let v = ((v / 5.0).round() * 5.0).clamp(70.0, 160.0);
-                st.ui_scale_edit = Some(v);
+                st.ui_scale_edit = down.then_some(v);
                 st.settings.ui_scale = v / 100.0;
                 if !down {
                     st.save_settings();
@@ -3407,226 +3588,7 @@ fn feature_edit(st: &mut AppState, id: FeatureId, label: &str, started: bool, f:
     });
 }
 
-/// The selected group in the panel: its name, closed or open, and its
-/// transform properties (Maya: "il y a des propriétés de transform"):
-/// position (its pivot), rotation, scale. Changing them moves, turns or
-/// scales its shapes.
-fn group_properties(ui: &mut Ui, st: &mut AppState) {
-    let Some(g) = st.selected_group().cloned() else { return };
-    let id = g.id;
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = 4.0;
-        ui.label(egui::RichText::new("Selection").font(regular(12.0)).color(TEXT2()));
-        ui.horizontal(|ui| {
-            let buf = Id::new("group-rename");
-            if st.renaming {
-                let mut name = ui.data(|d| d.get_temp::<String>(buf)).unwrap_or_else(|| g.name.clone());
-                let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0).font(semibold(15.0)));
-                ui.data_mut(|d| d.insert_temp(buf, name.clone()));
-                if r.lost_focus() {
-                    if !name.trim().is_empty() {
-                        st.rename_group(id, name.trim());
-                    }
-                    st.renaming = false;
-                    ui.data_mut(|d| d.remove::<String>(buf));
-                } else if !r.has_focus() {
-                    r.request_focus();
-                }
-            } else {
-                let r = ui.add(egui::Label::new(egui::RichText::new(&g.name).font(semibold(15.0)).color(TEXT())).sense(Sense::click()).truncate());
-                if r.on_hover_text("Double-click to rename").double_clicked() {
-                    st.renaming = true;
-                }
-            }
-            chip_label(ui, "Group", RAISED(), LABEL());
-            if g.open {
-                chip_label(ui, "Open", accent_bg(), accent());
-            } else {
-                chip_label(ui, "Closed", RAISED(), LABEL());
-            }
-        });
-    });
-    let shown = g.members.iter().any(|m| st.doc.feature(*m).is_some_and(|f| f.visible));
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        if icon_btn(ui, if g.open { Icon::Unlock } else { Icon::Lock }, g.open, if g.open { "Open: its shapes are picked one by one. Click: close it" } else { "Closed: a click takes the whole group. Click: open it" }, 30.0).clicked() {
-            st.set_group_open(id, !g.open);
-        }
-        if icon_btn(ui, Icon::Duplicate, false, "Duplicate (Ctrl+D): a copy of the group", 30.0).clicked() {
-            st.duplicate_selected();
-        }
-        if icon_btn(ui, Icon::Align, st.tool == Tool::Align, "Align (Alt+A): then click the shape to align to", 30.0).clicked() {
-            st.begin_align();
-        }
-        if icon_btn(ui, if shown { Icon::Eye } else { Icon::EyeOff }, false, "Show / hide its shapes", 30.0).clicked() {
-            st.toggle_group_visible(id);
-        }
-        if icon_btn(ui, Icon::Frame, false, "Frame", 30.0).clicked() {
-            st.frame_selection();
-        }
-        if icon_btn(ui, Icon::Trash, false, "Delete the group and its shapes", 30.0).clicked() {
-            st.delete_selected();
-        }
-    });
-    let Some(g) = st.selected_group().cloned() else { return };
-    let w = ui.available_width();
-    if secondary_btn(ui, "Ungroup  ·  Ctrl + Shift + G", w).on_hover_text("The group goes, its shapes stay where they are").clicked() {
-        st.ungroup(id);
-        return;
-    }
-    divider(ui);
-    let any_down = ui.input(|i| i.pointer.any_down());
-    if fold_section(ui, "Transform", "group-transform-open") {
-        let colors = [AXIS_X, AXIS_Y, AXIS_Z];
-        let (ex, ey, ez) = g.rot.to_euler(EulerRot::XYZ);
-        let mut e = [ex.to_degrees() as f32, ey.to_degrees() as f32, ez.to_degrees() as f32];
-        let row = |ui: &mut Ui, title: &str| {
-            ui.label(egui::RichText::new(title).font(regular(11.0)).color(TEXT2()));
-        };
-        row(ui, "Position");
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            for k in 0..3 {
-                let mut v = g.origin[k] as f32;
-                let r = axis_field(ui, ["X", "Y", "Z"][k], colors[k], &mut v, "");
-                if r.changed() {
-                    let mut o = g.origin;
-                    o[k] = v as f64;
-                    st.set_group_transform(id, o, g.rot, g.scale, "Move group", r.drag_started());
-                }
-            }
-        });
-        row(ui, "Rotation");
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            for k in 0..3 {
-                let r = axis_field(ui, ["X", "Y", "Z"][k], colors[k], &mut e[k], "°");
-                if r.changed() {
-                    let q = DQuat::from_euler(EulerRot::XYZ, (e[0] as f64).to_radians(), (e[1] as f64).to_radians(), (e[2] as f64).to_radians());
-                    st.set_group_transform(id, g.origin, q, g.scale, "Rotate group", r.drag_started());
-                }
-            }
-        });
-        row(ui, "Scale");
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            for k in 0..3 {
-                let mut v = g.scale[k] as f32;
-                let (lr, _) = ui.allocate_exact_size(vec2(18.0, 22.0), Sense::hover());
-                ui.painter().text(lr.center(), Align2::CENTER_CENTER, ["X", "Y", "Z"][k], semibold(12.0), colors[k]);
-                let r = value_field(ui, &mut v, 0.01..=1000.0, 0.01, "", 66.0);
-                if r.changed() {
-                    let mut sc = g.scale;
-                    sc[k] = (v as f64).max(0.01);
-                    st.set_group_transform(id, g.origin, g.rot, sc, "Scale group", r.drag_started());
-                }
-            }
-        });
-        ui.label(egui::RichText::new("Position: the group's pivot · D + click in the view puts it on a point").font(regular(11.0)).color(TEXT2()));
-        let w = ui.available_width();
-        if secondary_btn(ui, "Centre pivot", w).on_hover_text("The pivot back at the middle of its shapes (they do not move)").clicked() {
-            st.put_group_pivot(id, None);
-        }
-    }
-    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
-        st.end_live();
-    }
-    divider(ui);
-    let names: Vec<String> = g.members.iter().filter_map(|m| st.doc.feature(*m)).map(|f| f.name.clone()).collect();
-    ui.label(egui::RichText::new(format!("{} shape{}: {}", names.len(), if names.len() > 1 { "s" } else { "" }, names.join(", "))).font(regular(11.5)).color(TEXT2()));
-}
 
-fn properties(ui: &mut Ui, st: &mut AppState) {
-    let Some(f) = st.single().cloned() else { return };
-    let id = f.id;
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = 4.0;
-        ui.label(egui::RichText::new("Selection").font(regular(12.0)).color(TEXT2()));
-        ui.horizontal(|ui| {
-            if st.renaming {
-                let mut name = f.name.clone();
-                let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0).font(semibold(15.0)));
-                if r.changed() {
-                    st.edit("Rename", |d| {
-                        if let Some(x) = d.feature_mut(id) {
-                            x.name = name.clone();
-                        }
-                    });
-                }
-                if r.lost_focus() {
-                    st.renaming = false;
-                }
-            } else {
-                let r = ui.add(egui::Label::new(egui::RichText::new(&f.name).font(semibold(15.0)).color(TEXT())).sense(Sense::click()).truncate());
-                if r.on_hover_text("Double-click to rename").double_clicked() {
-                    st.renaming = true;
-                }
-            }
-            chip_label(ui, f.kind_label(), RAISED(), LABEL());
-            if f.is_solid() && !f.is_path() {
-                let c = op_color(f.op);
-                chip_label(ui, f.op.label(), tint(c, 0.16), c);
-            }
-        });
-    });
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        if f.is_solid() && icon_btn(ui, Icon::Duplicate, false, "Duplicate", 30.0).clicked() {
-            st.duplicate_selected();
-        }
-        if icon_btn(ui, Icon::Align, st.tool == Tool::Align, "Align (Alt+A): then click the shape to align to", 30.0).clicked() {
-            st.begin_align();
-        }
-        if f.is_solid() && icon_btn(ui, Icon::Mirror, st.target_sym().is_some(), "Symmetry (Alt+M): this shape symmetric across its own X, its operations on both sides", 30.0).clicked() {
-            st.mirror_selected();
-        }
-        if f.is_solid() && !f.is_path() && icon_btn(ui, Icon::Array, false, "Array (Ctrl+Shift+D): copies in a line, in rows or round an axis, with their operations", 30.0).clicked() {
-            st.add_array();
-        }
-        if f.is_solid() && !f.is_path() && icon_btn(ui, Icon::Shell, false, "Shell (Alt+S): the part hollowed, 2 mm walls (Face mode: the faces picked left open)", 30.0).clicked() {
-            st.add_shell();
-        }
-        if f.is_solid() && !f.is_path() && icon_btn(ui, Icon::Freeze, false, "Delete History (Alt+Shift+D): this shape made one solid with its operations, which go", 30.0).clicked() {
-            st.delete_history();
-        }
-        if icon_btn(ui, if f.visible { Icon::Eye } else { Icon::EyeOff }, false, "Hide", 30.0).clicked() {
-            st.toggle_visible(id);
-        }
-        if icon_btn(ui, Icon::Frame, false, "Frame", 30.0).clicked() {
-            st.frame_selection();
-        }
-        if icon_btn(ui, Icon::Trash, false, "Delete", 30.0).clicked() {
-            st.delete_selected();
-        }
-    });
-    if st.single().is_none() {
-        return;
-    }
-    divider(ui);
-    // a step or a path: its settings are in the window by it in the view
-    if !f.is_solid() || f.is_path() {
-        pop_note(ui);
-        if f.is_path() {
-            let any_down = ui.input(|i| i.pointer.any_down());
-            section(ui, "Position and rotation");
-            position_rows(ui, st, &f);
-            if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
-                st.end_live();
-            }
-        }
-        return;
-    }
-
-    // its sizes are in the window by it in the view; Add / Carve in the top
-    // island, its material in the materials island (Romain 19 nov.)
-    let any_down = ui.input(|i| i.pointer.any_down());
-    if fold_section(ui, "Position and rotation", "position-open") {
-        position_rows(ui, st, &f);
-    }
-    if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
-        st.end_live();
-    }
-}
 
 /// The selected shape's sizes (the operation window).
 fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
@@ -3701,24 +3663,6 @@ fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
     }
 }
 
-/// A section title with a fold arrow; open by default, kept per session.
-/// True when open.
-fn fold_section(ui: &mut Ui, title: &str, key: &str) -> bool {
-    let id = Id::new(key);
-    let open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
-    ui.add_space(4.0);
-    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
-    let p = ui.painter();
-    if resp.hovered() {
-        p.rect_filled(r, 6.0, RAISED());
-    }
-    icons::paint(p, Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(11.0, 11.0)), if open { Icon::Chevron } else { Icon::ChevronRight }, TEXT2());
-    p.text(pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, title, semibold(12.0), TEXT2());
-    if resp.clicked() {
-        ui.data_mut(|d| d.insert_temp(id, !open));
-    }
-    open
-}
 
 /// A curve of the Curves set: its settings, as 3ds Max's Parameters
 /// rollout (a Rectangle's width, length and corner radius, a Circle's

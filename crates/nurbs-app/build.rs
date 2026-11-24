@@ -1,5 +1,6 @@
 //! Version shown in the window title: branch, commit and commit date, read
-//! from git at build time (empty when built outside a git checkout).
+//! from git at build time (empty when built outside a git checkout). On
+//! Windows, the app icon (`assets/forme-icon.ico`) goes into the .exe.
 
 use std::process::Command;
 
@@ -21,6 +22,17 @@ fn main() {
         }
     }
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=assets/forme-icon.ico");
+    // the .exe's icon (Explorer, taskbar, shortcuts): never fails the build
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("assets/forme-icon.ico");
+        res.set("ProductName", "Forme NURBS");
+        res.set("FileDescription", "Forme NURBS");
+        if let Err(e) = res.compile() {
+            println!("cargo:warning=app icon not embedded in the .exe: {e}");
+        }
+    }
     let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
     let branch = branch.strip_prefix("claude/").unwrap_or(&branch);
     let commit = git(&["rev-parse", "--short=7", "HEAD"]).unwrap_or_default();

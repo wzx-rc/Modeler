@@ -60,6 +60,10 @@ pub fn run(ctx: &egui::Context, st: &mut AppState) {
     if let Some(p) = dropped.iter().find(|p| p.extension().map(|e| e.eq_ignore_ascii_case("obj")).unwrap_or(false)) {
         st.import_reference(&p.to_string_lossy());
     }
+    // an .obj chosen with the scene's Import scan button
+    if let Some(p) = files::picked_scan() {
+        st.import_reference(&p);
+    }
     viewport::show(ctx, st);
     ui::show(ctx, st);
     // the camera on its way: the next frame soon

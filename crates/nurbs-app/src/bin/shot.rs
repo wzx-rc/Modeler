@@ -1825,6 +1825,31 @@ fn main() {
         h.steps(3);
         eprintln!("  settings open: {}", h.st.settings_open);
         h.shot("zero-settings-1-window");
+        // the Interface size dragged as a hand would (the pointer's place on
+        // the screen moves in pixels; the window keeps its size meanwhile)
+        if let Some(band) = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("ui-scale-band"))) {
+            let z0 = h.ctx.zoom_factor();
+            let w = band.width();
+            // the knob: 100 % of 70 to 160 along the track
+            let p0 = Pos2::new(band.left() + w * (100.0 - 70.0) / 90.0, band.bottom() - 5.0);
+            let px0 = p0.to_vec2() * z0;
+            h.press(p0, true);
+            for i in 1..=12 {
+                let px = px0 + egui::vec2(w * z0 * 0.4 * i as f32 / 12.0, 0.0);
+                // the zoom the next frame takes (the harness sets it first)
+                let z = h.st.settings.ui_scale.clamp(0.7, 1.6);
+                h.move_to((px / z).to_pos2());
+                if i == 6 {
+                    h.shot("zero-settings-2a-dragging");
+                }
+                eprintln!("  drag {i}: {:.0} %, window at {:?}", h.st.settings.ui_scale * 100.0, h.ctx.memory(|m| m.area_rect(egui::Id::new("settings-pop"))).map(|r| r.min));
+            }
+            let z = h.st.settings.ui_scale.clamp(0.7, 1.6);
+            h.press(((px0 + egui::vec2(w * z0 * 0.4, 0.0)) / z).to_pos2(), false);
+            h.steps(4);
+            eprintln!("  let go: {:.0} %", h.st.settings.ui_scale * 100.0);
+            h.shot("zero-settings-2b-let-go");
+        }
         h.st.settings.light = true;
         h.st.settings.ui_scale = 1.25;
         h.steps(4);
@@ -1961,6 +1986,73 @@ fn main() {
         h.shot("zero-multi-5-edges-pulled");
     }
 
+    if want("panels") {
+        // Romain 24 nov., 6 h 18: the shape list alone, Q W E R in the top
+        // bar, the Transform Values under W / E / R (right click or held),
+        // the view ball a sphere, Import scan in the scene list
+        let mut d = Doc::default();
+        let a = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let b = d.add(Op::Add, Prim::Cylinder { radius: 8.0, height: 30.0 }, DVec3::new(40.0, 0.0, 0.0), DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.st.settings.nav = true;
+        h.settle();
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::Num4);
+        h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
+        h.steps(3);
+        h.shot("zero-panels-1-selected");
+        let btn = |h: &Harness, i: usize| h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(("gizmo-btn", i)))).map(|r| r.center());
+        if let Some(w) = btn(&h, 1) {
+            h.rpress(w, true);
+            h.rpress(w, false);
+            h.steps(3);
+        }
+        eprintln!("  right click on W: values open {}", h.ctx.data(|d| d.get_temp::<(u8, egui::Rect)>(egui::Id::new("xform-pop"))).is_some());
+        h.shot("zero-panels-2-move-values");
+        h.key(egui::Key::Escape);
+        h.steps(2);
+        // held on E
+        if let Some(e) = btn(&h, 2) {
+            h.press(e, true);
+            for _ in 0..35 {
+                h.step();
+            }
+            h.press(e, false);
+            h.steps(3);
+        }
+        eprintln!("  held on E: gizmo {:?}, values open {}", h.st.gizmo, h.ctx.data(|d| d.get_temp::<(u8, egui::Rect)>(egui::Id::new("xform-pop"))).is_some());
+        h.shot("zero-panels-3-rotate-held");
+        h.key(egui::Key::Escape);
+        // a group: its own transform
+        h.st.selection = vec![a, b];
+        h.st.group_selection();
+        h.steps(3);
+        if let Some(r) = btn(&h, 3) {
+            h.rpress(r, true);
+            h.rpress(r, false);
+            h.steps(3);
+        }
+        h.shot("zero-panels-4-group-scale-values");
+        h.key(egui::Key::Escape);
+        h.st.ungroup(h.st.doc.groups[0].id);
+        h.steps(2);
+        // renamed in the list by a double-click
+        // past the double-click time of the clicks before
+        h.steps(30);
+        if let Some(p) = h.ctx.data(|d| d.get_temp::<Pos2>(egui::Id::new(("row", a)))) {
+            h.click(p);
+            h.click(p);
+            h.steps(2);
+            eprintln!("  renaming: {:?}", h.ctx.data(|d| d.get_temp::<(u8, u32)>(egui::Id::new("tree-rename"))));
+            h.type_text("Base");
+            eprintln!("  typed: {:?}", h.ctx.data(|d| d.get_temp::<String>(egui::Id::new("tree-rename-buf"))));
+            h.key(egui::Key::Enter);
+            h.steps(3);
+        }
+        eprintln!("  renamed: {:?}", h.st.doc.feature(a).map(|f| f.name.clone()));
+        h.shot("zero-panels-5-renamed");
+    }
+
     if want("history-off") {
         // History off (Romain 23 nov., 22 h 05: "mettre une option de
         // history en OFF"): an inset then an extrusion on a block, each
@@ -2000,6 +2092,37 @@ fn main() {
         wait(&mut h);
         eprintln!("  undo: {:?}", list(&h));
         h.shot("zero-history-off-3-undo");
+        // a plain cube scaled then turned with History off (Romain's journal,
+        // 24 nov., 5 h 17: each Rotate and Scale followed by "Undo")
+        let mut d = Doc::default();
+        let c = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Cube");
+        h.st.settings.history_off = true;
+        h.key(egui::Key::Escape);
+        h.key(egui::Key::Num4);
+        h.st.selection = vec![c];
+        for (key, name) in [(egui::Key::R, "scale"), (egui::Key::E, "rotate")] {
+            h.key(key);
+            h.steps(2);
+            h.settle();
+            let Some(pivot) = h.st.pivot() else { continue };
+            let pivot = pivot.as_vec3();
+            let v = h.st.view();
+            let k = v.pixel_size_at((pivot - v.eye).length()) * 78.0;
+            let (a, b) = if name == "scale" {
+                (h.screen_of(pivot + Vec3::X * k * 0.6), h.screen_of(pivot + Vec3::X * k * 1.3))
+            } else {
+                (h.screen_of(pivot + Vec3::new(0.0, 0.0, 1.0) * k), h.screen_of(pivot + Vec3::new(0.7, 0.0, 0.7) * k))
+            };
+            h.move_to(a);
+            h.steps(2);
+            eprintln!("  {name}: handle {:?}", h.st.hot_handle);
+            h.drag(a, b, 10, true);
+            wait(&mut h);
+            let undo: Vec<String> = h.st.undo_labels();
+            eprintln!("  {name}: {:?}, undo {:?}, toast {:?}, prim {:?} rot {:?}", list(&h), undo, h.st.toast.as_ref().map(|t| t.text.clone()), h.st.doc.feature(c).map(|f| f.prim), h.st.doc.feature(c).map(|f| f.rot));
+        }
+        h.shot("zero-history-off-4-scaled-turned");
     }
 
     if want("normal") {
