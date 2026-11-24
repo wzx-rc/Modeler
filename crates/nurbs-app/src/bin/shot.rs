@@ -2125,6 +2125,55 @@ fn main() {
         h.shot("zero-history-off-4-scaled-turned");
     }
 
+    if want("intersect") {
+        // Boolean Intersection and CARVE named SUB (Romain 24 nov., 5 h 45:
+        // "Il y avait pas un mode Boolean Intersection? Appelle SUB à la
+        // place de CARVE"): a block, a cylinder across it made Intersect;
+        // the top bar's three modes; then History off turned on with a block
+        // already inset: "Fold them" folds it
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let cy = d.add(Op::Add, Prim::Cylinder { radius: 12.0, height: 60.0 }, DVec3::new(-30.0, 10.0, 0.0), DQuat::from_rotation_z(-std::f64::consts::FRAC_PI_2));
+        h.reset(d, "Block");
+        h.shot("zero-intersect-1-added");
+        h.key(egui::Key::Num4);
+        h.st.selection = vec![cy];
+        h.steps(2);
+        // the top bar's INTERSECT segment, as a click would
+        h.st.set_ops(&[cy], Op::Intersect);
+        for _ in 0..4 {
+            h.settle();
+            h.steps(3);
+        }
+        let m = h.st.model.as_ref();
+        eprintln!("  intersect: faces {:?}, errors {:?}", m.map(|m| m.faces.len()), m.map(|m| m.errors.clone()));
+        h.shot("zero-intersect-2-intersect");
+        h.st.set_ops(&[cy], Op::Carve);
+        for _ in 0..4 {
+            h.settle();
+            h.steps(3);
+        }
+        h.shot("zero-intersect-3-sub");
+        // History off turned on with an inset made before
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        d.add_push(nurbs_kernel::doc::Push { face: nurbs_kernel::doc::FaceRef { tag: FaceTag { feature: b, sub: 2 }.pack(), at: DVec3::new(0.0, 20.0, 0.0) }, inset: 3.0, depth: -4.0 });
+        h.reset(d, "Block");
+        for _ in 0..3 {
+            h.settle();
+            h.steps(3);
+        }
+        h.st.settings.history_off = true;
+        eprintln!("  foldable: {:?}", h.st.foldable_elements());
+        h.st.fold_all_history();
+        for _ in 0..6 {
+            h.settle();
+            h.steps(3);
+        }
+        eprintln!("  folded: {:?}, toast {:?}", h.st.doc.features.iter().map(|f| format!("{}{}", f.name, if f.frozen.is_some() { " (one solid)" } else { "" })).collect::<Vec<_>>(), h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.shot("zero-intersect-4-folded");
+    }
+
     if want("normal") {
         // The move along the picked components' normals (Maya's Axis
         // Orientation Normal; Romain 23 nov., 22 h 05: "un transformTool

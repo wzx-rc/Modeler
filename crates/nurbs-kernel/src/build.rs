@@ -2874,14 +2874,22 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         // the boolean
         let next = match (&stage.shape, f.op) {
             (None, Op::Add) => Some(Ok(t)),
-            (None, Op::Carve) => None,
+            (None, Op::Carve | Op::Intersect) => None,
             (Some(_), _) if skipped("boolean") => Some(Err("skipped, it crashed the kernel".to_string())),
             (Some(acc), op) => {
                 mark(&step("boolean", f));
                 model.booleans += 1;
                 // (where the tool reaches: a Carve's box is not in the result's)
                 boxes_add(&mut stage.ext, &t.lump_boxes());
-                Some(if op == Op::Add { acc.fuse(&t) } else { acc.cut(&t) }.map(Rc::new))
+                Some(
+                    match op {
+                        Op::Add => acc.fuse(&t),
+                        Op::Carve => acc.cut(&t),
+                        // a part all outside it: nothing left, said so
+                        Op::Intersect => acc.common(&t).and_then(|s| if s.lump_boxes().is_empty() { Err("the part and the shape share nothing".to_string()) } else { Ok(s) }),
+                    }
+                    .map(Rc::new),
+                )
             }
         };
         let first = stage.shape.is_none();
@@ -2897,7 +2905,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                     stage.join_faces(1);
                 }
             }
-            Some(Err(e)) => stage.errors.push(format!("{}: {} failed ({e})", f.name, if f.op == Op::Add { "union" } else { "subtraction" })),
+            Some(Err(e)) => stage.errors.push(format!("{}: {} failed ({e})", f.name, match f.op { Op::Add => "union", Op::Carve => "subtraction", Op::Intersect => "intersection" })),
             None => {}
         }
         keep(cache, key, &mut stage);
@@ -3288,7 +3296,10 @@ fn islands_upto<'a>(doc: &'a Doc, feats: &[&'a Feature], upto: usize, global: &[
 fn build_islands<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cache, model: &mut Model, used_tools: &mut Vec<u64>, used_stages: &mut Vec<u64>) -> Stage {
     let n = feats.len();
     // FORME_ONE_CHAIN=1: one history, as before (to compare)
-    if n < 2 || ONE_CHAIN.with(|c| c.get()) || std::env::var_os("FORME_ONE_CHAIN").is_some() {
+    // an Intersect takes away all of the part outside its shape, whatever
+    // island it is in: one history
+    let intersect = feats.iter().any(|f| f.is_solid() && f.op == Op::Intersect);
+    if n < 2 || intersect || ONE_CHAIN.with(|c| c.get()) || std::env::var_os("FORME_ONE_CHAIN").is_some() {
         return run(doc, feats, skip, cache, model, used_tools, used_stages);
     }
     let global: Vec<bool> = feats.iter().map(|f| f.mirror.is_some()).collect();
@@ -3569,7 +3580,7 @@ fn drag_order(doc: &Doc, last: &[(FeatureId, u64)]) -> Option<Doc> {
 /// Where a feature can change the part, in world space (`drag_order`):
 /// None, anywhere (a Mirror, a Shell, what cannot be told).
 fn reach(doc: &Doc, f: &Feature, depth: u32) -> Option<(DVec3, DVec3)> {
-    if depth > 6 || f.mirror.is_some() || f.shell.is_some() {
+    if depth > 6 || f.mirror.is_some() || f.shell.is_some() || (f.is_solid() && f.op == Op::Intersect) {
         return None;
     }
     let grow = |(lo, hi): (DVec3, DVec3), d: f64| (lo - DVec3::splat(d), hi + DVec3::splat(d));
@@ -3624,7 +3635,7 @@ fn reach(doc: &Doc, f: &Feature, depth: u32) -> Option<(DVec3, DVec3)> {
 fn mirror_safe(doc: &Doc, f: &Feature, m: &Mirror, depth: u32) -> bool {
     let tol = 1e-6;
     let kept = |r: Option<(DVec3, DVec3)>| r.is_some_and(|(lo, hi)| m.side(lo).min(m.side(hi)) >= -tol);
-    if f.mirror.is_some() || f.shell.is_some() || f.one_side || f.bridge.is_some() || depth > 6 {
+    if f.mirror.is_some() || f.shell.is_some() || (f.is_solid() && f.op == Op::Intersect) || f.one_side || f.bridge.is_some() || depth > 6 {
         return false;
     }
     // a face's image across the plane, for a face of a plain shape centred
@@ -7748,6 +7759,35 @@ mod tests {
         let m = build(&d, true, false, &[], &mut Cache::default());
         assert!(m.errors.is_empty(), "{:?}", m.errors);
         assert!(m.faces.iter().any(|f| f.tag == Some(FaceTag { feature: p, sub: 1 }) && f.kind == SurfKind::Cylinder), "{:?}", m.faces.iter().map(|f| (f.tag, f.kind)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn intersect_keeps_what_is_shared() {
+        // Romain 24 nov., 6 h 45: "Il y avait pas un mode Boolean
+        // Intersection?". A 40 x 20 x 30 block and a cylinder of radius 10
+        // lying along X through it, its axis at mid-height: what both hold is
+        // the cylinder cut to the block's length; a block far away is gone
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let other = d.add(Op::Add, Prim::Box { x: 10.0, y: 10.0, z: 10.0 }, DVec3::new(100.0, 0.0, 0.0), DQuat::IDENTITY);
+        let c = d.add(Op::Intersect, Prim::Cylinder { radius: 10.0, height: 60.0 }, DVec3::new(-30.0, 10.0, 0.0), DQuat::from_rotation_z(-std::f64::consts::FRAC_PI_2));
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (lo, hi) = m.bounds().unwrap();
+        assert!((lo[0] + 20.0).abs() < 1e-3 && (hi[0] - 20.0).abs() < 1e-3 && lo[1].abs() < 0.05 && (hi[1] - 20.0).abs() < 0.05 && (hi[2] - 10.0).abs() < 0.05, "{lo:?} {hi:?}");
+        // the other block, far outside the cylinder, is gone
+        assert!(!m.faces.iter().any(|f| f.tag.is_some_and(|t| t.feature == other)));
+        let v = mesh_volume(&m);
+        let want = std::f64::consts::PI * 100.0 * 40.0;
+        assert!((v - want).abs() < want * 0.01, "{v} {want}");
+        // its faces: the cylinder's side, the block's ends
+        assert!(m.faces.iter().any(|f| f.tag == Some(FaceTag { feature: c, sub: 0 })));
+        assert!(m.faces.iter().any(|f| f.tag.is_some_and(|t| t.feature == b)));
+        // nothing shared: an error, the part as it was before
+        d.feature_mut(c).unwrap().origin = DVec3::new(-30.0, 10.0, 200.0);
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.iter().any(|e| e.contains("share nothing")), "{:?}", m.errors);
     }
 
     #[test]

@@ -573,6 +573,9 @@ pub enum ToastAct {
     MirrorSingle(FeatureId),
     /// The holes a Delete faces step left, filled (Fill hole).
     FillDeleted(FeatureId),
+    /// History just turned off: the shapes that still have operations
+    /// folded into one solid each (`fold_all_history`).
+    FoldAll,
 }
 
 /// One line of the debug journal (Romain, 20 nov. 6 h 15: "un Interactive
@@ -1259,7 +1262,7 @@ impl AppState {
         for f in self.doc.features.iter().filter(|f| ids.contains(&f.id)) {
             // a shape with no faces of its own on screen (a Carve, a curve)
             let shown = m.map(|m| m.faces.iter().any(|g| g.tag.map(|t| t.feature == f.id).unwrap_or(false))).unwrap_or(false);
-            if f.is_solid() && (!shown || f.op == Op::Carve) {
+            if f.is_solid() && (!shown || f.op != Op::Add) {
                 let (lo, hi) = f.bounds();
                 pts.push(lo.as_vec3());
                 pts.push(hi.as_vec3());
@@ -1834,6 +1837,45 @@ impl AppState {
         self.toast(&format!("Delete History: {} being made one solid…", names.join(", ")), false);
     }
 
+    /// The shapes History off can fold that still have operations, those
+    /// with an operation in error left out (kept to be mended).
+    pub fn foldable_elements(&self) -> Vec<FeatureId> {
+        let errs = self.fine_errors.clone().or_else(|| self.model.as_ref().map(|m| m.errors.clone())).unwrap_or_default();
+        let failing = |id: FeatureId| self.doc.feature(id).is_some_and(|f| errs.iter().any(|e| e.starts_with(&format!("{}:", f.name))));
+        let els: Vec<FeatureId> = self
+            .doc
+            .features
+            .iter()
+            .filter(|f| f.is_solid() && !f.is_path() && !f.is_sheet() && f.sym.is_none() && f.bake.is_empty() && f.visible && !f.suspended)
+            .map(|f| f.id)
+            .filter(|el| {
+                let ops = self.history_ops(*el);
+                !ops.is_empty() && !failing(*el) && !ops.iter().any(|id| failing(*id) || self.doc.feature(*id).is_some_and(|g| g.one_side || g.mirror.is_some() || g.array.is_some() || g.shell.is_some()))
+            })
+            .collect();
+        self.bake_plan(&els).into_iter().map(|p| p.0).collect()
+    }
+
+    /// History turned off by hand: what already has a history folded too,
+    /// only when asked (the toast's button), one undo step.
+    pub fn fold_all_history(&mut self) {
+        let els = self.foldable_elements();
+        let plan = self.bake_plan(&els);
+        if plan.is_empty() {
+            self.toast("Nothing left to fold", false);
+            return;
+        }
+        let n = plan.len();
+        self.edit("Fold history", |d| {
+            for (el, ops) in &plan {
+                if let Some(f) = d.feature_mut(*el) {
+                    f.bake = ops.clone();
+                }
+            }
+        });
+        self.toast(&format!("History off: {n} shape{} being made one solid each…", if n > 1 { "s" } else { "" }), false);
+    }
+
     /// History off (`Settings.history_off`): the shapes the operations of
     /// an edit just made work on, each folded into one solid with all its
     /// operations, as Delete History does, with no undo step of its own
@@ -2196,7 +2238,7 @@ impl AppState {
 
     fn carve_toast(&mut self, cut: &[String]) {
         if !cut.is_empty() {
-            self.toast(&format!("Carve moved after {} in the history: it cuts it now", cut.join(", ")), false);
+            self.toast(&format!("Sub moved after {} in the history: it cuts it now", cut.join(", ")), false);
         }
     }
 
@@ -2254,6 +2296,8 @@ impl AppState {
                 // from 1 mm above the top, down through the base
                 (prim, b.origin + b.axis() * (h + 1.0), b.rot * DQuat::from_rotation_x(std::f64::consts::PI), "through")
             }
+            // Intersect: centred on the base, so what they share shows
+            (Some(b), Op::Intersect) => (kind.default_prim(), b.origin, b.rot, "over"),
             (None, _) => (kind.default_prim(), DVec3::ZERO, DQuat::IDENTITY, "at the origin"),
         };
         let mat = self.material;
@@ -4472,6 +4516,11 @@ impl AppState {
         let mut out = std::collections::HashMap::new();
         for (id, x) in &all {
             let Some(f) = self.doc.feature(*id) else { continue };
+            // an Intersect's faces are what it shares with the part: moved,
+            // that changes; left to the kernel
+            if f.op == Op::Intersect {
+                continue;
+            }
             if f.op == Op::Carve {
                 let c = boxes(f, Some(x));
                 // (a shape it cuts must go with it: carved out of nothing

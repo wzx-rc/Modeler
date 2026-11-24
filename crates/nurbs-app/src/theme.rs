@@ -219,6 +219,10 @@ pub fn on_accent() -> Color32 {
 pub fn carve() -> Color32 {
     pick(Color32::from_rgb(0xF0, 0x8A, 0x3C), Color32::from_rgb(0xD9, 0x66, 0x1A))
 }
+/// Boolean Intersection (what the part and the shape share).
+pub fn intersect() -> Color32 {
+    pick(Color32::from_rgb(0xB0, 0x8C, 0xFF), Color32::from_rgb(0x84, 0x5C, 0xE6))
+}
 pub fn carve_light() -> Color32 {
     pick(Color32::from_rgb(0xFF, 0xB2, 0x7A), Color32::from_rgb(0xF2, 0x9A, 0x55))
 }

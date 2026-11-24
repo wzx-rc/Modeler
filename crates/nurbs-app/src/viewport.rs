@@ -10,7 +10,7 @@ use egui::{pos2, vec2, Align2, Color32, Id, Order, Painter, PointerButton, Pos2,
 use glam::DVec3;
 use nurbs_kernel::client::Status;
 use nurbs_kernel::doc::{CurveKind, PrimKind};
-use nurbs_kernel::{Op, Prim};
+use nurbs_kernel::Prim;
 
 fn p2(v: Pos2) -> [f32; 2] {
     [v.x, v.y]
@@ -1004,7 +1004,7 @@ fn draw_sketch(p: &Painter, st: &AppState) {
         return;
     }
     let path = st.tool == Tool::Create(PrimKind::Path);
-    let col = if path { PATH } else if st.mode == Op::Carve { carve() } else { accent() };
+    let col = if path { PATH } else { crate::ui::op_color(st.mode) };
     let hover = p.ctx().input(|i| i.pointer.hover_pos());
     let closing = hover.map(|h| st.sketch_on_first(p2(h))).unwrap_or(false);
     let ctrl = p.ctx().input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
@@ -1132,7 +1132,7 @@ fn draw_surface_outline(p: &Painter, st: &AppState, k: &crate::state::Sketch, pa
 fn draw_creation(p: &Painter, st: &AppState) {
     // a curve pulled into a solid: its height
     if let Some(cp) = &st.curve_pull {
-        let col = if st.doc.feature(cp.id).map(|f| f.op == Op::Carve).unwrap_or(false) { carve() } else { accent() };
+        let col = st.doc.feature(cp.id).map(|f| crate::ui::op_color(f.op)).unwrap_or_else(accent);
         let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
         chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &format!("H {} mm", fmt_mm(cp.h as f32)), col, col);
         return;
@@ -1183,7 +1183,7 @@ fn draw_creation(p: &Painter, st: &AppState) {
                     draw_snap(p, st, s);
                 }
                 if let Some(s) = world(st, q) {
-                    let col = if st.mode == Op::Carve { carve() } else { accent() };
+                    let col = crate::ui::op_color(st.mode);
                     if plane.scan.is_some() {
                         // the scan's plane there: a square on it, about 60
                         // points wide, and its normal, so its tilt shows
@@ -1211,7 +1211,7 @@ fn draw_creation(p: &Painter, st: &AppState) {
         return;
     };
     let Some(f) = st.doc.feature(c.id) else { return };
-    let col = if f.op == Op::Carve { carve() } else { accent() };
+    let col = crate::ui::op_color(f.op);
     let at = p.ctx().input(|i| i.pointer.hover_pos()).unwrap_or(pos2(0.0, 0.0));
     let txt = match (c.phase, f.prim) {
         // a curve drawn from its centre: its radius
@@ -1808,11 +1808,11 @@ fn hint_of(st: &AppState) -> String {
         (None, Tool::Slot) => "Drag along a slot of the scan (or a raised pill), from one end to the other · Release: read there, a Carve sketch (cut in) or an Add (raised) with round ends".into(),
         (None, Tool::Create(PrimKind::Cylinder)) if st.scan_round.is_some() => "Across the round part, to the other side of its rim · Release: the scan read there, a cylinder made as read · Esc: cancel".into(),
         (None, Tool::Create(PrimKind::Cylinder)) if st.reference.is_some() && st.ref_shown => {
-            format!("Drag on the scan, rim to rim: a hole or a boss read there · Drag off the scan: the base, on the ground or a face · Click: 20 mm, on the scan too · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(PrimKind::Cylinder))
+            format!("Drag on the scan, rim to rim: a hole or a boss read there · Drag off the scan: the base, on the ground or a face · Click: 20 mm, on the scan too · {}: one at once · Top bar: Add, Sub or Intersect", crate::ui::prim_key(PrimKind::Cylinder))
         }
-        (None, Tool::Create(PrimKind::Box)) if on_scan => "Drag: the base, on a face, the scan or the ground · On the scan, corner to corner across a block or a pocket: read when let go (else on to the height) · Click: 20 mm · B: one at once · Top bar: Add or Carve".into(),
-        (None, Tool::Create(k)) if on_scan => format!("Drag: the base, on a face, the scan's face under the pointer or the ground · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
-        (None, Tool::Create(k)) => format!("Drag: the base, on the ground or a face · Click: 20 mm · {}: one at once · Top bar: Add or Carve", crate::ui::prim_key(k)),
+        (None, Tool::Create(PrimKind::Box)) if on_scan => "Drag: the base, on a face, the scan or the ground · On the scan, corner to corner across a block or a pocket: read when let go (else on to the height) · Click: 20 mm · B: one at once · Top bar: Add, Sub or Intersect".into(),
+        (None, Tool::Create(k)) if on_scan => format!("Drag: the base, on a face, the scan's face under the pointer or the ground · Click: 20 mm · {}: one at once · Top bar: Add, Sub or Intersect", crate::ui::prim_key(k)),
+        (None, Tool::Create(k)) => format!("Drag: the base, on the ground or a face · Click: 20 mm · {}: one at once · Top bar: Add, Sub or Intersect", crate::ui::prim_key(k)),
         (None, Tool::Curve(k)) => {
             let how = if k.from_centre() { "from its centre out" } else { "corner to corner" };
             format!("Drag: a {} {how}, on a face or the ground · Click: 20 mm · Then its settings in its window · G: another", k.label().to_lowercase())
@@ -1821,7 +1821,7 @@ fn hint_of(st: &AppState) -> String {
             PushKind::Inset => "Click a face (flat or round): 2 mm, then drag its dot · Press and drag: sized at once".into(),
             PushKind::Extrude => "Press on a face and drag: out adds, in carves · A round face goes along its normals · On a closed curve: pulled into a solid".into(),
         },
-        (None, Tool::Select) if st.curve_pull.is_some() => "Move: its height along its normal (the other way goes into the face) · Click: keep it · Esc: drop it · Top bar: Add or Carve".into(),
+        (None, Tool::Select) if st.curve_pull.is_some() => "Move: its height along its normal (the other way goes into the face) · Click: keep it · Esc: drop it · Top bar: Add, Sub or Intersect".into(),
         (None, Tool::Select) if st.pivot_edit => "D held · Click: the pivot jumps onto the nearest corner, edge middle or circle centre (the moves then put it on the points) · Far from any: back to its own".into(),
         (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => "Arrows: move it · Centre square: on all three axes · D + click: pivot on a point · Window: X, Y, Z · Del: delete it".into(),
         (None, Tool::Knife) => {

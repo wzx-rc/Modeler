@@ -21,20 +21,27 @@ pub const VERSION: u32 = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     Add,
+    /// Shown as "Sub" (Romain 24 nov.: "Appelle SUB à la place de CARVE");
+    /// saved as "Carve".
     Carve,
+    /// What the part and the shape share (Romain 24 nov., 6 h 45: "Il y
+    /// avait pas un mode Boolean Intersection?"): everything outside the
+    /// shape goes.
+    Intersect,
 }
 
 impl Op {
     pub fn label(self) -> &'static str {
         match self {
             Op::Add => "Add",
-            Op::Carve => "Carve",
+            Op::Carve => "Sub",
+            Op::Intersect => "Intersect",
         }
     }
     pub fn other(self) -> Op {
         match self {
             Op::Add => Op::Carve,
-            Op::Carve => Op::Add,
+            Op::Carve | Op::Intersect => Op::Add,
         }
     }
 }

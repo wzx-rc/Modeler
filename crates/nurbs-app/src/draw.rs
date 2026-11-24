@@ -276,11 +276,11 @@ impl Drawer {
             let selected = st.selection.contains(&f.id);
             // an Object-mode drag shows the faces themselves (no cage)
             let moving = moving && st.dragged_shapes().is_none();
-            let show = creating || (selected && (moving || f.op == Op::Carve || !f.visible)) || (st.tool == Tool::Select && (st.hover_feature == Some(f.id) || st.hover_also.contains(&f.id)) && f.op == Op::Carve);
+            let show = creating || (selected && (moving || f.op != Op::Add || !f.visible)) || (st.tool == Tool::Select && (st.hover_feature == Some(f.id) || st.hover_also.contains(&f.id)) && f.op != Op::Add);
             if !show || (creating && !f.visible) {
                 continue;
             }
-            let c = if f.op == Op::Carve { carve } else { accent };
+            let c = match f.op { Op::Add => accent, Op::Carve => carve, Op::Intersect => theme::intersect() };
             let alpha = if selected || creating { 230 } else { 140 };
             let lines: Vec<Vec<[f32; 3]>> = st.shape_outline(f).iter().map(|l| l.iter().map(|p| p.as_vec3().to_array()).collect()).collect();
             line_vertices(&lines, [c.r(), c.g(), c.b(), alpha], 1.2, &mut over);

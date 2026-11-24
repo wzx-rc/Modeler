@@ -253,6 +253,7 @@ fn op_name(op: Op) -> &'static str {
     match op {
         Op::Add => "add",
         Op::Carve => "carve",
+        Op::Intersect => "intersect",
     }
 }
 
@@ -416,8 +417,9 @@ pub fn spec_of(f: &Feature) -> Value {
 fn apply_spec(spec: &Value, base: Option<&Feature>) -> Result<(Op, Prim, DVec3, DQuat, Option<Profile>), String> {
     let op = match spec.get("op").and_then(|v| v.as_str()) {
         Some("add") | Some("Add") => Op::Add,
-        Some("carve") | Some("Carve") | Some("cut") => Op::Carve,
-        Some(o) => return Err(format!("op {o}: add or carve")),
+        Some("carve") | Some("Carve") | Some("cut") | Some("sub") | Some("Sub") => Op::Carve,
+        Some("intersect") | Some("Intersect") | Some("common") => Op::Intersect,
+        Some(o) => return Err(format!("op {o}: add, carve or intersect")),
         None => base.map(|f| f.op).unwrap_or(Op::Add),
     };
     let kind = spec.get("kind").and_then(|v| v.as_str()).map(|s| s.to_ascii_lowercase()).or_else(|| {

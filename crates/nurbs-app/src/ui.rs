@@ -32,6 +32,7 @@ pub fn op_color(op: Op) -> Color32 {
     match op {
         Op::Add => accent(),
         Op::Carve => carve(),
+        Op::Intersect => crate::theme::intersect(),
     }
 }
 
@@ -39,6 +40,19 @@ pub fn op_color(op: Op) -> Color32 {
 pub fn paint_op_glyph(p: &egui::Painter, c: egui::Pos2, op: Op, color: Color32, size: f32) {
     let s = size * 0.5;
     let st = Stroke::new((size * 0.13).max(1.4), color);
+    if op == Op::Intersect {
+        // ∩: two legs joined by a half circle
+        let n = 12;
+        let mut q = vec![c + vec2(s, s), c + vec2(s, 0.0)];
+        for i in 1..n {
+            let a = std::f32::consts::PI * i as f32 / n as f32;
+            q.push(c + vec2(s * a.cos(), -s * a.sin()));
+        }
+        q.push(c + vec2(-s, 0.0));
+        q.push(c + vec2(-s, s));
+        p.add(egui::Shape::line(q, st));
+        return;
+    }
     p.line_segment([c - vec2(s, 0.0), c + vec2(s, 0.0)], st);
     if op == Op::Add {
         p.line_segment([c - vec2(0.0, s), c + vec2(0.0, s)], st);
@@ -244,10 +258,13 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 20.0, 28.0), Sense::hover());
                 ui.painter().galley(pos2(r.min.x + 10.0, r.center().y - g.size().y * 0.5), g, TEXT());
                 let shown = shown_op(st);
-                let (well, _) = ui.allocate_exact_size(vec2(2.0 * 62.0 + 6.0, 28.0), Sense::hover());
+                let segs = [(Op::Add, "ADD", 52.0), (Op::Carve, "SUB", 52.0), (Op::Intersect, "INTERSECT", 84.0)];
+                let (well, _) = ui.allocate_exact_size(vec2(segs.iter().map(|s| s.2).sum::<f32>() + 6.0, 28.0), Sense::hover());
                 ui.painter().rect(well, 14.0, WELL(), Stroke::new(1.0, DIVIDER()), StrokeKind::Inside);
-                for (i, op) in [Op::Add, Op::Carve].into_iter().enumerate() {
-                    let r = Rect::from_min_size(well.min + vec2(3.0 + i as f32 * 62.0, 3.0), vec2(62.0, 22.0));
+                let mut x = well.min.x + 3.0;
+                for (i, (op, text, w)) in segs.into_iter().enumerate() {
+                    let r = Rect::from_min_size(pos2(x, well.min.y + 3.0), vec2(w, 22.0));
+                    x += w;
                     let resp = ui.interact(r, Id::new(("isl-mode", i)), Sense::click());
                     let on = shown == op;
                     let c = op_color(op);
@@ -256,8 +273,8 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     } else if resp.hovered() {
                         ui.painter().rect_filled(r, 11.0, RAISED());
                     }
-                    ui.painter().text(r.center(), Align2::CENTER_CENTER, if op == Op::Add { "ADD" } else { "CARVE" }, mono(11.0), if on { on_accent() } else { TEXT2() });
-                    if resp.on_hover_text("New shapes add matter or carve it (X)").clicked() {
+                    ui.painter().text(r.center(), Align2::CENTER_CENTER, text, mono(11.0), if on { on_accent() } else { TEXT2() });
+                    if resp.on_hover_text("New shapes add matter, take it away (Sub), or keep only what they share with the part (Intersect) · X: Add / Sub").clicked() {
                         set_op_from_ui(st, op);
                     }
                 }
@@ -665,11 +682,11 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
             }
             divider(ui);
             let mode = st.mode;
-            let m = if mode == Op::Add { "ADD" } else { "CARVE" };
+            let m = mode.label().to_uppercase();
             for k in PRIMS {
                 let key = prim_key(k);
                 let on = st.tool == Tool::Create(k);
-                let tip = format!("{} ({key}) · again, or Shift + {key}: a 20 mm {} at once, on top of the selection (Carve: through it)", k.label(), k.label().to_lowercase());
+                let tip = format!("{} ({key}) · again, or Shift + {key}: a 20 mm {} at once, on top of the selection (Sub: through it; Intersect: over it)", k.label(), k.label().to_lowercase());
                 if card(ui, Some(prim_icon(k)), &k.label().to_uppercase(), &format!("{m} · {key}"), on, op_color(mode), &tip).clicked() {
                     st.arm(k);
                 }
@@ -2628,7 +2645,7 @@ fn slot_options(ui: &mut Ui, st: &mut AppState) {
             let tip = if c {
                 "Drag along a slot of the scan (or a raised pill), end to end: the scan is read there and the slot made as read"
             } else {
-                "Drag from one end of the slot to the other on a face or the ground, move to set its width, click, then its height (Add or Carve)"
+                "Drag from one end of the slot to the other on a face or the ground, move to set its width, click, then its height (Add or Sub)"
             };
             let enabled = !c || st.doc.reference.is_some();
             let resp = resp.on_hover_text(if enabled { tip } else { "No scan loaded: drop an .obj on the window first" });
@@ -3524,9 +3541,22 @@ fn settings_window(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 st.settings.history_off = !st.settings.history_off;
                 st.save_settings();
                 st.toast(if st.settings.history_off { "History off: each operation is folded into its shape once made" } else { "History on: operations are kept as steps" }, false);
+                // what was made before keeps its history unless asked
+                let n = if st.settings.history_off { st.foldable_elements().len() } else { 0 };
+                if n > 0 {
+                    st.toast(&format!("History off: from now on. {n} shape{} still {} operations", if n > 1 { "s" } else { "" }, if n > 1 { "have" } else { "has" }), false);
+                    if let Some(t) = st.toast.as_mut() {
+                        t.acts = vec![("Fold them".into(), crate::state::ToastAct::FoldAll)];
+                        t.until = t.until.max(st.now + 8.0);
+                    }
+                }
             }
             if st.settings.history_off {
-                ui.label(egui::RichText::new("Off: each operation, once made, is folded into its shape (Delete History), so a long scene stays quick to open and to rebuild. Ctrl + Z still takes it back.").font(regular(12.0)).color(LABEL()));
+                ui.label(egui::RichText::new("Off: each operation, once made, is folded into its shape (Delete History), so a long scene stays quick to open and to rebuild. Ctrl + Z still takes it back. What was made before, and an operation in error, keep their history.").font(regular(12.0)).color(LABEL()));
+                let n = st.foldable_elements().len();
+                if n > 0 && ui.button(egui::RichText::new(format!("Fold the {n} shape{} with a history", if n > 1 { "s" } else { "" })).font(regular(12.0))).clicked() {
+                    st.fold_all_history();
+                }
             }
             section(ui, "View");
             if toggle_row(ui, "Ground grid", st.settings.grid) {
@@ -3821,7 +3851,7 @@ fn combine_card(ui: &mut Ui, st: &mut AppState) {
         ui.label(egui::RichText::new("A loft's curves are all closed or all open").font(regular(12.0)).color(TEXT2()));
         return;
     }
-    let what = if closed == n { "a solid (Add / Carve: the top bar)" } else { "a surface" };
+    let what = if closed == n { "a solid (Add / Sub / Intersect: the top bar)" } else { "a surface" };
     let r = ui.add_sized(vec2(ui.available_width(), 30.0), egui::Button::new(egui::RichText::new("Loft").font(semibold(13.0)).color(on_accent())).fill(PATH).corner_radius(15.0));
     if r.on_hover_text(format!("A surface through the curves in the order picked: {what}")).clicked() {
         st.make_loft();
