@@ -34,6 +34,8 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
         draw_array(p, st);
         draw_knife(p, st, ctx.input(|i| i.pointer.hover_pos()));
         draw_brush(p, st, ctx.input(|i| i.pointer.latest_pos()));
+        draw_cable(p, st, ctx.input(|i| i.pointer.hover_pos()));
+        draw_place(p, st);
         if let (Some(g), Some(h)) = (&st.round_drag, ctx.input(|i| i.pointer.latest_pos())) {
             if g.size > 1e-9 {
                 let label = if g.chamfer { "Chamfer" } else { "Fillet" };
@@ -605,6 +607,37 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
             }
         }
         Tool::Align | Tool::ShellPick => {}
+        Tool::Cable => {
+            // points clicked on the faces; a double-click, a right click
+            // or Enter makes the cable (`cable.rs`)
+            if resp.double_clicked_by(PointerButton::Primary) {
+                if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                    st.cable_click(p2(p));
+                }
+                st.cable_finish();
+            } else if resp.clicked_by(PointerButton::Primary) {
+                if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                    st.cable_click(p2(p));
+                }
+            } else if resp.clicked_by(PointerButton::Secondary) {
+                if st.cable_draw.as_ref().map(|c| c.len() >= 2).unwrap_or(false) {
+                    st.cable_finish();
+                } else {
+                    st.select_tool();
+                }
+            }
+        }
+        Tool::Place => {
+            // a Library sample put on the face under the pointer (`library.rs`)
+            st.place_hover(hover.map(p2));
+            if resp.clicked_by(PointerButton::Primary) {
+                if let Some(p) = resp.interact_pointer_pos().or(hover) {
+                    st.place_click(p2(p));
+                }
+            } else if resp.clicked_by(PointerButton::Secondary) {
+                st.select_tool();
+            }
+        }
         Tool::Form => {
             // a brush stroke on a form (`forms.rs`)
             if st.sculpt.is_some() {
@@ -1358,6 +1391,78 @@ fn draw_vertices(p: &Painter, st: &AppState) {
     }
 }
 
+/// The cable being drawn: its curve through its points and the pointer's,
+/// its points as dots.
+fn draw_cable(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
+    if st.tool != Tool::Cable {
+        return;
+    }
+    let spine = st.cable_preview(pointer.map(p2));
+    let pts: Vec<Pos2> = spine.iter().filter_map(|q| world(st, *q)).collect();
+    if pts.len() >= 2 {
+        let px = spine.first().map(|q| st.mm_per_point(*q)).unwrap_or(0.1).max(1e-6);
+        let w = ((st.cable.radius * 2.0 / px) as f32).clamp(1.5, 24.0);
+        p.add(Shape::line(pts.clone(), Stroke::new(w + 2.0, Color32::from_rgba_unmultiplied(10, 12, 16, 120))));
+        p.add(Shape::line(pts, Stroke::new(w, tint(CABLE, 0.75))));
+    }
+    for q in st.cable_draw.iter().flatten() {
+        if let Some(c) = world(st, *q) {
+            p.circle(c, 3.0, CABLE, Stroke::new(1.0, Color32::from_rgb(20, 22, 26)));
+        }
+    }
+    if let Some(at) = pointer {
+        let n = st.cable_draw.as_ref().map(|c| c.len()).unwrap_or(0);
+        let txt = format!("Cable · Ø {} mm · {n} point{}", fmt_mm((st.cable.radius * 2.0) as f32), if n == 1 { "" } else { "s" });
+        chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, CABLE, CABLE);
+    }
+}
+
+/// A Library sample where a click would put it: its faces shaded, its
+/// edges, the point it sits on and its normal.
+fn draw_place(p: &Painter, st: &AppState) {
+    if st.tool != Tool::Place {
+        return;
+    }
+    let Some((tris, edges, spot)) = st.place_preview() else { return };
+    let v = st.view();
+    let (fwd, right, up) = v.basis();
+    let light = (-fwd + up * 0.6 + right * 0.3).normalize();
+    let mut ts: Vec<(f32, [Pos2; 3], f32)> = vec![];
+    for t in &tris {
+        let (Some(a), Some(b), Some(c)) = (world(st, t[0].as_dvec3()), world(st, t[1].as_dvec3()), world(st, t[2].as_dvec3())) else { continue };
+        let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+        let n = if n.dot(-fwd) < 0.0 { -n } else { n };
+        let shade = 0.35 + 0.65 * n.dot(light).max(0.0);
+        let d = ((t[0] + t[1] + t[2]) / 3.0 - v.eye).length();
+        ts.push((d, [a, b, c], shade));
+    }
+    ts.sort_by(|x, y| y.0.total_cmp(&x.0));
+    let mut mesh = egui::Mesh::default();
+    for (_, q, shade) in &ts {
+        let k = (*shade * 235.0) as u8;
+        let col = Color32::from_rgba_unmultiplied(k, k.saturating_add(4), k.saturating_add(10), 200);
+        let i = mesh.vertices.len() as u32;
+        for v in q {
+            mesh.colored_vertex(*v, col);
+        }
+        mesh.add_triangle(i, i + 1, i + 2);
+    }
+    p.add(Shape::mesh(mesh));
+    for e in &edges {
+        let pts: Vec<Pos2> = e.iter().filter_map(|q| world(st, q.as_dvec3())).collect();
+        if pts.len() >= 2 {
+            p.add(Shape::line(pts, Stroke::new(1.2, tint(accent(), 0.9))));
+        }
+    }
+    if let (Some(c), Some(t)) = (world(st, spot.p), world(st, spot.p + spot.n * (24.0 * st.mm_per_point(spot.p)))) {
+        p.line_segment([c, t], Stroke::new(1.2, accent()));
+        p.circle(c, 3.5, accent(), Stroke::new(1.0, Color32::from_rgb(20, 22, 26)));
+        if let Some(k) = spot.snapped {
+            chip(p, c + vec2(12.0, -24.0), Align2::LEFT_TOP, k.label(), HOT, HOT);
+        }
+    }
+}
+
 /// The Knife: the point the pointer catches on an edge (a diamond), the
 /// line from the cut's last point to it (or to the pointer, dashed).
 /// The Forms tool's brush: a ring of its radius laid on the surface under
@@ -1843,6 +1948,12 @@ fn hint_of(st: &AppState) -> String {
             Some(_) => "First point or Enter: close it · Shift: 0°, 45°, 90° · Ctrl + drag a point: its fillet".into(),
         },
         (None, Tool::Align) => "Click: the shape to align the selection to · Esc or right click: cancel".into(),
+        (None, Tool::Cable) => match &st.cable_draw {
+            None => "Click: the cable's first point, on a face or the ground (a hole's or a boss's centre catches it) · Its radius and slack: in its window".into(),
+            Some(p) if p.len() < 2 => "Click: the next point · Backspace: the last point off · Esc: drop it".into(),
+            Some(_) => "Click: one more point · Enter, a double-click or a right click: make the cable · Backspace: the last point off · Esc: drop it".into(),
+        },
+        (None, Tool::Place) => "Click: place it on the face (its normal is its up; a hole's or a face's centre catches it) · [ ]: turn it by 15° · Esc or a right click: done".into(),
         (None, Tool::ShellPick) => "Click: a face of the part to open · Esc, Enter or right click: done · The window's ×: close one again".into(),
         (None, Tool::Select) if st.align_open() => "Min / Max: the box's sides · Center: its middle · Pivot: the base's centre (or the one put with D) · Apply: keep and go on · Enter: OK · Esc: cancel".into(),
         (None, Tool::Form) if st.sculpt.is_some() => "Drag: the brush pulls the surface · Release: done (one undo step) · Esc: cancel".into(),

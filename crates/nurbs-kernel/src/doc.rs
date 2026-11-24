@@ -1031,6 +1031,76 @@ pub struct Feature {
     /// the whole part).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sym: Option<Sym>,
+    /// A cable (Romain 24 nov., 8 h 21: "un premier système de Câble"): a
+    /// round section swept along a smooth curve through the points clicked,
+    /// sagging between them; its points in the unit box of its `Prim::Box`
+    /// (as a form's poles), its radius in mm. Always an Object of its own
+    /// (no boolean with what it lies on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cable: Option<Cable>,
+}
+
+/// A cable's points (x and z from −0.5 to 0.5, y from 0 to 1 in its box),
+/// its radius and how much it sags between two points (0: taut; the extra
+/// length over the straight run, 0.05 = 5 %).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Cable {
+    pub points: Vec<[f64; 3]>,
+    pub radius: f64,
+    #[serde(default)]
+    pub slack: f64,
+}
+
+impl Cable {
+    /// The curve it follows through world points `pts`: between two
+    /// points a hanging run (down the world's −Y by its slack, about
+    /// (1 + slack) times the straight run's length; a sin² bump, so the
+    /// curve leaves each point without a kink), points closer than a tenth
+    /// of the radius dropped.
+    pub fn spine(pts: &[DVec3], radius: f64, slack: f64) -> Vec<DVec3> {
+        let mut p: Vec<DVec3> = vec![];
+        for q in pts {
+            if p.last().map(|l: &DVec3| l.distance(*q) > (radius * 0.1).max(1e-3)).unwrap_or(true) {
+                p.push(*q);
+            }
+        }
+        if p.len() < 2 || (p.len() < 3 && slack <= 1e-6) {
+            return p;
+        }
+        // a smooth curve through the points (Hermite, each point's tangent
+        // the chord across it weighed by the runs on either side), then each
+        // run hung down by its slack
+        let n = p.len();
+        let tan = |i: usize, run: f64| -> DVec3 {
+            if i == 0 {
+                return p[1] - p[0];
+            }
+            if i == n - 1 {
+                return p[n - 1] - p[n - 2];
+            }
+            let (l0, l1) = (p[i].distance(p[i - 1]), p[i + 1].distance(p[i]));
+            (p[i + 1] - p[i - 1]) * (run / (l0 + l1).max(1e-9))
+        };
+        let mut out = vec![p[0]];
+        for i in 0..n - 1 {
+            let (a, b) = (p[i], p[i + 1]);
+            let l = a.distance(b);
+            let (ta, tb) = (tan(i, l), tan(i + 1, l));
+            let d = b - a;
+            // a hanging run's sag: its length L (1 + s) ≈ L + 8 h² / 3 L
+            // along the horizontal part of the run
+            let horiz = DVec3::new(d.x, 0.0, d.z).length();
+            let sag = if slack > 1e-6 { horiz * (3.0 * slack / 8.0).sqrt() } else { 0.0 };
+            let k = ((l / (radius * 4.0).max(1.0)).ceil() as usize).clamp(3, 12);
+            for j in 1..=k {
+                let t = j as f64 / k as f64;
+                let (t2, t3) = (t * t, t * t * t);
+                let q = a * (2.0 * t3 - 3.0 * t2 + 1.0) + ta * (t3 - 2.0 * t2 + t) + b * (-2.0 * t3 + 3.0 * t2) + tb * (t3 - t2);
+                out.push(q - DVec3::Y * (sag * (std::f64::consts::PI * t).sin().powi(2)));
+            }
+        }
+        out
+    }
 }
 
 /// A shape's own symmetry plane: through its centre, square to its own
@@ -1671,6 +1741,37 @@ impl Feature {
             fm.poles = local.iter().map(|q| [(q.x - base.x) / size.x, (q.y - base.y) / size.y, (q.z - base.z) / size.z]).collect();
         }
     }
+    /// A cable's points in the world (its unit box scaled and placed).
+    pub fn cable_points(&self) -> Vec<DVec3> {
+        let (Some(c), Prim::Box { x, y, z }) = (&self.cable, self.prim) else { return vec![] };
+        let m = self.matrix();
+        c.points.iter().map(|p| m.transform_point3(DVec3::new(p[0] * x, p[1] * y, p[2] * z))).collect()
+    }
+    /// The curve a cable follows (world), with its sag.
+    pub fn cable_spine(&self) -> Vec<DVec3> {
+        let Some(c) = &self.cable else { return vec![] };
+        Cable::spine(&self.cable_points(), c.radius, c.slack)
+    }
+    /// A cable's points set from world points: its box the one round its
+    /// curve grown by its radius (its turn kept), its base the box's.
+    pub fn set_cable_points(&mut self, world: &[DVec3]) {
+        let Some(c) = self.cable.clone() else { return };
+        if world.is_empty() {
+            return;
+        }
+        let inv = self.matrix().inverse();
+        let local: Vec<DVec3> = world.iter().map(|w| inv.transform_point3(*w)).collect();
+        let spine: Vec<DVec3> = Cable::spine(world, c.radius, c.slack).iter().map(|w| inv.transform_point3(*w)).collect();
+        let lo = local.iter().chain(spine.iter()).fold(DVec3::splat(f64::MAX), |a, b| a.min(*b)) - DVec3::splat(c.radius);
+        let hi = local.iter().chain(spine.iter()).fold(DVec3::splat(f64::MIN), |a, b| a.max(*b)) + DVec3::splat(c.radius);
+        let size = (hi - lo).max(DVec3::splat(0.01));
+        let base = DVec3::new((lo.x + hi.x) * 0.5, lo.y, (lo.z + hi.z) * 0.5);
+        self.origin = self.matrix().transform_point3(base);
+        self.prim = Prim::Box { x: size.x, y: size.y, z: size.z };
+        if let Some(cb) = self.cable.as_mut() {
+            cb.points = local.iter().map(|q| [(q.x - base.x) / size.x, (q.y - base.y) / size.y, (q.z - base.z) / size.z]).collect();
+        }
+    }
     /// An open curve turned whose two ends lie on the axis (2 % of its
     /// box across it, at least 0.05 mm): it closes into a solid.
     pub fn revolve_closes(&self) -> bool {
@@ -1718,6 +1819,9 @@ impl Feature {
         }
         if self.form.is_some() {
             return "Form";
+        }
+        if self.cable.is_some() {
+            return "Cable";
         }
         if self.loft.is_some() {
             return "Loft";
@@ -2059,7 +2163,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(prim.kind().label());
-        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None });
+        self.features.push(Feature { id, name, op, prim, origin, rot, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None });
         id
     }
     /// Adds a fillet (or chamfer) of these edges at the end.
@@ -2069,7 +2173,7 @@ impl Doc {
         let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0, only: false };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None });
         id
     }
     /// Adds an inset or extrusion of a face at the end.
@@ -2078,7 +2182,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(push.label());
         let origin = push.face.at;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: Some(push), tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None });
         id
     }
     /// Adds a move of a face, edge or vertex at the end.
@@ -2087,7 +2191,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(tweak.label());
         let origin = tweak.at();
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: Some(tweak), cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None });
         id
     }
     /// Adds a Mirror step at the end.
@@ -2096,7 +2200,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name("Mirror");
         let origin = mirror.normal() * mirror.offset;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: Some(mirror), array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: Some(mirror), array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None });
         id
     }
     /// Adds a Pattern / Array step at the end.
@@ -2105,7 +2209,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name("Array");
         let origin = array.sources.iter().filter_map(|s| self.feature(*s)).map(|f| f.centre()).next().unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: Some(array), shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: Some(array), shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None });
         id
     }
     /// Adds a Shell step at the end (`origin`: where its thickness handle
@@ -2116,7 +2220,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name("Bridge");
         let origin = (faces[0].at + faces[1].at) * 0.5;
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: Some(Bridge { faces }), one_side: false, frozen: None, bake: vec![], sym: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: Some(Bridge { faces }), one_side: false, frozen: None, bake: vec![], sym: None, cable: None });
         id
     }
 
@@ -2124,7 +2228,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name("Shell");
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: Some(shell), bridge: None, one_side: false, frozen: None, bake: vec![], sym: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: Some(shell), bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None });
         id
     }
     /// The shape with its own symmetry (`sym`) that the Carve at `at` cuts
@@ -2242,7 +2346,7 @@ impl Doc {
         self.next_id += 1;
         let name = self.fresh_name(name);
         let origin = cut.pts.first().map(|p| p.at).or(cut.remove_faces.first().map(|r| r.at)).or(cut.remove_edges.first().map(|e| e.at)).or(cut.fill.first().map(|e| e.at)).unwrap_or(DVec3::ZERO);
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: Some(cut), sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None });
         id
     }
     /// The curves' outlines made again from their settings and boxes (a
@@ -2572,6 +2676,16 @@ impl Doc {
             taken.extend(o.members.iter().copied());
         }
         self.objects.retain(|o| !o.members.is_empty());
+        // a cable is an Object of its own (it lies on the part, never fused
+        // with it)
+        let cables: Vec<(FeatureId, String)> = self.features.iter().filter(|f| f.cable.is_some() && members.contains(&f.id) && !taken.contains(&f.id)).map(|f| (f.id, f.name.clone())).collect();
+        for (c, name) in cables {
+            let id = self.next_id;
+            self.next_id += 1;
+            let name = self.fresh_object_name(&name);
+            self.objects.push(Object { id, name, members: vec![c] });
+            taken.push(c);
+        }
         let free: Vec<FeatureId> = members.iter().copied().filter(|m| !taken.contains(m)).collect();
         if !free.is_empty() {
             let n = free.len();
@@ -2630,6 +2744,10 @@ impl Doc {
             for g in groups {
                 let mut touched: Vec<FeatureId> = vec![];
                 for o in &self.objects {
+                    // a cable's Object takes nothing else
+                    if o.members.iter().all(|m| self.feature(*m).is_some_and(|f| f.cable.is_some())) {
+                        continue;
+                    }
                     let hit = o.members.iter().any(|m| g.iter().any(|&i| near(bx(*m), boxes[i]))) || links.iter().any(|(i, lo)| *lo == o.id && root[*i] == root[g[0]]);
                     if hit {
                         touched.push(o.id);

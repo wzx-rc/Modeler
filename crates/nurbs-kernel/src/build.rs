@@ -583,6 +583,11 @@ fn tool(f: &Feature) -> Result<Shape, String> {
         let poles: Vec<[f64; 3]> = f.form_poles().iter().map(|p| p.to_array()).collect();
         return Ok(tag_all(Shape::form(&poles, fm.nu, fm.nv)?, f.id));
     }
+    // a cable: a round section swept along its curve (world)
+    if let Some(c) = &f.cable {
+        let spine: Vec<[f64; 3]> = f.cable_spine().iter().map(|p| p.to_array()).collect();
+        return Ok(tag_all(Shape::cable(&spine, c.radius.max(0.01))?, f.id));
+    }
     let h = f.prim.height().max(0.01);
     let s = match f.prim {
         Prim::Box { x, z, .. } => Shape::cuboid(x.max(0.01), h, z.max(0.01))?,
@@ -624,7 +629,7 @@ const PAST: f64 = 0.1;
 /// it sits on (facing each other) put on it. None when nothing moves. Each
 /// face moves at most a quarter of the shape's size across it.
 fn settle(acc: &Shape, f: &Feature, t: &Shape) -> Option<Feature> {
-    if !f.is_solid() || f.is_path() || f.is_sheet() || f.shape_bool.is_some() || f.form.is_some() || f.frozen.is_some() {
+    if !f.is_solid() || f.is_path() || f.is_sheet() || f.shape_bool.is_some() || f.form.is_some() || f.cable.is_some() || f.frozen.is_some() {
         return None;
     }
     let rot = f.rot;
@@ -3736,7 +3741,7 @@ fn mirror_safe(doc: &Doc, f: &Feature, m: &Mirror, depth: u32) -> bool {
 /// A plain box or cylinder centred on a Mirror's plane, one of its own axes
 /// square to it: that axis (0 X, 1 Y, 2 Z), it is its own image.
 fn sym_axis(f: &Feature, m: &Mirror) -> Option<usize> {
-    let plain = matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }) && f.is_solid() && f.frozen.is_none() && f.profile.is_none() && f.form.is_none() && f.curve.is_none() && f.sheet.is_none() && f.revolve.is_none() && f.loft.is_none() && f.shape_bool.is_none();
+    let plain = matches!(f.prim, Prim::Box { .. } | Prim::Cylinder { .. }) && f.is_solid() && f.frozen.is_none() && f.profile.is_none() && f.form.is_none() && f.cable.is_none() && f.curve.is_none() && f.sheet.is_none() && f.revolve.is_none() && f.loft.is_none() && f.shape_bool.is_none();
     if !plain {
         return None;
     }
@@ -7836,6 +7841,43 @@ mod tests {
         d.feature_mut(c).unwrap().origin = DVec3::new(-30.0, 10.0, 200.0);
         let m = build(&d, true, false, &[], &mut cache);
         assert!(m.errors.iter().any(|e| e.contains("share nothing")), "{:?}", m.errors);
+    }
+
+    #[test]
+    fn cable_is_an_object_of_its_own() {
+        // Romain 24 nov., 8 h 21: "un premier système de Câble". A block and
+        // a cable lying on it from one end to the other: the cable is its own
+        // Object (no boolean with the block), it sags with its slack, and
+        // moving its box moves it
+        let mut d = Doc::default();
+        let b = d.add(Op::Add, Prim::Box { x: 60.0, y: 10.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let c = d.add(Op::Add, Prim::Box { x: 1.0, y: 1.0, z: 1.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let pts = [DVec3::new(-25.0, 11.5, 0.0), DVec3::new(0.0, 30.0, 0.0), DVec3::new(25.0, 11.5, 0.0)];
+        {
+            let f = d.feature_mut(c).unwrap();
+            f.cable = Some(crate::doc::Cable { points: vec![], radius: 1.5, slack: 0.0 });
+            f.set_cable_points(&pts);
+        }
+        let back = d.feature(c).unwrap().cable_points();
+        for (a, b) in back.iter().zip(pts.iter()) {
+            assert!(a.distance(*b) < 1e-9, "{a:?} {b:?}");
+        }
+        assert_eq!(d.feature(c).unwrap().kind_label(), "Cable");
+        assert!(d.settle_objects(None));
+        assert_ne!(d.object_of(c), d.object_of(b), "{:?}", d.objects);
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let (_, hi) = m.bounds().unwrap();
+        assert!((hi[1] - 31.5).abs() < 0.3, "the cable's top: {hi:?}");
+        // slack: the runs sag below the straight line (the middle point stays)
+        d.feature_mut(c).unwrap().cable.as_mut().unwrap().slack = 0.1;
+        let spine = d.feature(c).unwrap().cable_spine();
+        assert!(spine.len() > 3);
+        let mid = spine[spine.len() / 4];
+        assert!(mid.y < 11.5 + (30.0 - 11.5) * 0.5, "{mid:?}");
+        let m = build(&d, true, false, &[], &mut cache);
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
     }
 
     #[test]

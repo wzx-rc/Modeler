@@ -100,6 +100,10 @@ pub enum Icon {
     /// (pan).
     Zoom,
     Pan,
+    /// The Library (`library.rs`): a shelf of three samples.
+    Library,
+    /// The Cable (`cable.rs`): a hanging cable between two plugs.
+    Cable,
 }
 
 struct Pen<'a> {
@@ -511,6 +515,17 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.closed(&face);
             pen.line(&[(10.0, 13.5), (10.0, 2.5)]);
             pen.line(&[(7.0, 5.5), (10.0, 2.5), (13.0, 5.5)]);
+        }
+        Icon::Library => {
+            pen.closed(&[(3.0, 3.0), (8.5, 3.0), (8.5, 8.5), (3.0, 8.5)]);
+            pen.circle(14.25, 5.75, 2.9);
+            pen.closed(&[(3.0, 11.5), (8.5, 11.5), (8.5, 17.0), (3.0, 17.0)]);
+            pen.line(&[(11.5, 17.0), (14.25, 11.5), (17.0, 17.0), (11.5, 17.0)]);
+        }
+        Icon::Cable => {
+            pen.closed(&[(2.5, 4.0), (5.5, 4.0), (5.5, 7.5), (2.5, 7.5)]);
+            pen.closed(&[(14.5, 4.0), (17.5, 4.0), (17.5, 7.5), (14.5, 7.5)]);
+            pen.line(&[(4.0, 7.5), (4.2, 10.5), (5.2, 13.2), (7.0, 15.0), (10.0, 15.8), (13.0, 15.0), (14.8, 13.2), (15.8, 10.5), (16.0, 7.5)]);
         }
         Icon::Group => {
             for (cx, cy, dx, dy) in [(2.5, 2.5, 1.0, 1.0), (17.5, 2.5, -1.0, 1.0), (17.5, 17.5, -1.0, -1.0), (2.5, 17.5, 1.0, -1.0)] {

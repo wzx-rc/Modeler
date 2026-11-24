@@ -17,6 +17,10 @@
 #include <BRepTools.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
+#include <BRepOffsetAPI_MakePipe.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <GeomLProp_CLProps.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -713,6 +717,82 @@ FShape* focc_form(const double* poles, int nu, int nv) {
                 return nullptr;
             }
             return wrap(one);
+        },
+        (FShape*)nullptr);
+}
+
+// A cable (24 nov.): a disc of radius `r` swept along the smooth curve
+// through `pts` (world, n points, a cubic interpolation), its ends capped:
+// a solid. A curve bending tighter than the radius folds the tube through
+// itself: refused.
+FShape* focc_cable(const double* pts, int n, double r) {
+    return guard(
+        [&]() -> FShape* {
+            if (n < 2 || r <= 0) {
+                set_err("a cable needs 2 points and a radius");
+                return nullptr;
+            }
+            opencascade::handle<TColgp_HArray1OfPnt> P = new TColgp_HArray1OfPnt(1, n);
+            for (int i = 0; i < n; i++) P->SetValue(i + 1, gp_Pnt(pts[3 * i], pts[3 * i + 1], pts[3 * i + 2]));
+            GeomAPI_Interpolate it(P, Standard_False, 1e-6);
+            it.Perform();
+            if (!it.IsDone()) {
+                set_err("the cable's curve could not be made (points too close?)");
+                return nullptr;
+            }
+            opencascade::handle<Geom_BSplineCurve> c = it.Curve();
+            // the tightest bend: under the radius the tube folds through itself
+            {
+                GeomLProp_CLProps pr(c, 2, 1e-9);
+                double kmax = 0;
+                const int ns = 400;
+                for (int i = 0; i <= ns; i++) {
+                    pr.SetParameter(c->FirstParameter() + (c->LastParameter() - c->FirstParameter()) * i / ns);
+                    if (pr.IsTangentDefined()) kmax = std::max(kmax, pr.Curvature());
+                }
+                if (kmax * r > 0.98) {
+                    char m[200];
+                    snprintf(m, sizeof m, "the cable bends tighter than its radius (%.2f mm at its tightest): move its points apart or make it thinner", 1.0 / kmax);
+                    set_err(m);
+                    return nullptr;
+                }
+            }
+            TopoDS_Edge e = BRepBuilderAPI_MakeEdge(c).Edge();
+            TopoDS_Wire spine = BRepBuilderAPI_MakeWire(e).Wire();
+            gp_Pnt p0;
+            gp_Vec t0;
+            c->D1(c->FirstParameter(), p0, t0);
+            if (t0.Magnitude() < 1e-9) {
+                set_err("the cable's curve has no direction at its start");
+                return nullptr;
+            }
+            gp_Circ circ(gp_Ax2(p0, gp_Dir(t0)), r);
+            TopoDS_Wire ring = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(circ).Edge()).Wire();
+            TopoDS_Shape out;
+            // the pipe shell (corrected Frenet), made a solid with its caps
+            {
+                BRepOffsetAPI_MakePipeShell ps(spine);
+                ps.SetMode(Standard_False);
+                ps.Add(ring);
+                ps.Build();
+                if (ps.IsDone() && ps.MakeSolid()) out = ps.Shape();
+            }
+            if (out.IsNull() || !valid(out)) {
+                TopoDS_Face disc = BRepBuilderAPI_MakeFace(ring, Standard_True).Face();
+                BRepOffsetAPI_MakePipe mp(spine, disc);
+                mp.Build();
+                if (mp.IsDone()) out = mp.Shape();
+            }
+            TopoDS_Shape one;
+            if (!out.IsNull())
+                for (TopExp_Explorer x(out, TopAbs_SOLID); x.More(); x.Next()) one = x.Current();
+            if (one.IsNull() || !valid(one)) {
+                set_err("the cable bends tighter than its radius: move its points apart or make it thinner");
+                return nullptr;
+            }
+            TopoDS_Solid sol = TopoDS::Solid(one);
+            BRepLib::OrientClosedSolid(sol);
+            return wrap(sol);
         },
         (FShape*)nullptr);
 }

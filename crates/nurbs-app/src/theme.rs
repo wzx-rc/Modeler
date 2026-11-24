@@ -74,6 +74,7 @@ pub const EDGE_SEL: Color32 = Color32::from_rgb(0xFF, 0xCF, 0x5A);
 pub const FACE_SEL: Color32 = Color32::from_rgb(0x6F, 0xD3, 0x9A);
 /// Paths (curves with no thickness): drawn over the part.
 pub const PATH: Color32 = Color32::from_rgb(0x62, 0xD0, 0xE6);
+pub const CABLE: Color32 = Color32::from_rgb(0xE8, 0xA8, 0x5A);
 pub const EDGE_SEL_DIM: Color32 = Color32::from_rgb(0x6B, 0x55, 0x22);
 pub const OK: Color32 = Color32::from_rgb(0x8F, 0xC2, 0x7A);
 /// A hard error (the kernel is missing or broken).

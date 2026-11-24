@@ -56,6 +56,7 @@ extern "C" {
     fn focc_outline_wire(xy: *const c_double, smooth: *const c_int, cut: *const c_int, abm: *const c_double, n: c_int, open: c_int) -> *mut FShape;
     fn focc_revolve(s: *const FShape, o: *const c_double, d: *const c_double, angle: c_double) -> *mut FShape;
     fn focc_form(poles: *const c_double, nu: c_int, nv: c_int) -> *mut FShape;
+    fn focc_cable(pts: *const c_double, n: c_int, r: c_double) -> *mut FShape;
     fn focc_loft(secs: *const *const FShape, n: c_int, solid: c_int, ruled: c_int) -> *mut FShape;
     fn focc_fillet2d(s: *const FShape, xyz: *const c_double, size: *const c_double, n: c_int, tol: c_double, done: *mut c_int) -> *mut FShape;
     fn focc_section_count(s: *const FShape) -> c_int;
@@ -547,6 +548,12 @@ impl Shape {
         }
         let v: Vec<f64> = poles.iter().flatten().copied().collect();
         shape(unsafe { focc_form(v.as_ptr(), nu as c_int, nv as c_int) })
+    }
+    /// A cable: a disc of radius `r` swept along the smooth curve through
+    /// `pts` (world), its ends capped: a solid.
+    pub fn cable(pts: &[[f64; 3]], r: f64) -> Result<Shape, String> {
+        let v: Vec<f64> = pts.iter().flatten().copied().collect();
+        shape(unsafe { focc_cable(v.as_ptr(), pts.len() as c_int, r) })
     }
     /// A loft through `secs` in order (wires, or faces: their outline): a
     /// solid when `solid`, else a sheet; `ruled`: straight between them.

@@ -167,6 +167,7 @@ pub fn show(ctx: &egui::Context, st: &mut AppState) {
     rail(ctx, st, screen);
     crate::nav::show(ctx, st);
     materials_island(ctx, st);
+    library_island(ctx, st);
     history_strip(ctx, st, screen);
     help_box(ctx, st);
     deviation_legend(ctx, st);
@@ -252,6 +253,8 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     Tool::Form => format!("FORMS · {}", st.form.brush.label().to_uppercase()),
                     Tool::Align => "ALIGN · PICK THE TARGET".into(),
                     Tool::ShellPick => "SHELL · PICK FACES TO OPEN".into(),
+                    Tool::Cable => "CABLE".into(),
+                    Tool::Place => format!("LIBRARY · {}", st.place.as_ref().and_then(|p| st.library.samples.get(p.sample)).map(|s| s.name.to_uppercase()).unwrap_or_default()),
                     Tool::Select => format!("SELECTION · {}", st.sel_mode.label().to_uppercase()),
                 };
                 let g = ui.painter().layout_no_wrap(tool, mono(11.5), TEXT());
@@ -418,6 +421,10 @@ fn top_bar(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 }
                 if (st.quads || st.remesh_on) && icon_btn(ui, Icon::Export, false, if st.remesh_on { "Export the remesh as .obj (Documents/Forme NURBS, <name>-remesh.obj)" } else { "Export the quads as .obj (Documents/Forme NURBS)" }, 28.0).clicked() {
                     st.export_obj();
+                }
+                // the Library (its island left of the rail)
+                if icon_btn(ui, Icon::Library, st.library.open || st.tool == Tool::Place, "Library: samples (a bolt, a rivet, a vent…) placed with clicks on the faces; the selection saved as a new one", 28.0).clicked() {
+                    st.toggle_library();
                 }
                 // the Settings window (Romain 23 nov.: the light theme and
                 // the interface's size in it)
@@ -740,6 +747,13 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     st.arm_form();
                 }
             }
+            {
+                let tip = "Cable (H): click points on the faces or the ground (a hole's or a boss's centre catches them); Enter, a double-click or a right click makes a cable through them, sagging a little between them. Its radius and slack in its window. A cable is an Object of its own";
+                let sub = format!("Ø {} · H", fmt_mm((st.cable.radius * 2.0) as f32));
+                if card(ui, Some(Icon::Cable), "CABLE", &sub, st.tool == Tool::Cable, CABLE, tip).clicked() {
+                    st.arm_cable();
+                }
+            }
             divider(ui);
             for (k, icon, tip) in [
                 (PushKind::Inset, Icon::Inset, "Inset (I): a face's outline moved in (2 mm, on its surface when it is round), sized with its dot; its arrow raises or sinks it. Click a face, or pick a face (3) and press I"),
@@ -759,10 +773,148 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     st.arm_knife(t);
                 }
             }
-            divider(ui);
+            // (Duplicate, Ctrl + D, is in the selection's bar: its card made
+            // room for the Cable's; the Library is in the top bar)
+        });
+    });
+}
+
+// ----------------------------------------------------------- library
+
+/// A sample's picture: its faces seen from the front, a little from above
+/// and the right, shaded, its edges over them, fitted in `r`.
+pub fn paint_sample(p: &egui::Painter, r: Rect, s: &crate::library::Sample, lit: bool) {
+    use glam::{Mat3, Vec3};
+    let rot = Mat3::from_rotation_x(0.45) * Mat3::from_rotation_y(-0.6);
+    let (lo, hi) = s.bounds();
+    let c = (lo + hi) * 0.5;
+    let pts = |q: &[f32; 3]| rot * (Vec3::from_array(*q) - c);
+    let mut ext = 1e-3f32;
+    for t in &s.tris {
+        for q in t {
+            let v = pts(q);
+            ext = ext.max(v.x.abs()).max(v.y.abs());
+        }
+    }
+    let k = r.width().min(r.height()) * 0.42 / ext;
+    let to = |v: Vec3| r.center() + vec2(v.x * k, -v.y * k);
+    let light = Vec3::new(0.35, 0.7, 0.6).normalize();
+    let mut ts: Vec<(f32, [egui::Pos2; 3], f32)> = s
+        .tris
+        .iter()
+        .map(|t| {
+            let a = pts(&t[0]);
+            let b = pts(&t[1]);
+            let cc = pts(&t[2]);
+            let n = (b - a).cross(cc - a).normalize_or_zero();
+            let n = if n.z < 0.0 { -n } else { n };
+            ((a.z + b.z + cc.z) / 3.0, [to(a), to(b), to(cc)], 0.3 + 0.7 * n.dot(light).max(0.0))
+        })
+        .collect();
+    ts.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut mesh = egui::Mesh::default();
+    let base = if lit { [236.0, 240.0, 246.0] } else { [206.0, 210.0, 218.0] };
+    for (_, q, sh) in &ts {
+        let col = Color32::from_rgb((base[0] * sh) as u8, (base[1] * sh) as u8, (base[2] * sh) as u8);
+        let i = mesh.vertices.len() as u32;
+        for v in q {
+            mesh.colored_vertex(*v, col);
+        }
+        mesh.add_triangle(i, i + 1, i + 2);
+    }
+    p.add(egui::Shape::mesh(mesh));
+    for e in &s.edges {
+        let line: Vec<egui::Pos2> = e.iter().map(|q| to(pts(q))).collect();
+        p.add(egui::Shape::line(line, Stroke::new(0.8, Color32::from_rgba_unmultiplied(20, 22, 28, 150))));
+    }
+    if s.tris.is_empty() {
+        p.text(r.center(), Align2::CENTER_CENTER, "no picture", regular(10.5), TEXT2());
+    }
+}
+
+/// The Library island (the rail's LIBRARY card), left of the rail: the
+/// samples as pictures (a click arms the place tool, a right click on a
+/// saved one deletes it), and the selection saved as a new sample.
+fn library_island(ctx: &egui::Context, st: &mut AppState) {
+    if !st.library.open {
+        return;
+    }
+    let Some(rail) = ctx.memory(|m| m.area_rect(Id::new("rail"))) else { return };
+    let off = panel_offset(ctx, "library");
+    const TILE: f32 = 78.0;
+    const COLS: usize = 3;
+    let w = TILE * COLS as f32 + 6.0 * (COLS as f32 - 1.0);
+    egui::Area::new(Id::new("library")).order(Order::Middle).pivot(Align2::RIGHT_TOP).fixed_pos(pos2(rail.min.x - 8.0, rail.min.y) + off).show(ctx, |ui| {
+        island().inner_margin(Margin::same(8)).show(ui, |ui| {
+            ui.set_width(w);
+            grip(ui, "library");
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("LIBRARY").font(semibold(12.0)).color(TEXT()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_btn(ui, Icon::ChevronRight, false, "Close the Library", 22.0).clicked() {
+                        st.library.open = false;
+                    }
+                });
+            });
+            ui.add_space(4.0);
             let has = !st.selection.is_empty();
-            if card(ui, Some(Icon::Duplicate), "DUPLICATE", "CTRL+D", false, TEXT2(), "Duplicate the selection").clicked() && has {
-                st.duplicate_selected();
+            let save = primary_btn(ui, None, "Save selection", Some(w)).on_hover_text("The selected shapes (or Objects) with their operations become a sample; its base is the middle of its box, at the bottom of what it adds");
+            if save.clicked() {
+                if has {
+                    st.save_sample(None);
+                } else {
+                    st.toast("Library: select the shapes to save first (Object mode)", true);
+                }
+            }
+            ui.add_space(6.0);
+            let placing = st.place.as_ref().map(|p| p.sample);
+            let mut arm: Option<usize> = None;
+            let mut delete: Option<usize> = None;
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                let n = st.library.samples.len();
+                for row in 0..n.div_ceil(COLS) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        for col in 0..COLS {
+                            let i = row * COLS + col;
+                            if i >= n {
+                                break;
+                            }
+                            let s = &st.library.samples[i];
+                            let (r, resp) = ui.allocate_exact_size(vec2(TILE, TILE + 18.0), Sense::click());
+                            let pic = Rect::from_min_size(r.min, vec2(TILE, TILE));
+                            let on = placing == Some(i);
+                            let bg = if on { tint(accent_bg(), 1.0) } else if resp.hovered() { RAISED() } else { tint(RAISED(), 0.55) };
+                            ui.painter().rect_filled(pic, 8.0, bg);
+                            if on {
+                                ui.painter().rect_stroke(pic, 8.0, Stroke::new(1.2, accent()), StrokeKind::Inside);
+                            }
+                            paint_sample(&ui.painter().with_clip_rect(pic.shrink(2.0)), pic.shrink(6.0), s, resp.hovered() || on);
+                            let name = ui.painter().layout(s.name.clone(), regular(11.0), if on { TEXT() } else { TEXT2() }, TILE);
+                            ui.painter().galley(pos2(r.center().x - name.size().x * 0.5, pic.max.y + 3.0), name, TEXT2());
+                            let (ns, no) = s.counts();
+                            let tip = format!("{}: {ns} shape{}, {no} operation{}{} · Click: place it on the faces", s.name, if ns == 1 { "" } else { "s" }, if no == 1 { "" } else { "s" }, if s.builtin() { " · comes with the app" } else { " · right click: delete" });
+                            let resp = resp.on_hover_text(tip);
+                            if resp.clicked() {
+                                arm = Some(i);
+                            }
+                            if resp.secondary_clicked() && !s.builtin() {
+                                delete = Some(i);
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+            if let Some(i) = arm {
+                if placing == Some(i) {
+                    st.select_tool();
+                } else {
+                    st.arm_place(i);
+                }
+            }
+            if let Some(i) = delete {
+                st.delete_sample(i);
             }
         });
     });
@@ -1399,6 +1551,8 @@ fn help_title(st: &AppState) -> String {
         Tool::Form => format!("Forms · {}", st.form.brush.label()),
         Tool::Align => "Align · pick the target".into(),
         Tool::ShellPick => "Shell · pick faces to open".into(),
+        Tool::Cable => "Cable".into(),
+        Tool::Place => format!("Library · {}", st.place.as_ref().and_then(|p| st.library.samples.get(p.sample)).map(|s| s.name.clone()).unwrap_or_default()),
         Tool::Select if st.align_open() => "Align".into(),
         Tool::Select => format!("{} · {}", st.gizmo.label(), st.sel_mode.label()),
     }
@@ -1498,6 +1652,8 @@ fn help_box(ctx: &egui::Context, st: &mut AppState) {
         Tool::Form => op_color(st.mode),
         Tool::Align => TEXT2(),
         Tool::ShellPick => FACE_SEL,
+        Tool::Cable => CABLE,
+        Tool::Place => accent(),
         Tool::Select if st.sel_mode == SelMode::Edge => EDGE_SEL,
         Tool::Select if st.sel_mode == SelMode::Face => FACE_SEL,
         Tool::Select => st.single().map(feature_color).unwrap_or(TEXT2()),
@@ -3965,6 +4121,31 @@ fn shape_card(ui: &mut Ui, st: &mut AppState, f: &Feature) {
         }
         return;
     }
+    // a cable: its radius and slack, its points kept
+    if let Some(c) = &f.cable {
+        section(ui, "Cable");
+        let mut d = (c.radius * 2.0) as f32;
+        let (ch, start) = slider_row(ui, "Diameter", &mut d, 0.1..=60.0, 0.1, "mm");
+        if ch {
+            if start {
+                st.end_live();
+            }
+            st.set_cable(id, Some((d.max(0.1) as f64) * 0.5), None, true);
+        }
+        let mut sl = (c.slack * 100.0) as f32;
+        let (ch, start) = slider_row(ui, "Slack", &mut sl, 0.0..=40.0, 0.5, "%");
+        if ch {
+            if start {
+                st.end_live();
+            }
+            st.set_cable(id, None, Some((sl.max(0.0) as f64) / 100.0), true);
+        }
+        ui.label(egui::RichText::new(format!("{} points · its own Object (never fused with what it lies on)", c.points.len())).font(regular(11.5)).color(TEXT2()));
+        if !any_down && st.is_live() && st.drag.is_none() && st.creation.is_none() {
+            st.end_live();
+        }
+        return;
+    }
     section(ui, "Shape");
     match f.prim {
         Prim::Box { x, y, z } | Prim::Profile { x, y, z } => {
@@ -4951,6 +5132,8 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             } else if st.sketch.is_some() {
                 // drawing an outline: only its last point goes
                 st.sketch_back();
+            } else if st.cable_draw.is_some() {
+                st.cable_back();
             } else {
                 st.undo();
             }
@@ -5054,6 +5237,29 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     }
     if pressed(Key::M) && !shift && !ctx.input(|i| i.modifiers.alt) {
         st.arm_form();
+    }
+    if pressed(Key::H) && !shift && !ctx.input(|i| i.modifiers.alt) {
+        st.arm_cable();
+    }
+    // the cable being drawn: Enter makes it, Backspace takes its last point off
+    if st.tool == Tool::Cable && st.cable_draw.is_some() {
+        if pressed(Key::Enter) {
+            st.cable_finish();
+            return;
+        }
+        if pressed(Key::Backspace) || pressed(Key::Delete) {
+            st.cable_back();
+            return;
+        }
+    }
+    // the Library's sample placed: [ and ] turn it by 15°
+    if st.tool == Tool::Place {
+        if pressed(Key::OpenBracket) {
+            st.turn_place(-15.0);
+        }
+        if pressed(Key::CloseBracket) {
+            st.turn_place(15.0);
+        }
     }
     if st.tool == Tool::Form {
         if pressed(Key::OpenBracket) {

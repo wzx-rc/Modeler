@@ -373,6 +373,239 @@ fn timed<T: Default>(h: &mut Harness, log: &mut Vec<String>, label: &str, f: imp
     r
 }
 
+/// A Library sample made on a plate (60 × 10 × 60, its top at y = 10),
+/// then saved from its shapes (`library`).
+fn make_sample(h: &mut Harness, name: &str, f: impl FnOnce(&mut Harness, u32) -> Vec<u32>) {
+    let mut log = vec![];
+    h.reset(Doc::default(), name);
+    let plate = timed(h, &mut log, "Plate", |d| named(d, Op::Add, Prim::Box { x: 60.0, y: 10.0, z: 60.0 }, DVec3::ZERO, DQuat::IDENTITY, "Plate"));
+    let ids = f(h, plate);
+    h.st.sel_mode = SelMode::Object;
+    h.st.selection = ids;
+    h.settle();
+    let errs = h.st.model.as_ref().map(|m| m.errors.clone()).unwrap_or_default();
+    let i = h.st.save_sample(Some(name));
+    let s = i.and_then(|i| h.st.library.samples.get(i));
+    eprintln!("  sample {name}: {:?} features, {} triangles, {} edges, errors {errs:?}", s.map(|s| s.counts()), s.map_or(0, |s| s.tris.len()), s.map_or(0, |s| s.edges.len()));
+}
+
+/// `library` (Romain 24 nov., 8 h 21: "un nouveau composant la Library…
+/// sauvegarder de petits samples et ensuite les placer en interactif sur
+/// les surfaces comme des boulons"): four samples made on a plate and
+/// saved (a socket bolt, a domed rivet, a vent whose rim fillet names the
+/// plate, a boss with its foot fillet and its hole), the Library island,
+/// then each placed with clicks on a part's faces: on a hole's centre, on
+/// a slanted face, on a side, on a round face, turned with ].
+fn library(h: &mut Harness, out: &str) {
+    let docs = format!("{out}/docs");
+    let _ = std::fs::remove_dir_all(format!("{docs}/library"));
+    std::env::set_var("FORME_DOCS", &docs);
+    let up = DQuat::IDENTITY;
+    let mut log: Vec<String> = vec![];
+    make_sample(h, "Socket bolt", |h, plate| {
+        let mut log = vec![];
+        let head = timed(h, &mut log, "Head", |d| named(d, Op::Add, Prim::Cylinder { radius: 4.0, height: 3.0 }, DVec3::new(0.0, 10.0, 0.0), up, "Head"));
+        let hex: Vec<[f64; 2]> = (0..6).map(|k| { let a = std::f64::consts::TAU * k as f64 / 6.0; [0.5 * a.cos(), 0.5 * a.sin() / 0.866] }).collect();
+        let sock = timed(h, &mut log, "Socket", |d| {
+            let id = named(d, Op::Carve, Prim::Profile { x: 3.4, y: 1.8, z: 2.94 }, DVec3::new(0.0, 11.3, 0.0), up, "Socket");
+            d.feature_mut(id).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: hex, smooth: vec![false; 6], corner: vec![0.0; 6], tension: vec![], open: false, spline: false });
+            id
+        });
+        let e = edges_between(h, (head, 0), (head, 1));
+        timed(h, &mut log, "Head fillet 0.6", |d| d.add_round(0.6, false, e));
+        let _ = plate;
+        vec![head, sock]
+    });
+    make_sample(h, "Rivet", |h, _| {
+        let mut log = vec![];
+        let r = timed(h, &mut log, "Rivet", |d| named(d, Op::Add, Prim::Cylinder { radius: 2.5, height: 1.4 }, DVec3::new(0.0, 10.0, 0.0), up, "Rivet"));
+        let e = edges_between(h, (r, 0), (r, 1));
+        timed(h, &mut log, "Dome", |d| d.add_round(1.2, false, e));
+        vec![r]
+    });
+    make_sample(h, "Vent", |h, plate| {
+        let mut log = vec![];
+        let v = timed(h, &mut log, "Vent", |d| {
+            let id = named(d, Op::Carve, Prim::Profile { x: 14.0, y: 1.6, z: 4.0 }, DVec3::new(0.0, 8.5, 0.0), up, "Vent");
+            d.feature_mut(id).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![2.0; 4], tension: vec![], open: false, spline: false });
+            id
+        });
+        let mut e = vec![];
+        for sub in 3..20 {
+            e.extend(edges_between(h, (v, sub), (plate, 2)));
+        }
+        eprintln!("  vent rim edges: {}", e.len());
+        timed(h, &mut log, "Vent rim 0.4", |d| d.add_round(0.4, false, e));
+        vec![v]
+    });
+    make_sample(h, "Boss", |h, plate| {
+        let mut log = vec![];
+        let b = timed(h, &mut log, "Boss", |d| named(d, Op::Add, Prim::Cylinder { radius: 5.0, height: 4.0 }, DVec3::new(0.0, 10.0, 0.0), up, "Boss"));
+        let hole = timed(h, &mut log, "Hole", |d| named(d, Op::Carve, Prim::Cylinder { radius: 2.0, height: 5.0 }, DVec3::new(0.0, 9.1, 0.0), up, "Hole"));
+        let e = edges_between(h, (b, 0), (plate, 2));
+        timed(h, &mut log, "Foot fillet 1", |d| d.add_round(1.0, false, e));
+        let e = edges_between(h, (b, 0), (b, 1));
+        timed(h, &mut log, "Top chamfer 0.5", |d| d.add_round(0.5, true, e));
+        vec![b, hole]
+    });
+    let _ = &mut log;
+    h.shot("zero-library-1-boss-sample");
+    // the samples written: those of the app are these (assets/library)
+    let lib = format!("{docs}/library");
+    let names: Vec<String> = std::fs::read_dir(&lib).map(|r| r.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect()).unwrap_or_default();
+    eprintln!("  library files: {names:?}");
+    // the same four come with the app: the copies saved here put aside
+    // (FORME_KEEP_LIBRARY=1 keeps them, to copy into assets/library)
+    if std::env::var("FORME_KEEP_LIBRARY").is_err() {
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+    // a part to put them on: a plate with a hole, a slanted block, a pipe
+    let mut d = Doc::default();
+    let plate = named(&mut d, Op::Add, Prim::Box { x: 120.0, y: 8.0, z: 70.0 }, DVec3::ZERO, up, "Plate");
+    let hole = named(&mut d, Op::Carve, Prim::Cylinder { radius: 3.0, height: 12.0 }, DVec3::new(-35.0, -2.0, 18.0), up, "Hole");
+    let wedge = named(&mut d, Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 40.0 }, DVec3::new(30.0, 8.0, 0.0), DQuat::from_rotation_z(0.35), "Wedge");
+    let pipe = named(&mut d, Op::Add, Prim::Cylinder { radius: 10.0, height: 60.0 }, DVec3::new(-55.0, 18.0, -22.0), DQuat::from_rotation_z(-std::f64::consts::FRAC_PI_2), "Pipe");
+    let _ = (plate, hole, wedge, pipe);
+    h.reset(d, "Library");
+    h.st.library.load();
+    h.st.library.open = true;
+    h.st.camera.yaw = 0.6;
+    h.st.camera.pitch = 0.55;
+    h.st.frame_all();
+    h.settle();
+    let idx = |h: &Harness, n: &str| h.st.library.samples.iter().position(|s| s.name == n && !s.builtin()).or_else(|| h.st.library.samples.iter().position(|s| s.name == n)).unwrap_or(0);
+    eprintln!("  samples: {:?}", h.st.library.samples.iter().map(|s| (s.name.clone(), s.builtin(), s.counts())).collect::<Vec<_>>());
+    h.shot("zero-library-2-island");
+    // the bolt on the hole's centre (it catches), then turned and put on the plate
+    let i = idx(h, "Socket bolt");
+    h.st.arm_place(i);
+    let at = h.screen_of(Vec3::new(-35.0, 8.0, 18.0) + Vec3::new(1.2, 0.0, 0.8));
+    h.move_to(at);
+    h.steps(3);
+    eprintln!("  spot on the hole: {:?}", h.st.place.as_ref().and_then(|p| p.spot).map(|s| (s.p, s.snapped)));
+    h.shot("zero-library-3-preview-on-hole");
+    h.click(at);
+    h.settle();
+    for x in [-50.0, -20.0] {
+        let at = h.screen_of(Vec3::new(x, 8.0, 28.0));
+        h.move_to(at);
+        h.steps(2);
+        h.key(egui::Key::CloseBracket);
+        h.key(egui::Key::CloseBracket);
+        h.click(at);
+        h.settle();
+    }
+    // the boss on the slanted top: its normal is the boss's up
+    h.st.arm_place(idx(h, "Boss"));
+    let top = Vec3::new(30.0, 8.0, 0.0) + (glam::Quat::from_rotation_z(0.35) * Vec3::new(0.0, 20.0, 0.0));
+    let at = h.screen_of(top + Vec3::new(0.0, 0.0, -8.0));
+    h.move_to(at);
+    h.steps(3);
+    h.shot("zero-library-4-preview-slanted");
+    h.click(at);
+    h.settle();
+    // vents in a row on the plate, rivets along the pipe
+    h.st.arm_place(idx(h, "Vent"));
+    for z in [-8.0, 2.0, 12.0] {
+        let at = h.screen_of(Vec3::new(-10.0, 8.0, z + 10.0));
+        h.move_to(at);
+        h.steps(2);
+        h.click(at);
+        h.settle();
+    }
+    h.st.arm_place(idx(h, "Rivet"));
+    for x in [-48.0, -36.0, -24.0, -12.0] {
+        let at = h.screen_of(Vec3::new(x, 18.0 + 10.0 * 0.6, -22.0 + 10.0 * 0.8));
+        h.move_to(at);
+        h.steps(2);
+        h.click(at);
+        h.settle();
+    }
+    h.st.select_tool();
+    h.settle();
+    let m = h.st.model.as_ref();
+    eprintln!("  placed: {} features, {} objects, errors {:?}", h.st.doc.features.len(), h.st.doc.objects.len(), m.map(|m| m.errors.clone()));
+    eprintln!("  objects: {:?}", h.st.doc.objects.iter().map(|o| (o.name.clone(), o.members.len())).collect::<Vec<_>>());
+    if let Some(m) = h.st.model.as_ref() {
+        for f in h.st.doc.features.iter().filter(|f| f.round.is_some()) {
+            for e in &f.round.as_ref().unwrap().edges {
+                let (a, b) = (FaceTag::unpack(e.faces[0]), FaceTag::unpack(e.faces[1]));
+                let n = m.edges.iter().filter(|me| { let t = |i: i32| m.faces.get(i as usize).and_then(|x| x.tag); let (x, y) = (t(me.faces[0]), t(me.faces[1])); (x == a && y == b) || (x == b && y == a) }).count();
+                eprintln!("  {} edge {:?}/{:?} at {:?}: {n} in the model", f.name, a, b, e.at);
+            }
+        }
+    }
+    h.shot("zero-library-5-placed");
+    h.st.camera.yaw = -0.4;
+    h.st.camera.pitch = 0.35;
+    h.st.camera.dist *= 0.6;
+    h.settle();
+    h.shot("zero-library-6-close");
+    // a placed boss selected: its operations with it, as any shape
+    let boss = h.st.doc.features.iter().rev().find(|f| f.name.starts_with("Boss")).map(|f| f.id);
+    if let Some(b) = boss {
+        h.st.selection = vec![b];
+        h.settle();
+        h.shot("zero-library-7-boss-selected");
+    }
+}
+
+/// `cable` (Romain 24 nov., 8 h 21: "un premier système de Câble"): two
+/// blocks, each with a connector boss; the Cable tool (H) clicks on the
+/// first boss's centre, a point on the ground between them, the second
+/// boss's centre, then Enter; its slack and diameter changed in its window.
+fn cable(h: &mut Harness) {
+    let up = DQuat::IDENTITY;
+    let mut d = Doc::default();
+    named(&mut d, Op::Add, Prim::Box { x: 50.0, y: 30.0, z: 40.0 }, DVec3::new(-50.0, 0.0, 0.0), up, "Box A");
+    named(&mut d, Op::Add, Prim::Cylinder { radius: 5.0, height: 4.0 }, DVec3::new(-40.0, 30.0, 0.0), up, "Plug A");
+    named(&mut d, Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 40.0 }, DVec3::new(60.0, 0.0, 10.0), up, "Box B");
+    named(&mut d, Op::Add, Prim::Cylinder { radius: 5.0, height: 4.0 }, DVec3::new(60.0, 10.0, 30.0), DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2), "Plug B");
+    h.reset(d, "Cable");
+    h.st.camera.yaw = 0.35;
+    h.st.camera.pitch = 0.45;
+    h.st.frame_all();
+    h.settle();
+    h.key(egui::Key::H);
+    eprintln!("  tool {:?}", h.st.tool);
+    let pts = [Vec3::new(-40.0, 34.0, 0.0), Vec3::new(0.0, 0.0, 35.0), Vec3::new(60.0, 10.0, 34.0)];
+    for (k, w) in pts.iter().enumerate() {
+        let at = h.screen_of(*w);
+        h.move_to(at);
+        h.steps(2);
+        h.click(at);
+        h.steps(30);
+        eprintln!("  point {k}: {:?}", h.st.cable_draw.as_ref().and_then(|c| c.last().copied()));
+    }
+    let hover = h.screen_of(Vec3::new(25.0, 0.0, 45.0));
+    h.move_to(hover);
+    h.steps(2);
+    h.shot("zero-cable-1-drawing");
+    h.move_to(h.screen_of(Vec3::new(60.0, 10.0, 34.0)));
+    h.steps(2);
+    h.key(egui::Key::Enter);
+    h.settle();
+    let id = h.st.selection.first().copied();
+    let m = h.st.model.as_ref();
+    eprintln!("  cable {:?}: objects {:?}, errors {:?}", id, h.st.doc.objects.iter().map(|o| (o.name.clone(), o.members.clone())).collect::<Vec<_>>(), m.map(|m| m.errors.clone()));
+    h.st.select_tool();
+    h.st.selection = id.into_iter().collect();
+    h.settle();
+    h.shot("zero-cable-2-made");
+    if let Some(id) = id {
+        h.st.set_cable(id, None, Some(0.15), false);
+        h.settle();
+        h.shot("zero-cable-3-slack");
+        h.st.set_cable(id, Some(3.0), None, false);
+        h.settle();
+        eprintln!("  thicker: errors {:?}", h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.st.camera.yaw = 1.2;
+        h.st.camera.pitch = 0.25;
+        h.settle();
+        h.shot("zero-cable-4-thicker");
+    }
+}
+
 /// `gear` (Romain 24 nov., 7 h 45: "faire un engrenage avec le array
 /// radial"): a spur gear made as a user would, step by step: the disc, a
 /// boss, one tooth (a Sketch with its tip rounded, its top edges
@@ -6336,6 +6569,14 @@ fn main() {
 
     if want("gear") {
         gear(&mut h);
+    }
+
+    if want("library") {
+        library(&mut h, &out);
+    }
+
+    if want("cable") {
+        cable(&mut h);
     }
 
     if want("heavy") {

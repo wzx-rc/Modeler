@@ -36,6 +36,11 @@ pub enum Tool {
     Align,
     /// The selected Shell's faces to open, clicked one by one (`shell.rs`).
     ShellPick,
+    /// The Cable (H): points clicked on the faces, Enter makes the cable
+    /// (`cable.rs`).
+    Cable,
+    /// A Library sample placed with clicks on the faces (`library.rs`).
+    Place,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -691,6 +696,12 @@ pub struct AppState {
     /// The Forms tool's brushes and their settings, the stroke under way,
     /// the form drawn from its poles until the kernel's model of it comes.
     pub form: crate::forms::FormSettings,
+    /// The next cable's radius and slack; the points of the one being drawn.
+    pub cable: crate::cable::CableSettings,
+    pub cable_draw: Option<Vec<DVec3>>,
+    /// The Library's samples and island; the place tool under way.
+    pub library: crate::library::Library,
+    pub place: Option<crate::library::Placing>,
     pub sculpt: Option<crate::forms::Sculpt>,
     pub form_shown: Option<FeatureId>,
     /// Counts the changes of the balls' looks (they do not go to the
@@ -933,6 +944,10 @@ impl AppState {
             surface_on_scan: false,
             slot_on_scan: false,
             form: Default::default(),
+            cable: Default::default(),
+            cable_draw: None,
+            library: Default::default(),
+            place: None,
             sculpt: None,
             form_shown: None,
             looks_rev: 0,
@@ -2859,6 +2874,8 @@ impl AppState {
         self.marquee = None;
         self.acquired.clear();
         self.snap_shown = None;
+        self.cable_draw = None;
+        self.place = None;
     }
 
     /// Q, W or Enter (Romain 20 nov., 11 h 54: "Pour tous les outils,
@@ -2867,6 +2884,9 @@ impl AppState {
     /// is closed (a Path left open), a shape still at no height takes its
     /// base's smaller side (20 mm at most).
     pub fn commit_gestures(&mut self, at: [f32; 2]) {
+        if self.cable_draw.as_ref().map(|c| c.len() >= 2).unwrap_or(false) {
+            self.cable_finish();
+        }
         if self.knife.is_some() {
             self.knife_end();
         }
@@ -2936,6 +2956,15 @@ impl AppState {
         }
         let g = BasePlane::ground();
         g.hit(ro, rd).map(|q| (g, q))
+    }
+
+    /// The face a point of interest is put on: a flat face round it (the
+    /// one under the pointer first), else the one under the pointer, else
+    /// its first (a hole's centre: the face round the hole, not its wall).
+    pub fn snap_face(&self, s: &crate::snap::SnapPoint, under: Option<usize>) -> Option<usize> {
+        let flat = |f: usize| self.model.as_ref().and_then(|m| m.faces.get(f)).map(|x| x.kind == nurbs_kernel::model::SurfKind::Plane).unwrap_or(false);
+        let mine = under.filter(|f| s.faces.contains(f));
+        mine.filter(|f| flat(*f)).or_else(|| s.faces.iter().copied().find(|f| flat(*f))).or(mine).or_else(|| s.faces.first().copied())
     }
 
     pub fn pick_at(&self, p: [f32; 2]) -> Option<Hit> {
@@ -5104,7 +5133,7 @@ pub fn put_last(d: &mut Doc, ids: &[FeatureId]) {
     d.features = rest;
 }
 
-fn retag(f: &mut Feature, map: &std::collections::HashMap<FeatureId, FeatureId>) {
+pub(crate) fn retag(f: &mut Feature, map: &std::collections::HashMap<FeatureId, FeatureId>) {
     let t = |tag: &mut i64| {
         if let Some(ft) = FaceTag::unpack(*tag) {
             if let Some(n) = map.get(&ft.feature) {

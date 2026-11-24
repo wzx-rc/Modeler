@@ -9,6 +9,8 @@ pub mod mirror;
 pub mod array;
 pub mod shell;
 pub mod bools;
+pub mod cable;
+pub mod library;
 pub mod cage;
 pub mod camera;
 pub mod draw;
