@@ -373,6 +373,88 @@ fn timed<T: Default>(h: &mut Harness, log: &mut Vec<String>, label: &str, f: imp
     r
 }
 
+/// `gear` (Romain 24 nov., 7 h 45: "faire un engrenage avec le array
+/// radial"): a spur gear made as a user would, step by step: the disc, a
+/// boss, one tooth (a Sketch with its tip rounded, its top edges
+/// chamfered), the tooth 24 times round the axis (Array Circle), six
+/// lightening holes (one hole, its rim rounded, an Array Circle), the
+/// bore and its keyway, the bore's mouth chamfered. Then the count of
+/// teeth changed (30), the tooth made wider: every copy follows.
+fn gear(h: &mut Harness) {
+    use nurbs_kernel::{Array, ArrayKind};
+    let mut log: Vec<String> = vec![];
+    h.reset(Doc::default(), "Gear");
+    let up = DQuat::IDENTITY;
+    let circle = |sources: Vec<u32>, count: u32| Array { sources, kind: ArrayKind::Circle, count, step: DVec3::ZERO, count2: 1, step2: DVec3::ZERO, axis: 1, centre: DVec3::ZERO, angle: 360.0 };
+    let disc = timed(h, &mut log, "Disc (cylinder r 30)", |d| named(d, Op::Add, Prim::Cylinder { radius: 30.0, height: 8.0 }, DVec3::ZERO, up, "Disc"));
+    let boss = timed(h, &mut log, "Boss (cylinder r 11)", |d| named(d, Op::Add, Prim::Cylinder { radius: 11.0, height: 14.0 }, DVec3::new(0.0, -3.0, 0.0), up, "Boss"));
+    let e = edges_between(h, (boss, 0), (disc, 1));
+    timed(h, &mut log, "Fillet boss foot 1.5", |d| d.add_round(1.5, false, e));
+    // one tooth: a trapezoid from inside the disc's rim (r 29) out to r 37,
+    // 6 mm wide at its root, 3 at its tip, the tip's corners rounded
+    let tooth = timed(h, &mut log, "Tooth (sketch)", |d| {
+        let id = named(d, Op::Add, Prim::Profile { x: 8.0, y: 8.0, z: 6.0 }, DVec3::new(33.0, 0.0, 0.0), up, "Tooth");
+        d.feature_mut(id).unwrap().profile = Some(nurbs_kernel::doc::Profile { points: vec![[-0.5, -0.5], [0.5, -0.25], [0.5, 0.25], [-0.5, 0.5]], smooth: vec![false; 4], corner: vec![0.0, 0.8, 0.8, 0.0], tension: vec![], open: false, spline: false });
+        id
+    });
+    let mut e = vec![];
+    // its top and bottom are flush with the disc's: one face with them
+    for sub in 3..14 {
+        for (f, s) in [(tooth, 1), (tooth, 2), (disc, 1), (disc, 2)] {
+            e.extend(edges_between(h, (f, s), (tooth, sub)));
+        }
+    }
+    eprintln!("  tooth's top and bottom edges: {}", e.len());
+    timed(h, &mut log, "Chamfer tooth edges 0.5", |d| d.add_round(0.5, true, e));
+    let teeth = timed(h, &mut log, "Array circle x24 (tooth)", |d| d.add_array(circle(vec![tooth], 24)));
+    let hole = timed(h, &mut log, "Lightening hole (sub r 5)", |d| named(d, Op::Carve, Prim::Cylinder { radius: 5.0, height: 12.0 }, DVec3::new(19.0, -2.0, 0.0), up, "Hole"));
+    let mut e = edges_between(h, (hole, 0), (disc, 1));
+    e.extend(edges_between(h, (hole, 0), (disc, 2)));
+    timed(h, &mut log, "Fillet hole rims 0.8", |d| d.add_round(0.8, false, e));
+    timed(h, &mut log, "Array circle x6 (hole)", |d| d.add_array(circle(vec![hole], 6)));
+    let bore = timed(h, &mut log, "Bore (sub r 5)", |d| named(d, Op::Carve, Prim::Cylinder { radius: 5.0, height: 20.0 }, DVec3::new(0.0, -5.0, 0.0), up, "Bore"));
+    timed(h, &mut log, "Keyway (sub box)", |d| named(d, Op::Carve, Prim::Box { x: 2.0, y: 20.0, z: 3.0 }, DVec3::new(5.5, -5.0, 0.0), up, "Keyway"));
+    let e = edges_between(h, (bore, 0), (boss, 1));
+    timed(h, &mut log, "Chamfer bore mouth 0.6", |d| d.add_round(0.6, true, e));
+    h.st.frame_all();
+    h.settle();
+    h.shot("zero-gear-1");
+    let (yaw, pitch) = (h.st.camera.yaw, h.st.camera.pitch);
+    h.st.camera.pitch = 1.35;
+    h.st.frame_all();
+    h.settle();
+    h.shot("zero-gear-2-top");
+    h.st.camera.yaw = yaw + 0.5;
+    h.st.camera.pitch = 0.35;
+    h.st.camera.dist *= 0.45;
+    h.settle();
+    h.shot("zero-gear-3-close");
+    h.st.camera.yaw = yaw;
+    h.st.camera.pitch = pitch;
+    h.st.frame_all();
+    // the Array selected: its places and grips
+    h.st.select(Some(teeth), false);
+    h.settle();
+    h.shot("zero-gear-4-array");
+    // 30 teeth, then the tooth wider: every copy follows
+    timed(h, &mut log, "Teeth: 30", |d| {
+        if let Some(a) = d.feature_mut(teeth).and_then(|f| f.array.as_mut()) {
+            a.count = 30;
+        }
+    });
+    timed(h, &mut log, "Tooth narrower (5 mm)", |d| {
+        if let Some(f) = d.feature_mut(tooth) {
+            f.prim = Prim::Profile { x: 8.0, y: 8.0, z: 5.0 };
+        }
+    });
+    h.st.select(None, false);
+    h.settle();
+    h.shot("zero-gear-5-thirty");
+    std::fs::write(format!("{}/gear.txt", h.out), log.join("\n") + "\n").ok();
+    let save = format!("{}/gear.fnurbs", h.out);
+    std::fs::write(&save, serde_json::to_string_pretty(&h.st.doc).unwrap_or_default()).ok();
+}
+
 fn stats(v: &[f64]) -> (f64, f64, f64) {
     let mut s = v.to_vec();
     if s.is_empty() {
@@ -6250,6 +6332,10 @@ fn main() {
 
     if want("object") {
         object(&mut h);
+    }
+
+    if want("gear") {
+        gear(&mut h);
     }
 
     if want("heavy") {
