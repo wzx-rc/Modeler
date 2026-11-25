@@ -1606,7 +1606,7 @@ static bool ran_off(BRepFilletAPI_LocalOperation& op, const TopoDS_Shape& in, co
         Bnd_Box bf;
         BRepBndLib::AddOptimal(ex.Current(), bf, Standard_False, Standard_False);
         if (bf.IsVoid()) continue;
-        bool in_part = inside(bin, bf), near = true;
+        bool in_part = inside(bin, bf), close_by = true;
         if (trimmed.IsBound(ex.Current())) {
             int i = trimmed.Find(ex.Current());
             if (old_boxes[i].IsVoid()) {
@@ -1615,11 +1615,11 @@ static bool ran_off(BRepFilletAPI_LocalOperation& op, const TopoDS_Shape& in, co
                 BRepBndLib::AddOptimal(fin(i), old_boxes[i], Standard_False, Standard_False);
                 old_boxes[i].Enlarge(3.0 * rmax + tol);
             }
-            near = inside(old_boxes[i], bf);
+            close_by = inside(old_boxes[i], bf);
         } else if (!bedges.IsVoid()) {
-            near = inside(bedges, bf);
+            close_by = inside(bedges, bf);
         }
-        if (!in_part || !near) {
+        if (!in_part || !close_by) {
             double x0, y0, z0, x1, y1, z1;
             bf.Get(x0, y0, z0, x1, y1, z1);
             dbg("fillet ran off: a face from (%.2f %.2f %.2f) to (%.2f %.2f %.2f), %s\n", x0, y0, z0, x1, y1, z1, !in_part ? "out of the part's box" : trimmed.IsBound(ex.Current()) ? "past the face it trims" : "far from its edges");
