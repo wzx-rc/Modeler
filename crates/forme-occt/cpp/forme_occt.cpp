@@ -1564,13 +1564,58 @@ int focc_edge_faces(const FShape* s, int* out, int cap) {
 // part's box, and near the edges it rounds (its contours, tangent edges it
 // carried along included) within a few of its sizes, and the faces it trims
 // about as they were (a fillet's end carries them a little past their border).
+// A shape's box from points along its edges (and where each edge's curve on
+// its face puts them on the surface: that horn's lay 11 mm off), with
+// `inside` a grid over each curved face's (u, v) range too (a little more
+// than the face). OpenCascade's exact boxes (AddOptimal) took over half of
+// every fillet's time (25 nov., Romain: "un gros souci de performance").
+static void rough_box(const TopoDS_Shape& sh, Bnd_Box& b, bool inside) {
+    for (TopExp_Explorer fx(sh, TopAbs_FACE); fx.More(); fx.Next()) {
+        TopoDS_Face f = TopoDS::Face(fx.Current());
+        opencascade::handle<Geom_Surface> gs = BRep_Tool::Surface(f);
+        for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+            TopoDS_Edge e = TopoDS::Edge(ex.Current());
+            if (BRep_Tool::Degenerated(e)) continue;
+            double g0, g1;
+            opencascade::handle<Geom2d_Curve> pc = gs.IsNull() ? nullptr : BRep_Tool::CurveOnSurface(e, f, g0, g1);
+            if (pc.IsNull()) continue;
+            for (int k = 0; k <= 8; k++) {
+                gp_Pnt2d uv = pc->Value(g0 + (g1 - g0) * k / 8.0);
+                b.Add(gs->Value(uv.X(), uv.Y()));
+            }
+        }
+        if (inside && !gs.IsNull() && !gs->IsKind(STANDARD_TYPE(Geom_Plane))) {
+            double u0, u1, v0, v1;
+            BRepTools::UVBounds(f, u0, u1, v0, v1);
+            if (std::isfinite(u0) && std::isfinite(u1) && std::isfinite(v0) && std::isfinite(v1))
+                for (int a = 0; a <= 6; a++)
+                    for (int c = 0; c <= 6; c++) b.Add(gs->Value(u0 + (u1 - u0) * a / 6.0, v0 + (v1 - v0) * c / 6.0));
+        }
+    }
+    for (TopExp_Explorer ex(sh, TopAbs_EDGE); ex.More(); ex.Next()) {
+        TopoDS_Edge e = TopoDS::Edge(ex.Current());
+        if (BRep_Tool::Degenerated(e)) continue;
+        double t0, t1;
+        opencascade::handle<Geom_Curve> c3 = BRep_Tool::Curve(e, t0, t1);
+        if (c3.IsNull()) continue;
+        for (int k = 0; k <= 8; k++) b.Add(c3->Value(t0 + (t1 - t0) * k / 8.0));
+    }
+}
+
 static bool ran_off(BRepFilletAPI_LocalOperation& op, const TopoDS_Shape& in, const TopoDS_Shape& out, double rmax) {
     if (getenv("FORME_FILLET_UNCHECKED")) return false;  // as before 25 nov.
+    const bool exact = getenv("FORME_FILLET_EXACT_BOXES") != nullptr;
+    auto box_of = [&](const TopoDS_Shape& sh, Bnd_Box& b, bool inside) {
+        if (exact)
+            BRepBndLib::AddOptimal(sh, b, Standard_False, Standard_False);
+        else
+            rough_box(sh, b, inside);
+    };
     Bnd_Box bin, bedges;
-    BRepBndLib::AddOptimal(in, bin, Standard_False, Standard_False);
+    box_of(in, bin, true);
     if (bin.IsVoid()) return false;
     for (int ic = 1; ic <= op.NbContours(); ic++)
-        for (int ie = 1; ie <= op.NbEdges(ic); ie++) BRepBndLib::AddOptimal(op.Edge(ic, ie), bedges, Standard_False, Standard_False);
+        for (int ie = 1; ie <= op.NbEdges(ic); ie++) box_of(op.Edge(ic, ie), bedges, false);
     double tol = 1e-3 * std::sqrt(bin.SquareExtent()) + 0.01;
     bin.Enlarge(tol);
     if (!bedges.IsVoid()) bedges.Enlarge(10.0 * rmax + tol);
@@ -1604,7 +1649,7 @@ static bool ran_off(BRepFilletAPI_LocalOperation& op, const TopoDS_Shape& in, co
     for (TopExp_Explorer ex(out, TopAbs_FACE); ex.More(); ex.Next()) {
         if (fin.Contains(ex.Current())) continue;
         Bnd_Box bf;
-        BRepBndLib::AddOptimal(ex.Current(), bf, Standard_False, Standard_False);
+        box_of(ex.Current(), bf, false);
         if (bf.IsVoid()) continue;
         bool in_part = inside(bin, bf), close_by = true;
         if (trimmed.IsBound(ex.Current())) {
@@ -1612,7 +1657,7 @@ static bool ran_off(BRepFilletAPI_LocalOperation& op, const TopoDS_Shape& in, co
             if (old_boxes[i].IsVoid()) {
                 // a face a fillet ends on is carried a little past its
                 // old border (a fillet's end): its size, three times
-                BRepBndLib::AddOptimal(fin(i), old_boxes[i], Standard_False, Standard_False);
+                box_of(fin(i), old_boxes[i], true);
                 old_boxes[i].Enlarge(3.0 * rmax + tol);
             }
             close_by = inside(old_boxes[i], bf);
@@ -6222,6 +6267,12 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                 // the displacement at a point of the old face: the outline's,
                 // weighted by the inverse square distance
                 std::vector<std::pair<gp_Pnt, gp_Vec>> bd;
+                // (each sample's (u, v) on the old face from its edge's own
+                // curve there, when it has one that is not a seam's: a
+                // projection of each onto a spline face was a fifth of the
+                // move's time, 25 nov.)
+                std::vector<gp_Pnt2d> bduv;
+                std::vector<bool> bdhas;
                 {
                     TopTools_MapOfShape s2;
                     for (TopExp_Explorer x(fw, TopAbs_EDGE); x.More(); x.Next()) {
@@ -6236,9 +6287,14 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                             for (int k = 0; k <= 8; k++) {
                                 gp_Pnt p = oc.Value(oc.FirstParameter() + (oc.LastParameter() - oc.FirstParameter()) * k / 8.0);
                                 bd.push_back({p, gp_Vec(p, q)});
+                                bduv.push_back(gp_Pnt2d());
+                                bdhas.push_back(false);
                             }
                             continue;
                         }
+                        double h0 = 0, h1 = 0;
+                        opencascade::handle<Geom2d_Curve> opc;
+                        if (!BRep_Tool::IsClosed(ef, fw)) opc = BRep_Tool::CurveOnSurface(ef, fw, h0, h1);
                         TopoDS_Edge ne = enew.IsBound(ef) ? TopoDS::Edge(enew(ef)) : ef;
                         BRepAdaptor_Curve nc(ne);
                         // about every size / 150 along it (8 to 64)
@@ -6257,6 +6313,14 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                             gp_Pnt a = oc.Value(oc.FirstParameter() + (oc.LastParameter() - oc.FirstParameter()) * fr);
                             gp_Pnt b = nc.Value(nc.FirstParameter() + (nc.LastParameter() - nc.FirstParameter()) * fr);
                             bd.push_back({a, gp_Vec(a, b)});
+                            bool has = false;
+                            gp_Pnt2d uv;
+                            if (!opc.IsNull()) {
+                                uv = opc->Value(h0 + (h1 - h0) * fr);
+                                has = gs->Value(uv.X(), uv.Y()).Distance(a) < 1e-6 * size;
+                            }
+                            bduv.push_back(uv);
+                            bdhas.push_back(has);
                         }
                     }
                 }
@@ -6289,8 +6353,10 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                 const double UT = uround ? gs->UPeriod() : 0.0;
                 std::vector<gp_XY> tx;
                 std::vector<gp_Vec> tv;
-                for (auto& [q, v] : bd) {
-                    gp_Pnt2d uv = sa0.ValueOfUV(q, tol);
+                for (size_t bk = 0; bk < bd.size(); bk++) {
+                    const gp_Pnt& q = bd[bk].first;
+                    const gp_Vec& v = bd[bk].second;
+                    gp_Pnt2d uv = bdhas[bk] ? bduv[bk] : sa0.ValueOfUV(q, tol);
                     double uu = uv.X();
                     if (uround) uu = u0 + std::fmod(std::fmod(uu - u0, UT) + UT, UT);
                     gp_XY x(uu * su, uv.Y() * sv);
@@ -6527,10 +6593,16 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                         // (not when the outline's points miss it by as much as
                         // a face may: the plate then, as before)
                         if (!init.IsNull()) {
+                            // (each point looked for from the one before
+                            // it along the outline, which is next to it)
                             ShapeAnalysis_Surface sai(init);
+                            gp_Pnt2d prev;
+                            bool first = true;
                             for (const gp_Pnt& p : pts) {
-                                sai.ValueOfUV(p, tol);
-                                if (sai.Gap() > 5e-3 * size) {
+                                prev = first ? sai.ValueOfUV(p, tol) : sai.NextValueOfUV(prev, p, tol);
+                                if (!first && init->Value(prev.X(), prev.Y()).Distance(p) > 5e-3 * size) prev = sai.ValueOfUV(p, tol);
+                                first = false;
+                                if (init->Value(prev.X(), prev.Y()).Distance(p) > 5e-3 * size) {
                                     init.Nullify();
                                     break;
                                 }
@@ -6646,12 +6718,63 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                         return nullptr;
                     }
                 };
+                // on a face refitted flat-wise (no seam): each edge's curve on
+                // it through 33 of its points, each looked for from the one
+                // before (ShapeFix's projection of every edge took a quarter
+                // of the move's time, 25 nov.); made same parameter below
+                const bool chased = std::string(how) == "fitted" && !ns->IsUPeriodic() && !ns->IsVPeriodic() && !ns->IsUClosed() && !ns->IsVClosed() && !std::getenv("FORME_DEFORM_NO_CHASE");
+                auto chase = [&](const TopoDS_Edge& e) -> opencascade::handle<Geom2d_Curve> {
+                    double t0, t1;
+                    opencascade::handle<Geom_Curve> c3 = BRep_Tool::Curve(e, t0, t1);
+                    if (c3.IsNull()) return nullptr;
+                    const int M = 33;
+                    opencascade::handle<TColgp_HArray1OfPnt2d> q2 = new TColgp_HArray1OfPnt2d(1, M);
+                    opencascade::handle<TColStd_HArray1OfReal> qp = new TColStd_HArray1OfReal(1, M);
+                    gp_Pnt2d uv;
+                    double dprev = 0;
+                    for (int j = 0; j < M; j++) {
+                        double t = t0 + (t1 - t0) * j / double(M - 1);
+                        gp_Pnt p = c3->Value(t);
+                        uv = j == 0 ? sas.ValueOfUV(p, 1e-7) : sas.NextValueOfUV(uv, p, 1e-7);
+                        // (a neighbour's answer that lands off the point: the
+                        // whole surface searched, the nearer kept)
+                        // (much further than the one before was)
+                        double d = ns->Value(uv.X(), uv.Y()).Distance(p);
+                        if (j > 0 && d > 3 * dprev + 1e-6 * size) {
+                            gp_Pnt2d w = sas.ValueOfUV(p, 1e-7);
+                            const double dw = ns->Value(w.X(), w.Y()).Distance(p);
+                            if (dw < d) {
+                                uv = w;
+                                d = dw;
+                            }
+                        }
+                        dprev = d;
+                        if (j > 0 && uv.Distance(q2->Value(j)) < 1e-12) return nullptr;
+                        q2->SetValue(j + 1, uv);
+                        qp->SetValue(j + 1, t);
+                    }
+                    try {
+                        Geom2dAPI_Interpolate ip(q2, qp, Standard_False, 1e-9);
+                        ip.Perform();
+                        if (!ip.IsDone()) return nullptr;
+                        return opencascade::handle<Geom2d_Curve>(ip.Curve());
+                    } catch (Standard_Failure&) {
+                        return nullptr;
+                    }
+                };
                 for (int k = 1; k <= fe.Extent(); k++) {
                     TopoDS_Edge e = TopoDS::Edge(fe(k));
                     if (BRep_Tool::Degenerated(e)) continue;
                     double g0, g1;
                     if (!BRep_Tool::CurveOnSurface(e, nf, g0, g1).IsNull()) continue;
                     TopoDS_Edge ef = TopoDS::Edge(e.Oriented(TopAbs_FORWARD));
+                    if (chased && count[k] == 1) {
+                        opencascade::handle<Geom2d_Curve> a = chase(ef);
+                        if (!a.IsNull()) {
+                            bb.UpdateEdge(ef, a, nf, BRep_Tool::Tolerance(ef));
+                            continue;
+                        }
+                    }
                     // a round face refitted: an edge that did not move
                     // follows its own old curve too
                     if (round_fit && !olde.IsBound(ef)) {
@@ -6854,9 +6977,47 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                 return nullptr;
             }
             // a face through another: the volume turned inside out
-            GProp_GProps gp;
-            BRepGProp::VolumeProperties(solid, gp);
-            if (!solids.empty() && gp.Mass() <= 0) {
+            // (first from its faces' outlines, each a fan round its middle:
+            // clearly positive is enough; the exact volume of the refitted
+            // faces, with their many knots, took a fifth of the move's time)
+            bool inside_out = false;
+            if (!solids.empty()) {
+                Bnd_Box vb;
+                BRepBndLib::Add(solid, vb, Standard_False);
+                gp_XYZ o(0, 0, 0);
+                if (!vb.IsVoid()) o = 0.5 * (vb.CornerMin().XYZ() + vb.CornerMax().XYZ());
+                double rough = 0, all = 0;
+                for (TopExp_Explorer x(solid, TopAbs_FACE); x.More(); x.Next()) {
+                    std::vector<std::pair<gp_XYZ, gp_XYZ>> segs;
+                    gp_XYZ c(0, 0, 0);
+                    for (TopExp_Explorer y(x.Current(), TopAbs_EDGE); y.More(); y.Next()) {
+                        TopoDS_Edge e = TopoDS::Edge(y.Current());
+                        if (BRep_Tool::Degenerated(e)) continue;
+                        BRepAdaptor_Curve ec(e);
+                        const bool rev = e.Orientation() == TopAbs_REVERSED;
+                        gp_XYZ last;
+                        for (int j = 0; j <= 8; j++) {
+                            double fr = (rev ? 8 - j : j) / 8.0;
+                            gp_XYZ p = ec.Value(ec.FirstParameter() + (ec.LastParameter() - ec.FirstParameter()) * fr).XYZ() - o;
+                            if (j > 0) segs.push_back({last, p});
+                            last = p;
+                        }
+                    }
+                    if (segs.empty()) continue;
+                    for (auto& sg : segs) c += sg.first;
+                    c /= (double)segs.size();
+                    double fv = 0;
+                    for (auto& sg : segs) fv += sg.first.Dot(sg.second.Crossed(c)) / 6.0;
+                    rough += fv;
+                    all += std::abs(fv);
+                }
+                if (!(rough > 0.05 * all) || std::getenv("FORME_DEFORM_EXACT_VOLUME")) {
+                    GProp_GProps gp;
+                    BRepGProp::VolumeProperties(solid, gp);
+                    inside_out = gp.Mass() <= 0;
+                }
+            }
+            if (inside_out) {
                 set_err("the move turns the part inside out");
                 return nullptr;
             }

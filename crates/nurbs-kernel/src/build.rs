@@ -161,7 +161,40 @@ pub struct Cache {
     /// l'historique").
     rigid: HashMap<u64, (DMat4, Stage)>,
     rigid_order: std::collections::VecDeque<u64>,
+    /// How each fillet or chamfer that OpenCascade refused in one go came
+    /// out the last time it was searched (`RoundWay`): while a gesture is
+    /// live (a coarse build) that way is taken at once and nothing is
+    /// searched again (Romain 25 nov.: a vertex dragged before a fillet of
+    /// three edges that fails, 2 s of searches at each step of the drag).
+    ways: HashMap<FeatureId, RoundWay>,
 }
+
+/// What the searches of a fillet or chamfer refused in one go gave: its
+/// edges one at a time in that order (`one_by_one`: the edges' places in the
+/// step, and how many could not be made), a smaller size, or nothing.
+#[derive(Clone, Debug, PartialEq)]
+enum RoundWay {
+    Order(Vec<usize>, usize),
+    Limit(f64),
+    Failed,
+}
+
+thread_local! {
+    /// A coarse build (a gesture live): the fillets whose last search is
+    /// remembered (`Cache.ways` as the build began), made that way at once.
+    static REMEMBERED: std::cell::RefCell<std::collections::HashSet<FeatureId>> = std::cell::RefCell::new(Default::default());
+}
+
+/// A fillet made the way its last search found (a gesture live): its stage
+/// and its island's are kept under keys of their own, so the fine build
+/// after the gesture searches again.
+fn remembered(f: &Feature) -> bool {
+    f.round.is_some() && REMEMBERED.with(|c| c.borrow().contains(&f.id))
+}
+
+/// A fillet's edges made one at a time: the order they were made in, how
+/// many are left out, and what the others gave when some are.
+type Ordered = (Vec<usize>, usize, Option<Shape>);
 
 /// How many islands `Cache.rigid` keeps.
 const RIGID_KEEP: usize = 48;
@@ -199,6 +232,9 @@ fn rigid_key(doc: &Doc, fs: &[&Feature], list: &[usize], whole: &Whole, upto: us
     }
     for s in skip {
         h = hash2(h, crate::doc::fnv(s.as_bytes()));
+    }
+    if fs.iter().any(|f| remembered(f)) {
+        h = hash2(h, 0x77617973);
     }
     for f in fs {
         let mut g = f.carried_by(&|p| inv.transform_point3(p));
@@ -785,21 +821,41 @@ fn resolve(shape: &Shape, refs: &[EdgeRef]) -> (Vec<i32>, usize) {
 /// `search`: when the size does not work, look for the largest that does
 /// (`round_search`). `one`: when it fails, it may try the edges one at a
 /// time (`one_by_one`; not after that crashed the kernel).
-fn round(acc: &Shape, f: &Feature, r: &Round, search: bool, one: bool) -> (Option<Result<Shape, String>>, usize, Option<f64>) {
+fn round(acc: &Shape, f: &Feature, r: &Round, search: bool, one: bool, way: Option<&RoundWay>) -> (Option<Result<Shape, String>>, usize, Option<f64>, Option<Ordered>) {
     let (edges, missing) = resolve(acc, &r.edges);
     if edges.is_empty() || r.size <= 1e-6 {
-        return (None, missing, None);
+        return (None, missing, None, None);
     }
     let fresh = FaceTag { feature: f.id, sub: 0 }.pack();
     mark(&step("round", f));
     let make = |size: f64| made_on(acc, &edges, r, size, fresh);
+    // (a gesture live, its edges made one at a time the last time: that
+    // order first, the fillet in one go only when it no longer works)
+    if let Some(RoundWay::Order(o, left)) = way {
+        if let Some(s) = in_order(acc, r, fresh, o) {
+            if *left == 0 {
+                return (Some(Ok(s)), missing, None, Some((o.clone(), 0, None)));
+            }
+            return (Some(Err("some of its edges only".to_string())), missing, None, Some((o.clone(), *left, Some(s))));
+        }
+    }
     let mut res = make(r.size).map_err(|e| plain_error(&e));
     // on a part that is not a valid solid no order or size will do (21 nov.:
     // the drone's hub dragged, its arms' fillets each searched 12 sizes,
     // 13 s for one step of the drag)
     if res.as_ref().is_err_and(|e| !e.starts_with("its edges are smooth")) && !acc.is_valid() {
-        return (Some(Err(NOT_VALID.to_string())), missing, None);
+        return (Some(Err(NOT_VALID.to_string())), missing, None, None);
     }
+    // a gesture live: the way the last search found, nothing searched again
+    if let (true, Some(w)) = (res.is_err(), way) {
+        if let RoundWay::Limit(size) = w {
+            if let Ok(s) = make(*size) {
+                return (Some(Ok(s)), missing, Some(*size), None);
+            }
+        }
+        return (Some(res), missing, None, None);
+    }
+    let mut ordered = None;
     // two or three of the edges meeting at a corner of four (Romain 20 nov.,
     // a cap standing flush with a pocket's end): OpenCascade rounds one of
     // them, or all four, but not two or three in one go; one at a time in
@@ -809,18 +865,41 @@ fn round(acc: &Shape, f: &Feature, r: &Round, search: bool, one: bool) -> (Optio
         // corner after a fillet ran into it, 20 nov.): a crash skips only
         // this search the next time
         mark(&step("onebyone", f));
-        if let Some(s) = one_by_one(acc, r, fresh) {
-            res = Ok(s);
+        match one_by_one(acc, r, fresh) {
+            (Some((s, order)), _) => {
+                res = Ok(s);
+                ordered = Some((order, 0, None));
+            }
+            // (some of them only: kept aside, for when nothing else makes
+            // them all)
+            (None, Some((s, order, left))) => ordered = Some((order, left, Some(s))),
+            _ => {}
         }
         mark(&step("round", f));
     }
     if res.is_ok() || !search {
-        return (Some(res), missing, None);
+        return (Some(res), missing, None, ordered);
     }
     match round_search(acc, &edges, r, fresh) {
-        Some((s, size)) => (Some(Ok(s)), missing, Some(size)),
-        None => (Some(res), missing, None),
+        Some((s, size)) => (Some(Ok(s)), missing, Some(size), None),
+        None => (Some(res), missing, None, ordered),
     }
+}
+
+/// A fillet's edges made one at a time in the order given (their places in
+/// the step; one that an earlier one's fillet took along is passed): None
+/// when one of them cannot be made.
+fn in_order(acc: &Shape, r: &Round, fresh: i64, order: &[usize]) -> Option<Shape> {
+    let mut s: Option<Shape> = None;
+    for &i in order {
+        let cur = s.as_ref().unwrap_or(acc);
+        let (e, missing) = resolve(cur, std::slice::from_ref(r.edges.get(i)?));
+        if missing > 0 || e.is_empty() {
+            continue;
+        }
+        s = Some(made_on(cur, &e, r, r.size, fresh).ok()?);
+    }
+    s
 }
 
 /// A fillet's error when what it is made on is not a valid solid.
@@ -1023,34 +1102,49 @@ fn round_search(acc: &Shape, edges: &[i32], r: &Round, fresh: i64) -> Option<(Sh
 /// does not depend on the load, and a last stop after 6 s). An edge already
 /// rounded by one before it (OpenCascade carries a fillet along tangent
 /// edges) counts as made. All the faces made carry the step's tag.
-fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> Option<Shape> {
-    fn go(s: &Shape, left: &[EdgeRef], r: &Round, fresh: i64, t0: Instant, tries: &mut u32) -> Option<Shape> {
+fn one_by_one(acc: &Shape, r: &Round, fresh: i64) -> (Option<(Shape, Vec<usize>)>, Option<(Shape, Vec<usize>, usize)>) {
+    struct Walk {
+        tries: u32,
+        t0: Instant,
+        // the most edges made when no order makes them all: the part, the
+        // order, how many are left
+        best: Option<(Shape, Vec<usize>, usize)>,
+    }
+    fn go(s: &Shape, left: &[(usize, EdgeRef)], path: &mut Vec<usize>, r: &Round, fresh: i64, w: &mut Walk) -> Option<Shape> {
         for k in 0..left.len() {
-            if *tries >= 40 || t0.elapsed().as_secs_f64() > SEARCH_STOP {
+            if w.tries >= 40 || w.t0.elapsed().as_secs_f64() > SEARCH_STOP {
                 return None;
             }
-            let rest: Vec<EdgeRef> = left.iter().enumerate().filter(|(j, _)| *j != k).map(|(_, e)| e.clone()).collect();
-            let (e, missing) = resolve(s, std::slice::from_ref(&left[k]));
-            let next = if missing > 0 || e.is_empty() {
+            let (e, missing) = resolve(s, std::slice::from_ref(&left[k].1));
+            if missing > 0 || e.is_empty() {
                 continue;
-            } else {
-                *tries += 1;
-                made_on(s, &e, r, r.size, fresh)
-            };
-            if let Ok(n) = next {
+            }
+            w.tries += 1;
+            if let Ok(n) = made_on(s, &e, r, r.size, fresh) {
+                path.push(left[k].0);
                 // the edges left that this one's fillet took along with it
-                let rest: Vec<EdgeRef> = rest.into_iter().filter(|x| resolve(&n, std::slice::from_ref(x)).1 == 0).collect();
+                let rest: Vec<(usize, EdgeRef)> = left.iter().enumerate().filter(|(j, _)| *j != k).map(|(_, e)| e.clone()).filter(|x| resolve(&n, std::slice::from_ref(&x.1)).1 == 0).collect();
                 if rest.is_empty() {
                     return Some(n);
                 }
-                if let Some(done) = go(&n, &rest, r, fresh, t0, tries) {
+                if let Some(done) = go(&n, &rest, path, r, fresh, w) {
                     return Some(done);
                 }
+                if w.best.as_ref().map_or(true, |b| rest.len() < b.2) {
+                    w.best = Some((n, path.clone(), rest.len()));
+                }
+                path.pop();
             }
         }
         None
     }
-    go(acc, &r.edges, r, fresh, Instant::now(), &mut 0)
+    let all: Vec<(usize, EdgeRef)> = r.edges.iter().cloned().enumerate().collect();
+    let mut w = Walk { tries: 0, t0: Instant::now(), best: None };
+    let mut path = vec![];
+    match go(acc, &all, &mut path, r, fresh, &mut w) {
+        Some(s) => (Some((s, path)), None),
+        None => (None, w.best),
+    }
 }
 
 /// The last stop of the fillet searches (`round_search`, `one_by_one`): they
@@ -1537,8 +1631,8 @@ fn tweak_unrounded(doc: &Doc, acc: &Shape, f: &Feature, t: &Tweak) -> Result<Sha
             }
         }
         let again = Round { edges, ..rd.clone() };
-        match round(&s, g, &again, true, false) {
-            (Some(Ok(r)), _, _) => s = r,
+        match round(&s, g, &again, true, false, None) {
+            (Some(Ok(r)), _, _, _) => s = r,
             _ => return Err(format!("{} could not be made again", g.name)),
         }
     }
@@ -2569,6 +2663,12 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
         if let Some(m) = &f.mirror {
             sym = Some(*m);
         }
+        // a gesture live and a fillet whose last search is remembered: made
+        // that way at once (`Cache.ways`), under a key of its own, so the
+        // fine build after the gesture searches again
+        if remembered(f) {
+            key = hash2(key, 0x77617973);
+        }
         used_stages.push(key);
         if let Some(s) = cache.stages.get(&key) {
             stage = s.clone();
@@ -2696,22 +2796,46 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                     }
                 }
                 if made.is_none() {
-                    let (mut res, missing, mut limit) = if skipped("round") { (Some(Err("skipped, it crashed the kernel".to_string())), 0, None) } else { round(&acc, f, r, false, !skip.contains(&step("onebyone", f))) };
+                    // (a gesture live: the way its last search found)
+                    let way = if remembered(f) { cache.ways.get(&f.id).cloned() } else { None };
+                    let (mut res, missing, mut limit, ordered) = if skipped("round") { (Some(Err("skipped, it crashed the kernel".to_string())), 0, None, None) } else { round(&acc, f, r, false, !skip.contains(&step("onebyone", f)), way.as_ref()) };
                     // (with a blended result at hand, a smaller size made on
                     // its own would not be taken: no search for it)
-                    if matches!(&res, Some(Err(e)) if e != NOT_VALID) && partial.is_none() && !skipped("round") {
+                    if matches!(&res, Some(Err(e)) if e != NOT_VALID) && partial.is_none() && !skipped("round") && way.is_none() {
                         // next to fillets made just before it: made before
                         // them, they made again on what it gives
                         if let Some(s) = replay_round(doc, &feats[..i], f, r, &stage, skip, cache, model, used_tools, used_stages) {
+                            cache.ways.remove(&f.id);
                             stage = s;
                             keep(cache, key, &mut stage);
                             continue;
                         }
                         // too big? the largest size that works
+                        // (OpenCascade can recurse without end at a smaller
+                        // size too, Romain's corner of 25 nov.: a crash
+                        // skips only this search the next time)
+                        // (not at a corner of four edges or more of which
+                        // it takes some: no size makes those)
                         let (edges, _) = resolve(&acc, &r.edges);
-                        if let Some((s, size)) = round_search(&acc, &edges, r, FaceTag { feature: f.id, sub: 0 }.pack()) {
-                            res = Some(Ok(s));
-                            limit = Some(size);
+                        if !skipped("search") && crowded(&acc, &edges).is_none() {
+                            mark(&step("search", f));
+                            if let Some((s, size)) = round_search(&acc, &edges, r, FaceTag { feature: f.id, sub: 0 }.pack()) {
+                                res = Some(Ok(s));
+                                limit = Some(size);
+                            }
+                            mark(&step("round", f));
+                        }
+                    }
+                    // what the searches gave, for the next live builds
+                    // (not from a replay, which makes it on another part)
+                    if way.is_none() && !skipped("round") && !REPLAYING.with(|c| c.get()) {
+                        match (&res, &ordered, limit) {
+                            (Some(Ok(_)), _, Some(l)) => drop(cache.ways.insert(f.id, RoundWay::Limit(l))),
+                            (Some(Ok(_)), Some((o, 0, _)), _) => drop(cache.ways.insert(f.id, RoundWay::Order(o.clone(), 0))),
+                            (Some(Ok(_)), _, _) => drop(cache.ways.remove(&f.id)),
+                            (Some(Err(_)), Some((o, left, Some(_))), _) => drop(cache.ways.insert(f.id, RoundWay::Order(o.clone(), *left))),
+                            (Some(Err(e)), _, _) if e != NOT_VALID => drop(cache.ways.insert(f.id, RoundWay::Failed)),
+                            _ => {}
                         }
                     }
                     // (an image across a symmetry that is not there, another
@@ -2749,6 +2873,19 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                             made = Some((t, full));
                         }
                         (Some(Err(e)), None) if e.starts_with("its edges are smooth") => stage.errors.push(format!("{}: {e}", f.name)),
+                        // some of its edges only, one at a time: those are
+                        // made, and it says which are not (Romain 25 nov.:
+                        // "le Fillet sur les 3 edge ne perform rien", three
+                        // of the four edges of a corner, of which two go)
+                        (Some(Err(_)), None) if matches!(&ordered, Some((_, left, Some(_))) if *left > 0) => {
+                            let (_, left, s) = ordered.unwrap();
+                            let n = r.edges.len();
+                            let (t, full, _, errs) = finish(s.unwrap(), &[]);
+                            stage.errors.extend(errs.0);
+                            stage.tension_limits.extend(errs.1);
+                            made = Some((t, full));
+                            stage.errors.push(format!("{}: only {} of its {n} edges rounded: OpenCascade cannot round the other{} where they meet at one corner", f.name, n - left, if left > 1 { "s" } else { "" }));
+                        }
                         (Some(Err(e)), None) => {
                             // at a corner of four edges or more: say so, and
                             // what OpenCascade can do there
@@ -4181,6 +4318,7 @@ pub fn build(doc: &Doc, fine: bool, quads: bool, skip: &[String], cache: &mut Ca
     let t0 = Instant::now();
     let mut model = Model { fine, ..Default::default() };
     LIVE.with(|l| l.borrow_mut().clear());
+    REMEMBERED.with(|c| *c.borrow_mut() = if fine || quads { Default::default() } else { cache.ways.keys().copied().collect() });
     // the elements the app asks to freeze (Delete History): each built
     // alone with its operations, sent back as a solid in its own frame
     if fine {
@@ -7049,6 +7187,19 @@ mod tests {
         let t = std::time::Instant::now();
         let m = build(&d, true, false, &[], &mut cache);
         eprintln!("fine build {:.0} ms, {} faces, cached {}", t.elapsed().as_secs_f64() * 1e3, m.faces.len(), m.cached);
+        // FORME_NEAR="x,y,z,r": the edges with an end within r of that point
+        // (their faces' tags and kinds, their ends)
+        if let Some(v) = std::env::var("FORME_NEAR").ok().map(|v| v.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect::<Vec<_>>()).filter(|v| v.len() == 4) {
+            let c = glam::Vec3::new(v[0], v[1], v[2]);
+            for e in &m.edges {
+                let (Some(a), Some(b)) = (e.pts.first(), e.pts.last()) else { continue };
+                if glam::Vec3::from_array(*a).distance(c) > v[3] && glam::Vec3::from_array(*b).distance(c) > v[3] {
+                    continue;
+                }
+                let face = |i: i32| m.faces.get(i as usize).map(|f| format!("{:?} {:?}", f.tag.map(|t| (t.feature, t.sub)), f.kind)).unwrap_or_default();
+                eprintln!("  edge {} {:?} seam {} {:?} → {:?} ({} pts) | {} | {}", e.index, e.kind, e.seam, a, b, e.pts.len(), face(e.faces[0]), face(e.faces[1]));
+            }
+        }
         // the shape's operations go with it, as the app carries them
         let mut ids = vec![id];
         for f in &d.features {
@@ -7068,7 +7219,26 @@ mod tests {
         // FORME_PUSH=id,id…: those insets / extrusions deepened 0.2 mm a
         // step instead (an Extrude of several faces dragged)
         let pushes: Vec<FeatureId> = std::env::var("FORME_PUSH").ok().map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
+        // FORME_VERTEX="x,y,z": a Move vertex step added at the end for the
+        // vertex there, its delta grown a step at a time (a vertex dragged)
+        let vertex = std::env::var("FORME_VERTEX").ok().map(|v| v.split(',').filter_map(|x| x.trim().parse::<f64>().ok()).collect::<Vec<_>>()).filter(|v| v.len() == 3);
+        let moved = vertex.map(|v| d.add_tweak(crate::doc::Tweak::new(vec![crate::doc::Comp::Vertex(DVec3::new(v[0], v[1], v[2]))]).unwrap()));
         for i in 0..steps {
+            if let Some(id) = moved {
+                if let Some(tw) = d.features.iter_mut().find(|f| f.id == id).and_then(|f| f.tweak.as_mut()) {
+                    tw.delta += dir;
+                }
+                let t = std::time::Instant::now();
+                let m = build(&d, false, false, &[], &mut cache);
+                worst = worst.max(t.elapsed().as_secs_f64() * 1e3);
+                eprintln!("vertex {i}: {:.0} ms, cached {} of {}, errors {}", t.elapsed().as_secs_f64() * 1e3, m.cached, d.features.len(), m.errors.len());
+                if std::env::var("FORME_ERRORS").is_ok() {
+                    for e in &m.errors {
+                        eprintln!("  ERROR {e}");
+                    }
+                }
+                continue;
+            }
             if !pushes.is_empty() {
                 for f in d.features.iter_mut().filter(|f| pushes.contains(&f.id)) {
                     if let Some(pu) = f.push.as_mut() {
@@ -7079,6 +7249,11 @@ mod tests {
                 let m = build(&d, false, false, &[], &mut cache);
                 worst = worst.max(t.elapsed().as_secs_f64() * 1e3);
                 eprintln!("push {i}: {:.0} ms, cached {} of {}, errors {}", t.elapsed().as_secs_f64() * 1e3, m.cached, d.features.len(), m.errors.len());
+                if std::env::var("FORME_ERRORS").is_ok() {
+                    for e in &m.errors {
+                        eprintln!("  ERROR {e}");
+                    }
+                }
                 continue;
             }
             for f in d.features.iter_mut().filter(|f| ids.contains(&f.id)) {
@@ -8256,6 +8431,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn some_edges_of_a_corner_rounded_and_remembered() {
+        // Romain 25 nov., 9 h 49: "le Fillet sur les 3 edge ne perform rien"
+        // (his Cube with its cuts, moves and two fillets, then Fillet 4:
+        // three of the four edges meeting at a corner of its top, one of
+        // them running on from Fillet 3's end). OpenCascade rounds neither
+        // the three together nor all four, and recursed without end at a
+        // smaller size; one at a time two of them go: those are made and
+        // the step says one is missing. While a gesture is live the way
+        // found is taken at once (0.95 s → 0.26 s a step of a drag before
+        // the fillets), and the fine build after it searches again.
+        let d = Doc::from_json(include_str!("../testdata/corner-25nov.fnurbs")).unwrap();
+        let of = |m: &Model, id: u32| m.faces.iter().filter(|f| f.tag.is_some_and(|t| t.feature == id)).count();
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        assert_eq!(m.errors.len(), 1, "{:?}", m.errors);
+        assert!(m.errors[0].starts_with("Fillet 4: only 2 of its 3 edges rounded"), "{:?}", m.errors);
+        assert!(of(&m, 37) >= 2 && of(&m, 36) >= 3, "{} {}", of(&m, 37), of(&m, 36));
+        assert!(matches!(cache.ways.get(&37), Some(RoundWay::Order(o, 1)) if o.len() == 2), "{:?}", cache.ways.get(&37));
+        assert!(matches!(cache.ways.get(&36), Some(RoundWay::Order(o, 0)) if o.len() == 3), "{:?}", cache.ways.get(&36));
+        // the Extrude before the fillets dragged: the same fillets, no search
+        let mut d2 = d.clone();
+        d2.features.iter_mut().find(|f| f.id == 19).unwrap().push.as_mut().unwrap().depth += 0.2;
+        let live = build(&d2, false, false, &[], &mut cache);
+        assert_eq!(live.errors, m.errors);
+        assert_eq!((of(&live, 36), of(&live, 37)), (of(&m, 36), of(&m, 37)));
+        // let go: searched again, the same answer here
+        let fine = build(&d2, true, false, &[], &mut cache);
+        assert_eq!(fine.errors, m.errors);
+        assert_eq!(fine.faces.len(), live.faces.len());
     }
 
     #[test]
