@@ -1109,8 +1109,10 @@ fn arrow(p: &Painter, a: Pos2, b: Pos2, color: Color32, width: f32) {
 
 fn draw_gizmo(p: &Painter, st: &AppState) {
     // shapes selected (Object mode), or a component picked (Vertex, Edge,
-    // Face modes): `pivot` says where, if anywhere
-    if st.tool != Tool::Select || st.creation.is_some() {
+    // Face modes): `pivot` says where, if anywhere. Not while a fillet is
+    // dragged in the view (Romain 25 nov., 6 h 17: "Quand on direct fillet
+    // un point cacher le Gizmo": it sat on the corner being rounded)
+    if st.tool != Tool::Select || st.creation.is_some() || st.round_drag.is_some() {
         return;
     }
     let hot = st.hot_handle;

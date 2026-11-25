@@ -46,6 +46,20 @@ impl AppState {
             self.toast("Project: pick a curve", true);
             return None;
         };
+        // already projected: that projection takes the mode asked, no
+        // second one on the same faces (Romain 25 nov.: clicking Draw on
+        // faces again made Project 2 and 3, which drew nothing)
+        let made = self.projections_of(curve).into_iter().rev().find(|p| self.doc.feature(*p).is_some_and(|f| f.visible && !f.suspended));
+        if let Some((pid, p)) = made.and_then(|pid| Some((pid, self.doc.feature(pid)?.project.clone()?))) {
+            if p.cut != cut {
+                self.set_project(pid, Project { cut, ..p });
+            }
+            self.set_sel_mode(SelMode::Object);
+            self.selection = vec![pid];
+            let name = self.doc.feature(pid).map(|f| f.name.clone()).unwrap_or_default();
+            self.toast(&format!("{} is projected already: {name} {}", c.name, if cut { "cuts through" } else { "draws on the faces" }), false);
+            return Some(pid);
+        }
         let Some(o) = self.project_target(&c) else {
             self.toast("Project: the curve is over no Object (it projects along its normal)", true);
             return None;

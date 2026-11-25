@@ -76,3 +76,24 @@ fn a_face_next_to_a_fillet_moves() {
     let r = f.deform(&m).expect("deform");
     assert!(r.is_valid(), "sheared");
 }
+
+#[test]
+fn a_corner_pulled_out_bends_without_bulging() {
+    // the top front +x corner pulled 6 out of the front face (along z): the
+    // front face bends (the top and the +x side stay flat: the corner moves
+    // in their planes), no point of it past where the corner went
+    // (the plate through their outlines bulged far past it, 25 nov.), and
+    // their edges lie on them
+    let b = block();
+    let m = moves(&b, |p| p[0] > 19.9 && p[1] > 19.9 && p[2] > 14.9, [0.0, 0.0, 6.0]);
+    assert_eq!(m.len(), 1);
+    let r = b.deform(&m).expect("deform");
+    assert!(r.is_valid());
+    assert_eq!(r.face_count(), 6);
+    let t = r.topo(0.01, 0.1).unwrap();
+    let (lo, hi) = t.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])]));
+    assert!(hi[2] < 21.0 + 0.02 && hi[0] < 20.02 && hi[1] < 20.02 && lo[2] > -15.02, "{lo:?} {hi:?}");
+    assert_eq!(kinds(&r).iter().filter(|k| **k == SurfKind::Plane).count(), 5, "{:?}", kinds(&r));
+    let v0 = b.volume();
+    assert!(r.volume() > v0 + 50.0 && r.volume() < v0 + 0.5 * 6.0 * (40.0 * 30.0 + 20.0 * 30.0), "{} {v0}", r.volume());
+}

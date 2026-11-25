@@ -1696,42 +1696,102 @@ fn tweak_swept(acc: &Shape, f: &Feature, t: &Tweak) -> Option<Shape> {
 /// inside taken away (`flip`: all but its inside), an open curve's smaller
 /// side (`flip`: the other), its ends carried on along their tangents; the
 /// walls tagged `(step, 1)`.
-fn project(doc: &Doc, acc: &Shape, f: &Feature, p: &crate::doc::Project) -> Result<Shape, String> {
+fn project(doc: &Doc, acc: &Shape, f: &Feature, p: &crate::doc::Project) -> Result<(Shape, Vec<String>), String> {
     let c = doc.feature(p.curve).filter(|c| c.is_path()).ok_or("its curve is not there")?;
     let n = c.axis().normalize();
     let curve = section(doc, c)?;
     mark(&step("project", f));
+    // across a symmetry (its shape's own, a Mirror's) it is made on the
+    // other side too: the curve's image along its normal's image there
+    // (drawn: both lines split the faces, one point where they cross on the
+    // plane; cut: the tool's image cut as well), not again where the image
+    // is itself (a curve or a tool symmetric across that plane)
+    let mut warn = vec![];
     if !p.cut {
         // an open curve drawn to a face's border reaches it
         let (lo, hi) = c.bounds();
         let ext = (0.004 * (hi - lo).length()).clamp(0.3, 2.0);
-        return acc.project_imprint(&curve, n.to_array(), ext);
+        let mut out = acc.project_imprint(&curve, n.to_array(), ext)?;
+        let own = samples(&curve);
+        for r in &p.images {
+            let m = crate::doc::rows_to_mat(*r);
+            let Ok(image) = curve.transformed(*r) else { continue };
+            let n2 = m.transform_vector3(n).normalize();
+            if n2.dot(n) > 1.0 - 1e-9 && same_points(&own, &samples(&image), 1e-4 * (hi - lo).length() + 1e-5) {
+                continue;
+            }
+            match out.project_imprint(&image, n2.to_array(), ext) {
+                Ok(s) => out = s,
+                Err(e) => warn.push(format!("its mirror side: {e}")),
+            }
+        }
+        return Ok((out, warn));
     }
-    let boxes = acc.lump_boxes();
-    let lo = boxes.iter().fold([f64::MAX; 3], |a, b| [a[0].min(b.0[0]), a[1].min(b.0[1]), a[2].min(b.0[2])]);
-    let hi = boxes.iter().fold([f64::MIN; 3], |a, b| [a[0].max(b.1[0]), a[1].max(b.1[1]), a[2].max(b.1[2])]);
+    let mut boxes = acc.lump_boxes();
     if boxes.is_empty() {
         return Err("nothing to cut".into());
     }
+    // the box round the part and its images (so a tool's image covers the
+    // part across the plane as the tool covers it here)
+    for r in &p.images {
+        let m = crate::doc::rows_to_mat(*r);
+        let more: Vec<([f64; 3], [f64; 3])> = boxes
+            .iter()
+            .map(|b| {
+                let (a, c) = (m.transform_point3(DVec3::from_array(b.0)), m.transform_point3(DVec3::from_array(b.1)));
+                (a.min(c).to_array(), a.max(c).to_array())
+            })
+            .collect();
+        boxes.extend(more);
+    }
+    let lo = boxes.iter().fold([f64::MAX; 3], |a, b| [a[0].min(b.0[0]), a[1].min(b.0[1]), a[2].min(b.0[2])]);
+    let hi = boxes.iter().fold([f64::MIN; 3], |a, b| [a[0].max(b.1[0]), a[1].max(b.1[1]), a[2].max(b.1[2])]);
     let tagged = |mut t: Shape| {
         let tags = vec![FaceTag { feature: f.id, sub: 1 }.pack(); t.face_count()];
         t.set_tags(&tags);
         t
     };
-    let made = |tool: Shape, keep_inside: bool| -> Result<Shape, String> {
-        let tool = tagged(tool);
-        if keep_inside { acc.common(&tool) } else { acc.cut(&tool) }
+    // the tool and its images, each once
+    let with_images = |tool: Shape| -> Vec<Shape> {
+        let mut all = vec![tagged(tool)];
+        for r in &p.images {
+            let Ok(t) = all[0].transformed(*r) else { continue };
+            if !all.iter().any(|x| same_solid(x, &t)) {
+                all.push(tagged(t));
+            }
+        }
+        all
     };
     if doc.is_closed_curve(c.id) {
-        let tool = Shape::project_tool(&curve, n.to_array(), lo, hi, 1)?;
-        return made(tool, p.flip);
+        let tools = with_images(Shape::project_tool(&curve, n.to_array(), lo, hi, 1)?);
+        if p.flip {
+            // only its inside kept: the insides of the curve and its images
+            let mut it = tools.into_iter();
+            let mut tool = it.next().ok_or("no tool")?;
+            for t in it {
+                tool = tool.fuse(&t)?;
+            }
+            return Ok((acc.common(&tool)?, warn));
+        }
+        let mut out = acc.cut(&tools[0])?;
+        for t in &tools[1..] {
+            match out.cut(t) {
+                Ok(s) => out = s,
+                Err(e) => warn.push(format!("its mirror side: {e}")),
+            }
+        }
+        return Ok((out, warn));
     }
-    // an open curve: the smaller side taken away (flip: the larger)
-    let mut sides: Vec<(f64, Shape)> = vec![];
+    // an open curve: the smaller side taken away (flip: the larger), then
+    // the image of that side's tool
+    let mut sides: Vec<(f64, Shape, Shape)> = vec![];
     let mut why = String::new();
     for side in [1, -1] {
-        match Shape::project_tool(&curve, n.to_array(), lo, hi, side).and_then(|t| made(t, false)) {
-            Ok(s) => sides.push((s.volume(), s)),
+        match Shape::project_tool(&curve, n.to_array(), lo, hi, side).and_then(|t| {
+            let t = tagged(t);
+            Ok((acc.cut(&t)?, t))
+        }) {
+            Ok((s, t)) => sides.push((s.volume(), s, t)),
             Err(e) => why = e,
         }
     }
@@ -1739,16 +1799,59 @@ fn project(doc: &Doc, acc: &Shape, f: &Feature, p: &crate::doc::Project) -> Resu
         return Err(why);
     }
     let before = acc.volume();
-    if sides.iter().all(|(v, _)| (before - v).abs() < 1e-6 * before.abs().max(1.0)) {
+    if sides.iter().all(|(v, _, _)| (before - v).abs() < 1e-6 * before.abs().max(1.0)) {
         return Err("the curve, carried on, does not cross the part".into());
     }
     sides.sort_by(|a, b| b.0.total_cmp(&a.0));
     let k = if p.flip { sides.len() - 1 } else { 0 };
-    let (v, s) = sides.swap_remove(k);
+    let (v, mut out, tool) = sides.swap_remove(k);
     if (before - v).abs() < 1e-6 * before.abs().max(1.0) || v < 1e-9 {
         return Err("the curve, carried on, does not cross the part".into());
     }
-    Ok(s)
+    for t in &with_images(tool)[1..] {
+        match out.cut(t) {
+            Ok(s) => out = s,
+            Err(e) => warn.push(format!("its mirror side: {e}")),
+        }
+    }
+    Ok((out, warn))
+}
+
+/// Points along a curve's edges (a quarter, half and three quarters of
+/// each, and its vertices).
+fn samples(s: &Shape) -> Vec<DVec3> {
+    let mut out: Vec<DVec3> = s.vertex_points().into_iter().map(DVec3::from_array).collect();
+    for e in 0..512 {
+        let mut any = false;
+        for f in [0.25, 0.5, 0.75] {
+            if let Some(p) = s.edge_point(e, f) {
+                out.push(DVec3::from_array(p));
+                any = true;
+            }
+        }
+        if !any && e > 0 {
+            break;
+        }
+    }
+    out
+}
+
+/// Whether two sets of points are the same within `tol` (each of one near
+/// one of the other).
+fn same_points(a: &[DVec3], b: &[DVec3], tol: f64) -> bool {
+    !a.is_empty() && a.len() == b.len() && b.iter().all(|q| a.iter().any(|p| p.distance(*q) < tol)) && a.iter().all(|p| b.iter().any(|q| p.distance(*q) < tol))
+}
+
+/// Whether two solids fill the same space (their boxes, then their common
+/// part's volume).
+fn same_solid(a: &Shape, b: &Shape) -> bool {
+    let (Some((l1, h1)), Some((l2, h2))) = (shape_box(a), shape_box(b)) else { return false };
+    let tol = 1e-5 * (h1 - l1).length() + 1e-6;
+    if l1.distance(l2) > tol || h1.distance(h2) > tol {
+        return false;
+    }
+    let v = a.volume();
+    v > 0.0 && a.common(b).is_ok_and(|x| (x.volume() - v).abs() < 1e-6 * v && (b.volume() - v).abs() < 1e-6 * v)
 }
 
 fn bridge(acc: &Shape, f: &Feature, b: &crate::doc::Bridge) -> Result<Shape, String> {
@@ -1826,9 +1929,12 @@ fn sweep_face(acc: &Shape, f: &Feature, r: &FaceRef, face: usize, n: DVec3, o: D
 /// A move and its mirror image (after a Mirror) made in one go, each
 /// vertex by its own move (a face across the plane whose two corners move
 /// bends once, not twice: a bent face cannot follow a second move).
-fn tweak_pair(acc: &Shape, f: &Feature, t: &Tweak, u: &Tweak) -> Result<Option<Shape>, String> {
+fn tweak_pair(acc: &Shape, f: &Feature, t: &Tweak, u: &Tweak, bend: bool) -> Result<Option<Shape>, String> {
     if t.copy || u.copy {
         return Err("copies one at a time".into());
+    }
+    if bend && !(t.bend && u.bend) {
+        return Err("an older move is not bent".into());
     }
     let pts = acc.vertex_points();
     let at = |v: i32| DVec3::from_array(pts[(v - 1) as usize]);
@@ -1847,10 +1953,20 @@ fn tweak_pair(acc: &Shape, f: &Feature, t: &Tweak, u: &Tweak) -> Result<Option<S
         }
         let centre = tw.about.unwrap_or_else(|| vs.iter().map(|&v| at(v)).sum::<DVec3>() / vs.len() as f64);
         for &v in &vs {
-            if !moves.iter().any(|(w, _)| *w == v) {
-                moves.push((v, (centre + (at(v) - centre) * tw.scale + tw.delta).to_array()));
+            let to = centre + (at(v) - centre) * tw.scale + tw.delta;
+            match moves.iter_mut().find(|(w, _)| *w == v) {
+                // a vertex on the plane, named by both: where the two moves
+                // agree, so it stays on the plane (the part stays even)
+                Some(m) => m.1 = ((DVec3::from_array(m.1) + to) * 0.5).to_array(),
+                None => moves.push((v, to.to_array())),
             }
         }
+    }
+    if bend {
+        // every face round them follows; a vertex and its image meeting
+        // on the plane become one
+        mark(&step("deform", f));
+        return acc.deform(&moves).map(Some);
     }
     mark(&step("tweak", f));
     acc.move_vertices(&moves).map(Some)
@@ -2155,6 +2271,7 @@ fn mirrored_doc(doc: &Doc) -> Option<Doc> {
             let mut g = f.clone();
             let images: Vec<EdgeRef> = r.edges.iter().filter(|e| m.reflect(e.at).distance(e.at) > 1e-6).map(|e| EdgeRef { at: m.reflect(e.at), ..e.clone() }).collect();
             if let Some(gr) = g.round.as_mut() {
+                gr.images += images.len();
                 gr.edges.extend(images);
             }
             out.features.push(g);
@@ -2164,6 +2281,13 @@ fn mirrored_doc(doc: &Doc) -> Option<Doc> {
             let images: Vec<FaceRef> = sh.faces.iter().filter(|r| m.reflect(r.at).distance(r.at) > 1e-6).map(|r| FaceRef { at: m.reflect(r.at), ..*r }).collect();
             if let Some(gs) = g.shell.as_mut() {
                 gs.faces.extend(images);
+            }
+            out.features.push(g);
+        } else if f.project.is_some() {
+            // a curve projected: across the plane too, in the same step
+            let mut g = f.clone();
+            if let Some(gp) = g.project.as_mut() {
+                gp.add_image(m.rows());
             }
             out.features.push(g);
         } else if f.push.is_some() || f.tweak.is_some() || f.cut.is_some() || f.bridge.is_some() {
@@ -2208,6 +2332,18 @@ fn local_doc(doc: &Doc) -> Option<Doc> {
             out.features.push(f.clone());
             continue;
         }
+        // a curve projected on its Object: made across its plane too (one
+        // step, `project`)
+        if let Some(pj) = f.project.as_ref().filter(|_| !f.one_side) {
+            let mut g = f.clone();
+            for s in syms.iter().filter(|s| pj.shapes.contains(&s.id)) {
+                if let (Some(r), Some(gp)) = (s.sym_rows(), g.project.as_mut()) {
+                    gp.add_image(r);
+                }
+            }
+            out.features.push(g);
+            continue;
+        }
         let Some(k) = (0..syms.len()).find(|&k| crate::doc::pattern_op(f, &ids[k], &[syms[k]]).is_some()) else {
             out.features.push(f.clone());
             continue;
@@ -2222,6 +2358,7 @@ fn local_doc(doc: &Doc) -> Option<Doc> {
             let mut g = f.clone();
             let images: Vec<EdgeRef> = r.edges.iter().filter(|e| e.faces.iter().any(|t| *t >= 0 && ids[k].contains(&((*t >> 16) as FeatureId)))).map(|e| EdgeRef { at: s.sym_reflect(e.at), faces: e.faces.map(|t| s.sym_image_tag(t)) }).filter(|e| r.edges.iter().all(|x| x.at.distance(e.at) > 1e-6)).collect();
             if let Some(gr) = g.round.as_mut() {
+                gr.images += images.len();
                 gr.edges.extend(images);
             }
             out.features.push(g);
@@ -2577,6 +2714,9 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                             limit = Some(size);
                         }
                     }
+                    // (an image across a symmetry that is not there, another
+                    // shape covering it: nothing to round there, no error)
+                    let missing = if missing > 0 && r.images > 0 { resolve(&acc, &r.edges[..r.edges.len().saturating_sub(r.images)]).1 } else { missing };
                     if missing > 0 {
                         stage.errors.push(format!("{}: {missing} edge{} not found", f.name, if missing > 1 { "s" } else { "" }));
                     }
@@ -2719,7 +2859,7 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                 // in one go when they do not name the same components
                 let image = feats.get(i + 1).copied().filter(|g| g.id == f.id && twin_of(feats, i).is_none() && !skipped("tweak") && g.tweak.is_some() && !twin_same(Some(&acc), f, g));
                 if let Some((g, u)) = image.and_then(|g| Some((g, g.tweak.as_ref()?))) {
-                    if let Ok(Some(s)) = tweak_pair(&acc, f, t, u) {
+                    if let Ok(Some(s)) = tweak_pair(&acc, f, t, u, false) {
                         model.booleans += 1;
                         stage.shape = Some(Rc::new(s));
                         stage.rough = true;
@@ -2734,6 +2874,21 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
                         if let Some(mut s) = replay(doc, &feats[..i], f, Some(g), t, &stage, skip, cache, model, used_tools, used_stages) {
                             s.paired = true;
                             stage = s;
+                            keep(cache, key, &mut stage);
+                            continue;
+                        }
+                    }
+                    // the most general way, both together: every face round
+                    // them follows, and a vertex meeting its image on the
+                    // plane is one with it (Romain 25 nov., 6 h 17: "En
+                    // miroir un point au milieu de la coupe doit fusionner,
+                    // actuellement ça casse la symétrie")
+                    if !skipped("deform") {
+                        if let Ok(Some(s)) = tweak_pair(&acc, f, t, u, true) {
+                            model.booleans += 1;
+                            stage.shape = Some(Rc::new(s));
+                            stage.rough = true;
+                            stage.paired = true;
                             keep(cache, key, &mut stage);
                             continue;
                         }
@@ -2803,7 +2958,8 @@ fn run<'a>(doc: &'a Doc, feats: &[&'a Feature], skip: &[String], cache: &mut Cac
             if let Some(acc) = stage.shape.clone() {
                 let res = if skipped("project") { Err("skipped, it crashed the kernel".to_string()) } else { project(doc, &acc, f, pj) };
                 match res {
-                    Ok(s) => {
+                    Ok((s, warn)) => {
+                        stage.errors.extend(warn.into_iter().map(|w| format!("{}: {w}", f.name)));
                         model.booleans += 1;
                         stage.shape = Some(Rc::new(s));
                         if pj.cut {
@@ -5053,6 +5209,93 @@ mod tests {
         assert!(d.feature(p).is_none());
     }
 
+    #[test]
+    fn projected_across_a_symmetry() {
+        use crate::doc::{Mirror, Sym};
+        // the block and open curve of `curves_projected`, the block with its
+        // own symmetry (Romain 25 nov., 6 h 17: "j'ai cut avec la spline
+        // mais ça ne prend pas le miroir")
+        let block = |d: &mut Doc| d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        let curve = |d: &mut Doc| {
+            let l = path_of(d, &[[-20.0, -5.0], [5.0, -2.0], [8.0, 15.0]], true, false, DVec3::new(0.0, 25.0, 0.0));
+            d.feature_mut(l).unwrap().profile.as_mut().unwrap().smooth = vec![false; 3];
+            l
+        };
+        let full = 40.0 * 20.0 * 30.0;
+        let tops = |m: &Model, b: u32| m.faces.iter().filter(|f| f.tag.map(|t| t.pack()) == Some(tag(b, 2))).count();
+        // the centre of the part's volume along X
+        let cx = |m: &Model| {
+            let (mut v, mut mx) = (0.0, 0.0);
+            for t in &m.triangles {
+                let p = |i: u32| DVec3::from_array(m.positions[i as usize].map(|x| x as f64));
+                let dv = p(t[0]).dot(p(t[1]).cross(p(t[2]))) / 6.0;
+                v += dv;
+                mx += dv * (p(t[0]).x + p(t[1]).x + p(t[2]).x) / 4.0;
+            }
+            mx / v
+        };
+        // where four edges end at the crossing of the curve and its image
+        let ends_at = |m: &Model, q: DVec3| {
+            m.edges.iter().flat_map(|e| [e.pts.first(), e.pts.last()]).flatten().filter(|p| DVec3::from_array(p.map(|x| x as f64)).distance(q) < 0.05).count()
+        };
+        // with no symmetry: the smaller side's volume, to compare
+        let mut d = Doc::default();
+        let b = block(&mut d);
+        let l = curve(&mut d);
+        let p = d.add_project(l, true, vec![b]).unwrap();
+        let small = full - mesh_volume(&build(&d, true, false, &[], &mut Cache::default()));
+        // across its Y (its middle, y = 10): the image projected up onto the
+        // bottom, split as the top is
+        d.feature_mut(p).unwrap().project.as_mut().unwrap().cut = false;
+        d.feature_mut(b).unwrap().sym = Some(Sym { axis: 1, flip: false });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.faces.len(), 8, "{:?}", m.faces.iter().map(|f| f.tag).collect::<Vec<_>>());
+        assert_eq!(m.faces.iter().filter(|f| f.tag.map(|t| t.pack()) == Some(tag(b, 3))).count(), 2, "the bottom split");
+        // across its X: the curve and its image cross on the top at
+        // (0, 20, −2.6), one vertex, the top in four pieces
+        d.feature_mut(b).unwrap().sym = Some(Sym { axis: 0, flip: false });
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(tops(&m, b), 4, "{:?}", m.faces.iter().map(|f| f.tag).collect::<Vec<_>>());
+        assert_eq!(ends_at(&m, DVec3::new(0.0, 20.0, -2.6)), 4, "one vertex where they cross");
+        // cut through: both corners taken away, the part symmetric
+        d.feature_mut(p).unwrap().project.as_mut().unwrap().cut = true;
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        let gone = full - mesh_volume(&m);
+        assert!(gone > small + 100.0 && gone < 2.0 * small + 1.0, "both sides cut: {gone} (one: {small})");
+        assert!(cx(&m).abs() < 0.05, "symmetric: {}", cx(&m));
+        // the same with the scene's Mirror across X in place of the block's own
+        let mut e = Doc::default();
+        let b2 = block(&mut e);
+        let l2 = curve(&mut e);
+        e.add_mirror(Mirror { axis: 0, offset: 0.0, flip: false, single: false });
+        let p2 = e.add_project(l2, false, vec![b2]).unwrap();
+        let m = build(&e, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(tops(&m, b2), 4);
+        assert_eq!(ends_at(&m, DVec3::new(0.0, 20.0, -2.6)), 4);
+        e.feature_mut(p2).unwrap().project.as_mut().unwrap().cut = true;
+        let m = build(&e, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert!((full - mesh_volume(&m) - gone).abs() < 5.0, "as the block's own: {} {gone}", full - mesh_volume(&m));
+        assert!(cx(&m).abs() < 0.05, "symmetric: {}", cx(&m));
+        // a corner moved onto the block's own plane (z = 0) with its image:
+        // the two meet in one vertex, the edge between them gone (25 nov.:
+        // "en miroir un point au milieu de la coupe doit fusionner")
+        let mut d = Doc::default();
+        let b = block(&mut d);
+        d.feature_mut(b).unwrap().sym = Some(Sym { axis: 2, flip: false });
+        let mut t = Tweak::new(vec![Comp::Vertex(DVec3::new(20.0, 0.0, 15.0))]).unwrap();
+        t.delta = DVec3::new(0.0, 0.0, -15.0);
+        d.add_tweak(t);
+        let m = build(&d, true, false, &[], &mut Cache::default());
+        assert!(m.errors.is_empty(), "{:?}", m.errors);
+        assert_eq!(m.edges.iter().filter(|e| !e.seam).count(), 11, "the edge between them gone");
+        assert_eq!(ends_at(&m, DVec3::new(20.0, 0.0, 0.0)), 4, "one vertex on the plane");
+    }
+
     /// A saved scene's curve projected onto its Object (`FORME_DOC`,
     /// `FORME_CURVE` = the curve's id, `FORME_CUT=1`, `FORME_FLIP=1`): the
     /// errors, faces and volume before and after.
@@ -5070,6 +5313,57 @@ mod tests {
         let m = build(&d, true, false, &[], &mut Cache::default());
         println!("before: {} faces, {:.0} mm3, {:?}", m0.faces.len(), mesh_volume(&m0), m0.errors);
         println!("after: {} faces, {:.0} mm3, {:?} ({:.0} ms)", m.faces.len(), mesh_volume(&m), m.errors, t.elapsed().as_secs_f64() * 1e3);
+    }
+
+    /// A saved scene built as it is (FORME_DOC), then with vertex moves
+    /// added (FORME_MOVES = "x,y,z,dx,dy,dz;…": each the vertex at x, y, z
+    /// moved), printing the errors, faces, lumps and volume each time;
+    /// FORME_SYM = 0 / 1 / 2 sets the first shape's own symmetry's axis,
+    /// FORME_DROP = ids (commas) takes features out first.
+    #[test]
+    #[ignore]
+    fn sym_probe() {
+        let Ok(path) = std::env::var("FORME_DOC") else { return };
+        let mut d = Doc::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        if let Ok(v) = std::env::var("FORME_DROP") {
+            let ids: Vec<u32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            d.features.retain(|f| !ids.contains(&f.id));
+        }
+        if let Ok(v) = std::env::var("FORME_SYM") {
+            if let Some(f) = d.features.iter_mut().find(|f| f.sym.is_some()) {
+                match v.parse::<u8>() {
+                    Ok(a) => f.sym.as_mut().unwrap().axis = a,
+                    Err(_) => f.sym = None,
+                }
+            }
+        }
+        let show = |d: &Doc, what: &str| {
+            let t = Instant::now();
+            let m = build(d, true, false, &[], &mut Cache::default());
+            // FORME_BAND = "x0,x1,y0,y1": the reach along Z of the part there
+            let band = std::env::var("FORME_BAND").ok().map(|v| v.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect::<Vec<_>>());
+            let reach = band.filter(|b| b.len() == 4).map(|b| m.positions.iter().filter(|p| p[0] >= b[0] && p[0] <= b[1] && p[1] >= b[2] && p[1] <= b[3]).fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2]))));
+            println!("{what}: {} faces, {} edges, {:.0} mm3, {:?} ({:.0} ms), z reach {:?}", m.faces.len(), m.edges.len(), mesh_volume(&m), m.errors, t.elapsed().as_secs_f64() * 1e3, reach);
+            m
+        };
+        show(&d, "as it is");
+        if let Ok(v) = std::env::var("FORME_MOVES") {
+            for mv in v.split(';').filter(|x| !x.trim().is_empty()) {
+                let n: Vec<f64> = mv.split(',').map(|x| x.trim().parse().unwrap()).collect();
+                let mut t = Tweak::new(vec![Comp::Vertex(DVec3::new(n[0], n[1], n[2]))]).unwrap();
+                t.delta = DVec3::new(n[3], n[4], n[5]);
+                d.add_tweak(t);
+                let m = show(&d, &format!("moved {mv}"));
+                // the part's vertices on the move's plane, as a check
+                let mut vs: Vec<[f32; 3]> = m.edges.iter().flat_map(|e| [e.pts.first().copied(), e.pts.last().copied()]).flatten().collect();
+                vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                vs.dedup_by(|a, b| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() + (a[2] - b[2]).abs() < 1e-3);
+                println!("  {} vertices", vs.len());
+            }
+        }
+        if let Ok(dir) = std::env::var("FORME_SAVE") {
+            std::fs::write(dir, d.to_json()).unwrap();
+        }
     }
 
     #[test]

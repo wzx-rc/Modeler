@@ -3436,6 +3436,150 @@ fn main() {
         }
     }
 
+    if want("sym-project") {
+        // Romain 25 nov., 6 h 17: "Sur la scène ouverte j'ai cut avec la
+        // spline mais ça ne prend pas le miroir / En miroir un point au
+        // milieu de la coupe doit fusionner, actuellement ça casse la
+        // symétrie / … la touche petit 2 … : faut bien object mode / Quand
+        // on direct fillet un point cacher le Gizmo". A block with its own
+        // symmetry across its Z, an open curve in front of it drawn on its
+        // faces: the drawing on its back too; its symmetry across X: the
+        // curve and its image crossing on the plane; a corner pulled to the
+        // middle of its edge with its image: one vertex; a point of the
+        // drawing pulled out, both sides. FORME_DOC: his scene (its
+        // Project 2 and 3, the same drawing again, left out).
+        let mode = |h: &Harness| format!("{:?}", h.st.sel_mode);
+        let info = |h: &Harness| -> String {
+            let Some(m) = h.st.model.as_ref() else { return "no model".into() };
+            format!("{} faces, {} edges, errors {:?}", m.faces.len(), m.edges.len(), m.errors)
+        };
+        let doc: Doc = match std::env::var("FORME_DOC") {
+            Ok(path) => serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap(),
+            Err(_) => serde_json::from_str(r#"{"version":1,"next_id":22,"features":[
+                {"id":12,"name":"Cube","op":"Add","prim":{"kind":"Box","x":119.6554,"y":203.6433,"z":32.6572},"origin":[-6.0825,0.0,16.90387],"rot":[0,0,0,1],"visible":true,"material":0,"sym":{"axis":2}},
+                {"id":16,"name":"Path","op":"Add","prim":{"kind":"Path","x":137.9733,"z":116.5667},"origin":[11.9721,41.6156,40.2026],"rot":[0.7071067811865475,0,0,0.7071067811865475],"visible":true,"material":0,"profile":{"points":[[0.5,-0.5],[0.0559,-0.3447],[-0.3487,0.2154],[-0.5,0.5]],"smooth":[false,false,false,false],"corner":[0.0,57.1,56.0,0.0],"open":true}},
+                {"id":21,"name":"Project","op":"Add","prim":{"kind":"Box","x":0,"y":0,"z":0},"origin":[8.47,45.84,40.2],"rot":[0,0,0,1],"visible":true,"material":0,"project":{"curve":16,"cut":false,"flip":false,"shapes":[12]}}]}"#).unwrap(),
+        };
+        let mut doc = doc;
+        doc.features.retain(|f| f.id != 22 && f.id != 23);
+        h.reset(doc, "Scene");
+        for _ in 0..3 {
+            h.settle();
+            h.steps(3);
+        }
+        eprintln!("  sym Z: {}", info(&h));
+        let look = |h: &mut Harness, yaw: f32, pitch: f32, dist: f32| {
+            h.st.camera.yaw = yaw;
+            h.st.camera.pitch = pitch;
+            h.st.camera.target = Vec3::new(-6.0, 100.0, 17.0);
+            h.st.camera.dist = dist;
+            h.steps(3);
+        };
+        look(&mut h, 0.55, 0.25, 520.0);
+        h.shot("zero-symproj-1-front");
+        look(&mut h, 0.55 + std::f32::consts::PI, 0.25, 520.0);
+        h.shot("zero-symproj-2-back-mirrored");
+        // its symmetry across its X instead: the curve's image crosses it
+        // on the plane, one point there
+        let cube = h.st.doc.features.iter().find(|f| f.sym.is_some()).map(|f| f.id);
+        if let Some(c) = cube {
+            h.st.edit("Symmetry", |d| d.feature_mut(c).unwrap().sym.as_mut().unwrap().axis = 0);
+            h.settle();
+            h.steps(3);
+            eprintln!("  sym X: {}", info(&h));
+            look(&mut h, 0.0, 0.0, 480.0);
+            h.shot("zero-symproj-3-sym-x-crossing");
+            h.st.edit("Symmetry", |d| d.feature_mut(c).unwrap().sym.as_mut().unwrap().axis = 2);
+            h.settle();
+            h.steps(3);
+        }
+        // the corner pulled down to the middle of its edge (the plane): it
+        // and its image one vertex
+        let at = h.st.doc.feature(cube.unwrap_or(12)).map(|f| {
+            let (lo, hi) = f.bounds();
+            (DVec3::new(hi.x, lo.y, hi.z), 0.5 * (lo.z + hi.z) - hi.z)
+        });
+        if let Some((corner, dz)) = at {
+            look(&mut h, 1.15, 0.12, 380.0);
+            h.st.camera.target = Vec3::new(corner.x as f32, 40.0, 17.0);
+            h.steps(3);
+            h.shot("zero-symproj-4-corner-before");
+            let mut t = nurbs_kernel::Tweak::new(vec![nurbs_kernel::Comp::Vertex(corner)]).unwrap();
+            t.delta = DVec3::new(0.0, 0.0, dz);
+            h.st.edit("Move vertex", |d| {
+                d.add_tweak(t);
+            });
+            h.settle();
+            h.steps(3);
+            let near = h.st.model.as_ref().map(|m| {
+                let mut v: Vec<[f32; 3]> = m.edges.iter().flat_map(|e| [e.pts.first().copied(), e.pts.last().copied()]).flatten().filter(|p| (p[0] - corner.x as f32).abs() < 0.05 && p[1].abs() < 0.05).collect();
+                v.sort_by(|a, b| a[2].total_cmp(&b[2]));
+                v.dedup_by(|a, b| (a[2] - b[2]).abs() < 1e-3);
+                v
+            });
+            eprintln!("  corner moved {dz:.3}: {} ; vertices left on that edge {near:?}", info(&h));
+            h.key_phys(egui::Key::Num1, egui::Key::Num1, "&");
+            h.steps(2);
+            h.shot("zero-symproj-5-corner-merged");
+            h.key_phys(egui::Key::Quote, egui::Key::Num4, "'");
+            // a point of the drawing (where it meets the block's side)
+            // pulled out of the face: both sides (the corner put back first)
+            h.st.undo_doc();
+            h.settle();
+            h.steps(2);
+            let side = h.st.model.as_ref().and_then(|m| {
+                let same = |e: &nurbs_kernel::model::Edge| e.faces[0] >= 0 && e.faces[1] >= 0 && m.faces[e.faces[0] as usize].tag == m.faces[e.faces[1] as usize].tag;
+                m.edges.iter().filter(|e| same(e)).flat_map(|e| [e.pts.first().copied(), e.pts.last().copied()]).flatten().filter(|p| (p[0] - corner.x as f32).abs() < 0.05 && p[1] > 1.0).max_by(|a, b| a[2].total_cmp(&b[2]))
+            });
+            if let Some(p) = side {
+                let mut t = nurbs_kernel::Tweak::new(vec![nurbs_kernel::Comp::Vertex(DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64))]).unwrap();
+                t.delta = DVec3::new(0.0, 0.0, 14.7);
+                h.st.edit("Move vertex", |d| {
+                    d.add_tweak(t);
+                });
+                h.settle();
+                h.steps(3);
+                eprintln!("  point {p:?} pulled 14.7 out: {}", info(&h));
+                look(&mut h, 1.0, 0.3, 560.0);
+                h.shot("zero-symproj-6-point-pulled");
+            }
+        }
+        // the key left of 1 (AZERTY's ²) gives Object mode
+        h.key_phys(egui::Key::Num2, egui::Key::Num2, "é");
+        eprintln!("  é: {}", mode(&h));
+        h.key_phys(egui::Key::Backtick, egui::Key::Backtick, "²");
+        eprintln!("  ²: {}", mode(&h));
+        // a direct fillet on a curve's corner: no gizmo while it is dragged
+        // (another point of the curve picked, its gizmo shown, then the
+        // corner dragged)
+        let corner = h.st.doc.features.iter().filter(|f| f.is_path() && f.profile.as_ref().is_some_and(|p| p.open && p.points.len() >= 4 && p.corner.iter().any(|c| *c > 0.0))).min_by(|a, b| a.rot.angle_between(DQuat::IDENTITY).total_cmp(&b.rot.angle_between(DQuat::IDENTITY))).cloned();
+        if let Some(c) = corner {
+            let pr = c.profile.clone().unwrap();
+            let i = (1..pr.points.len() - 1).max_by(|a, b| pr.corner[*a].abs().total_cmp(&pr.corner[*b].abs())).unwrap_or(1);
+            let w = nurbs_app::surfaces::path_point_pos(&c, i).unwrap_or(c.origin);
+            let other = nurbs_app::surfaces::path_point_pos(&c, 0).unwrap_or(c.origin);
+            look(&mut h, 0.2, 1.0, 420.0);
+            h.st.camera.target = w.as_vec3();
+            h.steps(3);
+            h.key_phys(egui::Key::Num1, egui::Key::Num1, "&");
+            h.key(egui::Key::W);
+            h.steps(2);
+            let q = h.screen_of(w.as_vec3());
+            h.click(h.screen_of(other.as_vec3()));
+            h.steps(2);
+            eprintln!("  {} picked {:?} (gizmo {:?})", c.name, h.st.vert_sel, h.st.gizmo);
+            h.shot("zero-symproj-7-corner-picked");
+            h.drag(q, q + egui::vec2(40.0, 30.0), 10, false);
+            h.steps(2);
+            eprintln!("  fillet dragged: round drag {}", h.st.round_drag.is_some());
+            h.shot("zero-symproj-8-corner-fillet-no-gizmo");
+            h.press(q + egui::vec2(40.0, 30.0), false);
+            h.settle();
+            h.steps(2);
+            eprintln!("  after: {}", info(&h));
+        }
+    }
+
     if want("intersect") {
         // Boolean Intersection and CARVE named SUB (Romain 24 nov., 5 h 45:
         // "Il y avait pas un mode Boolean Intersection? Appelle SUB à la

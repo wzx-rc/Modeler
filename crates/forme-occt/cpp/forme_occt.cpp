@@ -5846,17 +5846,79 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                     }
                 }
             }
+            // vertices that meet (a corner and its image moved onto the
+            // plane between them, Maya's merge at the seam; Romain 25 nov.,
+            // 6 h 17: "En miroir un point au milieu de la coupe doit
+            // fusionner"): one vertex, the edge between them gone, the
+            // faces round it closing on that vertex
+            const double mtol = 1e-4 * size + 1e-5;
+            std::vector<int> rep(vm.Extent() + 1);
+            for (int i = 0; i <= vm.Extent(); i++) rep[i] = i;
+            std::function<int(int)> root = [&](int i) {
+                while (rep[i] != i) i = rep[i] = rep[rep[i]];
+                return i;
+            };
+            TopTools_MapOfShape gone;
+            for (int i = 1; i <= em.Extent(); i++) {
+                TopoDS_Edge ef = TopoDS::Edge(em(i).Oriented(TopAbs_FORWARD));
+                TopoDS_Vertex a, b;
+                TopExp::Vertices(ef, a, b);
+                if (a.IsNull() || b.IsNull() || a.IsSame(b) || BRep_Tool::Degenerated(ef)) continue;
+                int ia = vm.FindIndex(a), ib = vm.FindIndex(b);
+                if (d[ia].Magnitude() <= tol && d[ib].Magnitude() <= tol) continue;
+                gp_Pnt qa = BRep_Tool::Pnt(a).Translated(d[ia]), qb = BRep_Tool::Pnt(b).Translated(d[ib]);
+                if (qa.Distance(qb) > mtol) continue;
+                gone.Add(ef);
+                int ra = root(ia), rb = root(ib);
+                if (ra != rb) rep[rb] = ra;
+            }
+            // each group on one point: where one that does not move is, else
+            // the middle of where they go
+            std::map<int, std::vector<int>> groups;
+            if (!gone.IsEmpty())
+                for (int i = 1; i <= vm.Extent(); i++) groups[root(i)].push_back(i);
+            std::map<int, int> keep_of; // a group's vertex that stays (its old vertex kept)
+            for (auto& [r, members] : groups) {
+                if (members.size() < 2) continue;
+                gp_XYZ at(0, 0, 0);
+                int still = 0;
+                for (int k : members) {
+                    if (d[k].Magnitude() <= tol && !still) still = k;
+                    at += BRep_Tool::Pnt(TopoDS::Vertex(vm(k))).XYZ() + d[k].XYZ();
+                }
+                at /= (double)members.size();
+                if (still) {
+                    at = BRep_Tool::Pnt(TopoDS::Vertex(vm(still))).XYZ();
+                    keep_of[r] = still;
+                }
+                for (int k : members) d[k] = gp_Vec(at - BRep_Tool::Pnt(TopoDS::Vertex(vm(k))).XYZ());
+            }
             BRep_Builder bb;
             TopTools_DataMapOfShapeShape vnew, enew;
-            for (int i = 1; i <= vm.Extent(); i++)
+            for (int i = 1; i <= vm.Extent(); i++) {
+                int r = gone.IsEmpty() ? i : root(i);
+                bool merged = !gone.IsEmpty() && groups.count(r) && groups[r].size() > 1;
+                if (merged) {
+                    if (keep_of.count(r)) {
+                        if (i != keep_of[r]) vnew.Bind(vm(i), vm(keep_of[r]));
+                        continue;
+                    }
+                    // the group's first makes the vertex, the others take it
+                    if (vnew.IsBound(vm(i))) continue;
+                    TopoDS_Shape nvx = vnew.IsBound(vm(r)) ? vnew(vm(r)) : TopoDS_Shape(BRepBuilderAPI_MakeVertex(BRep_Tool::Pnt(TopoDS::Vertex(vm(i))).Translated(d[i])).Vertex());
+                    vnew.Bind(vm(i), nvx);
+                    if (!vnew.IsBound(vm(r))) vnew.Bind(vm(r), nvx);
+                    continue;
+                }
                 if (d[i].Magnitude() > tol) vnew.Bind(vm(i), BRepBuilderAPI_MakeVertex(BRep_Tool::Pnt(TopoDS::Vertex(vm(i))).Translated(d[i])).Vertex());
+            }
             auto nv = [&](const TopoDS_Vertex& v) { TopoDS_Shape x = vnew.IsBound(v) ? vnew(v) : TopoDS_Shape(v); return TopoDS::Vertex(x.Oriented(TopAbs_FORWARD)); };
             // the edges
             for (int i = 1; i <= em.Extent(); i++) {
                 TopoDS_Edge ef = TopoDS::Edge(em(i).Oriented(TopAbs_FORWARD));
                 TopoDS_Vertex a, b;
                 TopExp::Vertices(ef, a, b);
-                if (a.IsNull() || b.IsNull()) continue;
+                if (a.IsNull() || b.IsNull() || gone.Contains(ef)) continue;
                 bool ma = moved(a), mb = moved(b);
                 if (!ma && !mb) continue;
                 if (BRep_Tool::Degenerated(ef)) {
@@ -5961,6 +6023,9 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                 for (TopExp_Explorer x(shm(k), TopAbs_FACE); x.More(); x.Next())
                     if (!shell_of.IsBound(x.Current())) shell_of.Bind(x.Current(), k - 1);
             auto shell_for = [&](const TopoDS_Shape& f) -> TopoDS_Shell& { return shells[shell_of.IsBound(f) ? shell_of(f) : 0]; };
+            // a face that could not bend is said once all are tried (a
+            // round face closed on itself, refused at once, says more)
+            bool cannot_bend = false;
             std::vector<long long> tags;
             for (int i = 1; i <= fm.Extent(); i++) {
                 TopoDS_Face f = TopoDS::Face(fm(i));
@@ -5991,9 +6056,13 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                     TopoDS_Wire nw;
                     bb.MakeWire(nw);
                     bool isouter = ow.IsSame(oldouter);
+                    int kept = 0, lines = 0;
                     for (TopoDS_Iterator ei(ow.Oriented(TopAbs_FORWARD)); ei.More(); ei.Next()) {
                         TopoDS_Edge e = TopoDS::Edge(ei.Value());
                         TopoDS_Edge ef = TopoDS::Edge(e.Oriented(TopAbs_FORWARD));
+                        if (gone.Contains(ef)) continue;
+                        kept += BRep_Tool::Degenerated(ef) ? 0 : 1;
+                        lines += BRepAdaptor_Curve(ef).GetType() == GeomAbs_Line ? 1 : 0;
                         TopoDS_Edge ne = enew.IsBound(ef) ? TopoDS::Edge(enew(ef)) : ef;
                         bb.Add(nw, ne.Oriented(e.Orientation()));
                         if (isouter && !BRep_Tool::Degenerated(ne)) {
@@ -6004,6 +6073,14 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                                 ring.push_back(c.Value(c.FirstParameter() + (c.LastParameter() - c.FirstParameter()) * fr));
                             }
                         }
+                    }
+                    if (kept == 0 || (kept <= 2 && lines == kept)) {
+                        // its edges folded onto each other
+                        if (isouter) {
+                            set_err("the move closes a face to nothing");
+                            return nullptr;
+                        }
+                        continue;
                     }
                     nw.Closed(Standard_True);
                     nw.Orientation(ow.Orientation());
@@ -6043,17 +6120,39 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                         TopoDS_Edge ef = TopoDS::Edge(x.Current().Oriented(TopAbs_FORWARD));
                         if (!s2.Add(ef) || BRep_Tool::Degenerated(ef)) continue;
                         BRepAdaptor_Curve oc(ef);
+                        if (gone.Contains(ef)) {
+                            // folded to its vertex
+                            TopoDS_Vertex a, b;
+                            TopExp::Vertices(ef, a, b);
+                            gp_Pnt q = BRep_Tool::Pnt(nv(a));
+                            for (int k = 0; k <= 8; k++) {
+                                gp_Pnt p = oc.Value(oc.FirstParameter() + (oc.LastParameter() - oc.FirstParameter()) * k / 8.0);
+                                bd.push_back({p, gp_Vec(p, q)});
+                            }
+                            continue;
+                        }
                         TopoDS_Edge ne = enew.IsBound(ef) ? TopoDS::Edge(enew(ef)) : ef;
                         BRepAdaptor_Curve nc(ne);
-                        for (int k = 0; k <= 8; k++) {
-                            double fr = k / 8.0;
+                        // about every size / 150 along it (8 to 64)
+                        double len = 0;
+                        for (int k = 0; k < 8; k++) len += oc.Value(oc.FirstParameter() + (oc.LastParameter() - oc.FirstParameter()) * k / 8.0).Distance(oc.Value(oc.FirstParameter() + (oc.LastParameter() - oc.FirstParameter()) * (k + 1) / 8.0));
+                        const int ns = std::clamp((int)std::ceil(len / (size / 150.0)), 8, 64);
+                        // closer near its ends too, where its move may bend
+                        std::vector<double> frs;
+                        for (int k = 0; k <= ns; k++) frs.push_back((double)k / ns);
+                        for (double o : {0.004, 0.012, 0.03})
+                            if (o < 0.5 / ns) {
+                                frs.push_back(o);
+                                frs.push_back(1.0 - o);
+                            }
+                        for (double fr : frs) {
                             gp_Pnt a = oc.Value(oc.FirstParameter() + (oc.LastParameter() - oc.FirstParameter()) * fr);
                             gp_Pnt b = nc.Value(nc.FirstParameter() + (nc.LastParameter() - nc.FirstParameter()) * fr);
                             bd.push_back({a, gp_Vec(a, b)});
                         }
                     }
                 }
-                auto disp = [&](const gp_Pnt& p) {
+                auto shepard = [&](const gp_Pnt& p) {
                     gp_Vec acc(0, 0, 0);
                     double wsum = 0;
                     for (auto& [q, v] : bd) {
@@ -6062,6 +6161,95 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                         wsum += w;
                     }
                     return wsum > 0 ? acc / wsum : acc;
+                };
+                // the displacement over the face: a thin-plate spline in its
+                // (u, v) (scaled to mm at its middle) through the outline's,
+                // smooth and bending least (inverse distances alone made a
+                // plate bulging 30 mm past a point pulled 15 out, 25 nov.)
+                const double su = std::max(du.Magnitude(), 1e-9) / size, sv = std::max(dvv.Magnitude(), 1e-9) / size;
+                ShapeAnalysis_Surface sa0(gs);
+                std::vector<gp_XY> tx;
+                std::vector<gp_Vec> tv;
+                for (auto& [q, v] : bd) {
+                    gp_Pnt2d uv = sa0.ValueOfUV(q, tol);
+                    gp_XY x(uv.X() * su, uv.Y() * sv);
+                    bool dup = false;
+                    for (const gp_XY& y : tx)
+                        if ((y - x).SquareModulus() < 1e-14) {
+                            dup = true;
+                            break;
+                        }
+                    if (!dup) {
+                        tx.push_back(x);
+                        tv.push_back(v);
+                    }
+                }
+                auto phi = [](double r2) { return r2 > 1e-300 ? 0.5 * r2 * std::log(r2) : 0.0; };
+                const int tm = (int)tx.size(), tn = tm + 3;
+                std::vector<double> tw;
+                if (tm >= 3 && tm <= 2000) {
+                    std::vector<double> A((size_t)tn * tn, 0.0), B((size_t)tn * 3, 0.0);
+                    for (int r = 0; r < tm; r++) {
+                        for (int c = 0; c < tm; c++) A[(size_t)r * tn + c] = phi((tx[r] - tx[c]).SquareModulus());
+                        double pr[3] = {1.0, tx[r].X(), tx[r].Y()};
+                        for (int k = 0; k < 3; k++) {
+                            A[(size_t)r * tn + tm + k] = pr[k];
+                            A[(size_t)(tm + k) * tn + r] = pr[k];
+                        }
+                        B[(size_t)r * 3] = tv[r].X();
+                        B[(size_t)r * 3 + 1] = tv[r].Y();
+                        B[(size_t)r * 3 + 2] = tv[r].Z();
+                    }
+                    // Gauss with partial pivoting
+                    bool ok = true;
+                    for (int c = 0; c < tn && ok; c++) {
+                        int piv = c;
+                        for (int r = c + 1; r < tn; r++)
+                            if (std::abs(A[(size_t)r * tn + c]) > std::abs(A[(size_t)piv * tn + c])) piv = r;
+                        if (std::abs(A[(size_t)piv * tn + c]) < 1e-13) {
+                            ok = false;
+                            break;
+                        }
+                        if (piv != c) {
+                            for (int k = 0; k < tn; k++) std::swap(A[(size_t)c * tn + k], A[(size_t)piv * tn + k]);
+                            for (int k = 0; k < 3; k++) std::swap(B[(size_t)c * 3 + k], B[(size_t)piv * 3 + k]);
+                        }
+                        for (int r = c + 1; r < tn; r++) {
+                            double f = A[(size_t)r * tn + c] / A[(size_t)c * tn + c];
+                            if (f == 0.0) continue;
+                            for (int k = c; k < tn; k++) A[(size_t)r * tn + k] -= f * A[(size_t)c * tn + k];
+                            for (int k = 0; k < 3; k++) B[(size_t)r * 3 + k] -= f * B[(size_t)c * 3 + k];
+                        }
+                    }
+                    if (ok) {
+                        for (int r = tn - 1; r >= 0; r--)
+                            for (int k = 0; k < 3; k++) {
+                                double acc = B[(size_t)r * 3 + k];
+                                for (int c = r + 1; c < tn; c++) acc -= A[(size_t)r * tn + c] * B[(size_t)c * 3 + k];
+                                B[(size_t)r * 3 + k] = acc / A[(size_t)r * tn + r];
+                            }
+                        tw = B;
+                        for (double x : tw)
+                            if (!std::isfinite(x)) {
+                                tw.clear();
+                                break;
+                            }
+                    }
+                }
+                auto tps = [&](double u, double v) {
+                    gp_XY x(u * su, v * sv);
+                    double o[3] = {tw[(size_t)tm * 3], tw[(size_t)tm * 3 + 1], tw[(size_t)tm * 3 + 2]};
+                    for (int k = 0; k < 3; k++) o[k] += tw[(size_t)(tm + 1) * 3 + k] * x.X() + tw[(size_t)(tm + 2) * 3 + k] * x.Y();
+                    for (int r = 0; r < tm; r++) {
+                        double f = phi((x - tx[r]).SquareModulus());
+                        for (int k = 0; k < 3; k++) o[k] += tw[(size_t)r * 3 + k] * f;
+                    }
+                    return gp_Vec(o[0], o[1], o[2]);
+                };
+                auto disp = [&](const gp_Pnt& p) {
+                    if (tw.empty()) return shepard(p);
+                    gp_Pnt2d uv = sa0.ValueOfUV(p, tol);
+                    return tps(uv.X(), uv.Y());
                 };
                 gp_Pnt p1 = p0.Translated(disp(p0));
                 opencascade::handle<Geom_Surface> ns;
@@ -6112,12 +6300,91 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                             return nullptr;
                         }
                     BRepFill_Filling fill(3, 15, 2, Standard_False, 1e-5, 1e-4, 1e-2, 0.1, 8, 9);
+                    // its first guess: the old surface moved by the spline,
+                    // a grid of it a little past the face interpolated (the
+                    // plate then only mends the outline)
+                    opencascade::handle<Geom_Surface> init;
+                    if (!tw.empty()) {
+                        // nodes even over it, closer round the vertices
+                        // that moved and the other ends of their edges
+                        // (where the outline's moves bend: a smooth surface
+                        // misses such a bend by about its nodes' spacing)
+                        std::vector<gp_Pnt2d> bends;
+                        for (TopExp_Explorer x(fw, TopAbs_EDGE); x.More(); x.Next()) {
+                            TopoDS_Edge ef = TopoDS::Edge(x.Current());
+                            if (BRep_Tool::Degenerated(ef)) continue;
+                            TopoDS_Vertex a, b;
+                            TopExp::Vertices(ef, a, b);
+                            if (a.IsNull() || b.IsNull()) continue;
+                            bool ma = BRep_Tool::Pnt(nv(a)).Distance(BRep_Tool::Pnt(a)) > tol, mb = BRep_Tool::Pnt(nv(b)).Distance(BRep_Tool::Pnt(b)) > tol;
+                            if (ma == mb) continue;
+                            for (const TopoDS_Vertex& vx : {a, b}) bends.push_back(BRep_Tool::Parameters(vx, fw));
+                        }
+                        const int G0 = 25;
+                        auto nodes = [&](double lo, double hi, bool along_u) {
+                            std::vector<double> t;
+                            const double span = hi - lo;
+                            for (int k = 0; k < G0; k++) t.push_back(lo + span * k / (G0 - 1));
+                            if (bends.size() <= 24)
+                                for (const gp_Pnt2d& q : bends) {
+                                    double c = along_u ? q.X() : q.Y();
+                                    t.push_back(c);
+                                    for (double o : {0.003, 0.008, 0.016, 0.03, 0.055})
+                                        for (double sgn : {-1.0, 1.0}) t.push_back(c + sgn * o * span);
+                                }
+                            for (double& x : t) x = std::clamp(x, lo, hi);
+                            std::sort(t.begin(), t.end());
+                            std::vector<double> o;
+                            for (double x : t)
+                                if (o.empty() || x - o.back() > 0.0015 * span) o.push_back(x);
+                            if (o.back() < hi) o.back() = hi;
+                            return o;
+                        };
+                        const double eu = 0.05 * (u1 - u0), ev = 0.05 * (v1 - v0);
+                        std::vector<double> gu = nodes(u0 - eu, u1 + eu, true), gv = nodes(v0 - ev, v1 + ev, false);
+                        TColgp_Array2OfPnt grid(1, (int)gu.size(), 1, (int)gv.size());
+                        for (size_t a = 0; a < gu.size(); a++)
+                            for (size_t c = 0; c < gv.size(); c++) {
+                                gp_Pnt g = gs->Value(gu[a], gv[c]);
+                                grid.SetValue((int)a + 1, (int)c + 1, g.Translated(tps(gu[a], gv[c])));
+                            }
+                        try {
+                            GeomAPI_PointsToBSplineSurface ps;
+                            ps.Interpolate(grid);
+                            if (ps.IsDone()) init = ps.Surface();
+                        } catch (const Standard_Failure&) {
+                        }
+                        // (not when the outline's points miss it by as much as
+                        // a face may: the plate then, as before)
+                        if (!init.IsNull()) {
+                            ShapeAnalysis_Surface sai(init);
+                            for (const gp_Pnt& p : pts) {
+                                sai.ValueOfUV(p, tol);
+                                if (sai.Gap() > 5e-3 * size) {
+                                    init.Nullify();
+                                    break;
+                                }
+                            }
+                        }
+                        if (!init.IsNull()) fill.LoadInitSurface(BRepBuilderAPI_MakeFace(init, Precision::Confusion()).Face());
+                    }
+                    // that surface is the face's (the plate through its outline
+                    // bulged far past it: 28 mm past a point pulled 15 out,
+                    // 25 nov.); the plate only when it could not be made
+                    // (FORME_DEFORM_PLATE=1: always)
+                    if (!init.IsNull() && !std::getenv("FORME_DEFORM_PLATE")) {
+                        ns = init;
+                        how = "fitted";
+                    } else {
                     TopTools_MapOfShape s3;
                     for (size_t w = 0; w < wires.size(); w++)
                         for (TopExp_Explorer x(wires[w], TopAbs_EDGE); x.More(); x.Next())
                             if (s3.Add(x.Current())) fill.Add(TopoDS::Edge(x.Current()), GeomAbs_C0, (int)w == outer);
-                    // a curved face keeps its bulge: its inside moved too
-                    if (BRepAdaptor_Surface(fw).GetType() != GeomAbs_Plane)
+                    // a curved face keeps its bulge: its inside moved too;
+                    // a flat one as well (its outline alone, with a curve
+                    // drawn on it by Project, made a plate bulging 270 mm
+                    // out of a 33 mm thick block)
+                    if (true)
                         for (int a = 1; a < 6; a++)
                             for (int c = 1; c < 6; c++) {
                                 gp_Pnt2d uv(u0 + (u1 - u0) * a / 6.0, v0 + (v1 - v0) * c / 6.0);
@@ -6128,11 +6395,12 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                             }
                     fill.Build();
                     if (!fill.IsDone()) {
-                        set_err("a face could not bend to follow the move");
-                        return nullptr;
+                        cannot_bend = true;
+                        continue;
                     }
                     ns = BRep_Tool::Surface(fill.Face());
                     how = "bent";
+                    }
                 }
                 // the new surface turned the old one's way
                 if (!rigid && ns != gs && n0.Magnitude() > 0) {
@@ -6232,6 +6500,7 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                         ShapeFix_Wire sfw(TopoDS::Wire(wi.Value()), nf, Precision::Confusion());
                         sfw.FixShifted();
                     }
+                double gapmax = 0, gapgeo = 0;
                 for (int k = 1; k <= fe.Extent(); k++) {
                     TopoDS_Edge e = TopoDS::Edge(fe(k));
                     if (BRep_Tool::Degenerated(e)) continue;
@@ -6242,21 +6511,27 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                         return nullptr;
                     }
                     BRepAdaptor_Curve ec(e);
-                    double dmax = 0;
+                    double dmax = 0, dgeo = 0;
                     for (int j = 0; j <= 32; j++) {
                         gp_Pnt2d uv = pc->Value(g0 + (g1 - g0) * j / 32.0);
-                        dmax = std::max(dmax, ns->Value(uv.X(), uv.Y()).Distance(ec.Value(ec.FirstParameter() + (ec.LastParameter() - ec.FirstParameter()) * j / 32.0)));
+                        gp_Pnt q = ec.Value(ec.FirstParameter() + (ec.LastParameter() - ec.FirstParameter()) * j / 32.0);
+                        dmax = std::max(dmax, ns->Value(uv.X(), uv.Y()).Distance(q));
+                        gp_Pnt2d uq = sas.NextValueOfUV(uv, q, Precision::Confusion());
+                        dgeo = std::max(dgeo, ns->Value(uq.X(), uq.Y()).Distance(q));
                     }
-                    if (dmax > 1e-2 * size) {
-                        set_err("a face could not bend to follow the move");
-                        return nullptr;
+                    gapgeo = std::max(gapgeo, dgeo);
+                    if (dgeo > 1e-3) {
+                        gp_Pnt a = ec.Value(ec.FirstParameter()), b = ec.Value(ec.LastParameter());
+                        dbg("deform face %d edge kind %d (%.1f %.1f %.1f)-(%.1f %.1f %.1f) off %.4f", i, (int)ec.GetType(), a.X(), a.Y(), a.Z(), b.X(), b.Y(), b.Z(), dgeo);
                     }
+                    if (dmax > 1e-2 * size) cannot_bend = true;
                     if (dmax > BRep_Tool::Tolerance(e)) bb.UpdateEdge(e, 1.5 * dmax);
+                    gapmax = std::max(gapmax, dmax);
                 }
                 {
                     int nw = 0;
                     for (TopExp_Explorer y(nf, TopAbs_WIRE); y.More(); y.Next()) nw++;
-                    dbg("deform: face %d %s, %d wires, kind %d, at %.2f %.2f %.2f\n", i, how, nw, (int)BRepAdaptor_Surface(fw).GetType(), p0.X(), p0.Y(), p0.Z());
+                    dbg("deform: face %d %s, %d wires, kind %d, at %.2f %.2f %.2f, gap %.5f (off the surface %.5f)\n", i, how, nw, (int)BRepAdaptor_Surface(fw).GetType(), p0.X(), p0.Y(), p0.Z(), gapmax, gapgeo);
                     if (nw > 1 && getenv("FORME_OCCT_DEBUG"))
                         for (int side = 0; side < 2; side++)
                             for (TopExp_Explorer y(side ? nf : fw, TopAbs_WIRE); y.More(); y.Next()) {
@@ -6272,6 +6547,10 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                 nf.Orientation(f.Orientation());
                 bb.Add(shell_for(f), nf);
                 tags.push_back(tag);
+            }
+            if (cannot_bend) {
+                set_err("a face could not bend to follow the move");
+                return nullptr;
             }
             // the solids again, each with its shells; a shell of no solid a
             // solid when it closes, else a sheet

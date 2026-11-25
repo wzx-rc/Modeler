@@ -724,6 +724,15 @@ pub struct Round {
     /// (it ends square where the edge ends); not blended.
     #[serde(default, skip_serializing_if = "is_false")]
     pub only: bool,
+    /// How many of its last edges are its edges' images across a symmetry
+    /// (set by the kernel only, `local_doc`, `mirrored_doc`): one of those
+    /// not found (an image another shape covers) is no error.
+    #[serde(default, skip_serializing_if = "is_none_usize")]
+    pub images: usize,
+}
+
+fn is_none_usize(x: &usize) -> bool {
+    *x == 0
 }
 
 fn is_zero(x: &f64) -> bool {
@@ -1074,9 +1083,33 @@ pub struct Project {
     pub flip: bool,
     #[serde(default)]
     pub shapes: Vec<FeatureId>,
+    /// The symmetries it is made across too (world affine maps' rows): set
+    /// by the kernel only, for a projection on a shape with its own
+    /// symmetry (`local_doc`) or after a Mirror (`mirrored_doc`), never
+    /// saved by the app (Romain 25 nov., 6 h 17: "j'ai cut avec la spline
+    /// mais ça ne prend pas le miroir").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<[[f64; 4]; 3]>,
 }
 
 impl Project {
+    /// Another symmetry added: the maps it is made across become the group
+    /// they make with it (each image, the new one, and each image after the
+    /// new one), at most 7 (three planes).
+    pub fn add_image(&mut self, r: [[f64; 4]; 3]) {
+        let m = rows_to_mat(r);
+        let mut more = vec![r];
+        for x in &self.images {
+            more.push(mat_to_rows(m * rows_to_mat(*x)));
+        }
+        for y in more {
+            let my = rows_to_mat(y);
+            let same = |x: &[[f64; 4]; 3]| rows_to_mat(*x).abs_diff_eq(my, 1e-9);
+            if !my.abs_diff_eq(DMat4::IDENTITY, 1e-9) && !self.images.iter().any(same) && self.images.len() < 7 {
+                self.images.push(y);
+            }
+        }
+    }
     pub fn label(&self) -> &'static str {
         if self.cut {
             "Project cut"
@@ -1701,6 +1734,13 @@ impl Feature {
             let t = m.matrix();
             st.rows = mat_to_rows(t * st.matrix() * t.inverse());
         }
+        // the symmetries a projection is made across too, seen likewise
+        if let Some(p) = f.project.as_mut() {
+            let t = m.matrix();
+            for r in &mut p.images {
+                *r = mat_to_rows(t * rows_to_mat(*r) * t.inverse());
+            }
+        }
         if (k - 1.0).abs() < 1e-15 {
             return f;
         }
@@ -1775,6 +1815,11 @@ impl Feature {
         let mut f = self.carried_by(&|p| m.transform_point3(p));
         if let Some(st) = f.stretch.as_mut() {
             st.rows = mat_to_rows(m * st.matrix() * m.inverse());
+        }
+        if let Some(p) = f.project.as_mut() {
+            for r in &mut p.images {
+                *r = mat_to_rows(m * rows_to_mat(*r) * m.inverse());
+            }
         }
         if !self.is_solid() {
             return f;
@@ -2438,7 +2483,7 @@ impl Doc {
     pub fn add_round(&mut self, size: f64, chamfer: bool, edges: Vec<EdgeRef>) -> FeatureId {
         let id = self.next_id;
         self.next_id += 1;
-        let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0, only: false };
+        let round = Round { size, chamfer, edges, blend: !chamfer, tension: 0.0, only: false, images: 0 };
         let name = self.fresh_name(round.label());
         let origin = round.edges.iter().map(|e| e.at).sum::<DVec3>() / round.edges.len().max(1) as f64;
         self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin, rot: DQuat::IDENTITY, visible: true, material: 0, round: Some(round), profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: None });
@@ -2518,7 +2563,7 @@ impl Doc {
         let id = self.next_id;
         self.next_id += 1;
         let name = self.fresh_name(if cut { "Project cut" } else { "Project" });
-        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin: at, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: Some(Project { curve, cut, flip: false, shapes }) });
+        self.features.push(Feature { id, name, op: Op::Add, prim: Prim::Box { x: 0.0, y: 0.0, z: 0.0 }, origin: at, rot: DQuat::IDENTITY, visible: true, material: 0, round: None, profile: None, push: None, tweak: None, cut: None, sheet: None, curve: None, shape_bool: None, suspended: false, fill: false, revolve: None, loft: None, form: None, mirror: None, array: None, shell: None, bridge: None, one_side: false, frozen: None, bake: vec![], sym: None, cable: None, stretch: None, project: Some(Project { curve, cut, flip: false, shapes, images: vec![] }) });
         Some(id)
     }
     /// The shape with its own symmetry (`sym`) that the Carve at `at` cuts
