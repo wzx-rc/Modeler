@@ -721,7 +721,7 @@ fn gizmo_drag(h: &mut Harness, log: &mut Vec<String>, label: &str, ids: &[u32], 
         }
     }
     h.key(egui::Key::Escape);
-    h.key(egui::Key::Num4);
+    h.key(egui::Key::Num1);
     h.st.selection = ids.to_vec();
     h.key(egui::Key::W);
     h.steps(2);
@@ -1201,7 +1201,7 @@ fn main() {
         }
         h.reset(d, "Test part");
         // Edges mode (2): the block's top front edge, right of the slot
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         assert_eq!(h.st.sel_mode, SelMode::Edge);
         let e1 = h.screen_of(Vec3::new(12.0, 20.0, 15.0));
         h.move_to(e1);
@@ -1265,7 +1265,7 @@ fn main() {
         // the component modes (Face, 3) and the Inset / Extrude tools on the
         // test part
         h.reset(test_part(), "Test part");
-        h.key(egui::Key::Num3);
+        h.key(egui::Key::Num4);
         assert_eq!(h.st.sel_mode, SelMode::Face);
         // the block's front face (it has the slot's notch at the top)
         let front = h.screen_of(Vec3::new(-12.0, 7.0, 15.0));
@@ -1330,11 +1330,11 @@ fn main() {
         h.settle();
         h.shot("zero-faces-9-raised");
         // Vertex mode (1): the corners, one under the pointer
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         h.move_to(h.screen_of(Vec3::new(20.0, 20.0, 15.0)));
         h.steps(2);
         h.shot("zero-faces-10-vertex");
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         assert_eq!(h.st.sel_mode, SelMode::Object);
     }
 
@@ -1531,7 +1531,7 @@ fn main() {
             h.settle();
         };
         // Face mode: the +X face, out 8 mm
-        h.key(egui::Key::Num3);
+        h.key(egui::Key::Num4);
         let side = h.screen_of(Vec3::new(20.0, 10.0, 5.0));
         h.click(side);
         h.move_to(side + egui::vec2(0.0, 2.0));
@@ -1540,7 +1540,7 @@ fn main() {
         pull(&mut h, 0, 8.0);
         h.shot("zero-comp-2-face-moved");
         // Edge mode: the top front edge, up 6 mm (the top and the front tilt)
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         let edge = h.screen_of(Vec3::new(0.0, 20.0, 15.0));
         h.click(edge);
         h.steps(2);
@@ -1548,7 +1548,7 @@ fn main() {
         h.shot("zero-comp-3-edge-moved");
         // Vertex mode: the front left top corner (raised with the edge), up
         // 8 mm more: the top and the left side bend
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         let corner = h.screen_of(Vec3::new(-20.0, 26.0, 15.0));
         h.click(corner);
         h.steps(2);
@@ -1569,7 +1569,7 @@ fn main() {
         h.reset(d, "Plate");
         h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(25.0, 10.0, 20.0));
         h.steps(2);
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         let corner = h.screen_of(Vec3::new(20.0, 3.0, 15.0));
         h.click(corner);
         h.steps(2);
@@ -1598,7 +1598,7 @@ fn main() {
         h.reset(d, "Sketch");
         h.st.camera.frame(Vec3::new(-25.0, 0.0, -20.0), Vec3::new(25.0, 10.0, 20.0));
         h.steps(2);
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         // local (x, z) = the points scaled; the top at y = 6
         let at = |x: f32, z: f32| Vec3::new(x, 6.0, z);
         h.click(h.screen_of(at(20.0, -15.0)));
@@ -1674,7 +1674,7 @@ fn main() {
         h.st.camera.target = Vec3::new(-8.0, 0.0, 12.0);
         h.st.camera.dist *= 0.62;
         h.steps(2);
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         h.click(g(&h, -5.0, 25.0));
         h.hold(egui::Modifiers::SHIFT);
         h.click(g(&h, 5.0, 40.0));
@@ -1702,7 +1702,7 @@ fn main() {
             eprintln!("  {} corners {:?}", f.name, f.profile.as_ref().map(|p| p.corner.clone()));
         }
         // Object mode: a click on the open path selects it
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.click(g(&h, -20.0, 25.0));
         h.steps(2);
         h.shot("zero-path-8-selected");
@@ -1876,7 +1876,7 @@ fn main() {
         // from Forme Rectify: a drag on an edge makes its fillet, the top
         // bar's option a chamfer, Ctrl + B, a drag on a sketch corner
         h.reset(test_part(), "Test part");
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         let a = h.screen_of(Vec3::new(12.0, 20.0, 15.0));
         h.drag(a, a + egui::vec2(0.0, -40.0), 10, true);
         h.settle();
@@ -1912,7 +1912,7 @@ fn main() {
         }
         h.shot("zero-rdrag-3-ctrl-b");
         // a sketch: its corner rounded by a drag in Vertex mode
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.st.camera.frame(Vec3::new(-60.0, 0.0, 10.0), Vec3::new(20.0, 0.0, 50.0));
         h.steps(2);
         h.key(egui::Key::L);
@@ -1925,7 +1925,7 @@ fn main() {
         let sk = h.st.doc.features.iter().find(|f| f.profile.is_some() && !f.is_path()).map(|f| f.id);
         eprintln!("  sketch {:?}", sk);
         h.st.round_chamfer = false;
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         h.steps(2);
         if let Some(id) = sk {
             let top = h.st.doc.feature(id).map(|f| f.prim.height()).unwrap_or(0.0);
@@ -2309,7 +2309,7 @@ fn main() {
         h.st.settings.nav = true;
         h.settle();
         h.key(egui::Key::Escape);
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
         h.steps(3);
         h.shot("zero-panels-1-selected");
@@ -2411,7 +2411,7 @@ fn main() {
         h.reset(d, "Cube");
         h.st.settings.history_off = true;
         h.key(egui::Key::Escape);
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.st.selection = vec![c];
         for (key, name) in [(egui::Key::R, "scale"), (egui::Key::E, "rotate")] {
             h.key(key);
@@ -2460,7 +2460,7 @@ fn main() {
         wait(&mut h);
         let objs = |h: &Harness| h.st.doc.objects.iter().map(|o| format!("{} {:?}", o.name, o.members)).collect::<Vec<_>>();
         eprintln!("  opened: {:?}", objs(&h));
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.click(h.screen_of(Vec3::new(-20.0, 30.0, 15.0)));
         h.steps(3);
         eprintln!("  click on the block: selection {:?}, object {:?}", h.st.selection, h.st.selected_object().map(|o| o.name.clone()));
@@ -2560,7 +2560,7 @@ fn main() {
                 o.is_some_and(|o| h.st.doc.is_stretched(o.id))
             );
         };
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.click(h.screen_of(Vec3::new(5.0, 20.0, -8.0)));
         eprintln!("  picked: {:?} (Object {:?})", h.st.selection, h.st.selected_object().map(|o| o.name.clone()));
         h.shot("zero-object-xf-1-picked");
@@ -2688,7 +2688,7 @@ fn main() {
         d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, q);
         d.add(Op::Carve, Prim::Cylinder { radius: 5.0, height: 30.0 }, q * DVec3::new(-8.0, -5.0, 0.0), q);
         h.reset(d, "Block");
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.click(h.screen_of(Vec3::new(8.0, 20.0, 4.0)));
         h.key(egui::Key::Y);
         h.steps(3);
@@ -2751,7 +2751,7 @@ fn main() {
             q + dir * px * 44.0
         };
         // a face: its arrow along its normal
-        h.key(egui::Key::Num3);
+        h.key(egui::Key::Num4);
         h.click(h.screen_of(Vec3::new(6.0, 20.0, 4.0)));
         h.key(egui::Key::Y);
         h.steps(3);
@@ -2766,7 +2766,7 @@ fn main() {
         h.shot("zero-universal-6-face-moved");
         // an edge: along it (its ends' squares and arrows), across (arrows
         // from the centre), the ring and the cube
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         h.click(h.screen_of(Vec3::new(0.0, 20.0 + 6.0, 15.0)));
         h.steps(3);
         h.shot("zero-universal-7-edge");
@@ -2779,7 +2779,7 @@ fn main() {
         h.settle();
         eprintln!("  edge moved across: {:?}", tweaks(&h));
         // a vertex alone: an arrow along each of its edges
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         h.click(h.screen_of(Vec3::new(20.0, 26.0, -15.0)));
         h.steps(3);
         eprintln!("  picked vertices {:?}", h.st.vert_sel);
@@ -2805,7 +2805,7 @@ fn main() {
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, DVec3::ZERO, DQuat::IDENTITY);
         h.reset(d, "Block");
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
         h.key(egui::Key::R);
         h.steps(3);
@@ -2859,7 +2859,7 @@ fn main() {
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::new(13.0, 0.0, 7.0), DQuat::IDENTITY);
         h.reset(d, "Cube");
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.click(h.screen_of(Vec3::new(13.0, 20.0, 7.0)));
         h.key(egui::Key::R);
         h.steps(3);
@@ -2897,7 +2897,7 @@ fn main() {
         let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 20.0, z: 20.0 }, DVec3::ZERO, DQuat::IDENTITY);
         d.add_round(3.0, false, vec![EdgeRef { faces: [FaceTag { feature: b, sub: 2 }.pack(), FaceTag { feature: b, sub: 4 }.pack()], at: DVec3::new(0.0, 20.0, 10.0) }]);
         h.reset(d, "Block");
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.click(h.screen_of(Vec3::new(0.0, 20.0, 0.0)));
         h.key(egui::Key::R);
         h.steps(3);
@@ -2922,7 +2922,7 @@ fn main() {
         let mut d = Doc::default();
         let b = d.add(Op::Add, Prim::Box { x: 20.0, y: 10.0, z: 20.0 }, DVec3::new(13.3, 4.2, -6.7), DQuat::IDENTITY);
         h.reset(d, "Block");
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.click(h.screen_of(Vec3::new(13.3, 14.2, -6.7)));
         h.st.begin_align();
         h.steps(3);
@@ -2966,7 +2966,7 @@ fn main() {
             h.shot("zero-xfreeze-7-scene");
             let objs: Vec<u32> = h.st.doc.objects.iter().filter(|o| h.st.doc.is_stretched(o.id)).map(|o| o.id).collect();
             for o in objs {
-                h.key(egui::Key::Num4);
+                h.key(egui::Key::Num1);
                 h.st.select_object(o, false);
                 let t0 = std::time::Instant::now();
                 h.st.freeze_transform();
@@ -2991,7 +2991,7 @@ fn main() {
         h.reset(d, "Scaled");
         let side = |h: &mut Harness, from: Vec3, to: Vec3| {
             h.key(egui::Key::Escape);
-            h.key(egui::Key::Num4);
+            h.key(egui::Key::Num1);
             let c = h.st.doc.feature(b).unwrap().centre().as_vec3();
             h.click(h.screen_of(c));
             h.key(egui::Key::R);
@@ -3101,7 +3101,7 @@ fn main() {
         let scale_side = |h: &mut Harness, pick: Vec3, from: Vec3, to: Vec3| {
             h.key(egui::Key::Escape);
             h.st.tool = Tool::Select;
-            h.key(egui::Key::Num4);
+            h.key(egui::Key::Num1);
             h.click(h.screen_of(pick));
             h.key(egui::Key::R);
             h.steps(3);
@@ -3187,7 +3187,7 @@ fn main() {
         h.steps(3);
         h.shot("zero-rescale-4-drawn-on-it");
         // the Sub hovered then selected: its volume filled lightly
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         // the hole's far wall, seen through its mouth
         let eye = h.st.view().eye.as_dvec3();
         let c0 = cyl.origin;
@@ -3294,7 +3294,7 @@ fn main() {
             h.key_phys(key, phys, text);
             eprintln!("  key {text:?} (physical {phys:?}): {}", mode(&h));
         }
-        h.key_phys(egui::Key::Quote, egui::Key::Num4, "'");
+        h.key_phys(egui::Key::Num1, egui::Key::Num1, "&");
         // an open curve on the top: from the −X edge to the slot's edge,
         // in front of the hole
         let t = |h: &Harness, x: f32, z: f32| h.screen_of(Vec3::new(x, 20.0, z));
@@ -3315,14 +3315,14 @@ fn main() {
         let open = h.st.doc.features.last().unwrap().clone();
         eprintln!("  open curve {} {:?} points {:?}", open.name, open.prim, open.profile.as_ref().map(|p| p.points.len()));
         // Vertex mode: its points
-        h.key_phys(egui::Key::Num1, egui::Key::Num1, "&");
+        h.key_phys(egui::Key::Num2, egui::Key::Num2, "é");
         h.st.selection.clear();
         h.move_to(t(&h, -14.0, 11.0));
         h.steps(3);
         eprintln!("  {}: curve points {}", mode(&h), h.st.curve_points().len());
         h.shot("zero-project-2-points");
         // Object mode, the curve selected: its window's Project section
-        h.key_phys(egui::Key::Quote, egui::Key::Num4, "'");
+        h.key_phys(egui::Key::Num1, egui::Key::Num1, "&");
         h.click(t(&h, -14.0, 11.0));
         h.steps(3);
         eprintln!("  selected {:?}", h.st.selection);
@@ -3334,7 +3334,7 @@ fn main() {
         h.shot("zero-project-4-drawn-on-faces");
         // Face mode: the piece in front of the curve picked, extruded by
         // Shift + drag
-        h.key_phys(egui::Key::Num3, egui::Key::Num3, "\"");
+        h.key_phys(egui::Key::Quote, egui::Key::Num4, "'");
         h.st.selection.clear();
         let piece = t(&h, -12.0, 13.5);
         h.click(piece);
@@ -3348,7 +3348,7 @@ fn main() {
         h.steps(2);
         let push = h.st.doc.features.last().unwrap().clone();
         eprintln!("  extruded: {} {:?}: {}", push.name, push.push.as_ref().map(|p| (p.inset, p.depth)), info(&h));
-        h.key_phys(egui::Key::Quote, egui::Key::Num4, "'");
+        h.key_phys(egui::Key::Num1, egui::Key::Num1, "&");
         h.st.selection.clear();
         h.move_to(pos2(560.0, 820.0));
         h.steps(2);
@@ -3518,10 +3518,10 @@ fn main() {
                 v
             });
             eprintln!("  corner moved {dz:.3}: {} ; vertices left on that edge {near:?}", info(&h));
-            h.key_phys(egui::Key::Num1, egui::Key::Num1, "&");
+            h.key_phys(egui::Key::Num2, egui::Key::Num2, "é");
             h.steps(2);
             h.shot("zero-symproj-5-corner-merged");
-            h.key_phys(egui::Key::Quote, egui::Key::Num4, "'");
+            h.key_phys(egui::Key::Num1, egui::Key::Num1, "&");
             // a point of the drawing (where it meets the block's side)
             // pulled out of the face: both sides (the corner put back first)
             h.st.undo_doc();
@@ -3545,7 +3545,7 @@ fn main() {
             }
         }
         // the key left of 1 (AZERTY's ²) gives Object mode
-        h.key_phys(egui::Key::Num2, egui::Key::Num2, "é");
+        h.key_phys(egui::Key::Num3, egui::Key::Num3, "\"");
         eprintln!("  é: {}", mode(&h));
         h.key_phys(egui::Key::Backtick, egui::Key::Backtick, "²");
         eprintln!("  ²: {}", mode(&h));
@@ -3561,7 +3561,7 @@ fn main() {
             look(&mut h, 0.2, 1.0, 420.0);
             h.st.camera.target = w.as_vec3();
             h.steps(3);
-            h.key_phys(egui::Key::Num1, egui::Key::Num1, "&");
+            h.key_phys(egui::Key::Num2, egui::Key::Num2, "é");
             h.key(egui::Key::W);
             h.steps(2);
             let q = h.screen_of(w.as_vec3());
@@ -3591,7 +3591,7 @@ fn main() {
         let cy = d.add(Op::Add, Prim::Cylinder { radius: 12.0, height: 60.0 }, DVec3::new(-30.0, 10.0, 0.0), DQuat::from_rotation_z(-std::f64::consts::FRAC_PI_2));
         h.reset(d, "Block");
         h.shot("zero-intersect-1-added");
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.st.selection = vec![cy];
         h.steps(2);
         // the top bar's INTERSECT segment, as a click would
@@ -4367,7 +4367,7 @@ fn main() {
         let errors = |h: &Harness| h.st.model.as_ref().map(|m| m.errors.len()).unwrap_or(0);
         let faces = |h: &Harness| h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0);
         h.key(egui::Key::Escape);
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.st.selection = vec![id];
         h.st.frame_selection();
         h.settle();
@@ -4428,10 +4428,10 @@ fn main() {
             h.reset(d, "Scene");
             h.settle();
             let key = match std::env::var("FORME_MODE").as_deref() {
-                Ok("1") => egui::Key::Num1,
-                Ok("2") => egui::Key::Num2,
-                Ok("3") => egui::Key::Num3,
-                _ => egui::Key::Num4,
+                Ok("1") => egui::Key::Num2,
+                Ok("2") => egui::Key::Num3,
+                Ok("3") => egui::Key::Num4,
+                _ => egui::Key::Num1,
             };
             h.key(key);
             h.st.selection = vec![id];
@@ -4537,7 +4537,7 @@ fn main() {
         let tags: Vec<i64> = edges.iter().flat_map(|e| e.faces).collect();
         let count = |h: &Harness| h.st.model.as_ref().map(|m| m.faces.iter().filter(|f| f.tag.map(|t| tags.contains(&t.pack())).unwrap_or(false)).count()).unwrap_or(0);
         h.key(egui::Key::Escape);
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         h.st.edge_sel = edges.clone();
         h.st.frame_current();
         h.settle();
@@ -4901,7 +4901,7 @@ fn main() {
         eprintln!("  mirror: {:?}", h.st.selected_mirror().map(|f| (f.name.clone(), f.mirror)));
         // the far end's top front edge picked (the mirror side), filleted
         h.st.select(None, false);
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         let e = h.screen_of(Vec3::new(-35.0, 20.0, 0.0));
         h.click(e);
         h.st.set_round(4.0, false, true);
@@ -4956,12 +4956,12 @@ fn main() {
         h.st.camera.pitch += 0.25;
         h.settle();
         // the rim rounded (one edge: OpenCascade runs it round)
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         h.click(h.screen_of(Vec3::new(-33.5, 8.0, -12.0)));
         h.st.set_round(0.8, false, true);
         h.st.end_live();
         h.settle();
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.st.select(None, false);
         h.click(h.screen_of(Vec3::new(-36.0, 5.0, -12.0)));
         h.settle();
@@ -5001,7 +5001,7 @@ fn main() {
         h.st.select(None, false);
         h.settle();
         // the floor of a copy (the second row's sixth) inset and sunk
-        h.key(egui::Key::Num3);
+        h.key(egui::Key::Num4);
         let floor = h.screen_of(Vec3::new(14.0, 5.0, 12.0));
         h.click(floor);
         h.settle();
@@ -5012,7 +5012,7 @@ fn main() {
         h.st.end_live();
         h.settle();
         eprintln!("  order: {:?}", h.st.doc.features.iter().map(|f| f.name.clone()).collect::<Vec<_>>());
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.st.select(None, false);
         h.move_to(pos2(800.0, 120.0));
         h.steps(3);
@@ -5031,12 +5031,12 @@ fn main() {
         h.st.camera.pitch += 0.2;
         h.settle();
         // the boss's foot rounded
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         h.click(h.screen_of(Vec3::new(30.0, 8.0, 5.0)));
         h.st.set_round(1.5, false, true);
         h.st.end_live();
         h.settle();
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.st.selection = vec![boss, hole];
         h.hold(Modifiers::CTRL | Modifiers::SHIFT);
         h.key(egui::Key::D);
@@ -5085,7 +5085,7 @@ fn main() {
         h.steps(3);
         h.shot("zero-shell-1-part");
         // the top face picked
-        h.key(egui::Key::Num3);
+        h.key(egui::Key::Num4);
         h.click(h.screen_of(Vec3::new(-12.0, 30.0, 6.0)));
         h.settle();
         h.move_to(pos2(800.0, 120.0));
@@ -5136,12 +5136,12 @@ fn main() {
         h.key(egui::Key::Escape);
         h.settle();
         // an inner edge rounded after it (the floor along the back wall)
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         h.click(h.screen_of(Vec3::new(-6.0, 2.0, -23.0)));
         h.st.set_round(3.0, false, true);
         h.st.end_live();
         h.settle();
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.st.select(None, false);
         h.move_to(pos2(800.0, 120.0));
         h.steps(3);
@@ -5155,7 +5155,7 @@ fn main() {
         h.reset(d, "Shell closed");
         h.st.camera.dist *= 1.3;
         h.settle();
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.click(h.screen_of(Vec3::new(0.0, 30.0, 0.0)));
         h.settle();
         h.hold(Modifiers::ALT);
@@ -5196,12 +5196,12 @@ fn main() {
         h.st.camera.dist *= 1.2;
         h.st.camera.pitch += 0.25;
         h.settle();
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         h.click(h.screen_of(Vec3::new(-33.5, 8.0, -12.0)));
         h.st.set_round(0.8, false, true);
         h.st.end_live();
         h.settle();
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.st.select(None, false);
         h.click(h.screen_of(Vec3::new(-36.0, 5.0, -12.0)));
         h.settle();
@@ -5483,7 +5483,7 @@ fn main() {
             b.origin.x = 12.0;
         }
         h.reset(doc, "Test part");
-        h.key(egui::Key::Num3);
+        h.key(egui::Key::Num4);
         h.st.camera.frame(Vec3::new(-20.0, 0.0, -15.0), Vec3::new(20.0, 30.0, 15.0));
         h.steps(2);
         h.st.arm_push(PushKind::Inset, None);
@@ -5561,7 +5561,7 @@ fn main() {
         // normals (a thicker boss), the Hole's wall pushed in (a bigger
         // hole), a fillet's face pulled out
         h.reset(test_part(), "Test part");
-        h.key(egui::Key::Num3);
+        h.key(egui::Key::Num4);
         h.st.camera.frame(Vec3::new(-20.0, 0.0, -15.0), Vec3::new(20.0, 30.0, 15.0));
         h.steps(2);
         h.st.arm_push(PushKind::Extrude, None);
@@ -6664,7 +6664,7 @@ fn main() {
         // the direct fillet's modifiers: Shift held during the drag sets
         // the tension (up fuller), Ctrl held makes a chamfer
         h.reset(test_part(), "Test part");
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         let a = h.screen_of(Vec3::new(12.0, 20.0, 15.0));
         h.drag(a, a + egui::vec2(0.0, -60.0), 10, true);
         h.settle();
@@ -6714,7 +6714,7 @@ fn main() {
         eprintln!("  Ctrl drag {:?}", fillet(&h));
         h.shot("zero-tension-5-ctrl-chamfer");
         // a sketch corner: rounded, then Shift drag on it
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.st.camera.frame(Vec3::new(-60.0, 0.0, 10.0), Vec3::new(20.0, 0.0, 50.0));
         h.steps(2);
         h.key(egui::Key::L);
@@ -6725,7 +6725,7 @@ fn main() {
         h.click(g(&h, -30.0, 30.0) + egui::vec2(0.0, -40.0));
         h.settle();
         let sk = h.st.doc.features.iter().find(|f| f.profile.is_some() && !f.is_path()).map(|f| f.id);
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         h.steps(2);
         if let Some(id) = sk {
             let top = h.st.doc.feature(id).map(|f| f.prim.height()).unwrap_or(0.0);
@@ -7133,7 +7133,7 @@ fn main() {
         eprintln!("  slot made: steps {:?} faces {} errors {:?}", h.st.doc.features.iter().map(|f| (f.name.clone(), f.prim)).collect::<Vec<_>>(), h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
         h.shot("zero-slot-hand-2-made");
         // Object mode: a click on the fillet selects the block, all lit
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.click(h.screen_of(Vec3::new(20.0, 20.0, 0.0)));
         h.steps(2);
         eprintln!("  object click: selection {:?}", h.st.selection);
@@ -7575,7 +7575,7 @@ fn main() {
         h.st.camera.frame(Vec3::new(-32.0, 0.0, -12.0), Vec3::new(32.0, 22.0, 12.0));
         h.steps(2);
         h.settle();
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         h.click(h.screen_of(Vec3::new(-5.0, 20.0, 10.0)));
         eprintln!("  picked {}", h.st.edge_sel.len());
         h.st.set_round_only(true);
@@ -7615,7 +7615,7 @@ fn main() {
             h.st.edge_sel = vec![e];
             h.st.set_round(3.0, false, true);
             h.settle();
-            h.key(egui::Key::Num4);
+            h.key(egui::Key::Num1);
             h.key(egui::Key::Escape);
         }
         h.st.selection.clear();
@@ -7708,7 +7708,7 @@ fn main() {
             };
             for id in ids {
                 h.key(egui::Key::Escape);
-                h.key(egui::Key::Num4);
+                h.key(egui::Key::Num1);
                 h.st.selection = vec![id];
                 h.key(egui::Key::W);
                 h.key(egui::Key::F);
@@ -8385,7 +8385,7 @@ fn main() {
         h.shot("zero-isolate-1-on");
         // the part's block picked by a face (Face mode), isolated with its hole, boss, slot
         h.hold(Modifiers::CTRL);
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         h.hold(Modifiers::NONE);
         h.settle();
         h.st.camera.frame(Vec3::new(-40.0, 0.0, -30.0), Vec3::new(85.0, 30.0, 30.0));
@@ -8393,7 +8393,7 @@ fn main() {
         h.click(h.screen_of(Vec3::new(-20.0, 10.0, 10.0)));
         eprintln!("  selected {:?}", h.st.selection);
         h.hold(Modifiers::CTRL);
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         h.hold(Modifiers::NONE);
         h.settle();
         eprintln!("  isolated {:?}: faces {}", h.st.isolated_ids(), h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0));
@@ -8407,14 +8407,14 @@ fn main() {
         h.shot("zero-isolate-3-off");
         eprintln!("  camera after {:?} {}", h.st.camera.target, h.st.camera.dist);
         // F in Edge mode: the edge picked framed
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         h.click(h.screen_of(Vec3::new(80.0, 20.0, 0.0)));
         eprintln!("  edges picked {}", h.st.edge_sel.len());
         h.key(egui::Key::F);
         h.settle();
         eprintln!("  F on the edge: {:?} {}", h.st.camera.target, h.st.camera.dist);
         h.shot("zero-isolate-4-f-edge");
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.key(egui::Key::Escape);
         h.st.selection.clear();
         h.key(egui::Key::F);
@@ -8550,7 +8550,7 @@ fn main() {
         eprintln!("  filled: faces {:?} edges {:?} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()), h.st.model.as_ref().map(|m| m.edges.len()), h.st.model.as_ref().map(|m| m.errors.clone()));
         h.shot("zero-surf-curve-3-filled");
         // Vertex mode: the fourth point picked and moved 12 mm along X
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         h.steps(1);
         let v = nurbs_app::surfaces::path_point_pos(h.st.doc.feature(id).unwrap(), 3).unwrap();
         let q = h.screen_of(v.as_vec3());
@@ -8567,7 +8567,7 @@ fn main() {
         h.shot("zero-surf-curve-4-moved");
         // the Surface tool on its plane, LINEAR, a corner filleted: a curve
         // filled, editable
-        h.key(egui::Key::Num4);
+        h.key(egui::Key::Num1);
         h.st.selection.clear();
         h.key(egui::Key::U);
         h.st.surface_curve = false;
@@ -9243,7 +9243,7 @@ fn main() {
         h.st.camera.frame(Vec3::new(-12.0, 0.0, -12.0), Vec3::new(16.0, 22.0, 14.0));
         h.steps(2);
         h.settle();
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         let corner = h.screen_of(Vec3::new(10.0, 0.0, 10.0));
         h.click(corner);
         h.steps(2);
@@ -9267,7 +9267,7 @@ fn main() {
         h.st.camera.frame(Vec3::new(-16.0, 0.0, -16.0), Vec3::new(16.0, 16.0, 16.0));
         h.steps(2);
         h.settle();
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         let corner = h.screen_of(Vec3::new(15.0, 10.0, -15.0));
         h.click(corner);
         h.steps(2);
@@ -9300,7 +9300,7 @@ fn main() {
         h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
         h.steps(2);
         h.settle();
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         let edge = h.screen_of(Vec3::new(-20.0, 20.0, 6.0));
         h.click(edge);
         h.steps(2);
@@ -9320,7 +9320,7 @@ fn main() {
         h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
         h.steps(2);
         h.settle();
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         let edge = h.screen_of(Vec3::new(20.0, 20.0, 6.0));
         h.click(edge);
         h.steps(2);
@@ -9333,7 +9333,7 @@ fn main() {
         h.st.undo_doc();
         h.steps(2);
         h.settle();
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         let edge = h.screen_of(Vec3::new(20.0, 20.0, 6.0));
         h.click(edge);
         h.steps(2);
@@ -9365,7 +9365,7 @@ fn main() {
         h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
         h.steps(2);
         h.settle();
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         let rim = h.screen_of(Vec3::new(-10.0, 20.0, 5.0));
         h.click(rim);
         h.steps(2);
@@ -9375,7 +9375,7 @@ fn main() {
         h.key(egui::Key::Escape);
         h.steps(2);
         h.shot("zero-edge-round-2-hole-moved");
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         let rim = h.screen_of(Vec3::new(10.0, 30.0, 7.0));
         h.click(rim);
         h.steps(2);
@@ -9391,7 +9391,7 @@ fn main() {
         h.st.camera.frame(Vec3::new(-16.0, 0.0, -16.0), Vec3::new(22.0, 28.0, 16.0));
         h.steps(2);
         h.settle();
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         let rim = h.screen_of(Vec3::new(0.0, 25.0, 8.0));
         h.click(rim);
         h.steps(2);
@@ -9427,7 +9427,7 @@ fn main() {
         h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
         h.steps(2);
         h.settle();
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         let corner = h.screen_of(Vec3::new(20.0, 20.0, 15.0));
         h.click(corner);
         h.steps(2);
@@ -9438,7 +9438,7 @@ fn main() {
         h.st.select(None, false);
         h.steps(2);
         h.shot("zero-bend-2-corner-up");
-        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
         let corner = h.screen_of(Vec3::new(-20.0, 20.0, -15.0));
         h.click(corner);
         h.steps(2);
@@ -9454,7 +9454,7 @@ fn main() {
         h.st.undo_doc();
         h.steps(2);
         h.settle();
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         let edge = h.screen_of(Vec3::new(20.0, 20.0, 0.0));
         h.click(edge);
         h.steps(2);
@@ -9494,7 +9494,7 @@ fn main() {
         h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
         h.steps(2);
         h.settle();
-        h.key(egui::Key::Num3);
+        h.key(egui::Key::Num4);
         let top = h.screen_of(Vec3::new(2.0, 20.0, 2.0));
         h.click(top);
         h.steps(2);
@@ -9514,7 +9514,7 @@ fn main() {
         h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
         h.steps(2);
         h.settle();
-        h.key(egui::Key::Num2);
+        h.key(egui::Key::Num3);
         let edge = h.screen_of(Vec3::new(6.0, 20.0, 15.0));
         h.click(edge);
         h.steps(2);
@@ -9540,7 +9540,7 @@ fn main() {
             h.settle();
         };
         let say = |h: &Harness| eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
-        h.key(egui::Key::Num3);
+        h.key(egui::Key::Num4);
         let top = h.screen_of(Vec3::new(10.0, 30.0, 2.0));
         h.click(top);
         h.steps(2);
@@ -9598,7 +9598,7 @@ fn main() {
         h.key(egui::Key::Escape);
         h.shot("zero-knife-curved-2-done");
         // Face mode: the piece between the two lines picked
-        h.key(egui::Key::Num3);
+        h.key(egui::Key::Num4);
         let m = h.screen_of(on(25.0, 85.0));
         h.move_to(m);
         h.steps(2);

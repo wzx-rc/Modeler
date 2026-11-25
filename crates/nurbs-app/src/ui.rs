@@ -649,10 +649,10 @@ fn mode_pill(ui: &mut Ui, st: &mut AppState) {
         let icon = [Icon::ModeVertex, Icon::ModeEdge, Icon::ModeFace, Icon::ModeObject][i];
         icons::paint(p, Rect::from_center_size(r.center(), vec2(17.0, 17.0)), icon, if on { on_accent() } else if lit { accent() } else { TEXT_ICON() });
         let tip = match m {
-            SelMode::Vertex => "Vertex (1 or F9): pick the part's corners · drag a rectangle to pick several",
-            SelMode::Edge => "Edge (2 or F10): pick edges to fillet or chamfer · drag a rectangle to pick several",
-            SelMode::Face => "Face (3 or F11): pick faces to inset (I) or extrude (Ctrl + E) · drag a rectangle to pick several",
-            SelMode::Object => "Object (4, Q or F8): pick and move whole shapes",
+            SelMode::Vertex => "Vertex (2 or F9): pick the part's corners · drag a rectangle to pick several",
+            SelMode::Edge => "Edge (3 or F10): pick edges to fillet or chamfer · drag a rectangle to pick several",
+            SelMode::Face => "Face (4 or F11): pick faces to inset (I) or extrude (Ctrl + E) · drag a rectangle to pick several",
+            SelMode::Object => "Object (1, Q or F8): pick and move whole shapes",
         };
         let tip = format!("{tip}\nCtrl + click: convert what is picked to it");
         if resp.on_hover_text(tip).clicked() {
@@ -725,7 +725,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 SelMode::Object => (Icon::Select, TEXT2()),
             };
             let sub = format!("{} · {}", m.label().to_uppercase(), m.key());
-            if card(ui, Some(icon), "SELECTION", &sub, select, color, "Select (Esc): what a click picks is set by the modes at the top (1 or F9 vertex, 2 or F10 edge, 3 or F11 face, 4 or F8 object)").clicked() {
+            if card(ui, Some(icon), "SELECTION", &sub, select, color, "Select (Esc): what a click picks is set by the modes at the top (1 or F8 object, 2 or F9 vertex, 3 or F10 edge, 4 or F11 face)").clicked() {
                 st.select_tool();
             }
             divider(ui);
@@ -745,7 +745,7 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                 st.arm(sk);
             }
             let pk = PrimKind::Path;
-            let tip = "Curves (P: a line): curves with no thickness, on a face or the ground. The line: click the corners; Enter ends it open, a click on the first point closes it; its corners take a fillet or a bevel in Vertex mode (1). Below, 3ds Max's shapes, dragged out, their settings in their window";
+            let tip = "Curves (P: a line): curves with no thickness, on a face or the ground. The line: click the corners; Enter ends it open, a click on the first point closes it; its corners take a fillet or a bevel in Vertex mode (2). Below, 3ds Max's shapes, dragged out, their settings in their window";
             let on = st.tool == Tool::Create(pk) || matches!(st.tool, Tool::Curve(_));
             let sub = match st.tool {
                 Tool::Curve(k) => k.label().to_uppercase(),
@@ -5329,7 +5329,7 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
     if ctrl {
         // Ctrl + F8 to F11 (or 2 to 4): what is picked converted to that
         // mode's components (Maya's Convert Selection)
-        for (k, m) in [(Key::F8, SelMode::Object), (Key::F9, SelMode::Vertex), (Key::F10, SelMode::Edge), (Key::F11, SelMode::Face), (Key::Num2, SelMode::Edge), (Key::Num3, SelMode::Face), (Key::Num4, SelMode::Object), (Key::Backtick, SelMode::Object)] {
+        for (k, m) in [(Key::F8, SelMode::Object), (Key::F9, SelMode::Vertex), (Key::F10, SelMode::Edge), (Key::F11, SelMode::Face), (Key::Num2, SelMode::Vertex), (Key::Num3, SelMode::Edge), (Key::Num4, SelMode::Face), (Key::Backtick, SelMode::Object)] {
             if if matches!(k, Key::Num2 | Key::Num3 | Key::Num4 | Key::Backtick) { digit(k) } else { pressed(k) } {
                 st.convert_selection(m);
                 return;
@@ -5431,16 +5431,17 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
         }
     }
     // the modes on the number row by the key's place, whatever the layout
-    // (AZERTY: & Vertex, é Edge, " Face, ' Object), the key left of 1
+    // (AZERTY: & Object, é Vertex, " Edge, ' Face: Romain 25 nov., 9 h 38,
+    // "& pour Object mode, é pour vertex, \" edge, ' face"), the key left of 1
     // (AZERTY's ², above Tab: Romain 25 nov., 6 h 17, "la touche petit 2
     // au dessus de TAB et à gauche de 1 : faut bien object mode") Object
     // too, and Maya's F8 to F11
     for k in [Key::Backtick, Key::Num1, Key::Num2, Key::Num3, Key::Num4] {
         if !ctrl && digit(k) {
             st.set_sel_mode(match k {
-                Key::Num1 => SelMode::Vertex,
-                Key::Num2 => SelMode::Edge,
-                Key::Num3 => SelMode::Face,
+                Key::Num2 => SelMode::Vertex,
+                Key::Num3 => SelMode::Edge,
+                Key::Num4 => SelMode::Face,
                 _ => SelMode::Object,
             });
         }
