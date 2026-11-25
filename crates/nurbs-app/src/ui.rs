@@ -805,6 +805,16 @@ fn rail(ctx: &egui::Context, st: &mut AppState, screen: Rect) {
                     st.arm_push(k, None);
                 }
             }
+            {
+                // the edges picked rounded together (Romain 25 nov.)
+                let tip = "Fillet (Ctrl + F): the edges picked rounded together in one step (pick them in Edge mode: a click, Shift + click, a rectangle, a double-click for a loop); its radius by a drag on one of them or in its window. Vertices picked: the edges leaving them";
+                let on = st.selected_round().map(|f| f.round.as_ref().map(|r| !r.chamfer).unwrap_or(false)).unwrap_or(false);
+                let n = st.edge_sel.len();
+                let sub = if n > 0 { format!("{n} EDGE{} · Ctrl+F", if n > 1 { "S" } else { "" }) } else { "EDGE · Ctrl+F".to_string() };
+                if card(ui, Some(Icon::Fillet), "FILLET", &sub, on, EDGE_SEL, tip).clicked() {
+                    st.make_fillet();
+                }
+            }
             divider(ui);
             for (t, icon, name, key, tip) in [
                 (Tool::Knife, Icon::Knife, "KNIFE", "S", "Knife (S), like Maya's Multi-Cut: click points on the part's edges; each one after the first is joined to the one before across their face (flat or curved). Ctrl + click: a cut across the face; Ctrl + Shift + click: a loop round the part. Enter, Esc or a right click ends the cut"),
@@ -4800,7 +4810,7 @@ fn round_card(ui: &mut Ui, st: &mut AppState) {
     }
     let max = st.round_max().max(size.ceil()) as f32;
     let mut v = size as f32;
-    let (ch, start) = slider_row(ui, if chamfer { "Distance" } else { "Radius" }, &mut v, 0.0..=max, 0.1, "mm");
+    let (ch, start) = slider_row(ui, if chamfer { "Distance" } else { "Radius" }, &mut v, 0.01..=max, 0.1, "mm");
     if ch {
         st.set_round(v.max(0.0) as f64, chamfer, start || !st.is_live());
     }
@@ -5358,6 +5368,10 @@ fn shortcuts(ctx: &egui::Context, st: &mut AppState) {
             } else {
                 st.group_selection();
             }
+        }
+        // Ctrl + F: the edges picked filleted together (the rail's FILLET)
+        if pressed(Key::F) && !shift {
+            st.make_fillet();
         }
         // Ctrl + B: Bridge in Face mode (Romain 24 nov., 12 h 24), else
         // the chamfer of what is picked

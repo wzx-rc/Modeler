@@ -561,13 +561,16 @@ fn handle_input(ctx: &egui::Context, st: &mut AppState, resp: &egui::Response, r
         st.hover_vertex = if verts { hover.and_then(|h| st.pick_vertex(p2(h))) } else { None };
         st.hover_face = if faces { st.hover_hit.map(|h| h.face) } else { None };
         // Ctrl: a cut across the face from the edge under the pointer (no point catches)
+        // Shift alone: corners and middles catch, and the point lines up
+        // with the one before (25 nov.); else nothing catches
         let kp = match (knife, st.tool == Tool::Knife && ctrl) {
             (false, _) => None,
-            (true, false) => hover.and_then(|h| st.knife_pick(p2(h))),
-            (true, true) => hover.and_then(|h| st.knife_loop_point(p2(h), shift)).map(|(e, q, f)| (e, q, f, false)),
+            (true, false) => hover.and_then(|h| st.knife_pick(p2(h), shift)),
+            (true, true) => hover.and_then(|h| st.knife_loop_point(p2(h), shift)).map(|(e, q, f)| (e, q, f, false, None)),
         };
         st.knife_hover = kp.map(|k| k.1);
         st.knife_hover_point = kp.map(|k| k.3).unwrap_or(false);
+        st.knife_guide = kp.and_then(|k| k.4);
         st.knife_preview = if st.tool == Tool::Knife && ctrl {
             hover.and_then(|h| st.knife_loop_at(p2(h), shift)).map(|(v, closed)| (v.iter().map(|q| q.at).collect(), closed))
         } else {
@@ -1488,6 +1491,11 @@ fn draw_creation(p: &Painter, st: &AppState) {
         (_, Prim::Path { x, z }) if f.curve.is_some_and(|k| k.kind.from_centre()) => format!("R {} mm", fmt_mm(f.curve.map(|k| k.radius(x, z)).unwrap_or(0.0) as f32)),
         (Phase::Base, Prim::Box { x, z, .. } | Prim::Profile { x, z, .. } | Prim::Path { x, z }) => format!("{} × {} mm", fmt_mm(x as f32), fmt_mm(z as f32)),
         (Phase::Base, Prim::Cylinder { radius, .. }) => format!("R {} mm", fmt_mm(radius as f32)),
+        // on the scan's middle: its whole depth, and whether it is the scan's
+        (Phase::Height, _) if c.plane.centred && c.kind == PrimKind::Box => {
+            let at_fit = c.fit.is_some_and(|f| (f - c.height).abs() < 1e-9);
+            format!("D {} mm{}", fmt_mm((2.0 * c.height.abs()) as f32), if at_fit { " · the scan's depth" } else { "" })
+        }
         (Phase::Height, _) => format!("H {} mm", fmt_mm(c.height as f32)),
     };
     chip(p, at + vec2(16.0, 16.0), Align2::LEFT_TOP, &txt, col, col);
@@ -1826,6 +1834,26 @@ fn draw_knife(p: &Painter, st: &AppState, pointer: Option<Pos2>) {
     }
     if let Some(a) = st.knife_last().and_then(|q| world(st, q)) {
         p.circle(a, 3.0, col, Stroke::new(1.0, chip_bg()));
+    }
+    // lined up with the point before (Shift): the line run on past both
+    // dashed, in the axis's colour, and what it runs along
+    if let Some(g) = st.knife_guide {
+        if let (Some(a), Some(b)) = (world(st, g.from), world(st, g.to)) {
+            let gc = match g.what {
+                "X" => AXIS_X,
+                "Y" => AXIS_Y,
+                "Z" => AXIS_Z,
+                _ => accent(),
+            };
+            let d = (b - a).normalized();
+            p.extend(egui::Shape::dashed_line(&[a - d * 40.0, b + d * 40.0], Stroke::new(1.2, gc), 5.0, 4.0));
+            let label = match g.what {
+                "parallel" => "parallel to an edge".to_string(),
+                "square" => "square to the edge".to_string(),
+                w => format!("along {w}"),
+            };
+            chip(p, b + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, &label, gc, TEXT());
+        }
     }
     // a vertex or an edge's middle caught: a ring round the diamond
     if let (Some(c), true) = (hot, st.knife_hover_point) {
@@ -2256,12 +2284,12 @@ fn hint_of(st: &AppState) -> String {
         (None, Tool::Select) if st.sel_mode != SelMode::Object && st.selected_tweak().is_some() => "Arrows: move it · Centre square: on all three axes · D + click: pivot on a point · Window: X, Y, Z · Del: delete it".into(),
         (None, Tool::Knife) => {
             if st.knife.is_some() {
-                "Click the next edge: a line across their face (a round one: along it), the cut goes on · Corners and middles catch first · Esc, right click: end the cut · Enter, Q, W: done, back to Select".into()
+                "Click the next edge: a line across their face (a round one: along it), the cut goes on · Shift held: corners and middles catch, and the point lines up with the one before (an axis, parallel to an edge, square to it) · Esc, right click: end the cut · Enter, Q, W: done, back to Select".into()
             } else {
-                "Click an edge: a point, then the next edges · Corners and middles catch first · Ctrl + click: a cut across the face · Ctrl + Shift + click: a loop round the part".into()
+                "Click an edge: a point where the pointer is, then the next edges · Shift held: corners and middles catch · Ctrl + click: a cut across the face · Ctrl + Shift + click: a loop round the part".into()
             }
         }
-        (None, Tool::Point) => "Click an edge: a point cut into it (its middle catches) · Esc: Select".into(),
+        (None, Tool::Point) => "Click an edge: a point cut into it where the pointer is · Shift held: its corners and middle catch · Esc: Select".into(),
         (None, Tool::Select) if st.face_drag.is_some() => "Away from the press: bigger · Release: keep it".into(),
         (None, Tool::Select) if st.round_drag.is_some() => "Away from the press: bigger · Ctrl held: chamfer · Shift held: tension (up fuller, down flatter)".into(),
         (None, Tool::Select) if st.sel_mode == SelMode::Vertex => {

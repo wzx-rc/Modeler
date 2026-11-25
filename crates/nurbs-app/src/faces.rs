@@ -2371,6 +2371,37 @@ impl AppState {
         Some((p, [d[0] / len, d[1] / len], len / s, y))
     }
 
+    /// The rail's FILLET card and Ctrl + F (Romain 25 nov.: "Je dois pouvoir
+    /// facilement perform un fillet sur une multi selection de edge"): the
+    /// edges picked rounded together in one step, at the last fillet's size
+    /// (2 mm the first time), selected with its window; vertices picked:
+    /// the edges leaving them; a chamfer selected becomes a fillet; nothing
+    /// picked: Edge mode, and what to do next.
+    pub fn make_fillet(&mut self) {
+        self.round_chamfer = false;
+        let last = self.doc.features.iter().rev().find_map(|f| f.round.as_ref().filter(|r| !r.chamfer && r.size > 0.01).map(|r| r.size)).unwrap_or(2.0);
+        if let Some(r) = self.selected_round().and_then(|f| f.round.clone()) {
+            self.set_round(if r.size > 0.01 { r.size } else { last }, false, true);
+            self.end_live();
+        } else if !self.edge_sel.is_empty() {
+            let n = self.edge_sel.len();
+            self.set_round(last, false, true);
+            self.end_live();
+            self.edge_sel.clear();
+            let what = if n > 1 { format!("{n} edges") } else { "the edge".to_string() };
+            self.toast(&format!("Fillet {} mm on {what}: drag on one of them, or set its radius in its window", crate::widgets::fmt_mm(last as f32)), false);
+        } else if let Some((s, _, _)) = self.profile_corner_state() {
+            self.set_profile_corners(if s > 1e-9 { s } else { last }, false, true);
+            self.end_live();
+        } else if self.sel_mode == SelMode::Vertex && !self.vert_sel.is_empty() {
+            self.round_corners(last);
+            self.end_live();
+        } else {
+            self.set_sel_mode(SelMode::Edge);
+            self.toast("Fillet: pick the edges (click, Shift + click, a rectangle, a double-click for a loop), then FILLET or Ctrl + F again, or drag on one of them", false);
+        }
+    }
+
     /// Ctrl + B (Rectify's bevel): a chamfer on what is picked: the picked
     /// edges (1 mm), the selected fillet becomes a chamfer, the picked
     /// sketch corners (their size, else 2 mm).

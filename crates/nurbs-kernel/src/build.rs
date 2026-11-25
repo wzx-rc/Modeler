@@ -5343,7 +5343,7 @@ mod tests {
             // FORME_BAND = "x0,x1,y0,y1": the reach along Z of the part there
             let band = std::env::var("FORME_BAND").ok().map(|v| v.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect::<Vec<_>>());
             let reach = band.filter(|b| b.len() == 4).map(|b| m.positions.iter().filter(|p| p[0] >= b[0] && p[0] <= b[1] && p[1] >= b[2] && p[1] <= b[3]).fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2]))));
-            println!("{what}: {} faces, {} edges, {:.0} mm3, {:?} ({:.0} ms), z reach {:?}", m.faces.len(), m.edges.len(), mesh_volume(&m), m.errors, t.elapsed().as_secs_f64() * 1e3, reach);
+            println!("{what}: {} faces, {} edges, {:.0} mm3, {:?} ({:.0} ms), z reach {:?}, bounds {:?}", m.faces.len(), m.edges.len(), mesh_volume(&m), m.errors, t.elapsed().as_secs_f64() * 1e3, reach, m.bounds());
             m
         };
         show(&d, "as it is");
@@ -8323,6 +8323,95 @@ mod tests {
             let m = build(&d, true, false, &[], &mut Cache::default());
             assert!(m.errors.is_empty(), "{what}: {:?}", m.errors);
             assert!(m.faces.iter().any(|f| f.tag.is_some_and(|t| t.feature == id)), "{what}: no fillet face");
+        }
+    }
+
+    /// Romain 25 nov. ("améliorer en mode edge où c'est encore refusé
+    /// parfois"): every edge of a part moved along X, Y, Z and its faces'
+    /// mean normal, both ways, by `FORME_STEP` mm (3): how many are refused,
+    /// by reason. The test part, or `FORME_DOC` (with `FORME_PREP` = more
+    /// steps first: "fillets", "extrudes", "knife"); `FORME_SHOW=1` prints
+    /// each refusal.
+    #[test]
+    #[ignore]
+    fn edge_move_probe() {
+        let mut d = match std::env::var("FORME_DOC") {
+            Ok(p) => Doc::from_json(&std::fs::read_to_string(p).unwrap()).unwrap(),
+            Err(_) => test_part().0,
+        };
+        let prep = std::env::var("FORME_PREP").unwrap_or_default();
+        if std::env::var("FORME_DOC").is_err() {
+            let ops = combo_ops(1, 2, 3, 4, DVec3::ZERO);
+            for (name, op) in &ops {
+                let pick = match prep.as_str() {
+                    "fillets" => name.starts_with("fillet") || name.starts_with("chamfer"),
+                    "extrudes" => name.starts_with("extrude") || name.starts_with("inset"),
+                    "knife" => name.starts_with("knife"),
+                    "all" => !name.starts_with("tension"),
+                    _ => false,
+                };
+                if pick {
+                    op(&mut d);
+                }
+            }
+        }
+        let step: f64 = std::env::var("FORME_STEP").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0);
+        let show = std::env::var("FORME_SHOW").is_ok();
+        let mut cache = Cache::default();
+        let m = build(&d, true, false, &[], &mut cache);
+        println!("part: {} faces, {} edges, errors {:?}", m.faces.len(), m.edges.len(), m.errors);
+        let before = m.errors.len();
+        let mut why: std::collections::BTreeMap<String, usize> = Default::default();
+        let (mut n, mut bad) = (0, 0);
+        let t0 = Instant::now();
+        for e in m.edges.iter() {
+            if e.seam || e.faces[0] < 0 || e.faces[1] < 0 || e.pts.len() < 2 {
+                continue;
+            }
+            let (fa, fb) = (&m.faces[e.faces[0] as usize], &m.faces[e.faces[1] as usize]);
+            let (Some(ta), Some(tb)) = (fa.tag, fb.tag) else { continue };
+            let pts: Vec<DVec3> = e.pts.iter().map(|q| DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64)).collect();
+            let at = pts[pts.len() / 2];
+            let at = if pts.len() == 2 { (pts[0] + pts[1]) * 0.5 } else { at };
+            // FORME_AT = "x,y,z": that edge only; FORME_DIR: that way only
+            if let Ok(w) = std::env::var("FORME_AT") {
+                let v: Vec<f64> = w.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if v.len() == 3 && at.distance(DVec3::new(v[0], v[1], v[2])) > 0.1 {
+                    continue;
+                }
+            }
+            let er = EdgeRef { faces: [ta.pack(), tb.pack()], at };
+            let nrm = (DVec3::from_array(fa.normal) + DVec3::from_array(fb.normal)).try_normalize();
+            let mut dirs = vec![("+X", DVec3::X), ("-X", -DVec3::X), ("+Y", DVec3::Y), ("-Y", -DVec3::Y), ("+Z", DVec3::Z), ("-Z", -DVec3::Z)];
+            if let Some(n) = nrm.filter(|_| fa.kind == crate::model::SurfKind::Plane && fb.kind == crate::model::SurfKind::Plane) {
+                dirs.push(("out", n));
+                dirs.push(("in", -n));
+            }
+            for (dn, dir) in dirs {
+                if std::env::var("FORME_DIR").map(|w| !w.split(',').any(|x| x == dn)).unwrap_or(false) {
+                    continue;
+                }
+                let mut d2 = d.clone();
+                let mut t = Tweak::new(vec![Comp::Edge(er.clone())]).unwrap();
+                t.delta = dir * step;
+                d2.add_tweak(t);
+                let m2 = build(&d2, true, false, &[], &mut cache);
+                n += 1;
+                if m2.errors.len() > before {
+                    bad += 1;
+                    let e0 = m2.errors.last().cloned().unwrap_or_default();
+                    let key = e0.split(':').skip(1).collect::<Vec<_>>().join(":").trim().to_string();
+                    let key = if key.is_empty() { e0.clone() } else { key };
+                    *why.entry(key).or_default() += 1;
+                    if show {
+                        println!("  edge {:?}-{:?} at {:.2?} {dn}: {e0}", (ta.feature, ta.sub), (tb.feature, tb.sub), at);
+                    }
+                }
+            }
+        }
+        println!("{bad} of {n} moves refused ({:.1} s)", t0.elapsed().as_secs_f64());
+        for (k, v) in &why {
+            println!("  {v:>4} × {k}");
         }
     }
 

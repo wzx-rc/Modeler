@@ -138,15 +138,19 @@ pub struct BasePlane {
     /// Tangent to a curved face of the part (a cylinder's side, a fillet,
     /// a surface) where the pointer is.
     pub tangent: bool,
+    /// Through the scan's middle, facing the view (a Cube on the scan,
+    /// Romain 25 nov.): the Cube's depth grows both ways from it.
+    pub centred: bool,
 }
 
 impl BasePlane {
     pub fn ground() -> BasePlane {
-        BasePlane { origin: DVec3::ZERO, u: DVec3::X, n: DVec3::Y, v: DVec3::Z, face: None, scan: None, tangent: false }
+        BasePlane { origin: DVec3::ZERO, u: DVec3::X, n: DVec3::Y, v: DVec3::Z, face: None, scan: None, tangent: false, centred: false }
     }
     /// Where it lies, for the pointer's chip.
     pub fn label(&self) -> &'static str {
         match (self.face, self.scan) {
+            _ if self.centred => "the scan's middle, facing the view",
             (Some(_), _) if self.tangent => "tangent to the face",
             (Some(_), _) => "on the face",
             (None, Some(true)) => "on the scan's face",
@@ -166,7 +170,7 @@ impl BasePlane {
         let pick = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Z };
         let u = (pick - n * pick.dot(n)).normalize();
         // (u, n, v) right-handed like (X, Y, Z)
-        BasePlane { origin, u, n, v: u.cross(n), face, scan: None, tangent: false }
+        BasePlane { origin, u, n, v: u.cross(n), face, scan: None, tangent: false, centred: false }
     }
     pub fn to_plane(&self, p: DVec3) -> [f64; 2] {
         let d = p - self.origin;
@@ -212,6 +216,9 @@ pub struct Creation {
     pub profile: Option<Profile>,
     /// A curve of the Curves set (`kind` is Path): no height phase.
     pub curve: Option<CurveKind>,
+    /// A Cube on the scan's middle plane (`BasePlane::centred`): half the
+    /// scan's depth under its outline, where its depth starts and catches.
+    pub fit: Option<f64>,
 }
 
 /// A closed curve or 2D boolean pulled into a solid (step 3 of the Curves
@@ -785,6 +792,8 @@ pub struct AppState {
     /// The loop cut a click would make (the Knife; Ctrl: round the part):
     /// its points and whether it closes.
     pub knife_preview: Option<(Vec<DVec3>, bool)>,
+    /// The line the Knife's next point is lined up on (Shift)
+    pub knife_guide: Option<crate::knife::KnifeGuide>,
     /// The last tool armed (G calls it again).
     pub last_tool: Option<Tool>,
     pub hover_feature: Option<FeatureId>,
@@ -1017,6 +1026,7 @@ impl AppState {
             knife_hover: None,
             knife_hover_point: false,
             knife_preview: None,
+            knife_guide: None,
             last_tool: None,
             hover_feature: None,
             hover_also: vec![],
@@ -2851,7 +2861,10 @@ impl AppState {
                         f.name = name;
                     }
                     if let Some(r) = f.round.as_mut() {
-                        r.size = size.max(0.0);
+                        // a fillet made never goes down to nothing (Romain's
+                        // 25 nov. scene: a fillet of 35 edges left at 0 by
+                        // the slider, which then did nothing)
+                        r.size = size.max(0.01);
                         r.chamfer = chamfer;
                     }
                 }
@@ -3003,10 +3016,21 @@ impl AppState {
     /// plane there (when the part is not in front of it), else the ground.
     /// `hover`: the pointer only passes (`scan_plane_at`).
     pub fn base_plane_at(&self, p: [f32; 2], hover: bool) -> Option<(BasePlane, DVec3)> {
-        if let Some(r) = self.scan_plane_at(p, hover) {
-            return Some(r);
+        // a Cube with the scan shown (Romain 25 nov.: "supprime l'effet de
+        // détection auto… qui détecterait juste le plan de pose, par rapport
+        // à la cam et l'objet"): a face of the part in front, else the
+        // world plane facing the view through the scan's middle
+        let cube_on_scan = self.tool == Tool::Create(PrimKind::Box) && self.reference.is_some() && self.ref_shown;
+        if !cube_on_scan {
+            if let Some(r) = self.scan_plane_at(p, hover) {
+                return Some(r);
+            }
         }
         let (ro, rd) = self.ray(p);
+        if cube_on_scan && self.part_in_front_of_scan(p).is_none() {
+            let g = self.scan_middle_plane()?;
+            return g.hit(ro, rd).map(|q| (g, q));
+        }
         if let (Some(m), Some(h)) = (&self.model, self.pick_at(p)) {
             let f = &m.faces[h.face];
             if f.kind == nurbs_kernel::model::SurfKind::Plane {
@@ -3024,6 +3048,54 @@ impl AppState {
         }
         let g = self.empty_plane();
         g.hit(ro, rd).map(|q| (g, q))
+    }
+
+    /// The world plane facing the view most (its normal the world axis
+    /// nearest the eye's way, towards the eye) through the scan's middle.
+    pub fn scan_middle_plane(&self) -> Option<BasePlane> {
+        let r = self.reference.as_ref()?;
+        let vr = self.view_rect;
+        let (_, f) = self.ray([(vr[0] + vr[2]) * 0.5, (vr[1] + vr[3]) * 0.5]);
+        let axis = [DVec3::X, DVec3::Y, DVec3::Z].into_iter().max_by(|a, b| a.dot(f).abs().total_cmp(&b.dot(f).abs()))?;
+        let n = if f.dot(axis) > 0.0 { -axis } else { axis };
+        let mid = (r.lo + r.hi) * 0.5;
+        let mut g = BasePlane::new(n * n.dot(mid), n, None);
+        g.centred = true;
+        Some(g)
+    }
+
+    /// The part's face under the pointer when it is in front of the scan
+    /// (or there is no scan under it).
+    fn part_in_front_of_scan(&self, p: [f32; 2]) -> Option<Hit> {
+        let h = self.pick_at(p)?;
+        let Some(r) = self.reference.as_ref() else { return Some(h) };
+        let (ro, rd) = self.ray(p);
+        match r.hit_tri(ro, rd) {
+            Some((_, x, s)) if (h.t as f64) > s + self.mm_per_point(x) * 4.0 => None,
+            _ => Some(h),
+        }
+    }
+
+    /// How far the scan reaches along the plane's normal under the
+    /// rectangle `a`-`b` on it (rays through a 9 × 9 grid from both sides):
+    /// its front and back, from the plane.
+    pub fn scan_reach(&self, plane: &BasePlane, a: [f64; 2], b: [f64; 2]) -> Option<(f64, f64)> {
+        let r = self.reference.as_ref()?;
+        let far = (r.hi - r.lo).length() + (plane.origin - (r.lo + r.hi) * 0.5).length() + 1.0;
+        let (mut front, mut back) = (f64::MIN, f64::MAX);
+        for i in 0..9 {
+            for j in 0..9 {
+                let (u, v) = (0.02 + 0.96 * i as f64 / 8.0, 0.02 + 0.96 * j as f64 / 8.0);
+                let q = plane.at([a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * v]);
+                if let Some((x, _)) = r.hit(q + plane.n * far, -plane.n) {
+                    front = front.max((x - plane.origin).dot(plane.n));
+                }
+                if let Some((x, _)) = r.hit(q - plane.n * far, plane.n) {
+                    back = back.min((x - plane.origin).dot(plane.n));
+                }
+            }
+        }
+        (front > back).then_some((front, back))
     }
 
     /// The plane a shape is drawn on where there is no face: the ground,
@@ -3154,8 +3226,10 @@ impl AppState {
         }
         let Some((plane, a, snapped)) = self.start_plane(p) else { return };
         self.snap_shown = snapped;
-        // a Cube drawn on the scan reads it when let go
-        self.scan_box_from = if kind == PrimKind::Box && plane.scan.is_some() { self.scan_under(p) } else { None };
+        // a Cube drawn on the scan no longer reads it when let go (Romain
+        // 25 nov.: "supprime l'effet de detection auto"): the Slot's ON SCAN
+        // still does
+        self.scan_box_from = None;
         self.begin_live(&format!("New {}", kind.label()));
         let op = self.mode;
         let origin = plane.at(a);
@@ -3173,7 +3247,7 @@ impl AppState {
             f.visible = false;
             f.material = mat;
         }
-        self.creation = Some(Creation { kind, id, plane, a, b: a, height: 0.0, phase: Phase::Base, height_from: p, profile: None, curve: None });
+        self.creation = Some(Creation { kind, id, plane, a, b: a, height: 0.0, phase: Phase::Base, height_from: p, profile: None, curve: None, fit: None });
         self.selection = vec![id];
     }
 
@@ -3192,6 +3266,23 @@ impl AppState {
                         c.b = [c.a[0] + d * (c.b[0] - c.a[0]).signum(), c.a[1] + d * (c.b[1] - c.a[1]).signum()];
                     }
                 }
+            }
+            Phase::Height if c.plane.centred && c.kind == PrimKind::Box => {
+                // on the scan's middle: the depth grows both ways from it,
+                // the pointer's travel moving the near side; it starts at
+                // the scan's depth under the outline and catches there
+                let centre = self.creation_base_centre(&c);
+                let mpp = self.mm_per_point(centre);
+                let d = if c.plane.n.dot(rd).abs() > HEAD_ON {
+                    (c.height_from[1] - p[1]) as f64 * mpp
+                } else {
+                    let (fo, fd) = self.ray(c.height_from);
+                    let t0 = closest_on_line(centre, c.plane.n, fo, fd).unwrap_or(0.0);
+                    closest_on_line(centre, c.plane.n, ro, rd).map(|t| t - t0).unwrap_or(0.0)
+                };
+                let fit = c.fit.unwrap_or(0.0);
+                c.height = if c.fit.is_some() && d.abs() < 8.0 * mpp { fit } else { (self.snap(2.0 * (fit + d)) * 0.5).max(0.05) };
+                self.snap_shown = None;
             }
             Phase::Height => {
                 // the height along the normal through the base centre, closest to the ray
@@ -3253,6 +3344,9 @@ impl AppState {
         // a thin slab while the base is drawn
         let shown_h = if h.abs() < 1e-6 { 0.2 } else { h.abs() };
         let down = h < 0.0;
+        // on the scan's middle: as deep both ways from it
+        let both = c.plane.centred && c.kind == PrimKind::Box && h.abs() > 1e-6;
+        let (centre, shown_h, down) = if both { (centre - c.plane.n * h.abs(), 2.0 * h.abs(), false) } else { (centre, shown_h, down) };
         let rot = basis_rotation(c.plane.u, c.plane.n);
         let rot = if down { rot * DQuat::from_rotation_x(std::f64::consts::PI) } else { rot };
         let id = c.id;
@@ -3295,6 +3389,10 @@ impl AppState {
             }
             c.phase = Phase::Height;
             c.height = if self.mode == Op::Carve && c.plane.on_face() { -20.0 } else { 20.0 };
+            if c.kind == PrimKind::Box && c.plane.centred {
+                self.centre_on_scan(&mut c);
+                c.height = c.fit.unwrap_or(10.0);
+            }
             self.creation = Some(c.clone());
             self.apply_creation(&c);
             self.finish_creation();
@@ -3310,8 +3408,23 @@ impl AppState {
         c.phase = Phase::Height;
         c.height_from = p;
         c.height = 0.0;
+        if c.kind == PrimKind::Box && c.plane.centred {
+            self.centre_on_scan(&mut c);
+            c.height = c.fit.unwrap_or(0.0);
+        }
         self.creation = Some(c.clone());
         self.apply_creation(&c);
+    }
+
+    /// A Cube drawn on the scan's middle plane, its outline let go: the
+    /// plane moved to the middle of the scan's depth under the outline,
+    /// which is where its depth starts (half of it each way).
+    fn centre_on_scan(&self, c: &mut Creation) {
+        if let Some((front, back)) = self.scan_reach(&c.plane, c.a, c.b) {
+            let mid = (front + back) * 0.5;
+            c.plane.origin += c.plane.n * mid;
+            c.fit = Some(crate::snap::tidy(((front - back) * 0.5).max(0.05)));
+        }
     }
 
     /// Click in the height phase: done.
@@ -3379,7 +3492,7 @@ impl AppState {
                 f.visible = false;
             }
         });
-        self.creation = Some(Creation { kind: PrimKind::Path, id, plane, a, b: a, height: 0.0, phase: Phase::Base, height_from: p, profile: None, curve: Some(kind) });
+        self.creation = Some(Creation { kind: PrimKind::Path, id, plane, a, b: a, height: 0.0, phase: Phase::Base, height_from: p, profile: None, curve: Some(kind), fit: None });
         self.selection = vec![id];
     }
 
@@ -3893,7 +4006,7 @@ impl AppState {
                 f.profile = Some(pr);
             }
         });
-        let cr = Creation { kind: PrimKind::Profile, id, plane: k.plane, a: lo, b: hi, height: 0.0, phase: Phase::Height, height_from: p, profile: Some(profile), curve: None };
+        let cr = Creation { kind: PrimKind::Profile, id, plane: k.plane, a: lo, b: hi, height: 0.0, phase: Phase::Height, height_from: p, profile: Some(profile), curve: None, fit: None };
         self.creation = Some(cr.clone());
         self.selection = vec![id];
         self.apply_creation(&cr);

@@ -4025,7 +4025,11 @@ fn main() {
         let corner = h.screen_of(Vec3::new(-20.0, 20.0, 15.0));
         h.move_to(corner + egui::vec2(7.0, 6.0));
         h.steps(2);
-        eprintln!("  9 points from the corner: hover {:?} point {}", h.st.knife_hover, h.st.knife_hover_point);
+        eprintln!("  9 points from the corner, nothing held: hover {:?} point {}", h.st.knife_hover, h.st.knife_hover_point);
+        // since 25 nov. only with Shift held
+        h.hold(Modifiers::SHIFT);
+        h.steps(2);
+        eprintln!("  9 points from the corner, Shift: hover {:?} point {}", h.st.knife_hover, h.st.knife_hover_point);
         let pp = corner + egui::vec2(7.0, 6.0);
         if let Some(m) = h.st.model.clone() {
             for (i, e) in m.edges.iter().enumerate() {
@@ -4037,6 +4041,7 @@ fn main() {
         }
         eprintln!("  knife_point {:?} hidden {} corner on screen {:?} pointer {:?}", h.st.knife_point([pp.x, pp.y]), h.st.hidden(Vec3::new(-20.0, 20.0, 15.0)), corner, pp);
         h.shot("zero-knife-chain-1-catch");
+        h.hold(Modifiers::NONE);
         let pts = [Vec3::new(-20.0, 15.0, 15.0), Vec3::new(-12.0, 0.0, 15.0), Vec3::new(20.0, 6.0, 15.0)];
         for (i, at) in pts.iter().enumerate() {
             let p = h.screen_of(*at);
@@ -6178,6 +6183,110 @@ fn main() {
         }
     }
 
+    if want("cube-scan") {
+        // the Cube over the scan (Romain 25 nov., 7 h 24: "supprime l'effet
+        // de détection auto… le plan de pose, par rapport à la cam et
+        // l'objet… à échelle et aligné centre par rapport à l'objet /
+        // scan"): drawn on the world plane facing the view through the
+        // scan's middle, its depth starting at the scan's under the outline,
+        // centred on it; from the Front view, then in 3D, then a click
+        let path = std::env::var("FORME_REF").unwrap_or_else(|_| "/mnt/project-files/GUN_A_ORIGIN.obj".into());
+        if std::path::Path::new(&path).exists() {
+            let mut d = Doc::default();
+            d.reference = Some(nurbs_kernel::RefMesh { path: path.clone() });
+            h.reset(d, "Retopo");
+            h.step();
+            let end = Instant::now() + Duration::from_secs(180);
+            while h.st.ref_busy() && Instant::now() < end {
+                h.step();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            h.settle();
+            h.st.toast = None;
+            let refm = h.st.reference.clone().expect("reference");
+            eprintln!("  scan {:.2?} to {:.2?}", refm.lo, refm.hi);
+            let mid = ((refm.lo + refm.hi) * 0.5).as_vec3();
+            let show = |h: &Harness, what: &str| {
+                for f in h.st.doc.features.iter().filter(|f| f.is_solid()) {
+                    let (lo, hi) = (f.origin, f.origin + f.rot * DVec3::new(0.0, f.prim.height(), 0.0));
+                    eprintln!("  {what}: {} {:?} from {:.2?} to {:.2?}", f.name, f.prim, lo, hi);
+                }
+            };
+            let chip = |h: &Harness| h.st.creation.as_ref().map(|c| format!("{} fit {:?} height {:.2} origin {:.2?}", c.plane.label(), c.fit, c.height, c.plane.origin)).unwrap_or_default();
+            // 1. Front view: over the receiver's side
+            h.st.camera.preset(nurbs_app::camera::ViewPreset::Front);
+            h.st.camera.frame(Vec3::new(-40.0, 55.0, mid.z), Vec3::new(30.0, 100.0, mid.z));
+            h.steps(2);
+            h.st.tool = Tool::Create(PrimKind::Box);
+            let a = h.screen_of(Vec3::new(-9.0, 79.0, mid.z));
+            let b = h.screen_of(Vec3::new(3.0, 89.0, mid.z));
+            h.move_to(a);
+            h.steps(2);
+            eprintln!("  hover: {:?}", h.st.start_plane([a.x, a.y]).map(|(p, _, _)| p.label()));
+            h.shot("zero-cube-scan-1-hover");
+            h.drag(a, b, 10, true);
+            h.settle();
+            eprintln!("  released: {}", chip(&h));
+            h.shot("zero-cube-scan-2-depth");
+            // the pointer moved a little: it stays at the scan's depth
+            h.move_to(b + vec2(0.0, -4.0));
+            h.settle();
+            eprintln!("  near: {}", chip(&h));
+            h.click(b + vec2(0.0, -4.0));
+            h.settle();
+            show(&h, "front");
+            h.st.tool = Tool::Select;
+            h.st.select(None, false);
+            h.steps(2);
+            // seen from the side and above
+            h.st.camera.ortho = false;
+            h.st.camera.yaw = 0.9;
+            h.st.camera.pitch = 0.35;
+            h.st.camera.frame(Vec3::new(-40.0, 55.0, -30.0), Vec3::new(30.0, 100.0, 30.0));
+            h.steps(2);
+            h.shot("zero-cube-scan-3-seen");
+            h.st.ref_ghost = true;
+            h.steps(2);
+            h.shot("zero-cube-scan-4-ghost");
+            h.st.ref_ghost = false;
+            // 2. in 3D over the front block, pushed deeper than the scan
+            h.st.camera.yaw = 0.45;
+            h.st.camera.pitch = 0.3;
+            h.st.camera.frame(Vec3::new(10.0, 55.0, -20.0), Vec3::new(60.0, 100.0, 20.0));
+            h.steps(2);
+            h.st.tool = Tool::Create(PrimKind::Box);
+            let a = h.screen_of(Vec3::new(24.0, 70.0, mid.z));
+            let b = h.screen_of(Vec3::new(42.0, 84.0, mid.z));
+            h.move_to(a);
+            h.steps(2);
+            h.drag(a, b, 10, true);
+            h.settle();
+            eprintln!("  3d released: {}", chip(&h));
+            h.move_to(b + vec2(0.0, -40.0));
+            h.settle();
+            eprintln!("  3d pushed: {}", chip(&h));
+            h.shot("zero-cube-scan-5-pushed");
+            h.click(b + vec2(0.0, -40.0));
+            h.settle();
+            // 3. a click: 20 mm across, the scan's depth there
+            h.st.tool = Tool::Create(PrimKind::Box);
+            let c = h.screen_of(Vec3::new(-25.0, 68.0, mid.z));
+            h.move_to(c);
+            h.steps(2);
+            h.click(c);
+            h.settle();
+            show(&h, "all");
+            h.st.tool = Tool::Select;
+            h.st.select(None, false);
+            h.steps(2);
+            h.shot("zero-cube-scan-6-three");
+            h.st.ref_shown = false;
+            h.steps(2);
+            h.shot("zero-cube-scan-7-alone");
+            h.st.ref_shown = true;
+        }
+    }
+
     if want("scan-box") {
         // the Cube read on the scan from a loose drag: the square button
         // from 2 mm outside its corners (the plate under it, whose edges
@@ -6652,6 +6761,56 @@ fn main() {
         eprintln!("  undo steps: {:?}", h.st.undo_labels());
     }
 
+    if want("knife-shift") {
+        // Romain 25 nov.: "Pour le Knife ne pas activer de snaping, juste si
+        // on maintient SHIFT … je pose un point, avec SHIFT je veux pouvoir
+        // descendre poser un autre point aligné par rapport au premier".
+        // A point on the block's top front edge, then the pointer on its
+        // bottom front edge 14 points off the vertical: plain, where it is;
+        // Shift, straight below the first (along Y); then near a corner:
+        // plain, nothing catches; Shift, the corner
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Box { x: 40.0, y: 20.0, z: 30.0 }, glam::DVec3::ZERO, glam::DQuat::IDENTITY);
+        h.reset(d, "Block");
+        h.settle();
+        h.key(egui::Key::S);
+        let a = h.screen_of(Vec3::new(-6.0, 20.0, 15.0));
+        h.move_to(a);
+        h.steps(2);
+        h.click(a);
+        h.settle();
+        let below = h.screen_of(Vec3::new(-6.0, 0.0, 15.0));
+        let p = below + egui::vec2(14.0, 0.0);
+        h.move_to(p);
+        h.steps(2);
+        eprintln!("  plain: {:?} guide {:?}", h.st.knife_hover, h.st.knife_guide.map(|g| g.what));
+        h.shot("zero-knife-shift-1-plain");
+        h.hold(Modifiers::SHIFT);
+        h.steps(2);
+        eprintln!("  Shift: {:?} guide {:?}", h.st.knife_hover, h.st.knife_guide.map(|g| g.what));
+        h.shot("zero-knife-shift-2-aligned");
+        h.click(p);
+        h.settle();
+        h.hold(Modifiers::NONE);
+        let c = h.screen_of(Vec3::new(20.0, 20.0, 15.0)) + egui::vec2(-6.0, 5.0);
+        h.move_to(c);
+        h.steps(2);
+        eprintln!("  near the corner, plain: {:?} caught {}", h.st.knife_hover, h.st.knife_hover_point);
+        h.hold(Modifiers::SHIFT);
+        h.steps(2);
+        eprintln!("  near the corner, Shift: {:?} caught {}", h.st.knife_hover, h.st.knife_hover_point);
+        h.shot("zero-knife-shift-3-corner");
+        h.hold(Modifiers::NONE);
+        h.key(egui::Key::Enter);
+        h.settle();
+        for f in h.st.doc.features.iter().filter(|f| f.cut.is_some()) {
+            let k = f.cut.as_ref().unwrap();
+            eprintln!("  {} points {:?} lines {:?}", f.name, k.pts.iter().map(|q| q.at).collect::<Vec<_>>(), k.segs);
+        }
+        eprintln!("  faces {} errors {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()));
+        h.shot("zero-knife-shift-4-done");
+    }
+
     if want("knife") {
         // from Forme Rectify: the Knife (K) across the block's top, from
         // the front edge's middle to the back edge's, then a point (J)
@@ -6707,9 +6866,13 @@ fn main() {
             let p = h.screen_of(at);
             h.move_to(p);
             h.steps(2);
-            eprintln!("  pick at {at:?}: {:?}", h.st.knife_pick([p.x, p.y]).map(|k| (h.st.edge_ref(k.0).map(|r| r.faces), k.2, k.3)));
+            // corners catch only with Shift held (25 nov.)
+            h.hold(Modifiers::SHIFT);
+            h.steps(1);
+            eprintln!("  pick at {at:?}: {:?}", h.st.knife_pick([p.x, p.y], true).map(|k| (h.st.edge_ref(k.0).map(|r| r.faces), k.2, k.3)));
             h.click(p);
             h.settle();
+            h.hold(Modifiers::NONE);
         }
         h.key(egui::Key::Enter);
         h.settle();
@@ -9181,6 +9344,65 @@ fn main() {
         h.steps(2);
         h.shot("zero-comp-tilt-4-lowered");
     }
+    if want("edge-round") {
+        // Romain 25 nov., 7 h 24: "il faut grandement travailler le
+        // déplacement de component… améliorer en mode edge où c'est encore
+        // refusé parfois": a round face closed on itself (a hole's wall, a
+        // boss's side) follows an edge moved aside now. The test part: the
+        // hole's top rim pulled 3 along Z, the boss's top rim 3 along -X
+        // (it leans), then a lone cylinder's top rim 6 along X
+        let pull = |h: &mut Harness, axis: usize, mm: f32| {
+            let c = h.st.pivot().expect("a gizmo").as_vec3();
+            let s0 = h.screen_of(c);
+            let dir = (h.screen_of(c + Vec3::AXES[axis]) - s0).normalized();
+            let grab = s0 + dir * 55.0;
+            let by = h.screen_of(c + Vec3::AXES[axis] * mm) - s0;
+            h.drag(grab, grab + by, 10, true);
+            h.settle();
+        };
+        let say = |h: &Harness, what: &str| eprintln!("  {what}: faces {} errors {:?} toast {:?}", h.st.model.as_ref().map(|m| m.faces.len()).unwrap_or(0), h.st.model.as_ref().map(|m| m.errors.clone()), h.st.toast.as_ref().map(|t| t.text.clone()));
+        h.reset(test_part(), "Test part");
+        h.st.camera.frame(Vec3::new(-22.0, 0.0, -16.0), Vec3::new(22.0, 30.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num2);
+        let rim = h.screen_of(Vec3::new(-10.0, 20.0, 5.0));
+        h.click(rim);
+        h.steps(2);
+        h.shot("zero-edge-round-1-hole-rim");
+        pull(&mut h, 2, 3.0);
+        say(&h, "hole's rim +Z 3");
+        h.key(egui::Key::Escape);
+        h.steps(2);
+        h.shot("zero-edge-round-2-hole-moved");
+        h.key(egui::Key::Num2);
+        let rim = h.screen_of(Vec3::new(10.0, 30.0, 7.0));
+        h.click(rim);
+        h.steps(2);
+        pull(&mut h, 0, -3.0);
+        say(&h, "boss's rim -X 3");
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-edge-round-3-boss-leans");
+        let mut d = Doc::default();
+        d.add(Op::Add, Prim::Cylinder { radius: 8.0, height: 25.0 }, DVec3::ZERO, DQuat::IDENTITY);
+        h.reset(d, "Cylinder");
+        h.st.camera.frame(Vec3::new(-16.0, 0.0, -16.0), Vec3::new(22.0, 28.0, 16.0));
+        h.steps(2);
+        h.settle();
+        h.key(egui::Key::Num2);
+        let rim = h.screen_of(Vec3::new(0.0, 25.0, 8.0));
+        h.click(rim);
+        h.steps(2);
+        pull(&mut h, 0, 6.0);
+        say(&h, "cylinder's top rim +X 6");
+        h.key(egui::Key::Escape);
+        h.st.select(None, false);
+        h.steps(2);
+        h.shot("zero-edge-round-4-cylinder");
+    }
+
     if want("bend") {
         // the move made as Maya does (23 nov., 20 h 03: "revoir l'algo de
         // déplacement de composant de zéro"): every face round what moves

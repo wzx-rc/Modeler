@@ -24,16 +24,124 @@ use nurbs_kernel::{FeatureId, Knife, KnifePoint};
 /// (points on screen).
 pub const KNIFE_CATCH: f32 = 12.0;
 
+/// How near the pointer a point lined up with the cut's last one catches
+/// it, Shift held (points on screen).
+pub const ALIGN_CATCH: f32 = 40.0;
+
+/// A Knife point lined up with the one before (Shift): the line it is on.
+#[derive(Clone, Copy, Debug)]
+pub struct KnifeGuide {
+    pub from: DVec3,
+    pub to: DVec3,
+    /// "X", "Y", "Z", "parallel" (to an edge of the face), "square" (to
+    /// the edge it is on or the one before is on)
+    pub what: &'static str,
+}
+
 impl AppState {
-    /// Where a Knife click at `p` puts its point: an edge's end (a vertex)
-    /// or middle near the pointer first (`knife_point`), else the edge
-    /// under it at the place nearest the pointer. The edge's index, the
-    /// point, how far along it (0 to 1) and whether a point caught it.
-    pub fn knife_pick(&self, p: [f32; 2]) -> Option<(usize, DVec3, f64, bool)> {
-        if let Some((e, q, f)) = self.knife_point(p) {
-            return Some((e, q, f, true));
+    /// Where a Knife click at `p` puts its point. Plain (Romain 25 nov.: "Pour
+    /// le Knife ne pas activer de snaping, juste si on maintient SHIFT"):
+    /// the edge under the pointer at the place nearest it, nothing catches.
+    /// `snap` (Shift held): an edge's end (a vertex) or middle near the
+    /// pointer (`knife_point`), or the place on the edge under the pointer
+    /// lined up with the cut's last point ("je pose un point, avec SHIFT je
+    /// veux pouvoir descendre poser un autre point aligné par rapport au
+    /// premier": along a world axis, parallel to an edge of the face, or
+    /// square to the edge), the nearest on screen. The edge's index, the
+    /// point, how far along it (0 to 1), whether a point caught it, and the
+    /// line it is lined up on.
+    pub fn knife_pick(&self, p: [f32; 2], snap: bool) -> Option<(usize, DVec3, f64, bool, Option<KnifeGuide>)> {
+        if !snap {
+            return self.knife_pick_edge_with(p, false).map(|(e, q, f)| (e, q, f, false, None));
         }
-        self.knife_pick_edge(p).map(|(e, q, f)| (e, q, f, false))
+        let point = self.knife_point(p);
+        let aligned = self.knife_aligned(p);
+        let pd = |q: DVec3| self.view().project(q.as_vec3()).map(|s| (s[0] - p[0]).hypot(s[1] - p[1])).unwrap_or(f32::MAX);
+        match (point, aligned) {
+            // a vertex or middle a little before a line (it is exact)
+            (Some(a), Some(b)) if pd(b.1) + 4.0 < pd(a.1) => Some((b.0, b.1, b.2, true, Some(b.3))),
+            (Some((e, q, f)), _) => Some((e, q, f, true, None)),
+            (None, Some((e, q, f, g))) => Some((e, q, f, true, Some(g))),
+            (None, None) => self.knife_pick_edge_with(p, false).map(|(e, q, f)| (e, q, f, false, None)),
+        }
+    }
+
+    /// Shift held with a cut under way: on the edge under the pointer, the
+    /// place where the line from the cut's last point runs along a world
+    /// axis, parallel to a straight edge of a face holding both, or square
+    /// to the edge either is on (in that face's plane), within
+    /// `ALIGN_CATCH` of the pointer on screen; the nearest.
+    pub fn knife_aligned(&self, p: [f32; 2]) -> Option<(usize, DVec3, f64, KnifeGuide)> {
+        let a = self.knife_last()?;
+        let m = self.model.as_ref()?;
+        let e = self.pick_edge(p)?;
+        let pts = poly(m, e);
+        if pts.len() < 2 {
+            return None;
+        }
+        let size = m.bounds().map(|(lo, hi)| (Vec3::from(hi) - Vec3::from(lo)).length() as f64).unwrap_or(100.0);
+        let tol = (size * 1e-4).max(1e-4) * 10.0;
+        // the directions: the world's axes, then those of the faces of the
+        // edge under the pointer (flat ones) that hold the last point too
+        let mut dirs: Vec<(DVec3, &'static str)> = vec![(DVec3::X, "X"), (DVec3::Y, "Y"), (DVec3::Z, "Z")];
+        let edge_dir = |pts: &[DVec3]| (pts[pts.len() - 1] - pts[0]).try_normalize();
+        let last_edge = self.knife_going().and_then(|(id, last)| self.doc.feature(id)?.cut.as_ref()?.pts.get(last).cloned()).and_then(|kp| self.model_edge_of(&kp.edge));
+        for &fi in m.edges[e].faces.iter().filter(|&&f| f >= 0) {
+            let fc = &m.faces[fi as usize];
+            if fc.kind != SurfKind::Plane {
+                continue;
+            }
+            let n = DVec3::from_array(fc.normal).normalize_or_zero();
+            if (a - DVec3::from_array(fc.point)).dot(n).abs() > tol {
+                continue;
+            }
+            for g in face_edges(m, fi) {
+                let gp = poly(m, g);
+                let straight = gp.len() == 2 || gp.windows(2).all(|w| (w[1] - w[0]).normalize_or_zero().dot((gp[gp.len() - 1] - gp[0]).normalize_or_zero()) > 0.9999);
+                if let (true, Some(d)) = (straight, edge_dir(&gp)) {
+                    dirs.push((d, "parallel"));
+                }
+            }
+            for own in [Some(e), last_edge] {
+                if let Some(d) = own.and_then(|o| edge_dir(&poly(m, o))) {
+                    if let Some(sq) = n.cross(d).try_normalize() {
+                        dirs.push((sq, "square"));
+                    }
+                }
+            }
+        }
+        let len: f64 = pts.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+        let mut best: Option<(f32, usize, DVec3, f64, KnifeGuide)> = None;
+        for (d, what) in dirs {
+            // where the line a + t d meets the edge's polyline
+            let mut run = 0.0;
+            for w in pts.windows(2) {
+                let (p0, p1) = (w[0], w[1]);
+                let u = p1 - p0;
+                let l = u.length();
+                let (b, c) = (u.dot(d), d.dot(d));
+                let den = u.dot(u) * c - b * b;
+                if den.abs() > 1e-12 * u.dot(u) * c {
+                    let r = p0 - a;
+                    let s = ((b * r.dot(d)) - c * r.dot(u)) / den;
+                    if (-1e-9..=1.0 + 1e-9).contains(&s) {
+                        let q = p0 + u * s.clamp(0.0, 1.0);
+                        let t = (q - a).dot(d) / c;
+                        let off = (q - (a + d * t)).length();
+                        if off < tol && (q - a).length() > tol && (self.xray || !self.hidden(q.as_vec3())) {
+                            if let Some(sp) = self.view().project(q.as_vec3()) {
+                                let dist = (sp[0] - p[0]).hypot(sp[1] - p[1]);
+                                if dist <= ALIGN_CATCH && best.as_ref().map(|x| dist < x.0).unwrap_or(true) {
+                                    best = Some((dist, e, q, (run + l * s.clamp(0.0, 1.0)) / len.max(1e-12), KnifeGuide { from: a, to: q, what }));
+                                }
+                            }
+                        }
+                    }
+                }
+                run += l;
+            }
+        }
+        best.map(|(_, e, q, f, g)| (e, q, f, g))
     }
 
     /// The points first (Romain 20 nov., 12 h 09: "Donne la priorité au
@@ -85,6 +193,12 @@ impl AppState {
     /// and how far along it (0 to 1, from its first point); its middle
     /// catches the pointer within 2.5 points.
     pub fn knife_pick_edge(&self, p: [f32; 2]) -> Option<(usize, DVec3, f64)> {
+        self.knife_pick_edge_with(p, true)
+    }
+
+    /// The same, the middle catching only with `mid` (no catch at all for a
+    /// plain Knife click since 25 nov.).
+    pub fn knife_pick_edge_with(&self, p: [f32; 2], mid_catch: bool) -> Option<(usize, DVec3, f64)> {
         let e = self.pick_edge(p)?;
         let m = self.model.as_ref()?;
         let pts: Vec<DVec3> = m.edges[e].pts.iter().map(|q| Vec3::from_array(*q).as_dvec3()).collect();
@@ -102,8 +216,14 @@ impl AppState {
         for w in pts.windows(2) {
             let d = w[1] - w[0];
             let l = d.length();
-            for k in 0..=16 {
-                let t = k as f64 / 16.0;
+            // exactly (it went by sixteenths of each piece: on a 40 mm edge
+            // a point landed every 2.5 mm, which read as a snap, 25 nov.)
+            let rd = rd.normalize_or_zero();
+            let (a, b) = (d.dot(d), d.dot(rd));
+            let r = w[0] - ro;
+            let den = a - b * b;
+            let t = if den.abs() > 1e-12 * a { ((b * r.dot(rd)) - r.dot(d)) / den } else { 0.0 };
+            for t in [t.clamp(0.0, 1.0), 0.0, 1.0] {
                 let q = w[0] + d * t;
                 let dist = (q - ro).cross(rd).length();
                 if dist < best.0 {
@@ -125,7 +245,7 @@ impl AppState {
         }
         // the middle catches only when the pointer is right on it (Romain,
         // 19 nov. 23 h: a point placed seemed to snap)
-        if let Some(s) = self.view().project(mid.as_vec3()) {
+        if let Some(s) = self.view().project(mid.as_vec3()).filter(|_| mid_catch) {
             if (s[0] - p[0]).hypot(s[1] - p[1]) <= 2.5 {
                 return Some((e, mid, 0.5));
             }
@@ -261,10 +381,11 @@ impl AppState {
         self.vert_sel.clear();
     }
 
-    pub fn knife_hover_at(&mut self, p: [f32; 2]) {
-        let k = self.knife_pick(p);
+    pub fn knife_hover_at(&mut self, p: [f32; 2], snap: bool) {
+        let k = self.knife_pick(p, snap);
         self.knife_hover = k.map(|k| k.1);
         self.knife_hover_point = k.map(|k| k.3).unwrap_or(false);
+        self.knife_guide = k.and_then(|k| k.4);
     }
 
     /// The cut under way, if its step is still the last one made (not the
@@ -287,7 +408,8 @@ impl AppState {
 
     /// A click with the Knife: a plain click a point (joined to the one
     /// before), Ctrl a cut across the face, Ctrl + Shift a loop round the
-    /// part (Romain, 19 nov. 23 h 18).
+    /// part (Romain, 19 nov. 23 h 18); Shift alone, the point catches an
+    /// edge's end or middle, or lines up with the one before (25 nov.).
     pub fn knife_click_with(&mut self, p: [f32; 2], shift: bool, ctrl: bool) {
         if self.tool == Tool::Knife && ctrl {
             if !self.knife_cut_loop(p, shift) {
@@ -295,7 +417,7 @@ impl AppState {
             }
             return;
         }
-        let Some((e, at, f, _)) = self.knife_pick(p) else {
+        let Some((e, at, f, _, _)) = self.knife_pick(p, shift) else {
             self.knife_end();
             return;
         };

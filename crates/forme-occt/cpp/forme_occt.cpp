@@ -51,6 +51,7 @@
 #include <BRepGProp.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <IMeshTools_Parameters.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -1556,6 +1557,80 @@ int focc_edge_faces(const FShape* s, int* out, int cap) {
 
 // --------------------------------------------------------- fillets, chamfers
 
+// Whether a fillet or chamfer's result ran off the part (Romain 25 nov.: a
+// horn 46 mm long out of the corner where three fillets meet, a valid solid
+// for BRepCheck): a fillet only takes material away (convex edges) or fills
+// a corner (concave ones), so every face it made or trimmed stays inside the
+// part's box, and near the edges it rounds (its contours, tangent edges it
+// carried along included) within a few of its sizes, and the faces it trims
+// about as they were (a fillet's end carries them a little past their border).
+static bool ran_off(BRepFilletAPI_LocalOperation& op, const TopoDS_Shape& in, const TopoDS_Shape& out, double rmax) {
+    if (getenv("FORME_FILLET_UNCHECKED")) return false;  // as before 25 nov.
+    Bnd_Box bin, bedges;
+    BRepBndLib::AddOptimal(in, bin, Standard_False, Standard_False);
+    if (bin.IsVoid()) return false;
+    for (int ic = 1; ic <= op.NbContours(); ic++)
+        for (int ie = 1; ie <= op.NbEdges(ic); ie++) BRepBndLib::AddOptimal(op.Edge(ic, ie), bedges, Standard_False, Standard_False);
+    double tol = 1e-3 * std::sqrt(bin.SquareExtent()) + 0.01;
+    bin.Enlarge(tol);
+    if (!bedges.IsVoid()) bedges.Enlarge(10.0 * rmax + tol);
+    TopTools_IndexedMapOfShape fin;
+    face_map(in, fin);
+    // the faces round the edges, trimmed: each within its own old box
+    TopTools_DataMapOfShapeInteger trimmed;
+    std::vector<Bnd_Box> old_boxes(fin.Extent() + 1);
+    for (int i = 1; i <= fin.Extent(); i++)
+        for (TopTools_ListOfShape::Iterator it(op.Modified(fin(i))); it.More(); it.Next()) trimmed.Bind(it.Value(), i);
+    auto inside = [](const Bnd_Box& b, const Bnd_Box& a) {
+        double x0, y0, z0, x1, y1, z1, u0, v0, w0, u1, v1, w1;
+        a.Get(x0, y0, z0, x1, y1, z1);
+        b.Get(u0, v0, w0, u1, v1, w1);
+        return x0 >= u0 && y0 >= v0 && z0 >= w0 && x1 <= u1 && y1 <= v1 && z1 <= w1;
+    };
+    // its new edges: OpenCascade's tolerances there are thousandths of a
+    // mm; that horn's corner had edges 25 mm "within tolerance", its curves
+    // on the face up to 11 mm off them
+    TopTools_IndexedMapOfShape ein;
+    TopExp::MapShapes(in, TopAbs_EDGE, ein);
+    const double loose = 0.25 * rmax + 0.02;
+    for (TopExp_Explorer ex(out, TopAbs_EDGE); ex.More(); ex.Next()) {
+        if (ein.Contains(ex.Current())) continue;
+        double t = BRep_Tool::Tolerance(TopoDS::Edge(ex.Current()));
+        if (t > loose) {
+            dbg("fillet ran off: an edge made with a tolerance of %.3g mm\n", t);
+            return true;
+        }
+    }
+    for (TopExp_Explorer ex(out, TopAbs_FACE); ex.More(); ex.Next()) {
+        if (fin.Contains(ex.Current())) continue;
+        Bnd_Box bf;
+        BRepBndLib::AddOptimal(ex.Current(), bf, Standard_False, Standard_False);
+        if (bf.IsVoid()) continue;
+        bool in_part = inside(bin, bf), near = true;
+        if (trimmed.IsBound(ex.Current())) {
+            int i = trimmed.Find(ex.Current());
+            if (old_boxes[i].IsVoid()) {
+                // a face a fillet ends on is carried a little past its
+                // old border (a fillet's end): its size, three times
+                BRepBndLib::AddOptimal(fin(i), old_boxes[i], Standard_False, Standard_False);
+                old_boxes[i].Enlarge(3.0 * rmax + tol);
+            }
+            near = inside(old_boxes[i], bf);
+        } else if (!bedges.IsVoid()) {
+            near = inside(bedges, bf);
+        }
+        if (!in_part || !near) {
+            double x0, y0, z0, x1, y1, z1;
+            bf.Get(x0, y0, z0, x1, y1, z1);
+            dbg("fillet ran off: a face from (%.2f %.2f %.2f) to (%.2f %.2f %.2f), %s\n", x0, y0, z0, x1, y1, z1, !in_part ? "out of the part's box" : trimmed.IsBound(ex.Current()) ? "past the face it trims" : "far from its edges");
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char* RAN_OFF = "the fillet ran off the part at a corner (OpenCascade)";
+
 // Rounds the edges (1-based indices) with radius r, all in one operation
 // (corners where they meet are blended).
 FShape* focc_fillet(const FShape* s, const int* idx, int n, double r, long long fresh) {
@@ -1575,6 +1650,10 @@ FShape* focc_fillet(const FShape* s, const int* idx, int n, double r, long long 
             }
             if (!valid(op.Shape())) {
                 set_err("fillet gave an invalid solid");
+                return (FShape*)nullptr;
+            }
+            if (ran_off(op, s->s, op.Shape(), r)) {
+                set_err(RAN_OFF);
                 return (FShape*)nullptr;
             }
             FShape* res = wrap(op.Shape());
@@ -3356,6 +3435,12 @@ FShape* focc_fillet_multi(const FShape* s, const int* idx, const double* r, cons
                 set_err("fillet gave an invalid solid");
                 return (FShape*)nullptr;
             }
+            double rmax = 0;
+            for (int i = 0; i < n; i++) rmax = std::max(rmax, r[i]);
+            if (ran_off(op, s->s, op.Shape(), rmax)) {
+                set_err(RAN_OFF);
+                return (FShape*)nullptr;
+            }
             FShape* res = wrap(op.Shape());
             if (!res) return res;
             carry_tags(op, s, res, fresh);
@@ -3394,6 +3479,10 @@ FShape* focc_chamfer(const FShape* s, const int* idx, int n, double d, long long
             }
             if (!valid(op.Shape())) {
                 set_err("chamfer gave an invalid solid");
+                return (FShape*)nullptr;
+            }
+            if (ran_off(op, s->s, op.Shape(), d)) {
+                set_err("the chamfer ran off the part at a corner (OpenCascade)");
                 return (FShape*)nullptr;
             }
             FShape* res = wrap(op.Shape());
@@ -5720,8 +5809,27 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
             TopExp::MapShapes(src, TopAbs_VERTEX, vm);
             TopExp::MapShapes(src, TopAbs_EDGE, em);
             face_map(src, fm);
+            // the size of what moves: the solids (else the shells) holding
+            // the vertices named, so a lump beside it (another island of
+            // the history, built apart) changes none of the measures below
             Bnd_Box box;
-            BRepBndLib::Add(src, box);
+            {
+                TopTools_MapOfShape named;
+                for (int i = 0; i < n; i++)
+                    if (vidx[i] >= 1 && vidx[i] <= vm.Extent()) named.Add(vm(vidx[i]));
+                bool any = false;
+                for (TopAbs_ShapeEnum t : {TopAbs_SOLID, TopAbs_SHELL}) {
+                    for (TopExp_Explorer x(src, t); x.More(); x.Next()) {
+                        bool holds = false;
+                        for (TopExp_Explorer y(x.Current(), TopAbs_VERTEX); y.More() && !holds; y.Next()) holds = named.Contains(y.Current());
+                        if (!holds) continue;
+                        BRepBndLib::Add(x.Current(), box);
+                        any = true;
+                    }
+                    if (any) break;
+                }
+                if (!any) BRepBndLib::Add(src, box);
+            }
             const double size = box.IsVoid() ? 1.0 : std::sqrt(box.SquareExtent());
             const double tol = 1e-6 * size + 1e-6;
             std::vector<gp_Vec> d(vm.Extent() + 1, gp_Vec(0, 0, 0));
@@ -6168,11 +6276,24 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                 // plate bulging 30 mm past a point pulled 15 out, 25 nov.)
                 const double su = std::max(du.Magnitude(), 1e-9) / size, sv = std::max(dvv.Magnitude(), 1e-9) / size;
                 ShapeAnalysis_Surface sa0(gs);
+                // a face closed on itself round u (a cylinder's whole side, a
+                // hole's wall, a boss's side): its (u, v) taken in the turn
+                // the face covers, the samples near either end copied a turn
+                // further, so the spline goes on smoothly across its seam
+                bool uround = false;
+                if (gs->IsUPeriodic() && (u1 - u0) > gs->UPeriod() * (1 - 1e-6) && !(gs->IsVPeriodic() && (v1 - v0) > gs->VPeriod() * (1 - 1e-6))) {
+                    uround = true;
+                    for (TopExp_Explorer x(fw, TopAbs_EDGE); x.More(); x.Next())
+                        if (BRep_Tool::Degenerated(TopoDS::Edge(x.Current()))) uround = false;
+                }
+                const double UT = uround ? gs->UPeriod() : 0.0;
                 std::vector<gp_XY> tx;
                 std::vector<gp_Vec> tv;
                 for (auto& [q, v] : bd) {
                     gp_Pnt2d uv = sa0.ValueOfUV(q, tol);
-                    gp_XY x(uv.X() * su, uv.Y() * sv);
+                    double uu = uv.X();
+                    if (uround) uu = u0 + std::fmod(std::fmod(uu - u0, UT) + UT, UT);
+                    gp_XY x(uu * su, uv.Y() * sv);
                     bool dup = false;
                     for (const gp_XY& y : tx)
                         if ((y - x).SquareModulus() < 1e-14) {
@@ -6182,6 +6303,20 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                     if (!dup) {
                         tx.push_back(x);
                         tv.push_back(v);
+                    }
+                }
+                if (uround) {
+                    const size_t n0s = tx.size();
+                    for (size_t k = 0; k < n0s; k++) {
+                        double uu = tx[k].X() / su;
+                        if (uu < u0 + 0.3 * UT) {
+                            tx.push_back(gp_XY((uu + UT) * su, tx[k].Y()));
+                            tv.push_back(tv[k]);
+                        }
+                        if (uu > u0 + 0.7 * UT) {
+                            tx.push_back(gp_XY((uu - UT) * su, tx[k].Y()));
+                            tv.push_back(tv[k]);
+                        }
                     }
                 }
                 auto phi = [](double r2) { return r2 > 1e-300 ? 0.5 * r2 * std::log(r2) : 0.0; };
@@ -6249,7 +6384,9 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                 auto disp = [&](const gp_Pnt& p) {
                     if (tw.empty()) return shepard(p);
                     gp_Pnt2d uv = sa0.ValueOfUV(p, tol);
-                    return tps(uv.X(), uv.Y());
+                    double uu = uv.X();
+                    if (uround) uu = u0 + std::fmod(std::fmod(uu - u0, UT) + UT, UT);
+                    return tps(uu, uv.Y());
                 };
                 gp_Pnt p1 = p0.Translated(disp(p0));
                 opencascade::handle<Geom_Surface> ns;
@@ -6293,12 +6430,45 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                         }
                     }
                 }
+                // a face closed on itself round u: the old surface moved by
+                // the spline on a grid over its whole turn, interpolated as
+                // a surface closed the same way (an oblique cylinder for a
+                // hole's rim moved aside, a boss's side leaning)
+                // (its (u, v) the old one's, scaled: u from u0 over a turn to
+                // 0..1, v from rv0 over rvs to 0..1)
+                double rv0 = 0, rvs = 1;
                 if (ns.IsNull()) {
+                    bool closed = false;
                     for (TopExp_Explorer x(fw, TopAbs_EDGE); x.More(); x.Next())
-                        if (BRep_Tool::IsClosed(TopoDS::Edge(x.Current()), fw)) {
+                        if (BRep_Tool::IsClosed(TopoDS::Edge(x.Current()), fw)) closed = true;
+                    if (closed) {
+                        if (uround && !tw.empty()) {
+                            const int NU = 64;
+                            const double ev = 0.05 * (v1 - v0);
+                            const int NV = 25;
+                            rv0 = v0 - ev;
+                            rvs = v1 - v0 + 2 * ev;
+                            TColgp_Array2OfPnt grid(1, NU, 1, NV);
+                            for (int a = 0; a < NU; a++)
+                                for (int c = 0; c < NV; c++) {
+                                    double u = u0 + UT * a / NU, v = v0 - ev + (v1 - v0 + 2 * ev) * c / (NV - 1);
+                                    grid.SetValue(a + 1, c + 1, gs->Value(u, v).Translated(tps(u, v)));
+                                }
+                            try {
+                                GeomAPI_PointsToBSplineSurface ps;
+                                ps.Interpolate(grid, Approx_IsoParametric, Standard_True);
+                                if (ps.IsDone()) ns = ps.Surface();
+                            } catch (const Standard_Failure&) {
+                            }
+                            if (!ns.IsNull()) how = "fitted round";
+                        }
+                        if (ns.IsNull()) {
                             set_err("a round face closed on itself cannot bend yet");
                             return nullptr;
                         }
+                    }
+                }
+                if (ns.IsNull()) {
                     BRepFill_Filling fill(3, 15, 2, Standard_False, 1e-5, 1e-4, 1e-2, 0.1, 8, 9);
                     // its first guess: the old surface moved by the spline,
                     // a grid of it a little past the face interpolated (the
@@ -6403,7 +6573,8 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                     }
                 }
                 // the new surface turned the old one's way
-                if (!rigid && ns != gs && n0.Magnitude() > 0) {
+                // (a round face refitted keeps the old one's way by its grid)
+                if (!rigid && ns != gs && n0.Magnitude() > 0 && std::string(how) != "fitted round") {
                     GeomAPI_ProjectPointOnSurf pj(p1, ns);
                     if (pj.NbPoints() > 0) {
                         double u, v;
@@ -6411,7 +6582,10 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                         gp_Pnt q;
                         gp_Vec a, b;
                         ns->D1(u, v, q, a, b);
-                        if (a.Crossed(b).Dot(n0) < 0) ns = ns->UReversed();
+                        if (a.Crossed(b).Dot(n0) < 0) {
+                            dbg("deform: face %d %s turned over", i, how);
+                            ns = ns->UReversed();
+                        }
                     }
                 }
                 TopoDS_Face nf;
@@ -6426,7 +6600,8 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                 // follows its old edge's: sampled, each point's (u, v) found
                 // from the old one at the same place along it (a cylinder's
                 // seam stays on both its sides, in the same turn)
-                bool seeded = std::string(how) == "carried" || std::string(how) == "kept";
+                const bool round_fit = std::string(how) == "fitted round";
+                bool seeded = std::string(how) == "carried" || std::string(how) == "kept" || round_fit;
                 TopTools_DataMapOfShapeShape olde;
                 if (seeded)
                     for (TopExp_Explorer x(fw, TopAbs_EDGE); x.More(); x.Next()) {
@@ -6447,6 +6622,7 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                     for (int j = 0; j < M; j++) {
                         double fr = j / double(M - 1);
                         gp_Pnt2d seed = op->Value(g0 + (g1 - g0) * fr);
+                        if (round_fit) seed = gp_Pnt2d((seed.X() - u0) / UT, (seed.Y() - rv0) / rvs);
                         gp_Pnt p = c3->Value(t0 + (t1 - t0) * fr);
                         gp_Pnt2d uv = sas.NextValueOfUV(seed, p, 1e-7);
                         double u = uv.X(), v = uv.Y();
@@ -6476,6 +6652,12 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                     double g0, g1;
                     if (!BRep_Tool::CurveOnSurface(e, nf, g0, g1).IsNull()) continue;
                     TopoDS_Edge ef = TopoDS::Edge(e.Oriented(TopAbs_FORWARD));
+                    // a round face refitted: an edge that did not move
+                    // follows its own old curve too
+                    if (round_fit && !olde.IsBound(ef)) {
+                        double h0, h1;
+                        if (!BRep_Tool::CurveOnSurface(ef, fw, h0, h1).IsNull()) olde.Bind(ef, ef);
+                    }
                     if (seeded && olde.IsBound(ef)) {
                         TopoDS_Edge oe = TopoDS::Edge(olde(ef));
                         if (count[k] > 1) {
@@ -6524,10 +6706,27 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                         gp_Pnt a = ec.Value(ec.FirstParameter()), b = ec.Value(ec.LastParameter());
                         dbg("deform face %d edge kind %d (%.1f %.1f %.1f)-(%.1f %.1f %.1f) off %.4f", i, (int)ec.GetType(), a.X(), a.Y(), a.Z(), b.X(), b.Y(), b.Z(), dgeo);
                     }
-                    if (dmax > 1e-2 * size) cannot_bend = true;
-                    if (dmax > BRep_Tool::Tolerance(e)) bb.UpdateEdge(e, 1.5 * dmax);
+                    // a refitted face's curves are made same parameter again
+                    // below: only how far the edge lies off the face counts
+                    const double off = std::string(how).rfind("fitted", 0) == 0 ? dgeo : dmax;
+                    if (off > 1e-2 * size) cannot_bend = true;
+                    if (off > BRep_Tool::Tolerance(e)) bb.UpdateEdge(e, 1.5 * off);
                     gapmax = std::max(gapmax, dmax);
                 }
+                // a face refitted (round or not): each edge made same
+                // parameter again, its tolerance from all its curves on it
+                // (a seam's two, of which the loop above measured one; a
+                // curve projected onto it is not parameterised as the edge)
+                if (std::string(how).rfind("fitted", 0) == 0)
+                    for (int k = 1; k <= fe.Extent(); k++) {
+                        TopoDS_Edge e = TopoDS::Edge(fe(k));
+                        if (BRep_Tool::Degenerated(e)) continue;
+                        try {
+                            bb.SameParameter(e, Standard_False);
+                            BRepLib::SameParameter(e, Precision::Confusion());
+                        } catch (const Standard_Failure&) {
+                        }
+                    }
                 {
                     int nw = 0;
                     for (TopExp_Explorer y(nf, TopAbs_WIRE); y.More(); y.Next()) nw++;
@@ -6543,6 +6742,38 @@ FShape* focc_deform(const FShape* s, const int* vidx, const double* xyz, int n) 
                                 for (TopExp_Explorer z(y.Current(), TopAbs_EDGE); z.More(); z.Next()) ne++;
                                 dbg("   %s wire %d edges (%.3f %.3f %.3f)-(%.3f %.3f %.3f)\n", side ? "new" : "old", ne, a0, a1, a2, b0, b1, b2);
                             }
+                }
+                if (getenv("FORME_OCCT_DEBUG") && std::string(how).rfind("fitted", 0) == 0) {
+                    BRepCheck_Analyzer an(nf);
+                    for (TopAbs_ShapeEnum t : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_WIRE, TopAbs_FACE})
+                        for (TopExp_Explorer x(nf, t); x.More(); x.Next()) {
+                            opencascade::handle<BRepCheck_Result> res = an.Result(x.Current());
+                            if (res.IsNull()) continue;
+                            for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More(); it.Next())
+                                if (it.Value() != BRepCheck_NoError) fprintf(stderr, "round face alone: type %d status %d\n", (int)t, (int)it.Value());
+                            for (res->InitContextIterator(); res->MoreShapeInContext(); res->NextShapeInContext())
+                                for (BRepCheck_ListOfStatus::Iterator it(res->StatusOnShape()); it.More(); it.Next())
+                                    if (it.Value() != BRepCheck_NoError) {
+                                        fprintf(stderr, "round face alone: type %d in context %d status %d", (int)t, (int)res->ContextualShape().ShapeType(), (int)it.Value());
+                                        if (t == TopAbs_EDGE) {
+                                            TopoDS_Edge ee = TopoDS::Edge(x.Current());
+                                            BRepAdaptor_Curve ec(ee);
+                                            gp_Pnt a = ec.Value(ec.FirstParameter()), b = ec.Value(ec.LastParameter());
+                                            double g0, g1;
+                                            opencascade::handle<Geom2d_Curve> pa = BRep_Tool::CurveOnSurface(ee, nf, g0, g1);
+                                            opencascade::handle<Geom2d_Curve> pb = BRep_Tool::CurveOnSurface(TopoDS::Edge(ee.Reversed()), nf, g0, g1);
+                                            fprintf(stderr, " edge (%.2f %.2f %.2f)-(%.2f %.2f %.2f) seam %d tol %.5f kind %d", a.X(), a.Y(), a.Z(), b.X(), b.Y(), b.Z(), (int)BRep_Tool::IsClosed(ee, nf), BRep_Tool::Tolerance(ee), (int)ec.GetType());
+                                            if (!pa.IsNull()) fprintf(stderr, " uv (%.4f %.4f)-(%.4f %.4f)", pa->Value(g0).X(), pa->Value(g0).Y(), pa->Value(g1).X(), pa->Value(g1).Y());
+                                            if (!pb.IsNull() && pb != pa) fprintf(stderr, " and (%.4f %.4f)-(%.4f %.4f)", pb->Value(g0).X(), pb->Value(g0).Y(), pb->Value(g1).X(), pb->Value(g1).Y());
+                                        }
+                                        fprintf(stderr, "\n");
+                                    }
+                        }
+                    double a0, a1, b0, b1;
+                    ns->Bounds(a0, a1, b0, b1);
+                    fprintf(stderr, "round face: surface u %.3f..%.3f v %.3f..%.3f, face uv ", a0, a1, b0, b1);
+                    BRepTools::UVBounds(nf, a0, a1, b0, b1);
+                    fprintf(stderr, "%.3f..%.3f %.3f..%.3f\n", a0, a1, b0, b1);
                 }
                 nf.Orientation(f.Orientation());
                 bb.Add(shell_for(f), nf);
@@ -7351,6 +7582,34 @@ static void mesh_lumps(const TopoDS_Shape& s, double defl, double angle) {
 //       1 circle, 2 other), i32 seam (a closed surface's own seam),
 //       u32 points, f64 xyz each
 // Degenerated edges (a sphere's poles) are left out.
+// Where a face's triangles may lie (Romain 25 nov.: a corner of three
+// fillets drawn with a horn 46 mm long, OpenCascade's face with edges 25 mm
+// "within tolerance", its curves on the surface 11 mm off them): when its
+// triangles' box passes the box of its edges grown by half that box's size
+// (a dome rises above its rim) and the face's exact box, that exact box,
+// grown a little; the triangles outside it are left out. Else void.
+static Bnd_Box stray_box(const TopoDS_Face& f, const opencascade::handle<Poly_Triangulation>& t, const gp_Trsf& tr) {
+    Bnd_Box bt, be, none;
+    for (int k = 1; k <= t->NbNodes(); k++) bt.Add(t->Node(k).Transformed(tr));
+    for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) BRepBndLib::Add(ex.Current(), be, Standard_False);
+    if (bt.IsVoid() || be.IsVoid()) return none;
+    auto within = [](const Bnd_Box& x, const Bnd_Box& y) {
+        gp_Pnt a = x.CornerMin(), b = x.CornerMax(), c = y.CornerMin(), d = y.CornerMax();
+        return a.X() >= c.X() && a.Y() >= c.Y() && a.Z() >= c.Z() && b.X() <= d.X() && b.Y() <= d.Y() && b.Z() <= d.Z();
+    };
+    Bnd_Box grown = be;
+    grown.Enlarge(0.5 * std::sqrt(be.SquareExtent()) + 0.05);
+    if (within(bt, grown)) return none;
+    Bnd_Box bf;
+    BRepBndLib::AddOptimal(f, bf, Standard_False, Standard_False);
+    if (bf.IsVoid()) return none;
+    bf.Enlarge(0.02 * std::sqrt(bf.SquareExtent()) + 0.05);
+    if (within(bt, bf)) return none;
+    gp_Pnt a = bt.CornerMin(), b = bt.CornerMax();
+    dbg("a face's triangles stray off it: (%.2f %.2f %.2f)-(%.2f %.2f %.2f)\n", a.X(), a.Y(), a.Z(), b.X(), b.Y(), b.Z());
+    return bf;
+}
+
 FBuf* focc_topo(const FShape* s, double defl, double angle) {
     return guard(
         [&]() -> FBuf* {
@@ -7377,20 +7636,25 @@ FBuf* focc_topo(const FShape* s, double defl, double angle) {
                 if (t.IsNull()) continue;
                 if (!t->HasNormals()) BRepLib_ToolTriangulatedShape::ComputeNormals(f, t);
                 const gp_Trsf tr = loc.Transformation();
+                const Bnd_Box keep = stray_box(f, t, tr);
                 const bool rev = f.Orientation() == TopAbs_REVERSED;
-                const uint32_t base = (uint32_t)(pos.size() / 3);
+                // each node's index in `pos` (-1: off the face, left out)
+                std::vector<long long> at(t->NbNodes() + 1, -1);
                 for (int k = 1; k <= t->NbNodes(); k++) {
                     gp_Pnt p = t->Node(k).Transformed(tr);
+                    if (!keep.IsVoid() && keep.IsOut(p)) continue;
                     gp_Dir d = t->Normal(k).Transformed(tr);
                     double sg = rev ? -1.0 : 1.0;
+                    at[k] = (long long)(pos.size() / 3);
                     pos.insert(pos.end(), {(float)p.X(), (float)p.Y(), (float)p.Z()});
                     nrm.insert(nrm.end(), {(float)(d.X() * sg), (float)(d.Y() * sg), (float)(d.Z() * sg)});
                 }
                 for (int k = 1; k <= t->NbTriangles(); k++) {
                     int a, b, c;
                     t->Triangle(k).Get(a, b, c);
+                    if (at[a] < 0 || at[b] < 0 || at[c] < 0) continue;
                     if (rev) std::swap(b, c);
-                    tri.insert(tri.end(), {base + a - 1, base + b - 1, base + c - 1});
+                    tri.insert(tri.end(), {(uint32_t)at[a], (uint32_t)at[b], (uint32_t)at[c]});
                     tri_face.push_back((uint32_t)(i - 1));
                 }
             }
